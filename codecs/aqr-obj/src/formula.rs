@@ -266,7 +266,7 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Portion> {
             .map(|(i, s)| {
                 ac.clear();
                 (AC_STREAMS[i] && s.len() > 64 && ans::encode(s, &mut ac).is_some() && ac.len() < s.len())
-                    .then(|| ac.clone())
+                    .then(|| std::mem::take(&mut ac))
             })
             .collect()
     };

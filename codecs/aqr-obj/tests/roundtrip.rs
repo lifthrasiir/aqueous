@@ -364,3 +364,23 @@ fn portion_ends() {
     let ends = formula::portions(long.as_bytes(), 1000);
     assert_eq!(ends, [8, 5011, long.len()]);
 }
+
+/// An index of one coded block whose streams claim `raw` bytes each, stored (not rANS).
+fn index_of_streams(raw: u64) -> Vec<u8> {
+    let mut index = vec![1];
+    for _ in 0..aqr_obj::block::NSTREAMS {
+        aqr_common::varint::put(&mut index, raw << 1);
+    }
+    index
+}
+
+#[test]
+fn plan_refuses_streams_longer_than_a_block_can_hold() {
+    // (the sums of 35 such sizes would wrap, and the decoder reserve each)
+    assert_eq!(aqr_obj::module::plan(&[0; 37], &index_of_streams(1 << 60), 100), None);
+    assert_eq!(aqr_obj::module::plan(&[0; 37], &index_of_streams(u64::MAX >> 1), 100), None);
+    // the longest a stream of the biggest block can be
+    let most = 8 * (64 << 20) + 64;
+    assert!(aqr_obj::module::plan(&[0; 37], &index_of_streams(most), 100).is_some());
+    assert_eq!(aqr_obj::module::plan(&[0; 37], &index_of_streams(most + 1), 100), None);
+}

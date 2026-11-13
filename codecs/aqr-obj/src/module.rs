@@ -2,7 +2,7 @@
 //! aqr-modules builds it into its Wasm module.
 
 use crate::block::NSTREAMS;
-use crate::codec::{self, AC_STREAMS, M_ANS, M_STORED, MAX_BLOCK, Sizes, Stored};
+use crate::codec::{self, AC_STREAMS, M_ANS, M_STORED, MAX_BLOCK, MAX_STREAM, Sizes, Stored};
 use crate::varint::Rd;
 use crate::{Result, corrupt};
 
@@ -18,7 +18,7 @@ fn sizes(index: &[u8]) -> Result<Sizes> {
             s.coded = true;
             for (i, l) in s.longest.iter_mut().enumerate() {
                 let v = ix.uv();
-                let raw = usize::try_from(v >> 1).map_err(|_| corrupt())?;
+                let raw = usize::try_from(v >> 1).ok().filter(|&n| n <= MAX_STREAM).ok_or_else(corrupt)?;
                 *l = (*l).max(raw);
                 if i == crate::block::S_TPL {
                     s.templates = s.templates.saturating_add(raw);

@@ -252,6 +252,37 @@ fn version5() {
     round_trip(&u, &abbrev, &[]);
 }
 
+/// Units of version 5 whose names are indices of `form` (DW_FORM_strx2 or strx3), `width` bytes
+/// each: every unit is coded, none kept as it is.
+fn indexed_names(form: u64, width: usize) {
+    let abbrev = abbrev_table(&[(1, 0x4a, true, &[(NAME, form), (LOW_PC, ADDR)]), (2, 0x34, false, &[(NAME, form)])]);
+    let mut u = vec![0, 0, 0, 0, 5, 0, 4, 8, 0, 0, 0, 0];
+    u.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    u.extend_from_slice(&[1]);
+    u.extend_from_slice(&[7, 0, 0x55][..width]);
+    u.extend_from_slice(&0x4000u64.to_le_bytes());
+    for i in 1..40u8 {
+        u.push(2);
+        u.extend_from_slice(&[i, 1, 0x55][..width]);
+    }
+    u.push(0);
+    let len = (u.len() - 4) as u32;
+    u[..4].copy_from_slice(&len.to_le_bytes());
+    let (_, st) = round_trip(&u, &abbrev, &[]);
+    let raw = aqr_dwarf::info::STREAM_NAMES.iter().position(|&n| n == "raw").unwrap();
+    assert!(st[raw].is_empty());
+}
+
+#[test]
+fn strx2() {
+    indexed_names(0x26, 2);
+}
+
+#[test]
+fn strx3() {
+    indexed_names(0x27, 3);
+}
+
 #[test]
 fn units_kept() {
     let (mut d, abbrev, strs) = section(3);

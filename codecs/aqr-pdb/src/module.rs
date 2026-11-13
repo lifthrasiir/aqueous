@@ -3,8 +3,6 @@
 
 use crate::{Result, corrupt};
 
-/// `pdb-msf`: the file of `len` bytes from `params` (none) and `inputs` (those of
-/// [`crate::msf::INPUT_NAMES`]).
 /// The memory plan of `pdb-msf` ([`aqr_api::stack`]): what it takes beyond its initial memory at
 /// most, of inputs of `inputs` bytes (the second the layout `layout`) and an output of `len`: what
 /// `aqr_api::whole` copies, and what decoding takes ([`crate::msf::decode_plan`]).
@@ -12,6 +10,8 @@ pub fn msf_plan(inputs: &[u64], layout: &[u8], len: u64) -> Option<u64> {
     Some(aqr_api::stack::whole(0, &[], inputs) + crate::msf::decode_plan(layout, len)?)
 }
 
+/// `pdb-msf`: the file of `len` bytes from `params` (none) and `inputs` (those of
+/// [`crate::msf::INPUT_NAMES`]).
 pub fn msf(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     if !params.is_empty() {
         return Err(corrupt());

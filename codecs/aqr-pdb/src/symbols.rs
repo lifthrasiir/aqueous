@@ -159,7 +159,7 @@ fn cached(cache: &mut Vec<u32>, prev: &mut u32, v: u32) -> u64 {
 fn uncached(cache: &mut Vec<u32>, prev: &mut u32, sym: u64) -> Option<u32> {
     let v = match sym {
         _ if sym < CACHE as u64 => *cache.get(sym as usize)?,
-        _ => u32::try_from(*prev as i64 + varint::unzz(sym - CACHE as u64)).ok()?,
+        _ => u32::try_from((*prev as i64).wrapping_add(varint::unzz(sym - CACHE as u64))).ok()?,
     };
     used(cache, prev, v);
     Some(v)
@@ -438,13 +438,13 @@ fn lines_decode(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize)
     let n = r[C13].get()?;
     let u32_of = |v: u64| u32::try_from(v).map_err(|_| corrupt());
     let moved = |r: &mut Reader, prev: &mut u32| -> Result<u32> {
-        *prev = u32::try_from(*prev as i64 + varint::unzz(r.get()?)).map_err(|_| corrupt())?;
+        *prev = u32::try_from((*prev as i64).wrapping_add(varint::unzz(r.get()?))).map_err(|_| corrupt())?;
         Ok(*prev)
     };
     for _ in 0..n {
         let kind = u32_of(r[C13].get()?)?;
         let len = usize::try_from(r[C13].get()?).map_err(|_| corrupt())?;
-        if out.len() - start + 8 + len > size {
+        if (out.len() - start + 8).wrapping_add(len) > size {
             return Err(corrupt());
         }
         out.extend_from_slice(&kind.to_le_bytes());
@@ -462,8 +462,8 @@ fn lines_decode(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize)
                 while out.len() - body < len {
                     let file = moved(&mut r[C13], &mut s.c13[1])?;
                     let n = r[C13].get()?;
-                    let size = 12 + n * if cols { 12 } else { 8 };
-                    if (out.len() - body) as u64 + size > len as u64 {
+                    let size = n.wrapping_mul(if cols { 12 } else { 8 }).wrapping_add(12);
+                    if ((out.len() - body) as u64).wrapping_add(size) > len as u64 {
                         return Err(corrupt());
                     }
                     out.extend_from_slice(&file.to_le_bytes());
@@ -735,6 +735,15 @@ fn cint(d: &[u8], at: &mut usize) -> Option<u32> {
     Some(v)
 }
 
+/// Bytes of the shortest form of `v` (below `0x2000_0000`, as `cint` reads).
+fn cint_len(v: u32) -> usize {
+    match v {
+        0..0x80 => 1,
+        0x80..0x4000 => 2,
+        _ => 4,
+    }
+}
+
 fn put_cint(out: &mut Vec<u8>, v: u32) -> Option<()> {
     match v {
         _ if v < 0x80 => out.push(v as u8),
@@ -776,9 +785,7 @@ fn annotations(st: &mut [Vec<u8>], d: &[u8]) -> Option<()> {
         for _ in 0..n {
             let s = at;
             let v = cint(d, &mut at)?;
-            let mut back = Vec::new();
-            put_cint(&mut back, v)?;
-            if back[..] != d[s..at] {
+            if at - s != cint_len(v) {
                 return None;
             }
             varint::put(&mut st[k], v as u64);
@@ -941,7 +948,7 @@ fn symbols(r: &mut [Reader], s: &mut State, out: &mut Vec<u8>, size: usize, stac
                         Code => {
                             let sl = slot(kind, k);
                             let z = varint::unzz(r[CODE].get()?);
-                            let v = u32::try_from(s.prev[sl] as i64 + z).map_err(|_| corrupt())?;
+                            let v = u32::try_from((s.prev[sl] as i64).wrapping_add(z)).map_err(|_| corrupt())?;
                             s.prev[sl] = v;
                             out.extend_from_slice(&v.to_le_bytes());
                         }

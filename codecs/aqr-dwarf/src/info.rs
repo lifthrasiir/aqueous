@@ -86,8 +86,12 @@ const DW_FORM_LOCLISTX: u64 = 0x22;
 const DW_FORM_RNGLISTX: u64 = 0x23;
 const DW_FORM_REF_SUP8: u64 = 0x24;
 const DW_FORM_STRX1: u64 = 0x25;
+const DW_FORM_STRX2: u64 = 0x26;
+const DW_FORM_STRX3: u64 = 0x27;
 const DW_FORM_STRX4: u64 = 0x28;
 const DW_FORM_ADDRX1: u64 = 0x29;
+const DW_FORM_ADDRX2: u64 = 0x2a;
+const DW_FORM_ADDRX3: u64 = 0x2b;
 const DW_FORM_ADDRX4: u64 = 0x2c;
 const DW_FORM_GNU_ADDR_INDEX: u64 = 0x1f01;
 const DW_FORM_GNU_STR_INDEX: u64 = 0x1f02;
@@ -100,6 +104,17 @@ const DW_UT_PARTIAL: u8 = 3;
 const DW_UT_SKELETON: u8 = 4;
 const DW_UT_SPLIT_COMPILE: u8 = 5;
 const DW_UT_SPLIT_TYPE: u8 = 6;
+
+/// The bytes a version 5 unit header has after its abbreviation offset, by unit type (`None` for
+/// types not taken).
+fn unit_extra(unit_type: u8) -> Option<usize> {
+    match unit_type {
+        DW_UT_COMPILE | DW_UT_PARTIAL => Some(0),
+        DW_UT_SKELETON | DW_UT_SPLIT_COMPILE => Some(8),
+        DW_UT_TYPE | DW_UT_SPLIT_TYPE => Some(12),
+        _ => None,
+    }
+}
 
 /// Abbreviation codes above this are not taken (the tables are indexed by code).
 const MAX_CODE: u64 = 1 << 16;
@@ -155,9 +170,9 @@ fn sleb(d: &[u8], at: &mut usize) -> Option<i64> {
             return None;
         }
     }
-    let mut back = Vec::new();
-    put_sleb(&mut back, v);
-    (back.len() == *at - start).then_some(v)
+    // (the shortest form: the bits of the magnitude and a sign)
+    let bits = 64 - (v ^ (v >> 63)).leading_zeros() as usize;
+    (*at - start == (bits + 1).div_ceil(7)).then_some(v)
 }
 
 fn put_sleb(out: &mut Vec<u8>, mut v: i64) {
@@ -526,10 +541,9 @@ fn fixed_size(form: u64, h: UnitHead) -> Option<usize> {
     Some(match form {
         DW_FORM_ADDR => h.addr_size as usize,
         DW_FORM_DATA1 | DW_FORM_REF1 | DW_FORM_FLAG | DW_FORM_STRX1 | DW_FORM_ADDRX1 => 1,
-        DW_FORM_DATA2 | DW_FORM_REF2 => 2,
-        0x26 | 0x2a => 3, // strx3, addrx3
+        DW_FORM_DATA2 | DW_FORM_REF2 | DW_FORM_STRX2 | DW_FORM_ADDRX2 => 2,
+        DW_FORM_STRX3 | DW_FORM_ADDRX3 => 3,
         DW_FORM_DATA4 | DW_FORM_REF4 | DW_FORM_REF_SUP4 | DW_FORM_STRX4 | DW_FORM_ADDRX4 => 4,
-        0x27 | 0x2b => 2, // strx2, addrx2
         DW_FORM_DATA8 | DW_FORM_REF8 | DW_FORM_REF_SIG8 | DW_FORM_REF_SUP8 => 8,
         DW_FORM_DATA16 => 16,
         DW_FORM_STRP | DW_FORM_SEC_OFFSET | DW_FORM_LINE_STRP | DW_FORM_STRP_SUP | DW_FORM_GNU_REF_ALT
@@ -866,12 +880,7 @@ fn header(d: &[u8], start: usize, end: usize) -> Option<(UnitHead, u64, usize)> 
             let unit_type = *d.get(start + 6)?;
             let addr_size = *d.get(start + 7)?;
             let abbrev = get_le(d, start + 8, 4)?;
-            let extra = match unit_type {
-                DW_UT_COMPILE | DW_UT_PARTIAL => 0,
-                DW_UT_SKELETON | DW_UT_SPLIT_COMPILE => 8,
-                DW_UT_TYPE | DW_UT_SPLIT_TYPE => 12,
-                _ => return None,
-            };
+            let extra = unit_extra(unit_type)?;
             (UnitHead { version, addr_size }, abbrev, start + 12 + extra)
         }
         _ => return None,
@@ -1018,12 +1027,7 @@ fn unit_offsets(d: &[u8], mut f: impl FnMut(u64) -> Result<()>) -> Result<()> {
             5 => {
                 let unit_type = r.byte()?;
                 r.byte()?;
-                r.bytes(match unit_type {
-                    DW_UT_COMPILE | DW_UT_PARTIAL => 0,
-                    DW_UT_SKELETON | DW_UT_SPLIT_COMPILE => 8,
-                    DW_UT_TYPE | DW_UT_SPLIT_TYPE => 12,
-                    _ => return Err(corrupt()),
-                })?;
+                r.bytes(unit_extra(unit_type).ok_or_else(corrupt)?)?;
             }
             _ => return Err(corrupt()),
         }
@@ -1218,12 +1222,7 @@ fn decode_as(sh: Shape, inputs: &[&[u8]], len: u64) -> Result<(Vec<u8>, usize)> 
                 let (unit_type, addr_size) = (r[UNIT].byte()?, r[UNIT].byte()?);
                 out.extend_from_slice(&[unit_type, addr_size]);
                 out.extend_from_slice(&abbrev32.to_le_bytes());
-                let extra = match unit_type {
-                    DW_UT_COMPILE | DW_UT_PARTIAL => 0,
-                    DW_UT_SKELETON | DW_UT_SPLIT_COMPILE => 8,
-                    DW_UT_TYPE | DW_UT_SPLIT_TYPE => 12,
-                    _ => return Err(corrupt()),
-                };
+                let extra = unit_extra(unit_type).ok_or_else(corrupt)?;
                 out.extend_from_slice(r[UNIT].bytes(extra)?);
                 UnitHead { version, addr_size }
             }

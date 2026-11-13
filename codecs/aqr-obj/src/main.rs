@@ -4,37 +4,6 @@ use aqr_obj::block::NSTREAMS;
 use aqr_obj::codec::Options;
 use aqr_obj::formula::{self, MODULE};
 
-#[cfg(unix)]
-#[repr(C)]
-struct Timespec {
-    sec: i64,
-    nsec: i64,
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn clock_gettime(clk: u32, tp: *mut Timespec) -> i32;
-}
-
-/// Wall time where there is no thread CPU time to ask for.
-#[cfg(not(unix))]
-fn cpu() -> f64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
-}
-
-/// CPU time of this thread, in seconds (wall time is skewed by other load).
-#[cfg(unix)]
-fn cpu() -> f64 {
-    #[cfg(target_os = "macos")]
-    const CLOCK_THREAD_CPUTIME_ID: u32 = 16;
-    #[cfg(not(target_os = "macos"))]
-    const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
-    let mut t = Timespec { sec: 0, nsec: 0 };
-    unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut t) };
-    t.sec as f64 + t.nsec as f64 * 1e-9
-}
-
 fn usage() -> ! {
     eprintln!(
         "usage: aqr-obj bench [-n ITERS] [-B BLOCK] [-P PORTION] [-x] [-t THREADS] [-c|-d] [-v] FILE...\n       aqr-obj stats FILE... | aqr-obj fuzz [-n N] [-s SEED] FILE..."
@@ -57,7 +26,7 @@ fn opt_arg<'a>(a: &str, it: &mut impl Iterator<Item = &'a String>, opt: &mut Opt
 
 /// Seconds: the thread's CPU time with one thread, wall time with more.
 fn clock(threads: usize) -> f64 {
-    if threads > 1 { wall() } else { cpu() }
+    if threads > 1 { wall() } else { aqr_common::cpu::thread() }
 }
 
 fn wall() -> f64 {

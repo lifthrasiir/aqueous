@@ -804,7 +804,7 @@ impl Io for Enc<'_> {
 /// Record `rec` (with its length) of index `me` coded to `st`.
 fn encode_record(st: &mut Streams, own: Space, me: u32, begin: u32, fprev: &mut [u32; 2], rec: &[u8]) {
     let kind = u16::from_le_bytes([rec[2], rec[3]]);
-    let marks: Vec<usize> = st.iter().map(|s| s.len()).collect();
+    let marks: [usize; NUM_INPUTS] = std::array::from_fn(|i| st[i].len());
     if let Some(code) = KINDS.iter().position(|&k| k == kind) {
         st[KIND].push(code as u8);
         let (tis, attrs) = classes(kind);
@@ -855,7 +855,7 @@ pub type Coded = (u8, u8, [u64; 3]);
 /// `index` in the file) is derived from it, else as `RECORDS`; `None` (and `st` as it was) where
 /// not even its records are coded.
 pub fn encode_stream(st: &mut Streams, own: Space, d: &[u8], hash: Option<(&[u8], u16)>) -> Option<Coded> {
-    let marks: Vec<usize> = st.iter().map(|s| s.len()).collect();
+    let marks: [usize; NUM_INPUTS] = std::array::from_fn(|i| st[i].len());
     let coded = encode_records(st, own, d, hash);
     if coded.is_none() {
         for (s, m) in st.iter_mut().zip(marks) {
@@ -1173,14 +1173,15 @@ impl Io for Dec<'_> {
                 How::Back => own_index(v, self.me, self.begin).ok_or_else(corrupt)?,
                 How::Abs => u32::try_from(v).map_err(|_| corrupt())?,
                 How::Prev => {
-                    let r = u32::try_from(self.fprev[1] as i64 + varint::unzz(v)).map_err(|_| corrupt())?;
+                    let r =
+                        u32::try_from((self.fprev[1] as i64).wrapping_add(varint::unzz(v))).map_err(|_| corrupt())?;
                     self.fprev[1] = r;
                     r
                 }
             }
         } else {
             let v = self.num(FTI)?;
-            let r = u32::try_from(self.fprev[0] as i64 + varint::unzz(v)).map_err(|_| corrupt())?;
+            let r = u32::try_from((self.fprev[0] as i64).wrapping_add(varint::unzz(v))).map_err(|_| corrupt())?;
             self.fprev[0] = r;
             r
         };

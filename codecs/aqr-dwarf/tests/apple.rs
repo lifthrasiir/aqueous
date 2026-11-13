@@ -154,3 +154,17 @@ fn corrupt_inputs() {
     assert!(run(inputs(&s), len).is_err());
     assert!(decode(&params, &[&strs[..]], len).is_err());
 }
+
+#[test]
+fn plan_takes_the_params_decode_takes() {
+    let (strs, at) = strings(&["a", "b", "c"]);
+    let entries: Vec<_> = at.iter().map(|&s| (s, vec![(s, vec![])])).collect();
+    let t = table(&strs, &entries, 2, &[]);
+    let (params, st) = round_trip(&strs, &t);
+    let lens: Vec<u64> = [&strs[..]].into_iter().chain(st.iter().map(|s| &s[..])).map(|s| s.len() as u64).collect();
+    let plan = |params: &[u8]| aqr_dwarf::apple::plan(params, &lens, &st[0], &st[1], t.len() as u64);
+    assert!(plan(&params).is_some());
+    let mut longer = params.clone();
+    longer.push(0);
+    assert_eq!(plan(&longer), None);
+}

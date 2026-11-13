@@ -92,7 +92,7 @@ pub fn encode(src: &[u8], out: &mut Vec<u8>) -> Option<()> {
     while !r.done() {
         let p = r.p;
         let u = r.uv();
-        if r.overrun() || r.p - p != ((64 - (u | 1).leading_zeros()) as usize).div_ceil(7) {
+        if r.overrun() || r.p - p != aqr_common::varint::len(u) {
             return None;
         }
         let (s, nraw, x) = split(u);

@@ -17,6 +17,9 @@ use std::sync::{Arc, Mutex, mpsc};
 /// Largest block the decoder accepts (bounds its memory).
 pub(crate) const MAX_BLOCK: usize = 64 << 20;
 
+/// Longest stream of a coded block that the decoder accepts (of a block of `MAX_BLOCK` bytes).
+pub(crate) const MAX_STREAM: usize = 8 * MAX_BLOCK + 64;
+
 /// How a stream is stored.
 pub(crate) const M_STORED: u8 = 0;
 /// rANS coded (`ans`).

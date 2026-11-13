@@ -166,7 +166,7 @@ const ENTRY_BYTES: u64 = 16;
 /// the sort or the output. `None` for params or inputs it does not take.
 pub fn plan(params: &[u8], inputs: &[u64], strps: &[u8], counts_in: &[u8], len: u64) -> Option<u64> {
     use aqr_api::stack::{block, whole};
-    let h = Header::parse(params)?;
+    let h = Header::parse(params).filter(|h| h.bytes.len() == params.len())?;
     let (entries, records) = counts(strps, counts_in)?;
     let e = entries as u64;
     let sort = block(4 * ((1u64 << 16).max(h.buckets as u64) + 1));
@@ -200,7 +200,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let (mut entries, mut dies) = (Vec::with_capacity(n_entries), Vec::with_capacity(n_records as usize));
     let nb = h.buckets;
     while at < strps.len() {
-        strp = u32::try_from(strp as u64 + get(strps, &mut at)?).map_err(|_| corrupt())?;
+        strp = u32::try_from((strp as u64).checked_add(get(strps, &mut at)?).ok_or_else(corrupt)?)
+            .map_err(|_| corrupt())?;
         let n = get(counts_in, &mut ac)?;
         if n > (dies_in.len() - ad) as u64 || nb == 0 {
             return Err(corrupt());
@@ -209,7 +210,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         entries.push((hash % nb, hash, strp, dies.len() as u32));
         let mut prev = first;
         for k in 0..n {
-            let die = prev as i64 + varint::get_signed(dies_in, &mut ad).map_err(|_| corrupt())?;
+            let die = (prev as i64).wrapping_add(varint::get_signed(dies_in, &mut ad).map_err(|_| corrupt())?);
             let die = u32::try_from(die).map_err(|_| corrupt())?;
             if k == 0 {
                 first = die;

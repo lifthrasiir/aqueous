@@ -4,7 +4,7 @@
 
 use aqr_formula::{Formula, Kind, Module, Node};
 
-use crate::wasm::{self, CUSTOM, DATA, STREAM_NAMES, STREAMS};
+use crate::wasm::{self, CUSTOM, DATA, STREAM_NAMES};
 
 pub use crate::module::decode;
 
@@ -14,33 +14,6 @@ pub const MODULE: Module = Module::new("wasm-recons", 1).with_plan(memory);
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::plan(u.inputs, u.output()))
 }
-
-/// The classes of the streams, in order.
-const CLASSES: [&str; STREAMS] = {
-    let mut c = [""; STREAMS];
-    let mut i = 0;
-    while i < STREAMS {
-        c[i] = match STREAM_NAMES[i].as_bytes() {
-            b"skeleton" => "wasm/skeleton",
-            b"sections" => "wasm/sections",
-            b"custom" => "wasm/custom",
-            b"locals" => "wasm/locals",
-            b"op" => "wasm/op",
-            b"local" => "wasm/local",
-            b"label" => "wasm/label",
-            b"brtable" => "wasm/brtable",
-            b"blocktype" => "wasm/blocktype",
-            b"offset" => "wasm/offset",
-            b"i64" => "wasm/i64",
-            b"bytes" => "wasm/bytes",
-            b"misc" => "wasm/misc",
-            b"data" => "wasm/data",
-            _ => panic!("a stream without a class"),
-        };
-        i += 1;
-    }
-    c
-};
 
 /// Whether `d` starts like a Wasm module of the binary format's version 1.
 pub fn starts(d: &[u8]) -> bool {
@@ -74,7 +47,8 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
         .into_iter()
         .enumerate()
         .map(|(i, s)| {
-            if i == DATA || i == CUSTOM { f.push_content(CLASSES[i], Kind::Unknown, s) } else { f.push(CLASSES[i], s) }
+            let class = format!("wasm/{}", STREAM_NAMES[i]);
+            if i == DATA || i == CUSTOM { f.push_content(class, Kind::Unknown, s) } else { f.push(class, s) }
         })
         .collect();
     f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);
