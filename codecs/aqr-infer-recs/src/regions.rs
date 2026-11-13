@@ -202,7 +202,7 @@ impl Region {
             }
             Form::Fields => {
                 let k2 = lifted_width(k, &self.floats);
-                let l = fields::decode(src.get(..n * k2)?, n, k2, &self.fields)?;
+                let l = crate::module::decode_planes(src.get(..n * k2)?, n, k2, &self.fields)?;
                 if self.floats.is_empty() { l } else { unlift(&l, n, k, &self.floats)? }
             }
         };

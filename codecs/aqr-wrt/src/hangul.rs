@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use aqr_common::varint;
 
-use crate::words::{PIECE, in_pieces, split};
+use crate::words::{PIECE, in_pieces, put_at, split};
 use crate::{Result, corrupt};
 
 /// The longest token coded by an entry, in bytes (16 syllables, or 15 and the space before).
@@ -468,17 +468,12 @@ impl Parsed {
         let (n1, n2) = (self.n1, 256 * self.two);
         let byte = |j: usize| text.get(j).copied().ok_or_else(corrupt);
         let (mut i, mut o) = (0, 0);
-        let mut put = |o: &mut usize, s: &[u8]| -> Result<()> {
-            out.get_mut(*o..*o + s.len()).ok_or_else(corrupt)?.copy_from_slice(s);
-            *o += s.len();
-            Ok(())
-        };
         while i < text.len() {
             let s = i;
             while i < text.len() && class[text[i] as usize] == LIT {
                 i += 1;
             }
-            put(&mut o, &text[s..i])?;
+            put_at(out, &mut o, &text[s..i])?;
             if i == text.len() {
                 break;
             }
@@ -490,12 +485,12 @@ impl Parsed {
                         return Err(corrupt());
                     }
                     let c = FIRST + j;
-                    put(&mut o, &[0xe0 | (c >> 12) as u8, 0x80 | (c >> 6 & 63) as u8, 0x80 | (c & 63) as u8])?;
+                    put_at(out, &mut o, &[0xe0 | (c >> 12) as u8, 0x80 | (c >> 6 & 63) as u8, 0x80 | (c & 63) as u8])?;
                     i += 2;
                     continue;
                 }
                 ESCAPE => {
-                    put(&mut o, &[byte(i + 1)?])?;
+                    put_at(out, &mut o, &[byte(i + 1)?])?;
                     i += 2;
                     continue;
                 }
@@ -505,7 +500,7 @@ impl Parsed {
                     if !c[1..].iter().all(|&c| continues(c)) {
                         return Err(corrupt());
                     }
-                    put(&mut o, c)?;
+                    put_at(out, &mut o, c)?;
                     i = e;
                     continue;
                 }
@@ -530,7 +525,7 @@ impl Parsed {
                 _ => return Err(corrupt()),
             };
             let &(s, e) = self.entries.get(k).ok_or_else(corrupt)?;
-            put(&mut o, &dict[s..e])?;
+            put_at(out, &mut o, &dict[s..e])?;
         }
         if o != out.len() {
             return Err(corrupt());

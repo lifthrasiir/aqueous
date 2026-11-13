@@ -12,7 +12,7 @@ use aqr_common::varint;
 use crate::bases::Packed;
 #[cfg(feature = "encode")]
 use crate::bases::Packer;
-use crate::stream::{Lines, PIECE, Reader, Slice, Writer};
+use crate::stream::{Lines, Reader, Writer};
 use crate::{Result, corrupt};
 
 /// A FASTA file's parts.
@@ -120,6 +120,15 @@ pub fn width_of(d: &[u8]) -> Option<u64> {
     Some(widths.iter().max_by_key(|&(&w, &n)| (n, w)).map_or(0, |(&w, _)| w) as u64)
 }
 
+/// The run of `olen` of the other letter `other` after `gap` bases, put to the other letters'
+/// stream.
+#[cfg(feature = "encode")]
+fn put_run(out: &mut Vec<u8>, gap: u64, olen: u64, other: u8) {
+    varint::put(out, gap);
+    varint::put(out, olen);
+    out.push(other);
+}
+
 /// The parts of `d`, a FASTA file or, where `continues`, the rest of one from a line's end that
 /// is followed by a sequence line (the first record has no header), whose sequence lines are
 /// of `width` as the whole's are; `None` where it is not one this crate takes.
@@ -204,9 +213,7 @@ pub fn parse_part(d: &[u8], width: u64, continues: bool) -> Option<Parts> {
             match k & !LOWER {
                 b @ 0..4 => {
                     if olen > 0 {
-                        varint::put(&mut p.other, gap);
-                        varint::put(&mut p.other, olen);
-                        p.other.push(other);
+                        put_run(&mut p.other, gap, olen, other);
                         (olen, gap, runs) = (0, 0, runs + 1);
                     }
                     bases.push(b);
@@ -215,9 +222,7 @@ pub fn parse_part(d: &[u8], width: u64, continues: bool) -> Option<Parts> {
                 _ if olen > 0 && c.to_ascii_uppercase() == other => olen += 1,
                 _ => {
                     if olen > 0 {
-                        varint::put(&mut p.other, gap);
-                        varint::put(&mut p.other, olen);
-                        p.other.push(other);
+                        put_run(&mut p.other, gap, olen, other);
                         (gap, runs) = (0, runs + 1);
                     }
                     (other, olen) = (c.to_ascii_uppercase(), 1);
@@ -227,9 +232,7 @@ pub fn parse_part(d: &[u8], width: u64, continues: bool) -> Option<Parts> {
         letters += n;
     }
     if olen > 0 {
-        varint::put(&mut p.other, gap);
-        varint::put(&mut p.other, olen);
-        p.other.push(other);
+        put_run(&mut p.other, gap, olen, other);
         runs += 1;
     }
     varint::put(&mut p.case, run);
@@ -355,8 +358,10 @@ pub fn build<B: Iterator<Item = u8>>(shape: Shape, s: &mut Streams, bases: &mut 
 }
 
 /// The file of `p` and `bases`, of `len` bytes, from the streams as they are; fails where they
-/// do not make one of that length. (For tests, and where the file is built whole.)
+/// do not make one of that length.
+#[cfg(test)]
 pub fn rebuild<B: Iterator<Item = u8>>(shape: Shape, streams: [&[u8]; 4], mut bases: B, len: u64) -> Result<Vec<u8>> {
+    use crate::stream::{PIECE, Slice};
     let [h, l, c, o] = streams;
     let (mut h, mut l, mut c, mut o) = (Slice(h), Slice(l), Slice(c), Slice(o));
     let mut s = Streams {

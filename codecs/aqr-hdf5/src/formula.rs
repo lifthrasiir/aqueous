@@ -50,7 +50,14 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, zlib: true, trial: true, floats: true, limit: u64::MAX }
+        Options {
+            threads: 1,
+            profile: aqr_flate::DEFAULT_PROFILE,
+            zlib: true,
+            trial: true,
+            floats: true,
+            limit: u64::MAX,
+        }
     }
 }
 
@@ -100,6 +107,13 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_with(input, &Options { threads, limit: limit(input.len()), ..Options::default() }).map(|e| e.formula)
 }
 
+/// Which of shuffle and Fletcher-32 a chunk's filters before deflate are (in that order).
+#[derive(Clone, Copy, PartialEq)]
+struct Before {
+    shuffle: bool,
+    fletcher: bool,
+}
+
 /// A chunk whose DEFLATE stream may be rebuilt: the stream, its zlib header, and the bytes of
 /// data its dataset's chunks have before filtering (where its filters keep that); the chunk,
 /// and where its filters before deflate are shuffle and Fletcher-32 (each perhaps, in that
@@ -109,7 +123,7 @@ struct Job {
     header: [u8; 2],
     size: Option<u64>,
     chunk: usize,
-    before: Option<(bool, bool)>,
+    before: Option<Before>,
 }
 
 /// The chunks of `file` in `input` whose last filter is deflate (but for Fletcher-32 after it),
@@ -143,10 +157,10 @@ fn jobs(input: &[u8], file: &File, mut limit: u64) -> Vec<Job> {
         }
         limit -= cost;
         let before = match before {
-            [] => Some((false, false)),
-            [SHUFFLE] => Some((true, false)),
-            [FLETCHER32] => Some((false, true)),
-            [SHUFFLE, FLETCHER32] => Some((true, true)),
+            [] => Some(Before { shuffle: false, fletcher: false }),
+            [SHUFFLE] => Some(Before { shuffle: true, fletcher: false }),
+            [FLETCHER32] => Some(Before { shuffle: false, fletcher: true }),
+            [SHUFFLE, FLETCHER32] => Some(Before { shuffle: true, fletcher: true }),
             _ => None,
         };
         out.push(Job { deflate: c.at.start + 2..c.at.end - 4 - tail, header: [d[0], d[1]], size, chunk: i, before });
@@ -154,9 +168,18 @@ fn jobs(input: &[u8], file: &File, mut limit: u64) -> Vec<Job> {
     out
 }
 
-/// A chunk's stream made: its data and record, the zlib settings emulation found, and whether it
-/// predicted every token.
-type Made = Option<(Vec<u8>, Vec<u8>, Option<zlib::Params>, bool)>;
+/// A chunk's stream rebuilt from its data.
+struct Rebuilt {
+    data: Vec<u8>,
+    record: Vec<u8>,
+    /// The zlib settings emulation found.
+    params: Option<zlib::Params>,
+    /// Whether emulation predicted every token.
+    exact: bool,
+}
+
+/// A chunk's stream made, if it could be.
+type Made = Option<Rebuilt>;
 
 /// The formula rebuilding the HDF5 file `input`, or None where it is not one (or no chunk is
 /// rebuilt). The deflated chunks whose data inflates to what their dataset tells (where its
@@ -207,7 +230,12 @@ pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bo
         let p = parse(j, threads)?;
         let hints = Hints { params, ..Hints::zlib_header(j.header) };
         let (data, record, report) = p.deconstruct(fopt(threads), &hints).ok()?;
-        (record.len() < j.deflate.len()).then_some((data, record, report.zlib, report.misses == 0))
+        (record.len() < j.deflate.len()).then_some(Rebuilt {
+            data,
+            record,
+            params: report.zlib,
+            exact: report.misses == 0,
+        })
     };
     let size = |j: &usize| jobs[*j].deflate.len();
     let run = |js: &[usize], params: Option<zlib::Params>| {
@@ -227,7 +255,7 @@ pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bo
     if adaptive.is_some() && !order.is_empty() {
         exact.store(true, Relaxed);
         let done = run(&order, None);
-        let hit = done.iter().flatten().filter(|m| m.2.is_some() && m.3).count();
+        let hit = done.iter().flatten().filter(|m| m.params.is_some() && m.exact).count();
         if hit > 0 && 2 * hit >= done.iter().flatten().count() {
             sampled = Some(done);
         } else {
@@ -236,7 +264,7 @@ pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bo
     }
     let mut seen: Vec<(zlib::Params, usize)> = Vec::new();
     for (&j, m) in order.iter().zip(sampled.unwrap_or_else(|| run(&order, None))) {
-        if let Some(p) = m.as_ref().and_then(|m| m.2) {
+        if let Some(p) = m.as_ref().and_then(|m| m.params) {
             match seen.iter_mut().find(|s| s.0 == p) {
                 Some(s) => s.1 += 1,
                 None => seen.push((p, 1)),
@@ -246,7 +274,7 @@ pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bo
     }
     if exact.load(Relaxed) {
         for j in &order {
-            let Some((d, r, ..)) = made[j].as_ref() else { continue };
+            let Some(Rebuilt { data: d, record: r, .. }) = made[j].as_ref() else { continue };
             let Ok(profile) = aqr_flate::record_profile(r) else { continue };
             let mut f = Formula::default();
             let (data, record) = (f.push("hdf5/data", d.clone()), f.push("flate/record", r.clone()));
@@ -287,7 +315,7 @@ pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bo
     let mut at = 0;
     let mut inflated = 0;
     for (j, job) in jobs.iter().enumerate() {
-        let Some((d, r, ..)) = made.remove(&j).flatten() else { continue };
+        let Some(Rebuilt { data: d, record: r, .. }) = made.remove(&j).flatten() else { continue };
         let Ok(profile) = aqr_flate::record_profile(&r) else { continue };
         let kept = &input[at..job.deflate.start];
         parts.push(Some(Node::slice(META, meta.len() as u64, kept.len() as u64)));
@@ -352,10 +380,11 @@ fn floats(
         let ds = &file.datasets[k];
         let Some(t) = ds.dtype.filter(|t| t.class == FLOATS && matches!(t.size, 4 | 8)) else { continue };
         let Some(bytes) = ds.chunk_bytes().and_then(|n| usize::try_from(n).ok()) else { continue };
-        let (shuffle, fletcher) = jobs[js[0]].before.unwrap();
+        let before = jobs[js[0]].before.unwrap();
+        let Before { shuffle, fletcher } = before;
         // (shuffle of the element's bytes, as HDF5 sets it)
         let shuffled = ds.filters.iter().find(|f| f.id == SHUFFLE).map(|f| f.client.first() == Some(&t.size));
-        if js.iter().any(|&j| jobs[j].before != Some((shuffle, fletcher)))
+        if js.iter().any(|&j| jobs[j].before != Some(before))
             || bytes % t.size as usize != 0
             || shuffle && shuffled != Some(true)
         {
@@ -373,7 +402,7 @@ fn floats(
         };
         let mut bits = Vec::with_capacity(p.samples().unwrap_or(0));
         for &j in &js {
-            let d = &made[&j].as_ref().unwrap().0;
+            let d = &made[&j].as_ref().unwrap().data;
             p.samples_of(&d[..bytes], &mut bits);
         }
         if bits.len() < MIN_FLOATS {
@@ -383,7 +412,10 @@ fn floats(
         let or = bits.iter().fold(0, |a, b| a | b);
         let p = Floats { shift: or.trailing_zeros().min(8 * p.bytes() as u32 - 8) as u8, ..p };
         let c = float::encode(&bits, p.wide, p.shift as u32, p.order as usize);
-        let plain: Vec<u8> = bits.iter().flat_map(|&b| b.to_le_bytes()[..p.bytes()].to_vec()).collect();
+        let mut plain = Vec::with_capacity(bits.len() * p.bytes());
+        for &b in &bits {
+            plain.extend_from_slice(&b.to_le_bytes()[..p.bytes()]);
+        }
         let zstd = zstd::bulk::compress(&plain, 3).map_or(plain.len(), |z| z.len());
         // (and not more output than the module takes of so few bytes)
         if c.coefs.len() + c.model.len() + c.raw.len() >= zstd
@@ -425,7 +457,7 @@ fn floats(
         for (&j, o) in js.iter().zip(f.split(a, vec![bytes as u64; js.len()])) {
             let n = match fletcher {
                 true => {
-                    let d = &made[&j].as_ref().unwrap().0;
+                    let d = &made[&j].as_ref().unwrap().data;
                     let at = meta.len() as u64;
                     meta.extend_from_slice(&d[bytes..]);
                     Node::concat([o, Node::slice(0, at, 4)])

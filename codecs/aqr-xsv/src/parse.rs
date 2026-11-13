@@ -79,6 +79,16 @@ fn raw_end(d: &[u8], p: usize, dia: &Dialect) -> usize {
     }
 }
 
+/// What follows a quoted field.
+enum After {
+    /// The record's end: where the next starts, and how it ends.
+    End(usize, u64),
+    /// A delimiter.
+    Delim,
+    /// Neither.
+    Other,
+}
+
 /// The record at `p`, its fields pushed to `fields`: where the next one starts, and how it
 /// ends ([`E_TERM`] and the like). None where it is not one of the dialect: a quoted field not
 /// closed, or followed by other bytes than a delimiter or the record's end, or a field holding
@@ -86,20 +96,20 @@ fn raw_end(d: &[u8], p: usize, dia: &Dialect) -> usize {
 fn record(d: &[u8], mut p: usize, dia: &Dialect, fields: &mut Vec<Field>) -> Option<(usize, u64)> {
     let line = dia.term.is_empty();
     let end_byte = if line { b'\n' } else { dia.term[0] };
-    // How the record ends at `k`, and the byte after: None if neither a delimiter nor its end.
-    let after = |k: usize| -> Option<Option<(usize, u64)>> {
+    // How the record ends at `k`, and the byte after.
+    let after = |k: usize| -> After {
         if k == d.len() {
-            Some(Some((k, E_NONE)))
+            After::End(k, E_NONE)
         } else if d[k..].starts_with(&dia.delim) {
-            Some(None)
+            After::Delim
         } else if line && d[k] == b'\n' {
-            Some(Some((k + 1, E_TERM)))
+            After::End(k + 1, E_TERM)
         } else if line && d[k..].starts_with(b"\r\n") {
-            Some(Some((k + 2, E_CRLF)))
+            After::End(k + 2, E_CRLF)
         } else if !line && d[k..].starts_with(&dia.term) {
-            Some(Some((k + dia.term.len(), E_TERM)))
+            After::End(k + dia.term.len(), E_TERM)
         } else {
-            None
+            After::Other
         }
     };
     loop {
@@ -121,9 +131,10 @@ fn record(d: &[u8], mut p: usize, dia: &Dialect, fields: &mut Vec<Field>) -> Opt
                 return None;
             }
             fields.push(Field { start: p + 1, end: close, quoted: true, escaped });
-            match after(close + 1)? {
-                Some(r) => return Some(r),
-                None => p = close + 1 + dia.delim.len(),
+            match after(close + 1) {
+                After::End(next, e) => return Some((next, e)),
+                After::Delim => p = close + 1 + dia.delim.len(),
+                After::Other => return None,
             }
             continue;
         }

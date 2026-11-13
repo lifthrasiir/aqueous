@@ -82,11 +82,6 @@ fn text_byte(c: u8) -> bool {
     c >= 0x20 && c != 0x7f || matches!(c, b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
-/// Whether all of `d` is text bytes.
-pub fn is_text(d: &[u8]) -> bool {
-    d.iter().all(|&c| text_byte(c))
-}
-
 /// Whether `d` is text but for at most 1 in 1000 of its bytes (escapes of a terminal, say).
 pub fn mostly_text(d: &[u8]) -> bool {
     // (counted a piece at a time, ending at the first over the bound: it is asked of every file
@@ -188,10 +183,10 @@ fn coded_in(input: &[u8], shared: &Shared, own: usize, threads: usize, segment: 
     Some(f)
 }
 
-/// The applications of a text's segments ([`words::SEGMENT`]) of one module and dictionary.
 /// The lengths of a segment's pieces, as a coder tells them.
 type Pieces = Vec<(usize, usize)>;
 
+/// The applications of a text's segments ([`words::SEGMENT`]) of one module and dictionary.
 struct Segments<'a> {
     module: Module,
     resource: &'a Resource,
@@ -233,17 +228,14 @@ impl Segments<'_> {
         }
         let stream = f.streams.len();
         f.push_as(self.class, Kind::Text, coded);
-        let mut nodes: Vec<Node> = (parts.into_iter().zip(&segments))
+        let nodes: Vec<Node> = (parts.into_iter().zip(&segments))
             .map(|((start, len, pieces), segment)| {
                 let params = [self.head, &words::params_of(&pieces)].concat();
                 let input = Node::slice(stream, start, len);
                 Node::apply_with(self.module, vec![self.resource.clone()], params, vec![input], segment.len() as u64)
             })
             .collect();
-        match nodes.len() {
-            1 => nodes.pop().unwrap(),
-            _ => Node::concat(nodes),
-        }
+        Node::concat(nodes)
     }
 }
 

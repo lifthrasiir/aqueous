@@ -59,7 +59,7 @@ const MAP_MAX_KEYS: u64 = 4096;
 const SEEN_LISTS: usize = 4096;
 
 /// A path's arrays are tuples where 9 in 10 of them, of [`TUPLE_ARRAYS`] at least, are of one
-/// length within 2..=[`MAX_WIDTH`].
+/// length within 2..[`MAX_WIDTH`].
 const TUPLE_ARRAYS: u64 = 8;
 
 /// The style of `d`, told from its start.
@@ -84,6 +84,11 @@ pub fn starts(d: &[u8]) -> bool {
     d.len() >= MIN_LEN && style_of(d).is_some()
 }
 
+/// `h` with `v` mixed in (FxHash's step).
+fn mix(h: u64, v: u64) -> u64 {
+    (h.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95)
+}
+
 /// A fast hash of a key list and its separators not of the style (`others`).
 fn hash_keys(d: &[u8], toks: &[Tok], i: usize, others: &[u8]) -> u64 {
     let Tok::Obj { n, .. } = toks[i] else { unreachable!() };
@@ -94,13 +99,13 @@ fn hash_keys(d: &[u8], toks: &[Tok], i: usize, others: &[u8]) -> u64 {
         for c in d[a..b].chunks(8) {
             let mut w = [0u8; 8];
             w[..c.len()].copy_from_slice(c);
-            h = (h.rotate_left(5) ^ u64::from_le_bytes(w)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+            h = mix(h, u64::from_le_bytes(w));
         }
-        h = (h.rotate_left(5) ^ 0xff).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        h = mix(h, 0xff);
         j = skip(toks, j + 1);
     }
     for &o in others {
-        h = (h.rotate_left(5) ^ o as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        h = mix(h, o as u64);
     }
     h
 }
@@ -310,9 +315,10 @@ impl<'a> First<'a> {
                         s.map = true;
                         s.lists = Lists::default();
                     } else {
-                        let kids = s.lists.lists[l as usize].kids.clone();
+                        let n = s.lists.lists[l as usize].kids.len();
                         let mut j = i + 1;
-                        for c in kids {
+                        for t in 0..n {
+                            let c = self.seen[p as usize].lists.lists[l as usize].kids[t];
                             self.value(toks, j + 1, c);
                             j = skip(toks, j + 1);
                         }
@@ -522,9 +528,10 @@ impl<'a, 'b> Second<'a, 'b> {
                     }
                 } else {
                     let l = self.list(toks, i, p);
-                    let kids = self.paths[p as usize].lists.lists[l as usize].kids.clone();
+                    let n = self.paths[p as usize].lists.lists[l as usize].kids.len();
                     let mut j = i + 1;
-                    for c in kids {
+                    for t in 0..n {
+                        let c = self.paths[p as usize].lists.lists[l as usize].kids[t];
                         self.value(toks, j + 1, c);
                         j = skip(&toks.t, j + 1);
                     }
@@ -749,10 +756,7 @@ fn encode_in(input: &[u8], style: Style, segment: usize) -> Option<(Formula, usi
         raw_len += raw.len();
         roots.push(s.finish(&mut f, layout, raw, (at - start) as u64));
     }
-    f.root = match roots.len() {
-        1 => roots.pop().unwrap(),
-        _ => Node::concat(roots),
-    };
+    f.root = Node::concat(roots);
     Some((f, raw_len))
 }
 
@@ -868,10 +872,17 @@ mod tests {
         assert_eq!(f.streams[1].data.len(), deeper.len());
     }
 
+    const STYLES: [Style; 4] = [
+        Style { comma_space: false, colon_space: false },
+        Style { comma_space: true, colon_space: true },
+        Style { comma_space: false, colon_space: true },
+        Style { comma_space: true, colon_space: false },
+    ];
+
     #[test]
     fn styles() {
         let s = "{\"a\": 1, \"b\": [1.5, \"x\"]}\n{\"b\": null, \"a\": 2}\n".repeat(500);
-        for st in Style::ALL {
+        for st in STYLES {
             roundtrip(s.as_bytes(), st);
         }
         let f = encode(s.as_bytes(), 1).unwrap();
@@ -890,7 +901,7 @@ mod tests {
             let sp = if i % 20 == 0 { " " } else { "" };
             s += &format!("{{\"m\":{{\"k{i}\": 1,\"j{i}\":2, \"l{i}\"{sp}:3}}, \"a\":[{i},{i}, {i}]}}\n");
         }
-        for st in Style::ALL {
+        for st in STYLES {
             roundtrip(s.as_bytes(), st);
         }
         let f = encode(s.as_bytes(), 1).unwrap();

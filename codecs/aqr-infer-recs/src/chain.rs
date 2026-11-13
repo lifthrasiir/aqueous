@@ -357,7 +357,7 @@ fn trim(data: &[u8], bg: &[f64; 256], p: Vec<usize>) -> Vec<usize> {
     let lp = kt::column_log2(&counts, fit);
     let scores = p[..p.len() - 1]
         .iter()
-        .map(|&q| (0..COLS).map(|j| (lp[j * 256 + lead(q, j)] - bg[lead(q, j)]).max(-4.0)).sum());
+        .map(|&q| (0..COLS).map(|j| (lp[j * 256 + lead(q, j)] - bg[lead(q, j)]).max(kt::CLIP)).sum());
     let (s, e, _) = best_run(scores);
     p[s..e + 1].to_vec()
 }

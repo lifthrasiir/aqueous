@@ -525,18 +525,13 @@ impl Parsed {
         let (class, place) = layout.classes();
         let (n1, n2) = (layout.one.len(), layout.two.len() * 256);
         let byte = |j: usize| text.get(j).copied().ok_or_else(corrupt);
-        let put = |out: &mut [u8], o: &mut usize, s: &[u8]| -> Result<()> {
-            out.get_mut(*o..*o + s.len()).ok_or_else(corrupt)?.copy_from_slice(s);
-            *o += s.len();
-            Ok(())
-        };
         let (mut i, mut o) = (0, 0);
         while i < text.len() {
             let s = i;
             while i < text.len() && class[text[i] as usize] == LIT {
                 i += 1;
             }
-            put(out, &mut o, &text[s..i])?;
+            put_at(out, &mut o, &text[s..i])?;
             if i == text.len() {
                 break;
             }
@@ -546,7 +541,7 @@ impl Parsed {
                 if class[b as usize] == LIT {
                     return Err(corrupt());
                 }
-                put(out, &mut o, &[b])?;
+                put_at(out, &mut o, &[b])?;
                 i += 2;
                 continue;
             }
@@ -588,13 +583,13 @@ impl Parsed {
                 if nosp || case != Case::Lower {
                     return Err(corrupt());
                 }
-                put(out, &mut o, t)?;
+                put_at(out, &mut o, t)?;
             } else {
                 if !nosp {
-                    put(out, &mut o, b" ")?;
+                    put_at(out, &mut o, b" ")?;
                 }
                 let w = o;
-                put(out, &mut o, t)?;
+                put_at(out, &mut o, t)?;
                 match case {
                     Case::Lower => {}
                     Case::Cap => out[w].make_ascii_uppercase(),
@@ -636,6 +631,13 @@ fn parsed(dict: &[u8]) -> Result<impl std::borrow::Borrow<Parsed>> {
 #[cfg(target_family = "wasm")]
 fn parsed(dict: &[u8]) -> Result<impl std::borrow::Borrow<Parsed>> {
     Parsed::of(dict)
+}
+
+/// `s` copied to `out` at `o`, which moves past it; fails where it does not fit.
+pub(crate) fn put_at(out: &mut [u8], o: &mut usize, s: &[u8]) -> Result<()> {
+    out.get_mut(*o..*o + s.len()).ok_or_else(corrupt)?.copy_from_slice(s);
+    *o += s.len();
+    Ok(())
 }
 
 /// The parameters of `wrt-recons`: the shape of the dictionary `dict` (its count of entries and

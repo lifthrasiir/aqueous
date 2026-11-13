@@ -8,13 +8,13 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula"]
+encode = ["dep:aqr-formula", "dep:zstd"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-zstd = "0.13"
+zstd = { version = "0.13", optional = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
@@ -22,3 +22,4 @@ zstd = "0.13"
 [[example]]
 name = "aqr-wrt-bench"
 path = "examples/bench.rs"
+required-features = ["encode"]

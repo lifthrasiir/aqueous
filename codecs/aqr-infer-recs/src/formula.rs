@@ -101,6 +101,19 @@ pub const GROUP_BYTES: usize = 32 << 20;
 /// others.
 pub const GROUP_ROWS: usize = 1 << 22;
 
+/// What a group of rows takes of the streams, and what its modules give.
+struct Sizes {
+    /// Its planes' bytes.
+    planes: usize,
+    /// Its fields' records (the planes decoded).
+    lifted: usize,
+    /// Its records' heads (the lifted ones unlifted).
+    heads: usize,
+    /// Where its tails start in the stream of tails, and their bytes.
+    tail_at: usize,
+    tails: usize,
+}
+
 /// The formula of `d` with the regions `choices` (sorted, apart) in their forms.
 pub fn formula(d: &[u8], choices: &[Choice]) -> Formula {
     formula_in(d, choices, GROUP_BYTES, GROUP_ROWS)
@@ -146,8 +159,7 @@ pub fn formula_in(d: &[u8], choices: &[Choice], group_bytes: usize, group_rows: 
         // the groups' records (a group's heads), planes and tails
         let mut all = Vec::new();
         let mut tails = Vec::new();
-        let mut lens = Vec::new();
-        let mut recs: Vec<std::borrow::Cow<[u8]>> = Vec::with_capacity(groups.len());
+        let mut sizes = Vec::with_capacity(groups.len());
         for g in &groups {
             let (m, t): (std::borrow::Cow<[u8]>, _) = match &r.shape {
                 Shape::Fixed { .. } => (d[r.start + g.start * k..r.start + g.end * k].into(), None),
@@ -162,22 +174,27 @@ pub fn formula_in(d: &[u8], choices: &[Choice], group_bytes: usize, group_rows: 
             all.extend_from_slice(&fields::encode(&lifted, k2, &fl));
             let tail_at = tails.len();
             tails.extend(t.into_iter().flatten());
-            lens.push((all.len() - before, lifted.len(), tail_at, tails.len() - tail_at));
-            recs.push(m);
+            sizes.push(Sizes {
+                planes: all.len() - before,
+                lifted: lifted.len(),
+                heads: m.len(),
+                tail_at,
+                tails: tails.len() - tail_at,
+            });
         }
         let Node::Slice { stream: planes, .. } = f.push("recs/planes", all) else { unreachable!() };
         let tails = matches!(r.shape, Shape::Entries { .. }).then(|| f.push("recs/tails", tails));
         let mut at = 0u64;
-        for ((g, m), &(plen, llen, tail_at, tlen)) in groups.iter().zip(&recs).zip(&lens) {
-            let slice = Node::slice(planes, at, plen as u64);
-            at += plen as u64;
-            let mut node = Node::apply(FIELDS, fields_params(g.len(), k2, &fl), vec![slice], llen as u64);
+        for (g, z) in groups.iter().zip(&sizes) {
+            let slice = Node::slice(planes, at, z.planes as u64);
+            at += z.planes as u64;
+            let mut node = Node::apply(FIELDS, fields_params(g.len(), k2, &fl), vec![slice], z.lifted as u64);
             if !lifts.is_empty() {
-                node = Node::apply(FLOATS, floats_params(g.len(), k, lifts), vec![node], m.len() as u64);
+                node = Node::apply(FLOATS, floats_params(g.len(), k, lifts), vec![node], z.heads as u64);
             }
             parts.push(match (&r.shape, &tails) {
                 (Shape::Entries { rule, head, starts }, Some(Node::Slice { stream, .. })) => {
-                    let tails = Node::slice(*stream, tail_at as u64, tlen as u64);
+                    let tails = Node::slice(*stream, z.tail_at as u64, z.tails as u64);
                     let len = (starts[g.end] - starts[g.start]) as u64;
                     Node::apply(ENTRIES, entries_params(g.len(), *head, rule), vec![node, tails], len)
                 }

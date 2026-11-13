@@ -19,8 +19,6 @@ use crate::{fixed, floats, zcost};
 /// Windows of WINDOW bytes, PROBES of them over the file (the file itself if not larger).
 const WINDOW: usize = 1 << 13;
 const PROBES: usize = 48;
-/// The largest record size a window is tried at.
-const MAX_K: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct Estimate {
@@ -43,7 +41,7 @@ pub fn estimate(data: &[u8]) -> Estimate {
         let a = &data[s..s + w];
         let z = zcost::len(&[a]);
         before += z;
-        let (k, gain, h0) = fixed::scan_window(a, MAX_K, &mut counts);
+        let (k, gain, h0) = fixed::scan_window(a, fixed::MAX_K, &mut counts);
         if k == 1 || gain < 0.05 || h0 > 7.8 {
             after += z;
             continue;

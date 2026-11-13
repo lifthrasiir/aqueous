@@ -7,6 +7,10 @@ use std::sync::OnceLock;
 /// The models' prior count per symbol.
 pub const ALPHA: f64 = 1.0 / 16.0;
 
+/// The least score of a byte against the column models: one value the models have not seen
+/// does not end a region.
+pub const CLIP: f64 = -4.0;
+
 /// Counts the tables reach: the windows are 64 KiB at most, and planes 4096 rows.
 const MAX: usize = 1 << 17;
 
@@ -56,19 +60,6 @@ pub fn bits(counts: &[u32]) -> f64 {
             t.all_sum[n as usize] - row.iter().filter(|&&c| c > 0).map(|&c| t.sym_sum[c as usize]).sum::<f64>()
         })
         .sum()
-}
-
-/// Code length of byte planes (`p` planes of `n` bytes, one after another), a model each.
-pub fn plane_bits(planes: &[u8], n: usize) -> f64 {
-    let p = planes.len() / n.max(1);
-    let mut counts = vec![0u32; p * 256];
-    for (i, plane) in planes.chunks_exact(n.max(1)).enumerate() {
-        let c = &mut counts[i * 256..i * 256 + 256];
-        for &b in plane {
-            c[b as usize] += 1;
-        }
-    }
-    bits(&counts)
 }
 
 /// log2 probabilities of the bytes of data under its order-0 model (with the prior).

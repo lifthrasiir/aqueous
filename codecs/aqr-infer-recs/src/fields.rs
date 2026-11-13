@@ -18,14 +18,14 @@ pub enum Cost {
 }
 
 /// Records up to this size also try fields against earlier fields of their width.
-pub const REF_K: usize = 128;
+const REF_K: usize = 128;
 /// How far back in the record those fields are.
 const REF_BACK: usize = 32;
 /// The description of a field, which breaks ties towards fewer, wider fields.
 const FIELD_BITS: f64 = 16.0;
 /// Fields are chosen on 4 runs of this many records spread over the records, or fewer of big
 /// records: FIELD_BYTES in all.
-pub const FIELD_ROWS: usize = 256;
+const FIELD_ROWS: usize = 256;
 const FIELD_BYTES: usize = 1 << 16;
 
 /// The values v of field f coded.
@@ -67,11 +67,6 @@ pub fn encode(m: &[u8], k: usize, fields: &[Field]) -> Vec<u8> {
         planes(&code(&values(m, k, f.off, f.width, f.big), m, k, f), f.width, &mut out);
     }
     out
-}
-
-/// The n records of k bytes back from the planes of their fields (None if not exactly).
-pub fn decode(planes: &[u8], n: usize, k: usize, fields: &[Field]) -> Option<Vec<u8>> {
-    crate::module::decode_planes(planes, n, k, fields)
 }
 
 /// FIELD_ROWS records from each of 4 places over m (all of m if that is not fewer).
@@ -298,7 +293,7 @@ mod tests {
             assert!(bits < raw / 4.0, "{cost:?}: {}", describe(&fields));
             let p = encode(&m, k, &fields);
             assert_eq!(p.len(), m.len());
-            assert_eq!(decode(&p, n, k, &fields).unwrap(), m);
+            assert_eq!(crate::module::decode_planes(&p, n, k, &fields).unwrap(), m);
         }
     }
 }

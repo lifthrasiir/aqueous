@@ -27,3 +27,4 @@ zstd = "0.13"
 [[example]]
 name = "aqr-hdf5-check"
 path = "examples/check.rs"
+required-features = ["encode"]

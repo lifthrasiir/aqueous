@@ -50,8 +50,6 @@ pub const FLOAT: u8 = 1;
 
 #[derive(Debug, Clone)]
 pub struct Dataset {
-    /// The address of its object header.
-    pub header: u64,
     pub filters: Vec<Filter>,
     pub dtype: Option<Dtype>,
     /// The dimensions of a chunk, the last the element's bytes.
@@ -84,10 +82,6 @@ pub struct Chunk {
 
 #[derive(Debug, Clone, Default)]
 pub struct File {
-    /// Where the superblock is: the user block before it.
-    pub start: usize,
-    /// The end of the file, as its superblock tells (in the data given to [`parse`]).
-    pub end: usize,
     pub datasets: Vec<Dataset>,
     /// The filtered chunks, by address, none overlapping.
     pub chunks: Vec<Chunk>,
@@ -245,7 +239,7 @@ pub fn parse(d: &[u8]) -> Option<File> {
     let Walk { datasets, mut chunks, .. } = w;
     chunks.sort_by_key(|c| (c.at.start, c.at.end));
     chunks.dedup_by(|next, kept| next.at.start < kept.at.end);
-    Some(File { start, end, datasets, chunks })
+    Some(File { datasets, chunks })
 }
 
 struct Walk<'a> {
@@ -280,6 +274,16 @@ impl<'a> Walk<'a> {
         Reader { d: data, p: 0, o: self.o, l: self.l }
     }
 
+    /// The address and length of the block that a message of type `t` and `data` continues the
+    /// header in, if it is a continuation message.
+    fn continuation(&self, t: u16, data: &'a [u8]) -> Option<(u64, u64)> {
+        if t != 0x10 {
+            return None;
+        }
+        let mut c = self.of(data);
+        Some((c.addr()?, c.len()?))
+    }
+
     fn node(&mut self) -> Option<()> {
         self.nodes += 1;
         (self.nodes <= MAX_OBJECTS).then_some(())
@@ -309,7 +313,7 @@ impl<'a> Walk<'a> {
                 _ => {}
             }
         }
-        if let Some((ds, index)) = self.dataset(a, &msgs) {
+        if let Some((ds, index)) = self.dataset(&msgs) {
             self.datasets.push(ds);
             // (what is found before an index goes wrong is kept: each chunk is checked)
             let _ = self.chunks_of(self.datasets.len() - 1, index);
@@ -374,12 +378,7 @@ impl<'a> Walk<'a> {
                     let flags = r.u8()?;
                     r.skip(3)?;
                     let Some(data) = r.bytes(size) else { break };
-                    if t == 0x10 {
-                        let mut c = self.of(data);
-                        if let (Some(ca), Some(cl)) = (c.addr(), c.len()) {
-                            blocks.push((ca, cl));
-                        }
-                    }
+                    blocks.extend(self.continuation(t, data));
                     out.push(Message { t, flags, data });
                 }
             }
@@ -407,12 +406,7 @@ impl<'a> Walk<'a> {
                 break;
             }
             let data = r.bytes(size)?;
-            if t == 0x10 {
-                let mut c = self.of(data);
-                if let (Some(ca), Some(cl)) = (c.addr(), c.len()) {
-                    blocks.push((ca, cl));
-                }
-            }
+            blocks.extend(self.continuation(t, data));
             out.push(Message { t, flags: mflags, data });
         }
         Some(())
@@ -612,13 +606,13 @@ impl<'a> Walk<'a> {
 
     /// A dataset's description and the index of its chunks, if its header is one of a dataset
     /// of filtered chunks.
-    fn dataset(&self, a: u64, msgs: &[Message<'a>]) -> Option<(Dataset, Index)> {
+    fn dataset(&self, msgs: &[Message<'a>]) -> Option<(Dataset, Index)> {
         let layout = msgs.iter().find(|m| m.t == 0x08)?;
         let filters = msgs.iter().find(|m| m.t == 0x0b && m.flags & 2 == 0)?;
         let filters = self.filters(filters.data)?;
         let dtype = msgs.iter().find(|m| m.t == 0x03 && m.flags & 2 == 0).and_then(|m| dtype(m.data));
         let (chunk, index) = self.layout(layout.data)?;
-        Some((Dataset { header: a, filters, dtype, chunk }, index))
+        Some((Dataset { filters, dtype, chunk }, index))
     }
 
     /// A filter pipeline message (§IV.A.2.l).

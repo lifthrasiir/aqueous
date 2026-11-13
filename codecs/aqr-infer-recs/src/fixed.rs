@@ -25,9 +25,6 @@ const MAX_REGIONS: usize = 32;
 const SCAN_KS: usize = 8;
 /// The times a region is grown, its models refitted on the last.
 const ROUNDS: usize = 2;
-/// The least score of a byte against the column models: one value the models have not seen
-/// does not end a region.
-const CLIP: f64 = -4.0;
 
 /// The best k of a window and its code length against k = 1, in bits per byte, and the
 /// window's order-0 code length in bits per byte. The code length of the window under k
@@ -114,10 +111,10 @@ fn columns(from: usize, k: usize) -> impl Iterator<Item = usize> {
 /// in bits). A maximum-sum run of each byte's log-ratio of the column models against the
 /// order-0 model; the column models are refitted on the region found and the region grown
 /// again, as a window alone misses values that drift along the file (counters, timestamps).
-/// With span, the region stays within that many bytes of the window.
-pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: Option<usize>) -> (usize, usize, f64) {
-    let base = span.map_or(0, |s| wo.saturating_sub(s));
-    let data = &data[base..span.map_or(data.len(), |s| (wo + wlen + s).min(data.len()))];
+/// The region stays within `span` bytes of the window.
+pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: usize) -> (usize, usize, f64) {
+    let base = wo.saturating_sub(span);
+    let data = &data[base..(wo + wlen + span).min(data.len())];
     let wo = wo - base;
     let bg = kt::order0_log2(data);
     let (mut s, mut e, mut gain) = (wo, wo + wlen, 0.0);
@@ -134,7 +131,7 @@ pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: Option<u
             let row = &counts[c * 256..c * 256 + 256];
             let lp = kt::column_log2(row, row.iter().sum::<u32>() as usize);
             for s in 0..256 {
-                llr[c * 256 + s] = (lp[s] - bg[s]).max(CLIP);
+                llr[c * 256 + s] = (lp[s] - bg[s]).max(kt::CLIP);
             }
         }
         let (ns, ne, g) = best_run(columns(phase, k).zip(data).map(|(c, &b)| llr[c * 256 + b as usize]));
@@ -207,7 +204,7 @@ pub fn grow_fields(
             tr.iter()
                 .zip(mr)
                 .enumerate()
-                .map(|(c, (&x, &y))| (lp[c * 256 + x as usize] - bg[y as usize]).max(CLIP))
+                .map(|(c, (&x, &y))| (lp[c * 256 + x as usize] - bg[y as usize]).max(kt::CLIP))
                 .sum()
         });
         let (ns, ne, _) = best_run(scores);
@@ -226,7 +223,8 @@ pub fn grow_fields(
         }
         let lp = kt::column_log2(&counts, e - s);
         let r = &m[(s - 1) * k..s * k];
-        if r.iter().enumerate().map(|(c, &b)| (lp[c * 256 + b as usize] - bg[b as usize]).max(CLIP)).sum::<f64>() > 0.0
+        if r.iter().enumerate().map(|(c, &b)| (lp[c * 256 + b as usize] - bg[b as usize]).max(kt::CLIP)).sum::<f64>()
+            > 0.0
         {
             s -= 1;
         }
@@ -269,16 +267,15 @@ pub fn find(data: &[u8], threads: usize) -> Vec<(usize, usize, usize)> {
         return Vec::new();
     }
     // the windows: coarse, then fine
-    let mut windows: Vec<(usize, usize, usize, Option<usize>)> =
-        linspace(n - wlen, (n / WINDOW_EVERY).clamp(1, MAX_WINDOWS))
-            .into_iter()
-            .map(|wo| (wo, wlen, MAX_K, Some(SPAN)))
-            .collect();
+    let mut windows: Vec<(usize, usize, usize, usize)> = linspace(n - wlen, (n / WINDOW_EVERY).clamp(1, MAX_WINDOWS))
+        .into_iter()
+        .map(|wo| (wo, wlen, MAX_K, SPAN))
+        .collect();
     if n >= 2 * FINE_WINDOW {
         windows.extend(
             linspace(n - FINE_WINDOW, MAX_FINE_WINDOWS.min(n / FINE_WINDOW))
                 .into_iter()
-                .map(|wo| (wo, FINE_WINDOW, FINE_K, Some(FINE_SPAN))),
+                .map(|wo| (wo, FINE_WINDOW, FINE_K, FINE_SPAN)),
         );
     }
     // The windows scanned at once, on `threads`; then their regions grown, in order, but where a

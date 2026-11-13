@@ -3,7 +3,7 @@
 //! to 2^16 that move by 1/64 towards each base seen; the top 12 bits of the first three are
 //! its frequencies, the fourth what is left of 4096.
 
-use crate::stream::{PIECE, Reader};
+use crate::stream::Reader;
 use crate::{Result, corrupt};
 
 /// Bases of the context: 9, a table of 2 MiB, so that several decoders at once keep theirs
@@ -118,6 +118,7 @@ impl Packed {
         self.len == 0
     }
 
+    #[cfg(test)]
     #[inline(always)]
     pub fn push(&mut self, b: u8) {
         let shift = 2 * (self.len & 3);
@@ -130,6 +131,7 @@ impl Packed {
     }
 
     /// Bases `r`, 0 to 3 each.
+    #[cfg(test)]
     pub fn iter(&self, r: std::ops::Range<usize>) -> impl Iterator<Item = u8> + '_ {
         r.map(|i| self.bytes[i / 4] >> (2 * (i & 3)) & 3)
     }
@@ -193,6 +195,7 @@ impl Packer {
     }
 }
 
+#[cfg(test)]
 impl FromIterator<u8> for Packed {
     fn from_iter<I: IntoIterator<Item = u8>>(bases: I) -> Packed {
         let mut p = Packed::default();
@@ -308,9 +311,10 @@ fn encode_in(s: &Packed, chunk: usize) -> Vec<u8> {
 }
 
 /// The `n` bases of coded form `c`; fails where `c` is not exactly of them.
+#[cfg(test)]
 pub fn decode(c: &[u8], n: usize) -> Result<Vec<u8>> {
     let mut src = crate::stream::Slice(c);
-    let mut d = Decoder::new(Reader::new(&mut src, PIECE))?;
+    let mut d = Decoder::new(Reader::new(&mut src, crate::stream::PIECE))?;
     let s = d.by_ref().take(n).collect();
     d.finish()?;
     Ok(s)

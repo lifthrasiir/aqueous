@@ -51,13 +51,6 @@ pub struct Style {
 }
 
 impl Style {
-    pub const ALL: [Style; 4] = [
-        Style { comma_space: false, colon_space: false },
-        Style { comma_space: true, colon_space: true },
-        Style { comma_space: false, colon_space: true },
-        Style { comma_space: true, colon_space: false },
-    ];
-
     /// The params of a file of this style and `lists` key lists defined.
     pub fn to_params(self, lists: u64) -> Vec<u8> {
         let mut p = vec![self.comma_space as u8 | (self.colon_space as u8) << 1];

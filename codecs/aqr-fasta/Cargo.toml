@@ -25,3 +25,4 @@ zstd = "0.13"
 [[example]]
 name = "aqr-fasta-bench"
 path = "examples/bench.rs"
+required-features = ["encode"]

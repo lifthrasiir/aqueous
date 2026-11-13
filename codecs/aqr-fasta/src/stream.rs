@@ -105,9 +105,4 @@ impl<'a> Writer<'a> {
             false => Err(corrupt()),
         }
     }
-
-    /// The bytes put so far, flushed or not.
-    pub fn total(&self) -> u64 {
-        self.flushed + self.buf.len() as u64
-    }
 }
