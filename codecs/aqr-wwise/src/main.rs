@@ -278,7 +278,7 @@ fn main() {
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_by_key(|g| std::cmp::Reverse(g.1.len()));
     for ((s, channels, pows), ms) in &groups {
-        let ident = Ident { channels: *channels, blocksizes: [1 << pows[0], 1 << pows[1]] };
+        let ident = Ident { channels: *channels, blocksizes: [1 << pows[0], 1 << pows[1]], stripped: false };
         let packets: usize = ms.iter().map(|m| m.w.packets.len()).sum();
         println!(
             "setup: {} media ({packets} packets), {channels} ch, {}..{} Hz, blocks {:?}, {} books, ends {:?}, read {}/{} bits, e.g. {}",

@@ -11,24 +11,32 @@ fn corrupt() -> Error {
 }
 
 /// The params of a stream of `ident`: its channels (a varint), then its block sizes' exponents,
-/// the short one's in the low 4 bits of a byte, the long one's in the high 4.
+/// the short one's in the low 4 bits of a byte, the long one's in the high 4; then, for stripped
+/// packets, a byte 1.
 pub fn params(ident: Ident) -> Vec<u8> {
     let mut p = Vec::new();
     varint::put(&mut p, ident.channels as u64);
     let exp = |b: usize| b.trailing_zeros() as u8;
     p.push(exp(ident.blocksizes[0]) | exp(ident.blocksizes[1]) << 4);
+    if ident.stripped {
+        p.push(1);
+    }
     p
 }
 
 pub(crate) fn ident(params: &[u8]) -> Result<Ident> {
     let mut at = 0;
     let channels = varint::get(params, &mut at).map_err(|_| corrupt())?;
-    let &[sizes] = &params[at..] else { return Err(corrupt()) };
+    let (sizes, stripped) = match params[at..] {
+        [sizes] => (sizes, false),
+        [sizes, 1] => (sizes, true),
+        _ => return Err(corrupt()),
+    };
     let (b0, b1) = (sizes & 15, sizes >> 4);
     if !(1..=255).contains(&channels) || !(6..=13).contains(&b0) || !(6..=13).contains(&b1) || b0 > b1 {
         return Err(corrupt());
     }
-    Ok(Ident { channels: channels as usize, blocksizes: [1 << b0, 1 << b1] })
+    Ok(Ident { channels: channels as usize, blocksizes: [1 << b0, 1 << b1], stripped })
 }
 
 /// The module: the packets, each after its 16-bit length, `len` bytes, from `params` (the

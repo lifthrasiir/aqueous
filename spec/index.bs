@@ -6538,8 +6538,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/tensors-recons.wasm" title="crates/aqr-modules/wasm/tensors-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tensors/FORMAT.md" title="codecs/aqr-tensors/FORMAT.md">R</a>
     <tr>
-      <td><code>43a6195dacde429fd1c040eb6f6158aa7df420e6ec278c87dddf6e5be114016b</code>
-      <td>vorbis-recons@2
+      <td><code>aaa4bb5e6855813424e589b4b02b8169f097add0cb6bce28b7efd8bf4c4aa2d4</code>
+      <td>vorbis-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/vorbis-recons.wasm" title="crates/aqr-modules/wasm/vorbis-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-vorbis/FORMAT.md" title="codecs/aqr-vorbis/FORMAT.md">R</a>
     <tr>

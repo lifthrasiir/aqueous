@@ -60,10 +60,11 @@ rANS stream.
 
 ## 3. The module
 
-- **Module**: name `vorbis-recons`, version 2.
+- **Module**: name `vorbis-recons`, version 3.
 - **Params**: `varint channels` (1 to 255), then a byte: the short block size's exponent in its
   low 4 bits, the long one's in its high 4, each from 6 to 13 (64 to 8192 samples), the short
-  not above the long. Nothing after.
+  not above the long. Then optionally a byte 1: the packets are **stripped** (Wwise's: no
+  packet type, no window flags, §5). Nothing after.
 - **Resources**: none.
 - **Inputs**: exactly 2: `setup` (class `vorbis/setup`), the setup header (a whole packet of
   type 5, Vorbis I §4.2.4), parsed for the params' channels; `record` (class `vorbis/record`), §4.
@@ -120,9 +121,11 @@ little-endian) and its bytes. It fails where:
 The decode of an audio packet of Vorbis I §4.3.1 reads, in order (each a **field** of `n` bits,
 or an **entry** of a book, read by its Huffman code), with `C` the channels:
 
-1. the packet type, 1 bit (field `Type`; 0, else the packet is not taken);
+1. the packet type, 1 bit (field `Type`; 0, else the packet is not taken), but in stripped
+   packets;
 2. the mode number, `ilog(modes − 1)` bits (`Mode`), which must be a mode of the setup;
-3. for a mode of long blocks, the previous and next window flags, 2 bits (`Window`);
+3. for a mode of long blocks, the previous and next window flags, 2 bits (`Window`), but in
+   stripped packets;
 4. for each channel `ch` in order, its floor (of the mode's mapping's submap of `ch`): 1 bit
    (`Nonzero`); where 1, Y[0] and Y[1], each `ilog(range − 1)` bits with `range` 256, 128, 86 or
    64 for multipliers 1 to 4 (`Y01`, `i` 0 and 1); then for each partition `part`, where its

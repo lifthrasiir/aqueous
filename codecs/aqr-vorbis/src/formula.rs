@@ -8,7 +8,7 @@ use crate::{codec, module};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("vorbis-recons", 2).with_plan(plan);
+pub const MODULE: Module = Module::new("vorbis-recons", 3).with_plan(plan);
 
 /// The memory of the module: its plan ([`crate::plan::decode`]).
 fn plan(u: &Usage<'_>) -> Option<u64> {
@@ -20,8 +20,13 @@ fn plan(u: &Usage<'_>) -> Option<u64> {
 /// the end of `data` or a length of 0) of a stream of `ident` and setup header `setup`, and the
 /// bytes it takes; None where the setup or a packet does not parse, or there are no packets.
 pub fn packets(f: &mut Formula, setup: &[u8], ident: Ident, data: &[u8]) -> Option<(Node, usize)> {
-    let s = Setup::parse(setup, ident).ok()?;
-    let (used, record) = codec::encode(&s, data)?;
+    packets_parsed(f, setup, &Setup::parse(setup, ident).ok()?, data)
+}
+
+/// As [`packets`], with the setup header `setup` parsed already (as `s`).
+pub fn packets_parsed(f: &mut Formula, setup: &[u8], s: &Setup, data: &[u8]) -> Option<(Node, usize)> {
+    let ident = s.ident;
+    let (used, record) = codec::encode(s, data)?;
     if used == 0 {
         return None;
     }

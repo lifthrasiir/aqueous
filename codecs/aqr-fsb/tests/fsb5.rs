@@ -150,7 +150,7 @@ impl aqr_vorbis::packet::Source for Random<'_> {
 fn vorbis_bank(crc: u32, channels: usize, packets: u64) -> Vec<u8> {
     let db = aqr_vorbis::setups::database().unwrap();
     let setup = db.assemble_row(db.row(crc).unwrap()).unwrap();
-    let ident = aqr_vorbis::setup::Ident { channels, blocksizes: [256, 2048] };
+    let ident = aqr_vorbis::setup::Ident { channels, blocksizes: [256, 2048], stripped: false };
     let s = aqr_vorbis::setup::Setup::parse(&setup, ident).unwrap();
     let mut data = Vec::new();
     for seed in 0..packets {

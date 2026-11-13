@@ -165,12 +165,12 @@ impl From<Error> for Stop {
 fn walk_or_short(s: &Setup, scratch: &mut Scratch, src: &mut dyn Source) -> std::result::Result<(), Stop> {
     let bits = |src: &mut dyn Source, f, n| src.bits(f, n).ok_or(Stop::Short);
     let entry = |src: &mut dyn Source, f, book: usize| src.entry(f, book).ok_or(Stop::Short);
-    if bits(src, Field::Type, 1)? != 0 {
+    if !s.ident.stripped && bits(src, Field::Type, 1)? != 0 {
         return Err(Error("not an audio packet").into());
     }
     let mode = bits(src, Field::Mode, ilog(s.modes.len() as u32 - 1))? as usize;
     let mode = *s.modes.get(mode).ok_or(Error("packet mode"))?;
-    if mode.blockflag {
+    if mode.blockflag && !s.ident.stripped {
         bits(src, Field::Window, 2)?;
     }
     let n = s.ident.blocksizes[mode.blockflag as usize];

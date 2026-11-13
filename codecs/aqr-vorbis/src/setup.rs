@@ -18,11 +18,13 @@ fn get(r: &mut Reader, n: u32) -> Result<u32> {
 }
 
 /// What a stream's identification header tells that the setup and the packets depend on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ident {
     pub channels: usize,
     /// The short and long block sizes, in samples.
     pub blocksizes: [usize; 2],
+    /// The audio packets leave out their packet type and window flags (Wwise's).
+    pub stripped: bool,
 }
 
 /// A codebook. (Its vectors are declared in the reverse of the order they are made in, so that

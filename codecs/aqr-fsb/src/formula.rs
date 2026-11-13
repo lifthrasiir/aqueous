@@ -32,7 +32,7 @@ fn class(codec: Codec) -> &'static str {
 fn vorbis(f: &mut Formula, d: &[u8], h: &Header, data: &[u8]) -> Option<(Node, usize)> {
     let crc = u32::from_le_bytes(h.chunk(d, CHUNK_VORBIS)?.get(..4)?.try_into().ok()?);
     let db = aqr_vorbis::setups::database().ok()?;
-    let ident = Ident { channels: h.channels, blocksizes: BLOCKSIZES };
+    let ident = Ident { channels: h.channels, blocksizes: BLOCKSIZES, stripped: false };
     db.lookup(crc).into_iter().find_map(|c| {
         let setup = db.assemble(c.skeleton, &c.ends).ok()?;
         aqr_vorbis::formula::packets(f, &setup, ident, data)

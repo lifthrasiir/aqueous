@@ -83,3 +83,24 @@ fn bad_records_fail() {
         }
     }
 }
+
+/// Stripped packets (Wwise's: no packet type, no window flags) through the record and back, and
+/// the module's params telling them.
+#[test]
+fn stripped_streams_round_trip() {
+    let ident = aqr_vorbis::setup::Ident { stripped: true, ..IDENT };
+    let s = Setup::parse(&setup_bytes(), ident).unwrap();
+    let plain = Setup::parse(&setup_bytes(), IDENT).unwrap();
+    for seed in 0..10 {
+        let d = stream(&s, 1 + seed * 7, seed);
+        let (used, record) = codec::encode(&s, &d).unwrap();
+        assert_eq!(used, d.len());
+        assert_eq!(codec::decode(&s, &record, used).unwrap(), d);
+        let params = aqr_vorbis::module::params(ident);
+        assert_eq!(params.last(), Some(&1));
+        let setup = setup_bytes();
+        assert_eq!(aqr_vorbis::module::decode(&params, &[&setup, &record], used as u64).unwrap(), d);
+        // (a record of stripped packets is not one of whole packets)
+        assert_ne!(codec::decode(&plain, &record, used).ok(), Some(d));
+    }
+}

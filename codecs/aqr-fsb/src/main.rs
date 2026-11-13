@@ -176,7 +176,7 @@ fn main() {
                 continue;
             };
             let bytes = db.assemble_row(row).expect("a row assembles");
-            let setup = Setup::parse(&bytes, Ident { channels: h.channels, blocksizes: [256, 2048] });
+            let setup = Setup::parse(&bytes, Ident { channels: h.channels, blocksizes: [256, 2048], stripped: false });
             let r = setup.map_err(|e| e.to_string()).and_then(|setup| sample(&mut s, &setup, &d[range.clone()]));
             if let Err(e) = r {
                 s.failed += 1;

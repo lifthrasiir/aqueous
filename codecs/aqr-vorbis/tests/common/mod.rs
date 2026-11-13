@@ -8,7 +8,7 @@ use aqr_vorbis::bits::Writer;
 use aqr_vorbis::packet::{self, End, Field, Source};
 use aqr_vorbis::setup::{Ident, Setup, lookup1_values};
 
-pub const IDENT: Ident = Ident { channels: 2, blocksizes: [64, 256] };
+pub const IDENT: Ident = Ident { channels: 2, blocksizes: [64, 256], stripped: false };
 
 /// A codebook: `lengths` (0 unused) stored sparse, or ordered where `ordered` (lengths then
 /// nondecreasing and all used), and a lookup of `lookup` type (0 for none).

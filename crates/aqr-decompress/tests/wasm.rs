@@ -2954,6 +2954,7 @@ fn vorbis_plans_hold() {
             let ident = aqr_vorbis::setup::Ident {
                 channels: a.params[0] as usize,
                 blocksizes: [1 << (a.params[1] & 15), 1 << (a.params[1] >> 4)],
+                stripped: false,
             };
             let (mut odd, mut at, mut k) = (Vec::new(), 0, 0u32);
             while at + 2 <= want.len() {

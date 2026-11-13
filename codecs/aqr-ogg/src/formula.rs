@@ -65,7 +65,7 @@ fn vorbis_ident(id: &[u8]) -> Option<Ident> {
     if !(6..=13).contains(&short) || !(6..=13).contains(&long) || short > long {
         return None;
     }
-    Some(Ident { channels: id[11] as usize, blocksizes: [1 << short, 1 << long] })
+    Some(Ident { channels: id[11] as usize, blocksizes: [1 << short, 1 << long], stripped: false })
 }
 
 /// Audio packets of a Vorbis stream are given to aqr-vorbis in pieces, each coded apart, on
