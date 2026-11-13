@@ -12,6 +12,7 @@
 use alloc::vec::Vec;
 
 use super::{Ref, NUM_STREAMS as NUM_BASE, STREAM_NAMES as BASE_NAMES};
+use crate::arch::flags::{map_values, names, ones};
 
 /// Number of the streams: those of [`super`], then [`CALLF`], [`JUMPF`], [`ADDRF`] and [`MAP`].
 pub const NUM_STREAMS: usize = NUM_BASE + 4;
@@ -26,19 +27,7 @@ pub const ADDRF: usize = NUM_BASE + 2;
 pub const MAP: usize = NUM_BASE + 3;
 
 /// Names of the streams, in order.
-pub const STREAM_NAMES: [&str; NUM_STREAMS] = {
-    let mut n = [""; NUM_STREAMS];
-    let mut i = 0;
-    while i < NUM_BASE {
-        n[i] = BASE_NAMES[i];
-        i += 1;
-    }
-    n[CALLF] = "ST_CALLF";
-    n[JUMPF] = "ST_JUMPF";
-    n[ADDRF] = "ST_ADDRF";
-    n[MAP] = "ST_MAP";
-    n
-};
+pub const STREAM_NAMES: [&str; NUM_STREAMS] = names(BASE_NAMES, ["ST_CALLF", "ST_JUMPF", "ST_ADDRF", "ST_MAP"]);
 
 /// The flag stream of references of `r`.
 const fn flags_of(r: Ref) -> usize {
@@ -62,6 +51,7 @@ const fn width(is64: bool) -> u64 {
 mod encode {
     use super::super::{encode_with, EncodedStreams as Base};
     use super::*;
+    use crate::arch::flags::Bits;
     use crate::arch::matching::{self, Code};
     pub use crate::arch::matching::{Signature, Stats, SAMPLE};
 
@@ -96,9 +86,8 @@ mod encode {
                 }
                 v
             };
-            if encode_with(c, va, is64, &mut hook).is_none() {
-                continue;
-            }
+            // (what a section that does not parse holds up to there is kept)
+            let _ = encode_with(c, va, is64, &mut hook);
         }
         cuts.push(units.len());
         refs.sort_unstable_by_key(|r| r.0);
@@ -209,23 +198,6 @@ mod encode {
         }
     }
 
-    /// Bits, the most significant of each byte first.
-    #[derive(Default)]
-    struct Bits {
-        out: Vec<u8>,
-        n: usize,
-    }
-
-    impl Bits {
-        fn push(&mut self, b: bool) {
-            if self.n.is_multiple_of(8) {
-                self.out.push(0);
-            }
-            *self.out.last_mut().unwrap() |= (b as u8) << (7 - self.n % 8);
-            self.n += 1;
-        }
-    }
-
     /// The streams of the code section `code` at address `origin`, of x86-64 or x86-32, its
     /// references written as `remap` maps them.
     pub fn encode(code: &[u8], origin: u64, is64: bool, remap: &Remap) -> Option<EncodedStreams> {
@@ -254,12 +226,7 @@ mod encode {
             last = s;
             // the difference sign-extended from the width, zigzag coded, as a LEB128
             let d = if is64 { d as i64 } else { d as u32 as i32 as i64 };
-            let mut z = ((d << 1) ^ (d >> 63)) as u64;
-            while z >= 0x80 {
-                map.push(z as u8 | 0x80);
-                z >>= 7;
-            }
-            map.push(z as u8);
+            crate::util::put_varint(&mut map, ((d << 1) ^ (d >> 63)) as u64);
         }
         let n = [0, 1, 2].map(|i| flags[i].n);
         let [c, j, a] = flags.map(|b| b.out);
@@ -274,26 +241,7 @@ pub use encode::*;
 mod decode {
     use super::super::{decode_hooked, DecodedStreams, Opcodes};
     use super::*;
-
-    /// Flags, the most significant bit of each byte first.
-    struct Flags<'a> {
-        s: &'a [u8],
-        n: usize,
-    }
-
-    impl Flags<'_> {
-        fn next(&mut self) -> Option<bool> {
-            let b = *self.s.get(self.n / 8)? >> (7 - self.n % 8) & 1;
-            self.n += 1;
-            Some(b != 0)
-        }
-
-        /// Whether all were read, the bits left in the last byte 0.
-        fn done(&self) -> bool {
-            let pad = if self.n.is_multiple_of(8) { 0 } else { 0xff >> (self.n % 8) };
-            self.s.len() == self.n.div_ceil(8) && self.s.last().is_none_or(|&b| b & pad == 0)
-        }
-    }
+    use crate::arch::flags::Flags;
 
     /// The shifts of the values `vals` (sorted, distinct) from map `s`, of x86-64 or x86-32.
     fn shifts(vals: &[u64], mut s: &[u8], is64: bool) -> Option<Vec<u64>> {
@@ -338,7 +286,7 @@ mod decode {
         // of each reference flagged, where its field is and its value (as many as the flags set,
         // at most: no more memory than that)
         // (each a field of 4 bytes of the section, so no more than `capacity` allows)
-        let ones: usize = flags.iter().flat_map(|f| f.s).map(|b| b.count_ones() as usize).sum();
+        let ones = ones(&streams[CALLF..=ADDRF]) as usize;
         let mut fixups: Vec<(u64, usize)> = Vec::with_capacity(ones.min(capacity / 4));
         let mut out = decode_hooked(&base, is64, opcodes, capacity, |r, v, at| {
             if flags[flags_of(r) - CALLF].next()? {
@@ -369,16 +317,6 @@ mod decode {
 
 #[cfg(feature = "decode")]
 pub use decode::decode;
-
-/// The values of a map of [`decode`]'s (`MAP`, or ARM64's): one a varint.
-pub(crate) fn map_values(map: &[u8]) -> u64 {
-    map.iter().filter(|&&b| b < 0x80).count() as u64
-}
-
-/// The flags set in flag streams `flags`.
-pub(crate) fn ones(flags: &[&[u8]]) -> u64 {
-    flags.iter().flat_map(|f| f.iter()).map(|b| b.count_ones() as u64).sum()
-}
 
 /// Bytes that [`decode`] takes of [`aqr_api::stack`], of the streams from [`CALLF`] on and a
 /// section of `room` bytes reserved, in its blocks' order: each reference flagged (its value and

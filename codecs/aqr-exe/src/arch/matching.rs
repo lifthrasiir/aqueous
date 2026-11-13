@@ -47,7 +47,6 @@ impl<T: Copy + Eq + Into<u64>> Code<T> {
             .collect()
     }
 
-    /// The references from unit `from` to `to`.
     /// The references from unit `from` to `to`: each its unit, its space and its value.
     fn refs_in(&self, from: usize, to: usize) -> impl Iterator<Item = (usize, u8, u64)> + '_ {
         let a = self.refs.partition_point(|r| (r.1 as usize) < from);

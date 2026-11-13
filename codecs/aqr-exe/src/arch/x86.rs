@@ -11,8 +11,6 @@ use core::cell::Cell;
 use core::mem;
 use core::ops;
 
-use bytemuck::must_cast_slice;
-
 use crate::util::{to_u32, to_u64};
 
 #[cfg(all(feature = "encode", trace_encode))]
@@ -376,6 +374,10 @@ const _: () = {
     assert!(bitset.count_ones() == 11);
 };
 
+/// Bytes an instruction may read past its start, and so the most that a section's end is
+/// extended with and cut again: enough for this encoding scheme (FORMAT.md allows 0 to this).
+pub(crate) const SENTINEL: usize = 15;
+
 macro_rules! define_streams {
     ($($i:ident $s:literal),* $(,)?) => (
         define_streams! { @0 $($i)* }
@@ -641,7 +643,7 @@ impl EncodedStreams {
                 header.extend_from_slice(&(stream.len() as u32).to_le_bytes());
             }
         }
-        w.write_all(must_cast_slice(&header))?;
+        w.write_all(&header)?;
 
         for stream in &self.streams {
             w.write_all(stream)?;
@@ -806,7 +808,6 @@ fn scan_pad(mut code: &[u8]) -> usize {
 }
 
 const fn pad_followed(op: u16) -> bool {
-    // TODO
     matches!(op, 0x9a | 0xe8 | 0xe9 | 0xea | 0xeb | 0xc2 | 0xc3 | 0xca | 0xcb | 0xcc | 0xcf)
 }
 
@@ -880,9 +881,6 @@ pub fn encode_with(
     let code_start = origin;
     let code_end = origin + code_len as u64;
 
-    // Bytes an instruction may read past its start: should be enough for this encoding scheme.
-    const SENTINEL: usize = 15;
-
     let mut prefixes = 0;
     let mut pad = false;
 
@@ -920,11 +918,6 @@ pub fn encode_with(
                     st.copy(ST_PAD, padding);
                 }
                 origin += pad_size as u64;
-
-                if false {
-                    // Speculatively record the next instruction as a call target.
-                    call_idx(origin);
-                }
 
                 pad = false;
                 continue;
@@ -1380,7 +1373,7 @@ impl Sink for Vec<u8> {
     }
 
     fn finish(&mut self, sentinel: usize) -> Option<()> {
-        self.truncate(self.len().checked_sub(sentinel)?);
+        self.truncate(self.len().checked_sub(sentinel).filter(|_| sentinel <= SENTINEL)?);
         Some(())
     }
 }
@@ -1511,13 +1504,6 @@ pub fn decode_core<S: Src, K: Sink>(
                 _ => return None,
             }
 
-            if false {
-                // Speculatively record the next instruction as a call target.
-                let target = origin + code.len() as u64;
-                let idx = call_cache.find_index(target);
-                call_cache.record(idx, target);
-            }
-
             pad = false;
             continue;
         }
@@ -1546,8 +1532,7 @@ pub fn decode_core<S: Src, K: Sink>(
         }
 
         let (pre, evex, vex, rex) = match op {
-            PRE_VEX3 => (op, 0, src.read8(ST_VEX)?, src.read8(ST_REX)?),
-            PRE_VEX2 => (op, 0, src.read8(ST_VEX)?, src.read8(ST_REX)?),
+            PRE_VEX3 | PRE_VEX2 => (op, 0, src.read8(ST_VEX)?, src.read8(ST_REX)?),
             PRE_EVEX => (op, src.read8(ST_EVEX)?, src.read8(ST_VEX)?, src.read8(ST_REX)?),
             REX_MARKER | PRE_REX2 if !is64 => fatal!("unsupported REX prefixes in x86-32"),
             REX_MARKER => (op, 0, 0, src.read8(ST_REX)?),

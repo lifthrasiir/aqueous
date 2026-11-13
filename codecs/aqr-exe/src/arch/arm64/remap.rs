@@ -10,6 +10,7 @@
 use alloc::vec::Vec;
 
 use super::{low, NUM_STREAMS as NUM_BASE, STREAM_NAMES as BASE_NAMES};
+use crate::arch::flags::{map_values, names, ones};
 
 /// Number of the streams: those of [`super`], then [`BLF`], [`ADRPF`], [`BLMAP`] and
 /// [`ADRPMAP`].
@@ -25,19 +26,7 @@ pub const BLMAP: usize = NUM_BASE + 2;
 pub const ADRPMAP: usize = NUM_BASE + 3;
 
 /// Names of the streams, in order.
-pub const STREAM_NAMES: [&str; NUM_STREAMS] = {
-    let mut n = [""; NUM_STREAMS];
-    let mut i = 0;
-    while i < NUM_BASE {
-        n[i] = BASE_NAMES[i];
-        i += 1;
-    }
-    n[BLF] = "BLF";
-    n[ADRPF] = "ADRPF";
-    n[BLMAP] = "BLMAP";
-    n[ADRPMAP] = "ADRPMAP";
-    n
-};
+pub const STREAM_NAMES: [&str; NUM_STREAMS] = names(BASE_NAMES, ["BLF", "ADRPF", "BLMAP", "ADRPMAP"]);
 
 /// Bits of the field of a BL (`true`) or an ADRP.
 const fn bits(bl: bool) -> u32 {
@@ -52,6 +41,7 @@ const fn bits(bl: bool) -> u32 {
 mod encode {
     use super::super::{adrp_imm, encode_into, kind, Kind};
     use super::*;
+    use crate::arch::flags::Bits;
     use core::array;
 
     /// The targets of BL (in words) and the pages of ADRP of an image, each as the field the
@@ -178,23 +168,6 @@ mod encode {
         }
     }
 
-    /// Bits, the most significant of each byte first.
-    #[derive(Default)]
-    struct Bits {
-        out: Vec<u8>,
-        n: usize,
-    }
-
-    impl Bits {
-        fn push(&mut self, b: bool) {
-            if self.n.is_multiple_of(8) {
-                self.out.push(0);
-            }
-            *self.out.last_mut().unwrap() |= (b as u8) << (7 - self.n % 8);
-            self.n += 1;
-        }
-    }
-
     /// The streams of the code section `code` whose first byte is at address `origin`, its
     /// BL and ADRP targets written as `remap` maps them.
     pub fn encode(code: &[u8], origin: u64, remap: &Remap) -> EncodedStreams {
@@ -224,12 +197,7 @@ mod encode {
                 last = s;
                 // the difference sign-extended from its bits, zigzag coded, as a LEB128
                 let d = ((d << (32 - b)) as i32) >> (32 - b);
-                let mut z = ((d << 1) ^ (d >> 31)) as u32;
-                while z >= 0x80 {
-                    out.push(z as u8 | 0x80);
-                    z >>= 7;
-                }
-                out.push(z as u8);
+                crate::util::put_varint(&mut out, (((d << 1) ^ (d >> 31)) as u32).into());
             }
             out
         });
@@ -246,26 +214,7 @@ pub use encode::*;
 mod decode {
     use super::super::{decode_from, kind, take, Kind};
     use super::*;
-
-    /// Flags, the most significant bit of each byte first.
-    struct Flags<'a> {
-        s: &'a [u8],
-        n: usize,
-    }
-
-    impl Flags<'_> {
-        fn next(&mut self) -> Option<bool> {
-            let b = *self.s.get(self.n / 8)? >> (7 - self.n % 8) & 1;
-            self.n += 1;
-            Some(b != 0)
-        }
-
-        /// Whether all were read, the bits left in the last byte 0.
-        fn done(&self) -> bool {
-            let pad = if self.n.is_multiple_of(8) { 0 } else { 0xff >> (self.n % 8) };
-            self.s.len() == self.n.div_ceil(8) && self.s.last().is_none_or(|&b| b & pad == 0)
-        }
-    }
+    use crate::arch::flags::Flags;
 
     /// The map of the values in `vals`, sorted and deduplicated, of `bits` bits from
     /// stream `s`: each value and its target.
@@ -302,9 +251,9 @@ mod decode {
         let code = streams[0].get(..len / 4 * 4)?;
         let mut flags = [Flags { s: streams[BLF], n: 0 }, Flags { s: streams[ADRPF], n: 0 }];
         // (as many as the flags set, at most: no more memory than that)
-        let ones = |s: &[u8]| s.iter().map(|b| b.count_ones() as usize).sum::<usize>();
         // (each a word of the section)
-        let mut vals: [Vec<u32>; 2] = [streams[BLF], streams[ADRPF]].map(|s| Vec::with_capacity(ones(s).min(len / 4)));
+        let mut vals: [Vec<u32>; 2] =
+            [streams[BLF], streams[ADRPF]].map(|s| Vec::with_capacity((ones(&[s]) as usize).min(len / 4)));
         for w in code.as_chunks::<4>().0 {
             let w = u32::from_be_bytes(*w);
             let (i, f) = match kind(w) {
@@ -342,7 +291,6 @@ pub use decode::decode;
 /// section of `len` bytes, in its blocks' order: the values flagged of BLs and of ADRPs, their
 /// maps (one an entry of a map's stream, which is a varint), and the section.
 pub fn decode_plan(streams: [&[u8]; 4], len: u64) -> u64 {
-    use crate::arch::x86::remap::{map_values, ones};
     use aqr_api::stack::block;
     let flagged = block(4 * ones(&streams[..1])) + block(4 * ones(&streams[1..2]));
     flagged + block(8 * map_values(streams[2])) + block(8 * map_values(streams[3])) + block(len)

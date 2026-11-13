@@ -48,19 +48,12 @@ pub fn delta(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
 /// [`delta_part`]).
 pub const DELTA_WINDOW: u32 = 1;
 
-/// The module `bcj-delta` as a part module (its entry point, of `aqr_api::entry!`): its input
-/// encoded a piece at a time through windows of [`DELTA_WINDOW`] pages, the bytes `dist` before
-/// each kept (those before the data zeros).
-pub fn delta_part(params_len: u64, in0_len: u64, size: u64) {
-    use aqr_api::{Input, Memory, Output, Params};
-    if params_len != 1 || size != in0_len {
-        aqr_api::finish(Err(Error("bad parameters, or output of another length")));
-    }
-    let mut k = [0];
-    Params::read(0, &mut k);
-    let dist = k[0] as usize + 1;
+/// The input 0 of a part module of `size` bytes taken a piece at a time through its window, each
+/// piece changed by `f` in place and put to the output 0 through its window.
+#[inline(always)]
+fn pieces(size: u64, mut f: impl FnMut(&mut [u8])) {
+    use aqr_api::{Input, Memory, Output};
     let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
-    let (mut hist, mut h) = ([0u8; 256], 0);
     let mut buf = [0; 4096];
     let mut pos = 0;
     while pos < size {
@@ -69,16 +62,33 @@ pub fn delta_part(params_len: u64, in0_len: u64, size: u64) {
         Input::<0>::request(pos + n);
         Input::<0>::read(pos % w_in, piece);
         Input::<0>::release(pos + n);
+        f(piece);
+        Output::<0>::write(pos % w_out, piece);
+        Output::<0>::commit(pos + n);
+        pos += n;
+    }
+}
+
+/// The module `bcj-delta` as a part module (its entry point, of `aqr_api::entry!`): its input
+/// encoded a piece at a time through windows of [`DELTA_WINDOW`] pages, the bytes `dist` before
+/// each kept (those before the data zeros).
+pub fn delta_part(params_len: u64, in0_len: u64, size: u64) {
+    use aqr_api::{Memory, Params};
+    if params_len != 1 || size != in0_len {
+        aqr_api::finish(Err(Error("bad parameters, or output of another length")));
+    }
+    let mut k = [0];
+    Params::read(0, &mut k);
+    let dist = k[0] as usize + 1;
+    let (mut hist, mut h) = ([0u8; 256], 0);
+    pieces(size, |piece| {
         for b in piece.iter_mut() {
             let x = *b;
             *b = x.wrapping_sub(hist[h]);
             hist[h] = x;
             h = if h + 1 == dist { 0 } else { h + 1 };
         }
-        Output::<0>::write(pos % w_out, piece);
-        Output::<0>::commit(pos + n);
-        pos += n;
-    }
+    });
 }
 
 /// The module `bcj2`: the main, call and jump streams of the data (input 0) with the bits that
@@ -286,7 +296,7 @@ fn bcj2_stream(params_len: u64, data_len: u64, rc_len: u64, sizes: [u64; 3]) -> 
         return Err(Error("output of another length"));
     }
     let mut rc = bcj2::Rc::new(Pull::<1>::new(rc_len)).ok_or(Error("bad range coder"))?;
-    let mut probs = [1024u16; 258];
+    let mut probs = bcj2::fresh_probs();
     let mut data = Pull::<0>::new(data_len);
     let (mut main, mut call, mut jump) = (Push::<0>::new(sizes[0]), Push::<1>::new(sizes[1]), Push::<2>::new(sizes[2]));
     let mut prev = 0u8;
@@ -304,7 +314,7 @@ fn bcj2_stream(params_len: u64, data_len: u64, rc_len: u64, sizes: [u64; 3]) -> 
             continue;
         }
         let t: [u8; 4] = data.buf[data.lo..data.hi].get(..4).ok_or_else(corrupt)?.try_into().unwrap();
-        let abs = u32::from_le_bytes(t).wrapping_add(data.position() as u32 + 4);
+        let abs = u32::from_le_bytes(t).wrapping_add((data.position() as u32).wrapping_add(4));
         match b == 0xe8 {
             true => call.put(&abs.to_be_bytes())?,
             false => jump.put(&abs.to_be_bytes())?,
@@ -337,22 +347,8 @@ pub const SWAP_WINDOW: u32 = 1;
 /// units), so each is converted on its own.
 #[inline(always)]
 pub fn swap_part(width: usize, params_len: u64, in0_len: u64, size: u64) {
-    use aqr_api::{Input, Memory, Output};
     if params_len != 0 || size != in0_len {
         aqr_api::finish(Err(Error("bad parameters, or output of another length")));
     }
-    let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
-    let mut buf = [0; 4096];
-    let mut pos = 0;
-    while pos < size {
-        let n = (size - pos).min(buf.len() as u64).min(w_in - pos % w_in).min(w_out - pos % w_out);
-        let piece = &mut buf[..n as usize];
-        Input::<0>::request(pos + n);
-        Input::<0>::read(pos % w_in, piece);
-        Input::<0>::release(pos + n);
-        swap::convert(piece, width);
-        Output::<0>::write(pos % w_out, piece);
-        Output::<0>::commit(pos + n);
-        pos += n;
-    }
+    pieces(size, |piece| swap::convert(piece, width));
 }

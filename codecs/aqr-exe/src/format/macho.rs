@@ -130,8 +130,8 @@ pub fn fat_archs(d: &[u8]) -> Option<Vec<(u32, u64, u64)>> {
         if offset < header_end || size < 28 {
             return None;
         }
-        if let Some(at) = usize::try_from(offset).ok().filter(|&o| o + 4 <= d.len()) {
-            if !thin_magic(&d[at..]) {
+        if let Some(thin) = usize::try_from(offset).ok().and_then(|o| d.get(o..)).filter(|t| t.len() >= 4) {
+            if !thin_magic(thin) {
                 return None;
             }
         }
@@ -308,6 +308,25 @@ pub fn extent(d: &[u8]) -> Option<u64> {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// A 64-bit universal file of one architecture at `offset`, of 28 bytes.
+    fn fat64(offset: u64) -> Vec<u8> {
+        let mut d = vec![0u8; 64];
+        d[..4].copy_from_slice(&FAT_MAGIC_64.to_be_bytes());
+        d[4..8].copy_from_slice(&1u32.to_be_bytes());
+        d[16..24].copy_from_slice(&offset.to_be_bytes());
+        d[24..32].copy_from_slice(&28u64.to_be_bytes());
+        d
+    }
+
+    #[test]
+    fn fat_offset_past_the_end() {
+        for offset in [64, 1 << 40, u64::MAX - 3, u64::MAX - 1, u64::MAX] {
+            let d = fat64(offset);
+            assert_eq!(fat_archs(&d), Some(vec![(0, offset, 28)]), "{offset:#x}");
+            assert!(images(&d).is_some());
+        }
+    }
 
     /// A thin 64-bit image of `cputype` with a `__TEXT` segment of `__text` (instructions),
     /// `__const` (none) and `__bss` (zerofill), and a code signature after them.

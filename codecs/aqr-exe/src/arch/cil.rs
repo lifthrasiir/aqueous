@@ -380,6 +380,7 @@ impl Tokens {
 #[cfg(feature = "encode")]
 mod encode {
     use super::*;
+    use crate::util::put_varint;
     use core::array;
     use core::ops::Range;
 
@@ -448,14 +449,6 @@ mod encode {
         pub fn rest(&self) -> &[Range<usize>] {
             &self.rest
         }
-    }
-
-    fn varint(mut v: u32, out: &mut Vec<u8>) {
-        while v >= 0x80 {
-            out.push(v as u8 | 0x80);
-            v >>= 7;
-        }
-        out.push(v as u8);
     }
 
     /// Whether `code` is whole instructions, the last ending with it.
@@ -538,7 +531,7 @@ mod encode {
                         None => {
                             st[TOKI].push(0);
                             let last = &mut tokens.last[table as usize];
-                            varint(zigzag(rid.wrapping_sub(*last) as i32), &mut st[rid_stream(table)]);
+                            put_varint(&mut st[rid_stream(table)], zigzag(rid.wrapping_sub(*last) as i32).into());
                             *last = rid;
                             tokens.insert(table, rid);
                         }
@@ -622,7 +615,7 @@ mod encode {
             if taken.get(next).is_some_and(|r| r.start < b + n) || !parses(&section[b + hl..][..code]) {
                 continue;
             }
-            varint((b - at) as u32, &mut st[BODYPOS]);
+            put_varint(&mut st[BODYPOS], ((b - at) as u32).into());
             st[HDR].extend_from_slice(&section[b..b + hl]);
             split(&section[b + hl..][..code], &mut st, &mut tokens);
             st[EH].extend_from_slice(&section[b + hl + code..b + n]);

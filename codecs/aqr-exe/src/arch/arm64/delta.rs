@@ -19,6 +19,9 @@
 
 use alloc::vec::Vec;
 
+#[cfg(feature = "decode")]
+use crate::util::varint;
+
 /// Number of the streams, after the reference.
 pub const NUM_STREAMS: usize = 4;
 pub const CTRL: usize = 0;
@@ -32,6 +35,7 @@ pub const STREAM_NAMES: [&str; NUM_STREAMS] = ["CTRL", "GAPS", "VALUES", "EXTRA"
 /// Bits of the table of predictions (8 bytes an entry).
 pub const TABLE_BITS: u32 = 16;
 
+#[cfg(feature = "decode")]
 fn word(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(*d.get(at..)?.first_chunk()?))
 }
@@ -63,20 +67,6 @@ impl Predict {
             *e = (x, y);
         }
     }
-}
-
-#[cfg(feature = "decode")]
-fn varint(s: &mut &[u8]) -> Option<u64> {
-    let mut v = 0u64;
-    for k in 0..10 {
-        let (&x, rest) = s.split_first()?;
-        *s = rest;
-        v |= ((x & 0x7f) as u64) << (7 * k);
-        if x < 0x80 {
-            return Some(v);
-        }
-    }
-    None
 }
 
 /// The stream of `len` bytes from `streams` against `reference`, or `None` where they are not
@@ -143,13 +133,7 @@ mod encode {
     /// Positions in each bucket of the index.
     const WAYS: usize = 4;
 
-    fn put(out: &mut Vec<u8>, mut v: u64) {
-        while v >= 0x80 {
-            out.push(v as u8 | 0x80);
-            v >>= 7;
-        }
-        out.push(v as u8);
-    }
+    use crate::util::put_varint as put;
 
     fn w(d: &[u8], i: usize) -> u32 {
         u32::from_be_bytes(*d[i * WORD..].first_chunk().unwrap())

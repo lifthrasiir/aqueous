@@ -193,3 +193,19 @@ mod arm64 {
         assert!(module::arm64_streamed(&p[..7], &base.iter().map(|v| &v[..]).collect::<Vec<_>>(), 0).is_err());
     }
 }
+
+#[test]
+fn sentinels_over_fifteen_are_refused() {
+    let d = noise(200, 3);
+    let e = x86::encode(&d, 0x1000, true).unwrap();
+    let streams: Vec<&[u8]> = e.streams().iter().map(|s| &s[..]).collect();
+    let res = Opcodes::BUILTIN.to_resource();
+    for sentinel in 14..40u8 {
+        let p = params(0x1000, sentinel, true);
+        // (the output as long as the decoding with this sentinel makes it)
+        let len = (d.len() + e.sentinel_size() as usize - sentinel as usize) as u64;
+        let (whole, part) = (module::x86(&p, &[&res], &streams, len), module::x86_streamed(&p, &[&res], &streams, len));
+        assert_eq!(whole.is_ok(), sentinel <= 15, "whole, sentinel {sentinel}");
+        assert_eq!(part.is_ok(), sentinel <= 15, "part, sentinel {sentinel}");
+    }
+}

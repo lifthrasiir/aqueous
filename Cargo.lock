@@ -852,7 +852,6 @@ name = "aqr-exe"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
- "bytemuck",
  "sha1",
  "sha2",
  "zstd",

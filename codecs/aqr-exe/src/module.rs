@@ -58,6 +58,27 @@ pub fn macho_symtab_plan(params: u64, inputs: &[u64], types: &[u8], names: &[u8]
     aqr_api::stack::whole(params, &[], inputs) + symtab::decode_plan(types, names, len)
 }
 
+/// The parameters of the x86 modules: the origin (u64, little endian), the sentinel size (u8) and
+/// 1 for x86-64 or 0 for x86-32 (what follows is ignored).
+struct X86Params {
+    origin: u64,
+    sentinel: u8,
+    is64: bool,
+}
+
+impl X86Params {
+    /// Bytes of the parameters read.
+    const LEN: usize = 10;
+
+    fn new(p: &[u8; Self::LEN]) -> X86Params {
+        X86Params { origin: u64::from_le_bytes(*p.first_chunk().unwrap()), sentinel: p[8], is64: p[9] != 0 }
+    }
+
+    fn parse(params: &[u8]) -> Option<X86Params> {
+        params.first_chunk().map(X86Params::new)
+    }
+}
+
 /// The output's room of [`x86`] and [`x86_remap`] (the sentinel decoded after it, then cut).
 fn x86_room(len: u64, sentinel: u8) -> usize {
     usize::try_from(len).ok().and_then(|n| n.checked_add(sentinel as usize)).unwrap_or(usize::MAX)
@@ -67,7 +88,7 @@ fn x86_room(len: u64, sentinel: u8) -> usize {
 /// sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
 /// ([`x86::Opcodes`]); inputs: the streams of [`x86::STREAM_NAMES`].
 pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-    let (Some(p), Ok(streams)) = (params.first_chunk::<10>(), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs)) else {
+    let (Some(p), Ok(streams)) = (X86Params::parse(params), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs)) else {
         return Err("bad parameters or inputs");
     };
     let Some(opcodes) = (match resources {
@@ -76,15 +97,14 @@ pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Re
     }) else {
         return Err("bad resources");
     };
-    let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
-    let cap = x86_room(len, p[8]);
-    of_len(x86::decode_with(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0, &opcodes, cap), len)
+    let cap = x86_room(len, p.sentinel);
+    of_len(x86::decode_with(&x86::DecodedStreams::new(p.origin, p.sentinel, streams), p.is64, &opcodes, cap), len)
 }
 
 /// The x86 disfilter on a code section, its references remapped to another image's.
 /// Parameters, resources: as [`fn@x86`]; inputs: the streams of [`x86::remap::STREAM_NAMES`].
 pub fn x86_remap(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-    let (Some(p), Ok(streams)) = (params.first_chunk::<10>(), <[&[u8]; x86::remap::NUM_STREAMS]>::try_from(inputs))
+    let (Some(p), Ok(streams)) = (X86Params::parse(params), <[&[u8]; x86::remap::NUM_STREAMS]>::try_from(inputs))
     else {
         return Err("bad parameters or inputs");
     };
@@ -94,9 +114,8 @@ pub fn x86_remap(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64)
     }) else {
         return Err("bad resources");
     };
-    let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
-    let cap = x86_room(len, p[8]);
-    of_len(x86::remap::decode(origin, p[8], streams, p[9] != 0, &opcodes, cap), len)
+    let cap = x86_room(len, p.sentinel);
+    of_len(x86::remap::decode(p.origin, p.sentinel, streams, p.is64, &opcodes, cap), len)
 }
 
 /// The ARM64 filter on a code section. Parameters: the origin (u64, little endian); inputs:
@@ -210,6 +229,16 @@ pub fn x86_part_plan(initial: u64) -> u64 {
     m.plan()
 }
 
+/// Binds `$ins` to the inputs `0..` of a part module, of the lengths `$lens` (an array of a length
+/// each), and `$srcs`, an array of `$n` of them as [`aqr_api::stream::Pull`]s: `$k`, the indices, are
+/// as many as `$n`.
+macro_rules! pull_ins {
+    ($lens:ident => $ins:ident, $srcs:ident: $n:expr; $($k:tt)*) => {
+        let mut $ins = ($(aqr_api::stream::In::<$k>::new($lens[$k]),)*);
+        let $srcs: [&mut dyn aqr_api::stream::Pull; $n] = [$(&mut $ins.$k),*];
+    };
+}
+
 /// The 13 streams of [`x86`], each read in order in pieces, with a byte of look-ahead.
 struct Readers<'a> {
     r: [aqr_api::stream::Reader<'a>; x86::NUM_STREAMS],
@@ -314,7 +343,7 @@ impl x86::Sink for Spool<'_> {
     }
 
     fn finish(&mut self, sentinel: usize) -> Option<()> {
-        let n = self.buf.len().checked_sub(sentinel).filter(|_| sentinel <= HOLD && !self.failed)?;
+        let n = self.buf.len().checked_sub(sentinel).filter(|_| sentinel <= x86::SENTINEL && !self.failed)?;
         self.put(n);
         (!self.failed).then_some(())
     }
@@ -328,46 +357,17 @@ pub fn x86_part(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], si
 }
 
 fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], size: u64) -> Result<()> {
-    use aqr_api::stream::{In, Pull, Written};
+    use aqr_api::stream::Written;
     use aqr_api::{Memory, Resource};
-    if params_len < 10 || res_len != 1280 {
+    if params_len < X86Params::LEN as u64 || res_len != x86::Opcodes::LEN as u64 {
         return Err("bad parameters or resources");
     }
-    let (mut p, mut table) = ([0u8; 10], [0u8; 1280]);
+    let (mut p, mut table) = ([0u8; X86Params::LEN], [0u8; x86::Opcodes::LEN]);
     aqr_api::Params::read(0, &mut p);
     Resource::<0>::read(0, &mut table);
-    let mut ins = (
-        In::<0>::new(lens[0]),
-        In::<1>::new(lens[1]),
-        In::<2>::new(lens[2]),
-        In::<3>::new(lens[3]),
-        In::<4>::new(lens[4]),
-        In::<5>::new(lens[5]),
-        In::<6>::new(lens[6]),
-        In::<7>::new(lens[7]),
-        In::<8>::new(lens[8]),
-        In::<9>::new(lens[9]),
-        In::<10>::new(lens[10]),
-        In::<11>::new(lens[11]),
-        In::<12>::new(lens[12]),
-    );
-    let srcs: [&mut dyn Pull; x86::NUM_STREAMS] = [
-        &mut ins.0,
-        &mut ins.1,
-        &mut ins.2,
-        &mut ins.3,
-        &mut ins.4,
-        &mut ins.5,
-        &mut ins.6,
-        &mut ins.7,
-        &mut ins.8,
-        &mut ins.9,
-        &mut ins.10,
-        &mut ins.11,
-        &mut ins.12,
-    ];
+    pull_ins!(lens => ins, srcs: x86::NUM_STREAMS; 0 1 2 3 4 5 6 7 8 9 10 11 12);
     let mut out = Written::new(size);
-    x86_run(&p, &table, srcs, &mut out)?;
+    x86_run(&X86Params::new(&p), &table, srcs, &mut out)?;
     (out.total() == size).then_some(()).ok_or("output of another length")
 }
 
@@ -375,31 +375,30 @@ fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], si
 pub fn x86_streamed(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     use aqr_api::stream::{Pull, Slice};
     let (Some(p), Ok(streams), &[table]) =
-        (params.first_chunk::<10>(), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs), resources)
+        (X86Params::parse(params), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs), resources)
     else {
         return Err("bad parameters or inputs");
     };
     let mut slices = streams.map(Slice);
     let srcs: [&mut dyn Pull; x86::NUM_STREAMS] = slices.each_mut().map(|s| s as &mut dyn Pull);
     let mut out = Vec::new();
-    x86_run(p, table, srcs, &mut out)?;
+    x86_run(&p, table, srcs, &mut out)?;
     (out.len() as u64 == len).then_some(out).ok_or("output of another length")
 }
 
 /// The decoding of [`x86`] on the streams `srcs`, put to `sink`; the length is for the caller to
 /// check.
 fn x86_run(
-    p: &[u8; 10],
+    p: &X86Params,
     table: &[u8],
     srcs: [&mut dyn aqr_api::stream::Pull; x86::NUM_STREAMS],
     sink: &mut dyn aqr_api::stream::Put,
 ) -> Result<()> {
     let opcodes = x86::Opcodes::from_resource(table).ok_or("bad resources")?;
-    let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
     let r = srcs.map(|s| aqr_api::stream::Reader::new(s, PIECE));
     let mut src = Readers { r, peeked: [None; x86::NUM_STREAMS] };
     let mut out = Spool { buf: Vec::with_capacity(SPOOL + HOLD + STEP), sink, failed: false, flushed: 0 };
-    x86::decode_core(&mut src, &mut out, origin, p[8], p[9] != 0, &opcodes, |_, _, _| Some(())).ok_or("corrupt")
+    x86::decode_core(&mut src, &mut out, p.origin, p.sentinel, p.is64, &opcodes, |_, _, _| Some(())).ok_or("corrupt")
 }
 
 /// Pages of the windows of [`arm64_part`]: of each of the inputs and of the output.
@@ -427,39 +426,14 @@ pub fn arm64_part(params_len: u64, lens: [u64; arm64::NUM_STREAMS], size: u64) {
 }
 
 fn arm64_part_run(params_len: u64, lens: [u64; arm64::NUM_STREAMS], size: u64) -> Result<()> {
-    use aqr_api::stream::{In, Pull, Written};
+    use aqr_api::stream::Written;
     use aqr_api::Memory;
     if params_len != 8 {
         return Err("bad parameters or inputs");
     }
     let mut p = [0u8; 8];
     aqr_api::Params::read(0, &mut p);
-    let mut ins = (
-        In::<0>::new(lens[0]),
-        In::<1>::new(lens[1]),
-        In::<2>::new(lens[2]),
-        In::<3>::new(lens[3]),
-        In::<4>::new(lens[4]),
-        In::<5>::new(lens[5]),
-        In::<6>::new(lens[6]),
-        In::<7>::new(lens[7]),
-        In::<8>::new(lens[8]),
-        In::<9>::new(lens[9]),
-        In::<10>::new(lens[10]),
-    );
-    let srcs: [&mut dyn Pull; arm64::NUM_STREAMS] = [
-        &mut ins.0,
-        &mut ins.1,
-        &mut ins.2,
-        &mut ins.3,
-        &mut ins.4,
-        &mut ins.5,
-        &mut ins.6,
-        &mut ins.7,
-        &mut ins.8,
-        &mut ins.9,
-        &mut ins.10,
-    ];
+    pull_ins!(lens => ins, srcs: arm64::NUM_STREAMS; 0 1 2 3 4 5 6 7 8 9 10);
     let mut out = Written::new(size);
     arm64_run(u64::from_le_bytes(p), size, srcs, &mut out)?;
     (out.total() == size).then_some(()).ok_or("output of another length")

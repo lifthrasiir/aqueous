@@ -80,30 +80,45 @@ impl Addrs {
         (k ^ k >> 29).wrapping_mul(0x9e37_79b9_7f4a_7c15)
     }
 
+    /// `k` put in, at the first node of the path to it that has a lesser priority (above it, the
+    /// subtree there split by `k` under the new node), or at the end of it.
     fn insert(&mut self, k: u64) {
-        self.root = self.insert_at(self.root, k);
-    }
-
-    /// `k` put in the subtree at `t`: its root after.
-    fn insert_at(&mut self, t: u32, k: u64) -> u32 {
-        if t == NIL {
-            self.nodes.push((k, [NIL; 2]));
-            return (self.nodes.len() - 1) as u32;
+        let p = Addrs::priority(k);
+        // (the link from the path's last node, `None` for the root)
+        let (mut up, mut t) = (None, self.root);
+        while t != NIL {
+            let key = self.nodes[t as usize].0;
+            if k == key {
+                return;
+            }
+            if Addrs::priority(key) < p {
+                break;
+            }
+            let d = (k > key) as usize;
+            up = Some((t, d));
+            t = self.nodes[t as usize].1[d];
         }
-        let key = self.nodes[t as usize].0;
-        if k == key {
-            return t;
+        let n = self.nodes.len() as u32;
+        self.nodes.push((k, [NIL; 2]));
+        // the split of the subtree at `t`: its lesser nodes hang off the last of the new node's
+        // lesser side, the greater off the greater's
+        let (mut lo, mut hi) = ((n, 0), (n, 1));
+        while t != NIL {
+            let (key, kids) = self.nodes[t as usize];
+            if key < k {
+                self.nodes[lo.0 as usize].1[lo.1] = t;
+                (lo, t) = ((t, 1), kids[1]);
+            } else {
+                self.nodes[hi.0 as usize].1[hi.1] = t;
+                (hi, t) = ((t, 0), kids[0]);
+            }
         }
-        let d = (k > key) as usize;
-        let c = self.insert_at(self.nodes[t as usize].1[d], k);
-        self.nodes[t as usize].1[d] = c;
-        if Addrs::priority(self.nodes[c as usize].0) <= Addrs::priority(key) {
-            return t;
+        self.nodes[lo.0 as usize].1[lo.1] = NIL;
+        self.nodes[hi.0 as usize].1[hi.1] = NIL;
+        match up {
+            None => self.root = n,
+            Some((u, d)) => self.nodes[u as usize].1[d] = n,
         }
-        // (the child up)
-        self.nodes[t as usize].1[d] = self.nodes[c as usize].1[1 - d];
-        self.nodes[c as usize].1[1 - d] = t;
-        c
     }
 
     /// The least value of at least `lo`.
@@ -197,7 +212,7 @@ impl Model {
     }
 
     fn key(t: u8) -> usize {
-        (if t & N_STAB == 0 && t & N_TYPE == N_SECT { N_SECT } else { t }) as usize
+        (if of_section(t) { N_SECT } else { t }) as usize
     }
 
     fn predict(&self, t: u8, sect: u8) -> Pred {
@@ -249,8 +264,8 @@ pub fn encode(symtab: &[u8], strtab: &[u8], ext: u32) -> Option<(Vec<u8>, [Vec<u
         st[1].push(sect);
         st[2].extend_from_slice(&e[6..8]);
         match m.predict(t, sect) {
-            Pred::Value(p) => put_varint(&mut st[3], zigzag(v.wrapping_sub(p))),
-            Pred::Size(p) => put_varint(&mut st[4], zigzag(v.wrapping_sub(p))),
+            Pred::Value(p) => crate::util::put_varint(&mut st[3], zigzag(v.wrapping_sub(p))),
+            Pred::Size(p) => crate::util::put_varint(&mut st[4], zigzag(v.wrapping_sub(p))),
         }
         if x < head {
             st[5].push(HEAD + x as u8);
@@ -262,7 +277,7 @@ pub fn encode(symtab: &[u8], strtab: &[u8], ext: u32) -> Option<(Vec<u8>, [Vec<u
                 }
                 Some(&id) => {
                     st[5].push(BACK);
-                    put_varint(&mut st[6], (ids.len() - 1 - id as usize) as u64);
+                    crate::util::put_varint(&mut st[6], (ids.len() - 1 - id as usize) as u64);
                     id
                 }
                 None if x == next => {
@@ -393,15 +408,6 @@ fn unzigzag(v: u64) -> u64 {
     (v >> 1) ^ (v & 1).wrapping_neg()
 }
 
-#[cfg(feature = "encode")]
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
 /// A varint of at most 10 bytes, below 2^64, taken off the front of `d`.
 fn get_varint(d: &mut &[u8]) -> Option<u64> {
     let mut v = 0u64;
@@ -422,7 +428,47 @@ fn get_varint(d: &mut &[u8]) -> Option<u64> {
 #[cfg(all(test, feature = "encode"))]
 mod tests {
     use super::*;
+    use alloc::collections::BTreeSet;
     use alloc::vec;
+
+    /// Keys put in by a stream in the order of a chain (each the root of those before) make the
+    /// treap a path: inserting past its end must not recurse down it.
+    #[test]
+    fn deep_treap_is_no_recursion() {
+        const N: u64 = 100_000;
+        std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(|| {
+                // a path of the keys 1..=N, each the left child of the next
+                let nodes: Vec<(u64, [u32; 2])> =
+                    (1..=N).map(|k| (k, [if k == 1 { NIL } else { k as u32 - 2 }, NIL])).collect();
+                let mut a = Addrs { nodes, root: N as u32 - 1 };
+                a.insert(0);
+                a.insert(N + 5);
+                assert_eq!(a.at_least(0), Some(0));
+                assert_eq!(a.at_least(1), Some(1));
+                assert_eq!(a.at_least(N), Some(N));
+                assert_eq!(a.at_least(N + 1), Some(N + 5));
+                assert_eq!(a.at_least(N + 6), None);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn treap_is_a_set() {
+        let (mut a, mut set, mut x) = (Addrs::new(0), BTreeSet::new(), 1u64);
+        for _ in 0..5000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let k = x >> 52;
+            a.insert(k);
+            set.insert(k);
+            let q = (x >> 20) & 0xfff;
+            assert_eq!(a.at_least(q), set.range(q..).next().copied());
+        }
+        assert_eq!(a.nodes.len(), set.len());
+    }
 
     /// A symbol table of `(name, type, section, desc, value)` and its string table: `" \0"`, then
     /// the names in their first use, the entries from `ext` first, padded to 8 bytes. An empty

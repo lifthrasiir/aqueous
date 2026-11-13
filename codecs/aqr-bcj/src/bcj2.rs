@@ -79,6 +79,12 @@ pub(crate) fn candidate(prev: u8, b: u8) -> bool {
     b & 0xfe == 0xe8 || prev == 0x0f && b & 0xf0 == 0x80
 }
 
+/// The probabilities of the bits, each by its [`context`], at first one half (of 2048).
+#[inline(always)]
+pub(crate) fn fresh_probs() -> [u16; 2 + 256] {
+    [1024; 2 + 256]
+}
+
 /// The probability of a candidate's bit.
 #[inline]
 pub(crate) fn context(prev: u8, b: u8) -> usize {
@@ -135,7 +141,7 @@ pub fn encode_joined(data: &[u8], rc: &[u8]) -> Result<Vec<u8>> {
 /// stream to `main`, each target taken out to `target` (whether a call's, and its bytes).
 fn walk(data: &[u8], rc: &[u8], mut main: impl FnMut(u8), mut target: impl FnMut(bool, [u8; 4])) -> Result<()> {
     let mut rc = Rc::new(Slice { d: rc, pos: 0 }).ok_or(Error("bad range coder"))?;
-    let mut probs = [1024u16; 258];
+    let mut probs = fresh_probs();
     let (mut i, mut prev) = (0, 0u8);
     while i < data.len() {
         let b = data[i];
@@ -146,7 +152,7 @@ fn walk(data: &[u8], rc: &[u8], mut main: impl FnMut(u8), mut target: impl FnMut
             continue;
         }
         let t = data.get(i..i + 4).ok_or_else(corrupt)?;
-        let abs = u32::from_le_bytes(t.try_into().unwrap()).wrapping_add(i as u32 + 4);
+        let abs = u32::from_le_bytes(t.try_into().unwrap()).wrapping_add((i as u32).wrapping_add(4));
         target(b == 0xe8, abs.to_be_bytes());
         prev = t[3];
         i += 4;
@@ -158,7 +164,7 @@ fn walk(data: &[u8], rc: &[u8], mut main: impl FnMut(u8), mut target: impl FnMut
 /// used up (but for what `rc` holds after its last bit).
 pub fn decode(s: &Streams, rc: &[u8], size: usize) -> Result<Vec<u8>> {
     let mut rc = Rc::new(Slice { d: rc, pos: 0 }).ok_or(Error("bad range coder"))?;
-    let mut probs = [1024u16; 258];
+    let mut probs = fresh_probs();
     let mut out = Vec::with_capacity(size);
     let (mut m, mut c, mut j) = (0, 0, 0);
     let mut prev = 0u8;
@@ -176,7 +182,7 @@ pub fn decode(s: &Streams, rc: &[u8], size: usize) -> Result<Vec<u8>> {
         if out.len() + 4 > size {
             return Err(corrupt());
         }
-        let rel = u32::from_be_bytes(t.try_into().unwrap()).wrapping_sub(out.len() as u32 + 4);
+        let rel = u32::from_be_bytes(t.try_into().unwrap()).wrapping_sub((out.len() as u32).wrapping_add(4));
         out.extend(rel.to_le_bytes());
         prev = (rel >> 24) as u8;
     }

@@ -134,10 +134,10 @@ fn header(d: &[u8]) -> Option<Header> {
     if shoff != 0 && (shnum == 0 || shstrndx == 0xffff) {
         let s0 = usize::try_from(shoff).ok()?;
         if shnum == 0 {
-            shnum = usize::try_from(word(d, wide, s0 + if wide { 32 } else { 20 })?).ok()?;
+            shnum = usize::try_from(word(d, wide, s0.checked_add(if wide { 32 } else { 20 })?)?).ok()?;
         }
         if shstrndx == 0xffff {
-            shstrndx = u32le(d, s0 + if wide { 44 } else { 28 })? as usize;
+            shstrndx = u32le(d, s0.checked_add(if wide { 44 } else { 28 })?)? as usize;
         }
     }
     Some(Header { wide, kind, machine, phoff, phentsize, phnum, shoff, shentsize, shnum, shstrndx })
@@ -148,26 +148,53 @@ pub fn starts(d: &[u8]) -> bool {
     header(d).is_some()
 }
 
-/// The fields of a section header: type, flags, address, offset, size, entry size, name.
-fn section_header(d: &[u8], wide: bool, p: usize) -> Option<(u32, u64, u64, u64, u64, u64, u32)> {
+/// The fields of a section header that are read.
+struct SectionHeader {
+    kind: u32,
+    flags: u64,
+    addr: u64,
+    off: u64,
+    size: u64,
+    entsize: u64,
+    /// The offset of its name in the section name string table.
+    name: u32,
+}
+
+fn section_header(d: &[u8], wide: bool, p: usize) -> Option<SectionHeader> {
     let name = u32le(d, p)?;
     let kind = u32le(d, p + 4)?;
     Some(if wide {
-        (kind, u64le(d, p + 8)?, u64le(d, p + 16)?, u64le(d, p + 24)?, u64le(d, p + 32)?, u64le(d, p + 56)?, name)
+        let [flags, addr, off, size] = [8, 16, 24, 32].map(|i| u64le(d, p + i));
+        SectionHeader { kind, flags: flags?, addr: addr?, off: off?, size: size?, entsize: u64le(d, p + 56)?, name }
     } else {
         let f = |i| u32le(d, p + i).map(u64::from);
-        (kind, f(8)?, f(12)?, f(16)?, f(20)?, f(36)?, name)
+        SectionHeader { kind, flags: f(8)?, addr: f(12)?, off: f(16)?, size: f(20)?, entsize: f(36)?, name }
     })
 }
 
-/// The fields of a program header: type, flags, offset, virtual address, size in the file.
-fn program_header(d: &[u8], wide: bool, p: usize) -> Option<(u32, u32, u64, u64, u64)> {
+/// The fields of a program header that are read.
+struct ProgramHeader {
+    kind: u32,
+    flags: u32,
+    off: u64,
+    vaddr: u64,
+    /// The size in the file.
+    filesz: u64,
+}
+
+fn program_header(d: &[u8], wide: bool, p: usize) -> Option<ProgramHeader> {
     let kind = u32le(d, p)?;
     Some(if wide {
-        (kind, u32le(d, p + 4)?, u64le(d, p + 8)?, u64le(d, p + 16)?, u64le(d, p + 32)?)
+        ProgramHeader {
+            kind,
+            flags: u32le(d, p + 4)?,
+            off: u64le(d, p + 8)?,
+            vaddr: u64le(d, p + 16)?,
+            filesz: u64le(d, p + 32)?,
+        }
     } else {
         let f = |i| u32le(d, p + i).map(u64::from);
-        (kind, u32le(d, p + 24)?, f(4)?, f(8)?, f(16)?)
+        ProgramHeader { kind, flags: u32le(d, p + 24)?, off: f(4)?, vaddr: f(8)?, filesz: f(16)? }
     })
 }
 
@@ -186,10 +213,11 @@ pub fn image(d: &[u8]) -> Option<Image> {
     let shoff = usize::try_from(h.shoff).ok().filter(|_| h.shoff != 0);
     let headers = shoff.map_or(0, |s| h.shnum.min(d.len().saturating_sub(s) / h.shentsize));
     let strtab = shoff
-        .and_then(|s| section_header(d, h.wide, s + h.shstrndx * h.shentsize).filter(|_| h.shstrndx < headers))
-        .and_then(|(.., off, size, _, _)| within(d, off, size));
+        .filter(|_| h.shstrndx < headers)
+        .and_then(|s| section_header(d, h.wide, s + h.shstrndx * h.shentsize))
+        .and_then(|s| within(d, s.off, s.size));
     for i in 0..headers {
-        let Some((kind, flags, addr, off, size, entsize, name)) =
+        let Some(SectionHeader { kind, flags, addr, off, size, entsize, name }) =
             section_header(d, h.wide, shoff.unwrap_or(0) + i * h.shentsize)
         else {
             break;
@@ -217,8 +245,8 @@ pub fn image(d: &[u8]) -> Option<Image> {
         // no section headers: the executable segments
         let phoff = usize::try_from(h.phoff).ok().filter(|_| h.phoff != 0);
         for i in 0..phoff.map_or(0, |_| h.phnum) {
-            let Some((kind, flags, off, vaddr, filesz)) =
-                program_header(d, h.wide, phoff.unwrap_or(0) + i * h.phentsize)
+            let Some(ProgramHeader { kind, flags, off, vaddr, filesz }) =
+                phoff.unwrap_or(0).checked_add(i * h.phentsize).and_then(|p| program_header(d, h.wide, p))
             else {
                 break;
             };
@@ -258,15 +286,23 @@ pub fn extent(d: &[u8]) -> Option<u64> {
         end = end.max(h.phoff.saturating_add((h.phnum * h.phentsize) as u64));
         let phoff = usize::try_from(h.phoff).ok()?;
         for i in 0..h.phnum {
-            let Some((_, _, off, _, filesz)) = program_header(d, h.wide, phoff + i * h.phentsize) else { break };
+            let Some(ProgramHeader { off, filesz, .. }) =
+                phoff.checked_add(i * h.phentsize).and_then(|p| program_header(d, h.wide, p))
+            else {
+                break;
+            };
             end = end.max(off.saturating_add(filesz));
         }
     }
     if h.shoff != 0 {
-        end = end.max(h.shoff.saturating_add((h.shnum * h.shentsize) as u64));
+        end = end.max(h.shoff.saturating_add((h.shnum as u64).saturating_mul(h.shentsize as u64)));
         let shoff = usize::try_from(h.shoff).ok()?;
         for i in 0..h.shnum {
-            let Some((kind, _, _, off, size, ..)) = section_header(d, h.wide, shoff + i * h.shentsize) else { break };
+            let Some(SectionHeader { kind, off, size, .. }) =
+                i.checked_mul(h.shentsize).and_then(|o| section_header(d, h.wide, shoff.checked_add(o)?))
+            else {
+                break;
+            };
             if kind != SHT_NOBITS && kind != 0 {
                 end = end.max(off.saturating_add(size));
             }

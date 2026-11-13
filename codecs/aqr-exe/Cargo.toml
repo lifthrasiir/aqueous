@@ -10,7 +10,6 @@ decode = []
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-bytemuck = { version = "1.16.0", features = ["must_cast"] }
 sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 

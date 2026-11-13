@@ -65,7 +65,9 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     // PE optional header
     let mut opt_header = vec![0u8; opt_header_size];
     r.read_exact(&mut opt_header)?;
-    let magic = to_u16(&opt_header[0..2]);
+    let Some(magic) = opt_header.first_chunk().map(|m| u16::from_le_bytes(*m)) else {
+        return Err(io::Error::other(format!("PE optional header too small ({opt_header_size:#x} < 0x2)")));
+    };
     // offsets to ImageBase and NumberOfRvaAndSizes; data directories follow the latter
     let (is64, image_base_offset, num_data_dirs_offset) = match magic {
         0x10b => (false, 0x1c, 0x5c), // IMAGE_OPTIONAL_HEADER32
@@ -84,6 +86,10 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     } else {
         to_u32(&opt_header[image_base_offset..image_base_offset + 4]) as u64
     };
+    // (an address is an RVA from it)
+    if image_base.checked_add(u32::MAX as u64).is_none() {
+        return Err(io::Error::other(format!("bad PE image base {image_base:#x}")));
+    }
     let num_data_dirs = to_u32(&opt_header[num_data_dirs_offset..dirs_offset]) as usize;
     let min_size = dirs_offset + num_data_dirs * 8;
     if opt_header_size < min_size {
@@ -100,13 +106,10 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     for _ in 0..num_sections {
         let mut buf = [0u8; 40];
         r.read_exact(&mut buf)?;
-        let name = &buf[..8];
-        let _name = String::from_utf8_lossy(name);
         let rva = to_u32(&buf[12..16]);
         let stored_size = to_u32(&buf[16..20]);
         let stored_offset = to_u32(&buf[20..24]);
         let flags = to_u32(&buf[36..40]);
-        //println!("section {_name:?}: rva {rva:#x}, stored {stored_offset:#x} + {stored_size:#x}, flags {flags:#x}");
         headers.push((rva, stored_offset, stored_size));
         if flags & 0x20 != 0 {
             sections.push((image_base + rva as u64, stored_offset as u64, stored_size as usize));
@@ -310,7 +313,7 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
             return None;
         }
         let num_sections = to_u32(&rtr[12..16]);
-        let sections = self.read(rtr_rva + 16, num_sections.checked_mul(12)?)?;
+        let sections = self.read(rtr_rva.checked_add(16)?, num_sections.checked_mul(12)?)?;
         Some(
             sections
                 .as_chunks::<12>()
@@ -362,6 +365,19 @@ mod tests {
 
     fn put(d: &mut [u8], at: usize, v: &[u8]) {
         d[at..at + v.len()].copy_from_slice(v);
+    }
+
+    #[test]
+    fn optional_header_too_small_for_its_magic() {
+        for size in 0..2u16 {
+            let mut d = vec![0u8; 0x60];
+            put(&mut d, 0, b"MZ");
+            put(&mut d, 0x3c, &0x40u32.to_le_bytes());
+            put(&mut d, 0x40, b"PE\0\0");
+            put(&mut d, 0x44, &0x8664u16.to_le_bytes());
+            put(&mut d, 0x54, &size.to_le_bytes());
+            assert!(locate_code(&mut std::io::Cursor::new(&d)).is_err(), "size {size}");
+        }
     }
 
     /// A PE32+ image with one section, `.text` (RVA 0x1000, at 0x200, 0x1000 bytes), holding

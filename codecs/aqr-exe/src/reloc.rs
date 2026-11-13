@@ -29,7 +29,7 @@ pub fn encode(d: &[u8], align: u8) -> Option<[Vec<u8>; 2]> {
         for e in &block[..n] {
             let e = u16::from_le_bytes(*e);
             let rva = page.wrapping_add(e as u32 & 0xfff);
-            put_varint(&mut rvas, rva.wrapping_sub(last));
+            crate::util::put_varint(&mut rvas, rva.wrapping_sub(last).into());
             types.push((e >> 12) as u8);
             last = rva;
         }
@@ -75,15 +75,6 @@ pub fn decode(rvas: &[u8], types: &[u8], align: u8, len: usize) -> Option<Vec<u8
         close(&mut out, s);
     }
     (pos == rvas.len() && out.len() == len).then_some(out)
-}
-
-#[cfg(feature = "encode")]
-fn put_varint(out: &mut Vec<u8>, mut v: u32) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
 }
 
 /// A varint below 2^32 of at most 5 bytes, and its length.

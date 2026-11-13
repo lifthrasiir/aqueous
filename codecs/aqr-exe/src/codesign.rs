@@ -11,6 +11,9 @@
 
 use alloc::vec::Vec;
 
+#[cfg(feature = "decode")]
+use crate::util::varint;
+
 /// The magic of a SuperBlob of an embedded signature.
 const EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
 /// The magic of a CodeDirectory.
@@ -32,21 +35,6 @@ struct Slots {
     hash: u8,
     size: usize,
     page: usize,
-}
-
-/// The digest of `d` by hash type `t` (1 SHA-1, 2 SHA-256, 3 SHA-256 cut to 20 bytes, 4 SHA-384),
-/// into `out` (of its size); false for another type or size.
-#[cfg(feature = "encode")]
-fn digest(t: u8, d: &[u8], out: &mut [u8]) -> bool {
-    use sha2::Digest;
-    match (t, out.len()) {
-        (1, 20) => out.copy_from_slice(&sha1::Sha1::digest(d)),
-        (2, 32) => out.copy_from_slice(&sha2::Sha256::digest(d)),
-        (3, 20) => out.copy_from_slice(&sha2::Sha256::digest(d)[..20]),
-        (4, 48) => out.copy_from_slice(&sha2::Sha384::digest(d)),
-        _ => return false,
-    }
-    true
 }
 
 /// The code slots of the `k`-th blob of `sig` (a SuperBlob), where it is a CodeDirectory whose
@@ -83,27 +71,16 @@ fn hashes(code: &[u8], image: usize, sig: usize, s: &Slots) -> Option<Vec<u8>> {
     }
     let page = if s.page == 0 { s.limit.max(1) } else { s.page };
     let mut out = alloc::vec![0; s.count * s.size];
+    if out.is_empty() {
+        return Some(out);
+    }
+    let mut hasher = Hasher::new(s.hash, s.size)?;
     for (i, h) in out.chunks_mut(s.size).enumerate() {
         let (a, b) = (image + i * page, image + ((i + 1) * page).min(s.limit));
-        if !digest(s.hash, &code[a..b], h) {
-            return None;
-        }
+        hasher.update(&code[a..b]);
+        hasher.finish(h);
     }
     Some(out)
-}
-
-#[cfg(feature = "decode")]
-fn varint(s: &mut &[u8]) -> Option<u64> {
-    let mut v = 0u64;
-    for k in 0..10 {
-        let (&x, rest) = s.split_first()?;
-        *s = rest;
-        v |= ((x & 0x7f) as u64) << (7 * k);
-        if x < 0x80 {
-            return Some(v);
-        }
-    }
-    None
 }
 
 /// A signature of the params: where its image starts, where it lies in the file, how long it
@@ -157,8 +134,9 @@ fn scan(params: &[u8], size: u64) -> Option<Scan> {
     p.is_empty().then_some(Scan { count, rest_at, max_n, max_jobs })
 }
 
-/// A running digest of one page of a hash type of [`digest`].
-#[cfg(feature = "decode")]
+/// A running digest of one page of a hash type (1 SHA-1, 2 SHA-256, 3 SHA-256 cut to 20 bytes, 4
+/// SHA-384).
+#[cfg(any(feature = "encode", feature = "decode"))]
 enum Hasher {
     Sha1(sha1::Sha1),
     Sha256(sha2::Sha256),
@@ -167,7 +145,7 @@ enum Hasher {
     Sha384(sha2::Sha384),
 }
 
-#[cfg(feature = "decode")]
+#[cfg(any(feature = "encode", feature = "decode"))]
 impl Hasher {
     fn new(t: u8, size: usize) -> Option<Hasher> {
         use sha2::Digest;
@@ -404,13 +382,7 @@ pub fn encode(d: &[u8], signatures: &[(usize, usize, usize)]) -> Option<Signed> 
         return None;
     }
     let mut params = Vec::new();
-    let put = |out: &mut Vec<u8>, mut v: u64| {
-        while v >= 0x80 {
-            out.push(v as u8 | 0x80);
-            v >>= 7;
-        }
-        out.push(v as u8);
-    };
+    let put = crate::util::put_varint;
     put(&mut params, found.len() as u64);
     let (mut sigs, mut ranges) = (Vec::new(), Vec::new());
     for (image, at, n, mask, zeroed) in found {
@@ -446,7 +418,9 @@ mod tests {
         cd.extend_from_slice(ident);
         for p in code.chunks(page) {
             let mut h = vec![0u8; hash.1];
-            assert!(digest(hash.0, p, &mut h));
+            let mut hasher = Hasher::new(hash.0, hash.1).unwrap();
+            hasher.update(p);
+            hasher.finish(&mut h);
             h[0] ^= wrong as u8;
             cd.extend_from_slice(&h);
         }
