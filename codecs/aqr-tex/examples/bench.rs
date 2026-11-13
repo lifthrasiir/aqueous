@@ -62,10 +62,10 @@ fn main() {
                     };
                     let blocks = &d[found.start..found.start + l.len() as usize];
                     let t = Instant::now();
-                    let (main, apart, cost) = texture::encode(&l, blocks, within);
+                    let (main, apart, cost) = texture::encode_any(&l, blocks, within);
                     let enc = t.elapsed().as_secs_f64();
                     let t = Instant::now();
-                    let back = texture::decode(&l, &main, &apart, within).unwrap_or_else(|e| panic!("{path}: {e}"));
+                    let back = texture::decode_any(&l, &main, &apart, within).unwrap_or_else(|e| panic!("{path}: {e}"));
                     let dec = t.elapsed().as_secs_f64();
                     assert!(back == blocks, "{path}: not given back");
                     let mut rest = d[..found.start].to_vec();

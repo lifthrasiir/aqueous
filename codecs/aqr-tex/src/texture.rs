@@ -7,11 +7,11 @@
 
 use aqr_common::arith::ArithDecoder;
 use aqr_common::packed;
-use std::mem::take;
 
+use crate::bcn::Bcn;
 use crate::coder::{CATS, Dec, Enc, Side};
-use crate::layout::{Format, Layout, Surface};
-use crate::model::{Alpha, Colour, Plane, Recent, Value, Work};
+use crate::layout::{Format, Group, Layout, Shape, Surface};
+use crate::plane::across_rows;
 use crate::{Result, corrupt};
 
 /// A surface is coded in a stripe per this many blocks of it, as rows of blocks, and in at most
@@ -20,9 +20,12 @@ use crate::{Result, corrupt};
 pub const STRIPE_BLOCKS: usize = 16384;
 pub const MAX_STRIPES: usize = 16;
 
-/// The stripes of a surface of `blocks` blocks.
-pub fn stripes(blocks: usize) -> usize {
-    (blocks / STRIPE_BLOCKS).clamp(1, MAX_STRIPES)
+/// The stripes of a surface of `blocks` blocks (one where the family takes none).
+pub fn stripes<F: Family>(blocks: usize) -> usize {
+    match F::STRIPED {
+        true => (blocks / STRIPE_BLOCKS).clamp(1, MAX_STRIPES),
+        false => 1,
+    }
 }
 
 /// The rows of blocks of stripe `k` of `n` of a surface of `bh` rows (none empty, as a surface
@@ -31,188 +34,87 @@ pub fn rows(k: usize, n: usize, bh: usize) -> std::ops::Range<usize> {
     k * bh / n..(k + 1) * bh / n
 }
 
-/// The models of a texture, or of a stripe.
-#[derive(Clone)]
-struct Models {
-    colour: Colour,
-    v0: Value,
-    v1: Value,
-    alpha: Alpha,
-    /// The cache of each part with endpoints: the colour, or the first value, and the second.
-    r0: Recent,
-    r1: Recent,
-}
+/// A family of block formats, as the walk takes it: the models of their blocks' parts, the
+/// planes the parts make as they decode, and the buffers of both.
+pub trait Family: 'static {
+    /// The group of formats it takes.
+    const GROUP: crate::layout::Group;
 
-impl Models {
-    fn new(f: Format) -> Models {
-        Models {
-            colour: Colour::new(f != Format::Bc1),
-            v0: Value::new(),
-            v1: Value::new(),
-            alpha: Alpha::new(),
-            r0: Recent::new(),
-            r1: Recent::new(),
-        }
+    /// The shape of format `f`'s blocks (the same as [`Format::shape`], which a family may know
+    /// without asking the format).
+    #[inline(always)]
+    fn shape(f: Format) -> Shape {
+        f.shape()
     }
+    /// Whether a large surface is coded in stripes ([`stripes`]).
+    const STRIPED: bool = true;
 
-    /// Bytes that [`Models::new`] takes of [`aqr_api::stack`].
-    fn plan() -> u64 {
-        Colour::plan() + 2 * Value::plan() + Alpha::plan() + 2 * Recent::plan()
-    }
+    /// The models of a texture, or of a stripe.
+    type Models: Clone + Send + Sync;
+    /// The planes of a surface's parts.
+    type Planes: Default + Send + Sync;
+    /// Buffers of a surface's planes, kept to be used again.
+    type Bufs: Send;
+    /// Buffers that coding a surface, and upsampling its planes, work in.
+    type Work: Send;
 
-    /// These models made those of `o`, in their vectors.
-    fn copy_from(&mut self, o: &Models) {
-        self.colour.copy_from(&o.colour);
-        self.v0.copy_from(&o.v0);
-        self.v1.copy_from(&o.v1);
-        self.alpha.copy_from(&o.alpha);
-        self.r0.copy_from(&o.r0);
-        self.r1.copy_from(&o.r1);
-    }
-}
+    fn models(f: Format) -> Self::Models;
+    /// Bytes that [`Family::models`] takes of [`aqr_api::stack`].
+    fn models_plan(f: Format) -> u64;
+    /// Models `m` made those of `o`, in their vectors.
+    fn copy_models(m: &mut Self::Models, o: &Self::Models);
 
-/// The planes a format's parts have: of colours, of the first values (or alpha), of the second.
-fn kinds(f: Format) -> [bool; 3] {
-    match f {
-        Format::Bc1 => [true, false, false],
-        Format::Bc2 | Format::Bc3 => [true, true, false],
-        Format::Bc4 => [false, true, false],
-        Format::Bc5 => [false, true, true],
-    }
-}
-
-/// The planes of a surface's parts: of colours, and of the first and second values (or alpha).
-#[derive(Default)]
-struct Planes {
-    c: Option<Plane<3>>,
-    a: Option<Plane<1>>,
-    b: Option<Plane<1>>,
-}
-
-/// Buffers of a surface's planes (of those of its format), kept to be used again.
-#[derive(Default)]
-struct Bufs {
-    c: Vec<[u8; 3]>,
-    a: Vec<[u8; 1]>,
-    b: Vec<[u8; 1]>,
-}
-
-impl Bufs {
-    /// Room for planes of `px` pixels of format `f`.
-    fn with(f: Format, px: usize) -> Bufs {
-        let [c, a, b] = kinds(f).map(|k| if k { px } else { 0 });
-        Bufs { c: Vec::with_capacity(c), a: Vec::with_capacity(a), b: Vec::with_capacity(b) }
-    }
-
-    /// Bytes that [`Bufs::with`] takes of [`aqr_api::stack`].
-    fn plan(f: Format, px: usize) -> u64 {
-        let [c, a, b] = kinds(f);
-        let px = px as u64;
-        let (c, a, b) = (c as u64 * 3 * px, a as u64 * px, b as u64 * px);
-        aqr_api::stack::block(c) + aqr_api::stack::block(a) + aqr_api::stack::block(b)
-    }
-
+    /// Room for planes of `px` pixels.
+    fn bufs(f: Format, px: usize) -> Self::Bufs;
+    /// Bytes that [`Family::bufs`] takes of [`aqr_api::stack`].
+    fn bufs_plan(f: Format, px: usize) -> u64;
     /// The buffers of planes `p` given back.
-    fn give(&mut self, p: Planes) {
-        if let Some(c) = p.c {
-            self.c = c.into_px();
-        }
-        if let Some(a) = p.a {
-            self.a = a.into_px();
-        }
-        if let Some(b) = p.b {
-            self.b = b.into_px();
-        }
-    }
-}
+    fn give(b: &mut Self::Bufs, p: Self::Planes);
+    fn is_empty(p: &Self::Planes) -> bool;
 
-impl Planes {
-    fn is_empty(&self) -> bool {
-        self.c.is_none() && self.a.is_none() && self.b.is_none()
-    }
+    /// Room for surfaces of `blocks` blocks, upsamplings to `cols` columns of `across` values.
+    fn work(f: Format, blocks: usize, cols: usize, across: usize) -> Self::Work;
+    /// Bytes that [`Family::work`] takes of [`aqr_api::stack`].
+    fn work_plan(f: Format, blocks: usize, cols: usize, across: usize) -> u64;
+    /// The values an upsampling sums across of each pixel of a row (of its largest plane).
+    fn across_values(f: Format) -> usize;
 
-    /// The planes of the blocks `b` of `size` blocks, below those of `p` (of format `f`).
-    fn of(f: Format, b: &[u8], size: (usize, usize), p: &mut Planes) {
-        let (c, a, pb) = (p.c.as_mut(), p.a.as_mut(), p.b.as_mut());
-        match f {
-            Format::Bc1 => Colour::plane(false, b, 8, size, c.expect("colours")),
-            Format::Bc2 => {
-                Colour::plane(true, &b[8..], 16, size, c.expect("colours"));
-                Alpha::plane(b, 16, size, a.expect("alpha"));
-            }
-            Format::Bc3 => {
-                Colour::plane(true, &b[8..], 16, size, c.expect("colours"));
-                Value::plane(b, 16, size, a.expect("values"));
-            }
-            Format::Bc4 => Value::plane(b, 8, size, a.expect("values")),
-            Format::Bc5 => {
-                Value::plane(b, 16, size, a.expect("values"));
-                Value::plane(&b[8..], 16, size, pb.expect("values"));
-            }
-        }
-    }
-
-    /// These planes, of the next smaller mipmap, upsampled to the rows of blocks `rows` of a
-    /// surface `bw` blocks wide, in `bufs`.
-    fn upsampled(&self, bw: usize, rows: std::ops::Range<usize>, bufs: &mut Bufs, work: &mut Work) -> Planes {
-        Planes {
-            c: self.c.as_ref().map(|p| p.upsampled(bw, rows.clone(), take(&mut bufs.c), work)),
-            a: self.a.as_ref().map(|p| p.upsampled(bw, rows.clone(), take(&mut bufs.a), work)),
-            b: self.b.as_ref().map(|p| p.upsampled(bw, rows, take(&mut bufs.b), work)),
-        }
-    }
+    /// The planes of the blocks `b` of `size` blocks, below those of `p`.
+    fn planes_of(f: Format, b: &[u8], size: (usize, usize), p: &mut Self::Planes);
+    /// Planes `p`, of the next smaller mipmap, upsampled to the rows `rows` (of pixels) of a
+    /// surface `w` pixels wide, in `bufs`.
+    fn upsampled(
+        p: &Self::Planes,
+        f: Format,
+        w: usize,
+        rows: std::ops::Range<usize>,
+        bufs: &mut Self::Bufs,
+        work: &mut Self::Work,
+    ) -> Self::Planes;
+    /// Codes the blocks `b` of a stripe of `size` blocks of a surface, `up` being the planes of
+    /// the surface before, upsampled to the stripe; its planes made in `bufs`.
+    #[allow(clippy::too_many_arguments)]
+    fn stripe(
+        s: &mut impl Side,
+        m: &mut Self::Models,
+        f: Format,
+        b: &mut [u8],
+        size: (usize, usize),
+        up: &Self::Planes,
+        bufs: &mut Self::Bufs,
+        work: &mut Self::Work,
+    ) -> Result<Self::Planes>;
 }
 
 /// The surface's planes `new` made those of the surface before (`prev`), the buffers of those
 /// given back to `spare`: from the planes `prev` held, or from `idle` where it held none (the
 /// first surface of a layer). So `spare` has every buffer again.
-fn turn(prev: &mut Planes, new: Planes, spare: &mut Bufs, idle: &mut Bufs) {
+fn turn<F: Family>(prev: &mut F::Planes, new: F::Planes, spare: &mut F::Bufs, idle: &mut F::Bufs) {
     let old = std::mem::replace(prev, new);
-    match old.is_empty() {
+    match F::is_empty(&old) {
         true => std::mem::swap(spare, idle),
-        false => spare.give(old),
+        false => F::give(spare, old),
     }
-}
-
-/// Codes the blocks `b` of a stripe of `size` blocks of a surface, `up` being the planes of the
-/// surface before, upsampled to the stripe; its planes made in `bufs`.
-#[allow(clippy::too_many_arguments)]
-fn stripe(
-    s: &mut impl Side,
-    m: &mut Models,
-    f: Format,
-    b: &mut [u8],
-    size: (usize, usize),
-    up: &Planes,
-    bufs: &mut Bufs,
-    work: &mut Work,
-) -> Result<Planes> {
-    let (c, a, pb) = (up.c.as_ref(), up.a.as_ref(), up.b.as_ref());
-    Ok(match f {
-        Format::Bc1 => Planes {
-            c: Some(m.colour.surface(s, b, 8, size, c, &mut m.r0, (take(&mut bufs.c), work))?),
-            ..Default::default()
-        },
-        Format::Bc2 => {
-            let a = m.alpha.surface(s, b, 16, size, a, take(&mut bufs.a));
-            let c = m.colour.surface(s, &mut b[8..], 16, size, c, &mut m.r0, (take(&mut bufs.c), work))?;
-            Planes { c: Some(c), a: Some(a), b: None }
-        }
-        Format::Bc3 => {
-            let a = m.v0.surface(s, b, 16, size, a, &mut m.r1, (take(&mut bufs.a), &mut *work))?;
-            let c = m.colour.surface(s, &mut b[8..], 16, size, c, &mut m.r0, (take(&mut bufs.c), work))?;
-            Planes { c: Some(c), a: Some(a), b: None }
-        }
-        Format::Bc4 => Planes {
-            a: Some(m.v0.surface(s, b, 8, size, a, &mut m.r0, (take(&mut bufs.a), work))?),
-            ..Default::default()
-        },
-        Format::Bc5 => {
-            let a = m.v0.surface(s, b, 16, size, a, &mut m.r0, (take(&mut bufs.a), &mut *work))?;
-            let pb = m.v1.surface(s, &mut b[8..], 16, size, pb, &mut m.r1, (take(&mut bufs.b), work))?;
-            Planes { a: Some(a), b: Some(pb), c: None }
-        }
-    })
 }
 
 /// `f(i)` for each `i` of `0..n`, apart from the calling thread (on up to `threads − 1` workers
@@ -284,29 +186,31 @@ struct Sizes {
 /// The work of a stripe of `rows` (rows of blocks) of surface `m` of `surfaces`, `bw` blocks
 /// wide: its blocks, the columns and values of its upsampling (none of the smallest surface),
 /// and the pixels of its planes upsampled.
-fn stripe_work(
+fn stripe_work<F: Family>(
     f: Format,
     surfaces: &[Surface],
     m: usize,
     rows: std::ops::Range<usize>,
 ) -> (usize, usize, usize, usize) {
+    let Shape { fw, fh, .. } = F::shape(f);
     let bw = surfaces[m].bw;
     let blocks = rows.len() * bw;
     let Some(before) = surfaces.get(m + 1) else { return (blocks, 0, 0, 0) };
-    let ch = if kinds(f)[0] { 3 } else { 1 };
-    let across = crate::model::across_rows(before.bh * 4, rows.start * 4, rows.len() * 4) * bw * 4 * ch;
-    (blocks, bw * 4, across, blocks * 16)
+    let ch = F::across_values(f);
+    let across = across_rows(before.bh * fh, rows.start * fh, rows.len() * fh) * bw * fw * ch;
+    (blocks, bw * fw, across, blocks * fw * fh)
 }
 
 impl Sizes {
-    fn of(f: Format, surfaces: &[Surface]) -> Sizes {
+    fn of<F: Family>(f: Format, surfaces: &[Surface]) -> Sizes {
         let mut z = Sizes { planes: 0, up: 0, blocks: 0, cols: 0, across: 0, striped: false };
+        let px = F::shape(f).pixels();
         for (m, sf) in surfaces.iter().enumerate() {
-            let n = stripes(sf.blocks());
+            let n = stripes::<F>(sf.blocks());
             let r = if n == 1 { 0..sf.bh } else { rows(0, n, sf.bh) };
             // (the largest mipmap's planes predict nothing: only those of its first stripe)
-            z.planes = z.planes.max(if n == 1 || m > 0 { sf.blocks() * 16 } else { r.len() * sf.bw * 16 });
-            let (blocks, cols, across, up) = stripe_work(f, surfaces, m, r);
+            z.planes = z.planes.max(if n == 1 || m > 0 { sf.blocks() * px } else { r.len() * sf.bw * px });
+            let (blocks, cols, across, up) = stripe_work::<F>(f, surfaces, m, r);
             z.blocks = z.blocks.max(blocks);
             z.cols = z.cols.max(cols);
             z.across = z.across.max(across);
@@ -322,32 +226,32 @@ impl Sizes {
 /// bytes, whole pages): the most the instance takes, and the most a task does, in bytes. The instance takes the walk's buffers once, and as a task's
 /// stripe is taken, a vector of its blocks; each task a copy of the instance's memory, with its
 /// stripe's blocks, work, planes and planes upsampled on top.
-pub fn plan(l: &Layout, initial: u64, held: u64) -> (u64, u64) {
+pub fn plan<F: Family>(l: &Layout, initial: u64, held: u64) -> (u64, u64) {
     use aqr_api::stack::block;
     let pages = |n: u64| n.div_ceil(1 << 16) << 16;
-    let (f, bb) = (l.format, l.format.block_bytes() as u64);
-    let surfaces: Vec<Surface> = l.mip_surfaces().collect();
-    let z = Sizes::of(f, &surfaces);
+    let (f, bb) = (l.format, F::shape(l.format).bytes as u64);
+    let surfaces: Vec<Surface> = l.surfaces_in(F::shape(f)).collect();
+    let z = Sizes::of::<F>(f, &surfaces);
     let walk = block(SURFACE_BYTES * surfaces.len() as u64)
-        + Models::plan() * (1 + z.striped as u64)
-        + Work::plan(z.blocks, z.cols, z.across)
-        + 2 * Bufs::plan(f, z.planes)
-        + Bufs::plan(f, z.up);
+        + F::models_plan(f) * (1 + z.striped as u64)
+        + F::work_plan(f, z.blocks, z.cols, z.across)
+        + 2 * F::bufs_plan(f, z.planes)
+        + F::bufs_plan(f, z.up);
     let top = initial + held + walk;
     let (mut end, mut most) = (pages(top), 0);
     for _ in 0..l.layers {
         for (m, sf) in surfaces.iter().enumerate().rev() {
-            let n = stripes(sf.blocks());
+            let n = stripes::<F>(sf.blocks());
             if n == 1 {
                 continue;
             }
             let tasks: Vec<u64> = (1..n)
                 .map(|i| {
-                    let (blocks, cols, across, up) = stripe_work(f, &surfaces, m, rows(i, n, sf.bh));
+                    let (blocks, cols, across, up) = stripe_work::<F>(f, &surfaces, m, rows(i, n, sf.bh));
                     let own = block(blocks as u64 * bb)
-                        + Work::plan(blocks, cols, across)
-                        + Bufs::plan(f, up)
-                        + Bufs::plan(f, blocks * 16);
+                        + F::work_plan(f, blocks, cols, across)
+                        + F::bufs_plan(f, up)
+                        + F::bufs_plan(f, blocks * F::shape(f).pixels());
                     end.max(pages(top + own))
                 })
                 .collect();
@@ -384,7 +288,7 @@ trait Sides: Sync {
 /// others by `sides`, `back` taking what comes back of each into its rows of the surface. A
 /// stripe coded apart takes its blocks of `src` or zeros, which come back.
 #[allow(clippy::too_many_arguments)]
-fn walk<X: Sides>(
+fn walk<F: Family, X: Sides>(
     main: &mut X::S,
     sides: &X,
     l: &Layout,
@@ -393,20 +297,21 @@ fn walk<X: Sides>(
     threads: usize,
     mut back: impl FnMut(usize, Vec<u8>, &mut [u8]) -> Result<()>,
 ) -> Result<()> {
-    let (f, bb) = (l.format, l.format.block_bytes());
-    let surfaces: Vec<Surface> = l.mip_surfaces().collect();
-    let z = Sizes::of(f, &surfaces);
-    let mut models = Models::new(f);
+    let (f, bb) = (l.format, F::shape(l.format).bytes);
+    let surfaces: Vec<Surface> = l.surfaces_in(F::shape(f)).collect();
+    let Shape { fw, fh, .. } = F::shape(f);
+    let z = Sizes::of::<F>(f, &surfaces);
+    let mut models = F::models(f);
     // (stripes as tasks have a copy of the memory of their own, the models' copy theirs to change)
     let own = cfg!(target_family = "wasm") && threads > 1;
-    let mut copy = std::sync::Mutex::new(z.striped.then(|| Models::new(f)));
-    let mut work = Work::with_capacity(z.blocks, z.cols, z.across);
-    let (mut spare, mut idle) = (Bufs::with(f, z.planes), Bufs::with(f, z.planes));
-    let mut up = Bufs::with(f, z.up);
+    let mut copy = std::sync::Mutex::new(z.striped.then(|| F::models(f)));
+    let mut work = F::work(f, z.blocks, z.cols, z.across);
+    let (mut spare, mut idle) = (F::bufs(f, z.planes), F::bufs(f, z.planes));
+    let mut up = F::bufs(f, z.up);
     let layer: usize = surfaces.iter().map(|s| s.blocks() * bb).sum();
     let mut next = 1;
     for k in 0..l.layers as usize {
-        let mut prev = Planes::default();
+        let mut prev = F::Planes::default();
         let mut end = (k + 1) * layer;
         for m in (0..surfaces.len()).rev() {
             let (bw, bh) = (surfaces[m].bw, surfaces[m].bh);
@@ -414,17 +319,17 @@ fn walk<X: Sides>(
             let start = end - size;
             let b = &mut out[start..end];
             end = start;
-            let n = stripes(surfaces[m].blocks());
+            let n = stripes::<F>(surfaces[m].blocks());
             if n == 1 {
-                let u = prev.upsampled(bw, 0..bh, &mut up, &mut work);
-                let new = stripe(main, &mut models, f, b, (bw, bh), &u, &mut spare, &mut work)?;
-                up.give(u);
-                turn(&mut prev, new, &mut spare, &mut idle);
+                let u = F::upsampled(&prev, f, bw * fw, 0..bh * fh, &mut up, &mut work);
+                let new = F::stripe(main, &mut models, f, b, (bw, bh), &u, &mut spare, &mut work)?;
+                F::give(&mut up, u);
+                turn::<F>(&mut prev, new, &mut spare, &mut idle);
                 continue;
             }
             let rows0 = rows(0, n, bh).end;
             let top = rows0 * bw * bb;
-            copy.get_mut().unwrap().as_mut().expect("a copy").copy_from(&models);
+            F::copy_models(copy.get_mut().unwrap().as_mut().expect("a copy"), &models);
             let (copy, coarse) = (&copy, &prev);
             let job = |i: usize| -> Vec<u8> {
                 let r = rows(i + 1, n, bh);
@@ -434,7 +339,7 @@ fn walk<X: Sides>(
                     None => vec![0; len],
                 };
                 let (mut g, mut mine);
-                let models: &mut Models = if own {
+                let models: &mut F::Models = if own {
                     g = copy.lock().unwrap();
                     g.as_mut().expect("a copy")
                 } else {
@@ -442,21 +347,21 @@ fn walk<X: Sides>(
                     &mut mine
                 };
                 let Ok(mut s) = sides.side(next + i) else { return vec![] };
-                let (blocks, cols, across, px) = stripe_work(f, &surfaces, m, r.clone());
-                let mut work = Work::with_capacity(blocks, cols, across);
-                let (mut up, mut bufs) = (Bufs::with(f, px), Bufs::with(f, blocks * 16));
-                let u = coarse.upsampled(bw, r.clone(), &mut up, &mut work);
-                match stripe(&mut s, models, f, &mut b, (bw, r.len()), &u, &mut bufs, &mut work) {
+                let (blocks, cols, across, px) = stripe_work::<F>(f, &surfaces, m, r.clone());
+                let mut work = F::work(f, blocks, cols, across);
+                let (mut up, mut bufs) = (F::bufs(f, px), F::bufs(f, blocks * F::shape(f).pixels()));
+                let u = F::upsampled(coarse, f, bw * fw, r.start * fh..r.end * fh, &mut up, &mut work);
+                match F::stripe(&mut s, models, f, &mut b, (bw, r.len()), &u, &mut bufs, &mut work) {
                     Ok(_) => sides.done(s, b),
                     Err(_) => vec![],
                 }
             };
             let (head, rest) = b.split_at_mut(top);
             let (main, models, spare, work, up) = (&mut *main, &mut models, &mut spare, &mut work, &mut up);
-            let here = || -> Result<Planes> {
-                let u = coarse.upsampled(bw, 0..rows0, up, work);
-                let p = stripe(main, models, f, head, (bw, rows0), &u, spare, work);
-                up.give(u);
+            let here = || -> Result<F::Planes> {
+                let u = F::upsampled(coarse, f, bw * fw, 0..rows0 * fh, up, work);
+                let p = F::stripe(main, models, f, head, (bw, rows0), &u, spare, work);
+                F::give(up, u);
                 p
             };
             let mut at = 0;
@@ -468,25 +373,25 @@ fn walk<X: Sides>(
                 if m > 0
                     && let Ok(p) = new
                 {
-                    Planes::of(f, chunk, (bw, r.len()), p);
+                    F::planes_of(f, chunk, (bw, r.len()), p);
                 }
                 at += chunk.len();
                 Ok(())
             })??;
             next += n - 1;
-            turn(&mut prev, new, spare, &mut idle);
+            turn::<F>(&mut prev, new, spare, &mut idle);
         }
         // (the layer's last planes given back)
-        if !prev.is_empty() {
-            idle.give(prev);
+        if !F::is_empty(&prev) {
+            F::give(&mut idle, prev);
         }
     }
     Ok(())
 }
 
 /// The streams of the stripes of `l` coded apart.
-fn apart_streams(l: &Layout) -> usize {
-    l.mip_surfaces().map(|s| stripes(s.blocks()) - 1).sum::<usize>() * l.layers as usize
+fn apart_streams<F: Family>(l: &Layout) -> usize {
+    l.surfaces_in(F::shape(l.format)).map(|s| stripes::<F>(s.blocks()) - 1).sum::<usize>() * l.layers as usize
 }
 
 struct Encoders;
@@ -527,12 +432,12 @@ impl<'a> Sides for Decoders<'a> {
 ///
 /// (The first stream is kept apart from the others, as it is: the streams of textures alike
 /// start alike, which the archive finds where they are not behind headers of other lengths.)
-pub fn encode(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8>, [u64; CATS]) {
-    assert_eq!(blocks.len() as u64, l.len());
+pub fn encode<F: Family>(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8>, [u64; CATS]) {
+    assert_eq!(blocks.len() as u64, l.len_in(F::shape(l.format)));
     let mut main = Enc::new();
-    let mut streams = vec![vec![]; apart_streams(l) + 1];
+    let mut streams = vec![vec![]; apart_streams::<F>(l) + 1];
     let mut cost = [0u64; CATS];
-    walk(&mut main, &Encoders, l, Some(blocks), &mut blocks.to_vec(), threads, |j, mut out, _| {
+    walk::<F, _>(&mut main, &Encoders, l, Some(blocks), &mut blocks.to_vec(), threads, |j, mut out, _| {
         let tally = out.split_off(out.len() - TALLY);
         for (i, c) in cost.iter_mut().enumerate() {
             *c += u64::from_le_bytes(tally[8 * i..8 * i + 8].try_into().unwrap());
@@ -551,9 +456,9 @@ pub fn encode(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8>, [
 /// The blocks of layout `l` from its first stream `main` and the streams coded apart `apart`
 /// (as [`encode`] gives them), decoded on up to `threads` threads: in a vector of their bytes
 /// reserved first, then the streams' slices ([`decode_held`]), and the walk's ([`plan`]).
-pub fn decode(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Result<Vec<u8>> {
-    let len = usize::try_from(l.len()).map_err(|_| corrupt())?;
-    let n = apart_streams(l);
+pub fn decode<F: Family>(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Result<Vec<u8>> {
+    let len = usize::try_from(l.len_in(F::shape(l.format))).map_err(|_| corrupt())?;
+    let n = apart_streams::<F>(l);
     let mut out = vec![0; len];
     let streams = match n {
         0 if apart.is_empty() => Vec::new(),
@@ -564,7 +469,7 @@ pub fn decode(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Result<V
         return Err(corrupt());
     }
     let mut main = Dec { c: ArithDecoder::new(main) };
-    walk(&mut main, &Decoders(streams), l, None, &mut out, threads, |_, b, chunk| {
+    walk::<F, _>(&mut main, &Decoders(streams), l, None, &mut out, threads, |_, b, chunk| {
         // (a stripe that failed gives nothing)
         if b.len() != chunk.len() {
             return Err(corrupt());
@@ -580,7 +485,31 @@ pub fn decode(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Result<V
 
 /// Bytes of [`aqr_api::stack`] that [`decode`] takes before the walk, of layout `l`: the
 /// blocks, and the streams' slices (8 bytes each on WebAssembly).
-pub fn decode_held(l: &Layout) -> u64 {
+pub fn decode_held<F: Family>(l: &Layout) -> u64 {
     use aqr_api::stack::block;
-    block(l.len()) + block(8 * apart_streams(l) as u64)
+    block(l.len_in(F::shape(l.format))) + block(8 * apart_streams::<F>(l) as u64)
+}
+
+/// [`encode`] of the family of `l`'s format.
+pub fn encode_any(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8>, [u64; CATS]) {
+    match l.format.group() {
+        Group::Bcn => encode::<Bcn>(l, blocks, threads),
+        g => unimplemented!("{g:?}"),
+    }
+}
+
+/// [`decode`] of the family of `l`'s format.
+pub fn decode_any(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Result<Vec<u8>> {
+    match l.format.group() {
+        Group::Bcn => decode::<Bcn>(l, main, apart, threads),
+        _ => Err(corrupt()),
+    }
+}
+
+/// [`stripes`] of a surface of `blocks` blocks of format `f`.
+pub fn stripes_of(f: Format, blocks: usize) -> usize {
+    match f.group() {
+        Group::Pvrtc => 1,
+        _ => stripes::<Bcn>(blocks),
+    }
 }

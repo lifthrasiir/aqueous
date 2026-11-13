@@ -6,6 +6,7 @@
 
 use aqr_formula::{Formula, Kind, Module, Node};
 
+use crate::bcn::Bcn;
 use crate::dds::{self, Data};
 use crate::layout::Layout;
 use crate::texture;
@@ -57,7 +58,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// The application giving `blocks`, exactly the blocks of layout `l`, its inputs pushed to `f`.
 /// None where the coder panics. It is the same whatever `threads` is.
 pub fn apply(f: &mut Formula, blocks: &[u8], l: &Layout, threads: usize) -> Option<Node> {
-    let (main, apart, _) = std::panic::catch_unwind(|| texture::encode(l, blocks, threads)).ok()?;
+    let (main, apart, _) = std::panic::catch_unwind(|| texture::encode::<Bcn>(l, blocks, threads)).ok()?;
     let inputs =
         vec![f.push_as("bcn/coded", Kind::Compressed, main), f.push_as("bcn/stripes", Kind::Compressed, apart)];
     Some(Node::apply(MODULE, l.to_bytes(), inputs, blocks.len() as u64))

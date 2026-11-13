@@ -83,6 +83,7 @@ fn blocks(format: Format, n: usize, seed: u32) -> Vec<u8> {
                 out.extend(half(&mut r, true));
                 out.extend(half(&mut r, true));
             }
+            _ => unreachable!("of BC1 to BC5 only"),
         }
     }
     out
@@ -135,6 +136,7 @@ fn file(format: Format, size: (u32, u32), mips: u32, layers: u32, cube: bool, se
         Format::Bc3 => b"DXT5",
         Format::Bc4 => b"ATI1",
         Format::Bc5 => b"ATI2",
+        _ => unreachable!("of BC1 to BC5 only"),
     };
     let l = Layout { format, width: size.0, height: size.1, mips, layers };
     let mut d = header(Some(fourcc), 0, size, mips, if cube { 0xfe00 } else { 0 }, None);
@@ -192,10 +194,10 @@ fn smooth_textures_code_small() {
             b.extend([0x00u8, 0x55, 0xaa, 0xff]);
         }
     }
-    let (main, apart, _) = texture::encode(&l, &b, 1);
+    let (main, apart, _) = texture::encode_any(&l, &b, 1);
     assert!(apart.is_empty());
     assert!(main.len() * 10 < b.len(), "{} of {}", main.len(), b.len());
-    assert_eq!(texture::decode(&l, &main, &apart, 1).unwrap(), b);
+    assert_eq!(texture::decode_any(&l, &main, &apart, 1).unwrap(), b);
 }
 
 /// Surfaces large enough to be coded in stripes: the same coded form whatever the threads, and
@@ -204,28 +206,28 @@ fn smooth_textures_code_small() {
 fn stripes() {
     for (format, size, mips, layers) in [(Format::Bc1, (1024, 1024), 3, 1), (Format::Bc5, (1024, 520), 2, 2)] {
         let l = Layout { format, width: size.0, height: size.1, mips, layers };
-        assert!(texture::stripes(l.mip_surfaces().next().unwrap().blocks()) > 1);
+        assert!(texture::stripes_of(l.format, l.mip_surfaces().next().unwrap().blocks()) > 1);
         let b = blocks(format, (l.len() / format.block_bytes() as u64) as usize, 21);
-        let (main, apart, _) = texture::encode(&l, &b, 1);
+        let (main, apart, _) = texture::encode_any(&l, &b, 1);
         for threads in [2, 3, 8] {
-            let (m, a, _) = texture::encode(&l, &b, threads);
+            let (m, a, _) = texture::encode_any(&l, &b, threads);
             assert!(m == main && a == apart, "{format:?} on {threads} threads");
-            assert!(texture::decode(&l, &main, &apart, threads).unwrap() == b, "{format:?} on {threads} threads");
+            assert!(texture::decode_any(&l, &main, &apart, threads).unwrap() == b, "{format:?} on {threads} threads");
         }
-        assert!(texture::decode(&l, &main, &apart, 1).unwrap() == b);
+        assert!(texture::decode_any(&l, &main, &apart, 1).unwrap() == b);
         // the streams of the stripes, one too few or too many, or none
         let mut streams = aqr_common::packed::unpack(&apart).unwrap();
         assert!(streams.len() > 1);
-        assert!(texture::decode(&l, &main, &[], 4).is_err());
+        assert!(texture::decode_any(&l, &main, &[], 4).is_err());
         let last = streams.pop().unwrap();
-        assert!(texture::decode(&l, &main, &aqr_common::packed::pack(&streams), 4).is_err());
+        assert!(texture::decode_any(&l, &main, &aqr_common::packed::pack(&streams), 4).is_err());
         streams.extend([last, last]);
-        assert!(texture::decode(&l, &main, &aqr_common::packed::pack(&streams), 4).is_err());
+        assert!(texture::decode_any(&l, &main, &aqr_common::packed::pack(&streams), 4).is_err());
         // a stripe's stream cut
         streams.pop();
         let n = streams.len();
         streams[n - 1] = &last[..last.len() / 2];
-        let cut = texture::decode(&l, &main, &aqr_common::packed::pack(&streams), 4);
+        let cut = texture::decode_any(&l, &main, &aqr_common::packed::pack(&streams), 4);
         assert!(!matches!(cut, Ok(o) if o == b));
     }
 }
@@ -274,7 +276,7 @@ fn corrupted() {
     for format in Format::ALL {
         let l = Layout { format, width: 32, height: 16, mips: 6, layers: 1 };
         let b = blocks(format, (l.len() / format.block_bytes() as u64) as usize, 11);
-        let (coded, apart, _) = texture::encode(&l, &b, 1);
+        let (coded, apart, _) = texture::encode_any(&l, &b, 1);
         let p = l.to_bytes();
         assert_eq!(module::decode(&p, &[&coded, &apart], l.len(), 1).unwrap(), b);
         // the wrong length, inputs or params; streams apart where there are none
@@ -283,7 +285,7 @@ fn corrupted() {
         assert!(module::decode(&p, &[&coded, &aqr_common::packed::pack::<&[u8]>(&[])], l.len(), 1).is_err());
         assert!(module::decode(&p[..p.len() - 1], &[&coded, &apart], l.len(), 1).is_err());
         // cut, or bits flipped: an error or other blocks, never a panic
-        let mut r = Rng(format as u32 + 1);
+        let mut r = Rng(format.block_bytes() as u32 + format.name().len() as u32 + 1);
         for _ in 0..200 {
             let mut c = coded.clone();
             match r.next() % 3 {

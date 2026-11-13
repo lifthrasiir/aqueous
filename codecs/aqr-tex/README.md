@@ -129,8 +129,10 @@ let node = formula::apply(&mut its_formula, blocks, &layout, threads);
 | `src/dds.rs` | DDS headers (with DX10): where the data is, and what it is |
 | `src/bc.rs` | What blocks decode to: colours, values, levels |
 | `src/coder.rs` | The two sides of the coder, trees and tokens of adaptive bits |
-| `src/model.rs` | Planes and predictions, the cache, the models of colours, values and BC2's alpha |
-| `src/texture.rs` | The walk over a texture's surfaces, the stripes and their threads |
+| `src/plane.rs` | Planes of 8- or 16-bit samples, their predictions: causal, and the smaller mipmap upsampled |
+| `src/model.rs` | The cache, the models of colours, values and BC2's alpha |
+| `src/bcn.rs` | BC1 to BC5 as a family of the walk: their parts, planes and models |
+| `src/texture.rs` | The walk over a texture's surfaces (of any family of formats), the stripes and their threads |
 | `src/module.rs`, `src/formula.rs` | The module `bcn-recons`, and formulas of DDS files |
 | `tests/dds.rs` | Every format and layout (mipmaps, cube maps, DX10 arrays, odd sizes), stripes on any number of threads, pixels, trailers, files not taken, corrupted inputs |
 | `examples/bench.rs` | `aqr-tex-bench` |

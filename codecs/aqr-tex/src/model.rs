@@ -13,23 +13,18 @@ use aqr_common::arith::Bit;
 
 use crate::bc;
 use crate::coder::{Cat, Side};
+use crate::plane::{Up, med};
 use crate::{Result, corrupt};
 
-/// A surface's pixels of `C` channels as its blocks decode, its sides whole blocks.
-pub struct Plane<const C: usize> {
-    w: usize,
-    h: usize,
-    px: Vec<[u8; C]>,
-}
+/// A plane of 8-bit samples, of the models here.
+pub type Plane<const C: usize> = crate::plane::Plane<u8, C>;
 
 /// Buffers that the models' surfaces and the planes upsampled work in, kept to be used again:
-/// the endpoints and choices of a surface's blocks, and the columns and rows of an upsampling.
-#[derive(Default)]
+/// the endpoints and choices of a surface's blocks, and an upsampling's.
 pub struct Work {
     keys: Vec<u32>,
     choices: Vec<u8>,
-    cols: Vec<(u32, u32)>,
-    across: Vec<u16>,
+    pub up: Up<u16>,
 }
 
 impl Work {
@@ -38,15 +33,14 @@ impl Work {
         Work {
             keys: Vec::with_capacity(blocks),
             choices: Vec::with_capacity(blocks),
-            cols: Vec::with_capacity(cols),
-            across: Vec::with_capacity(across),
+            up: Up::with_capacity(cols, across),
         }
     }
 
     /// Bytes that [`Work::with_capacity`] takes of [`aqr_api::stack`].
     pub fn plan(blocks: usize, cols: usize, across: usize) -> u64 {
         use aqr_api::stack::block;
-        block(4 * blocks as u64) + block(blocks as u64) + block(8 * cols as u64) + block(2 * across as u64)
+        block(4 * blocks as u64) + block(blocks as u64) + Up::<u16>::plan(cols, across)
     }
 
     /// The keys and choices of a surface of `n` blocks (none read before it is written).
@@ -57,121 +51,6 @@ impl Work {
         self.choices.resize(n, NONE);
         (&mut self.keys, &mut self.choices)
     }
-}
-
-/// The values of `across` that upsampling a plane of `h` rows to the rows from `y0`, `h1` of
-/// them, takes for each value of a row (as [`Plane::upsampled`] does).
-pub fn across_rows(h: usize, y0: usize, h1: usize) -> usize {
-    let lo = (y0 / 2).min(h - 1).saturating_sub(1);
-    let hi = ((y0 + h1).saturating_sub(1) / 2 + 1).min(h - 1);
-    hi + 1 - lo
-}
-
-impl<const C: usize> Plane<C> {
-    /// A plane of `bw` × `bh` blocks in `px` (cleared, and filled within its room).
-    fn new_in(mut px: Vec<[u8; C]>, bw: usize, bh: usize) -> Self {
-        px.clear();
-        px.resize(bw * bh * 16, [0; C]);
-        Plane { w: bw * 4, h: bh * 4, px }
-    }
-
-    /// The plane's buffer, to be used again.
-    pub fn into_px(self) -> Vec<[u8; C]> {
-        self.px
-    }
-
-    /// The plane of nothing yet of a surface `bw` blocks wide, in `px` (to be grown).
-    pub fn empty_in(mut px: Vec<[u8; C]>, bw: usize) -> Self {
-        px.clear();
-        Plane { w: bw * 4, h: 0, px }
-    }
-
-    /// The plane grown by `bh` rows of blocks below it (within its room); the first of them.
-    fn grow(&mut self, bw: usize, bh: usize) -> usize {
-        debug_assert_eq!(self.w, bw * 4);
-        let y0 = self.h;
-        self.px.resize(self.px.len() + bw * bh * 16, [0; C]);
-        self.h += bh * 4;
-        y0
-    }
-
-    #[inline(always)]
-    fn at(&self, x: usize, y: usize) -> [u8; C] {
-        self.px[y * self.w + x]
-    }
-
-    #[inline(always)]
-    fn set(&mut self, x: usize, y: usize, v: [u8; C]) {
-        self.px[y * self.w + x] = v;
-    }
-
-    /// The plane of the rows of blocks `rows` of a surface `bw` blocks wide from this one, of
-    /// the next smaller mipmap, bilinearly: each pixel (x, y) of the surface is between four of
-    /// this one, (x/2, y/2) and the one beside it towards (x, y) across and down (the sides
-    /// repeated), weighted 9, 3, 3 and 1. In `px`, with `work`.
-    #[cfg_attr(target_family = "wasm", target_feature(enable = "simd128"))]
-    pub fn upsampled(&self, bw: usize, rows: std::ops::Range<usize>, px: Vec<[u8; C]>, work: &mut Work) -> Plane<C> {
-        let (w, y0, h) = (bw * 4, rows.start * 4, rows.len() * 4);
-        let near = |v: usize, n: usize| {
-            let c = (v / 2).min(n - 1);
-            (c, if v.is_multiple_of(2) { c.saturating_sub(1) } else { (c + 1).min(n - 1) })
-        };
-        // across (3 · nearest + other), of the rows of this one that the rows taken are between,
-        // then down (3 · nearest + other): 9, 3, 3, 1
-        let lo = (y0 / 2).min(self.h - 1).saturating_sub(1);
-        let hi = ((y0 + h).saturating_sub(1) / 2 + 1).min(self.h - 1);
-        // (the columns of each x taken once for all rows; then rows of channels flat, which
-        // the compiler vectorizes)
-        let cols = &mut work.cols;
-        cols.clear();
-        cols.extend((0..w).map(|x| near(x, self.w)).map(|(c, n)| (c as u32, n as u32)));
-        let wc = w * C;
-        let across = &mut work.across;
-        across.clear();
-        across.resize((hi + 1 - lo) * wc, 0);
-        for (r, row) in across.chunks_exact_mut(wc).enumerate() {
-            let src = &self.px[(lo + r) * self.w..][..self.w];
-            for (o, &(c, n)) in row.as_chunks_mut::<C>().0.iter_mut().zip(cols.iter()) {
-                let (c, n) = (c as usize, n as usize);
-                for k in 0..C {
-                    o[k] = 3 * src[c][k] as u16 + src[n][k] as u16;
-                }
-            }
-        }
-        let mut px = px;
-        px.clear();
-        px.resize(w * h, [0u8; C]);
-        for (y, row) in px.chunks_exact_mut(w).enumerate() {
-            let (c, n) = near(y0 + y, self.h);
-            let (a, b) = (&across[(c - lo) * wc..][..wc], &across[(n - lo) * wc..][..wc]);
-            for ((o, &a), &b) in row.as_flattened_mut().iter_mut().zip(a).zip(b) {
-                *o = ((3 * a + b + 8) >> 4) as u8;
-            }
-        }
-        Plane { w, h, px }
-    }
-
-    /// Pixel (x, y) predicted by those before it: by MED (LOCO-I's median edge detector) of the
-    /// left, upper and upper left ones, else the one there is of the left and upper ones.
-    #[inline(always)]
-    fn causal(&self, x: usize, y: usize) -> Option<[u8; C]> {
-        let i = y * self.w + x;
-        match (x > 0, y > 0) {
-            (true, true) => {
-                let (a, b, c) = (self.px[i - 1], self.px[i - self.w], self.px[i - self.w - 1]);
-                Some(std::array::from_fn(|k| med(a[k] as i32, b[k] as i32, c[k] as i32) as u8))
-            }
-            (true, false) => Some(self.px[i - 1]),
-            (false, true) => Some(self.px[i - self.w]),
-            (false, false) => None,
-        }
-    }
-}
-
-/// MED: the median of `a`, `b` and `a + b − c` (without branches: pixels are not predictable).
-#[inline(always)]
-fn med(a: i32, b: i32, c: i32) -> i32 {
-    a.min(b).max(a.max(b).min(a + b - c))
 }
 
 #[inline(always)]
@@ -514,7 +393,7 @@ impl Colour {
     /// The plane of the colour blocks at the start of each `stride` of `blocks`, of `bw` × `bh`
     /// blocks (as [`Colour::surface`] gives it).
     pub fn plane(four_always: bool, blocks: &[u8], stride: usize, (bw, bh): (usize, usize), plane: &mut Plane<3>) {
-        let y0 = plane.grow(bw, bh);
+        let y0 = plane.grow(bh * 4);
         for (i, b) in blocks.chunks(stride).take(bw * bh).enumerate() {
             let (c0, c1) = (u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]]));
             let pal = bc::colours(c0, c1, four_always).map(|c| c.map(|v| v as u8));
@@ -562,7 +441,7 @@ impl Colour {
         recent: &mut Recent,
         (px, work): (Vec<[u8; 3]>, &mut Work),
     ) -> Result<Plane<3>> {
-        let mut plane = Plane::<3>::new_in(px, bw, bh);
+        let mut plane = Plane::<3>::new_in(px, bw * 4, bh * 4);
         let (keys, choices) = work.blocks(bw * bh);
         for by in 0..bh {
             for bx in 0..bw {
@@ -720,7 +599,7 @@ const VALUE_IDX: usize = 20 * 20 * 4 * 2;
 impl Value {
     /// As [`Colour::plane`], of BC4 blocks.
     pub fn plane(blocks: &[u8], stride: usize, (bw, bh): (usize, usize), plane: &mut Plane<1>) {
-        let y0 = plane.grow(bw, bh);
+        let y0 = plane.grow(bh * 4);
         for (i, b) in blocks.chunks(stride).take(bw * bh).enumerate() {
             let vals = bc::values(b[0], b[1]);
             let mut ix = [0; 8];
@@ -766,7 +645,7 @@ impl Value {
         recent: &mut Recent,
         (px, work): (Vec<[u8; 1]>, &mut Work),
     ) -> Result<Plane<1>> {
-        let mut plane = Plane::<1>::new_in(px, bw, bh);
+        let mut plane = Plane::<1>::new_in(px, bw * 4, bh * 4);
         let (keys, choices) = work.blocks(bw * bh);
         for by in 0..bh {
             for bx in 0..bw {
@@ -911,7 +790,7 @@ pub struct Alpha {
 impl Alpha {
     /// As [`Colour::plane`], of BC2's alpha.
     pub fn plane(blocks: &[u8], stride: usize, (bw, bh): (usize, usize), plane: &mut Plane<1>) {
-        let y0 = plane.grow(bw, bh);
+        let y0 = plane.grow(bh * 4);
         for (i, b) in blocks.chunks(stride).take(bw * bh).enumerate() {
             let v = u64::from_le_bytes(b[..8].try_into().unwrap());
             for p in 0..16 {
@@ -945,7 +824,7 @@ impl Alpha {
         prev: Option<&Plane<1>>,
         px: Vec<[u8; 1]>,
     ) -> Plane<1> {
-        let mut plane = Plane::<1>::new_in(px, bw, bh);
+        let mut plane = Plane::<1>::new_in(px, bw * 4, bh * 4);
         for by in 0..bh {
             for bx in 0..bw {
                 let b: &mut [u8; 8] = (&mut blocks[(by * bw + bx) * stride..][..8]).try_into().unwrap();

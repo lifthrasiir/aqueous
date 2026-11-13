@@ -5300,7 +5300,7 @@ fn bcn_plans_hold() {
     ] {
         let l = Layout { format, width, height, mips, layers };
         let blocks = rng.bytes(l.len() as usize);
-        let (main, apart, _) = aqr_tex::texture::encode(&l, &blocks, 4);
+        let (main, apart, _) = aqr_tex::texture::encode_any(&l, &blocks, 4);
         let mut f = Formula::default();
         let inputs = vec![f.push("bcn/coded", main), f.push("bcn/stripes", apart)];
         f.root = Node::apply(aqr_tex::formula::MODULE, l.to_bytes(), inputs, l.len());

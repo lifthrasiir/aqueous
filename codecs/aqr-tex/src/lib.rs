@@ -7,6 +7,7 @@
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
 
 pub mod bc;
+pub mod bcn;
 pub mod coder;
 pub mod dds;
 #[cfg(feature = "encode")]
@@ -14,6 +15,7 @@ pub mod formula;
 pub mod layout;
 pub mod model;
 pub mod module;
+pub mod plane;
 pub mod texture;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
