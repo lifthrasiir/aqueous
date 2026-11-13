@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Builds aqr-fsb's database of Vorbis setup headers from vorbis_setups.py's output.
+"""Builds aqr-vorbis's database of Vorbis setup headers from vorbis_setups.py's output.
 
 A setup header (Vorbis I section 4.2.4) is a list of codebooks, time placeholders, floors,
 residues, mappings and modes, each a run of bits; the setups libvorbis makes share nearly all of
 them. Each distinct run is kept once as a part, with a residue's 24-bit `end` field cleared: it
 varies with the sample rate and quality while the rest stays. A skeleton lists a setup's parts
-in order; a setup is a skeleton and its residues' ends. aqr-fsb's FORMAT.md describes the
+in order; a setup is a skeleton and its residues' ends. aqr-vorbis's FORMAT.md §8 describes the
 database and how a setup is assembled; this script checks that every setup assembles back byte
 for byte before writing.
 

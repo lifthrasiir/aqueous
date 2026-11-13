@@ -8,10 +8,10 @@
 use std::time::Instant;
 
 use aqr_fsb::fsb5::{CHUNK_VORBIS, Codec, Layout};
-use aqr_fsb::setups;
 use aqr_vorbis::bits::Reader;
 use aqr_vorbis::packet::{self, Field, Source};
 use aqr_vorbis::setup::{Ident, Setup};
+use aqr_vorbis::setups;
 
 /// The field kinds counted.
 const KINDS: [&str; 7] = ["header", "nonzero", "y01", "master", "y", "class", "vq"];

@@ -1,5 +1,5 @@
 //! The layout of an FSB5 sound bank: a header, the samples' headers, a table of names, then the
-//! samples' data one after another (FORMAT.md §7).
+//! samples' data one after another (FORMAT.md §2).
 
 use std::ops::Range;
 

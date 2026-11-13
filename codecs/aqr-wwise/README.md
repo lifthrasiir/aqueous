@@ -15,23 +15,37 @@ mappings and modes are all there, so only the ids' codebooks are missing to rebu
   first bits back.
 
 ```sh
-aqr-wwise ids FILE...   # .wem and .bnk: setups grouped, the ids' codebooks found
+aqr-wwise ids [--db FILE] FILE...|@LIST   # setups grouped, the ids' codebooks found
 ```
 
-`ids` tries every skeleton of aqr-fsb's database (libvorbis's setups) that has as many
-codebooks on each setup, and takes those under which every packet parses to its end (no
-packet cut short, at most 7 zero bits left). A wrong skeleton parses almost none (0 to 27 of
-400).
+`ids` takes `.wem` files, banks, and any other file holding media (Unreal's paks, No Man's
+Sky's audio paks: RIFF WAVEs of format `FFFF` found anywhere). It tries every skeleton of
+aqr-vorbis's setup database (libvorbis's setups; `--db` another one) that has as many codebooks
+on each setup, and takes those under which every packet parses to its end (no packet cut short,
+at most 7 zero bits left). A wrong skeleton parses few (0 to 27 of 400). Where none does, it
+seeks the codebooks one place at a time.
 
 ## Status
 
-On two games' media (Unpacking: 66 `.wem` and 3 banks; Chants of Sennaar: 3 banks; 16,834
-Vorbis media, 2.13 M packets, 8 distinct setups of 1 and 2 channels, 44.1 and 48 kHz), each
-setup has exactly one skeleton under which all of its packets parse exactly, and the ids agree
-across setups: 118 ids found, each one codebook. Two ids (423, 438) are the same codebook, as
-libvorbis's tables have it twice, which suggests that the library is libvorbis's books in the
-order of its tables. The ids found are not yet stored as a table.
+On seven games' media (Unpacking, Chants of Sennaar, Satisfactory, ASTRONEER and No Man's Sky
+of Steam; Alba and The Alto Collection of Epic): 82,366 Vorbis media, 26 distinct setups of 1
+to 6 channels (more than two coded with the mono setups, as FMOD does), 44.1 and 48 kHz. Under
+a database of stock libvorbis 1.3.7's setups (`scripts/vorbis_setups.py` at the standard
+rates and 6, 7 and 12 kHz), 25 setups have exactly one skeleton under which their packets parse,
+and the 286 ids seen agree across setups, each one codebook. The built-in database (FMOD's)
+lacks the skeletons of blocks of 512 and 4096 (libvorbis below quality 0), two of Alba's
+setups. One setup (Satisfactory, 9 media: stereo at 6 to 8 kHz, blocks of 512) is not found:
+no skeleton fits and the descent over the codebooks known stops at 29 of 200 packets, so its
+books are not libvorbis 1.3.7's (aoTuV's, perhaps).
 
-Left: the table of ids (and those of other Wwise versions, where the library differs: older
-ones have aoTuV's or no library, `vorb` chunks of other sizes, packets with granules); the
-recompressor itself, as aqr-fsb's: the setup rebuilt, the packets recoded by aqr-vorbis.
+The packets left out under the skeletons found end early with zero bits only, so they do not
+tell against them: a stream's last packet often ends 21 to 28 bits early, and in some of No
+Man's Sky's media runs of packets end far early (silence, padded). Two ids (423, 438) are the
+same codebook, as libvorbis's tables have it twice, which suggests that the library is
+libvorbis's books in the order of its tables. The ids found are not yet stored as a table.
+
+Left: the stock skeletons in the database; the table of ids (and those of other Wwise
+versions, where the library differs: `vorb` chunks of other sizes, packets with granules); the
+media cut short in banks (prefetched streams: 184 whose packets run past their data); the
+recompressor itself, as aqr-fsb's: the setup rebuilt, the packets recoded by aqr-vorbis, the
+zero tails kept.

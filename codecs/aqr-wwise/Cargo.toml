@@ -6,5 +6,4 @@ description = "Audiokinetic Wwise's Vorbis media (.wem): their stripped setup he
 publish = false
 
 [dependencies]
-aqr-fsb = { path = "../aqr-fsb", default-features = false }
-aqr-vorbis = { path = "../aqr-vorbis", default-features = false }
+aqr-vorbis = { path = "../aqr-vorbis" }

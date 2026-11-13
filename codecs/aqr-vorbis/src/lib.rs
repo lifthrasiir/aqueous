@@ -1,6 +1,7 @@
 //! Vorbis I audio packets as the values they code: the setup header ([`setup`]), the decode of
 //! a packet against a source of values ([`packet::walk`]), which parses a packet to its values
-//! and writes them back bit for bit ([`packet::parse`], [`packet::write`]).
+//! and writes them back bit for bit ([`packet::parse`], [`packet::write`]); the setups of
+//! streams kept without them, from a database ([`setups`]).
 
 pub mod bits;
 pub mod codec;
@@ -12,6 +13,8 @@ pub mod packet;
 #[cfg(feature = "encode")]
 pub mod plan;
 pub mod setup;
+#[cfg(feature = "encode")]
+pub mod setups;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

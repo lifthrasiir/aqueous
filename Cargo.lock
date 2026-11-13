@@ -1716,7 +1716,6 @@ dependencies = [
 name = "aqr-wwise"
 version = "0.1.0"
 dependencies = [
- "aqr-fsb",
  "aqr-vorbis",
 ]
 

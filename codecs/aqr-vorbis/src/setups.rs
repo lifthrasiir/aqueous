@@ -1,4 +1,5 @@
-//! The Vorbis setup database (FORMAT.md §3), assembling a setup from it (§4) and finding one by its CRC-32 (§5).
+//! The setup database (FORMAT.md §8.1): the setups libvorbis makes, assembled from it (§8.2),
+//! and found by their CRC-32 (§8.3), as FMOD's FSB5 samples give them.
 
 use aqr_common::crc32;
 use aqr_common::varint;
@@ -9,9 +10,9 @@ use std::sync::OnceLock;
 /// Why a database was rejected, or a setup could not be assembled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The database breaks §3.
+    /// The database breaks §8.1.
     Malformed(&'static str),
-    /// A skeleton and ends that do not make a setup (§4.2).
+    /// A skeleton and ends that do not make a setup (§8.2.2).
     Assemble(&'static str),
 }
 
@@ -37,15 +38,15 @@ const VERSION: u8 = 1;
 /// Kinds of parts, in the order of the database: codebooks, floors, residues, mappings, modes.
 const KINDS: usize = 5;
 const RESIDUE: usize = 2;
-/// Bits a residue part has up to and including its partition size (§4.1).
+/// Bits a residue part has up to and including its partition size (§8.2.1).
 const RESIDUE_MIN_BITS: u64 = 88;
-/// Residues' ends are below this (§3).
+/// Residues' ends are below this (§8.1).
 const END_LIMIT: u64 = 1 << 24;
-/// The search's largest `end` (§5.2); it has bits 0..=11.
+/// The search's largest `end` (§8.3.2); it has bits 0..=11.
 const SEARCH_MAX_END: u32 = 2048;
 const SEARCH_END_BITS: usize = 12;
 
-/// A run of bits, §1's way: `bytes` holds the bit string little-endian.
+/// A run of bits, §8's way: `bytes` holds the bit string little-endian.
 #[derive(Debug)]
 struct Part {
     bits: usize,
@@ -139,7 +140,7 @@ fn parse_parts(src: &[u8], at: &mut usize, kind: usize) -> Result<Vec<Part>, Err
 }
 
 impl Setups {
-    /// Parses and validates a database (§3).
+    /// Parses and validates a database (§8.1).
     pub fn parse(src: &[u8]) -> Result<Setups, Error> {
         if src.len() < 5 || &src[..4] != MAGIC || src[4] != VERSION {
             return Err(Error::Malformed("bad magic or version"));
@@ -217,12 +218,12 @@ impl Setups {
         &self.rows
     }
 
-    /// The row of a CRC-32 (§5.1).
+    /// The row of a CRC-32 (§8.3.1).
     pub fn row(&self, crc: u32) -> Option<&Row> {
         self.rows.binary_search_by_key(&crc, |r| r.crc).ok().map(|i| &self.rows[i])
     }
 
-    /// Assembles the setup header of a skeleton and its ends (§4.2).
+    /// Assembles the setup header of a skeleton and its ends (§8.2.2).
     pub fn assemble(&self, skeleton: usize, ends: &[u32]) -> Result<Vec<u8>, Error> {
         self.assemble_at(skeleton, ends).map(|(bytes, _)| bytes)
     }
@@ -274,7 +275,7 @@ impl Setups {
         self.assemble(row.skeleton, &row.ends)
     }
 
-    /// The setups that may have this CRC-32: its row if it has one, else the search's candidates (§5).
+    /// The setups that may have this CRC-32: its row if it has one, else the search's candidates (§8.3).
     pub fn lookup(&self, crc: u32) -> Vec<Candidate> {
         match self.row(crc) {
             Some(r) => vec![Candidate { skeleton: r.skeleton, ends: r.ends.clone() }],
@@ -282,7 +283,7 @@ impl Setups {
         }
     }
 
-    /// Searches all skeletons for setups with this CRC-32 (§5.2), ignoring the rows.
+    /// Searches all skeletons for setups with this CRC-32 (§8.3.2), ignoring the rows.
     pub fn search(&self, crc: u32) -> Vec<Candidate> {
         let mut out = Vec::new();
         for skeleton in 0..self.skeletons.len() {

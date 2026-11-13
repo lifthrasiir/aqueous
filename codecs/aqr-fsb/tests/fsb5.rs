@@ -148,7 +148,7 @@ impl aqr_vorbis::packet::Source for Random<'_> {
 /// A Vorbis bank of one sample of `channels` (1, 2 or 6) and `packets` random packets, of the
 /// database's setup of CRC-32 `crc`: framed packets, a length of 0, padding to 32 bytes.
 fn vorbis_bank(crc: u32, channels: usize, packets: u64) -> Vec<u8> {
-    let db = aqr_fsb::setups::database().unwrap();
+    let db = aqr_vorbis::setups::database().unwrap();
     let setup = db.assemble_row(db.row(crc).unwrap()).unwrap();
     let ident = aqr_vorbis::setup::Ident { channels, blocksizes: [256, 2048] };
     let s = aqr_vorbis::setup::Setup::parse(&setup, ident).unwrap();

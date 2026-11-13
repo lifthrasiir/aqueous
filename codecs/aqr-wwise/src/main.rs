@@ -1,5 +1,5 @@
 //! `aqr-wwise ids FILE...`: the Vorbis media of `.wem` files and of banks (`.bnk`), their
-//! stripped setups grouped, and the codebooks of aqr-fsb's database that their ids may stand for:
+//! stripped setups grouped, and the codebooks of aqr-vorbis's setup database that their ids may stand for:
 //! the database's skeletons with as many codebooks tried on each setup, by whether its packets
 //! parse to their ends.
 
@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use aqr_vorbis::packet;
 use aqr_vorbis::setup::{Ident, Setup};
-use aqr_fsb::setups::Setups;
+use aqr_vorbis::setups::Setups;
 use aqr_wwise::stripped::{self, Stripped};
 use aqr_wwise::wem;
 
@@ -224,7 +224,7 @@ fn main() {
     let mut media = Vec::new();
     let mut failed: BTreeMap<String, usize> = BTreeMap::new();
     // (`@LIST`: the files named in LIST, a line each)
-    // (`--db FILE`: a database other than aqr-fsb's, as aqr-fsb's FORMAT.md §3 has it)
+    // (`--db FILE`: a database other than aqr-vorbis's, as its FORMAT.md §8.1 has it)
     let mut rest = &args[1..];
     let mut db_file = None;
     if rest.first().map(String::as_str) == Some("--db") {
@@ -268,10 +268,10 @@ fn main() {
     }
     eprintln!("{} setups ({bad} not parsed)", groups.len());
 
-    let own = db_file.map(|d| aqr_fsb::setups::Setups::parse(&d).expect("database"));
+    let own = db_file.map(|d| aqr_vorbis::setups::Setups::parse(&d).expect("database"));
     let db = match &own {
         Some(db) => db,
-        None => aqr_fsb::setups::database().expect("database"),
+        None => aqr_vorbis::setups::database().expect("database"),
     };
     // For each id, the codebook parts of the skeletons that parse a setup with it.
     let mut by_id: BTreeMap<u16, BTreeMap<u32, usize>> = BTreeMap::new();

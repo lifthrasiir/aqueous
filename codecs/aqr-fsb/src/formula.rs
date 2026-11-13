@@ -1,14 +1,13 @@
 //! aqr-fsb as formulas (see aqr-formula): an FSB5 bank as its head and its samples' data, each a
-//! stream of its own (FORMAT.md §7), so that the samples banks share are stored once and the
+//! stream of its own (FORMAT.md §2), so that the samples banks share are stored once and the
 //! samples of a codec are compressed together. Vorbis samples whose setup the database has are
-//! rebuilt by aqr-vorbis's module from the record of their packets' values (§8), IMA ADPCM
-//! samples by aqr-ima's from the record of their blocks (§9).
+//! rebuilt by aqr-vorbis's module from the record of their packets' values (§3), IMA ADPCM
+//! samples by aqr-ima's from the record of their blocks (§4).
 
 use aqr_formula::{Formula, Node};
 use aqr_vorbis::setup::Ident;
 
 use crate::fsb5::{CHUNK_VORBIS, Codec, Header, Layout};
-use crate::setups;
 
 pub use crate::fsb5::{extent, sample_sums, starts};
 
@@ -32,7 +31,7 @@ fn class(codec: Codec) -> &'static str {
 /// database gives its CRC-32 (a row, else each candidate of the search in turn).
 fn vorbis(f: &mut Formula, d: &[u8], h: &Header, data: &[u8]) -> Option<(Node, usize)> {
     let crc = u32::from_le_bytes(h.chunk(d, CHUNK_VORBIS)?.get(..4)?.try_into().ok()?);
-    let db = setups::database().ok()?;
+    let db = aqr_vorbis::setups::database().ok()?;
     let ident = Ident { channels: h.channels, blocksizes: BLOCKSIZES };
     db.lookup(crc).into_iter().find_map(|c| {
         let setup = db.assemble(c.skeleton, &c.ends).ok()?;
