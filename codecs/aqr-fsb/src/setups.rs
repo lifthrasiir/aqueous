@@ -63,6 +63,11 @@ impl Skeleton {
     pub fn residues(&self) -> usize {
         self.ids[RESIDUE].len()
     }
+
+    /// The codebooks' part ids, in the setup's order ([`Setups::codebook`]).
+    pub fn codebooks(&self) -> &[u32] {
+        &self.ids[0]
+    }
 }
 
 /// A CRC-32 and the setup it stands for.
@@ -189,6 +194,18 @@ impl Setups {
             return Err(Error::Malformed("bytes after the last row"));
         }
         Ok(Setups { parts, skeletons, rows })
+    }
+
+    /// The number of codebook parts.
+    pub fn codebook_count(&self) -> usize {
+        self.parts[0].len()
+    }
+
+    /// Codebook part `id`: its bits (a codebook as a setup header codes it, Vorbis I §3.2.1)
+    /// and their number.
+    pub fn codebook(&self, id: usize) -> (&[u8], usize) {
+        let p = &self.parts[0][id];
+        (&p.bytes, p.bits)
     }
 
     pub fn skeletons(&self) -> &[Skeleton] {

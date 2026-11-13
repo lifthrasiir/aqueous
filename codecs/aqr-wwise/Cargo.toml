@@ -1,0 +1,10 @@
+[package]
+name = "aqr-wwise"
+version = "0.1.0"
+edition = "2024"
+description = "Audiokinetic Wwise's Vorbis media (.wem): their stripped setup headers rebuilt"
+publish = false
+
+[dependencies]
+aqr-fsb = { path = "../aqr-fsb", default-features = false }
+aqr-vorbis = { path = "../aqr-vorbis", default-features = false }

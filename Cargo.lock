@@ -1712,6 +1712,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-wwise"
+version = "0.1.0"
+dependencies = [
+ "aqr-fsb",
+ "aqr-vorbis",
+]
+
+[[package]]
 name = "aqr-xpress"
 version = "0.1.0"
 dependencies = [
