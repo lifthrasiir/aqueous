@@ -97,7 +97,9 @@ engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
 - `wwise-bnk`: Wwise's SoundBanks: the media of `DIDX`/`DATA` (`<id>.wem`). `wwise-pck`: Wwise's
   file packages (`AKPK`): banks and streamed files (unverified on real files).
 - `xact-xwb`: XACT's wave banks (`WBND`, versions 42 on): the waves' play regions, raw (`.pcm`,
-  `.adpcm`, `.xwma`, `.xma`).
+  `.adpcm`, `.xwma`, `.xma`). Where any is of ADPCM, the bank is a formula of its own
+  (`xact_xwb::encode_with`): those waves' blocks rebuilt by aqr-msadpcm (`msadpcm-recons`; their
+  layout is the entry's format, which a content alone would not have), the others contents.
 - `cri-awb`: CRI's AFS2 archives (HCA, ADX); `cri-acb`: the AFS2 archive a cue sheet (`@UTF`)
   holds; `cri-cpk`: CPK archives' `TOC` (or `ITOC`), CRILAYLA files compressed; `cri-afs`: AFS
   archives (the last two unverified on real files). `cri_utf` reads their `@UTF` tables.

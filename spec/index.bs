@@ -6418,6 +6418,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/mp3-recons.wasm" title="crates/aqr-modules/wasm/mp3-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-mp3/FORMAT.md" title="codecs/aqr-mp3/FORMAT.md">R</a>
     <tr>
+      <td><code>7ed36e1fe53ea5337a3e0950f6e5a464f9984508acfaa3c378adf4fa363552f7</code>
+      <td>msadpcm-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/msadpcm-recons.wasm" title="crates/aqr-modules/wasm/msadpcm-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-msadpcm/FORMAT.md" title="codecs/aqr-msadpcm/FORMAT.md">R</a>
+    <tr>
       <td><code>57fdb061a4e2bbc30c471c088608d528582ef0d4343b84b340e08e5f396d7352</code>
       <td>mszip-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/mszip-recons.wasm" title="crates/aqr-modules/wasm/mszip-recons.wasm">D</a>

@@ -59,6 +59,7 @@ pub fn encode_samples(input: &[u8], layout: Layout, threads: usize) -> Option<Fo
         Layout::Raster(f) => f.len().filter(|&l| l <= input.len())?,
         Layout::Raster16(f) => f.len().filter(|&l| l <= input.len())?,
         Layout::Ima(f) if f.valid() => input.len() - input.len() % f.block(),
+        Layout::MsAdpcm(f) if f.valid() => input.len() - input.len() % f.block,
         _ => return None,
     };
     encode_found(input, &Found { name: "raw", layout, start: 0, len }, threads)
@@ -75,6 +76,12 @@ pub fn apply(f: &mut Formula, samples: &[u8], layout: Layout, threads: usize) ->
             let l = aqr_ima::codec::Layout::new(fmt.channels, fmt.per_channel)?;
             // Any bytes of whole blocks are coded (aqr-ima's record keeps them all).
             let (node, used) = aqr_ima::formula::blocks(f, l, samples)?;
+            (used == samples.len()).then_some(node)
+        }
+        Layout::MsAdpcm(fmt) => {
+            let l = aqr_msadpcm::codec::Layout::new(fmt.channels, fmt.block)?;
+            // (as IMA's: any bytes of whole blocks)
+            let (node, used) = aqr_msadpcm::formula::blocks(f, l, samples)?;
             (used == samples.len()).then_some(node)
         }
     }

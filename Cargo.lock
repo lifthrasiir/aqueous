@@ -189,6 +189,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-lz4",
+ "aqr-msadpcm",
  "zstd",
 ]
 
@@ -353,6 +354,7 @@ dependencies = [
  "aqr-lzx",
  "aqr-modules",
  "aqr-mp3",
+ "aqr-msadpcm",
  "aqr-mszip",
  "aqr-native",
  "aqr-obj",
@@ -503,6 +505,7 @@ dependencies = [
  "aqr-lzx",
  "aqr-modules",
  "aqr-mp3",
+ "aqr-msadpcm",
  "aqr-mszip",
  "aqr-native",
  "aqr-obj",
@@ -1242,6 +1245,7 @@ dependencies = [
  "aqr-lzo",
  "aqr-lzx",
  "aqr-mp3",
+ "aqr-msadpcm",
  "aqr-mszip",
  "aqr-obj",
  "aqr-ogg",
@@ -1274,6 +1278,16 @@ dependencies = [
  "aqr-formula",
  "aqr-raw",
  "memchr",
+]
+
+[[package]]
+name = "aqr-msadpcm"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-formula",
+ "zstd",
 ]
 
 [[package]]
@@ -1325,6 +1339,7 @@ dependencies = [
  "aqr-lzo",
  "aqr-lzx",
  "aqr-mp3",
+ "aqr-msadpcm",
  "aqr-mszip",
  "aqr-obj",
  "aqr-ogg",
@@ -1521,6 +1536,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-ima",
+ "aqr-msadpcm",
 ]
 
 [[package]]

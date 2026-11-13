@@ -576,6 +576,7 @@ pub const NATIVE: &[Native] = &[
     bare("vorbis-recons", |p, _, i, n, _| aqr_vorbis::module::decode(p, i, n).map_err(err)),
     bare("ogg-recons", |p, _, i, n, _| aqr_ogg::module::decode(p, i, n).map_err(err)),
     bare("ima-recons", |p, _, i, n, _| aqr_ima::module::decode(p, i, n).map_err(err)),
+    bare("msadpcm-recons", |p, _, i, n, _| aqr_msadpcm::module::decode(p, i, n).map_err(err)),
     bare("hdf5-recons-float", |p, _, i, n, _| aqr_hdf5::module::float(p, i, n).map_err(err)),
     bare("xsv-recons", |p, _, i, n, t| aqr_xsv::module::decode(p, i, n, t).map_err(err)),
     bare("jsonl-recons", |p, _, i, n, t| aqr_jsonl::module::decode(p, i, n, t).map_err(err)),

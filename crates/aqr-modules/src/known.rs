@@ -364,6 +364,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/mp3-recons.block"),
     },
     Known {
+        name: "msadpcm-recons",
+        version: 1,
+        sha512_256: hex("7ed36e1fe53ea5337a3e0950f6e5a464f9984508acfaa3c378adf4fa363552f7"),
+        block: include_bytes!("../wasm/msadpcm-recons.block"),
+    },
+    Known {
         name: "mszip-recons",
         version: 2,
         sha512_256: hex("57fdb061a4e2bbc30c471c088608d528582ef0d4343b84b340e08e5f396d7352"),

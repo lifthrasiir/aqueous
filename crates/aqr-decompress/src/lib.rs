@@ -368,6 +368,10 @@ pub const OGG: Module = aqr_ogg::formula::MODULE;
 /// aqr-ima's IMA ADPCM blocks from the record of their headers and nibbles. Parameters: the
 /// channels and bytes per channel; no resources.
 pub const IMA: Module = aqr_ima::formula::MODULE;
+
+/// aqr-msadpcm's Microsoft ADPCM blocks from the record of their headers and nibbles.
+/// Parameters: the channels and the bytes per block (varints); inputs: the record.
+pub const MSADPCM: Module = aqr_msadpcm::formula::MODULE;
 /// The chunks of an HDF5 dataset of floats from aqr-hdf5's float model (their order's
 /// coefficients, the arithmetic code and the raw bits). Parameters: the chunks' layout; no
 /// resources.
@@ -500,6 +504,7 @@ const NATIVE: &[Entry] = &[
     entry(VORBIS),
     entry(OGG),
     entry(IMA),
+    entry(MSADPCM),
     entry(HDF5_FLOAT),
     entry(XSV),
     entry(JSONL),

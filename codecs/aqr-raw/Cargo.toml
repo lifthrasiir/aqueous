@@ -9,7 +9,7 @@ publish = false
 default = ["encode"]
 # The formulas (`formula`) and the built-in tables; without it, the code of the modules alone
 # (`module`).
-encode = ["dep:aqr-formula", "dep:aqr-ima", "aqr-common/zstd"]
+encode = ["dep:aqr-formula", "dep:aqr-ima", "dep:aqr-msadpcm", "aqr-common/zstd"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
@@ -17,3 +17,4 @@ aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 # IMA ADPCM blocks of WAV files, in the formulas.
 aqr-ima = { path = "../aqr-ima", optional = true }
+aqr-msadpcm = { path = "../aqr-msadpcm", optional = true }

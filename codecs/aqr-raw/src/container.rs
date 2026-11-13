@@ -19,6 +19,26 @@ pub enum Layout {
     Raster16(raster16::Format),
     /// Blocks of Microsoft's IMA ADPCM (WAV's format tag 0x11), for aqr-ima's `ima-recons`.
     Ima(Ima),
+    /// Blocks of Microsoft ADPCM (WAV's format tag 2), for aqr-msadpcm's `msadpcm-recons`.
+    MsAdpcm(MsAdpcm),
+}
+
+/// The layout of Microsoft ADPCM blocks: 1 to 8 channels, `block` bytes a block (a header of 7
+/// bytes a channel, then nibbles, as many of each channel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MsAdpcm {
+    pub channels: usize,
+    pub block: usize,
+}
+
+impl MsAdpcm {
+    pub fn valid(&self) -> bool {
+        let ch = self.channels;
+        (1..=8).contains(&ch)
+            && self.block > 7 * ch
+            && self.block <= 1 << 20
+            && (2 * (self.block - 7 * ch)).is_multiple_of(ch)
+    }
 }
 
 /// The layout of IMA ADPCM blocks: 1 to 255 channels of a header of 4 bytes and nibbles in
@@ -87,18 +107,19 @@ fn pcm_found(name: &'static str, d: &[u8], f: pcm::Format, start: usize, len: us
     Some(Found { name, layout: Layout::Pcm(f), start, len })
 }
 
-/// IMA ADPCM blocks at `start`, `len` bytes of them as the header says (clamped to the file),
-/// cut to whole blocks; None where there is not one.
-fn ima_found(d: &[u8], f: Ima, start: usize, len: usize) -> Option<Found> {
-    if !f.valid() || start > d.len() {
+/// ADPCM blocks of `block` bytes (of a valid layout) at `start`, `len` bytes of them as the
+/// header says (clamped to the file), cut to whole blocks; None where there is not one.
+fn blocks_found(d: &[u8], layout: Layout, valid: bool, block: usize, start: usize, len: usize) -> Option<Found> {
+    if !valid || start > d.len() {
         return None;
     }
     let len = len.min(d.len() - start);
-    let len = len - len % f.block();
-    (len > 0).then_some(Found { name: "wav", layout: Layout::Ima(f), start, len })
+    let len = len - len % block;
+    (len > 0).then_some(Found { name: "wav", layout, start, len })
 }
 
-/// A WAV file: RIFF chunks, `fmt ` (PCM or IMA ADPCM, also as WAVE_FORMAT_EXTENSIBLE) before
+/// A WAV file: RIFF chunks, `fmt ` (PCM, IMA ADPCM or Microsoft ADPCM, also as
+/// WAVE_FORMAT_EXTENSIBLE) before
 /// `data`.
 fn wav(d: &[u8]) -> Option<Found> {
     if d.get(0..4)? != b"RIFF" || d.get(8..12)? != b"WAVE" {
@@ -128,6 +149,7 @@ fn wav(d: &[u8]) -> Option<Found> {
                     Layout::Pcm(pcm::Format { channels, bytes, big_endian: false, unsigned: bytes == 1 })
                 }
                 0x11 if bits == 4 => Layout::Ima(Ima { channels, per_channel: align / channels }),
+                2 if bits == 4 => Layout::MsAdpcm(MsAdpcm { channels, block: align }),
                 _ => return None,
             });
         } else if id == b"data" {
@@ -135,7 +157,8 @@ fn wav(d: &[u8]) -> Option<Found> {
             let len = if len == 0 || len == 0xffff_ffff { d.len() - body } else { len };
             return match fmt? {
                 Layout::Pcm(f) => pcm_found("wav", d, f, body, len),
-                Layout::Ima(f) => ima_found(d, f, body, len),
+                Layout::Ima(f) => blocks_found(d, Layout::Ima(f), f.valid(), f.block(), body, len),
+                Layout::MsAdpcm(f) => blocks_found(d, Layout::MsAdpcm(f), f.valid(), f.block, body, len),
                 _ => None,
             };
         }

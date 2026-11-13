@@ -30,6 +30,7 @@ aqr-git = { path = "../../codecs/aqr-git", default-features = false }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = false }
 aqr-hdf5 = { path = "../../codecs/aqr-hdf5", default-features = false }
 aqr-ima = { path = "../../codecs/aqr-ima", default-features = false }
+aqr-msadpcm = { path = "../../codecs/aqr-msadpcm", default-features = false }
 aqr-infer-recs = { path = "../../codecs/aqr-infer-recs", default-features = false }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg", default-features = false }
 aqr-jsonl = { path = "../../codecs/aqr-jsonl", default-features = false }

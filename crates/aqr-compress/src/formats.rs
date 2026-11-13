@@ -667,7 +667,10 @@ formats! {
     /// Microsoft XACT's wave banks (`.xwb`): the waves' play regions (aqr-bundle's `packs`): at the
     /// start of data only.
     XactXwb = "xact-xwb" {
-        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::XactXwb, d)),
+        recompressor: Cx(|d, _, _, _, _| {
+            aqr_bundle::packs::xact_xwb::encode_with(d, crate::kind_by_name)
+                .or_else(|| crate::bundle::pack(aqr_bundle::packs::Pack::XactXwb, d))
+        }),
         // slices of the input
         heap: 0.0,
         bundle: true,

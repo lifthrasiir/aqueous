@@ -41,6 +41,19 @@ fn segment(d: &[u8], at: usize) -> Option<std::ops::Range<usize>> {
 
 /// The entries' waves of bank `d`; None where it is not a bank, or is cut short in the headers.
 pub fn files(d: &[u8]) -> Option<Vec<File>> {
+    Some(waves(d)?.into_iter().map(|w| w.0).collect())
+}
+
+/// The layout of the Microsoft ADPCM blocks of a wave of `format` (XACT's ADPCM: its channels,
+/// and its block alignment's field plus 22 bytes a channel), if it is one that aqr-msadpcm takes.
+pub fn adpcm_layout(format: u32) -> Option<aqr_msadpcm::codec::Layout> {
+    let channels = (format >> 2 & 7) as usize;
+    (format & 3 == 2)
+        .then(|| aqr_msadpcm::codec::Layout::new(channels, ((format >> 23 & 0xff) as usize + 22) * channels))?
+}
+
+/// The entries' waves of bank `d`, each a file and its format; as [`files`].
+pub fn waves(d: &[u8]) -> Option<Vec<(File, u32)>> {
     if !starts(d) {
         return None;
     }
@@ -83,8 +96,62 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
         };
         if let Some(r) = range.filter(|r| !r.is_empty()) {
             let r = data.start + r.start..data.start + r.end;
-            files.push(file(format!("{i:03}.{}", ext(format)).into_bytes(), r));
+            files.push((file(format!("{i:03}.{}", ext(format)).into_bytes(), r), format));
         }
     }
     Some(files)
+}
+
+/// The formula of bank `d` where any of its waves is of ADPCM that aqr-msadpcm takes: those
+/// waves' whole blocks rebuilt by `msadpcm-recons` from their records, the other waves contents
+/// of their kinds by `kind` (a stream each), the rest (headers, tables, padding, a wave's partial
+/// block) the stream `xact-xwb/rest`, stream 1, as aqr-disk's formula has it. None where no wave
+/// is of such ADPCM (the bank is then aqr-disk's formula).
+pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind) -> Option<aqr_formula::Formula> {
+    use aqr_formula::{Formula, Kind, Node};
+    let mut waves = waves(d)?;
+    if !waves.iter().any(|w| adpcm_layout(w.1).is_some()) {
+        return None;
+    }
+    waves.sort_by_key(|w| w.0.extents[0].start);
+    let mut f = Formula::default();
+    f.push_content("raw", Kind::Unknown, Vec::new());
+    f.push(aqr_disk::formula::rest("xact-xwb"), Vec::new());
+    let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
+    let kept = |rest: &mut Vec<u8>, parts: &mut Vec<Node>, b: &[u8]| {
+        if !b.is_empty() {
+            parts.push(Node::slice(1, rest.len() as u64, b.len() as u64));
+            rest.extend_from_slice(b);
+        }
+    };
+    for (file, format) in &waves {
+        let r = file.extents[0].clone();
+        // (waves overlapping one before are the rest's)
+        if r.start < at {
+            continue;
+        }
+        kept(&mut rest, &mut parts, &d[at..r.start]);
+        let w = &d[r.clone()];
+        match adpcm_layout(*format).and_then(|l| aqr_msadpcm::formula::blocks(&mut f, l, w)) {
+            Some((node, used)) => {
+                parts.push(node);
+                kept(&mut rest, &mut parts, &w[used..]);
+            }
+            None => {
+                let k = kind(&file.name);
+                let class = match k {
+                    Kind::Unknown => "raw".to_string(),
+                    Kind::Format(name) => format!("xact-xwb/{name}"),
+                    k => format!("xact-xwb/{k}"),
+                };
+                parts.push(f.push_content(class, k, w.to_vec()));
+            }
+        }
+        at = r.end;
+    }
+    kept(&mut rest, &mut parts, &d[at..]);
+    f.streams[1].data = rest.into();
+    f.root = Node::concat(parts);
+    debug_assert_eq!(f.root.len(), d.len() as u64);
+    Some(f)
 }

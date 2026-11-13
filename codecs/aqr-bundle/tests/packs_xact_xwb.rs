@@ -98,3 +98,32 @@ fn truncated_and_foreign() {
     assert!(files(b"WBND").is_none());
     assert!(files(&[0; 500]).is_none());
 }
+
+/// A bank of ADPCM waves (stereo blocks of 140 bytes, mono of 70) and a PCM one: the ADPCM
+/// waves' whole blocks rebuilt by `msadpcm-recons`, a partial block and the PCM wave kept; the
+/// bank given back. A bank of no ADPCM has no such formula.
+#[test]
+fn adpcm_waves() {
+    use aqr_bundle::packs::xact_xwb::{adpcm_layout, encode_with};
+    let mut rng = aqr_common::rng::Rng::new(4);
+    let mut noise = |n: usize| -> Vec<u8> { (0..n).map(|_| rng.below(256) as u8).collect() };
+    // (the format: ADPCM, channels, the block alignment's field: 140 = (48 + 22) x 2)
+    let adpcm = |ch: u32| 2 | ch << 2 | 44100 << 5 | 48 << 23;
+    let waves = [
+        Wave { format: adpcm(2), data: noise(140 * 30) },
+        Wave { format: 1 << 2 | 44100 << 5, data: noise(1000) },
+        Wave { format: adpcm(1), data: noise(70 * 12 + 9) },
+    ];
+    assert_eq!(adpcm_layout(waves[0].format), aqr_msadpcm::codec::Layout::new(2, 140));
+    let d = bank(&waves, None, 4);
+    let f = encode_with(&d, |_| aqr_formula::Kind::Unknown).unwrap();
+    assert_eq!(f.applies().len(), 2);
+    let out = f.eval(&|a: &aqr_formula::Apply, inputs: &[&[u8]]| {
+        assert_eq!(a.module, aqr_msadpcm::formula::MODULE);
+        aqr_msadpcm::formula::decode(&a.params, inputs, a.len).map_err(|e| aqr_formula::Error::new(e.0))
+    });
+    assert!(out.unwrap() == d);
+    assert!(f.streams[1].class == "xact-xwb/rest");
+    let pcm = [Wave { format: 1 << 2 | 44100 << 5, data: noise(1000) }];
+    assert!(encode_with(&bank(&pcm, None, 4), |_| aqr_formula::Kind::Unknown).is_none());
+}

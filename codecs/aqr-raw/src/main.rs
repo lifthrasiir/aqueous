@@ -54,12 +54,20 @@ fn bench(args: &[String]) {
             formula::raster16::decode(&a.params, inputs, a.len)
         } else if a.module == aqr_ima::formula::MODULE {
             return aqr_ima::formula::decode(&a.params, inputs, a.len).map_err(|e| aqr_formula::Error::new(e.0));
+        } else if a.module == aqr_msadpcm::formula::MODULE {
+            return aqr_msadpcm::formula::decode(&a.params, inputs, a.len).map_err(|e| aqr_formula::Error::new(e.0));
         } else {
             raster::decode(&a.params, inputs, a.len, threads)
         };
         r.map_err(|e| aqr_formula::Error::new(e.0))
     };
-    let modules = [formula::pcm::MODULE, raster::MODULE, formula::raster16::MODULE, aqr_ima::formula::MODULE];
+    let modules = [
+        formula::pcm::MODULE,
+        raster::MODULE,
+        formula::raster16::MODULE,
+        aqr_ima::formula::MODULE,
+        aqr_msadpcm::formula::MODULE,
+    ];
     let natives = aqr::natives(&modules, &apply);
     let encode = |d: &[u8]| -> Option<Formula> {
         match raw {

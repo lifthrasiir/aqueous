@@ -72,7 +72,8 @@ recording (`aqr-flac-corpus/ia`, 44.1 kHz stereo) written by ffmpeg (`adpcm_ima_
 1024 bytes) 5.33 MB -> 3.06 MB (0.575; zstd -3 0.862, xz -9e 0.712), by sox (`-e ima-adpcm`,
 512) 5.37 MB -> 3.26 MB (0.607; zstd -3 0.891, xz -9e 0.751), and in mono by sox 2.68 MB ->
 2.10 MB (0.784; xz -9e 0.797). The blocks are aqr-ima's (`ima-recons`); a file of a few tens of KB
-stays as it was, its gain smaller than the module.
+stays as it was, its gain smaller than the module. Microsoft ADPCM WAV files (format 2) are
+aqr-msadpcm's (`msadpcm-recons`) in the same way.
 
 ## Usage
 
@@ -106,11 +107,12 @@ let node = formula::apply(&mut its_formula, samples, layout, 1);
 | `src/image/pixel.rs` | The pixel model: MED, channel decorrelation, activity buckets (scalar and NEON) |
 | `src/image/raster.rs` | Raw rasters: the coder of 8-bit rows of 1 to 4 channels |
 | `src/image/raster16.rs` | Raw rasters of 16-bit samples: MED or mean prediction per chunk, tokens by rANS and raw bits |
-| `src/container.rs` | WAV (PCM and IMA ADPCM), AIFF / AIFC, BMP, PNM, TIFF, DICOM, and samples after a header telling their size: where the samples are, and their layout |
+| `src/container.rs` | WAV (PCM, IMA ADPCM and Microsoft ADPCM), AIFF / AIFC, BMP, PNM, TIFF, DICOM, and samples after a header telling their size: where the samples are, and their layout |
 | `src/formula/` | The modules `pcm-recons`, `raster-recons` and `raster-recons-16`, and formulas of containers |
 | `model/audio.bin` | The residual model's built-in tables (trained by `aqr-flac-train`) |
 | `tests/pcm.rs`, `tests/data` | WAV / AIFF / AIFC files and headerless PCM: round trips on threads, junk, cuts, corrupted inputs, the resource |
 | `tests/ima.rs`, `tests/ima` | IMA ADPCM WAV files of ffmpeg and sox: round trips, junk, cuts, layouts not taken |
+| `tests/msadpcm.rs`, `tests/msadpcm` | Microsoft ADPCM WAV files of ffmpeg: the same |
 | `tests/raster.rs` | Synthetic BMP and PNM files: round trips, trailers, cuts, corrupted inputs |
 
 ## Design
@@ -182,7 +184,7 @@ PCM is cut into it here.
 
 - **Not covered**: fewer than 8 bits per pixel, RLE BMP, ASCII
   PNM, TGA (no reliable signature), float audio, more than 8 channels, compressed AIFC, CAF,
-  W64, RF64, ADPCM other than IMA's (Microsoft's 0x02 and others), Apple's IMA4 (AIFC and CAF
+  W64, RF64, ADPCM other than IMA's and Microsoft's, Apple's IMA4 (AIFC and CAF
   `ima4`, packets of another layout).
 - **Other containers** with samples inside (other TIFFs, PSD raw channels, tracker
   modules, SoundFont) are for their recompressors to take apart with `formula::apply`; data

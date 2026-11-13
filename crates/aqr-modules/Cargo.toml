@@ -30,6 +30,7 @@ aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = fa
 aqr-vorbis = { path = "../../codecs/aqr-vorbis", default-features = false }
 aqr-ogg = { path = "../../codecs/aqr-ogg", default-features = false }
 aqr-ima = { path = "../../codecs/aqr-ima", default-features = false }
+aqr-msadpcm = { path = "../../codecs/aqr-msadpcm", default-features = false }
 aqr-fits = { path = "../../codecs/aqr-fits", default-features = false }
 aqr-hdf5 = { path = "../../codecs/aqr-hdf5", default-features = false }
 aqr-flac = { path = "../../codecs/aqr-flac", default-features = false }
@@ -238,6 +239,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "ima-recons"
 path = "src/bin/ima-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "msadpcm-recons"
+path = "src/bin/msadpcm-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

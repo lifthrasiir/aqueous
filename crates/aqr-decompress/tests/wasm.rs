@@ -3161,6 +3161,15 @@ fn more_plans_hold() {
         f.root = node;
         plan_holds(&format!("ima {channels}"), f, &d);
     }
+    for (channels, block) in [(1, 1024), (2, 140), (6, 516)] {
+        let l = aqr_msadpcm::codec::Layout::new(channels, block).unwrap();
+        let d = aqr_common::rng::noise(200 * block);
+        let mut f = Formula::default();
+        let (node, n) = aqr_msadpcm::formula::blocks(&mut f, l, &d).unwrap();
+        assert_eq!(n, d.len());
+        f.root = node;
+        plan_holds(&format!("msadpcm {channels}"), f, &d);
+    }
 }
 
 /// A `.mo` file of `pairs` (original, translation), sorted as msgfmt sorts them, little-endian, a

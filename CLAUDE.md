@@ -125,7 +125,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
   git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, zstd, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
-  asar, inno, ole, isc, vorbis, ogg, mkv, lzx, xpress, lznt1, div3, ac3, tensors, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
+  asar, inno, ole, isc, vorbis, ogg, ima, msadpcm, mkv, lzx, xpress, lznt1, div3, ac3, tensors, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
   crate with a `FORMAT.md` belongs here. Disk images are aqr-disk's (partition tables, containers,
   the formula; `docs/disk-image-design.md`), their file systems read by aqr-iso, aqr-fat, aqr-ntfs,
   aqr-ext, aqr-apfs and aqr-hfs (no FORMAT.md: aqr-disk's tells). Game engines' and middleware's packs are
