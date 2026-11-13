@@ -407,7 +407,7 @@ impl Live<'_> {
         if index == 0 {
             return Ok(());
         }
-        let f = *self.table_funcs.get(&index).ok_or(format!("table index {index} of no function"))?;
+        let f = *self.table_funcs.get(&index).ok_or_else(|| format!("table index {index} of no function"))?;
         self.table.insert(index);
         self.func(f);
         Ok(())

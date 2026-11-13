@@ -7,6 +7,7 @@
 
 use std::fmt;
 
+pub mod dispatch;
 #[cfg(feature = "runner")]
 pub mod interp;
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -55,8 +56,20 @@ impl fmt::Debug for Blob {
 
 pub const MAGIC: &[u8; 4] = b"AQB2";
 
+/// The size of an import descriptor of a PE image's import directory (the directory ends with
+/// an all-zero one).
+pub const IMPORT_DESCRIPTOR_LEN: usize = 20;
+
+/// The flag of a thunk of the import tables (64-bit images): the import is by ordinal, not by
+/// the RVA of a hint and name.
+pub const IMPORT_BY_ORDINAL: u64 = 0x8000_0000_0000_0000;
+
 fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
+}
+
+fn u64_at(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
 // ---- the Visual C++ runtime of blobs
@@ -226,15 +239,14 @@ pub fn take_vcruntime(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u
         let end = s.iter().position(|&c| c == 0).ok_or("unterminated import name")?;
         Ok(s[..end].to_vec())
     };
-    let u64_at = |img: &[u8], o: usize| u64::from_le_bytes(img[o..o + 8].try_into().unwrap());
     let start = at(dir_rva).ok_or("the import directory out of the image")?;
     let (mut slots, mut kept) = (Vec::new(), Vec::new());
     let mut d = start;
-    while img[d..d + 20].iter().any(|&b| b != 0) {
+    while img[d..d + IMPORT_DESCRIPTOR_LEN].iter().any(|&b| b != 0) {
         let (oft, name, ft) = (u32_at(img, d), u32_at(img, d + 12), u32_at(img, d + 16));
         if !cstr(img, name)?.eq_ignore_ascii_case(VCRUNTIME.as_bytes()) {
-            kept.extend_from_slice(&img[d..d + 20]);
-            d += 20;
+            kept.extend_from_slice(&img[d..d + IMPORT_DESCRIPTOR_LEN]);
+            d += IMPORT_DESCRIPTOR_LEN;
             continue;
         }
         let lookup = if oft != 0 { oft } else { ft };
@@ -244,7 +256,7 @@ pub fn take_vcruntime(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u
             if v == 0 {
                 break;
             }
-            let n = match v & 0x8000_0000_0000_0000 {
+            let n = match v & IMPORT_BY_ORDINAL {
                 0 => cstr(img, v as u32 + 2)?,
                 _ => return Err(format!("{VCRUNTIME}: an import by ordinal")),
             };
@@ -254,10 +266,10 @@ pub fn take_vcruntime(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u
             })?;
             slots.push((ft + k as u32 * 8, i));
         }
-        d += 20;
+        d += IMPORT_DESCRIPTOR_LEN;
     }
     img[start..start + kept.len()].copy_from_slice(&kept);
-    img[start + kept.len()..d + 20].fill(0);
+    img[start + kept.len()..d + IMPORT_DESCRIPTOR_LEN].fill(0);
     Ok(slots)
 }
 
@@ -313,7 +325,10 @@ impl Blob {
         if b.len() < 36 || &b[0..4] != MAGIC {
             return Err("not a module blob (of this version)".into());
         }
-        let mut r = Reader { b, at: 36 };
+        let mut r = Reader { b, at: MAGIC.len() };
+        let (apply_rva, info_rva, pdata_rva, pdata_count, import_dir_rva, first) =
+            (r.word()?, r.word()?, r.word()?, r.word()?, r.word()?, r.word()?);
+        let image_base = u64::from_le_bytes(r.take(8)?.try_into().unwrap());
         let name = r.string()?;
         let libs = (0..r.word()?).map(|_| r.string()).collect::<Result<Vec<_>>>()?;
         let mut binds = Vec::new();
@@ -326,13 +341,13 @@ impl Blob {
         let n = r.word()? as usize;
         let image = r.take(n)?.to_vec();
         Ok(Blob {
-            apply_rva: u32_at(b, 4),
-            info_rva: u32_at(b, 8),
-            pdata_rva: u32_at(b, 12),
-            pdata_count: u32_at(b, 16),
-            import_dir_rva: u32_at(b, 20),
-            first: u32_at(b, 24),
-            image_base: u64::from_le_bytes(b[28..36].try_into().unwrap()),
+            apply_rva,
+            info_rva,
+            pdata_rva,
+            pdata_count,
+            import_dir_rva,
+            first,
+            image_base,
             name,
             binds,
             relocs,

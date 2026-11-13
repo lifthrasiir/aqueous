@@ -146,14 +146,7 @@ impl Interpreter {
 
 impl Runner for Interpreter {
     fn load(&self, wasm: &[u8]) -> Decoded<Box<dyn Loaded + '_>> {
-        let mut error = [0u8; 1024];
-        let mut len = 0;
-        // SAFETY: the interpreter's load takes the module's bytes and a place for a message
-        let handle = unsafe { (self.vtable.load)(Slice::of(wasm), SliceMut::of(&mut error), &mut len) };
-        if handle.is_null() {
-            return Err(failure_of(&error[..len]));
-        }
-        Ok(Box::new(Handle { vtable: self.vtable, handle }))
+        self.load_with(wasm, None, None, false)
     }
 }
 

@@ -30,7 +30,6 @@ fn run() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find the program: {e}"))?;
     let bytes = std::fs::read(&exe).map_err(|e| format!("{}: {e}", exe.display()))?;
     let runner = Sfx::find();
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
 
     // the appended archive runs to the end of the file; find where it begins by its header magic,
     // scanning from the end and taking the last place a valid archive opens
@@ -41,7 +40,7 @@ fn run() -> Result<(), String> {
         .ok_or("no Aqueous archive is appended to this stub")?;
 
     let dest: PathBuf = std::env::args_os().nth(1).map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let value = archive.value(threads).map_err(|e| format!("{e:?}"))?;
+    let value = archive.value(runner.threads()).map_err(|e| format!("{e:?}"))?;
     let n = extract(value, &dest)?;
     eprintln!("aqr-sfx: {n} file{} written under {}", if n == 1 { "" } else { "s" }, dest.display());
     Ok(())

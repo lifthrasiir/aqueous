@@ -6,6 +6,9 @@
 //!   the relocations kept and the symbols not stripped (it strips them itself), for the rewrite
 //!   to take out what only panics need; any other output is linked again as asked.
 //! - `aqr-ld <in.wasm> <out.wasm>` rewrites `in.wasm` into `out.wasm`.
+//! - `aqr-ld blob --out M.blob MODULE.dll` and `aqr-ld blobs --out DIR LIBRARY.dll ...` digest
+//!   native libraries into blobs; `aqr-ld exports --out DIR LIBRARY.dll ...` writes for each
+//!   library the symbols that the others import from it.
 //! - `aqr-ld merge --stub S --out O NAME=MODULE.dll ...` merges native module libraries into a
 //!   stub executable as sections, with no loader ([`pemerge`]), toward self-extracting archives.
 //!
@@ -36,7 +39,7 @@ fn main() -> ExitCode {
     } else if msvc::is_link(&args) {
         msvc::link(&args)
     } else if let [input, output] = &args[..] {
-        process(input.into(), output.into(), true)
+        process(input.into(), output.into())
     } else {
         Err("usage: aqr-ld <in.wasm> <out.wasm>, aqr-ld blob --out M.blob MODULE.dll, \
              aqr-ld blobs --out DIR LIBRARY.dll ..., \
@@ -83,15 +86,12 @@ fn link(args: &[OsString]) -> Result<(), String> {
     if !rewrite::is_aqr_module(&wasm)? {
         return run(args);
     }
-    process(output.clone(), output, true)
+    process(output.clone(), output)
 }
 
-/// Rewrites `input` into `output`; unless `force`, only if it uses `aqr_api`.
-fn process(input: PathBuf, output: PathBuf, force: bool) -> Result<(), String> {
+/// Rewrites `input` into `output`.
+fn process(input: PathBuf, output: PathBuf) -> Result<(), String> {
     let wasm = std::fs::read(&input).map_err(|e| format!("{}: {e}", input.display()))?;
-    if !force && !rewrite::is_aqr_module(&wasm)? {
-        return Ok(());
-    }
     let wasm = rewrite::rewrite(&wasm).map_err(|e| format!("{}: {e}", input.display()))?;
     std::fs::write(&output, wasm).map_err(|e| format!("{}: {e}", output.display()))
 }

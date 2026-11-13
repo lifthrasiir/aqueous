@@ -9,6 +9,3 @@ publish = false
 aqr-api = { path = "../aqr-api", default-features = false }
 aqr-blob = { path = "../aqr-blob", features = ["runner"] }
 aqr-formula = { path = "../aqr-formula" }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }

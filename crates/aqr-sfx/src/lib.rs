@@ -34,14 +34,10 @@ pub struct Sfx {
     threads: usize,
 }
 
-// SAFETY: the vtable is in the image, static; the interpreter's own state is thread-safe, and so
-// is each native blob's (its applications share nothing).
-unsafe impl Sync for Sfx {}
-
 impl Sfx {
-    /// How many native module blobs are merged, and whether the interpreter blob is.
-    pub fn merged(&self) -> (usize, bool) {
-        (self.natives.len(), self.interp.is_some())
+    /// The threads the native blobs decode whole inputs on, as many as the machine has.
+    pub fn threads(&self) -> usize {
+        self.threads
     }
 }
 
@@ -68,19 +64,9 @@ impl Runner for Sfx {
 
 // ---- finding the merged blobs
 
-/// What `aqr-ld merge` fills: the dispatch table's place in the image (its magic, then RVA and
-/// length).
-#[repr(C)]
-struct Anchor {
-    magic: [u8; 16],
-    dispatch_rva: u32,
-    dispatch_len: u32,
-}
-
 #[used]
 #[unsafe(no_mangle)]
-static AQR_PEMERGE_ANCHOR: Anchor =
-    Anchor { magic: *b"\x89AQRPEMERGEv2\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
+static AQR_PEMERGE_ANCHOR: aqr_blob::dispatch::Anchor = aqr_blob::dispatch::Anchor::EMPTY;
 
 #[cfg(windows)]
 impl Sfx {
@@ -104,30 +90,15 @@ impl Sfx {
         #[cfg(target_env = "msvc")]
         aqr_blob::keep_vcruntime();
         let base = &raw const __ImageBase as usize;
-        let u32_at = |b: &[u8], o: usize| b.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
-        let (rva, len) = unsafe {
-            (
-                std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_rva),
-                std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_len),
-            )
-        };
-        if rva == 0 || len < 4 {
-            return sfx;
-        }
+        let Some((rva, len)) = AQR_PEMERGE_ANCHOR.table() else { return sfx };
         let table = unsafe { std::slice::from_raw_parts((base + rva as usize) as *const u8, len as usize) };
-        // the count, then an entry each (apply_rva, info_rva, image_rva, image_len, mod_base,
-        // name_off: 6 u32), then the names (each its length, u32, and its bytes)
-        let count = u32_at(table, 0).unwrap_or(0) as usize;
-        let field = |k: usize, i: usize| u32_at(table, 4 + k * 24 + i * 4).unwrap_or(0) as usize;
         REGISTERED.call_once(|| {
-            for k in 0..count {
-                aqr_blob::register_image(base + field(k, 2), field(k, 3), base + field(k, 4));
+            for e in aqr_blob::dispatch::entries(table) {
+                aqr_blob::register_image(base + e.image_rva as usize, e.image_len as usize, base + e.mod_base as usize);
             }
         });
-        for k in 0..count {
-            let (apply_rva, info_rva, name_at) = (field(k, 0), field(k, 1), field(k, 5));
-            let Some(n) = u32_at(table, name_at) else { continue };
-            let Some(name) = table.get(name_at + 4..name_at + 4 + n as usize) else { continue };
+        for e in aqr_blob::dispatch::entries(table) {
+            let (apply_rva, info_rva, name) = (e.apply_rva as usize, e.info_rva as usize, e.name);
             let at = base + apply_rva;
             if name == INTERP.as_bytes() {
                 // SAFETY: the merge wrote the RVA of aqr_interp_vtable, which returns the static vtable

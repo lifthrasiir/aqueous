@@ -24,7 +24,6 @@ pub fn serve() -> io::Result<()> {
     let threads = get_u64(&mut r)? as usize;
     // what the worker would make or load later, made before it is locked down
     aqr_common::pool::init(threads);
-    aqr_common::pool::size();
     wasm::warm_up();
     os::lockdown()?;
     w.write_all(READY)?;

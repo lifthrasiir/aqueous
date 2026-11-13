@@ -1,5 +1,5 @@
 //! Modules run as WebAssembly by Wasmtime, as the spec's "Module execution" defines (with the
-//! feature `wasm`): the module checked against the profile, the memories of an application
+//! feature `wasmtime`): the module checked against the profile, the memories of an application
 //! created and the entry point invoked, with the host functions.
 //!
 //! A trap, or a violation of a host function, is an invalid archive. Exceeding the memory
@@ -151,7 +151,7 @@ pub fn load_bounded(wasm: &[u8], hash: [u8; 32], bound: u64) -> Decoded<Box<dyn 
 /// [`load`] of a module as if it were of a release (not kept), for tests of the earlier rules.
 #[doc(hidden)]
 pub fn load_released(wasm: &[u8]) -> Decoded<Box<dyn Loaded>> {
-    Ok(Box::new(Shared(Arc::new(Compiled { released: true, ..compile(wasm, true)? }), None)))
+    Ok(Box::new(Shared(Arc::new(compile(wasm, true, [0; 32])?), None)))
 }
 
 /// [`load`], of the module itself (for [`Shared::apply_into`]).
@@ -160,7 +160,7 @@ pub(crate) fn compiled(wasm: &[u8], hash: [u8; 32]) -> Decoded<Shared> {
         return Ok(c.clone());
     }
     let released = aqr_formula::aqr::is_released(&hash);
-    let c = Shared(Arc::new(Compiled { hash, released, ..compile(wasm, released)? }), None);
+    let c = Shared(Arc::new(compile(wasm, released, hash)?), None);
     COMPILED.lock().unwrap().insert(hash, c.clone());
     Ok(c)
 }
@@ -189,8 +189,8 @@ fn func_of(name: &str, released: bool) -> Option<(HostFn, &'static [wp::ValType]
 }
 
 /// Checks `wasm` against the profile (the spec, "Module execution"), and compiles it; `released`
-/// if it is a module of a release, which may import the earlier `aqr_spawn`.
-fn compile(wasm: &[u8], released: bool) -> Decoded<Compiled> {
+/// if it is a module of a release, which may import the earlier `aqr_spawn`. `hash` is its own.
+fn compile(wasm: &[u8], released: bool, hash: [u8; 32]) -> Decoded<Compiled> {
     let bad = |e: wp::BinaryReaderError| Failure::Invalid(format!("not a module of the profile: {e}"));
     Validator::new_with_features(WasmFeatures::WASM2 | WasmFeatures::MULTI_MEMORY | WasmFeatures::MEMORY64)
         .validate_all(wasm)
@@ -359,7 +359,7 @@ fn compile(wasm: &[u8], released: bool) -> Decoded<Compiled> {
         slots: slots.iter().map(|s| s.0).collect(),
         gang: slots.iter().map(|s| s.1).collect(),
         released,
-        hash: [0; 32],
+        hash,
     })
 }
 
@@ -389,6 +389,11 @@ fn memory_module((min, max): (u64, Option<u64>)) -> Vec<u8> {
     // the export section: memory 0 as `m`
     m.extend([7, 5, 1, 1, b'm', 2, 0]);
     m
+}
+
+/// The failure of an application over its memory limit.
+fn over_limit() -> Failure {
+    Failure::Resource("memory limit exceeded".into())
 }
 
 /// The memory limit of an application, as the memories are made and grown.
@@ -770,6 +775,15 @@ fn ring_write(m: &mut [u8], w: u64, mut at: u64, mut d: &[u8]) {
     }
 }
 
+/// An input of a part module: its data, its memory, and its visible range (the bytes before `lo`
+/// released, those before `hi` requested).
+struct Input {
+    feed: Feed,
+    memory: Option<Memory>,
+    lo: u64,
+    hi: u64,
+}
+
 /// What the host functions of an instance work on.
 struct State {
     c: Shared,
@@ -778,8 +792,8 @@ struct State {
     /// The bytes of the memories of this instance, in the total of `app`.
     mine: u64,
     working: Option<Memory>,
-    /// The data of the inputs of a part module, their memories and visible ranges.
-    inputs: Vec<(Feed, Option<Memory>, u64, u64)>,
+    /// The inputs of a part module.
+    inputs: Vec<Input>,
     /// The outputs, their memories and (of a part module) the bytes committed so far.
     outputs: Vec<Output>,
     last_log: Option<Vec<u8>>,
@@ -897,7 +911,7 @@ fn violation<T>(msg: String) -> wasmtime::Result<T> {
 /// The failure of an invocation of the instance of `store`, with its last `aqr_log` message.
 fn failure(store: &Store<State>, e: wasmtime::Error) -> Failure {
     let f = if e.is::<OverLimit>() {
-        Failure::Resource("memory limit exceeded".into())
+        over_limit()
     } else if let Some(v) = e.downcast_ref::<Violation>() {
         Failure::Invalid(v.0.clone())
     } else if let Some(TaskFailed(f)) = e.downcast_ref() {
@@ -924,7 +938,7 @@ async fn instantiate<'a>(
     mem: &mut (dyn FnMut(Mem) -> (MemoryType, Option<&'a [u8]>) + Send),
 ) -> Decoded<(Instance, Vec<Option<Memory>>)> {
     let over = |e: wasmtime::Error| match e.downcast_ref::<OverLimit>() {
-        Some(_) => Failure::Resource("memory limit exceeded".into()),
+        Some(_) => over_limit(),
         None => Failure::Resource(format!("{e}")),
     };
     let mut externs = Vec::with_capacity(c.imports.len());
@@ -945,7 +959,7 @@ async fn instantiate<'a>(
                     Mem::Working => s.working = Some(memory),
                     Mem::Input(k) => {
                         if let Some(i) = s.inputs.get_mut(k as usize) {
-                            i.1 = Some(memory);
+                            i.memory = Some(memory);
                         }
                     }
                     Mem::Output(j) => {
@@ -963,7 +977,7 @@ async fn instantiate<'a>(
     }
     let instance = Instance::new_async(&mut *store, &c.module, &externs).await.map_err(|e| {
         match e.downcast_ref::<OverLimit>() {
-            Some(_) => Failure::Resource("memory limit exceeded".into()),
+            Some(_) => over_limit(),
             None => Failure::Invalid(format!("not instantiated: {e}")),
         }
     })?;
@@ -1124,7 +1138,7 @@ impl Shared {
         }
         let total = self.imported(params, resources, inputs, sizes) + c.working.0 as u128 * 65536;
         if total > memory_limit as u128 {
-            return Err(Failure::Resource("memory limit exceeded".into()));
+            return Err(over_limit());
         }
         Ok(())
     }
@@ -1202,7 +1216,7 @@ impl Shared {
             failed: Mutex::default(),
         });
         let mut state = State::new(self.clone(), app.clone(), None);
-        state.inputs = feeds.into_iter().map(|f| (f, None, 0, 0)).collect();
+        state.inputs = feeds.into_iter().map(|feed| Input { feed, memory: None, lo: 0, hi: 0 }).collect();
         state.outputs = drains.into_iter().map(|buf| Output { buf, memory: None, done: 0 }).collect();
         let mut store = Store::new(&ENGINE, state);
         store.limiter(|s| s);
@@ -1402,7 +1416,8 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             Func::wrap(&mut *store, move |mut c: Caller<'_, State>, k: i32, hi: i64| -> wasmtime::Result<()> {
                 part(&c, "aqr_request")?;
                 let (k, hi) = (k as u32 as usize, hi as u64);
-                let Some((len, Some(mem), lo_k, hi_k)) = c.data().inputs.get(k).map(|i| (i.0.len(), i.1, i.2, i.3))
+                let Some((len, Some(mem), lo_k, hi_k)) =
+                    c.data().inputs.get(k).map(|i| (i.feed.len(), i.memory, i.lo, i.hi))
                 else {
                     return violation(format!("aqr_request({k}) of an input not imported"));
                 };
@@ -1411,7 +1426,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                     return violation(format!("aqr_request({k}, {hi}) outside [{hi_k}, {len}] or window {w}"));
                 }
                 let (m, state) = mem.data_and_store_mut(&mut c);
-                match &mut state.inputs[k].0 {
+                match &mut state.inputs[k].feed {
                     Feed::Bytes(data) => ring_write(m, w, hi_k, &data[hi_k as usize..hi as usize]),
                     Feed::Pull(p) => {
                         let mut at = hi_k;
@@ -1424,7 +1439,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                             .map_err(|f| wasmtime::Error::new(TaskFailed(f)))?;
                     }
                 }
-                state.inputs[k].3 = hi;
+                state.inputs[k].hi = hi;
                 Ok(())
             })
         }
@@ -1432,13 +1447,13 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             Func::wrap(&mut *store, move |mut c: Caller<'_, State>, k: i32, lo: i64| -> wasmtime::Result<()> {
                 part(&c, "aqr_release")?;
                 let (k, lo) = (k as u32 as usize, lo as u64);
-                let Some((Some(_), lo_k, hi_k)) = c.data().inputs.get(k).map(|i| (i.1, i.2, i.3)) else {
+                let Some((Some(_), lo_k, hi_k)) = c.data().inputs.get(k).map(|i| (i.memory, i.lo, i.hi)) else {
                     return violation(format!("aqr_release({k}) of an input not imported"));
                 };
                 if !(lo_k..=hi_k).contains(&lo) {
                     return violation(format!("aqr_release({k}, {lo}) outside [{lo_k}, {hi_k}]"));
                 }
-                c.data_mut().inputs[k].2 = lo;
+                c.data_mut().inputs[k].lo = lo;
                 Ok(())
             })
         }

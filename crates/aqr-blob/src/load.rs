@@ -9,7 +9,7 @@
 
 use core::ffi::c_void;
 
-use crate::{Blob, Result};
+use crate::{Blob, IMPORT_BY_ORDINAL, IMPORT_DESCRIPTOR_LEN, Result, u32_at, u64_at};
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -48,14 +48,6 @@ impl Placed {
 #[derive(Debug)]
 pub struct Image {
     pub blobs: Vec<Placed>,
-}
-
-fn u32_at(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-}
-
-fn u64_at(b: &[u8], o: usize) -> u64 {
-    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
 /// Places the blobs of `set` (each its bytes, [`Blob::to_bytes`]) in memory, the imports between
@@ -106,7 +98,7 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
         // the imports from system libraries, as the loader binds them
         if b.import_dir_rva != 0 {
             let mut d = at(b.import_dir_rva);
-            while img[d..d + 20].iter().any(|&x| x != 0) {
+            while img[d..d + IMPORT_DESCRIPTOR_LEN].iter().any(|&x| x != 0) {
                 let (oft, name, ft) = (u32_at(img, d), u32_at(img, d + 12), u32_at(img, d + 16));
                 let cstr = |img: &[u8], rva: u32| -> Vec<u8> {
                     let s = &img[at(rva)..];
@@ -128,7 +120,7 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
                     if v == 0 {
                         break;
                     }
-                    let (f, what) = match v & 0x8000_0000_0000_0000 != 0 {
+                    let (f, what) = match v & IMPORT_BY_ORDINAL != 0 {
                         // (by ordinal: the ordinal as the name's pointer, as GetProcAddress takes it)
                         true => (
                             unsafe { GetProcAddress(h, (v & 0xffff) as usize as *const u8) },
@@ -146,7 +138,7 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
                     let slot = at(ft) + k * 8;
                     img[slot..slot + 8].copy_from_slice(&(f as u64).to_le_bytes());
                 }
-                d += 20;
+                d += IMPORT_DESCRIPTOR_LEN;
             }
         }
     }

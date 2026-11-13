@@ -131,21 +131,10 @@ pub(crate) fn choose_concurrency(
     Ok(concurrency)
 }
 
-/// The task slots of each class of tasks of `wasm` (its custom section `aqr_task_slots`, the low
-/// 7 bits of each byte; none where it has none), unchecked.
-pub fn task_slots(wasm: &[u8]) -> Vec<u64> {
-    for p in wp::Parser::new(0).parse_all(wasm) {
-        if let Ok(wp::Payload::CustomSection(c)) = p
-            && c.name() == TASK_SLOTS
-        {
-            return c.data().iter().map(|&n| (n & 0x7f) as u64).collect();
-        }
-    }
-    Vec::new()
-}
-
 /// The most the memories of an application may take: `memory_limit`, and with task limits, those
-/// of as many units of each class at once as its `concurrency` ([`choose_concurrency`]).
+/// of as many units of each class at once as its `concurrency` ([`choose_concurrency`]). A limit
+/// of [`aqr_formula::NO_LIMIT`] (not known) saturates it, where `choose_concurrency` counts it for
+/// nothing.
 pub fn application_bound(memory_limit: u64, task_limits: &[u64], concurrency: &[u64]) -> u64 {
     let tasks = task_limits.iter().zip(concurrency).fold(0u64, |t, (&l, &n)| t.saturating_add(l.saturating_mul(n)));
     memory_limit.saturating_add(tasks)

@@ -9,10 +9,10 @@
 //! never shared between sandboxes: a module escaping in one could change what the next
 //! applications of the same sandbox give, never another's.
 //!
-//! [`Sandbox`] runs every module so ([`Wasm`](crate::Wasm) in a worker), and [`Sandboxed`]
-//! those this crate does not know ([`Native`] in a worker). Each gives what the runner it stands
-//! for gives, failures included, or else a resource failure where a worker could not be
-//! started or ended unexpectedly.
+//! [`Sandbox`] runs every module so (as [`wasm::load`](crate::wasm::load) does in this process);
+//! aqr-decompress's `Sandboxed` runs only those it does not know natively so. Each gives what the
+//! runner it stands for gives, failures included, or else a resource failure where a worker could
+//! not be started or ended unexpectedly.
 
 // (with no Wasmtime linked, the worker's side of them is the interpreter blob's, not this one's)
 #[cfg_attr(not(feature = "wasmtime"), allow(dead_code, unused_imports))]
@@ -157,8 +157,8 @@ impl Sandbox {
     }
 }
 
-/// Every module run as WebAssembly in a worker, whether known or not, as [`Wasm`](crate::Wasm)
-/// runs it.
+/// Every module run as WebAssembly in a worker, whether known or not, as
+/// [`wasm::load`](crate::wasm::load) runs it in this process.
 impl Runner for Sandbox {
     fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
         let hash: [u8; 32] = Sha512_256::digest(wasm).into();
@@ -167,7 +167,9 @@ impl Runner for Sandbox {
             self.with_worker(|w| w.load(hash, &wasm))?;
             self.valid.lock().unwrap().insert(hash);
         }
-        Ok(Box::new(Remote { sandbox: self, hash, wasm }))
+        // (the module is valid: the worker loaded it)
+        let slots = aqr::class_slots(&wasm).into_iter().map(|s| s as usize).collect();
+        Ok(Box::new(Remote { sandbox: self, hash, wasm, slots }))
     }
 }
 
@@ -176,6 +178,8 @@ struct Remote<'a> {
     sandbox: &'a Sandbox,
     hash: [u8; 32],
     wasm: Arc<[u8]>,
+    /// The task slots of each class of its tasks.
+    slots: Vec<usize>,
 }
 
 impl Loaded for Remote<'_> {
@@ -189,9 +193,8 @@ impl Loaded for Remote<'_> {
         task_limits: &[u64],
     ) -> aqr::Decoded<Vec<Vec<u8>>> {
         // (the concurrency chosen here)
-        let slots: Vec<u64> = crate::wasm::task_slots(&self.wasm);
         let concurrency = crate::wasm::choose_concurrency(
-            &slots.iter().map(|&s| s as usize).collect::<Vec<_>>(),
+            &self.slots,
             memory_limit,
             task_limits,
             crate::wasm::application_bound_set(),

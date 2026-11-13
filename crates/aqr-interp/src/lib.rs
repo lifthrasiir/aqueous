@@ -4,11 +4,16 @@
 //! access), and the engine is made on first use.
 //!
 //! It exports, over the C ABI:
-//! - `aqr_interp_load`: a Wasm module made ready to apply, returning an opaque handle (null on
-//!   failure, with a message in `error`), freed with `aqr_interp_drop`.
+//! - `aqr_interp_load` and `aqr_interp_load_with`: a Wasm module made ready to apply, returning an
+//!   opaque handle (null on failure, with a message in `error`), freed with `aqr_interp_drop`.
 //! - `aqr_interp_is_part`: whether the handle's module is a part (streaming) module.
 //! - `aqr_interp_apply`: an application of the handle's module, its outputs written into the
-//!   caller's buffers (whole modules; a part module is run whole here too).
+//!   caller's buffers (whole modules).
+//! - `aqr_interp_apply_part`: an application of a part module, its inputs pulled and its outputs
+//!   pushed as it runs.
+//! - `aqr_interp_set_application_bound`, `aqr_interp_warm_up` and `aqr_interp_worker_main`:
+//!   `aqr_wasmrt`'s, for the programs that have no Wasmtime of their own.
+//! - `aqr_interp_vtable`: all of these, in one [`Vtable`] (what the stub merges in looks for).
 
 use core::ffi::c_void;
 
@@ -37,6 +42,17 @@ fn fail_bytes(msg: &[u8], error: SliceMut, error_len: *mut usize) {
     }
 }
 
+/// The `n` items at `p` (an empty list for none, whatever `p` is: it may be null).
+///
+/// # Safety
+/// `p` points to `n` items that live as long as the result is used.
+unsafe fn items<'a, T>(p: *const T, n: usize) -> &'a [T] {
+    match n {
+        0 => &[],
+        n => unsafe { std::slice::from_raw_parts(p, n) },
+    }
+}
+
 /// Makes the Wasm module `wasm` ready to apply, returning a handle (null on failure).
 ///
 /// # Safety
@@ -47,20 +63,7 @@ pub unsafe extern "C" fn aqr_interp_load(
     error: SliceMut,
     error_len: *mut usize,
 ) -> *mut core::ffi::c_void {
-    use sha2::{Digest, Sha512_256};
-    let bytes = unsafe { wasm.get() };
-    let hash: [u8; 32] = Sha512_256::digest(bytes).into();
-    match aqr_wasmrt::wasm::load(bytes, hash) {
-        // the inner box is the fat `dyn Loaded` pointer; the outer one is passed as a thin handle
-        Ok(loaded) => {
-            let handle: Handle = Box::new(loaded);
-            Box::into_raw(handle).cast()
-        }
-        Err(e) => {
-            fail_with(&e, error, error_len);
-            core::ptr::null_mut()
-        }
-    }
+    unsafe { aqr_interp_load_with(wasm, core::ptr::null(), u64::MAX, 0, error, error_len) }
 }
 
 /// Whether the handle's module is a part (streaming) module.
@@ -109,22 +112,13 @@ pub unsafe extern "C" fn aqr_interp_apply(
     error_len: *mut usize,
 ) -> u32 {
     let loaded: &dyn Loaded = unsafe { &**(handle as *const Box<dyn Loaded>) };
-    let slices = |p: *const Slice, n: usize| match n {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(p, n) }.iter().map(|s| unsafe { s.get() }).collect::<Vec<&[u8]>>(),
-    };
+    let slices =
+        |p: *const Slice, n: usize| unsafe { items(p, n) }.iter().map(|s| unsafe { s.get() }).collect::<Vec<&[u8]>>();
     let params = unsafe { params.get() };
-    let resources: Vec<Resource> =
-        slices(resources, n_resources).into_iter().map(|r| Resource::new(r.to_vec())).collect();
+    let resources: Vec<Resource> = slices(resources, n_resources).into_iter().map(Resource::new).collect();
     let inputs = slices(inputs, n_inputs);
-    let task_limits = match n_task_limits {
-        0 => &[][..],
-        n => unsafe { std::slice::from_raw_parts(task_limits, n) },
-    };
-    let outs: &[SliceMut] = match n_outputs {
-        0 => &[],
-        n => unsafe { std::slice::from_raw_parts(outputs, n) },
-    };
+    let task_limits = unsafe { items(task_limits, n_task_limits) };
+    let outs = unsafe { items(outputs, n_outputs) };
     let sizes: Vec<u64> = outs.iter().map(|o| o.len as u64).collect();
     match loaded.apply(params, &resources, &inputs, &sizes, memory_limit, task_limits) {
         Ok(got) => {
@@ -210,29 +204,12 @@ pub unsafe extern "C" fn aqr_interp_apply_part(
     error_len: *mut usize,
 ) -> u32 {
     let loaded: &dyn Loaded = unsafe { &**(handle as *const Box<dyn Loaded>) };
-    let resources: Vec<Resource> = match n_resources {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(resources, n) }
-            .iter()
-            .map(|s| Resource::new(unsafe { s.get() }.to_vec()))
-            .collect(),
-    };
-    let mut ins: Vec<FfiIn> = match n_inputs {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(inputs, n) }.iter().map(|&c| FfiIn(c)).collect(),
-    };
-    let mut outs: Vec<FfiOut> = match n_outputs {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(outputs, n) }.iter().map(|&c| FfiOut(c)).collect(),
-    };
-    let sizes = match n_sizes {
-        0 => &[][..],
-        n => unsafe { std::slice::from_raw_parts(sizes, n) },
-    };
-    let task_limits = match n_task_limits {
-        0 => &[][..],
-        n => unsafe { std::slice::from_raw_parts(task_limits, n) },
-    };
+    let resources: Vec<Resource> =
+        unsafe { items(resources, n_resources) }.iter().map(|s| Resource::new(unsafe { s.get() })).collect();
+    let mut ins: Vec<FfiIn> = unsafe { items(inputs, n_inputs) }.iter().map(|&c| FfiIn(c)).collect();
+    let mut outs: Vec<FfiOut> = unsafe { items(outputs, n_outputs) }.iter().map(|&c| FfiOut(c)).collect();
+    let sizes = unsafe { items(sizes, n_sizes) };
+    let task_limits = unsafe { items(task_limits, n_task_limits) };
     let mut in_refs: Vec<&mut dyn PartIn> = ins.iter_mut().map(|x| x as &mut dyn PartIn).collect();
     let mut out_refs: Vec<&mut dyn PartOut> = outs.iter_mut().map(|x| x as &mut dyn PartOut).collect();
     match loaded.apply_part(

@@ -21,9 +21,22 @@
 
 use std::path::Path;
 
+use aqr_blob::dispatch::{self, ANCHOR_MAGIC, Entry};
 use aqr_blob::{Bind, Blob};
+use aqr_blob::{IMPORT_BY_ORDINAL, IMPORT_DESCRIPTOR_LEN};
 
-const MAGIC: &[u8; 16] = b"\x89AQRPEMERGEv2\x00\x00\x00";
+/// The data directories of the optional header that are used here, by index.
+const DIR_EXPORT: usize = 0;
+const DIR_IMPORT: usize = 1;
+const DIR_EXCEPTION: usize = 3;
+const DIR_RELOC: usize = 5;
+const DIR_DEBUG: usize = 6;
+const DIR_TLS: usize = 9;
+const DIR_LOAD_CONFIG: usize = 10;
+const DIR_BOUND_IMPORT: usize = 11;
+
+/// The size of an entry of the exception directory (a `RUNTIME_FUNCTION`).
+pub(crate) const RUNTIME_FUNCTION_LEN: usize = 12;
 
 /// The characteristics of a merged section: code and data, readable, writable and executable
 /// (a module holds all three; writable, as its relocations are applied where it loads).
@@ -124,6 +137,12 @@ impl Pe {
         let d = self.opt + 112 + i * 8;
         (u32(&self.buf, d), u32(&self.buf, d + 4))
     }
+    /// Sets the RVA and size of the `i`-th data directory.
+    fn set_dir(&mut self, i: usize, rva: u32, size: u32) {
+        let d = self.opt + 112 + i * 8;
+        put_u32(&mut self.buf, d, rva);
+        put_u32(&mut self.buf, d + 4, size);
+    }
 
     /// The file offset of RVA `rva`.
     fn off(&self, rva: u32) -> Result<usize> {
@@ -137,7 +156,7 @@ impl Pe {
 
     /// The RVAs of every `DIR64` base relocation (type 10); an error on any other type.
     fn relocs(&self) -> Result<Vec<u32>> {
-        let (rva, size) = self.dir(5);
+        let (rva, size) = self.dir(DIR_RELOC);
         if rva == 0 {
             return Ok(Vec::new());
         }
@@ -166,7 +185,7 @@ impl Pe {
 
     /// The RVA of the exported function `name`.
     fn export(&self, name: &str) -> Result<u32> {
-        let (rva, _) = self.dir(0);
+        let (rva, _) = self.dir(DIR_EXPORT);
         if rva == 0 {
             return Err("no export directory".into());
         }
@@ -198,7 +217,7 @@ impl Pe {
     /// The library's own name (its export directory's, lowercase) and its exports, by name and
     /// by ordinal; `None` for an image that exports nothing.
     fn exports(&self) -> Result<Option<Exports>> {
-        let (rva, size) = self.dir(0);
+        let (rva, size) = self.dir(DIR_EXPORT);
         if rva == 0 {
             return Ok(None);
         }
@@ -235,15 +254,15 @@ impl Pe {
 
     /// The stub's import descriptors (20 bytes each), without the zero terminator.
     fn descriptors(&self) -> Result<Vec<u8>> {
-        let (rva, _) = self.dir(1);
+        let (rva, _) = self.dir(DIR_IMPORT);
         if rva == 0 {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
         let mut d = self.off(rva)?;
-        while self.buf[d..d + 20].iter().any(|&b| b != 0) {
-            out.extend_from_slice(&self.buf[d..d + 20]);
-            d += 20;
+        while self.buf[d..d + IMPORT_DESCRIPTOR_LEN].iter().any(|&b| b != 0) {
+            out.extend_from_slice(&self.buf[d..d + IMPORT_DESCRIPTOR_LEN]);
+            d += IMPORT_DESCRIPTOR_LEN;
         }
         Ok(out)
     }
@@ -273,11 +292,11 @@ fn bind_set(img: &mut [u8], first: u32, dir1_rva: u32, set: &[&Exports]) -> Resu
     let (mut binds, mut kept) = (Vec::new(), Vec::new());
     let mut d = idx(dir1_rva);
     let start = d;
-    while img[d..d + 20].iter().any(|&b| b != 0) {
+    while img[d..d + IMPORT_DESCRIPTOR_LEN].iter().any(|&b| b != 0) {
         let (oft, name, ft) = (u32(img, d), u32(img, d + 12), u32(img, d + 16));
         let lib = String::from_utf8_lossy(&cstr(img, name)?).to_lowercase();
         match set.iter().find(|e| e.name == lib) {
-            None => kept.extend_from_slice(&img[d..d + 20]),
+            None => kept.extend_from_slice(&img[d..d + IMPORT_DESCRIPTOR_LEN]),
             Some(e) => {
                 // (the lookup table names each import; the address table is what the code reads)
                 let lookup = if oft != 0 { oft } else { ft };
@@ -286,7 +305,7 @@ fn bind_set(img: &mut [u8], first: u32, dir1_rva: u32, set: &[&Exports]) -> Resu
                     if v == 0 {
                         break;
                     }
-                    let rva = if v & 0x8000_0000_0000_0000 != 0 {
+                    let rva = if v & IMPORT_BY_ORDINAL != 0 {
                         e.by_ordinal.get(&((v & 0xffff) as u32)).copied()
                     } else {
                         e.by_name.get(&cstr(img, v as u32 + 2)?).copied()
@@ -297,9 +316,9 @@ fn bind_set(img: &mut [u8], first: u32, dir1_rva: u32, set: &[&Exports]) -> Resu
                 }
             }
         }
-        d += 20;
+        d += IMPORT_DESCRIPTOR_LEN;
     }
-    let end = d + 20;
+    let end = d + IMPORT_DESCRIPTOR_LEN;
     img[start..start + kept.len()].copy_from_slice(&kept);
     img[start + kept.len()..end].fill(0);
     Ok(binds)
@@ -315,7 +334,7 @@ fn fix_imports(img: &mut [u8], first: u32, dir1_rva: u32, c: u32) -> Result<Vec<
     let idx = |rva: u32| (rva - first) as usize;
     let mut out = Vec::new();
     let mut d = dir1_rva;
-    while img[idx(d)..idx(d) + 20].iter().any(|&b| b != 0) {
+    while img[idx(d)..idx(d) + IMPORT_DESCRIPTOR_LEN].iter().any(|&b| b != 0) {
         let o = idx(d);
         let (oft, name, ft) = (u32(img, o), u32(img, o + 12), u32(img, o + 16));
         // each distinct thunk array: a by-name entry (high bit clear) is an RVA, so add c
@@ -329,13 +348,13 @@ fn fix_imports(img: &mut [u8], first: u32, dir1_rva: u32, c: u32) -> Result<Vec<
                 if e == 0 {
                     break;
                 }
-                if e & 0x8000_0000_0000_0000 == 0 {
+                if e & IMPORT_BY_ORDINAL == 0 {
                     img[t..t + 8].copy_from_slice(&(e + c as u64).to_le_bytes());
                 }
                 t += 8;
             }
         }
-        let mut nd = img[o..o + 20].to_vec();
+        let mut nd = img[o..o + IMPORT_DESCRIPTOR_LEN].to_vec();
         if oft != 0 {
             put_u32(&mut nd, 0, oft + c);
         }
@@ -344,7 +363,7 @@ fn fix_imports(img: &mut [u8], first: u32, dir1_rva: u32, c: u32) -> Result<Vec<
             put_u32(&mut nd, 16, ft + c);
         }
         out.extend_from_slice(&nd);
-        d += 20;
+        d += IMPORT_DESCRIPTOR_LEN as u32;
     }
     Ok(out)
 }
@@ -354,7 +373,7 @@ fn fix_imports(img: &mut [u8], first: u32, dir1_rva: u32, c: u32) -> Result<Vec<
 /// the libraries of `set`.
 fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&Exports]) -> Result<Blob> {
     // the image's span: the sections but `.reloc` (read into the relocation list instead)
-    let reloc_va = pe.dir(5).0;
+    let reloc_va = pe.dir(DIR_RELOC).0;
     let kept: Vec<&Section> = pe.sections.iter().filter(|s| s.va != reloc_va).collect();
     let first = kept.iter().map(|s| s.va).min().ok_or("no sections")?;
     let last = kept.iter().map(|s| s.va + s.vsize.max(s.raw_size)).max().unwrap();
@@ -364,7 +383,7 @@ fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&E
         let at = (s.va - first) as usize;
         image[at..at + n].copy_from_slice(&pe.buf[s.raw_ptr as usize..s.raw_ptr as usize + n]);
     }
-    let binds = bind_set(&mut image, first, pe.dir(1).0, set)?;
+    let binds = bind_set(&mut image, first, pe.dir(DIR_IMPORT).0, set)?;
     // the dead directories' data, zeroed (the loader reads only the stub's)
     let zero = |image: &mut [u8], (rva, size): (u32, u32)| {
         if rva >= first && rva + size <= last {
@@ -372,8 +391,7 @@ fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&E
         }
     };
     let name = pe.exports()?.map(|e| e.name).unwrap_or_default();
-    for dir in [0, 6, 9, 10] {
-        // export, debug, thread storage, load config
+    for dir in [DIR_EXPORT, DIR_DEBUG, DIR_TLS, DIR_LOAD_CONFIG] {
         zero(&mut image, pe.dir(dir));
     }
     let entry = |n: &str| match optional {
@@ -386,9 +404,9 @@ fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&E
             false => pe.export(apply_name)?,
         },
         info_rva: entry(info_name)?,
-        pdata_rva: pe.dir(3).0,
-        pdata_count: pe.dir(3).1 / 12,
-        import_dir_rva: pe.dir(1).0,
+        pdata_rva: pe.dir(DIR_EXCEPTION).0,
+        pdata_count: pe.dir(DIR_EXCEPTION).1 / RUNTIME_FUNCTION_LEN as u32,
+        import_dir_rva: pe.dir(DIR_IMPORT).0,
         first,
         image_base: pe.image_base(),
         name,
@@ -399,10 +417,10 @@ fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&E
 }
 
 /// A blob from the bytes of a library or a blob file (by its first bytes).
-fn parse_blob(bytes: Vec<u8>, apply_name: &str, info_name: &str) -> Result<Blob> {
+fn parse_blob(bytes: &[u8], apply_name: &str, info_name: &str) -> Result<Blob> {
     match bytes.first_chunk::<4>() {
-        Some(aqr_blob::MAGIC) => Blob::from_bytes(&bytes),
-        _ => blob_of(&Pe::parse(bytes)?, apply_name, info_name, false, &[]),
+        Some(aqr_blob::MAGIC) => Blob::from_bytes(bytes),
+        _ => blob_of(&Pe::parse(bytes.to_vec())?, apply_name, info_name, false, &[]),
     }
 }
 
@@ -413,19 +431,6 @@ struct New {
     vsize: u32,
     flags: u32,
     data: Vec<u8>,
-}
-
-/// A module merged, as the dispatch table records it.
-struct Entry {
-    name: String,
-    apply_rva: u32,
-    info_rva: u32,
-    /// Where its image is (RVA and length), and the RVA where its RVA 0 lands (`c`): for the stub
-    /// to register it (`aqr_blob::register_image`), its panics' type information being relative
-    /// to its RVA 0.
-    image_rva: u32,
-    image_len: u32,
-    mod_base: u32,
 }
 
 /// Merges `modules` (name, path) into the stub at `stub` and writes the result to `out`. Each
@@ -462,9 +467,11 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     let mut descriptors = pe.descriptors()?;
     // the stub's exception directory, then each module's function entries, rebased (crate::unwind)
     let mut functions: Vec<[u32; 3]> = {
-        let (rva, size) = pe.dir(3);
+        let (rva, size) = pe.dir(DIR_EXCEPTION);
         let at = if rva == 0 { 0 } else { pe.off(rva)? };
-        (0..size as usize / 12).map(|i| [0, 4, 8].map(|k| u32(&pe.buf, at + i * 12 + k))).collect()
+        (0..size as usize / RUNTIME_FUNCTION_LEN)
+            .map(|i| [0, 4, 8].map(|k| u32(&pe.buf, at + i * RUNTIME_FUNCTION_LEN + k)))
+            .collect()
     };
     // the modules' images, each at an RVA of its own, section-aligned, in one section (the stub's
     // headers have room for few more section headers)
@@ -475,7 +482,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     // `c + x`), for the imports bound between them
     let mut blobs = Vec::new();
     for (name, bytes) in modules {
-        let b = parse_blob(bytes.clone(), apply_name, info_name)?;
+        let b = parse_blob(bytes, apply_name, info_name)?;
         let va = next_va;
         next_va = align(va + b.image.len() as u32, salign);
         blobs.push((name, va, va.wrapping_sub(b.first), b));
@@ -517,7 +524,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
         }
         descriptors.extend_from_slice(&fix_imports(&mut img, b.first, b.import_dir_rva, c)?);
         entries.push(Entry {
-            name: name.clone(),
+            name: name.as_bytes(),
             apply_rva: if b.apply_rva == 0 { 0 } else { c.wrapping_add(b.apply_rva) },
             info_rva: if b.info_rva == 0 { 0 } else { c.wrapping_add(b.info_rva) },
             image_rva: va,
@@ -534,7 +541,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
 
     // the import directory: the descriptors gathered, zero-terminated; then the exception
     // directory, in the same section (the stub's headers have room for few more section headers)
-    descriptors.extend_from_slice(&[0u8; 20]);
+    descriptors.extend_from_slice(&[0u8; IMPORT_DESCRIPTOR_LEN]);
     let imp_va = next_va;
     let imp_len = descriptors.len() as u32;
     let mut data = descriptors;
@@ -550,24 +557,13 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    let exc_len = functions.len() as u32 * 12;
+    let exc_len = (functions.len() * RUNTIME_FUNCTION_LEN) as u32;
     let data_len = data.len() as u32;
     news.push(New { name: *b".aqri\0\0\0", va: imp_va, vsize: data_len, flags: DATA_FLAGS, data });
     next_va = align(imp_va + data_len, salign);
 
-    // the dispatch table: count, then an entry each (6 u32), then the names
-    let mut disp = Vec::new();
-    disp.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    let names_at = 4 + entries.len() * 24;
-    let mut names = Vec::new();
-    for e in &entries {
-        for v in [e.apply_rva, e.info_rva, e.image_rva, e.image_len, e.mod_base, (names_at + names.len()) as u32] {
-            disp.extend_from_slice(&v.to_le_bytes());
-        }
-        names.extend_from_slice(&(e.name.len() as u32).to_le_bytes());
-        names.extend_from_slice(e.name.as_bytes());
-    }
-    disp.extend_from_slice(&names);
+    // the dispatch table
+    let disp = dispatch::write(&entries);
     let disp_va = next_va;
     let disp_len = disp.len() as u32;
     news.push(New { name: *b".aqrd\0\0\0", va: disp_va, vsize: disp_len, flags: DATA_FLAGS, data: disp });
@@ -575,7 +571,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
 
     // the relocations: the stub's, then one block per 0x1000 page of the merged ones
     let mut reloc = {
-        let (rva, size) = pe.dir(5);
+        let (rva, size) = pe.dir(DIR_RELOC);
         match rva {
             0 => Vec::new(),
             _ => pe.buf[pe.off(rva)?..pe.off(rva)? + size as usize].to_vec(),
@@ -630,18 +626,14 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     // directories
     put_u16(&mut pe.buf, pe.pe + 6, (old_n + news.len()) as u32);
     put_u32(&mut pe.buf, pe.opt + 56, align(next_va, salign));
-    put_u32(&mut pe.buf, pe.opt + 112 + 8, imp_va); // directory 1 (import)
-    put_u32(&mut pe.buf, pe.opt + 112 + 8 + 4, imp_len);
-    put_u32(&mut pe.buf, pe.opt + 112 + 3 * 8, exc_va); // directory 3 (exception)
-    put_u32(&mut pe.buf, pe.opt + 112 + 3 * 8 + 4, exc_len);
-    // the bound-import directory (11) would pin the stub's imports to stale addresses; drop it
-    put_u32(&mut pe.buf, pe.opt + 112 + 11 * 8, 0);
-    put_u32(&mut pe.buf, pe.opt + 112 + 11 * 8 + 4, 0);
-    put_u32(&mut pe.buf, pe.opt + 112 + 5 * 8, reloc_va);
-    put_u32(&mut pe.buf, pe.opt + 112 + 5 * 8 + 4, reloc_len);
+    pe.set_dir(DIR_IMPORT, imp_va, imp_len);
+    pe.set_dir(DIR_EXCEPTION, exc_va, exc_len);
+    // the bound-import directory would pin the stub's imports to stale addresses; drop it
+    pe.set_dir(DIR_BOUND_IMPORT, 0, 0);
+    pe.set_dir(DIR_RELOC, reloc_va, reloc_len);
 
     // the anchor: the dispatch table's place, written after its magic
-    let anchor = find(&pe.buf, MAGIC).ok_or("the stub has no anchor (its magic)")?;
+    let anchor = find(&pe.buf, ANCHOR_MAGIC).ok_or("the stub has no anchor (its magic)")?;
     put_u32(&mut pe.buf, anchor + 16, disp_va);
     put_u32(&mut pe.buf, anchor + 16 + 4, disp_len);
 
@@ -686,7 +678,7 @@ pub fn main(args: &[std::ffi::OsString]) -> Result<()> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let next = |it: &mut std::slice::Iter<std::ffi::OsString>, what: &str| {
-            it.next().and_then(|s| s.to_str().map(str::to_owned)).ok_or(format!("{what}: no value"))
+            it.next().and_then(|s| s.to_str().map(str::to_owned)).ok_or_else(|| format!("{what}: no value"))
         };
         match a.to_str() {
             Some("--stub") => stub = Some(it.next().ok_or("--stub: no path")?.into()),
@@ -695,7 +687,7 @@ pub fn main(args: &[std::ffi::OsString]) -> Result<()> {
             Some("--info") => info_name = next(&mut it, "--info")?,
             _ => {
                 let a = a.to_str().ok_or("a module argument is not UTF-8")?;
-                let (name, path) = a.split_once('=').ok_or(format!("{a}: not NAME=MODULE.dll"))?;
+                let (name, path) = a.split_once('=').ok_or_else(|| format!("{a}: not NAME=MODULE.dll"))?;
                 modules.push((name.to_owned(), std::path::PathBuf::from(path)));
             }
         }
@@ -715,7 +707,7 @@ pub fn blob_main(args: &[std::ffi::OsString]) -> Result<()> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let val = |it: &mut std::slice::Iter<std::ffi::OsString>, w: &str| {
-            it.next().and_then(|s| s.to_str().map(str::to_owned)).ok_or(format!("{w}: no value"))
+            it.next().and_then(|s| s.to_str().map(str::to_owned)).ok_or_else(|| format!("{w}: no value"))
         };
         match a.to_str() {
             Some("--out") => out = Some(it.next().ok_or("--out: no path")?.into()),
@@ -768,7 +760,7 @@ pub fn blobs_main(args: &[std::ffi::OsString]) -> Result<()> {
 /// and the symbol's.
 pub fn imports(buf: Vec<u8>) -> Result<Vec<(String, String)>> {
     let pe = Pe::parse(buf)?;
-    let (rva, _) = pe.dir(1);
+    let (rva, _) = pe.dir(DIR_IMPORT);
     if rva == 0 {
         return Ok(Vec::new());
     }
@@ -779,7 +771,7 @@ pub fn imports(buf: Vec<u8>) -> Result<Vec<(String, String)>> {
     };
     let mut out = Vec::new();
     let mut d = pe.off(rva)?;
-    while pe.buf[d..d + 20].iter().any(|&b| b != 0) {
+    while pe.buf[d..d + IMPORT_DESCRIPTOR_LEN].iter().any(|&b| b != 0) {
         let (oft, name, ft) = (u32(&pe.buf, d), u32(&pe.buf, d + 12), u32(&pe.buf, d + 16));
         let lib = cstr(name)?.to_lowercase();
         let mut t = pe.off(if oft != 0 { oft } else { ft })?;
@@ -788,12 +780,12 @@ pub fn imports(buf: Vec<u8>) -> Result<Vec<(String, String)>> {
             if v == 0 {
                 break;
             }
-            if v & 0x8000_0000_0000_0000 == 0 {
+            if v & IMPORT_BY_ORDINAL == 0 {
                 out.push((lib.clone(), cstr(v as u32 + 2)?));
             }
             t += 8;
         }
-        d += 20;
+        d += IMPORT_DESCRIPTOR_LEN;
     }
     Ok(out)
 }

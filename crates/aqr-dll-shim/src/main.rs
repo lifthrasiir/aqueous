@@ -53,19 +53,12 @@ struct Lib {
     apply: ApplyFn,
 }
 
-/// What `aqr-ld merge` fills: the place of the dispatch table of the modules merged into this
-/// executable (its magic, then the table's RVA and length). Empty until something is merged in.
-#[repr(C)]
-struct Anchor {
-    magic: [u8; 16],
-    dispatch_rva: u32,
-    dispatch_len: u32,
-}
-
+/// Empty until `aqr-ld merge` fills it: the place of the dispatch table of the modules merged into
+/// this executable.
+#[cfg(windows)]
 #[used]
 #[unsafe(no_mangle)]
-static AQR_PEMERGE_ANCHOR: Anchor =
-    Anchor { magic: *b"\x89AQRPEMERGEv2\x00\x00\x00", dispatch_rva: 0, dispatch_len: 0 };
+static AQR_PEMERGE_ANCHOR: aqr_blob::dispatch::Anchor = aqr_blob::dispatch::Anchor::EMPTY;
 
 #[cfg(windows)]
 unsafe extern "C" {
@@ -82,38 +75,22 @@ impl Lib {
     fn embedded(name: &str) -> Option<Result<Lib>> {
         let base = &raw const __ImageBase as usize;
         let read = |rva: u32, n: usize| unsafe { std::slice::from_raw_parts((base + rva as usize) as *const u8, n) };
-        let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
-        let (rva, len) = unsafe {
-            (
-                std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_rva),
-                std::ptr::read_volatile(&AQR_PEMERGE_ANCHOR.dispatch_len),
-            )
-        };
-        if rva == 0 || len < 4 {
-            return None;
-        }
+        let (rva, len) = AQR_PEMERGE_ANCHOR.table()?;
         let table = read(rva, len as usize);
         // every image merged (the modules and the shared libraries they link against), once
         static IMAGES: std::sync::Once = std::sync::Once::new();
         IMAGES.call_once(|| {
             #[cfg(target_env = "msvc")]
             aqr_blob::keep_vcruntime();
-            for i in 0..u32_at(table, 0) as usize {
-                let e = 4 + i * 24;
-                let (image_rva, image_len, mod_base) =
-                    (u32_at(table, e + 8), u32_at(table, e + 12), u32_at(table, e + 16));
-                aqr_blob::register_image(base + image_rva as usize, image_len as usize, base + mod_base as usize);
+            for e in aqr_blob::dispatch::entries(table) {
+                aqr_blob::register_image(base + e.image_rva as usize, e.image_len as usize, base + e.mod_base as usize);
             }
         });
-        for i in 0..u32_at(table, 0) as usize {
-            // entry: apply_rva, info_rva, image_rva, image_len, mod_base, name_off (6 u32)
-            let e = 4 + i * 24;
-            let off = u32_at(table, e + 20) as usize;
-            let nlen = u32_at(table, off) as usize;
-            if &table[off + 4..off + 4 + nlen] != name.as_bytes() {
+        for e in aqr_blob::dispatch::entries(table) {
+            if e.name != name.as_bytes() {
                 continue;
             }
-            let (apply_rva, info_rva) = (u32_at(table, e), u32_at(table, e + 4));
+            let (apply_rva, info_rva) = (e.apply_rva, e.info_rva);
             if info_rva == 0 {
                 return Some(Err(format!("{name}: no info in the merged module")));
             }

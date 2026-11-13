@@ -47,11 +47,11 @@ pub fn import_names(img: &[u8], first: u32, dir_rva: u32) -> Result<HashMap<u32,
             if v == 0 {
                 break;
             }
-            if v & 0x8000_0000_0000_0000 == 0 {
+            if v & aqr_blob::IMPORT_BY_ORDINAL == 0 {
                 names.insert(ft + k * 8, r.cstr(v as u32 + 2)?);
             }
         }
-        d += 20;
+        d += aqr_blob::IMPORT_DESCRIPTOR_LEN as u32;
     }
     Ok(names)
 }
@@ -80,7 +80,7 @@ pub fn rebase(
     };
     let mut entries = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let e = pdata_rva + i * 12;
+        let e = pdata_rva + i * crate::pemerge::RUNTIME_FUNCTION_LEN as u32;
         let (begin, end, info) = (r.field(e)?, r.field(e + 4)?, r.field(e + 8)?);
         r.unwind_info(info)?;
         entries.push([begin, end, info].map(|v| v.wrapping_add(c)));

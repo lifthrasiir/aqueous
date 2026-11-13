@@ -299,7 +299,7 @@ fn task_slots(wasm: &[u8]) -> Result<Option<Vec<u8>>, String> {
 /// above it.
 fn task(m: &mut Module, body: Option<FunctionId>) -> Result<(), String> {
     use ValType::I32;
-    let body = body.ok_or(format!("tasks spawned without {TASK_BODY}"))?;
+    let body = body.ok_or_else(|| format!("tasks spawned without {TASK_BODY}"))?;
     let ty = m.types.get(m.funcs.get(body).ty());
     if ty.params() != [I32, I32] || !ty.results().is_empty() {
         return Err(format!("{TASK_BODY} has the type {:?} -> {:?}", ty.params(), ty.results()));
