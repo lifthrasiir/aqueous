@@ -28,7 +28,8 @@ tile the target.
 
 ## Status
 
-Used by aqr-compress (`src/pak.rs`: families of a file of 4 MiB or more inferred, the others
+Not used by aqr-compress: taken out again on 2026-11-13 (`docs/file-formats.md` tells why; it
+was at `4a93bf8`, `src/pak.rs`: families of a file of 4 MiB or more inferred, the others
 verified by templates). On the test set (The Crew, No Man's Sky, four files of other formats),
 `scripts/check.py` against the counts the headers give: 15 of 15 directories found, none found wrongly. The samples and their counts are in an
 expectations file of the user's (the script's docstring has its format), not in the repository.

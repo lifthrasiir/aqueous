@@ -61,7 +61,6 @@ aqr-ppmd = { path = "../../codecs/aqr-ppmd" }
 aqr-psd = { path = "../../codecs/aqr-psd" }
 aqr-clip = { path = "../../codecs/aqr-clip" }
 aqr-raw = { path = "../../codecs/aqr-raw" }
-aqr-infer-pak = { path = "../aqr-infer-pak" }
 aqr-infer-recs = { path = "../../codecs/aqr-infer-recs" }
 aqr-div3 = { path = "../../codecs/aqr-div3" }
 aqr-snappy = { path = "../../codecs/aqr-snappy" }

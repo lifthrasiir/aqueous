@@ -168,7 +168,35 @@ What aqr-compress tries on data in which no file of a known format is found.
 | what | crate | sample | ratio | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | records of fixed size, entries with a length field, floats of whole multiples | aqr-infer-recs | 11 files, 114.6 MB: ELF and Mach-O binaries, a font, a pcap, git's index and pack index, `ld.so.cache` (README) | 0.974 of zstd -3 (one thread) | | 65 (one thread) | | 527 MB peak RSS | tables of fixed-size records, entries with a length field and floats of whole multiples, their fields transposed (`recs-fields`, `recs-entries`, `recs-floats`); tried by aqr-compress on data in which no file is found, where a 2–50 ms estimate tells 5% at least. The SAO star catalogue 0.432 of zstd -3 |
-| directories of unknown archive formats (game paks) | aqr-infer-pak | The Crew: 14 files, 766.21 MB (`.fat` indexes of `.dat` files of LZO1X members: common, global, gui, common_patch, three patches) | 442.72 MB archived, 617.14 MB without (-28.3%) | | 32.3 (all of `aqr -c`, 104.2 without; mostly the textures found in the members recompressed; 64-69 with `--depth 1`, no textures recompressed: 571.02 MB) | | 1.93 GB heap peak, 3.14 GB resident | the files of no format detected whose names tell no kind and that start alike (3 at least) are a group with their families (a stem in a directory); the directories inferred in the biggest family, verified in the others by its template; a data file's LZO1X members rebuilt by aqr-lzo (`lzo-recons`, 32 MiB of data an application, one content), its stored ones apart, the members made apart. zstd members (No Man's Sky) are left as they are |
+| directories of unknown archive formats (game paks) | aqr-infer-pak | The Crew: 14 files, 766.21 MB (`.fat` indexes of `.dat` files of LZO1X members: common, global, gui, common_patch, three patches) | 442.72 MB archived, 617.14 MB without (-28.3%) | | 32.3 (all of `aqr -c`, 104.2 without; mostly the textures found in the members recompressed; 64-69 with `--depth 1`, no textures recompressed: 571.02 MB) | | 1.93 GB heap peak, 3.14 GB resident | the files of no format detected whose names tell no kind and that start alike (3 at least) are a group with their families (a stem in a directory); the directories inferred in the biggest family, verified in the others by its template; a data file's LZO1X members rebuilt by aqr-lzo (`lzo-recons`, 32 MiB of data an application, one content), its stored ones apart, the members made apart. zstd members (No Man's Sky) are left as they are. **Taken out of aqr-compress again (2026-11-13): below** |
+
+aqr-infer-pak on other games (2026-11-13). The inference was tried on about 150 games of three
+Steam libraries (416 files of 66 kinds probed, aqr's plan of the paks on 22 games), then judged
+on the formats one or two games use only: the formats many games share (Unity, Unreal, Wwise,
+FMOD, XACT, CRI, Godot, Source, GameMaker) are to have recompressors of their own. Four such
+formats were parsed by hand for a ground truth and archived three ways (no paks, inferred, the
+ground truth taken apart: `crates/aqr-infer-pak/scripts/gt`, by switches of aqr-compress at
+`4a93bf8`):
+
+| sample | input | no paks | inferred | ground truth | members inferred right | of them the scan finds |
+|---|---|---|---|---|---|---|
+| Baba Is You, `Assets.dat` (offsets and sizes after a table length) | 21.8 MB | 18.92 MB, 1.8 s | 18.95 MB, 0.6 s | 18.95 MB, 0.5 s | 3571 of 3572 | none |
+| Waveform, 10 `.fc` (a table at the end, its count last) | 665 MB | 528.58 MB, 14.9 s | as no paks (not looked at: PNG, Ogg, WAV first) | 528.59 MB | none | 31.5% (PNG) |
+| Sakuna, 16 `.arc` of stored members (names in the records) | 245 MB | 241.40 MB | 241.40 MB | 241.40 MB | 49 of 6689 (the template's base a record late) | none |
+| The Tiny Bang Story, `data.pfp` (records of names) | 175 MB | 134.230 MB, 9.4 s | as no paks | 134.230 MB | none | 39.0% (PNG, JPEG) |
+
+Even its ground truth taken apart gains nothing (within 0.1%): their members are PNG, JPEG,
+Ogg and WAV, which the scan finds where they matter, or game data stored. The gain is where the
+members are coded by a codec aqr rebuilds and the scan cannot find (The Crew's LZO1X, No Man's
+Sky's zstd chunks), and the directories of fixed-size records; many single-game formats have
+records of names (Braid, The Tiny Bang Story, Samorost 3's and Amanita's `LVL`, Cities:
+Skylines' `.crp`), out of the inference's design. A search of the three libraries' files of no
+engine's format (4534 of 1 MB or more, their first 16 MiB) for zlib streams decoding to the end,
+zstd frames and gzip members found no other such pak (Noita's `.wak` holds PNGs). For the
+cost of a plan on every archive (up to 45 s for a game of 10 GB, after making it 2–4 times
+faster), the paks' plan is out of aqr-compress; aqr-infer-pak stays, with its probe and batch.
+Left: an inference anchored on the members a scan finds (their offsets and sizes looked up in
+the file, records of names too); a measure of members repeated across the paks of one game.
 
 ### In progress or planned
 

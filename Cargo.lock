@@ -266,7 +266,6 @@ dependencies = [
  "aqr-gnu-gettext",
  "aqr-hdf5",
  "aqr-hfs",
- "aqr-infer-pak",
  "aqr-infer-recs",
  "aqr-inno",
  "aqr-isc",

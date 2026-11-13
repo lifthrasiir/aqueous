@@ -7,7 +7,9 @@ written by `AQR_PAK_DUMP`), and given the ground truth (`AQR_PAK_LAYOUT`), the s
 of each and how many members the inference got right. `scancov.py` tells how many of the
 members the scan finds by itself (`AQR_SCAN_DUMP`).
 
-The switches are in aqr builds not of the dist profile (`aqr_dist`, aqr-compress's `build.rs`).
+The switches are in aqr builds not of the dist profile (`aqr_dist`, aqr-compress's `build.rs`);
+`AQR_PAK_LAYOUT` and `AQR_PAK_DUMP` only as at `4a93bf8`, the paks' plan having been taken out of
+aqr-compress since (`AQR_SCAN_DUMP` stays).
 Copy a sample into a directory of its own: aqr plans paks only for archives of several files.
 
 ```sh
