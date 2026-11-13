@@ -898,7 +898,7 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
     if headed {
         let b = v.as_deref().unwrap_or(a);
         let (blocks, ended) = blocks(b);
-        let last_meta = blocks.iter().rposition(|b| (0x10..=0x17).contains(&b.1));
+        let last_meta = blocks.iter().rposition(|b| crate::aqr::locate::metadata(b.1));
         // (a block cut short at the end, of a critical type but a spacer block's or the footer's:
         // a content block of a segment cut short)
         let cut = blocks.last().map_or(HEADER_MAGIC.len(), |l| l.2.end + (l.2.end - l.0) % 2);
@@ -1328,7 +1328,7 @@ mod tests {
         out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
         let rev = |s: &str| s.bytes().rev().collect::<Vec<u8>>();
         assert_eq!(files(&out), [rev(NAMES[0]), rev(NAMES[1]), rev(NAMES[2])]);
-        let metas = blocks(&out).0.iter().filter(|b| (0x10..=0x17).contains(&b.1)).count();
+        let metas = blocks(&out).0.iter().filter(|b| crate::aqr::locate::metadata(b.1)).count();
         assert_eq!(metas, 2);
         let natives = natives();
         assert_eq!(super::super::open(&out, &natives).unwrap().status(), Some(crate::aqr::Status::Complete));

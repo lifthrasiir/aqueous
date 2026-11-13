@@ -312,12 +312,13 @@ enum Fan<'a> {
     /// A part module's application running: the queues of its outputs, each until it is pulled.
     Part(Vec<Option<Arc<Queue>>>),
     /// A Split's input, pulled so far: the bytes of it pulled, the output they reach into (and
-    /// where it starts), and those of each output not yet pulled of it.
+    /// where it starts), where each output ends in it, and those of each output not yet pulled of it.
     Split {
         input: Src<'a>,
         read: u64,
         out: usize,
         start: u64,
+        ends: Vec<u64>,
         held: Vec<Held<'a>>,
     },
     Failed(Failure),
@@ -371,7 +372,7 @@ impl<'a> Eval<'_, 'a> {
             Op::Slice { block, start, len } => Box::new(SliceSource { block, start, len, done: false }),
             Op::Apply(a, _, None) if (self.part)(a) => Box::new(Queued { node: v.node, q: None }),
             Op::Apply(_, _, None) | Op::Patch(..) => Box::new(Made { node: v.node, done: false }),
-            Op::Apply(..) | Op::Split(..) => Box::new(Fanned { v, end: None, q: None }),
+            Op::Apply(..) | Op::Split(..) => Box::new(Fanned { v, q: None }),
             Op::Concat(_) => Box::new(Items { node: v.node, next: 0, cur: None, header: false }),
             Op::Pack(_) => Box::new(Items { node: v.node, next: 0, cur: None, header: true }),
         };
@@ -407,6 +408,16 @@ struct SliceSource {
     done: bool,
 }
 
+/// The range of `len` bytes from `start` within a block of `of` bytes.
+fn slice_range(start: u64, len: u64, of: usize) -> Decoded<Range<usize>> {
+    usize::try_from(start)
+        .ok()
+        .zip(usize::try_from(len).ok())
+        .and_then(|(s, l)| Some(s..s.checked_add(l)?))
+        .filter(|r| r.end <= of)
+        .ok_or_else(|| Failure::Invalid("slice out of its block".into()))
+}
+
 impl<'a> Source<'a> for SliceSource {
     fn next(&mut self, at: At<'_, '_, 'a>) -> Decoded<Option<Chunk<'a>>> {
         if std::mem::replace(&mut self.done, true) {
@@ -417,12 +428,7 @@ impl<'a> Source<'a> for SliceSource {
         }
         let d = at.ev.block(self.block)?;
         at.ev.release(self.block);
-        let r = usize::try_from(self.start)
-            .ok()
-            .zip(usize::try_from(self.len).ok())
-            .and_then(|(s, l)| Some(s..s.checked_add(l)?))
-            .filter(|r| r.end <= d.len())
-            .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
+        let r = slice_range(self.start, self.len, d.len())?;
         Ok((!r.is_empty()).then_some(Chunk::Shared(d, r)))
     }
 }
@@ -537,10 +543,9 @@ impl<'a> Source<'a> for Items<'a> {
     }
 }
 
-/// An output of a node of several: and where it ends, of a Split's input.
+/// An output of a node of several.
 struct Fanned {
     v: Val,
-    end: Option<u64>,
     /// Of a part module's application, the queue of its output.
     q: Option<Arc<Queue>>,
 }
@@ -579,6 +584,13 @@ impl<'a> Source<'a> for Fanned {
                     read: 0,
                     out: 0,
                     start: 0,
+                    ends: sizes
+                        .iter()
+                        .scan(0u64, |end, &n| {
+                            *end += n;
+                            Some(*end)
+                        })
+                        .collect(),
                     held: sizes.iter().map(|_| Held::default()).collect(),
                 },
                 _ => unreachable!("a node of several outputs"),
@@ -591,9 +603,9 @@ impl<'a> Source<'a> for Fanned {
                 drop(f);
                 self.q.insert(q).pop()
             }
-            Fan::Split { input, read, out, start, held } => {
+            Fan::Split { input, read, out, start, ends, held } => {
                 let Op::Split(_, sizes, _) = *op else { unreachable!("a split") };
-                let end = *self.end.get_or_insert_with(|| sizes[..=v.out].iter().sum());
+                let end = ends[v.out];
                 loop {
                     if let Some(c) = held[v.out].pop()? {
                         return Ok(Some(c));
@@ -1289,12 +1301,7 @@ pub(super) fn hashed(
         for &n in nodes {
             let Op::Slice { start, len, .. } = g.ops[n] else { unreachable!("a slice") };
             contents.release(block);
-            let r = usize::try_from(start)
-                .ok()
-                .zip(usize::try_from(len).ok())
-                .and_then(|(s, l)| Some(s..s.checked_add(l)?))
-                .filter(|r| r.end <= d.len())
-                .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
+            let r = slice_range(start, len, d.len())?;
             out.push((n, Ch::of(&d[r])));
         }
         Ok(out)

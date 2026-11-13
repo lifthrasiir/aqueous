@@ -481,6 +481,11 @@ impl SegmentWriter {
             }
         }
         let roots: Vec<usize> = (0..leaves.len()).map(|i| find(&mut group, i)).collect();
+        // (a group's root is its least leaf)
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); leaves.len()];
+        for (i, &root) in roots.iter().enumerate() {
+            groups[root].push(i);
+        }
 
         // the streams compressed at once, then laid out
         let written = written(f, &uses);
@@ -501,7 +506,6 @@ impl SegmentWriter {
         // (the non-leaf blocks counted from the batch's first: only their deltas are stored)
         let mut ordinals = vec![None; f.streams.len()];
         let mut non_leaf = 0u64;
-        let mut done = vec![false; leaves.len()];
         let out = &mut b.bytes;
 
         // the dictionaries of the blocks alike, before all of the batch's blocks
@@ -533,12 +537,12 @@ impl SegmentWriter {
         let dicts = (!planned.is_empty()).then_some((&planned, first_dictionary));
 
         for first in 0..leaves.len() {
-            if done[first] {
+            if roots[first] != first {
                 continue;
             }
-            let members: Vec<usize> = (first..leaves.len()).filter(|&i| roots[i] == roots[first]).collect();
+            let members = &groups[first];
             // the modules and resources of the group not written yet
-            for &i in &members {
+            for &i in members {
                 for (m, d) in &uses[i].module_bytes {
                     enc.check_module_bytes(*m, d, level)?;
                 }
@@ -578,8 +582,7 @@ impl SegmentWriter {
                 blocks += super::blocks_in(f.streams[st].data.len());
             }
             let refs: Vec<&Resource> = resources.iter().collect();
-            for &i in &members {
-                done[i] = true;
+            for &i in members {
                 let at = out.len();
                 b.leaf_at[i] = self.at + at;
                 match data_leaf(i) {
@@ -1426,11 +1429,6 @@ mod tests {
         }
     }
 
-    /// An archive of three segments, each closed by its metadata block: each writes the module
-    /// it applies again and takes nothing of the others'; the trees merge (spec, "Merging
-    /// segments"): a directory again (its extra kept where it has none, replaced where it has
-    /// one), a file replaced, a directory replaced by a file, and link groups of a segment's own
-    /// apart from another's of the same number.
     /// The archive of `out` with the footer at `old` made a spacer block (spec, "Appending to an
     /// archive").
     fn killed(out: &[u8], old: std::ops::Range<usize>) -> Vec<u8> {
@@ -1589,7 +1587,7 @@ mod tests {
         let t = Tree { root: Extra::default(), entries: vec![dir.clone(), entry(Some(0), "a", EntryNode::File(0))] };
         out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap());
         // the next segment taking the directory away, and a file of nothing before
-        let gone = |parent, name| entry(parent, name, EntryNode::Special(0));
+        let gone = |parent, name| entry(parent, name, EntryNode::TOMBSTONE);
         let t = Tree { root: Extra::default(), entries: vec![gone(None, "d"), gone(None, "x")] };
         out.extend_from_slice(&w.finish(&enc, &t, &[]).unwrap().0);
         let Ok(Value::Tree(t, _)) = decode_value(&out, &natives()) else { panic!() };
@@ -1653,7 +1651,7 @@ mod tests {
             }
             // (the middle one taking away "e" and what is under it)
             if k == 1 {
-                t.entries.push(entry(None, "e", EntryNode::Special(0)));
+                t.entries.push(entry(None, "e", EntryNode::TOMBSTONE));
             }
             match k {
                 2 => out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0),
@@ -1776,6 +1774,11 @@ mod tests {
         assert!(crossing(511, 2) && !crossing(510, 2) && !crossing(512, 2) && crossing(1022, 3));
     }
 
+    /// An archive of three segments, each closed by its metadata block: each writes the module
+    /// it applies again and takes nothing of the others'; the trees merge (spec, "Merging
+    /// segments"): a directory again (its extra kept where it has none, replaced where it has
+    /// one), a file replaced, a directory replaced by a file, and link groups of a segment's own
+    /// apart from another's of the same number.
     #[test]
     fn several_segments() {
         let names = ["d/a", "x", "h1", "h2", "d/b", "x2", "h3", "d"];

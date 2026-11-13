@@ -35,6 +35,14 @@ pub struct Entry {
     pub extra: Extra,
 }
 
+impl Entry {
+    /// A tombstone of `name` in directory `parent`: what is at that name in the segments before
+    /// is taken away.
+    pub fn tombstone(parent: Option<usize>, name: Vec<u8>) -> Entry {
+        Entry { parent, name, node: EntryNode::TOMBSTONE, extra: Extra::default() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryNode {
     Dir,
@@ -54,6 +62,11 @@ pub enum EntryNode {
     /// is at its name in the segments before taken away, it of no extra), as one decoded is
     /// among `SegmentTree::tombstones` rather than an entry.
     Special(u64),
+}
+
+impl EntryNode {
+    /// The special entry of kind 0: a tombstone.
+    pub const TOMBSTONE: EntryNode = EntryNode::Special(0);
 }
 
 /// An extended attribute: its name (as `aqr-text`'s bytes) and value (shared by the entries of
@@ -548,7 +561,7 @@ pub(crate) fn merge(mut trees: Vec<SegmentTree>) -> (Tree, Vec<(usize, usize, u6
     let mut tree = Tree { root, entries: Vec::with_capacity(r.entries.len()) };
     for m in r.entries {
         let e = &mut trees[m.node.segment].tree.entries[m.node.entry];
-        let (name, node) = (std::mem::take(&mut e.name), e.node.clone());
+        let (name, node) = (std::mem::take(&mut e.name), std::mem::replace(&mut e.node, EntryNode::Dir));
         let extra = std::mem::take(&mut trees[m.extra.segment].tree.entries[m.extra.entry].extra);
         tree.entries.push(Entry { parent: m.parent, name, node, extra });
     }
@@ -1138,7 +1151,6 @@ fn ended(d: &[u8], at: &mut usize, n: Option<usize>, k: usize) -> bool {
     }
 }
 
-/// Reads a CBOR data item at `*at` of `d`.
 /// Goes over the item at `*at` of `d` at `depth` by its heads alone, as an item not read is
 /// (spec, "Partial access"): well-formed as far as they tell, but neither its texts nor a map's
 /// keys checked.
@@ -1189,6 +1201,7 @@ fn skip(d: &[u8], at: &mut usize, depth: usize) -> Decoded<()> {
     Ok(())
 }
 
+/// Reads a CBOR data item at `*at` of `d`.
 fn item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Decoded<Cbor<'a>> {
     if depth > CBOR_DEPTH {
         return super::resource("optional metadata nested too deep");
@@ -1627,7 +1640,7 @@ pub struct Member {
     pub fields: Option<Vec<(i128, Vec<u8>)>>,
 }
 
-/// The members of optional metadata `d` (well-formed, as [`extras`] read it): those of its
+/// The members of optional metadata `d` (well-formed, as [`extras_given`] read it): those of its
 /// top-level map but `entry-extras`, and by entry (from the root, `n` besides it) those of its
 /// entry extra (`None`: null, or none given), each as it is encoded. Byte and text strings
 /// over `cut` bytes are cut there (`None`: none cut).

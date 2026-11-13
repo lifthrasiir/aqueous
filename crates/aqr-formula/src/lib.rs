@@ -158,7 +158,7 @@ impl<'a> Usage<'a> {
     /// (`aqr_api::whole`) as it starts (before its outputs and its own buffers), with the pages of
     /// slack of the large ones and [`SMALL`]: what its tasks copy where it spawns them first.
     pub fn base(&self) -> u64 {
-        let large = [self.resources, self.inputs].concat().iter().filter(|&&n| n >= PAGE).count() as u64;
+        let large = self.resources.iter().chain(self.inputs).filter(|&&n| n >= PAGE).count() as u64;
         self.initial() + self.copied() + large * PAGE + SMALL
     }
 }
@@ -1405,7 +1405,7 @@ impl Formula {
             if at < b.len() {
                 let rest = (x.0, x.1 + at as u64, x.2 - at as u64);
                 match to.get(&rest) {
-                    Some(ps) => pieces.extend_from_slice(&ps.clone()),
+                    Some(ps) => pieces.extend_from_slice(ps),
                     None => {
                         if rest.2 >= min as u64 {
                             kept.entry(head(bytes(&rest))).or_default().push(rest);
@@ -1475,16 +1475,7 @@ impl Formula {
                 left[s] -= 1;
                 (old[s].take().unwrap(), &g[1..])
             } else {
-                (
-                    Stream {
-                        class: o.class.clone(),
-                        kind: o.kind,
-                        content: o.content,
-                        apart: o.apart,
-                        data: Bytes::default(),
-                    },
-                    &g[..],
-                )
+                (o.clone_empty(), &g[..])
             };
             if !rest.is_empty() {
                 let total: u64 = g.iter().map(|p| p.2 - p.1).sum();
@@ -1520,7 +1511,7 @@ impl Formula {
             .map(|g| {
                 let s = &self.streams[g[0].0];
                 let content = g.iter().all(|p| self.streams[p.0].content);
-                Stream { class: s.class.clone(), kind: s.kind, content, apart: s.apart, data: Bytes::default() }
+                Stream { content, ..s.clone_empty() }
             })
             .collect();
         let mut f = Formula { streams: Vec::new(), root: self.root.clone(), shared: self.shared.clone() };

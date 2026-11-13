@@ -105,7 +105,7 @@ pub(crate) fn frame_at(d: &[u8], at: usize) -> Option<(u64, Range<usize>, usize)
 }
 
 /// Whether block type `ty` is a metadata block's.
-fn metadata(ty: u64) -> bool {
+pub(super) fn metadata(ty: u64) -> bool {
     (0x10..=0x17).contains(&ty)
 }
 
@@ -161,10 +161,10 @@ fn trimmed(a: &[u8]) -> Option<usize> {
         && let Some((t, d, end)) = frame_at(a, p)
         && metadata(t)
     {
-        blocks.insert(0, end);
+        blocks.push(end);
         (at, data, ty) = (p, d, t);
     }
-    for mut e in blocks {
+    for mut e in blocks.into_iter().rev() {
         while let Some((0..=3, _, end)) = frame_at(a, e) {
             e = end;
         }

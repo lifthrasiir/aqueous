@@ -122,7 +122,6 @@ struct Node {
 /// The graph of one or more formulas, and module names given.
 pub(super) struct Graph<'f> {
     nodes: Vec<Node>,
-    insns: usize,
     name: &'f dyn Fn(usize) -> String,
     /// By instruction, the first of the graph's of its leaf.
     first_insn: Vec<usize>,
@@ -466,7 +465,7 @@ pub(super) fn module_names(blocks: &Blocks, name: &dyn Fn(&[u8]) -> Option<Strin
 /// The graph of the formulas of the leaf blocks of `blocks`, the modules named by `name`; and by
 /// leaf, its outputs (nodes).
 pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> Decoded<(Graph<'f>, Vec<Vec<usize>>)> {
-    let mut g = Graph { nodes: Vec::new(), insns: 0, name, first_insn: Vec::new() };
+    let mut g = Graph { nodes: Vec::new(), name, first_insn: Vec::new() };
     let loaded: Vec<OnceLock<_>> = blocks.modules.iter().map(|_| OnceLock::new()).collect();
     // by leaf, its outputs (nodes)
     let mut leaves: Vec<Vec<usize>> = Vec::new();
@@ -474,8 +473,7 @@ pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> D
     for leaf in &blocks.leaves {
         let outputs = match *leaf {
             LeafBlock::Stored(d, zstd, checked, _) => {
-                let insn = g.insns;
-                g.insns += 1;
+                let insn = g.first_insn.len();
                 g.first_insn.push(insn);
                 vec![g.add(Shape::Stored(zstd, checked), Vec::new(), insn, stored_len(d, zstd, checked))]
             }
@@ -491,10 +489,9 @@ pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> D
                 // (the program's modules and resources by their indices in the segment)
                 let seg = blocks.segments[segment].first;
                 let mut st: Vec<usize> = Vec::new();
-                let first = g.insns;
+                let first = g.first_insn.len();
                 for insn in &p.insns {
-                    let at = g.insns;
-                    g.insns += 1;
+                    let at = g.first_insn.len();
                     g.first_insn.push(first);
                     let mut pop = |n: usize| st.split_off(st.len() - n);
                     let sum = |g: &Graph, kids: &[usize]| kids.iter().map(|&k| g.nodes[k].size).sum::<u64>();
@@ -539,7 +536,7 @@ pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> D
                         }
                         &Insn::Pack(n) => {
                             let kids = pop(n);
-                            let size = 8 + 8 * n as u64 + sum(&g, &kids);
+                            let size = crate::packed::header_len(n) + sum(&g, &kids);
                             st.push(g.add(Shape::Pack, kids, at, size));
                         }
                         Insn::Split(sizes) => {
@@ -609,7 +606,7 @@ mod tests {
     #[test]
     fn summary_of_shared_nodes() {
         let name = |_: usize| String::from("m");
-        let mut g = Graph { nodes: Vec::new(), insns: 0, name: &name, first_insn: Vec::new() };
+        let mut g = Graph { nodes: Vec::new(), name: &name, first_insn: Vec::new() };
         let mut n = g.add(Shape::Slice(0, 0), Vec::new(), 0, 2);
         for i in 0..40 {
             let a = g.add(Shape::Split { out: 0, outs: 2 }, vec![n], 2 * i + 1, 1);

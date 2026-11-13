@@ -411,12 +411,7 @@ fn told_tree(told: &SegmentInfo, leaf_at: &[usize]) -> Result<(Tree, Vec<Content
     }
     let mut tree = st.tree.clone();
     for (parent, name) in &st.tombstones {
-        tree.entries.push(Entry {
-            parent: *parent,
-            name: name.clone(),
-            node: EntryNode::Special(0),
-            extra: Extra::default(),
-        });
+        tree.entries.push(Entry::tombstone(*parent, name.clone()));
     }
     let contents = (st.refs.iter()).map(|&(l, output, size)| ContentAt { leaf: leaf_at[l], output, size }).collect();
     Ok((tree, contents))

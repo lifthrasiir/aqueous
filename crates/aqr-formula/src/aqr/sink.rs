@@ -321,21 +321,17 @@ impl Sink {
             }
             if at < bytes.len() {
                 let rest = &bytes[at..];
-                let target = match st.kind {
-                    _ if st.apart => {
-                        *alone.entry(s).or_insert_with(|| new_stream(state, self.level, st.class.clone(), st.kind))
-                    }
-                    Kind::Compressed => {
-                        *alone.entry(s).or_insert_with(|| new_stream(state, self.level, st.class.clone(), st.kind))
-                    }
-                    _ => match state.by_class.get(&(st.class.clone(), st.kind)) {
+                let target = if st.apart || st.kind == Kind::Compressed {
+                    *alone.entry(s).or_insert_with(|| new_stream(state, self.level, st.class.clone(), st.kind))
+                } else {
+                    match state.by_class.get(&(st.class.clone(), st.kind)) {
                         Some(&t) => t,
                         None => {
                             let t = new_stream(state, self.level, st.class.clone(), st.kind);
                             state.by_class.insert((st.class.clone(), st.kind), t);
                             t
                         }
-                    },
+                    }
                 };
                 let start = state.streams[target].len;
                 if rest.len() >= self.min {

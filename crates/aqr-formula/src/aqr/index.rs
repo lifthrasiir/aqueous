@@ -178,7 +178,7 @@ pub(super) fn open<'c>(
     }
     loop {
         let (ty, data, next) = frame(p, at, archive_end)?;
-        if !(0x10..=0x17).contains(&ty) {
+        if !crate::aqr::locate::metadata(ty) {
             return invalid(match metas.is_empty() {
                 true => "no metadata block where the footer points",
                 false => "a metadata block not pointing to the one before it",
@@ -198,7 +198,7 @@ pub(super) fn open<'c>(
             }
             Some(b) if b >= HEADER_MAGIC.len() && settled => {
                 let (ty, _, end) = frame_at(p, b, at)?;
-                if !(0x10..=0x17).contains(&ty) {
+                if !crate::aqr::locate::metadata(ty) {
                     return invalid("a metadata block not pointing to the one before it");
                 }
                 start = end;

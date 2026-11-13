@@ -223,7 +223,7 @@ pub fn inspect<'c>(
     let framed = frame(d)?;
 
     // the segments: each up to a metadata block (all of the blocks where there is none)
-    let is_metadata = |ty: u64| (0x10..=0x17).contains(&ty);
+    let is_metadata = crate::aqr::locate::metadata;
     let mut cuts: Vec<(usize, usize)> = Vec::new();
     let mut first = 0;
     for (i, &(_, ty, ..)) in framed.iter().enumerate() {
@@ -593,7 +593,7 @@ pub fn join_segments(archives: &[&[u8]]) -> Vec<u8> {
         let fields = u16::from_le_bytes([c[c.len() - 2], c[c.len() - 1]]) as usize;
         let d = &c[HEADER_MAGIC.len()..c.len() - 2 - fields - 8];
         let framed = frame(d).expect("an archive");
-        let &(start, ty, data, _) = framed.iter().rev().find(|b| (0x10..=0x17).contains(&b.1)).expect("metadata");
+        let &(start, ty, data, _) = framed.iter().rev().find(|b| crate::aqr::locate::metadata(b.1)).expect("metadata");
         out.extend_from_slice(&d[..start]);
         let meta = decoded(data, ty & 0x04 != 0, true).expect("a metadata block");
         let mut at = 0;

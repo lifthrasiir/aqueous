@@ -633,7 +633,6 @@ impl Encoder {
         self
     }
 
-    /// The data of the module block of `m`, compressed at `level`, once.
     /// Checks bytes `d` that a [`Node::ModuleBytes`] takes of the block of module `m` against
     /// the block it writes (at `level`): the same.
     fn check_module_bytes(&self, m: Module, d: &[u8], level: i32) -> Result<()> {
@@ -653,6 +652,7 @@ impl Encoder {
         Ok(())
     }
 
+    /// The data of the module block of `m`, compressed at `level`, once.
     fn module_block(&self, m: Module, level: i32) -> Result<ModuleBlock> {
         if let Some(b) = self.module_blocks.borrow().get(&(m, level)) {
             return Ok(b.clone());
@@ -839,15 +839,7 @@ impl Encoder {
         checksum: Option<u64>,
         out: &mut dyn io::Write,
     ) -> io::Result<Result<usize>> {
-        let streams: Vec<&[&[u8]]> = pieces.iter().map(|p| &p[..]).collect();
-        let mut w = Writing { out, len: 0, failed: None };
-        self.keep.set(false);
-        let r = self.write_streams(f, &streams, &[], checksum, &mut w);
-        self.keep.set(true);
-        match w.failed {
-            Some(e) => Err(e),
-            None => Ok(r.map(|_| w.len)),
-        }
+        self.encode_sunk_to(f, pieces, &[], checksum, out)
     }
 
     /// [`Encoder::encode_pieces_to`] of `f` whose streams are those of `pieces`, then those of
@@ -1108,8 +1100,6 @@ fn how_of(level: Level, class: &str, kind: Kind) -> How {
     }
 }
 
-/// The instructions pushing node `n`, its streams' blocks at `ordinals` and its modules and
-/// resources at their indices in `modules` and `resources`.
 /// Instructions as nodes push their values, with the stack they leave: the outputs of
 /// applications of several outputs not taken yet by (application, output), the rest `None`.
 struct Emit<'a> {
@@ -1125,7 +1115,8 @@ struct Emit<'a> {
 }
 
 impl Emit<'_> {
-    /// The instructions pushing node `n`.
+    /// The instructions pushing node `n`, its streams' blocks at `ordinals` and its modules and
+    /// resources at their indices in `modules` and `resources`.
     fn node(&mut self, n: &Node) {
         match n {
             // (nothing of a block: an empty concatenation)
@@ -1258,7 +1249,6 @@ impl Emit<'_> {
         self.stack.push(None);
     }
 
-    /// The Apply instruction of `a` (its inputs pushed), of outputs of `sizes`.
     /// The instructions pushing the outputs of `s`, the `i`-th application of several outputs.
     fn shared(&mut self, i: usize, s: &crate::Shared) {
         s.inputs().iter().for_each(|n| self.node(n));
@@ -1284,6 +1274,7 @@ impl Emit<'_> {
         (0..s.sizes.len()).for_each(|j| self.stack[k + j] = Some((i, j)));
     }
 
+    /// The Apply instruction of `a` (its inputs pushed), of outputs of `sizes`.
     fn apply(&mut self, a: &crate::Apply, sizes: &[u64]) {
         let at = self.modules.iter().position(|&m| m == a.module).unwrap();
         let out = &mut *self.out;
@@ -1965,7 +1956,6 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
             let c = trial(&sample, l)?.map_or(sample.len(), |c| c.len());
             Ok(Plan::Level(l, scaled(c, sample.len(), n)))
         }
-        Level::STORED => Ok(Plan::Done(None, STORED)),
         Level::Of(level) => {
             let p = Pick::of(level);
             let sample = sampled(data);
@@ -2079,7 +2069,6 @@ fn total(pieces: &[&[u8]]) -> usize {
     pieces.iter().map(|p| p.len()).sum()
 }
 
-/// The `len` bytes from `start` of `pieces`, as pieces.
 /// Bytes of a non-leaf block at most: a longer stream is several (`Encoder::stream_blocks`),
 /// as the spec has content larger than a unit of random access split into blocks. As large as
 /// the window of long-distance matching (which every decoder takes): of boot.wim's 494 MB of
@@ -2154,6 +2143,7 @@ fn slice_blocks(start: u64, len: u64) -> Vec<(u64, u64, u64)> {
         .collect()
 }
 
+/// The `len` bytes from `start` of `pieces`, as pieces.
 fn cut<'a>(pieces: &[&'a [u8]], mut start: usize, mut len: usize) -> Vec<&'a [u8]> {
     let mut out = Vec::new();
     for p in pieces {
@@ -3119,7 +3109,7 @@ fn opened_with<'c>(
     }
     let outputs: Vec<u64> =
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
-    let mut lost = Vec::new();
+    let mut lost = 0;
     // each segment's tree, then merged (spec, "Interpreting an archive")
     // (the metadata blocks' data, no longer held once read)
     let metas: Vec<(usize, Vec<u8>)> = blocks
@@ -3189,7 +3179,7 @@ fn opened_with<'c>(
         _ => Some(tree::merge(trees)),
     };
     // (the leaves lost, after those there: never where they are, never with a dictionary)
-    for _ in lost {
+    for _ in 0..lost {
         blocks.leaves.push(LeafBlock::Lost);
         blocks.leaf_at.push(usize::MAX);
         blocks.leaf_dictionary.push(None);
@@ -3709,7 +3699,7 @@ fn tree_of(
     prev: usize,
     leaf_at: &mut LeafAt,
     lost_from: usize,
-    mut lost: Option<&mut Vec<()>>,
+    mut lost: Option<&mut usize>,
 ) -> Decoded<tree::SegmentTree> {
     if m.prev != (at - prev) as u64 {
         return invalid(match prev {
@@ -3732,8 +3722,8 @@ fn tree_of(
             (Some(found), _) => found,
             (None, Some(lost)) => {
                 let k = *lost_at.entry(at.wrapping_sub(offset as usize)).or_insert_with(|| {
-                    lost.push(());
-                    lost.len() - 1
+                    *lost += 1;
+                    *lost - 1
                 });
                 (lost_from + k, None)
             }
@@ -3822,12 +3812,6 @@ fn leb(d: &[u8], at: &mut usize) -> Decoded<u64> {
     varint::get(d, at).map_err(|e| Failure::Invalid(e.0.into()))
 }
 
-/// The blocks of an archive, framed: the data of leaf data blocks and non-leaf blocks as it is
-/// in the archive (with whether it is Zstandard data, and checked). The blocks of every segment
-/// are indexed together, those of a segment after those of the segments before it; what refers
-/// to them within a segment (a formula block to module, resource and non-leaf blocks, a block
-/// to its dictionary, a metadata block to its blocks) is taken within that segment's
-/// ([`Segmented`]).
 /// A module block's module: its Wasm bytes, or a shorthand block's registered hash, whose module
 /// the runner reconstructs from its registry on first use (spec, "Registered dictionaries and
 /// modules"). A shorthand block carries no module bytes, so none are decompressed or hashed.
@@ -3857,6 +3841,12 @@ impl ModuleSrc {
     }
 }
 
+/// The blocks of an archive, framed: the data of leaf data blocks and non-leaf blocks as it is
+/// in the archive (with whether it is Zstandard data, and checked). The blocks of every segment
+/// are indexed together, those of a segment after those of the segments before it; what refers
+/// to them within a segment (a formula block to module, resource and non-leaf blocks, a block
+/// to its dictionary, a metadata block to its blocks) is taken within that segment's
+/// ([`Segmented`]).
 struct Blocks<'c> {
     leaves: Vec<LeafBlock<'c>>,
     /// Where the leaf, module and resource blocks start, in the archive.
@@ -4216,10 +4206,13 @@ fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&dict::Diction
     Ok(out)
 }
 
+fn zstd_failure(e: zstd_safe::ErrorCode) -> Failure {
+    Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)))
+}
+
 /// Zstandard `blocks` of `window` making exactly `size` bytes, with dictionary `dict`.
 fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
     let _s = aqr_common::trace::span("unzstd");
-    let zstd = |e: zstd_safe::ErrorCode| Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)));
     // A context of the thread's, kept for the next frame (with its input buffer) where there is
     // no dictionary to refer to: archives have a formula block a leaf, each a frame, and making
     // a context for each was much of opening a big archive.
@@ -4230,7 +4223,7 @@ fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>)
         None => DCTX.with(|c| match c.try_borrow_mut() {
             Ok(mut c) => {
                 let dctx = c.get_or_insert_with(zstd_safe::DCtx::create);
-                dctx.reset(ResetDirective::SessionAndParameters).map_err(zstd)?;
+                dctx.reset(ResetDirective::SessionAndParameters).map_err(zstd_failure)?;
                 unzstd_with(dctx, window, blocks, size)
             }
             Err(_) => unzstd_with(&mut zstd_safe::DCtx::create(), window, blocks, size),
@@ -4238,8 +4231,8 @@ fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>)
         Some(d) => {
             let mut dctx = zstd_safe::DCtx::create();
             match d {
-                dict::Dictionary::Raw(d) => dctx.ref_prefix(d).map(drop).map_err(zstd)?,
-                dict::Dictionary::Tables(d) => dctx.ref_ddict(d).map(drop).map_err(zstd)?,
+                dict::Dictionary::Raw(d) => dctx.ref_prefix(d).map(drop).map_err(zstd_failure)?,
+                dict::Dictionary::Tables(d) => dctx.ref_ddict(d).map(drop).map_err(zstd_failure)?,
             }
             unzstd_with(&mut dctx, window, blocks, size)
         }
@@ -4248,7 +4241,6 @@ fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>)
 
 /// [`unzstd`] with `dctx` (of its dictionary, if any).
 fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
-    let zstd = |e: zstd_safe::ErrorCode| Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)));
     // the frame: a header, then the blocks (not copied after it)
     let head = [ZSTD_MAGIC[0], ZSTD_MAGIC[1], ZSTD_MAGIC[2], ZSTD_MAGIC[3], 0, window];
     let mut frame = [&head[..], blocks].into_iter();
@@ -4261,7 +4253,7 @@ fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64)
     if let Ok(n) = usize::try_from(limit)
         && out.try_reserve_exact(n).is_ok()
     {
-        dctx.set_parameter(zstd_safe::DParameter::StableOutBuffer(true)).map_err(zstd)?;
+        dctx.set_parameter(zstd_safe::DParameter::StableOutBuffer(true)).map_err(zstd_failure)?;
     }
     loop {
         let Some(room) = limit.checked_sub(out.len() as u64).filter(|&r| r > 0) else {
@@ -4270,7 +4262,7 @@ fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64)
         out.reserve(room.min(1 << 20) as usize);
         let (pos, before) = (out.len(), input.pos());
         let mut o = OutBuffer::around_pos(&mut out, pos);
-        let hint = dctx.decompress_stream(&mut o, &mut input).map_err(zstd)?;
+        let hint = dctx.decompress_stream(&mut o, &mut input).map_err(zstd_failure)?;
         let written = o.pos() > pos;
         if hint == 0 {
             break;
@@ -5579,6 +5571,9 @@ mod tests {
     /// The applications [`PartCut`] made as part modules.
     static PARTS: AtomicUsize = AtomicUsize::new(0);
 
+    /// Held by each test running [`PartCut`], as one counts [`PARTS`].
+    static PART_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The memory and task limits of the applications of `rev@1` with a memory limit of 1234.
     static LIMITS: std::sync::Mutex<Vec<Vec<u64>>> = std::sync::Mutex::new(Vec::new());
 
@@ -5671,6 +5666,7 @@ mod tests {
     /// back to the module as they were; one of none is an Apply instruction.
     #[test]
     fn task_limits() {
+        let _alone = PART_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut f = Formula::default();
         let d: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
         f.push("a", d.clone());
@@ -5717,6 +5713,7 @@ mod tests {
     /// module is applied; one of exactly that is applied.
     #[test]
     fn minimal_bound_limit() {
+        let _alone = PART_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(crate::application_limit(), 512 << 20);
         let d: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
         // (a module of two classes of tasks)
@@ -5758,6 +5755,7 @@ mod tests {
     /// waiting.
     #[test]
     fn part_modules() {
+        let _alone = PART_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut f = Formula::default();
         let n = (24 << 20) + 77u64;
         let d: Vec<u8> = (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
@@ -5809,6 +5807,7 @@ mod tests {
     /// the pool (each waits for another to have begun), their outputs written in order.
     #[test]
     fn parts_ahead() {
+        let _alone = PART_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut f = Formula::default();
         let d: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
         f.push("a", d.clone());
