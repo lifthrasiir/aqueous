@@ -28,7 +28,7 @@ pub(crate) enum Planned {
     /// A VPK's archive: the files whose data it holds.
     Vpk(Vec<File>),
     /// A Unity resource file: where the blocks of the textures streamed from it are, their layouts.
-    Ress(Vec<(Range<u64>, aqr_tex::layout::Layout)>),
+    Ress(Vec<(Range<u64>, unity_assets::Pixels)>),
 }
 
 /// The contents to take apart, by content.

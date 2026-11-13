@@ -275,11 +275,112 @@ pub enum Data {
     Stream { path: Vec<u8>, offset: u64, size: u64 },
 }
 
-/// A `Texture2D` of block-compressed pixels that aqr-tex takes (BC1, BC3, BC4, BC5): its layout,
-/// where its blocks are.
+/// What a texture's pixels are: blocks that aqr-tex takes (BC1, BC3, BC4, BC5), or uncompressed
+/// pixels of 8-bit samples that aqr-raw takes ([`Raw`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pixels {
+    Blocks(aqr_tex::layout::Layout),
+    Raw(Raw),
+}
+
+/// Uncompressed pixels of `channels` 8-bit samples (Alpha8, R8, RG16, RGB24, RGBA32, ARGB32,
+/// BGRA32): of each of the `layers`, the mipmaps from the largest, each halving the one before
+/// (rounded down, at least 1), its rows one after another, of no padding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Raw {
+    pub channels: usize,
+    pub width: u32,
+    pub height: u32,
+    pub mips: u32,
+    pub layers: u32,
+}
+
+impl Raw {
+    /// The surfaces of a layer: their widths and heights.
+    pub fn surfaces(&self) -> impl Iterator<Item = (u32, u32)> + use<> {
+        let (w, h) = (self.width, self.height);
+        (0..self.mips).map(move |m| ((w >> m).max(1), (h >> m).max(1)))
+    }
+
+    fn valid(&self) -> bool {
+        let max_mips = 32 - self.width.max(self.height).leading_zeros();
+        (1..=1 << 16).contains(&self.width)
+            && (1..=1 << 16).contains(&self.height)
+            && (1..=max_mips).contains(&self.mips)
+            && (1..=6).contains(&self.layers)
+    }
+}
+
+impl Pixels {
+    /// Bytes of all the pixels, of a valid one.
+    pub fn len(&self) -> u64 {
+        match self {
+            Pixels::Blocks(l) => l.len(),
+            Pixels::Raw(r) => {
+                let layer: u64 = r.surfaces().map(|(w, h)| w as u64 * h as u64).sum();
+                layer * r.channels as u64 * r.layers as u64
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn valid(&self) -> bool {
+        match self {
+            Pixels::Blocks(l) => l.valid(),
+            Pixels::Raw(r) => r.valid(),
+        }
+    }
+
+    fn set_layers(&mut self, n: u32) {
+        match self {
+            Pixels::Blocks(l) => l.layers = n,
+            Pixels::Raw(r) => r.layers = n,
+        }
+    }
+}
+
+/// The node rebuilding `bytes`, all the pixels of `p`: aqr-tex's `bcn-recons` of blocks; of
+/// uncompressed pixels, aqr-raw's `raster-recons` of each surface (one too small for it kept as
+/// it is, of kind `Pixels`). None where aqr-tex turns the blocks down.
+pub fn apply_pixels(
+    f: &mut aqr_formula::Formula,
+    bytes: &[u8],
+    p: &Pixels,
+    threads: usize,
+) -> Option<aqr_formula::Node> {
+    use aqr_formula::{Kind, Node};
+    match p {
+        Pixels::Blocks(l) => aqr_tex::formula::apply(f, bytes, l, threads),
+        Pixels::Raw(r) => {
+            let (mut parts, mut at) = (Vec::new(), 0);
+            for _ in 0..r.layers {
+                for (w, h) in r.surfaces() {
+                    let n = (w * h) as usize * r.channels;
+                    let samples = &bytes[at..at + n];
+                    let fmt = aqr_raw::image::raster::Format {
+                        width: w as usize,
+                        height: h as usize,
+                        channels: r.channels,
+                        stride: w as usize * r.channels,
+                    };
+                    let node = aqr_raw::formula::raster::apply(f, samples, fmt)
+                        .unwrap_or_else(|| f.push_as("unity/pixels", Kind::Pixels, samples.to_vec()));
+                    parts.push(node);
+                    at += n;
+                }
+            }
+            Some(Node::concat(parts))
+        }
+    }
+}
+
+/// A `Texture2D` taken: what its pixels are, where they are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Texture {
-    pub layout: aqr_tex::layout::Layout,
+    pub pixels: Pixels,
     pub data: Data,
 }
 
@@ -307,15 +408,20 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
     if at_least((2017, 3)) {
         base = (base + 4 + 1 + at_least((2020, 2)) as usize).next_multiple_of(4);
     }
-    // the fields at `at`: the layout, and the image's size (one image)
-    let head = |at: usize| -> Option<(Layout, u64)> {
+    // the fields at `at`: the pixels, and the image's size (one image)
+    let head = |at: usize| -> Option<(Pixels, u64)> {
         let (width, height, size) = (u32_at(at)?, u32_at(at + 4)?, u32_at(at + 8)? as u64);
         let at = at + 12 + 4 * at_least((2020, 1)) as usize;
+        // (the blocks' format, or the samples of an uncompressed pixel)
         let format = match u32_at(at)? {
-            10 => Format::Bc1,
-            12 => Format::Bc3,
-            26 => Format::Bc4,
-            27 => Format::Bc5,
+            10 => Ok(Format::Bc1),
+            12 => Ok(Format::Bc3),
+            26 => Ok(Format::Bc4),
+            27 => Ok(Format::Bc5),
+            1 | 63 => Err(1),
+            62 => Err(2),
+            3 => Err(3),
+            4 | 5 | 14 => Err(4),
             _ => return None,
         };
         // (before 5.2 whether there are mipmaps, a byte: then all of them)
@@ -326,20 +432,23 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
                 _ => 32 - width.max(height).leading_zeros(),
             },
         };
-        let layout = Layout { format, width, height, mips, layers: 1 };
-        (layout.valid() && size > 0 && layout.len() == size).then_some((layout, size))
+        let pixels = match format {
+            Ok(format) => Pixels::Blocks(Layout { format, width, height, mips, layers: 1 }),
+            Err(channels) => Pixels::Raw(Raw { channels, width, height, mips, layers: 1 }),
+        };
+        (pixels.valid() && size > 0 && pixels.len() == size).then_some((pixels, size))
     };
     // (the fields as of the version; or a field before or after, as later versions have them:
     // what the image's size checks)
-    let (mut layout, size) = [0, -4, 4, 8].into_iter().find_map(|k: isize| head(base.checked_add_signed(k)?))?;
+    let (mut pixels, size) = [0, -4, 4, 8].into_iter().find_map(|k: isize| head(base.checked_add_signed(k)?))?;
     // before 5.3 the image's data is last: its length, the bytes
     if !at_least((5, 3)) {
         for images in 1..=6u64 {
             let n = usize::try_from(size * images).ok()?;
             let Some(len_at) = o.len().checked_sub(n + 4) else { break };
             if u32_at(len_at)? as usize == n {
-                layout.layers = images as u32;
-                return Some(Texture { layout, data: Data::Inline(len_at + 4..o.len()) });
+                pixels.set_layers(images as u32);
+                return Some(Texture { pixels, data: Data::Inline(len_at + 4..o.len()) });
             }
         }
         return None;
@@ -365,8 +474,8 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
         let Some((_, offset, s)) = tail(path) else { continue };
         let p = &o[o.len() - path.next_multiple_of(4)..][..path];
         if s > 0 && s.is_multiple_of(size) && p.ends_with(b".resS") {
-            layout.layers = u32::try_from(s / size).ok()?;
-            return layout.valid().then(|| Texture { layout, data: Data::Stream { path: p.to_vec(), offset, size: s } });
+            pixels.set_layers(u32::try_from(s / size).ok()?);
+            return pixels.valid().then(|| Texture { pixels, data: Data::Stream { path: p.to_vec(), offset, size: s } });
         }
     }
     // inline: the image's data before an empty stream (no path, size 0), its length before it
@@ -375,8 +484,8 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
         let n = usize::try_from(size * images).ok()?;
         let Some(len_at) = start.checked_sub(n + 4) else { break };
         if u32_at(len_at)? as usize == n {
-            layout.layers = images as u32;
-            return Some(Texture { layout, data: Data::Inline(len_at + 4..len_at + 4 + n) });
+            pixels.set_layers(images as u32);
+            return Some(Texture { pixels, data: Data::Inline(len_at + 4..len_at + 4 + n) });
         }
     }
     None
@@ -422,7 +531,7 @@ pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usiz
         let b = &d[r.clone()];
         let app = t.as_ref().and_then(|t| {
             let Data::Inline(i) = &t.data else { return None };
-            Some((i.clone(), aqr_tex::formula::apply(&mut f, &b[i.clone()], &t.layout, threads)?))
+            Some((i.clone(), apply_pixels(&mut f, &b[i.clone()], &t.pixels, threads)?))
         });
         match app {
             Some((i, node)) => {
@@ -452,7 +561,7 @@ pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usiz
 
 /// The textures whose blocks are in resource file `name` (a `.resS`, by its name: the last part
 /// of the textures' paths) of serialized file `d`: where their blocks are in it, their layouts.
-pub fn streamed(d: &[u8], name: &[u8]) -> Vec<(std::ops::Range<u64>, aqr_tex::layout::Layout)> {
+pub fn streamed(d: &[u8], name: &[u8]) -> Vec<(std::ops::Range<u64>, Pixels)> {
     let base = |p: &[u8]| -> Vec<u8> {
         let p = p.rsplit(|&b| b == b'/' || b == b'\\').next().unwrap_or(p);
         p.to_ascii_lowercase()
@@ -465,7 +574,7 @@ pub fn streamed(d: &[u8], name: &[u8]) -> Vec<(std::ops::Range<u64>, aqr_tex::la
         if let Data::Stream { path, offset, size } = t.data
             && base(&path) == want
         {
-            out.push((offset..offset + size, t.layout));
+            out.push((offset..offset + size, t.pixels));
         }
     }
     out
@@ -477,7 +586,7 @@ pub fn streamed(d: &[u8], name: &[u8]) -> Vec<(std::ops::Range<u64>, aqr_tex::la
 /// the end, are the rest's. None where none is rebuilt.
 pub fn encode_resource(
     d: &[u8],
-    textures: &[(std::ops::Range<u64>, aqr_tex::layout::Layout)],
+    textures: &[(std::ops::Range<u64>, Pixels)],
     threads: usize,
 ) -> Option<aqr_formula::Formula> {
     use aqr_formula::{Formula, Kind, Node};
@@ -493,12 +602,12 @@ pub fn encode_resource(
             rest.extend_from_slice(b);
         }
     };
-    for (r, layout) in t {
+    for (r, pixels) in t {
         let r = r.start as usize..r.end as usize;
         if r.start < at {
             continue;
         }
-        let Some(node) = aqr_tex::formula::apply(&mut f, &d[r.clone()], layout, threads) else { continue };
+        let Some(node) = apply_pixels(&mut f, &d[r.clone()], pixels, threads) else { continue };
         kept(&mut rest, &mut parts, &d[at..r.start]);
         parts.push(node);
         (at, made) = (r.end, made + 1);

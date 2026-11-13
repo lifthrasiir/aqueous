@@ -89,7 +89,9 @@ engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
   end, the layout checked against the image's size) has its blocks rebuilt by aqr-tex's
   `bcn-recons`: those in the file (`unity_assets::encode_with`), and those it streams from its
   resource file (`NAME.resS`, archived along: `unity-ress`, planned by aqr-compress's `siblings`,
-  `unity_assets::encode_resource`). Not taken: textures of other formats (RGBA32, BC7, crunched).
+  `unity_assets::encode_resource`). Textures of uncompressed pixels of 8-bit samples (Alpha8, R8,
+  RG16, RGB24, RGBA32, ARGB32, BGRA32) have their surfaces rebuilt by aqr-raw's `raster-recons`
+  alike. Not taken: BC7, BC6H, crunched, ASTC, ETC.
 - `unity-resource`: Unity's `.resource` files: FSB5 banks (and the videos, WebM and MP4, of
   VideoClips) back to back, where more than one bank (a bank alone is aqr-fsb's).
 - `unreal-upk`: Unreal Engine 3's packages (`.upk`, `.u`, `.umap`) and texture caches (`.tfc`):

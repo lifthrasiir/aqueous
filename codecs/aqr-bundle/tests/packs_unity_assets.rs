@@ -277,19 +277,24 @@ fn eval(f: &aqr_formula::Formula) -> Vec<u8> {
 /// rebuilt by aqr-tex.
 #[test]
 fn textures() {
-    use aqr_bundle::packs::unity_assets::{Data, encode_resource, encode_with, objects, streamed, texture};
+    use aqr_bundle::packs::unity_assets::{Data, Pixels, Raw, encode_resource, encode_with, objects, streamed, texture};
     let blocks = bc1(64, 32, 7);
     let n = blocks.len() as u32;
     let inline = texture2d(64, 32, 10, 7, n, &blocks, None);
     let t = texture(&inline, (2019, 4), false).unwrap();
-    assert_eq!((t.layout.width, t.layout.height, t.layout.mips, t.layout.layers), (64, 32, 7, 1));
+    let Pixels::Blocks(l) = t.pixels else { panic!("blocks") };
+    assert_eq!((l.width, l.height, l.mips, l.layers), (64, 32, 7, 1));
     let Data::Inline(r) = t.data else { panic!("inline") };
     assert!(inline[r] == blocks[..]);
     let at = 1000;
     let streamed_obj = texture2d(64, 32, 10, 7, n, &[], Some((at, n, "sharedassets0.assets.resS")));
     let t = texture(&streamed_obj, (2019, 4), false).unwrap();
     assert_eq!(t.data, Data::Stream { path: b"sharedassets0.assets.resS".to_vec(), offset: at as u64, size: n as u64 });
-    // not taken: RGBA32 (format 4), a size other than the layout's, BC7 (25)
+    // RGBA32 (format 4) of its mipmaps (64 x 32 down to 1 x 1), uncompressed
+    let rgba: u32 = (0..7).map(|m| (64u32 >> m).max(1) * (32u32 >> m).max(1) * 4).sum();
+    let t = texture(&texture2d(64, 32, 4, 7, rgba, &vec![9; rgba as usize], None), (2019, 4), false).unwrap();
+    assert_eq!(t.pixels, Pixels::Raw(Raw { channels: 4, width: 64, height: 32, mips: 7, layers: 1 }));
+    // not taken: RGBA32 of a size other than its mipmaps', a size other than the layout's, BC7 (25)
     assert!(texture(&texture2d(64, 32, 4, 7, 64 * 32 * 4, &[], None), (2019, 4), false).is_none());
     assert!(texture(&texture2d(64, 32, 10, 7, n + 8, &blocks, None), (2019, 4), false).is_none());
     assert!(texture(&texture2d(64, 32, 25, 7, n * 2, &[], None), (2019, 4), false).is_none());

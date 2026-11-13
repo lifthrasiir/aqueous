@@ -9,7 +9,7 @@ publish = false
 default = ["encode"]
 # The formulas (`formula`); without it, the code of the module alone (`module`).
 # The packs of game engines (`packs`) are formulas of aqr-disk's, of no module.
-encode = ["dep:aqr-formula", "dep:aqr-disk", "dep:aqr-lz4", "dep:aqr-flate", "dep:aqr-msadpcm", "dep:aqr-tex"]
+encode = ["dep:aqr-formula", "dep:aqr-disk", "dep:aqr-lz4", "dep:aqr-flate", "dep:aqr-msadpcm", "dep:aqr-tex", "dep:aqr-raw"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false }
@@ -20,6 +20,7 @@ aqr-lz4 = { path = "../aqr-lz4", default-features = false, optional = true }
 aqr-flate = { path = "../aqr-flate", default-features = false, optional = true }
 aqr-msadpcm = { path = "../aqr-msadpcm", optional = true }
 aqr-tex = { path = "../aqr-tex", optional = true }
+aqr-raw = { path = "../aqr-raw", optional = true }
 
 [dev-dependencies]
 zstd = "0.13"
