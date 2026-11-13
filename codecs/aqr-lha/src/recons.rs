@@ -17,7 +17,7 @@ use crate::{Error, Result, corrupt};
 pub use aqr_common::lz::lcp;
 
 /// Bytes of what the module holds on WebAssembly (32-bit pointers), checked there by assertions:
-/// a stream's data and record, a token, a pair, a node's link.
+/// a stream's data and record, a token, a pair.
 pub mod wasm {
     pub const STREAM: u64 = 16;
     pub const TOKEN: u64 = 8;

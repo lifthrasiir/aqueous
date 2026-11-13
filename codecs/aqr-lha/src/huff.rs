@@ -7,8 +7,8 @@
 use crate::lzh::NC;
 use crate::lzh::{self, CTable, Head, Item, Method, NT, PtTable, Token};
 
-/// The code lengths of `freq` (`n` symbols). For fewer than two symbols used: None and the one
-/// symbol, or 0.
+/// The code lengths of `freq` (`n` symbols). For fewer than two symbols used: `Err` of the one
+/// symbol, or of 0.
 pub fn lengths(freq: &[u32]) -> Result<Vec<u8>, u16> {
     let n = freq.len();
     // node frequencies, leaves then inner nodes; the heap of nodes (1-based)
@@ -157,11 +157,7 @@ pub fn head(tokens: &[Token], m: Method) -> Head {
         }
         Ok(cl) => {
             let (n, items) = c_items(&cl);
-            let mut tf = vec![0u32; NT];
-            for it in &items {
-                tf[it.sym as usize] += 1;
-            }
-            (pt_table(lengths(&tf), true), CTable { n, single: 0, items })
+            (pt_table(lengths(&t_freqs(&items)), true), CTable { n, single: 0, items })
         }
     };
     let p = pt_table(lengths(&pf), false);

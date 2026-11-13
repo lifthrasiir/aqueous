@@ -39,6 +39,8 @@ fn h3(d: &[u8], p: usize) -> usize {
 }
 
 type Heads = [u32; WINDOW];
+/// Bytes of the match finder's heads, and of its links.
+pub const MF_BYTES: u64 = 4 * WINDOW as u64;
 
 /// The match finder of a stream: every position before the current one on a chain of a hash of
 /// its first 3 bytes (their links in a ring of the window's size). Positions are those of the
@@ -228,12 +230,12 @@ const _: () = {
     assert!(size_of::<Tok>() as u64 == wasm::TOK);
 };
 
-/// Bytes the table's work of a block takes at most (Huffman's lists): with room for the vectors
-/// that grow, and for the holes that leaves. The decoder takes them from the stack once before
-/// the blocks and gives them back, so that what it takes does not depend on the data.
 /// Bytes past the output's length that the module reserves.
 pub const SLACK: usize = 64;
 
+/// Bytes the table's work of a block takes at most (Huffman's lists): with room for the vectors
+/// that grow, and for the holes that leaves. The decoder takes them from the stack once before
+/// the blocks and gives them back, so that what it takes does not depend on the data.
 pub const SCRATCH: usize = 64 << 10;
 
 impl Ctx {

@@ -35,57 +35,54 @@ pub enum Op {
     Nop(u8),
 }
 
-/// What the stream decoded: its instructions and its bytes, up to and with the end.
-pub struct Parse {
-    pub ops: Vec<Op>,
-    pub used: usize,
+/// The instruction at `p` of `s` and its size without its literals, or `None` at the end.
+fn next(s: &[u8], p: usize) -> Result<Option<(Op, usize)>> {
+    let byte = |i: usize| s.get(i).copied().ok_or_else(corrupt);
+    let b = byte(p)?;
+    Ok(Some(match b {
+        0x06 => return Ok(None),
+        0x0e | 0x16 => (Op::Nop(b), 1),
+        0x1e | 0x26 | 0x2e | 0x36 | 0x3e | 0x70..=0x7f | 0xd0..=0xdf => return Err(Error("undefined instruction")),
+        0xe0 => (Op::Lits(byte(p + 1)? as u16 + 16), 2),
+        0xe1..=0xef => (Op::Lits(b as u16 & 15), 1),
+        0xf0 => (Op::Match(byte(p + 1)? as u16 + 16), 2),
+        0xf1..=0xff => (Op::Match(b as u16 & 15), 1),
+        0xa0..=0xbf => {
+            let w = byte(p + 1)? as u16 | (byte(p + 2)? as u16) << 8;
+            (Op::Medium { lits: b >> 3 & 3, len: ((b & 7) << 2 | (w & 3) as u8) + 3, dist: w >> 2 }, 3)
+        }
+        _ => {
+            let (lits, len) = (b >> 6, (b >> 3 & 7) + 3);
+            match b & 7 {
+                6 => (Op::Prev { lits, len }, 1),
+                7 => (Op::Large { lits, len, dist: byte(p + 1)? as u16 | (byte(p + 2)? as u16) << 8 }, 3),
+                _ => (Op::Small { lits, len, dist: ((b & 7) as u16) << 8 | byte(p + 1)? as u16 }, 2),
+            }
+        }
+    }))
+}
+
+/// The literals, the match length and the new distance (if any) of an instruction.
+fn shape(op: Op) -> (usize, usize, Option<usize>) {
+    match op {
+        Op::Small { lits, len, dist } | Op::Large { lits, len, dist } | Op::Medium { lits, len, dist } => {
+            (lits as usize, len as usize, Some(dist as usize))
+        }
+        Op::Prev { lits, len } => (lits as usize, len as usize, None),
+        Op::Lits(l) => (l as usize, 0, None),
+        Op::Match(m) => (0, m as usize, None),
+        Op::Nop(_) => (0, 0, None),
+    }
 }
 
 /// Decodes the LZVN stream `s` onto `out`, which it must grow by exactly `n` bytes.
 pub fn decode_onto(s: &[u8], out: &mut Vec<u8>, n: usize) -> Result<()> {
-    parse_onto(s, out, n, false).map(|_| ())
-}
-
-/// [`decode_onto`], and the stream's instructions if `keep`.
-pub fn parse_onto(s: &[u8], out: &mut Vec<u8>, n: usize, keep: bool) -> Result<Parse> {
     let start = out.len();
-    let mut ops = Vec::new();
     let mut p = 0;
     let mut dist = 0usize;
-    let byte = |i: usize| s.get(i).copied().ok_or_else(corrupt);
-    loop {
-        let b = byte(p)?;
-        let (op, size) = match b {
-            0x06 => break,
-            0x0e | 0x16 => (Op::Nop(b), 1),
-            0x1e | 0x26 | 0x2e | 0x36 | 0x3e | 0x70..=0x7f | 0xd0..=0xdf => return Err(Error("undefined instruction")),
-            0xe0 => (Op::Lits(byte(p + 1)? as u16 + 16), 2),
-            0xe1..=0xef => (Op::Lits(b as u16 & 15), 1),
-            0xf0 => (Op::Match(byte(p + 1)? as u16 + 16), 2),
-            0xf1..=0xff => (Op::Match(b as u16 & 15), 1),
-            0xa0..=0xbf => {
-                let w = byte(p + 1)? as u16 | (byte(p + 2)? as u16) << 8;
-                (Op::Medium { lits: b >> 3 & 3, len: ((b & 7) << 2 | (w & 3) as u8) + 3, dist: w >> 2 }, 3)
-            }
-            _ => {
-                let (lits, len) = (b >> 6, (b >> 3 & 7) + 3);
-                match b & 7 {
-                    6 => (Op::Prev { lits, len }, 1),
-                    7 => (Op::Large { lits, len, dist: byte(p + 1)? as u16 | (byte(p + 2)? as u16) << 8 }, 3),
-                    _ => (Op::Small { lits, len, dist: ((b & 7) as u16) << 8 | byte(p + 1)? as u16 }, 2),
-                }
-            }
-        };
+    while let Some((op, size)) = next(s, p)? {
         p += size;
-        let (lits, len, d) = match op {
-            Op::Small { lits, len, dist } | Op::Large { lits, len, dist } | Op::Medium { lits, len, dist } => {
-                (lits as usize, len as usize, Some(dist as usize))
-            }
-            Op::Prev { lits, len } => (lits as usize, len as usize, None),
-            Op::Lits(l) => (l as usize, 0, None),
-            Op::Match(m) => (0, m as usize, None),
-            Op::Nop(_) => (0, 0, None),
-        };
+        let (lits, len, d) = shape(op);
         if out.len() - start + lits + len > n {
             return Err(corrupt());
         }
@@ -102,14 +99,26 @@ pub fn parse_onto(s: &[u8], out: &mut Vec<u8>, n: usize, keep: bool) -> Result<P
                 out.push(out[out.len() - dist]);
             }
         }
-        if keep {
-            ops.push(op);
-        }
     }
     if out.len() - start != n {
         return Err(corrupt());
     }
-    Ok(Parse { ops, used: p + 1 })
+    Ok(())
+}
+
+/// The instructions of the LZVN stream `s`, up to the end. Their distances and lengths are not
+/// checked against the bytes they make (that is [`decode_onto`]'s).
+pub fn ops(s: &[u8]) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    let mut p = 0;
+    while let Some((op, size)) = next(s, p)? {
+        p += size + shape(op).0;
+        if p > s.len() {
+            return Err(corrupt());
+        }
+        ops.push(op);
+    }
+    Ok(ops)
 }
 
 /// A match after `lits` literals, of `len` bytes at `dist` back.

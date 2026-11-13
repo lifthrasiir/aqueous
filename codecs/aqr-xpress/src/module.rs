@@ -25,17 +25,6 @@ pub fn index(parts: &[Part]) -> Vec<u8> {
     out
 }
 
-/// The parts of `index`.
-pub fn parts(index: &[u8]) -> Result<Vec<Part>> {
-    let mut at = 0;
-    let mut out = Vec::new();
-    while at < index.len() {
-        let mut get = || varint::get(index, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
-        out.push(Part { kept: get()?, data: get()?, record: get()? });
-    }
-    Ok(out)
-}
-
 /// What `index` cuts the inputs into: for each stream, the bytes kept before it, its data and
 /// its record; and the bytes kept after the last.
 #[allow(clippy::type_complexity)]

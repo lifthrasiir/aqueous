@@ -242,7 +242,8 @@ pub fn bwt_in(twice: &[u8], sa: &mut [u32], ws: &mut [u32], st: &mut [u8]) -> u3
 }
 
 /// [`bwt_in`] of `block`, the last symbols as bytes.
-pub fn bwt(block: &[u8]) -> (Vec<u8>, u32) {
+#[cfg(test)]
+fn bwt(block: &[u8]) -> (Vec<u8>, u32) {
     let n = block.len();
     if n == 0 {
         return (Vec::new(), 0);

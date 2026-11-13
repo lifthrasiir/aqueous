@@ -9,7 +9,7 @@ use aqr_common::pool;
 
 use crate::compress;
 use crate::crc;
-use crate::{ALZ_END_MAGIC, ALZ_LEVEL, END_MAGIC, Error, Framing, MAGIC, Result, block_max, corrupt};
+use crate::{ALZ_LEVEL, Error, Framing, Result, block_max, corrupt};
 
 /// The parameters of one stream: its level, bytes of data, and the blocks whose `origPtr`
 /// differs from the one compressing gives (index, `origPtr`).
@@ -123,6 +123,15 @@ impl<'a> Params<'a> {
         self.next = b + 1;
         Ok((b as usize, o as u32))
     }
+
+    /// [`Params::orig_ptr`] while `left` of the stream's blocks given a rank remain, else None.
+    fn next_given(&mut self, left: &mut u64) -> Result<Option<(usize, u32)>> {
+        if *left == 0 {
+            return Ok(None);
+        }
+        *left -= 1;
+        self.orig_ptr().map(Some)
+    }
 }
 
 /// Pages of the windows of the module as a part module ([`decode_part`]): of the input and of
@@ -226,28 +235,18 @@ pub fn run(framing: Framing, params: &[u8], data: &mut dyn Pull, out: &mut dyn P
     // (the block's RLE1 output: it grows on top of the stack, then is written twice onto itself)
     let mut rle: Vec<u8> = Vec::new();
     while let Some((level, n, k)) = p.stream()? {
-        if framing == Framing::Bzip2 {
-            MAGIC.iter().for_each(|&c| w.put(c as u32, 8));
-            w.put((b'0' + level) as u32, 8);
-        }
+        compress::put_start(&mut w, framing, level);
         let max = block_max(level);
         let mut left = k;
-        let mut next_given = |p: &mut Params| -> Result<Option<(u64, u32)>> {
-            if left == 0 {
-                return Ok(None);
-            }
-            left -= 1;
-            p.orig_ptr().map(|(b, r)| Some((b as u64, r)))
-        };
-        let mut given = next_given(&mut p)?;
-        let (mut combined, mut index) = (0u32, 0u64);
+        let mut given = p.next_given(&mut left)?;
+        let (mut combined, mut index) = (0u32, 0usize);
         let mut runs = Runs { r: &mut rd, pending: None, left: n };
         let (mut crc, mut syms) = (!0u32, 0usize);
         // the block in `rle` written, with the rank the params give it
         let mut flush = |rle: &mut Vec<u8>, crc: u32, w: &mut BitWriter, p: &mut Params| -> Result<()> {
             let rank = match given {
                 Some((g, r)) if g == index => {
-                    given = next_given(p)?;
+                    given = p.next_given(&mut left)?;
                     Some(r)
                 }
                 _ => None,
@@ -283,14 +282,7 @@ pub fn run(framing: Framing, params: &[u8], data: &mut dyn Pull, out: &mut dyn P
         if given.is_some() {
             return Err(corrupt());
         }
-        match framing {
-            Framing::Bzip2 => {
-                w.put((END_MAGIC >> 24) as u32, 24);
-                w.put((END_MAGIC & 0xFF_FFFF) as u32, 24);
-                w.put(combined, 32);
-            }
-            Framing::Alz => w.put(ALZ_END_MAGIC, 32),
-        }
+        compress::put_end(&mut w, framing, combined);
         w.put(0, (8 - w.len() % 8) as u32 % 8);
         w.flush_aligned();
         spill(&mut w, out, true)?;
@@ -335,13 +327,6 @@ pub fn decode_streamed(framing: Framing, params: &[u8], inputs: &[&[u8]], len: u
     }
 }
 
-/// The streams of `data`, one after another, compressed as `streams` says.
-pub fn compress(data: &[u8], streams: &[StreamParams], threads: usize) -> Result<Vec<u8>> {
-    let mut params = Vec::new();
-    put_params(&mut params, streams);
-    compress_framed(data, Framing::Bzip2, &params, usize::MAX, threads)
-}
-
 /// The streams of `data` in `framing`, one after another, compressed as the params `p` say, onto
 /// an output of `cap` bytes at most (reserved first, where it is not `usize::MAX`). Natively
 /// on `threads` threads, each a block at a time; on one, each block compressed onto the output.
@@ -353,19 +338,9 @@ pub fn compress_framed(data: &[u8], framing: Framing, p: &[u8], cap: usize, thre
         let d = data.get(at..at.checked_add(usize::try_from(n).map_err(|_| corrupt())?).ok_or_else(corrupt)?);
         let d = d.ok_or(Error("data of another length"))?;
         at += d.len();
-        if framing == Framing::Bzip2 {
-            MAGIC.iter().for_each(|&c| w.put(c as u32, 8));
-            w.put((b'0' + level) as u32, 8);
-        }
+        compress::put_start(&mut w, framing, level);
         let mut left = k;
-        let mut next_given = |r: &mut Params| -> Result<Option<(usize, u32)>> {
-            if left == 0 {
-                return Ok(None);
-            }
-            left -= 1;
-            r.orig_ptr().map(Some)
-        };
-        let mut given = next_given(&mut r)?;
+        let mut given = r.next_given(&mut left)?;
         let mut combined = 0u32;
         // (the output past its bytes at most by a block, before it fails)
         let mut one = |w: &BitWriter, crc: u32| {
@@ -383,7 +358,7 @@ pub fn compress_framed(data: &[u8], framing: Framing, p: &[u8], cap: usize, thre
                         return Err(corrupt());
                     }
                     blk.set_orig_ptr(p);
-                    given = next_given(&mut r)?;
+                    given = r.next_given(&mut left)?;
                 }
                 w.copy(&mut BitReader::new(&blk.bits, 0), blk.nbits);
                 one(&w, blk.crc)?;
@@ -393,7 +368,7 @@ pub fn compress_framed(data: &[u8], framing: Framing, p: &[u8], cap: usize, thre
             compress::each_block(d, level, &mut |s, e, _| {
                 let rank = match given {
                     Some((g, p)) if g == k => {
-                        given = next_given(&mut r)?;
+                        given = r.next_given(&mut left)?;
                         Some(p)
                     }
                     _ => None,
@@ -406,14 +381,7 @@ pub fn compress_framed(data: &[u8], framing: Framing, p: &[u8], cap: usize, thre
         if given.is_some() {
             return Err(corrupt());
         }
-        match framing {
-            Framing::Bzip2 => {
-                w.put((END_MAGIC >> 24) as u32, 24);
-                w.put((END_MAGIC & 0xFF_FFFF) as u32, 24);
-                w.put(combined, 32);
-            }
-            Framing::Alz => w.put(ALZ_END_MAGIC, 32),
-        }
+        compress::put_end(&mut w, framing, combined);
         w.put(0, (8 - w.len() % 8) as u32 % 8);
     }
     if at != data.len() {

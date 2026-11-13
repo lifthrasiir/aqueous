@@ -52,6 +52,12 @@ struct Mf {
     prev: Box<[u32]>,
 }
 
+/// What the match finder takes of the stack: its heads, its links, and itself (two slices).
+pub const MF_HEAP: [u64; 3] = [4 << HBITS, 4 * WINDOW as u64, 16];
+
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(size_of::<Mf>() as u64 == MF_HEAP[2]);
+
 impl Mf {
     fn new() -> Mf {
         Mf { head: vec![NONE; 1 << HBITS].into_boxed_slice(), prev: vec![NONE; WINDOW].into_boxed_slice() }

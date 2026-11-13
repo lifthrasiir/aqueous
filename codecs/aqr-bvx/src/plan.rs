@@ -225,22 +225,17 @@ pub fn read(st: &Stream) -> Result<Plan> {
             plan.segs.push(Seg { end: plan.matches.len() as u32, tail: run });
         }
     };
-    let mut at = 0usize;
     for b in &st.blocks {
         match b {
             Block::Stored(n) => {
                 close(&mut pending, &mut plan);
                 plan.parts.push(Part::Stored(*n));
-                at += *n as usize;
             }
             Block::Lzvn(n, payload) => {
                 close(&mut pending, &mut plan);
-                let mut out = st.data[..at].to_vec();
-                let p = lzvn::parse_onto(payload, &mut out, *n as usize, true)?;
-                let (matches, tail) = lzvn::matches(&p.ops);
+                let (matches, tail) = lzvn::matches(&lzvn::ops(payload)?);
                 plan.parts.push(Part::Lzvn(*n));
                 plan.push_seg(&matches, tail);
-                at += *n as usize;
             }
             Block::Lzfse(b) => {
                 let (start, run, joined) = pending.get_or_insert((plan.matches.len(), 0, false));
@@ -280,7 +275,6 @@ pub fn read(st: &Stream) -> Result<Plan> {
                 };
                 side.pad[..pad.len()].copy_from_slice(pad);
                 plan.parts.push(Part::Lzfse(b.lmd.len() as u32, side));
-                at += b.lmd.iter().map(|t| (t[0] + t[1]) as usize).sum::<usize>();
             }
         }
     }

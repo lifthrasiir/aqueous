@@ -523,10 +523,6 @@ impl Model {
 pub struct Block {
     pub data: Vec<u8>,
     pub tokens: Vec<Token>,
-    /// The distance and length of each token (0 and 1 for a literal).
-    pub spans: Vec<(u32, u32)>,
-    /// Bits the decoder read.
-    pub bits: usize,
 }
 
 /// Decodes the code of a block of `size` bytes of data with `model`.
@@ -534,7 +530,6 @@ pub fn decode_block(code: &[u8], size: usize, model: &mut Model) -> Result<Block
     let mut c = Decoder::new(code);
     let mut data = Vec::with_capacity(size);
     let mut tokens = Vec::new();
-    let mut spans = Vec::new();
     if size > 0 {
         data.push(model.literal(&mut c, 0, 0));
     }
@@ -545,10 +540,8 @@ pub fn decode_block(code: &[u8], size: usize, model: &mut Model) -> Result<Block
             None => {
                 let b = model.literal(&mut c, data[pos - 1], 0);
                 data.push(b);
-                spans.push((0, 1));
             }
             Some(Match { dist, len }) => {
-                spans.push((dist, len));
                 let d = dist as usize;
                 if d == 0 || d > pos || pos + len as usize > size {
                     return Err(corrupt());
@@ -563,7 +556,7 @@ pub fn decode_block(code: &[u8], size: usize, model: &mut Model) -> Result<Block
             return Err(Error("code overrun"));
         }
     }
-    Ok(Block { data, tokens, spans, bits: c.bits_read() })
+    Ok(Block { data, tokens })
 }
 
 /// A block's tokens encoded one by one as they come (the encoding of [`encode_block`]).

@@ -9,7 +9,7 @@ use aqr_common::arith::ArithDecoder;
 
 use crate::lznt1::CHUNK;
 use crate::module::cut_lens;
-use crate::recons::{CTX_VECS, HBITS, SLACK, block_toks, read_head, wasm};
+use crate::recons::{CTX_VECS, MF_HEAP, SLACK, block_toks, read_head, wasm};
 
 /// The memory plan of `lznt1-recons` ([`crate::module::decode`]): of its initial memory
 /// (`initial` bytes), parameters `params`, inputs of `inputs` bytes (data, records, bytes kept,
@@ -38,9 +38,9 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, [records, i
     m.take(wasm::STREAM * streams.len() as u64);
     m.take(len + SLACK as u64);
     // (the match finder, made once for the streams: its heads and links, then itself)
-    m.take(4 << HBITS);
-    m.take(4 * CHUNK as u64);
-    m.take(16);
+    for n in MF_HEAP {
+        m.take(n);
+    }
     for &(data, record) in &streams {
         if data == 0 {
             continue;

@@ -108,7 +108,7 @@ const fn orig_ptr_bit(framing: Framing) -> usize {
 
 impl Block {
     /// The block with `p` for its `origPtr`, which only an order of equal rotations other than
-    /// [`sais::bwt`]'s gives.
+    /// [`sais::bwt_in`]'s gives.
     pub fn set_orig_ptr(&mut self, p: u32) {
         self.orig_ptr = p;
         for k in 0..24 {
@@ -436,41 +436,50 @@ pub fn blocks_framed(data: &[u8], framing: Framing, level: u8, threads: usize) -
     pool::par_map(n, threads, |k| block_framed(&data[cuts[k]..cuts[k + 1]], framing))
 }
 
+/// The header of a stream at `level`: `BZh` and the level's digit, which [`Framing::Alz`] has not.
+pub fn put_start(w: &mut BitWriter, framing: Framing, level: u8) {
+    if framing == Framing::Bzip2 {
+        MAGIC.iter().for_each(|&c| w.put(c as u32, 8));
+        w.put((b'0' + level) as u32, 8);
+    }
+}
+
+/// The end of a stream whose blocks' CRCs combine to `combined`.
+pub fn put_end(w: &mut BitWriter, framing: Framing, combined: u32) {
+    match framing {
+        Framing::Bzip2 => {
+            w.put((END_MAGIC >> 24) as u32, 24);
+            w.put((END_MAGIC & 0xFF_FFFF) as u32, 24);
+            w.put(combined, 32);
+        }
+        Framing::Alz => w.put(ALZ_END_MAGIC, 32),
+    }
+}
+
 /// The stream of `blocks` at `level`: the header, the blocks, the end and the combined CRC.
 pub fn stream(level: u8, blocks: &[Block]) -> Vec<u8> {
-    let bytes: usize = blocks.iter().map(|b| b.nbits / 8 + 1).sum();
-    let mut w = BitWriter::with_capacity(bytes + 16);
-    MAGIC.iter().for_each(|&c| w.put(c as u32, 8));
-    w.put((b'0' + level) as u32, 8);
-    let mut combined = 0u32;
-    for b in blocks {
-        w.copy(&mut BitReader::new(&b.bits, 0), b.nbits);
-        combined = combined.rotate_left(1) ^ b.crc;
-    }
-    w.put((END_MAGIC >> 24) as u32, 24);
-    w.put((END_MAGIC & 0xFF_FFFF) as u32, 24);
-    w.put(combined, 32);
-    w.finish()
+    stream_framed(Framing::Bzip2, level, blocks)
 }
 
 /// The stream of `blocks` (of [`Framing::Alz`]) as ALZip writes it: the blocks and the end.
 pub fn stream_alz(blocks: &[Block]) -> Vec<u8> {
-    let bytes: usize = blocks.iter().map(|b| b.nbits / 8 + 1).sum();
-    let mut w = BitWriter::with_capacity(bytes + 4);
-    for b in blocks {
-        debug_assert_eq!(b.orig_at, orig_ptr_bit(Framing::Alz));
-        w.copy(&mut BitReader::new(&b.bits, 0), b.nbits);
-    }
-    w.put(ALZ_END_MAGIC, 32);
-    w.finish()
+    stream_framed(Framing::Alz, ALZ_LEVEL, blocks)
 }
 
-/// The stream of `blocks` in `framing` at `level` ([`stream`] or [`stream_alz`]).
+/// The stream of `blocks` in `framing` at `level`: the header, the blocks and the end (as ALZip
+/// writes them for [`Framing::Alz`]).
 pub fn stream_framed(framing: Framing, level: u8, blocks: &[Block]) -> Vec<u8> {
-    match framing {
-        Framing::Bzip2 => stream(level, blocks),
-        Framing::Alz => stream_alz(blocks),
+    let bytes: usize = blocks.iter().map(|b| b.nbits / 8 + 1).sum();
+    let mut w = BitWriter::with_capacity(bytes + 16);
+    put_start(&mut w, framing, level);
+    let mut combined = 0u32;
+    for b in blocks {
+        debug_assert!(framing != Framing::Alz || b.orig_at == orig_ptr_bit(Framing::Alz));
+        w.copy(&mut BitReader::new(&b.bits, 0), b.nbits);
+        combined = combined.rotate_left(1) ^ b.crc;
     }
+    put_end(&mut w, framing, combined);
+    w.finish()
 }
 
 #[cfg(test)]

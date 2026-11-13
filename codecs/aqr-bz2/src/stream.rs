@@ -206,7 +206,7 @@ fn undo(
     max_data: usize,
 ) -> Result<()> {
     let at = out.len();
-    unbwt(last, orig, links);
+    unbwt(last, links);
     unrle(last, links, orig, out, max_data)?;
     if want.is_some_and(|want| crc::hash(&out[at..]) != want) {
         return Err(Error("CRC mismatch"));
@@ -421,8 +421,7 @@ fn block(r: &mut Bits, level: u8, last: &mut Vec<u8>) -> Result<usize> {
 }
 
 /// The links of the inverse BWT: for each row, the row of the rotation one symbol on.
-fn unbwt(last: &[u8], orig: u32, links: &mut Vec<u32>) {
-    let _ = orig;
+fn unbwt(last: &[u8], links: &mut Vec<u32>) {
     let mut start = [0u32; 256];
     for &c in last {
         start[c as usize] += 1;

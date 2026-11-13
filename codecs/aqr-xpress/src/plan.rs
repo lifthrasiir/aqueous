@@ -8,7 +8,7 @@ use aqr_api::stack::{Sim, block, whole};
 use aqr_common::arith::ArithDecoder;
 
 use crate::module::cut_lens;
-use crate::recons::{CTX_VECS, SCRATCH, SLACK, block_toks, read_head, wasm};
+use crate::recons::{CTX_VECS, MF_BYTES, SCRATCH, SLACK, block_toks, read_head, wasm};
 
 /// The memory plan of `xpress-recons` ([`crate::module::decode`]): of its initial memory
 /// (`initial` bytes), parameters `params`, inputs of `inputs` bytes (data, records, bytes kept,
@@ -37,9 +37,8 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, [records, i
     m.take(wasm::STREAM * streams.len() as u64);
     m.take(len + SLACK as u64);
     // (the match finder, made once for the streams)
-    for n in [65536, 65536] {
-        m.take(4 * n);
-    }
+    m.take(MF_BYTES);
+    m.take(MF_BYTES);
     for &(data, record) in &streams {
         if data == 0 {
             continue;
