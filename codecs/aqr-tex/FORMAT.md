@@ -13,10 +13,13 @@ rebuilds the blocks of a texture of a group of block formats from its coded form
 - `etc-recons` (§13): ETC1, ETC2 and EAC, each part of a block (RGB, EAC) as `bc7-recons`'s
   blocks, the fields of its mode by the pixels predicted, its indices by a ladder of its levels;
 - `pvrtc-recons` (§14): PVRTC1, a surface's colours (as `bc7-recons`'s blocks, new ones by the
-  words around) then its modulation (by the images between which it blends).
+  words around) then its modulation (by the images between which it blends);
+- `astc-recons` (§15): ASTC of 2D footprints, as `bc7-recons`, of its fields as ASTC reads them
+  and the codes of its integer sequences as choices among those of their values.
 
 The document is meant to be complete: an implementation of the modules can be written from it
-alone (with the partition tables of BC7 and the bit layouts of BC6H, which are their formats').
+alone (with the partition tables of BC7, the bit layouts of BC6H and what ASTC reads, which are
+their formats').
 Sections marked *(encoder)* describe the choices this implementation makes when it builds
 formulas; the modules do not depend on them.
 
@@ -36,6 +39,7 @@ Contents:
 12. [`bc6h-recons`](#12-bc6h-recons)
 13. [`etc-recons`](#13-etc-recons)
 14. [`pvrtc-recons`](#14-pvrtc-recons)
+15. [`astc-recons`](#15-astc-recons)
 
 ## 1. Conventions
 
@@ -56,7 +60,8 @@ Contents:
 
   ```text
   u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5 (8: BC7, of §11; 6, 7: BC6H, of §12;
-                   16 to 23: ETC and EAC, of §13; 32, 33: PVRTC1, of §14)
+                   16 to 23: ETC and EAC, of §13; 32, 33: PVRTC1, of §14; 48: ASTC, of §15,
+                   then its footprint)
   varint  W        the width of the largest mipmap, in pixels, 1 to 65536
   varint  H        its height, 1 to 65536
   varint  M        the mipmaps of a layer, 1 to bitlen(max(W, H))
@@ -826,3 +831,122 @@ each of bucket `clamp(floor((Σ (Q_c − A_c)·(B_c − A_c)·8 + floor(l2 / 2))
 - The pixels of 2 bits a pixel of M = 1 are PowerVR's decoders' (and texture2ddecoder's): their
   stored values of weights 0, 3, 5, 8, none punch-through, which the Khronos description has as
   those of 4 bits of M = 1.
+
+## 15. `astc-recons`
+
+- **Module**: name `astc-recons`, version 1.
+- **Params**: the layout of §2, of format 48 and its footprint (fw, fh: a u8 each) one of ASTC's
+  2D footprints (4×4 to 12×12).
+- **Resources**, **inputs** and **output**: as §2's.
+
+The walk is §5's, of one part (the block), its contexts and cache those of §15.2 to §15.4; the
+planes §6's, of 4 channels (R, G, B, A) of 8 bits, of blocks of fw × fh pixels.
+
+### 15.1 Blocks
+
+A block is 16 bytes, its bits numbered from bit 0 of byte 0 up, read as ASTC's (the Khronos Data
+Format Specification 1.3, §23) are: a *void-extent* block where its bits 0–8 are 0x1FC and bits
+10 and 11 are 1; a *normal* block where its block mode is of a 2D grid not reserved, of at most 64
+weights in 24 to 96 bits, its grid within the footprint, of no dual planes of 4 partitions, its
+colour values at most 18 and of at least `ceil(13·n / 5)` bits; else an *error* block. Of a
+normal block, its fields: the block mode (bits 0–10: the grid wx × wy, its weights' range, dual
+planes), the partitions (bits 11–12, plus 1), the partition index (the *seed*, bits 13–22), the
+endpoint modes (of one partition bits 13–16; else bits 23–24 the *selector*, 0 of one mode for
+all in bits 25–28, else of each partition its class bit and 2 mode bits, bits 25–28 and the bits
+just below the weights), the component selector of dual planes (2 bits below those), the colour
+values (from bit 17, or 29, in the largest of ASTC's ranges, 0 to 5 up to 0 to 255,
+whose integer sequence fits the bits up to the selector or the extra bits), the bits between the
+colour values' end and what lies above it (*unused*), and the weights (from bit 127 down, the bit
+order reversed). Of the integer sequences (ASTC's), each group of 5 trits' 8 bits, or of 3 quints'
+7 bits, is the *code* of its values: those present of a group cut short (the others 0). The codes
+of a group of values are those that decode to them (13 tuples of trits and 3 of quints have two,
+and a group cut short may have several), ascending.
+
+Its pixels, which the planes hold: of normal blocks, of each partition its endpoints by its mode
+as ASTC decodes them of its colour values unquantized (but of the HDR modes 2, 3, 7, 11, 14 and 15
+an approximation: of 2, 3 and 11 the values as they are; of 7, e1 = (v0, v1, v2) and e0 = e1 −
+v3/2 of each channel; of 14 and 15 as 11, alpha v6, v7), each texel's weight by ASTC's infill of
+the grid's weights unquantized (of dual planes, the second plane's of the selected component), its
+partition by ASTC's function of the seed, and of each channel `(C0·(64 − i) + C1·i + 32) / 64 >> 8`
+of the endpoints' channels times 257; of a void-extent block the top byte of each of its 16-bit
+channels; of an error block (255, 0, 255, 255).
+
+### 15.2 The choices
+
+As §11.2, the head of a normal block its bits below its weights plus 2^127, of any other all 128
+of its bits.
+
+### 15.3 New blocks
+
+Its kind by `tree_2(kind[(kl·4 + ku)·4 …])`, kl and ku the kinds of L and U (void-extent 0, error
+1, normal 2; 3 where there is none); a value of 3 is normal.
+
+- An error block: its 16 bytes, raw.
+- A void-extent block: bit 9 by `void[256]`; the extents (bits 12–63) all 1 by `void[257]`, else
+  their 52 bits raw from the top; then its channels k = 0 to 3 (R, G, B, A, bits 64 + 16k), each
+  `(pred + unzz(v)) mod 2^16` of v by `wtoken(void[(d·4 + k)·32 …], void_next[(d·4 + k)·32 …])`
+  (d bit 9; the residual of [−2^15, 2^15)), pred the channel of L where L is void-extent, else of
+  bit 9 0 the mean of the pixels predicted (rounded: of the coarse predictions of all its texels,
+  of mipmap m < M − 1; else of the column to its left and the row above in the plane; 0x80 of
+  none) times 257, of bit 9 1 0x3C00. Bits 0–8 are 0x1FC, 10 and 11 are 1.
+- A normal block (§15.4): its fields but its weights, then its weights (§15.5).
+
+### 15.4 New normal blocks
+
+1. The block mode: where L is normal, `same[0]` (1: L's); else where U is normal and its mode is
+   not L's (where L is normal), `same[1]` (1: U's); else `tree_11(mode)`.
+2. The partitions: `tree_2(np[l·4 …])` plus 1, l L's partitions minus 1 where L is normal, else 4.
+3. Of several partitions: the seed, `same[2]` (1: L's) where L is normal of as many partitions,
+   else `tree_10(seed)`; the selector `tree_2(cem[1280 …])`.
+4. The endpoint modes: of one partition or the selector 0, one for all by
+   `tree_4(cem[(np − 1)·256 + c·16 …])` (c L's first mode where L is normal, else 16); else of each
+   partition p in turn, its class bit `cem[1284 + (sel − 1)·4 + min(p, 3)]` (1: the class sel, 0: sel
+   − 1) and mode `tree_2(cem[1300 + (class·4 + min(p, 3))·4 …])`.
+5. Of dual planes, the component `tree_2(ccs)`.
+6. The colour values (their range and number by the fields so far, §15.1), each by its predicted
+   value: of the first of L and U that is normal of the same partitions, modes and range, its
+   value unquantized (source 0); else of the modes 0, 4, 6, 8, 10 and 12 by the pixels predicted
+   of the partition (source 1): of mipmap m < M − 1 the coarse predictions of its texels, else the
+   column to the left and the row above; lo the first of the least sum of R, G, B, hi the first of
+   the most; of mode 0 (Llo, Lhi), 4 (Llo, Lhi, lo_A, hi_A), 8 (lo_R, hi_R, lo_G, hi_G, lo_B, hi_B),
+   12 (those, lo_A, hi_A), 6 (hi_R, hi_G, hi_B, s), 10 (hi_R, hi_G, hi_B, s, lo_A, hi_A), L the sum
+   divided by 3 and s = `clamp(256·sum(lo) / max(sum(hi), 1), 0, 255)`; else 128 (source 2). The
+   values of a range in the order of what they unquantize to (then of their own) are its *ranks*;
+   of the rank pr of the first nearest the prediction:
+
+   ```text
+   ctx  = ((source·8 + min(place, 7))·5 + min(cr/4, 4))       (place: of the partition's values)
+   v    = token(colour[ctx·16 …], colour_next[ctx·16 …])
+   rank = (pr + unzz(v)) mod L                                 (L the range's levels)
+   ```
+
+   Then the codes of its groups (below).
+7. The unused bits from the lowest, the k-th by `unused[min(k, 7)]`.
+
+The *codes* of a sequence's groups in turn: where its values have several codes (§15.1), the
+index of its code among them by `tree_n(choice[((t·6 + k)·2 + w)·8 …])` (n the bits of their
+number less one, at most that less one; t 1 of trits, 0 of quints; k the values of the group; w 1
+of weights, 0 of colour values).
+
+*(encoder)* The residual is of ranks of [−L/2, L/2): `d = (rank − pr) mod L`, less L where d ≥
+(L + 1)/2.
+
+### 15.5 Weights
+
+The endpoints of each partition (§15.1) decoded. Of each weight i of the grid's values (grid point
+g = i / planes at (gx, gy), plane i mod planes): its texel (tx, ty) = `((gx·(fw − 1) + (wx − 1)/2)
+/ (wx − 1), …)` (0 of wx = 1, and likewise of y); e0, e1 the endpoints of its partition there;
+the channels all but the selected component of plane 0, it alone of plane 1 (all of no dual
+planes). Of mipmap m < M − 1, wp = `clamp(floor((Σ (Q_c − e0_c)·(e1_c − e0_c)·64 + floor(l2/2)) /
+l2), 0, 64)` of Q the coarse prediction at the texel, where l2 = Σ (e1_c − e0_c)² > 0; and m the MED
+of the weights (unquantized) to the left, above and above to the left in the grid (of the same
+plane), else the one there is of the left and upper ones. The prediction and its agreement a: wp
+and min(|wp − m| / 12, 2); wp and 2 of no m; m and 3 of no wp; 32 and 3 of neither. The weight
+by its rank as the colour values', `ctx = (wr·4 + a)·2 + plane` (wr the range's index) of
+`weight` and `weight_next`; then the codes of its groups.
+
+### 15.6 Encoding *(encoder)*
+
+- `.astc` files (astcenc's) of 2D footprints, KTX files of OpenGL's internal formats 0x93B0–0x93BD
+  and 0x93D0–0x93DD, KTX 2 of Vulkan's 157–184 and 1000066000–1000066013, PVR 3 of pixel formats
+  27–40, as §11.6; Unity's textures of formats 48–59 and 66–71 by aqr-bundle.

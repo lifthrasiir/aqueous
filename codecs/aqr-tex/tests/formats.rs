@@ -275,13 +275,12 @@ fn containers() {
     let d = ktx(&c, &cb, 0, 6, false);
     assert_eq!(container::detect(&d).unwrap().layout, c);
     assert!(eval(&formula::encode_container(&d, 1).unwrap()) == d);
-    // an `.astc` file is one surface: ASTC not taken yet, its layout found
+    // an `.astc` file is one surface
     let mut a = vec![0x13, 0xab, 0xa1, 0x5c, 6, 5, 1, 13, 0, 0, 7, 0, 0, 1, 0, 0];
-    a.extend(vec![0u8; 3 * 2 * 16]);
-    assert_eq!(
-        container::detect(&a).unwrap().layout,
-        Layout { format: Format::Astc { w: 6, h: 5 }, width: 13, height: 7, mips: 1, layers: 1 }
-    );
+    a.extend(astc_random(3 * 2, 5, (6, 5)));
+    let l = Layout { format: Format::Astc { w: 6, h: 5 }, width: 13, height: 7, mips: 1, layers: 1 };
+    assert_eq!(container::detect(&a).unwrap().layout, l);
+    assert!(eval(&formula::encode_container(&a, 1).unwrap()) == a);
 }
 
 /// Random blocks of BC6H: of every header in turn (the reserved ones too), some repeated.
@@ -654,5 +653,96 @@ fn pvrtc_smooth_codes_small() {
     let z = zstd::bulk::compress(&blocks, 19).unwrap().len();
     let cost = texture::encode_any(&l, &blocks, 1).2.map(|c| c / 65536 / 8);
     eprintln!("pvrtc smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
+    assert!(n * 10 < z * 9, "{n} against zstd's {z}");
+}
+
+/// Random blocks of ASTC (any bits: most are error blocks, some void-extent), and blocks of
+/// legal fields: of each random block a normal one of its block mode where it is one.
+fn astc_random(n: usize, seed: u64, fp: (u32, u32)) -> Vec<u8> {
+    let mut b = etc_random(n, 16, seed);
+    // (some made void-extent blocks, of all-1 extents)
+    for (i, blk) in b.chunks_mut(16).enumerate() {
+        if i % 7 == 3 {
+            let mut v = u128::from_le_bytes(blk.try_into().unwrap());
+            v = v & !0xfff | 0x1fc | 3 << 10 | ((1u128 << 52) - 1) << 12;
+            blk.copy_from_slice(&v.to_le_bytes());
+        }
+        let _ = fp;
+    }
+    b
+}
+
+#[test]
+fn astc_layouts() {
+    for (fp, size, mips, layers) in
+        [((4u8, 4u8), (16, 16), 5, 1), ((6, 5), (37, 23), 3, 2), ((8, 8), (64, 64), 7, 1), ((12, 12), (100, 50), 2, 1)]
+    {
+        let l = Layout { format: Format::Astc { w: fp.0, h: fp.1 }, width: size.0, height: size.1, mips, layers };
+        let b = astc_random(l.len() as usize / 16, fp.0 as u64 * 31 + fp.1 as u64, (fp.0 as u32, fp.1 as u32));
+        round(&l, &b);
+    }
+    let l = Layout { format: Format::Astc { w: 4, h: 4 }, width: 1024, height: 520, mips: 2, layers: 1 };
+    round(&l, &astc_random(l.len() as usize / 16, 77, (4, 4)));
+}
+
+/// ASTC blocks of 4x4 of `img` (`w` × `h`): one partition of CEM 8 (RGB direct, 8 bits each: the
+/// least and most of each channel), a grid of 4x4 weights of 3 bits (nearest each pixel's place
+/// between the endpoints).
+fn astc_encode(img: &[[u8; 4]], w: usize, h: usize) -> Vec<u8> {
+    use aqr_tex::astc::{Block, Kind};
+    let mut out = vec![];
+    for by in 0..h.div_ceil(4) {
+        for bx in 0..w.div_ceil(4) {
+            let px: Vec<[u8; 4]> =
+                (0..16).map(|p| img[(by * 4 + p / 4).min(h - 1) * w + (bx * 4 + p % 4).min(w - 1)]).collect();
+            let lo: [u8; 3] = std::array::from_fn(|c| px.iter().map(|v| v[c]).min().unwrap());
+            let hi: [u8; 3] = std::array::from_fn(|c| px.iter().map(|v| v[c]).max().unwrap());
+            let mut b = Block {
+                kind: Kind::Normal,
+                mode: 83,
+                wx: 4,
+                wy: 4,
+                wr: 5,
+                np: 1,
+                cem: [8; 4],
+                cr: 16,
+                ..Default::default()
+            };
+            b.colours.n = 6;
+            for c in 0..3 {
+                (b.colours.v[2 * c], b.colours.v[2 * c + 1]) = (lo[c], hi[c]);
+            }
+            let d: [i32; 3] = std::array::from_fn(|c| hi[c] as i32 - lo[c] as i32);
+            let l2 = d.iter().map(|v| v * v).sum::<i32>().max(1);
+            b.weights.n = 16;
+            for p in 0..16 {
+                let t: i32 = (0..3).map(|c| (px[p][c] as i32 - lo[c] as i32) * d[c]).sum();
+                b.weights.v[p] = ((t * 7 + l2 / 2) / l2).clamp(0, 7) as u8;
+            }
+            (b.unused_at, b.unused_n) = (17 + 48, 128 - 48 - 17 - 48);
+            let raw = b.write();
+            assert_eq!(Block::read(&raw, (4, 4)).write(), raw);
+            assert_eq!(Block::read(&raw, (4, 4)).kind, Kind::Normal);
+            out.extend(raw);
+        }
+    }
+    out
+}
+
+#[test]
+fn astc_smooth_codes_small() {
+    let (w, h) = (128, 64);
+    let (mut blocks, mut mips, mut mw, mut mh) = (vec![], 0, w, h);
+    while mips < 5 {
+        blocks.extend(astc_encode(&image(mw, mh, (1 << mips) as f64), mw, mh));
+        mips += 1;
+        (mw, mh) = (mw / 2, mh / 2);
+    }
+    let l = Layout { format: Format::Astc { w: 4, h: 4 }, width: w as u32, height: h as u32, mips, layers: 1 };
+    assert_eq!(l.len() as usize, blocks.len());
+    let n = round(&l, &blocks);
+    let z = zstd::bulk::compress(&blocks, 19).unwrap().len();
+    let cost = texture::encode_any(&l, &blocks, 1).2.map(|c| c / 65536 / 8);
+    eprintln!("astc smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
     assert!(n * 10 < z * 9, "{n} against zstd's {z}");
 }

@@ -3,7 +3,8 @@
 Block-compressed textures rebuilt bit for bit from one coded stream (`FORMAT.md`), a module for
 each group of formats: `bcn-recons` of BC1 to BC5 (DXT1–DXT5, ATI1, ATI2), `bc7-recons` of BC7,
 `bc6h-recons` of BC6H, `etc-recons` of ETC1, ETC2 (RGB, RGBA, punch-through alpha) and EAC (R11,
-RG11, signed or not), `pvrtc-recons` of PVRTC1 (4 and 2 bits a pixel).
+RG11, signed or not), `pvrtc-recons` of PVRTC1 (4 and 2 bits a pixel), `astc-recons` of ASTC (of
+every 2D footprint, LDR and HDR).
 The containers are taken apart around them: DDS files (the header and whatever follows the blocks
 kept as they are), and KTX, KTX 2, PVR (version 3) and astcenc's `.astc` files (the bytes between
 their surfaces kept, the module's output cut into the surfaces where the file has them), the
@@ -12,7 +13,7 @@ uncompressed 8-, 24- and 32-bit pixels go surface by surface to aqr-raw's `raste
 
 The modules know nothing of containers: a recompressor that finds blocks of a known layout in a
 format of its own (an engine's bundles: Unity's textures in aqr-bundle) applies them the same
-way (`formula::apply`). ASTC is read in the containers (and Unity's textures) but not taken yet.
+way (`formula::apply`).
 
 ## How it does
 
@@ -117,6 +118,22 @@ nearest), 0.42 of zstd -19. The pixels matched texture2ddecoder's on random word
 of 2 bits a pixel once its stored values are of weights 0, 3, 5, 8 and never punch-through (as
 PowerVR's decoders; the Khronos description has mode 1's weights). PVRTC2 is not taken.
 
+### ASTC
+
+A block is read into its fields as ASTC reads them, and written back; one that does not come back
+as it was (illegal ones, reserved modes) is an error block, kept as it is. Of the integer
+sequences, the packed trits and quints of each group are a choice among the codes of its values
+(13 tuples of trits and 3 of quints have two codes, and a group cut short several), which an
+encoder makes the same way each time: so any bits are some values and choices, the choices cheap.
+Blocks are copies as BC7's, or new: their block mode, partitions, endpoint modes, colour values
+(from a neighbour of the same configuration, or from the pixels predicted for the modes of direct
+and scaled colours) and weights (by where the pixel predicted at each grid point falls between
+the endpoints there, and by the weights around it in the grid), in ranks of what they unquantize
+to. HDR endpoint modes predict only roughly. On a smooth texture of 4×4 blocks (CEM 8, a grid of
+4×4 weights of 3 bits; `tests/formats.rs`), 0.67 of zstd -19. The decoding was within 1 of
+texture2ddecoder's on every texel of 485 legal LDR blocks of random bits (it rounds the 8 bits
+of the interpolation otherwise).
+
 ## Design
 
 Measured on the first 400 files of the sample (123 MB) by code length, before the coder was
@@ -172,10 +189,11 @@ written (the bits of each choice are of BC1 unless said):
   the mispredictions it saves), and the decoder's read-ahead on the encoder too. Across stripes, what is left serial bounds one file: the
   mipmaps too small to split (about 6% of a 2048×2048 texture's blocks) and a stripe of each
   split one, about 6.4 times faster than one thread at best for that texture.
-- **Formats.** ASTC (its containers are read already); PVRTC2.
-- **BC6H, ETC, EAC, PVRTC** are not measured on real textures (HDR environment maps; mobile
+- **Formats.** PVRTC2; ASTC of 3D footprints.
+- **BC6H, ETC, EAC, PVRTC, ASTC** are not measured on real textures (HDR environment maps; mobile
   games' textures, as of Android and iOS packages); their models were tried only on smooth
-  textures of simple encoders.
+  textures of simple encoders. Encoders to make samples of real images with (astcenc,
+  Compressonator, DirectXTex's texconv) are to be run as black boxes.
 - **BC7.** Most of its bits are indices; a model of their levels as an image (residuals from a
   predicted level) rather than the joint buckets of two predictions may do better on 4-bit
   indices. Real textures of mobile formats are missing (the sample is of Unity on Windows).
@@ -217,8 +235,10 @@ let node = formula::apply(&mut its_formula, blocks, &layout, threads);
 | `src/etc.rs` | ETC1's, ETC2's and EAC's blocks: modes, fields and the bits left over, pixels |
 | `src/etcm.rs` | ETC1, ETC2 and EAC as a family of the walk: their parts (RGB, EAC), models and ladders |
 | `src/pvrtc.rs` | PVRTC1: its words, images and pixels, Morton order, and its family of two passes |
+| `src/astc.rs` | ASTC's blocks: their fields read and written back, integer sequences and their codes, unquantization, partitions, pixels |
+| `src/astcm.rs` | ASTC as a family of the walk: copies, new blocks' fields, weights by their grid points |
 | `src/texture.rs` | The walk over a texture's surfaces (of any family of formats), the stripes and their threads |
 | `src/module.rs`, `src/formula.rs` | The modules, and formulas of DDS files and the other containers |
 | `tests/dds.rs` | Every format and layout (mipmaps, cube maps, DX10 arrays, odd sizes), stripes on any number of threads, pixels, trailers, files not taken, corrupted inputs |
-| `tests/formats.rs` | The other groups (BC7, BC6H, ETC and EAC, PVRTC): random blocks of every mode, stripes, smooth textures; the containers, DDS's DX10 |
+| `tests/formats.rs` | The other groups (BC7, BC6H, ETC and EAC, PVRTC, ASTC): random blocks of every mode, stripes, smooth textures; the containers, DDS's DX10 |
 | `examples/bench.rs` | `aqr-tex-bench` |

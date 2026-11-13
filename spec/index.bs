@@ -6133,6 +6133,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/asar-recons.wasm" title="crates/aqr-modules/wasm/asar-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-asar/FORMAT.md" title="codecs/aqr-asar/FORMAT.md">R</a>
     <tr>
+      <td><code>74130201ab88df03bbdbaf019f0e4f97395b9cd0625a8ed94046de0761e9c762</code>
+      <td>astc-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/astc-recons.wasm" title="crates/aqr-modules/wasm/astc-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tex/FORMAT.md" title="codecs/aqr-tex/FORMAT.md">R</a>
+    <tr>
       <td><code>6d0945d550a86fdf62dc44885b7378f7e88e75f68e003869b02bb36f842ab026</code>
       <td>azo-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/azo-recons.wasm" title="crates/aqr-modules/wasm/azo-recons.wasm">D</a>

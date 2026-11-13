@@ -6,6 +6,8 @@
 
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
 
+pub mod astc;
+pub mod astcm;
 pub mod bc;
 pub mod bc6h;
 pub mod bc7;

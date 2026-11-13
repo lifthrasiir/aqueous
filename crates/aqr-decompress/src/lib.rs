@@ -327,6 +327,8 @@ pub const BC6H: Module = aqr_tex::formula::MODULE_BC6H;
 pub const ETC: Module = aqr_tex::formula::MODULE_ETC;
 /// The blocks of a PVRTC1 texture of a layout (its params), a surface at a time.
 pub const PVRTC: Module = aqr_tex::formula::MODULE_PVRTC;
+/// The blocks of an ASTC texture (of a 2D footprint) of a layout (its params), as [`BC7`]'s.
+pub const ASTC: Module = aqr_tex::formula::MODULE_ASTC;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
@@ -497,6 +499,7 @@ const NATIVE: &[Entry] = &[
     entry(BC6H),
     entry(ETC),
     entry(PVRTC),
+    entry(ASTC),
     entry(PDF),
     entry(SQLITE),
     entry(FASTA),

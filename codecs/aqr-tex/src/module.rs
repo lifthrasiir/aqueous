@@ -93,3 +93,13 @@ pub fn plan_pvrtc(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Opti
 pub fn decode_pvrtc(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     decode_of::<crate::pvrtc::Pvrtc>(params, inputs, len, threads)
 }
+
+/// `astc-recons`'s plan ([`plan_of`]).
+pub fn plan_astc(params: &[u8], inputs: &[u64], initial: u64, len: u64) -> Option<(u64, u64)> {
+    plan_of::<crate::astcm::Astc>(params, inputs, initial, len)
+}
+
+/// `astc-recons` ([`decode_of`]).
+pub fn decode_astc(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    decode_of::<crate::astcm::Astc>(params, inputs, len, threads)
+}

@@ -447,6 +447,11 @@ path = "src/bin/pvrtc-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "astc-recons"
+path = "src/bin/astc-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "mp3-recons"
 path = "src/bin/mp3-recons.rs"
 required-features = ["wasm"]

@@ -20,6 +20,7 @@ pub const MODULE_BC7: Module = Module::new("bc7-recons", 1).with_task_plan(memor
 pub const MODULE_BC6H: Module = Module::new("bc6h-recons", 1).with_task_plan(memory::<crate::bc6h::Bc6h>);
 pub const MODULE_ETC: Module = Module::new("etc-recons", 1).with_task_plan(memory::<crate::etcm::Etc>);
 pub const MODULE_PVRTC: Module = Module::new("pvrtc-recons", 1).with_plan(memory_whole::<crate::pvrtc::Pvrtc>);
+pub const MODULE_ASTC: Module = Module::new("astc-recons", 1).with_task_plan(memory::<crate::astcm::Astc>);
 
 /// The module of the formats of group `g`.
 pub fn module(g: Group) -> Module {
@@ -29,7 +30,7 @@ pub fn module(g: Group) -> Module {
         Group::Bc6h => MODULE_BC6H,
         Group::Etc => MODULE_ETC,
         Group::Pvrtc => MODULE_PVRTC,
-        _ => unimplemented!("{g:?}"),
+        Group::Astc => MODULE_ASTC,
     }
 }
 
@@ -142,6 +143,7 @@ pub fn decode_any(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> a
         "bc6h-recons" => crate::module::decode_bc6h(&a.params, inputs, a.len, threads),
         "etc-recons" => crate::module::decode_etc(&a.params, inputs, a.len, threads),
         "pvrtc-recons" => crate::module::decode_pvrtc(&a.params, inputs, a.len, threads),
+        "astc-recons" => crate::module::decode_astc(&a.params, inputs, a.len, threads),
         _ => return Err(aqr_formula::Error::new(format!("{}: not of aqr-tex", a.module.name))),
     };
     r.map_err(|e| aqr_formula::Error::new(e.0))

@@ -22,6 +22,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/asar-recons.block"),
     },
     Known {
+        name: "astc-recons",
+        version: 1,
+        sha512_256: hex("74130201ab88df03bbdbaf019f0e4f97395b9cd0625a8ed94046de0761e9c762"),
+        block: include_bytes!("../wasm/astc-recons.block"),
+    },
+    Known {
         name: "azo-recons",
         version: 1,
         sha512_256: hex("6d0945d550a86fdf62dc44885b7378f7e88e75f68e003869b02bb36f842ab026"),
