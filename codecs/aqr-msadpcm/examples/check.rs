@@ -1,5 +1,5 @@
 //! The ADPCM waves of XACT wave banks (`.xwb`, version 42 on, not compact) coded: the record's
-//! bytes against the blocks', zstd -19 of the blocks, each wave given back, and the speeds.
+//! bytes against the blocks', zstd -3 of the blocks, each wave given back, and the speeds.
 //!
 //! ```sh
 //! cargo run --release -p aqr-msadpcm --example aqr-msadpcm-check -- FILE.xwb...
@@ -34,14 +34,14 @@ fn main() {
             let t = std::time::Instant::now();
             assert!(codec::decode(l, &rec, used).unwrap() == w[..used], "{p}: wave {i} not given back");
             back += t.elapsed().as_secs_f64();
-            zstd += zstd::bulk::compress(&w[..used], 19).unwrap().len();
+            zstd += zstd::bulk::compress(&w[..used], 3).unwrap().len();
             (b, r) = (b + used, r + rec.len());
         }
         println!("{p}: {:.2} MB of blocks, record {:.3}", b as f64 / 1e6, r as f64 / b.max(1) as f64);
         (blocks, record) = (blocks + b, record + r);
     }
     println!(
-        "all: {:.2} MB, record {:.2} MB ({:.3}), zstd -19 {:.3}; encode {:.1} MB/s, decode {:.1} MB/s",
+        "all: {:.2} MB, record {:.2} MB ({:.3}), zstd -3 {:.3}; encode {:.1} MB/s, decode {:.1} MB/s",
         blocks as f64 / 1e6,
         record as f64 / 1e6,
         record as f64 / blocks.max(1) as f64,

@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = ["encode"]
-# The formulas (`formula`); without it, the code of the module alone.
+# The formulas (`formula`).
 encode = ["dep:aqr-formula"]
 
 [dependencies]
@@ -18,4 +18,3 @@ aqr-vorbis = { path = "../aqr-vorbis" }
 
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }
-aqr-common = { path = "../../crates/aqr-common" }

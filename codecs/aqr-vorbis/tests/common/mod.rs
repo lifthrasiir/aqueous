@@ -48,9 +48,9 @@ pub fn codebook(w: &mut Writer, dims: u32, lengths: &[u32], ordered: bool, looku
     }
 }
 
-fn residue(w: &mut Writer, kind: u32, end: u32, partition: u32) {
+fn residue(w: &mut Writer, kind: u32, begin: u32, end: u32, partition: u32) {
     w.bits(kind, 16);
-    w.bits(0, 24);
+    w.bits(begin, 24);
     w.bits(end, 24);
     w.bits(partition - 1, 24);
     w.bits(1, 6); // 2 classifications
@@ -66,6 +66,11 @@ fn residue(w: &mut Writer, kind: u32, end: u32, partition: u32) {
 }
 
 pub fn setup_bytes() -> Vec<u8> {
+    setup_bytes_with_residue(0, 96)
+}
+
+/// [`setup_bytes`] with the first residue's `begin` and `end` as given.
+pub fn setup_bytes_with_residue(begin: u32, end: u32) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(5, 8);
     b"vorbis".iter().for_each(|&c| w.bits(c as u32, 8));
@@ -97,9 +102,9 @@ pub fn setup_bytes() -> Vec<u8> {
         w.bits(x, 7);
     }
     w.bits(2, 6); // 3 residues
-    residue(&mut w, 2, 96, 8);
-    residue(&mut w, 0, 64, 16);
-    residue(&mut w, 1, 50, 8);
+    residue(&mut w, 2, begin, end, 8);
+    residue(&mut w, 0, 0, 64, 16);
+    residue(&mut w, 1, 0, 50, 8);
     w.bits(1, 6); // 2 mappings
     // mapping 0: one submap, channels 0 and 1 coupled, floor 0, residue 0 (type 2)
     w.bits(0, 16);

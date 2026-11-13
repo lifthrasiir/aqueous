@@ -197,9 +197,9 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// A layout of 1 to 255 channels and of 8 or more bytes per channel, a multiple of 4.
+    /// A layout of 1 to 255 channels and of 8 to 2^20 bytes per channel, a multiple of 4.
     pub fn new(channels: usize, per_channel: usize) -> Option<Layout> {
-        ((1..=255).contains(&channels) && per_channel >= 8 && per_channel.is_multiple_of(4))
+        ((1..=255).contains(&channels) && (8..=1 << 20).contains(&per_channel) && per_channel.is_multiple_of(4))
             .then_some(Layout { channels, per_channel })
     }
 

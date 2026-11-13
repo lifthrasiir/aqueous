@@ -1,9 +1,9 @@
 //! `aqr-fsb ima FILE...|-`: the IMA ADPCM samples of FSB5 banks through aqr-ima's record and back,
 //! its size and speed.
 //!
-//! `aqr-fsb vorbis FILE...` (or `-` for the files' names on standard input): the Vorbis samples of FSB5 banks parsed to the values their
-//! packets code (aqr-vorbis), with their setups from the database, and written back; what the
-//! packets' bits code, by field.
+//! `aqr-fsb vorbis FILE...` (or `-` for the files' names on standard input): the Vorbis samples
+//! of FSB5 banks parsed to the values their packets code (aqr-vorbis), with their setups from
+//! the database, and written back; what the packets' bits code, by field.
 
 use std::time::Instant;
 

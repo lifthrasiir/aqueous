@@ -54,7 +54,7 @@ impl Header {
     }
 }
 
-/// The chunk types read here.
+/// A sample's chunk of its channel count (a byte).
 pub const CHUNK_CHANNELS: u32 = 1;
 /// A Vorbis sample's: the CRC-32 of its setup header, then (optionally) a seek table.
 pub const CHUNK_VORBIS: u32 = 11;

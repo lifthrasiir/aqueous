@@ -6,7 +6,7 @@ fn u16le(d: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(d.get(at..at + 2)?.try_into().ok()?))
 }
 
-fn u32le(d: &[u8], at: usize) -> Option<u32> {
+pub fn u32le(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(at..at + 4)?.try_into().ok()?))
 }
 
@@ -16,19 +16,14 @@ pub struct Wem {
     pub channels: usize,
     pub rate: u32,
     pub samples: u32,
-    /// The `vorb` fields' size (0x2A where they are in `fmt `).
-    pub vorb_size: usize,
     /// The audio packets lack their packet type and window flags.
     pub mod_packets: bool,
     /// log2 of the short and long block sizes.
     pub blocksize_pows: [u8; 2],
-    pub uid: u32,
     /// The stripped setup header's bytes (after its packet header).
     pub setup: Range<usize>,
     /// The audio packets' bytes (each after its packet header).
     pub packets: Vec<Range<usize>>,
-    /// The `data` chunk's contents.
-    pub data: Range<usize>,
     /// Where the first audio packet's header is.
     pub audio: usize,
     /// The packets end inside a packet: the medium is cut short (a bank's prefetched part of a
@@ -95,7 +90,6 @@ pub fn parse(d: &[u8]) -> Result<Wem, Error> {
     let mod_packets = !matches!(mod_signal, 0x4A | 0x4B | 0x69 | 0x70);
     let setup_at = data.start + u32le(v, 0x10).ok_or("vorb")? as usize;
     let audio_at = data.start + u32le(v, 0x14).ok_or("vorb")? as usize;
-    let uid = u32le(v, 0x24).ok_or("vorb")?;
     let blocksize_pows = [v[0x28], v[0x29]];
     let packet = |at: usize| -> Option<Range<usize>> {
         let n = u16le(d, at)? as usize;
@@ -116,18 +110,5 @@ pub fn parse(d: &[u8]) -> Result<Wem, Error> {
         at = p.end;
         packets.push(p);
     }
-    Ok(Wem {
-        channels,
-        rate,
-        samples,
-        vorb_size: v.len(),
-        mod_packets,
-        blocksize_pows,
-        uid,
-        setup,
-        packets,
-        data,
-        audio: audio_at,
-        cut,
-    })
+    Ok(Wem { channels, rate, samples, mod_packets, blocksize_pows, setup, packets, audio: audio_at, cut })
 }

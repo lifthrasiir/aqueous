@@ -27,6 +27,15 @@ pub struct Ident {
     pub stripped: bool,
 }
 
+impl Ident {
+    /// The identification of a stream of `channels` (1 to 255) whose short and long block sizes
+    /// are 2^`short` and 2^`long` (6 to 13, the short not above the long).
+    pub fn from_exps(channels: usize, short: u8, long: u8, stripped: bool) -> Option<Ident> {
+        let ok = (1..=255).contains(&channels) && (6..=13).contains(&short) && (short..=13).contains(&long);
+        ok.then(|| Ident { channels, blocksizes: [1 << short, 1 << long], stripped })
+    }
+}
+
 /// A codebook. (Its vectors are declared in the reverse of the order they are made in, so that
 /// they are freed top first.)
 #[derive(Debug, Clone, PartialEq)]
@@ -75,14 +84,6 @@ impl Drop for Codebooks {
 const FAST: u32 = 10;
 const FAST_NODE: u32 = 1 << 30;
 
-/// What a bit of a codeword leads to in a codebook's decoding tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Child {
-    None,
-    Node(usize),
-    Entry(u32),
-}
-
 const LEAF: u32 = 1 << 31;
 const NONE: u32 = 0;
 /// Set in a node's second child while the tree is made: the node is full.
@@ -115,14 +116,28 @@ pub fn lookup1_values(entries: usize, dims: usize) -> usize {
     r
 }
 
+/// The most entries the ordered codebooks of a setup hold in all: their lengths take no bits per
+/// entry (the others' entries take one at least, which the header's bytes bound), and a book
+/// costs memory by its entries. (A real encoder's books hold some thousands.)
+const ORDERED_ENTRIES: usize = 1 << 20;
+
 impl Codebook {
-    fn parse(r: &mut Reader) -> Result<Codebook> {
+    /// Parses a codebook; an ordered one takes its entries from `ordered_left`.
+    fn parse(r: &mut Reader, ordered_left: &mut usize) -> Result<Codebook> {
         if get(r, 24)? != 0x564342 {
             return Err(bad("codebook sync"));
         }
         let (dims, entries) = (get(r, 16)? as usize, get(r, 24)? as usize);
+        let ordered = get(r, 1)? == 1;
+        let sparse = !ordered && get(r, 1)? == 1;
+        if ordered {
+            *ordered_left = ordered_left.checked_sub(entries).ok_or(bad("codebook entries"))?;
+        } else if entries > r.left() {
+            // (an entry's length takes a bit at least)
+            return Err(bad("setup header ends early"));
+        }
         let mut lengths = vec![0u8; entries];
-        if get(r, 1)? == 1 {
+        if ordered {
             let (mut at, mut len) = (0, get(r, 5)? + 1);
             while at < entries {
                 let n = get(r, ilog((entries - at) as u32))? as usize;
@@ -134,7 +149,6 @@ impl Codebook {
                 len += 1;
             }
         } else {
-            let sparse = get(r, 1)? == 1;
             for l in &mut lengths {
                 if !sparse || get(r, 1)? == 1 {
                     *l = get(r, 5)? as u8 + 1;
@@ -147,6 +161,9 @@ impl Codebook {
                 let (min, delta) = (get(r, 32)?, get(r, 32)?);
                 let value_bits = get(r, 4)? as u8 + 1;
                 let sequence = get(r, 1)? == 1;
+                if dims == 0 {
+                    return Err(bad("codebook dimensions"));
+                }
                 let n = if kind == 1 { lookup1_values(entries, dims) } else { entries.saturating_mul(dims) };
                 let bits = n.saturating_mul(value_bits as usize);
                 if bits > r.left() {
@@ -157,9 +174,6 @@ impl Codebook {
             }
             _ => return Err(bad("codebook lookup type")),
         };
-        if dims == 0 && lookup.is_some() {
-            return Err(bad("codebook dimensions"));
-        }
         let mut packed = vec![0u32; entries];
         let mut fast = vec![u32::MAX; 1 << FAST];
         let mut tree = Vec::with_capacity(4);
@@ -229,15 +243,6 @@ impl Codebook {
     /// The decoding tree's nodes (the root is node 0).
     pub fn nodes(&self) -> usize {
         self.tree.len()
-    }
-
-    /// Where bit `b` leads from node `node`: another node, an entry, or nowhere.
-    pub fn child(&self, node: usize, b: u32) -> Child {
-        match self.tree[node][b as usize] {
-            NONE => Child::None,
-            c if c & LEAF != 0 => Child::Entry(c & !LEAF),
-            c => Child::Node(c as usize),
-        }
     }
 
     /// Whether entry `e` has a codeword.
@@ -599,8 +604,9 @@ impl Setup {
         }
         let n = get(r, 8)? as usize + 1;
         let mut codebooks = Codebooks(Vec::with_capacity(n));
+        let mut ordered_left = ORDERED_ENTRIES;
         for _ in 0..n {
-            let book = Codebook::parse(r)?;
+            let book = Codebook::parse(r, &mut ordered_left)?;
             codebooks.0.push(book);
         }
         for _ in 0..get(r, 6)? + 1 {

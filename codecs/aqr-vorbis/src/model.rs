@@ -212,11 +212,6 @@ impl Keys {
         self.field0 + FIELD_AT[kind] + ((n - 1) * FIELDS[kind]) as u32
     }
 
-    /// The default tables: of each book's chunks, then the flat ones of 1 to 8 bits.
-    pub fn tables(&self) -> usize {
-        (0..self.books()).map(|b| self.chunks(b)).sum::<usize>() + FIELD_BITS
-    }
-
     /// `f` of each default table's size, in the order of their numbers.
     pub fn table_sizes(&self, mut f: impl FnMut(usize)) {
         for b in 0..self.books() {
@@ -259,18 +254,26 @@ fn weight(len: u8) -> u64 {
     1 << (32 - len as u32)
 }
 
+/// A channel's slots: nonzero, `Y[0]`, `Y[1]`, [`MASTERS`] master entries from [`MASTER_AT`], then
+/// the Y values from [`Y_AT`].
+const MASTER_AT: usize = 3;
+const MASTERS: usize = 32;
+const Y_AT: usize = MASTER_AT + MASTERS;
+/// The most partitions of a residue the classword slots are made for.
+const MAX_PARTS: usize = 1024;
+
 const PASSES: usize = 8;
 const NONE8: u8 = 255;
 const NONE16: u16 = u16::MAX;
 
 /// The slots of the values a stream's packets have coded so far, as the contexts need them: per
-/// channel `stride` of them (nonzero, `Y[0]`, `Y[1]`, 32 master entries, the Y values), then the
-/// classwords', per (submap, vector) `parts`.
+/// channel `stride` of them ([`Y_AT`] and the Y values), then the classwords', per (submap, vector)
+/// `parts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slots {
     pub stride: usize,
     pub class_base: usize,
-    /// The vectors of a submap, and the partitions of a residue (1024 at most), of the most.
+    /// The vectors of a submap, and the partitions of a residue ([`MAX_PARTS`] at most), of the most.
     pub vectors: usize,
     pub parts: usize,
     pub total: usize,
@@ -278,12 +281,12 @@ pub struct Slots {
 
 impl Slots {
     pub fn of(s: &Setup) -> Slots {
-        let stride = 35 + s.floors.iter().map(|f| f.xs().len()).max().unwrap_or(0);
+        let stride = Y_AT + s.floors.iter().map(|f| f.xs().len()).max().unwrap_or(0);
         let (mut submaps, mut vectors, mut parts) = (0, 0, 0);
         crate::packet::residue_shapes(s, |submap, p, rows, _| {
             (submaps, vectors, parts) = (submaps.max(submap + 1), vectors.max(rows), parts.max(p));
         });
-        let parts = parts.min(1024);
+        let parts = parts.min(MAX_PARTS);
         let class_base = s.ident.channels * stride;
         Slots { stride, class_base, vectors, parts, total: class_base + submaps * vectors * parts }
     }
@@ -475,7 +478,7 @@ impl<'s> Contexts<'s> {
     }
 
     fn slot_class(&self, submap: usize, v: usize, part: usize) -> usize {
-        self.slots.class_base + (submap * self.slots.vectors + v) * self.slots.parts + part.min(1023)
+        self.slots.class_base + (submap * self.slots.vectors + v) * self.slots.parts + part.min(MAX_PARTS - 1)
     }
 
     fn slot_nonzero(&self, ch: usize) -> usize {
@@ -487,10 +490,10 @@ impl<'s> Contexts<'s> {
     }
 
     fn slot_master(&self, ch: usize, part: usize) -> usize {
-        ch * self.slots.stride + 3 + part.min(31)
+        ch * self.slots.stride + MASTER_AT + part.min(MASTERS - 1)
     }
 
     fn slot_y(&self, ch: usize, i: usize) -> usize {
-        ch * self.slots.stride + 35 + i.min(92)
+        ch * self.slots.stride + Y_AT + i.min(92)
     }
 }

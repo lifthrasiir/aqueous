@@ -15,15 +15,15 @@ pub const KEYS: &str = "mkv/keys";
 
 /// The least bytes of a frame taken from where it was before, or into [`KEYS`]: a smaller one
 /// costs more as a slice than as its bytes.
-pub const FRAME_MIN: usize = 256;
+const FRAME_MIN: usize = 256;
 
 /// The least bytes of frames seen before for any file to be taken ([`taken_min`]).
-pub const TAKEN_MIN: usize = 64 << 10;
+const TAKEN_MIN: usize = 64 << 10;
 
 /// The least bytes of frames seen before for a file of `len` bytes to be taken: a hundredth of
 /// it, and [`TAKEN_MIN`]. Fewer gain too little for a pass of zstd over all of the file, which
 /// would otherwise be stored as it is (aqr-compress takes Matroska files as compressed).
-pub const fn taken_min(len: usize) -> usize {
+const fn taken_min(len: usize) -> usize {
     let n = len / 100;
     if n > TAKEN_MIN { n } else { TAKEN_MIN }
 }

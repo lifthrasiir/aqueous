@@ -8,12 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use aqr_vorbis::packet;
 use aqr_vorbis::setup::{Ident, Setup};
 use aqr_vorbis::setups::Setups;
+use aqr_wwise::formula::assemble;
 use aqr_wwise::stripped::{self, Stripped};
-use aqr_wwise::wem;
-
-fn u32le(d: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(d.get(at..at + 4)?.try_into().ok()?))
-}
+use aqr_wwise::wem::{self, u32le};
 
 /// The media of bank `d` (little endian), as ranges.
 fn bank_media(d: &[u8]) -> Vec<std::ops::Range<usize>> {
@@ -70,17 +67,23 @@ fn score(s: &Stripped, setup: &Setup, media: &[&Medium], limit: usize) -> (usize
     (exact, tried)
 }
 
+/// Whether packet `i` of medium `m` (of stripped setup `s`) is a long block.
+fn long_flags<'a>(s: &'a Stripped, m: &'a Medium) -> impl Fn(usize) -> bool + 'a {
+    move |i| {
+        m.w.packets
+            .get(i)
+            .and_then(|p| stripped::mode(s, &m.d[p.clone()]))
+            .and_then(|k| s.blockflags.get(k).copied())
+            .unwrap_or(false)
+    }
+}
+
 /// As `score`, with how far the packets that parse end from their ends, in bits, in all.
 fn score_by(s: &Stripped, setup: &Setup, media: &[&Medium], limit: usize) -> (usize, usize, u64) {
     let (mut exact, mut tried, mut off) = (0, 0, 0u64);
     'm: for m in media {
         let ps = &m.w.packets;
-        let long = |i: usize| -> bool {
-            ps.get(i)
-                .and_then(|p| stripped::mode(s, &m.d[p.clone()]))
-                .and_then(|k| s.blockflags.get(k).copied())
-                .unwrap_or(false)
-        };
+        let long = long_flags(s, m);
         for (i, p) in ps.iter().enumerate() {
             if tried >= limit {
                 break 'm;
@@ -118,8 +121,7 @@ fn score_by(s: &Stripped, setup: &Setup, media: &[&Medium], limit: usize) -> (us
 fn descend(db: &Setups, s: &Stripped, ident: Ident, ms: &[&Medium], start: &[u32]) -> (Vec<u32>, (usize, usize)) {
     const SAMPLE: usize = 200;
     let eval = |parts: &[u32]| -> Option<(usize, usize, u64)> {
-        let books: Vec<_> = parts.iter().map(|&b| db.codebook(b as usize)).collect();
-        let setup = Setup::parse(&s.assemble(&books), ident).ok()?;
+        let (_, setup) = assemble(db, s, ident, parts)?;
         Some(score_by(s, &setup, ms, SAMPLE))
     };
     let key = |r: (usize, usize, u64)| (r.0, std::cmp::Reverse(r.2));
@@ -157,12 +159,7 @@ fn diagnose(s: &Stripped, setup: &Setup, media: &[&Medium]) {
     let mut shown = 0;
     for m in media {
         let ps = &m.w.packets;
-        let long = |i: usize| -> bool {
-            ps.get(i)
-                .and_then(|p| stripped::mode(s, &m.d[p.clone()]))
-                .and_then(|k| s.blockflags.get(k).copied())
-                .unwrap_or(false)
-        };
+        let long = long_flags(s, m);
         let mut bad = Vec::new();
         for (i, p) in ps.iter().enumerate() {
             let d = &m.d[p.clone()];
@@ -313,7 +310,7 @@ fn recode(names: &[String]) {
     }
     let s = sums.into_inner().unwrap();
     println!(
-        "{} of {} media taken ({} not given back): {} -> {} bytes of streams but setups ({:.4}; records {};          setups {} bytes, {} distinct); thread seconds: encode {:.1} ({:.1} MB/s), decode {:.1} ({:.1} MB/s); {:.1} s",
+        "{} of {} media taken ({} not given back): {} -> {} bytes of streams but setups ({:.4}; records {}; setups {} bytes, {} distinct); thread seconds: encode {:.1} ({:.1} MB/s), decode {:.1} ({:.1} MB/s); {:.1} s",
         s.taken,
         s.media,
         s.wrong,
@@ -422,14 +419,14 @@ fn main() {
             }
         }
         if hits.is_empty() {
-            let best = db.skeletons().iter().filter(|k| k.codebooks().len() == s.ids.len()).max_by_key(|k| {
-                let books: Vec<_> = k.codebooks().iter().map(|&b| db.codebook(b as usize)).collect();
-                Setup::parse(&s.assemble(&books), ident).map_or(0, |x| score(s, &x, ms, 400).0)
-            });
+            let best = db
+                .skeletons()
+                .iter()
+                .filter(|k| k.codebooks().len() == s.ids.len())
+                .max_by_key(|k| assemble(db, s, ident, k.codebooks()).map_or(0, |(_, x)| score(s, &x, ms, 400).0));
             if let Some(k) = best {
                 let (parts, _) = descend(db, s, ident, ms, k.codebooks());
-                let books: Vec<_> = parts.iter().map(|&b| db.codebook(b as usize)).collect();
-                if let Ok(setup) = Setup::parse(&s.assemble(&books), ident) {
+                if let Some((_, setup)) = assemble(db, s, ident, &parts) {
                     let (exact, tried) = score(s, &setup, ms, usize::MAX);
                     println!("  descent, all packets: {exact}/{tried} exact; parts {parts:?}");
                     if exact == tried {
@@ -441,8 +438,7 @@ fn main() {
             }
         }
         for &k in &hits {
-            let books: Vec<_> = db.skeletons()[k].codebooks().iter().map(|&b| db.codebook(b as usize)).collect();
-            let setup = Setup::parse(&s.assemble(&books), ident).expect("parsed before");
+            let (_, setup) = assemble(db, s, ident, db.skeletons()[k].codebooks()).expect("parsed before");
             let (exact, tried) = score(s, &setup, ms, usize::MAX);
             println!("  skeleton {k}, all packets: {exact}/{tried} exact");
             if exact < tried {

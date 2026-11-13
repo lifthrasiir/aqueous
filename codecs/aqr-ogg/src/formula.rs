@@ -58,14 +58,10 @@ fn predictor(p: &Packets) -> (Predictor, Option<Setup>) {
 
 /// The channels and block sizes of a Vorbis identification header.
 fn vorbis_ident(id: &[u8]) -> Option<Ident> {
-    if id.len() < 30 || &id[..7] != b"\x01vorbis" || id[11] == 0 {
+    if id.len() < 30 || &id[..7] != b"\x01vorbis" {
         return None;
     }
-    let (short, long) = (id[28] & 15, id[28] >> 4);
-    if !(6..=13).contains(&short) || !(6..=13).contains(&long) || short > long {
-        return None;
-    }
-    Some(Ident { channels: id[11] as usize, blocksizes: [1 << short, 1 << long], stripped: false })
+    Ident::from_exps(id[11] as usize, id[28] & 15, id[28] >> 4, false)
 }
 
 /// Audio packets of a Vorbis stream are given to aqr-vorbis in pieces, each coded apart, on
@@ -124,13 +120,12 @@ fn vorbis(f: &mut Formula, s: &Setup, p: &Packets, audio: &Audio, records: Vec<O
     let node = f.push("vorbis/setup", setup.to_vec());
     let mut parts = vec![f.push(HEADERS, head), node.clone()];
     let raw = |f: &mut Formula, d: &[u8]| f.push_as(PACKETS, Kind::Compressed, d.to_vec());
+    let params = aqr_vorbis::module::params(s.ident);
     let mut at = 0;
     for (r, record) in audio.pieces.iter().zip(records) {
         if let Some((used, record)) = record {
-            let inputs =
-                vec![node.clone(), f.push_as(aqr_vorbis::formula::RECORD, aqr_formula::Kind::Compressed, record)];
-            let params = aqr_vorbis::module::params(s.ident);
-            parts.push(Node::apply(aqr_vorbis::formula::MODULE, params, inputs, used as u64));
+            let inputs = vec![node.clone(), f.push_as(aqr_vorbis::formula::RECORD, Kind::Compressed, record)];
+            parts.push(Node::apply(aqr_vorbis::formula::MODULE, params.clone(), inputs, used as u64));
             at = r.start + used;
         }
         if at < r.end {

@@ -138,3 +138,22 @@ fn bad_records_fail_or_decode_to_the_length() {
         }
     }
 }
+
+/// Params of a layout of `channels` and `per_channel` bytes, then `extra`.
+fn params(channels: u64, per_channel: u64, extra: &[u8]) -> Vec<u8> {
+    let mut p = Vec::new();
+    aqr_common::varint::put(&mut p, channels);
+    aqr_common::varint::put(&mut p, per_channel);
+    p.extend_from_slice(extra);
+    p
+}
+
+#[test]
+fn plan_takes_the_params_decode_takes() {
+    use aqr_ima::module::{decode, plan};
+    assert!(plan(&params(2, 36, &[]), 100, 72).is_some());
+    for p in [params(2, 1 << 40, &[]), params(2, (1 << 20) + 4, &[]), params(2, 36, &[0])] {
+        assert!(plan(&p, 100, 72).is_none());
+        assert!(decode(&p, &[&[0; 100]], 72).is_err());
+    }
+}

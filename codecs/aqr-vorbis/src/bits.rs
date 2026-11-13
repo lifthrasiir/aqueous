@@ -69,6 +69,11 @@ impl<'a> Reader<'a> {
         Some(v)
     }
 
+    /// The bits left, one to a byte.
+    pub fn tail_bits(&self) -> Vec<u8> {
+        (self.pos..self.len()).map(|i| self.data[i >> 3] >> (i & 7) & 1).collect()
+    }
+
     /// Back to bit `pos`.
     pub fn seek(&mut self, pos: usize) {
         self.pos = pos;

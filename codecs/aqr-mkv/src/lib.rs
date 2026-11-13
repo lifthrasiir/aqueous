@@ -8,7 +8,7 @@ use std::ops::Range;
 pub mod formula;
 
 /// The EBML header's ID, the first 4 bytes of a file.
-pub const EBML: u32 = 0x1a45_dfa3;
+const EBML: u32 = 0x1a45_dfa3;
 /// The EBML header's DocType.
 const DOC_TYPE: u32 = 0x4282;
 const SEGMENT: u32 = 0x1853_8067;
@@ -16,10 +16,21 @@ const CLUSTER: u32 = 0x1f43_b675;
 const BLOCK_GROUP: u32 = 0xa0;
 const BLOCK: u32 = 0xa1;
 const SIMPLE_BLOCK: u32 = 0xa3;
+const TRACKS: u32 = 0x1654_ae6b;
+const TRACK_ENTRY: u32 = 0xae;
+const TRACK_NUMBER: u32 = 0xd7;
+const TRACK_TYPE: u32 = 0x83;
+/// A TrackEntry's TrackType of a video track.
+const VIDEO: u64 = 1;
 
-/// The IDs of the elements of a Segment (level 1), at which a Cluster of unknown size ends.
+/// The IDs of the elements of a Segment (level 1) and the EBML header's (which a Segment's
+/// elements may follow), at which a Cluster of unknown size ends.
 const LEVEL_1: [u32; 9] =
-    [0x114d_9b74, 0x1549_a966, 0x1654_ae6b, CLUSTER, 0x1c53_bb6b, 0x1941_a469, 0x1043_a770, 0x1254_c367, EBML];
+    [0x114d_9b74, 0x1549_a966, TRACKS, CLUSTER, 0x1c53_bb6b, 0x1941_a469, 0x1043_a770, 0x1254_c367, EBML];
+
+/// The most elements nested in the walk (a Segment holds a Cluster holds a BlockGroup holds a
+/// Block); a file nesting more is not walked further down.
+const DEPTH: usize = 8;
 
 /// An element's header at `p` of `d`: its ID (the marker bit kept, as the specification writes
 /// IDs), its size (None where unknown, all of its bits set) and the header's length. None where
@@ -94,19 +105,14 @@ pub struct Walk {
 /// known size that does not read within is passed over whole.
 pub fn walk(d: &[u8]) -> Walk {
     let mut w = Walk::default();
-    elements(d, 0, d.len(), None, &mut w);
+    elements(d, 0, d.len(), None, 0, &mut w);
     w
 }
 
-const TRACKS: u32 = 0x1654_ae6b;
-const TRACK_ENTRY: u32 = 0xae;
-const TRACK_NUMBER: u32 = 0xd7;
-const TRACK_TYPE: u32 = 0x83;
-
-/// Walks the elements from `p` up to `end`, of a parent of ID `parent` (None at the top), into
-/// `w`; returns where it stopped: at `end`, at an element that ends a Cluster of unknown size,
-/// or where an element does not read.
-fn elements(d: &[u8], mut p: usize, end: usize, parent: Option<u32>, w: &mut Walk) -> usize {
+/// Walks the elements from `p` up to `end`, of a parent of ID `parent` (None at the top) and
+/// `depth` levels down, into `w`; returns where it stopped: at `end`, at an element that ends a
+/// Cluster of unknown size, or where an element does not read (or is nested past [`DEPTH`]).
+fn elements(d: &[u8], mut p: usize, end: usize, parent: Option<u32>, depth: usize, w: &mut Walk) -> usize {
     while p < end {
         let Some((id, size, h)) = header(&d[..end], p) else { return p };
         if parent == Some(CLUSTER) && LEVEL_1.contains(&id) {
@@ -122,13 +128,16 @@ fn elements(d: &[u8], mut p: usize, end: usize, parent: Option<u32>, w: &mut Wal
         };
         match id {
             TRACK_ENTRY if parent == Some(TRACKS) && stop <= end => {
-                if let Some(n) = track_entry(&d[start..stop]).filter(|&(_, kind)| kind == 1) {
+                if let Some(n) = track_entry(&d[start..stop]).filter(|&(_, kind)| kind == VIDEO) {
                     w.video.push(n.0);
                 }
             }
             _ if container => {
+                if depth == DEPTH {
+                    return p;
+                }
                 // (one cut short is walked up to where the data ends)
-                let q = elements(d, start, stop.min(end), Some(id), w);
+                let q = elements(d, start, stop.min(end), Some(id), depth + 1, w);
                 p = match size {
                     Some(_) if stop <= end => stop,
                     Some(_) => return q,
@@ -235,5 +244,16 @@ mod tests {
         assert!(!starts(&d[..20]));
         let other = [&d[..8], b"mkv3", &d[12..]].concat();
         assert!(!starts(&other));
+    }
+
+    /// Elements nested without end (Segments, BlockGroups) are not walked down to a stack
+    /// overflow.
+    #[test]
+    fn nesting_is_bounded() {
+        for id in [&[0x18, 0x53, 0x80, 0x67][..], &[0xa0][..]] {
+            let open = [id, &[0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]].concat();
+            let d = open.repeat(50_000);
+            std::thread::Builder::new().stack_size(512 << 10).spawn(move || walk(&d)).unwrap().join().unwrap();
+        }
     }
 }

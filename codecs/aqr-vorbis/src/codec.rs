@@ -70,6 +70,11 @@ fn gamma(r: &mut BitR) -> Result<usize> {
     if r.overrun() { Err(corrupt()) } else { Ok(g) }
 }
 
+/// [`gamma`] less one (the codes of counts and gaps start at 1).
+fn gamma1(r: &mut BitR) -> Result<usize> {
+    gamma(r)?.checked_sub(1).ok_or_else(corrupt)
+}
+
 /// Reads `n` levels (up to 256) into `levels`.
 fn read_levels(r: &mut BitR, n: usize, levels: &mut [u32; 256]) -> Result<()> {
     let (mut at, mut prev) = (0, 0i64);
@@ -183,8 +188,7 @@ pub fn encode(setup: &Setup, d: &[u8]) -> Option<(usize, Vec<u8>)> {
         let p = d.get(at + 2..at + 2 + n)?;
         let mut g = Gather { setup, keys: &keys, cx: &mut cx, r: Reader::new(p), syms: &mut syms, values: 0 };
         let end = packet::walk_in(setup, &mut scratch, &mut g).ok()?;
-        let (values, mut r) = (g.values, g.r);
-        let tail: Vec<u8> = (r.pos()..r.len()).map(|_| r.bit().expect("within the packet") as u8).collect();
+        let (values, tail) = (g.values, g.r.tail_bits());
         if end == End::Short || tail.len() >= 8 || tail.iter().any(|&b| b != 0) {
             odd.push(Odd { packet: packets, short: (end == End::Short).then_some(values), tail });
         }
@@ -412,17 +416,17 @@ fn header(
     own: &mut dyn FnMut(usize),
 ) -> Result<Counts> {
     let mut r = BitR::<false>::new(h);
-    let packets = gamma(&mut r)?.checked_sub(1).ok_or(corrupt())?;
+    let packets = gamma1(&mut r)?;
     // (a packet is 3 bytes at least, with its length)
     if packets > len / 3 || packets >= NOT_SHORT as usize {
         return Err(corrupt());
     }
-    let mut c = Counts { packets, odd: gamma(&mut r)?.checked_sub(1).ok_or(corrupt())?, tail: 0, own: 0, symbols: 0 };
+    let mut c = Counts { packets, odd: gamma1(&mut r)?, tail: 0, own: 0, symbols: 0 };
     let mut next = 0usize;
     for _ in 0..c.odd {
-        let packet = next + gamma(&mut r)?.checked_sub(1).ok_or(corrupt())?;
-        let short = if r.bits(1) == 1 { Some(gamma(&mut r)?.checked_sub(1).ok_or(corrupt())?) } else { None };
-        let n = gamma(&mut r)?.checked_sub(1).ok_or(corrupt())?;
+        let packet = next + gamma1(&mut r)?;
+        let short = if r.bits(1) == 1 { Some(gamma1(&mut r)?) } else { None };
+        let n = gamma1(&mut r)?;
         if packet >= packets || n > 8 * len || short.is_some_and(|s| s >= NOT_SHORT as usize) {
             return Err(corrupt());
         }
@@ -441,10 +445,10 @@ fn header(
         c.tail += n;
         next = packet + 1;
     }
-    c.own = gamma(&mut r)?.checked_sub(1).ok_or(corrupt())?;
+    c.own = gamma1(&mut r)?;
     let mut next = 0usize;
     for _ in 0..c.own {
-        let key = next + gamma(&mut r)?.checked_sub(1).ok_or(corrupt())?;
+        let key = next + gamma1(&mut r)?;
         if key >= keys.len() {
             return Err(corrupt());
         }

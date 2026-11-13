@@ -28,7 +28,7 @@ fn parses(setup: &Setup, d: &[u8], packets: &[std::ops::Range<usize>]) -> bool {
 }
 
 /// The setup header of `s` (of a stream of `ident`) from codebook parts `parts`, if it parses.
-fn assemble(db: &Setups, s: &Stripped, ident: Ident, parts: &[u32]) -> Option<(Vec<u8>, Setup)> {
+pub fn assemble(db: &Setups, s: &Stripped, ident: Ident, parts: &[u32]) -> Option<(Vec<u8>, Setup)> {
     let books: Vec<_> = parts.iter().map(|&b| db.codebook(b as usize)).collect();
     let bytes = s.assemble(&books);
     let setup = Setup::parse(&bytes, ident).ok()?;
@@ -108,12 +108,9 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
 /// The formula of medium `input`, whatever its size ([`encode`]'s, before it is weighed).
 pub fn formula_of(input: &[u8]) -> Option<Formula> {
     let w = wem::parse(input).ok()?;
-    let s = stripped::parse(&input[w.setup.clone()], w.channels)?;
     let [b0, b1] = w.blocksize_pows;
-    if !(6..=13).contains(&b0) || !(b0..=13).contains(&b1) || !(1..=255).contains(&w.channels) {
-        return None;
-    }
-    let ident = Ident { channels: w.channels, blocksizes: [1 << b0, 1 << b1], stripped: w.mod_packets };
+    let ident = Ident::from_exps(w.channels, b0, b1, w.mod_packets)?;
+    let s = stripped::parse(&input[w.setup.clone()], w.channels)?;
     let setup = cached(&input[w.setup.clone()], &s, ident, input, &w)?;
     // the whole packets (each after its 16-bit length)
     let end = w.packets.last().map_or(w.audio, |p| p.end);

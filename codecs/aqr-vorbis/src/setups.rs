@@ -44,7 +44,7 @@ const RESIDUE_MIN_BITS: u64 = 88;
 const END_LIMIT: u64 = 1 << 24;
 /// The search's largest `end` (§8.3.2); it has bits 0..=11.
 const SEARCH_MAX_END: u32 = 2048;
-const SEARCH_END_BITS: usize = 12;
+const SEARCH_END_BITS: usize = (32 - SEARCH_MAX_END.leading_zeros()) as usize;
 
 /// A run of bits, §8's way: `bytes` holds the bit string little-endian.
 #[derive(Debug)]

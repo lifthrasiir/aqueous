@@ -133,7 +133,7 @@ fn residue_shape(s: &Setup, res: usize, vectors: usize, half: usize) -> Option<(
     let (rows, size) = if r.kind == 2 { (1, half * vectors) } else { (vectors, half) };
     let begin = (r.begin as usize).min(size);
     let end = (r.end as usize).min(size);
-    let parts = (end - begin) / r.partition as usize;
+    let parts = end.saturating_sub(begin) / r.partition as usize;
     (parts > 0).then_some((parts, rows))
 }
 
@@ -320,9 +320,7 @@ impl Source for Parse<'_> {
 pub fn parse(setup: &Setup, d: &[u8]) -> Result<Packet> {
     let mut p = Parse { setup, r: Reader::new(d), values: Vec::new() };
     let end = walk(setup, &mut p)?;
-    let mut r = p.r;
-    let tail = (r.pos()..r.len()).map(|_| r.bit().expect("within the packet") as u8).collect();
-    Ok(Packet { values: p.values, tail, short: end == End::Short })
+    Ok(Packet { values: p.values, tail: p.r.tail_bits(), short: end == End::Short })
 }
 
 struct Write<'a> {

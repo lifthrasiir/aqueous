@@ -32,11 +32,10 @@ pub(crate) fn ident(params: &[u8]) -> Result<Ident> {
         [sizes, 1] => (sizes, true),
         _ => return Err(corrupt()),
     };
-    let (b0, b1) = (sizes & 15, sizes >> 4);
-    if !(1..=255).contains(&channels) || !(6..=13).contains(&b0) || !(6..=13).contains(&b1) || b0 > b1 {
-        return Err(corrupt());
-    }
-    Ok(Ident { channels: channels as usize, blocksizes: [1 << b0, 1 << b1], stripped })
+    usize::try_from(channels)
+        .ok()
+        .and_then(|channels| Ident::from_exps(channels, sizes & 15, sizes >> 4, stripped))
+        .ok_or_else(corrupt)
 }
 
 /// The module: the packets, each after its 16-bit length, `len` bytes, from `params` (the
