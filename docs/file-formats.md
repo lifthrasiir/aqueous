@@ -469,7 +469,7 @@ files (pages, logs) copied by a backup tool. What they share:
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | BC6H and BC7 textures; KTX, KTX2, engine bundles | most of a game's install size | fixed-rate block compression, no entropy coding (BC7 and BC6H: modes and partitions) | as aqr-tex does BC1–BC5 in DDS | aqr-tex |
-| Unity AssetBundle | Unity games | LZ4 (chunked; LZ4HC as Unity writes it) or LZMA | the LZ4HC chunks reproduced (the nodes of stored blocks are taken apart: aqr-bundle's `unity-bundle`, Done) | aqr-lz4 |
+| Unity AssetBundle | Unity games | LZ4 (chunked; LZ4HC as Unity writes it) or LZMA | the LZ4HC chunks reproduced, which may not pay: 941.2 MB of LZ4HC blocks of 184 bundles of 10 games hold 12.09 GB of data, whose zstd -3 is 6.0% larger than the blocks' (847.2 against 799.3 MB, measured 2026-11-13) (the nodes of stored blocks are taken apart: aqr-bundle's `unity-bundle`, Done) | aqr-lz4 |
 | Unreal `.pak` with zlib | Unreal Engine 4 games (before Oodle) | zlib per compression block | the zlib blocks as streams of their own, rather than found by the scan (stored entries are taken apart: aqr-bundle's `unreal-pak`, Done) | aqr-flate |
 | Bethesda BSA, BA2 | Skyrim, Fallout | zlib or LZ4 per file | the zlib and LZ4 | aqr-flate, aqr-lz4 |
 | Ren'Py (`.rpa`, `.rpyc`) | visual novels | an archive with a zlib-compressed index; compiled scripts in zlib | the zlib; the images inside through their recompressors | aqr-flate, aqr-png, aqr-jpeg |
@@ -480,7 +480,7 @@ files (pages, logs) copied by a backup tool. What they share:
 | Wwise (`.wem`, `.bnk`: the banks are taken apart, aqr-bundle's `wwise-bnk`, Done) | most AAA games' audio | Vorbis without its setup header (codebooks referenced from a known set), ADPCM, Opus in newer versions; banks of them | as FSB5: the setup rebuilt, the Vorbis recoded; the ADPCM through aqr-ima | aqr-fsb, aqr-vorbis, aqr-ima |
 | CRI ADX, HCA, USM, CPK | Japanese games | ADX: 4-bit ADPCM at fixed width; HCA: MDCT with static tables; USM: MPEG-1, VP9 or H.264 in its own container; CPK: an archive of CRILAYLA (an LZ of its own) | ADX's samples modelled (a large gain); CRILAYLA reproduced | aqr-ima's approach |
 | Valve VTF | Source engine games | DXT1/DXT5 textures with mipmaps (VPKs are taken apart: aqr-bundle's `source-vpk`, Done) | the textures as aqr-tex does DDS | aqr-tex |
-| XNA, MonoGame `.xnb` | indie games | XMemCompress's LZX (XNA) or LZ4 (MonoGame) | the LZX as aqr-lzx's record of the parse, the LZ4 reproduced (stored files' textures and sounds are taken: aqr-bundle's `xna-xnb`, Done; 69 of three games' stored files 11.85 → 10.37 MB) | aqr-lzx, aqr-lz4 |
+| XNA, MonoGame `.xnb` | indie games | XMemCompress's LZX (XNA) or LZ4 (MonoGame) | the LZX as aqr-lzx's record of the parse, the LZ4 reproduced (stored files' textures and sounds are taken: aqr-bundle's `xna-xnb`, Done; 69 of three games' stored files 11.85 → 10.37 MB). The LZX does not pay to take apart: of 389 files of A Virus Named TOM (48.1 MB), aqr-lzx splits every one, but their data (855.8 MB, sparse RGBA) archives to 44.48 MB and the record is 7.39 MB, against 47.33 MB for the files as they are (measured 2026-11-13) | aqr-lzx, aqr-lz4 |
 | GameCube and Wii disc images | emulation | none; padding of junk from a known generator; Wii's partitions encrypted with known keys and hashed | the junk regenerated (as RVZ does), Wii's data decrypted and its hashes derived | |
 
 ### Older archives
