@@ -1844,3 +1844,74 @@ fn unreal_texture_cache() {
     let m: Vec<&str> = r.files[0].modules.iter().map(|m| m.name).collect();
     assert!(m.contains(&"lzo-recons"), "{m:?}");
 }
+
+/// A Unity serialized file (format 17, of Unity 2019.4, no type trees) of one `Texture2D` whose
+/// BC1 blocks (`n` bytes, of `w` x `h` and its mipmaps) stream from `path` at `offset`.
+fn unity_assets(w: u32, h: u32, mips: u32, n: u32, offset: u32, path: &str) -> Vec<u8> {
+    let mut o = Vec::new();
+    let str4 = |o: &mut Vec<u8>, s: &[u8]| {
+        o.extend((s.len() as u32).to_le_bytes());
+        o.extend(s);
+        o.resize(o.len().next_multiple_of(4), 0);
+    };
+    str4(&mut o, b"rock");
+    o.extend([4, 0, 0, 0, 0, 0, 0, 0]);
+    for v in [w, h, n, 10, mips] {
+        o.extend(v.to_le_bytes());
+    }
+    o.extend([0; 4]);
+    for v in [0u32, 1, 2, 1, 1, 0, 0, 0, 0, 0, 1, 0, offset, n] {
+        o.extend(v.to_le_bytes());
+    }
+    str4(&mut o, path.as_bytes());
+    // the metadata: the version, the platform, no trees, one type (Texture2D), one object
+    let mut m = b"2019.4.1f1\0".to_vec();
+    m.extend(19u32.to_le_bytes());
+    m.push(0);
+    m.extend(1u32.to_le_bytes());
+    m.extend(28u32.to_le_bytes());
+    m.push(0);
+    m.extend(0xffffu16.to_le_bytes());
+    m.extend([0xa5; 16]);
+    m.extend(1u32.to_le_bytes());
+    m.resize((20 + m.len()).next_multiple_of(4) - 20, 0);
+    m.extend(1u64.to_le_bytes());
+    for v in [0u32, o.len() as u32, 0] {
+        m.extend(v.to_le_bytes());
+    }
+    m.extend([0; 8]);
+    let data = (20 + m.len()).next_multiple_of(16);
+    let mut d = Vec::new();
+    for v in [m.len(), data + o.len(), 17, data] {
+        d.extend((v as u32).to_be_bytes());
+    }
+    d.extend([0; 4]);
+    d.extend(m);
+    d.resize(data, 0);
+    d.extend(o);
+    d
+}
+
+/// A Unity resource file (`.resS`, of no header) taken apart by the serialized file beside it:
+/// the BC1 blocks its texture streams from it rebuilt by aqr-tex's `bcn-recons`; alone, it is
+/// not.
+#[test]
+fn unity_resource_file() {
+    let l = aqr_tex::layout::Layout { format: aqr_tex::layout::Format::Bc1, width: 256, height: 256, mips: 9, layers: 1 };
+    let mut x = 0x1234_5678u32;
+    let blocks: Vec<u8> = (0..l.len())
+        .map(|i| {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            if i % 8 < 4 { (i / 512) as u8 } else { (x >> 24) as u8 & 0x0f }
+        })
+        .collect();
+    let mut ress = vec![0u8; 4096];
+    ress.extend(&blocks);
+    let assets = unity_assets(256, 256, 9, blocks.len() as u32, 4096, "sharedassets0.assets.resS");
+    let files = [("Game_Data/sharedassets0.assets", assets), ("Game_Data/sharedassets0.assets.resS", ress.clone())];
+    let (_, r) = archived(&files, &Options::default());
+    let m: Vec<&str> = r.files[1].modules.iter().map(|m| m.name).collect();
+    assert!(m.contains(&"bcn-recons"), "{m:?}");
+    let (_, r) = archived(&files[1..], &Options::default());
+    assert!(!r.files[0].modules.iter().any(|m| m.name == "bcn-recons"));
+}

@@ -69,10 +69,12 @@ impl Reader<'_> {
         Some(if self.big { u64::from_be_bytes(b) } else { u64::from_le_bytes(b) })
     }
 
-    fn cstr(&mut self) -> Option<()> {
+    /// A string of a NUL, its bytes.
+    fn cstr(&mut self) -> Option<&[u8]> {
         let n = self.d.get(self.at..)?.iter().position(|&b| b == 0)?;
+        let s = &self.d[self.at..self.at + n];
         self.at += n + 1;
-        Some(())
+        Some(s)
     }
 
     /// A count of items of `min` bytes at least each, if they may fit in what is left.
@@ -158,12 +160,40 @@ fn extension(class: i32) -> String {
 
 /// The objects of serialized file `d`; None where it is not one, or its metadata is not read.
 pub fn files(d: &[u8]) -> Option<Vec<File>> {
+    Some(objects(d)?.objects.into_iter().map(|o| file(format!("{}.{}", o.id, extension(o.class)).into_bytes(), o.extent)).collect())
+}
+
+/// An object of a serialized file: its id, its class, where its bytes are in the file.
+#[derive(Debug, Clone)]
+pub struct Object {
+    pub id: i64,
+    pub class: i32,
+    pub extent: std::ops::Range<usize>,
+}
+
+/// What [`objects`] reads: the engine's version (its major and minor numbers, as `2019.4`), the
+/// objects' byte order, and the objects (of bytes, in the order of the table).
+#[derive(Debug, Clone)]
+pub struct Objects {
+    pub engine: (u32, u32),
+    pub big: bool,
+    pub objects: Vec<Object>,
+}
+
+/// The major and minor numbers of an engine's version (`2019.4.31f1`, `5.6.3p1`).
+fn engine(v: &[u8]) -> (u32, u32) {
+    let mut n = v.split(|&b| !b.is_ascii_digit()).map(|s| std::str::from_utf8(s).ok().and_then(|s| s.parse().ok()));
+    (n.next().flatten().unwrap_or(0), n.next().flatten().unwrap_or(0))
+}
+
+/// The objects of serialized file `d`; None where it is not one, or its metadata is not read.
+pub fn objects(d: &[u8]) -> Option<Objects> {
     if !starts(d) {
         return None;
     }
     let Header { version: v, meta, data, big } = header(d)?;
     let mut r = Reader { d, at: meta, big };
-    r.cstr()?;
+    let engine = engine(r.cstr()?);
     r.u32()?;
     let trees = v < 13 || r.u8()? != 0;
     let n = r.count(4)?;
@@ -200,7 +230,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
     }
     let big_ids = (7..14).contains(&v) && r.u32()? != 0;
     let n = r.count(12)?;
-    let mut files = Vec::with_capacity(n);
+    let mut objects = Vec::with_capacity(n);
     for _ in 0..n {
         if v >= 14 {
             r.at = r.at.next_multiple_of(4);
@@ -232,7 +262,253 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
             continue;
         }
         let extent = within(d, data.checked_add(start)?, size)?;
-        files.push(file(format!("{id}.{}", extension(class)).into_bytes(), extent));
+        objects.push(Object { id, class, extent });
     }
-    Some(files)
+    Some(Objects { engine, big, objects })
+}
+
+/// Where a texture's blocks are: in its object, or in a resource file (`.resS`, by its path as
+/// the object names it) at an offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Data {
+    Inline(std::ops::Range<usize>),
+    Stream { path: Vec<u8>, offset: u64, size: u64 },
+}
+
+/// A `Texture2D` of block-compressed pixels that aqr-tex takes (BC1, BC3, BC4, BC5): its layout,
+/// where its blocks are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Texture {
+    pub layout: aqr_tex::layout::Layout,
+    pub data: Data,
+}
+
+/// The texture of object `o` (of class 28, `Texture2D`) of a serialized file of `engine`'s, in its
+/// byte order `big`: where its blocks are (positions in `o`, or in a resource file) and their
+/// layout; None where it is not of the formats taken, or does not read.
+///
+/// Its first fields (AssetStudio's description of the class, by the engine's version): the
+/// name (a u32 length, the bytes, to 4 bytes), from 2017.3 the fallback format (i32) and whether
+/// to downscale (a byte; from 2020.2 another, whether alpha is optional; then to 4 bytes), the
+/// width, the height and the image's size (i32 each), from 2020.1 the mipmaps stripped (i32),
+/// the format (i32) and from 5.2 the mipmaps (i32). Its last: the image's data (a u32 length,
+/// the bytes), then the streamed data's offset (u32, u64 from 2020.1), size (u32) and path (a
+/// string as the name's): read from the object's end, as the fields between vary by version. The
+/// blocks' size as the layout makes it must be the image's size (times the images).
+pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
+    use aqr_tex::layout::{Format, Layout};
+    let at_least = |v: (u32, u32)| engine >= v;
+    let u32_at = |at: usize| -> Option<u32> {
+        let b: [u8; 4] = o.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(if big { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) })
+    };
+    let name = u32_at(0)? as usize;
+    let mut base = (4usize.checked_add(name)?).next_multiple_of(4);
+    if at_least((2017, 3)) {
+        base = (base + 4 + 1 + at_least((2020, 2)) as usize).next_multiple_of(4);
+    }
+    // the fields at `at`: the layout, and the image's size (one image)
+    let head = |at: usize| -> Option<(Layout, u64)> {
+        let (width, height, size) = (u32_at(at)?, u32_at(at + 4)?, u32_at(at + 8)? as u64);
+        let at = at + 12 + 4 * at_least((2020, 1)) as usize;
+        let format = match u32_at(at)? {
+            10 => Format::Bc1,
+            12 => Format::Bc3,
+            26 => Format::Bc4,
+            27 => Format::Bc5,
+            _ => return None,
+        };
+        // (before 5.2 whether there are mipmaps, a byte: then all of them)
+        let mips = match at_least((5, 2)) {
+            true => u32_at(at + 4)?,
+            false => match *o.get(at + 4)? {
+                0 => 1,
+                _ => 32 - width.max(height).leading_zeros(),
+            },
+        };
+        let layout = Layout { format, width, height, mips, layers: 1 };
+        (layout.valid() && size > 0 && layout.len() == size).then_some((layout, size))
+    };
+    // (the fields as of the version; or a field before or after, as later versions have them:
+    // what the image's size checks)
+    let (mut layout, size) = [0, -4, 4, 8].into_iter().find_map(|k: isize| head(base.checked_add_signed(k)?))?;
+    // before 5.3 the image's data is last: its length, the bytes
+    if !at_least((5, 3)) {
+        for images in 1..=6u64 {
+            let n = usize::try_from(size * images).ok()?;
+            let Some(len_at) = o.len().checked_sub(n + 4) else { break };
+            if u32_at(len_at)? as usize == n {
+                layout.layers = images as u32;
+                return Some(Texture { layout, data: Data::Inline(len_at + 4..o.len()) });
+            }
+        }
+        return None;
+    }
+    // the streamed data at the end: the path (its length and bytes, to 4 bytes), the size and the
+    // offset before them
+    let wide = at_least((2020, 1));
+    let tail = |path: usize| -> Option<(usize, u64, u64)> {
+        let path_at = o.len().checked_sub(path.next_multiple_of(4) + 4)?;
+        (u32_at(path_at)? as usize == path).then_some(())?;
+        let s = u32_at(path_at.checked_sub(4)?)? as u64;
+        let (offset, start) = match wide {
+            true => {
+                let at = path_at.checked_sub(12)?;
+                (u32_at(at)? as u64 | (u32_at(at + 4)? as u64) << 32, at)
+            }
+            false => (u32_at(path_at.checked_sub(8)?)? as u64, path_at - 8),
+        };
+        Some((start, offset, s))
+    };
+    // streamed: a path that names a resource file, of the image's size (or of whole images)
+    for path in (1..=256).rev() {
+        let Some((_, offset, s)) = tail(path) else { continue };
+        let p = &o[o.len() - path.next_multiple_of(4)..][..path];
+        if s > 0 && s.is_multiple_of(size) && p.ends_with(b".resS") {
+            layout.layers = u32::try_from(s / size).ok()?;
+            return layout.valid().then(|| Texture { layout, data: Data::Stream { path: p.to_vec(), offset, size: s } });
+        }
+    }
+    // inline: the image's data before an empty stream (no path, size 0), its length before it
+    let (start, _, 0) = tail(0)? else { return None };
+    for images in 1..=6u64 {
+        let n = usize::try_from(size * images).ok()?;
+        let Some(len_at) = start.checked_sub(n + 4) else { break };
+        if u32_at(len_at)? as usize == n {
+            layout.layers = images as u32;
+            return Some(Texture { layout, data: Data::Inline(len_at + 4..len_at + 4 + n) });
+        }
+    }
+    None
+}
+
+/// The formula of serialized file `d` where any of its objects is a texture whose blocks are in
+/// it ([`texture`]): those blocks rebuilt by aqr-tex's `bcn-recons`, the rest of their objects
+/// (and the headers, the table, the padding) the stream `unity-assets/rest`, stream 1 (as
+/// aqr-disk's formula has it), the other objects contents of their kinds by `kind`, a stream
+/// each. None where no texture's blocks are in it (the file is then aqr-disk's formula).
+pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usize) -> Option<aqr_formula::Formula> {
+    use aqr_formula::{Formula, Kind, Node};
+    let o = objects(d)?;
+    let mut objects: Vec<(Object, Option<Texture>)> = o
+        .objects
+        .into_iter()
+        .map(|ob| {
+            let t = (ob.class == 28).then(|| texture(&d[ob.extent.clone()], o.engine, o.big)).flatten();
+            (ob, t.filter(|t| matches!(t.data, Data::Inline(_))))
+        })
+        .collect();
+    if !objects.iter().any(|x| x.1.is_some()) {
+        return None;
+    }
+    objects.sort_by_key(|x| x.0.extent.start);
+    let mut f = Formula::default();
+    f.push_content("raw", Kind::Unknown, Vec::new());
+    f.push(aqr_disk::formula::rest("unity-assets"), Vec::new());
+    let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
+    let kept = |rest: &mut Vec<u8>, parts: &mut Vec<Node>, b: &[u8]| {
+        if !b.is_empty() {
+            parts.push(Node::slice(1, rest.len() as u64, b.len() as u64));
+            rest.extend_from_slice(b);
+        }
+    };
+    for (ob, t) in &objects {
+        let r = ob.extent.clone();
+        // (objects overlapping one before are the rest's)
+        if r.start < at {
+            continue;
+        }
+        kept(&mut rest, &mut parts, &d[at..r.start]);
+        let b = &d[r.clone()];
+        let app = t.as_ref().and_then(|t| {
+            let Data::Inline(i) = &t.data else { return None };
+            Some((i.clone(), aqr_tex::formula::apply(&mut f, &b[i.clone()], &t.layout, threads)?))
+        });
+        match app {
+            Some((i, node)) => {
+                kept(&mut rest, &mut parts, &b[..i.start]);
+                parts.push(node);
+                kept(&mut rest, &mut parts, &b[i.end..]);
+            }
+            None => {
+                let name = format!("{}.{}", ob.id, extension(ob.class));
+                let k = kind(name.as_bytes());
+                let class = match k {
+                    Kind::Unknown => "raw".to_string(),
+                    Kind::Format(name) => format!("unity-assets/{name}"),
+                    k => format!("unity-assets/{k}"),
+                };
+                parts.push(f.push_content(class, k, b.to_vec()));
+            }
+        }
+        at = r.end;
+    }
+    kept(&mut rest, &mut parts, &d[at..]);
+    f.streams[1].data = rest.into();
+    f.root = Node::concat(parts);
+    debug_assert_eq!(f.root.len(), d.len() as u64);
+    Some(f)
+}
+
+/// The textures whose blocks are in resource file `name` (a `.resS`, by its name: the last part
+/// of the textures' paths) of serialized file `d`: where their blocks are in it, their layouts.
+pub fn streamed(d: &[u8], name: &[u8]) -> Vec<(std::ops::Range<u64>, aqr_tex::layout::Layout)> {
+    let base = |p: &[u8]| -> Vec<u8> {
+        let p = p.rsplit(|&b| b == b'/' || b == b'\\').next().unwrap_or(p);
+        p.to_ascii_lowercase()
+    };
+    let want = base(name);
+    let Some(o) = objects(d) else { return Vec::new() };
+    let mut out = Vec::new();
+    for ob in o.objects.iter().filter(|ob| ob.class == 28) {
+        let Some(t) = texture(&d[ob.extent.clone()], o.engine, o.big) else { continue };
+        if let Data::Stream { path, offset, size } = t.data
+            && base(&path) == want
+        {
+            out.push((offset..offset + size, t.layout));
+        }
+    }
+    out
+}
+
+/// The formula of resource file `d` (a `.resS`) of the textures `textures` (where their blocks are
+/// in it, their layouts: [`streamed`]): their blocks rebuilt by aqr-tex's `bcn-recons`, the rest
+/// of the file the stream `unity-ress/rest`, stream 1. Textures overlapping one before, or past
+/// the end, are the rest's. None where none is rebuilt.
+pub fn encode_resource(
+    d: &[u8],
+    textures: &[(std::ops::Range<u64>, aqr_tex::layout::Layout)],
+    threads: usize,
+) -> Option<aqr_formula::Formula> {
+    use aqr_formula::{Formula, Kind, Node};
+    let mut t: Vec<_> = textures.iter().filter(|(r, _)| r.end <= d.len() as u64).collect();
+    t.sort_by_key(|(r, _)| r.start);
+    let mut f = Formula::default();
+    f.push_content("raw", Kind::Unknown, Vec::new());
+    f.push(aqr_disk::formula::rest("unity-ress"), Vec::new());
+    let (mut rest, mut parts, mut at, mut made) = (Vec::new(), Vec::new(), 0, 0);
+    let kept = |rest: &mut Vec<u8>, parts: &mut Vec<Node>, b: &[u8]| {
+        if !b.is_empty() {
+            parts.push(Node::slice(1, rest.len() as u64, b.len() as u64));
+            rest.extend_from_slice(b);
+        }
+    };
+    for (r, layout) in t {
+        let r = r.start as usize..r.end as usize;
+        if r.start < at {
+            continue;
+        }
+        let Some(node) = aqr_tex::formula::apply(&mut f, &d[r.clone()], layout, threads) else { continue };
+        kept(&mut rest, &mut parts, &d[at..r.start]);
+        parts.push(node);
+        (at, made) = (r.end, made + 1);
+    }
+    if made == 0 {
+        return None;
+    }
+    kept(&mut rest, &mut parts, &d[at..]);
+    f.streams[1].data = rest.into();
+    f.root = Node::concat(parts);
+    debug_assert_eq!(f.root.len(), d.len() as u64);
+    Some(f)
 }

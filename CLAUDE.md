@@ -131,8 +131,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   aqr-ext, aqr-apfs and aqr-hfs (no FORMAT.md: aqr-disk's tells). Game engines' and middleware's packs are
   aqr-bundle's `packs` (aqr-disk's formula, no module), formats named `<engine>-<extension>` or the
   middleware's or tool's (`godot-pck`, `unity-assets`, `unreal-upk`, `wwise-bnk`, `cri-awb`,
-  `bethesda-ba2`, …: `packs/mod.rs`'s `packs!`); aqr-compress's `vpk.rs` plans a VPK's archives by
-  its directory file. `aqr-flate` underlies everything that uses DEFLATE. The workspace
+  `bethesda-ba2`, …: `packs/mod.rs`'s `packs!`); aqr-compress's `siblings.rs` plans the files of no
+  header taken apart by others archived along (a VPK's archives, Unity's `.resS`). `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
   of slow measurements).

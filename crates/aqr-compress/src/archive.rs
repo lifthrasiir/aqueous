@@ -415,9 +415,11 @@ fn compress_tree_noting<S: Source + ?Sized>(
     };
     let w_at = w.len();
     let weights: Vec<u64> = batches.iter().map(weight).collect();
-    // (the archives of VPKs, by their directory files)
-    let vpks = opt.recompresses().then(|| crate::vpk::plan(src)).filter(|p| !p.is_empty()).map(std::sync::Arc::new);
-    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop, vpks };
+    // (the files of no header taken apart by others: VPKs' archives, Unity's resource files)
+    let siblings =
+        opt.recompresses().then(|| crate::siblings::plan(src)).filter(|p| !p.is_empty()).map(std::sync::Arc::new);
+    let cx =
+        Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop, siblings };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),
         state: Mutex::new(State {
@@ -557,8 +559,8 @@ struct Ctx<'a, S: ?Sized> {
     /// The entries archived, those of each segment written as it is closed.
     tree: &'a Tree,
     stop: Option<&'a Stop<'a>>,
-    /// The archives of VPKs to take apart ([`crate::vpk`]).
-    vpks: Option<std::sync::Arc<crate::vpk::Plan>>,
+    /// The files to take apart by others ([`crate::siblings`]).
+    siblings: Option<std::sync::Arc<crate::siblings::Plan>>,
 }
 
 impl<S: ?Sized> Ctx<'_, S> {
@@ -656,7 +658,7 @@ impl Pipe {
             taken.map(|(files, data)| {
                 // (what is cut out of the files mapped shared, not copied: an image's files, say)
                 let _known: Vec<_> = data.iter().map(aqr_formula::store::known).collect();
-                let a = analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes, cx.vpks.clone());
+                let a = analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes, cx.siblings.clone());
                 (files, a)
             })
         }));
@@ -969,8 +971,8 @@ impl Writer {
                     File::of(c, d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c))
                 })
                 .collect();
-            let part =
-                self.watched(cx, out, || analyze(i, &files, data, &HashSet::new(), cx.opt, notes, cx.vpks.clone()))?;
+            let part = self
+                .watched(cx, out, || analyze(i, &files, data, &HashSet::new(), cx.opt, notes, cx.siblings.clone()))?;
             self.put(i, &files, part, cx, out)?;
         }
         batch.iter().try_for_each(|&c| src.intact(c))?;
@@ -1004,7 +1006,7 @@ impl Writer {
             let bytes = batch.iter().map(|&c| src.size(c)).sum();
             notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
             let data = reread(src, files, opt.threads)?;
-            part = self.watched(cx, out, || analyze(i, files, data, &raw, opt, notes, cx.vpks.clone()))?;
+            part = self.watched(cx, out, || analyze(i, files, data, &raw, opt, notes, cx.siblings.clone()))?;
         };
         files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);
@@ -1724,7 +1726,7 @@ fn analyze(
     raw: &HashSet<usize>,
     opt: &Options,
     notes: &Notes,
-    vpks: Option<std::sync::Arc<crate::vpk::Plan>>,
+    siblings: Option<std::sync::Arc<crate::siblings::Plan>>,
 ) -> Analyzed {
     if !opt.recompresses() {
         return analyze_plain(i, files, data, opt, notes);
@@ -1770,7 +1772,7 @@ fn analyze(
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let contents = files.iter().zip(&f.streams).map(|(file, s)| (file.c, &s.data[..]));
     cx.files = Some(std::sync::Arc::new(Files::of(notes, contents)));
-    cx.vpks = vpks
+    cx.siblings = siblings
         .map(|p| p.placed(files.iter().zip(&f.streams).map(|(file, s)| (file.c, &s.data[..]))))
         .filter(|p| !p.is_empty())
         .map(std::sync::Arc::new);

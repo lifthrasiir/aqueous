@@ -760,9 +760,13 @@ formats! {
     /// Unity's serialized files (`.assets`, `globalgamemanagers`, `levelN`, versions 9 to 22):
     /// their objects (aqr-bundle's `packs`): at the start of data only.
     UnityAssets = "unity-assets" {
-        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnityAssets, d)),
-        // slices of the input
-        heap: 0.0,
+        recompressor: Cx(|d, _, opt, _, _| {
+            aqr_bundle::packs::unity_assets::encode_with(d, crate::kind_by_name, opt.threads)
+                .or_else(|| crate::bundle::pack(aqr_bundle::packs::Pack::UnityAssets, d))
+        }),
+        // the objects copied and the textures' coded streams, a texture coded at a time (aqr-tex
+        // takes 12 times one's blocks)
+        heap: 3.0,
         bundle: true,
     }
     /// Unity's `.resource` files: FSB5 banks and videos back to back (aqr-bundle's `packs`): at the
@@ -817,11 +821,19 @@ formats! {
         heap: 0.0,
         bundle: true,
     }
+    /// Unity's resource file (`.resS`): the blocks of the textures that the serialized file beside
+    /// it streams from it, rebuilt by aqr-tex ([`crate::siblings`]: never detected).
+    UnityRess = "unity-ress" {
+        recompressor: Cx(crate::siblings::encode),
+        // the textures' coded streams, a texture coded at a time (aqr-tex takes 12 times one's)
+        heap: 3.0,
+        bundle: true,
+    }
     /// Valve's VPK (aqr-bundle's `packs`): a directory file known by its header (the files whose
     /// data it holds), or an archive of one found among the files archived along
-    /// ([`crate::vpk`]: never detected).
+    /// ([`crate::siblings`]: never detected).
     SourceVpk = "source-vpk" {
-        recompressor: Cx(crate::vpk::encode),
+        recompressor: Cx(crate::siblings::encode),
         // slices of the input
         heap: 0.0,
         bundle: true,

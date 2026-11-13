@@ -190,6 +190,7 @@ dependencies = [
  "aqr-formula",
  "aqr-lz4",
  "aqr-msadpcm",
+ "aqr-tex",
  "zstd",
 ]
 

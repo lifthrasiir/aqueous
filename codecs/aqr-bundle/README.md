@@ -84,8 +84,12 @@ engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
   `globalgamemanagers`, `levelN`, the `CAB-*` of bundles), versions 9 to 22 of either byte order,
   their type trees skipped: each object a file `<path id>.<class>` (`tex2d`, `mesh`,
   `audioclip`, ...). Of no magic: its header checked against the data, tried after every other
-  format. Not read: versions below 9. The `.resS` files the objects stream from are not split
-  (their offsets are the last fields of each class's own layout).
+  format. Not read: versions below 9. A `Texture2D` of BC1, BC3, BC4 or BC5 blocks
+  (`unity_assets::texture`: its first fields by the engine's version, its data from the object's
+  end, the layout checked against the image's size) has its blocks rebuilt by aqr-tex's
+  `bcn-recons`: those in the file (`unity_assets::encode_with`), and those it streams from its
+  resource file (`NAME.resS`, archived along: `unity-ress`, planned by aqr-compress's `siblings`,
+  `unity_assets::encode_resource`). Not taken: textures of other formats (RGBA32, BC7, crunched).
 - `unity-resource`: Unity's `.resource` files: FSB5 banks (and the videos, WebM and MP4, of
   VideoClips) back to back, where more than one bank (a bank alone is aqr-fsb's).
 - `unreal-upk`: Unreal Engine 3's packages (`.upk`, `.u`, `.umap`) and texture caches (`.tfc`):

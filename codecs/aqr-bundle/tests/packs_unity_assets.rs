@@ -225,3 +225,86 @@ fn not_serialized() {
     b[8..12].copy_from_slice(&8u32.to_be_bytes());
     assert!(files(&b).is_none());
 }
+
+/// A `Texture2D` object of Unity 2019.4 (name, fallback format, downscale, then width, height,
+/// image size, format, mipmaps, other fields, the image's data, the streamed data): its blocks
+/// inline (`data`), or streamed from `path` at `offset` (`data` empty, `size` the blocks').
+fn texture2d(w: u32, h: u32, format: u32, mips: u32, size: u32, data: &[u8], stream: Option<(u32, u32, &str)>) -> Vec<u8> {
+    let mut o = Vec::new();
+    let str4 = |o: &mut Vec<u8>, s: &[u8]| {
+        o.extend((s.len() as u32).to_le_bytes());
+        o.extend(s);
+        o.resize(o.len().next_multiple_of(4), 0);
+    };
+    str4(&mut o, b"brick_albedo");
+    o.extend(4u32.to_le_bytes());
+    o.push(0);
+    o.resize(o.len().next_multiple_of(4), 0);
+    for v in [w, h, size, format, mips] {
+        o.extend(v.to_le_bytes());
+    }
+    // (readable, streaming, image count, dimension, the sampler's fields, lightmap, colour space)
+    o.extend([0, 0, 0, 0]);
+    for v in [0u32, 1, 2, 1, 1, 0, 0, 0, 0, 0, 1] {
+        o.extend(v.to_le_bytes());
+    }
+    o.extend((data.len() as u32).to_le_bytes());
+    o.extend(data);
+    let (offset, s, path) = stream.unwrap_or((0, 0, ""));
+    o.extend(offset.to_le_bytes());
+    o.extend(s.to_le_bytes());
+    str4(&mut o, path.as_bytes());
+    o
+}
+
+/// BC1 blocks of `w` x `h` and its mipmaps: bytes of a gradient, so that aqr-tex has something
+/// to code.
+fn bc1(w: u32, h: u32, mips: u32) -> Vec<u8> {
+    let l = aqr_tex::layout::Layout { format: aqr_tex::layout::Format::Bc1, width: w, height: h, mips, layers: 1 };
+    (0..l.len()).map(|i| (i * 7 / 3) as u8 ^ (i as u8 >> 3)).collect()
+}
+
+fn eval(f: &aqr_formula::Formula) -> Vec<u8> {
+    f.eval(&|a: &aqr_formula::Apply, inputs: &[&[u8]]| {
+        assert_eq!(a.module, aqr_tex::formula::MODULE);
+        aqr_tex::formula::decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.0))
+    })
+    .unwrap()
+}
+
+/// Textures read: their blocks inline or streamed, of the formats taken, of the size their
+/// layout makes; the serialized file's inline blocks and a resource file's streamed ones
+/// rebuilt by aqr-tex.
+#[test]
+fn textures() {
+    use aqr_bundle::packs::unity_assets::{Data, encode_resource, encode_with, objects, streamed, texture};
+    let blocks = bc1(64, 32, 7);
+    let n = blocks.len() as u32;
+    let inline = texture2d(64, 32, 10, 7, n, &blocks, None);
+    let t = texture(&inline, (2019, 4), false).unwrap();
+    assert_eq!((t.layout.width, t.layout.height, t.layout.mips, t.layout.layers), (64, 32, 7, 1));
+    let Data::Inline(r) = t.data else { panic!("inline") };
+    assert!(inline[r] == blocks[..]);
+    let at = 1000;
+    let streamed_obj = texture2d(64, 32, 10, 7, n, &[], Some((at, n, "sharedassets0.assets.resS")));
+    let t = texture(&streamed_obj, (2019, 4), false).unwrap();
+    assert_eq!(t.data, Data::Stream { path: b"sharedassets0.assets.resS".to_vec(), offset: at as u64, size: n as u64 });
+    // not taken: RGBA32 (format 4), a size other than the layout's, BC7 (25)
+    assert!(texture(&texture2d(64, 32, 4, 7, 64 * 32 * 4, &[], None), (2019, 4), false).is_none());
+    assert!(texture(&texture2d(64, 32, 10, 7, n + 8, &blocks, None), (2019, 4), false).is_none());
+    assert!(texture(&texture2d(64, 32, 25, 7, n * 2, &[], None), (2019, 4), false).is_none());
+    // a serialized file of both, and the resource file
+    let (d, _) = build(21, false, true, &[(1, 1, b"GameObject"), (2, 28, &inline), (3, 28, &streamed_obj)]);
+    assert_eq!(objects(&d).unwrap().engine, (2019, 4));
+    let f = encode_with(&d, |_| aqr_formula::Kind::Unknown, 1).unwrap();
+    assert_eq!(f.applies().len(), 1);
+    assert!(eval(&f) == d);
+    let mut ress = vec![0x33u8; at as usize];
+    ress.extend(&blocks);
+    ress.extend(b"after");
+    let t = streamed(&d, b"archive:/x/SHAREDASSETS0.assets.resS");
+    assert_eq!(t.len(), 1);
+    let f = encode_resource(&ress, &t, 1).unwrap();
+    assert!(eval(&f) == ress);
+    assert!(encode_resource(&ress[..1100], &t, 1).is_none());
+}
