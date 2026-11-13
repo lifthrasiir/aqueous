@@ -1527,7 +1527,10 @@ fn recompress_sealed(
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
     // (text as aqr-wrt tells, see [`made`])
-    (format == Format::Text || smaller_as(&f, None, d, of, opt, cx)).then_some(f)
+    // (nor a data file of an unknown archive format taken apart: its members' data is held to
+    // it as contents, and its check compressed it all again on a thread, 1.5 s of 7 for The
+    // Crew's)
+    (format == Format::Text || format == Format::Pak || smaller_as(&f, None, d, of, opt, cx)).then_some(f)
 }
 
 /// Where bytes `b` are, as an address (0 for bytes not made yet, or sunk).

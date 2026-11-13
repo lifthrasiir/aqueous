@@ -72,11 +72,19 @@ pub struct Options {
     pub tries: usize,
     /// Tells on standard error what each table gave.
     pub verbose: bool,
+    /// Threads the tables are tested on.
+    pub threads: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { keep: 16, per: 4, tries: 16, verbose: false }
+        Options {
+            keep: 16,
+            per: 4,
+            tries: 16,
+            verbose: false,
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        }
     }
 }
 
@@ -180,6 +188,58 @@ pub fn decode_in_place<'a>(
     Target::decoded(name, file, src, parts)
 }
 
+/// The tests of a table ([`test_table`]): how many sizes passed the gate, the candidates of
+/// each kind, and their times.
+struct Tests {
+    sizes: usize,
+    cands: Vec<Cand>,
+    imp: Vec<Cand>,
+    dsz: Duration,
+    dex: Duration,
+    dim: Duration,
+}
+
+/// The tests of table `t` of file `owner` as a directory of a target of length `l` (`same`:
+/// the table's own file).
+fn test_table(files: &[File], (owner, t): (usize, Table), l: u64, same: bool, opt: &Options) -> Tests {
+    let b = files[owner].data;
+    let prof = Profile::new(b, &t);
+    let te = Instant::now();
+    let sizes = tiling::sizes(b, &t, &prof.candidates(l), l);
+    let dsz = te.elapsed();
+    let mut cands = tiling::explicit(b, &t, &prof, l, &sizes);
+    cands.truncate(opt.tries);
+    let dex = te.elapsed();
+    let tm = Instant::now();
+    let run = tiling::run_sizes(b, &t, &sizes, l);
+    let mut imp = tiling::implicit(b, &t, &run, l, same);
+    imp.truncate(opt.tries);
+    Tests { sizes: sizes.len(), cands, imp, dsz, dex, dim: tm.elapsed() }
+}
+
+/// `f` of 0..n on up to `threads` threads, in order.
+fn par_map<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    if threads <= 1 || n <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: Vec<std::sync::Mutex<Option<T>>> = (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    *out[i].lock().unwrap() = Some(f(i));
+                }
+            });
+        }
+    });
+    out.into_iter().map(|m| m.into_inner().unwrap().unwrap()).collect()
+}
+
 struct Tested {
     ev: f64,
     cand: Cand,
@@ -197,7 +257,6 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
         tables.extend(tables::of_file(f.data, opt.keep, opt.per).into_iter().map(|t| (i, t)));
     }
     times.tables += t0.elapsed();
-    let mut profiles: Vec<Option<Profile>> = Vec::new();
     let mut targets: Vec<Target> = files.iter().enumerate().map(|(i, f)| Target::file(&f.name, i, f.data)).collect();
     let mut dirs: Vec<Directory> = Vec::new();
     let mut ti = 0;
@@ -205,6 +264,18 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
         let mut new_targets = Vec::new();
         let tg = &targets[ti];
         let l = tg.len;
+        // the tests of the tables there are, at once (taken in order below)
+        let tp = Instant::now();
+        let (tg_file, tg_is_file, tg_parent) = (tg.file, tg.is_file(), tg.parent);
+        let skip = |j: usize| {
+            let (owner, t) = tables[j];
+            let overlap = |u: &Table| t.end.min(u.end).saturating_sub(t.start.max(u.start)) * 2 >= t.end - t.start;
+            tg_parent.is_some_and(|p| dirs[p].owner_file == owner && overlap(&dirs[p].cand.table))
+        };
+        let mut tested: Vec<Option<Tests>> = par_map(tables.len(), opt.threads, |j| {
+            (!skip(j)).then(|| test_table(files, tables[j], l, tg_is_file && tg_file == tables[j].0, opt))
+        });
+        times.explicit += tp.elapsed();
         let mut j = 0;
         while j < tables.len() {
             let (owner, t) = tables[j];
@@ -221,25 +292,10 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
                 j += 1;
                 continue;
             }
-            if profiles.len() <= j {
-                profiles.resize_with(j + 1, || None);
-            }
-            let tp = Instant::now();
-            let prof = profiles[j].get_or_insert_with(|| Profile::new(b, &t));
-            times.profiles += tp.elapsed();
-            let te = Instant::now();
-            let sizes = tiling::sizes(b, &t, &prof.candidates(l), l);
-            let dsz = te.elapsed();
-            let mut cands = tiling::explicit(b, &t, prof, l, &sizes);
-            cands.truncate(opt.tries);
-            let dex = te.elapsed();
-            times.explicit += dex;
-            let tm = Instant::now();
-            let run = tiling::run_sizes(b, &t, &sizes, l);
-            let mut imp = tiling::implicit(b, &t, &run, l, tg.is_file() && tg.file == owner);
-            imp.truncate(opt.tries);
-            let dim = tm.elapsed();
-            times.implicit += dim;
+            let Tests { sizes, mut cands, imp, dsz, dex, dim } = match tested.get_mut(j).and_then(Option::take) {
+                Some(x) => x,
+                None => test_table(files, (owner, t), l, tg.is_file() && tg.file == owner, opt),
+            };
             if opt.verbose {
                 eprintln!(
                     "    {} by {} {:#x}..{:#x}/{} ({} rows): {} sizes ({:.1} ms), {} explicit ({:.1} ms), {} implicit ({:.1} ms)",
@@ -249,7 +305,7 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
                     t.end,
                     t.k,
                     t.rows(),
-                    sizes.len(),
+                    sizes,
                     dsz.as_secs_f64() * 1e3,
                     cands.len(),
                     dex.as_secs_f64() * 1e3,

@@ -421,8 +421,24 @@ pub fn split(s: &[u8], limit: usize) -> Result<Split> {
     if lzo1x::encode(&dec.data, &dec.parse) != s[..dec.used] {
         return Err(Error("stream not given back"));
     }
-    let (record, cost) =
-        record(&dec.data, &dec.parse, mode(&dec.data, &dec.parse)).or_else(|_| record(&dec.data, &dec.parse, SKIP))?;
+    // a stream of no more data than the trial's: its records under both modes, the smaller
+    // (the trial would code them as much again: a game's data file of thousands of small
+    // streams spent a third of its time on it)
+    let (record, cost) = if dec.data.len() <= TRIAL {
+        match (record(&dec.data, &dec.parse, 0), record(&dec.data, &dec.parse, SKIP)) {
+            (Ok(a), Ok(b)) => {
+                if a.0.len() <= b.0.len() {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Ok(a), Err(_)) | (Err(_), Ok(a)) => a,
+            (Err(e), Err(_)) => return Err(e),
+        }
+    } else {
+        record(&dec.data, &dec.parse, mode(&dec.data, &dec.parse)).or_else(|_| record(&dec.data, &dec.parse, SKIP))?
+    };
     Ok(Split { data: dec.data, record, used: dec.used, cost })
 }
 
