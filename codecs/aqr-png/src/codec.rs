@@ -310,7 +310,7 @@ fn parts(
         let workers = threads.min(imgs.len()).max(1);
         // Threads left over from the images go to each image's own parallel steps.
         let inner = (threads / workers).max(1);
-        par_map(imgs.len(), workers, |i| image(i, inner))
+        aqr_common::pool::par_map(imgs.len(), workers, |i| image(i, inner))
     } else {
         (0..imgs.len()).map(|i| image(i, 1)).collect()
     };
@@ -392,13 +392,6 @@ pub(crate) fn formula_parts(
 
 /// Files smaller than this are handled on one thread whatever the thread count.
 const PAR_MIN: usize = 1 << 16;
-
-/// Runs `f(0..n)` on `workers` threads at most (the caller's among them, the others of
-/// the pool), each index once, and returns the results in order.
-#[cfg(feature = "encode")]
-pub(crate) fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    aqr_common::pool::par_map(n, workers, f)
-}
 
 /// Appends the record of a coded image to `rec`, against `reference` if given.
 #[cfg(feature = "encode")]
@@ -598,7 +591,7 @@ impl<'a> Skeleton<'a> {
             let skip = if classes[range.start] == FDAT { 4 } else { 0 };
             cs[range.clone()].iter().map(|c| c.len - skip).sum::<usize>()
         };
-        let image_payload = |i: usize, threads: usize| {
+        let payload_of_image = |i: usize, threads: usize| {
             let ih = &imgs[i].1;
             let r = if recs[i].head.first() == Some(&2) { reference_of(ih, refs.and_then(|r| r.get(i))) } else { None };
             image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r, keep)
@@ -611,7 +604,7 @@ impl<'a> Skeleton<'a> {
             let inner = (threads / workers).max(1);
             // (as tasks on WebAssembly: each the payload, its reference's positions and tokens
             // (in the payload's room), and a 0; or a 1)
-            let task = |i: usize| match image_payload(i, inner) {
+            let task = |i: usize| match payload_of_image(i, inner) {
                 Ok((mut p, r)) => {
                     if let Some(r) = r {
                         r.put_fixed(&mut p);
@@ -643,7 +636,7 @@ impl<'a> Skeleton<'a> {
             )?;
         } else {
             for (i, img) in imgs.iter().enumerate() {
-                let (p, r) = image_payload(i, threads)?;
+                let (p, r) = payload_of_image(i, threads)?;
                 if let Some(own) = &mut own {
                     own.push((img.1, r));
                 }

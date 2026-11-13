@@ -136,9 +136,9 @@ pub fn encode_set(
     // the references of the parents, each once
     let mut is_parent = vec![false; files.len()];
     parents.iter().flatten().for_each(|&p| is_parent[p] = true);
-    let refs = codec::par_map(files.len(), workers, |i| is_parent[i].then(|| codec::references(files[i])));
+    let refs = aqr_common::pool::par_map(files.len(), workers, |i| is_parent[i].then(|| codec::references(files[i])));
     let alone: Vec<Option<Alone>> = (0..files.len()).map(|i| alone.get(i)?.as_ref().and_then(parts_of)).collect();
-    let parts = codec::par_map(files.len(), workers, |i| match (parents[i], &alone[i]) {
+    let parts = aqr_common::pool::par_map(files.len(), workers, |i| match (parents[i], &alone[i]) {
         (None, Some(a)) => Some(Parts { skeleton: a.0.to_vec(), records: a.1.clone() }),
         (p, a) => {
             let alone: Option<Vec<&[u8]>> = a.as_ref().map(|a| a.1.iter().map(|r| &r[..]).collect());

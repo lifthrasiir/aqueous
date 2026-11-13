@@ -5,7 +5,7 @@
 use crate::Result;
 use aqr_common::rans32;
 
-pub use rans32::{Decoder, cost};
+pub use rans32::Decoder;
 
 pub const PROB_BITS: u32 = 12;
 pub const PROB_SCALE: u32 = 1 << PROB_BITS;
@@ -21,13 +21,9 @@ pub fn write_table(w: &mut BitW, counts: &[u32]) -> Vec<u32> {
     rans32::write_table::<PROB_BITS, false>(w, counts)
 }
 
-/// [`read_table`], appended to `out`.
+/// Reads the levels of a table of `n` frequencies (as [`write_table`] writes them), appended to `out`.
 pub fn read_table_into(r: &mut BitR, n: usize, out: &mut Vec<u32>) -> Result<()> {
     rans32::read_table_into::<PROB_BITS, false>(r, n, out).map_err(|_| crate::corrupt())
-}
-
-pub fn read_table(r: &mut BitR, n: usize) -> Result<Vec<u32>> {
-    rans32::read_table::<PROB_BITS, false>(r, n).map_err(|_| crate::corrupt())
 }
 
 /// Encodes `syms` (table index, symbol), in order; returns the byte stream the decoder

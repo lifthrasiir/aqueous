@@ -7,6 +7,7 @@ use aqr_api::stack::{Sim, block};
 
 use crate::codec::{self, Skeleton, get_bytes, get_varint};
 use crate::model::{self, Geometry, Kind};
+use crate::part::THREADS;
 use crate::png::Ihdr;
 use crate::rans::BitR;
 
@@ -30,9 +31,6 @@ pub mod wasm {
     pub const TOKEN: u64 = 6;
     pub const POS: u64 = 4;
 }
-
-/// Threads the modules are given (their task slots).
-pub const THREADS: usize = 8;
 
 /// What rebuilding an image takes, as its record tells.
 struct Image {
@@ -157,11 +155,10 @@ fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool, streamed: bool) 
     Some(Image { kept, over, refs: own.then_some(ntok as u64), tokens: Some(ntok as u64) })
 }
 
-/// A file's images, as `codec::Skeleton::rebuild` takes them: each image's record, payload's length
-/// and header.
 /// An image's record, payload's length and header.
 type Img<'a> = (&'a [u8], usize, Option<Ihdr>);
 
+/// A file's images, as `codec::Skeleton::rebuild` takes them.
 fn images<'a>(sk: &Skeleton, index: &[u8], records: &'a [u8]) -> Option<Vec<Img<'a>>> {
     let (cs, classes) = (&sk.chunks, &sk.classes);
     let (mut at, mut from) = (0, 0);
@@ -198,16 +195,11 @@ fn file(m: &mut Sim, sk: &[u8], index: &[u8], records: &[u8], threads: usize, ke
     // (the references kept: each image's tokens, where it has one)
     let mut refs = Vec::with_capacity(imgs.len());
     if threads > 1 && imgs.len() > 1 {
-        let tasks = imgs
-            .iter()
-            .map(|(rec, len, ih)| {
-                image(rec, *len, ih, keep, false).map(|i| m.task(i.kept.iter().sum::<u64>() + i.over))
-            })
-            .collect::<Option<Vec<u64>>>()?;
+        let infos = imgs.iter().map(|(rec, len, ih)| image(rec, *len, ih, keep, false)).collect::<Option<Vec<_>>>()?;
+        let tasks = infos.iter().map(|i| m.task(i.kept.iter().sum::<u64>() + i.over)).collect::<Vec<u64>>();
         // (the tasks' handles; each result kept as it is taken, with its reference)
         m.take(k);
-        for (rec, len, ih) in &imgs {
-            let i = image(rec, *len, ih, keep, false)?;
+        for ((_, len, ih), i) in imgs.iter().zip(&infos) {
             let t = i.refs.unwrap_or(0);
             m.take(*len as u64 + 9 * t + 1);
             if keep {
@@ -418,7 +410,7 @@ pub fn set(
 ///   time (their records read, then each a task: a copy of the memory as it is, and its payload,
 ///   layout, tables, pieces, windows and tokens over it).
 pub fn part(initial: u64, inputs: &[u64], (sk, index, heads): (&[u8], &[u8], &[u8])) -> Option<(u64, u64)> {
-    use crate::part::{BATCH, PIECE, THREADS};
+    use crate::part::{BATCH, PIECE};
     /// An image of a batch: its payload kept as it is (its length), or coded (its head past the
     /// mode byte, its streams, the room of its task over a copy of the memory).
     enum Item {

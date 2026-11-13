@@ -8,11 +8,8 @@ use std::ops::Range;
 pub struct Image {
     /// Where its descriptor (`0x2C`) is.
     pub at: usize,
-    pub left: u16,
-    pub top: u16,
     pub width: u16,
     pub height: u16,
-    pub interlaced: bool,
     /// The LZW minimum code size.
     pub min: u8,
     /// Its data: the chain of sub-blocks, the terminator included, or up to the end of the file
@@ -23,14 +20,10 @@ pub struct Image {
 /// A file as far as its blocks hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gif {
-    pub width: u16,
-    pub height: u16,
     pub images: Vec<Image>,
     /// Bytes of whole blocks from the start: up to and with the trailer (`0x3B`), else up to
     /// where a block is not whole or not one.
     pub end: usize,
-    /// Whether the blocks end with the trailer.
-    pub trailer: bool,
 }
 
 pub fn le16(d: &[u8], p: usize) -> u16 {
@@ -66,7 +59,7 @@ pub fn parse(d: &[u8]) -> Option<Gif> {
     if !header(d) {
         return None;
     }
-    let mut g = Gif { width: le16(d, 6), height: le16(d, 8), images: vec![], end: 0, trailer: false };
+    let mut g = Gif { images: vec![], end: 0 };
     let mut p = 13 + table_len(d[10]);
     if p > d.len() {
         return None;
@@ -76,7 +69,6 @@ pub fn parse(d: &[u8]) -> Option<Gif> {
         match d.get(p) {
             Some(0x3B) => {
                 g.end = p + 1;
-                g.trailer = true;
                 break;
             }
             Some(0x21) => match d.get(p + 1).and_then(|_| chain(d, p + 2)) {
@@ -93,11 +85,8 @@ pub fn parse(d: &[u8]) -> Option<Gif> {
                 let (e, cut) = chain(d, start).map_or((d.len(), true), |e| (e, false));
                 g.images.push(Image {
                     at: p,
-                    left: le16(desc, 1),
-                    top: le16(desc, 3),
                     width: le16(desc, 5),
                     height: le16(desc, 7),
-                    interlaced: desc[9] & 0x40 != 0,
                     min: d[start - 1],
                     data: start..e,
                 });

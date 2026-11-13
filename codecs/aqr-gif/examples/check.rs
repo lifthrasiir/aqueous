@@ -25,14 +25,13 @@ fn main() {
     for a in std::env::args().skip(1) {
         files(Path::new(&a), &mut paths);
     }
-    let (mut tot_file, mut tot_data, mut tot_rec, mut tot_sk, mut tot_px) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut tot_file, mut tot_data, mut tot_rec, mut tot_sk) = (0u64, 0u64, 0u64, 0u64);
     let mut cost = [0f64; aqr_gif::model::CATS];
     let (mut t_split, mut t_join) = (0f64, 0f64);
     let (mut ok, mut failed) = (0, 0);
     for p in &paths {
         let d = std::fs::read(p).unwrap();
         let Some(g) = gif::parse(&d) else { continue };
-        let data: usize = g.images.iter().map(|i| i.data.len()).sum();
         let area: u64 = g.images.iter().map(|i| i.width as u64 * i.height as u64).sum();
         let t = Instant::now();
         let sp = match recons::split(&d) {
@@ -79,7 +78,6 @@ fn main() {
         tot_data += px as u64;
         tot_rec += sp.record.len() as u64;
         tot_sk += sp.skeleton.len() as u64;
-        tot_px += data as u64;
         for (a, b) in cost.iter_mut().zip(sp.cost) {
             *a += b / 8.0;
         }
@@ -92,5 +90,4 @@ fn main() {
         cost[1],
         cost[2],
     );
-    let _ = tot_px;
 }

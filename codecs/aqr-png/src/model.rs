@@ -13,7 +13,7 @@
 //!
 //! Decoding runs the model byte by byte. Encoding sees the whole data up front: images
 //! whose stream expands little (mostly literals) get every pixel byte's symbol computed
-//! row by row (with NEON where available), then the tokens walked; the others are modelled
+//! row by row (with SIMD where available), then the tokens walked; the others are modelled
 //! as the parser hands over the tokens.
 //!
 //! Buffers: the filtered data has `Geometry::pad` zero bytes in front, so that the bytes
@@ -210,15 +210,6 @@ impl Reference {
             true => Ok(()),
             false => Err(crate::corrupt()),
         }
-    }
-
-    /// Its tokens.
-    pub fn len(&self) -> usize {
-        self.tokens.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
     }
 
     /// Appends its positions (u32 LE) and tokens (5 bytes each, `deflate::token_bytes`): 9
@@ -672,7 +663,6 @@ fn unfilter_bytes(ft: u8, d: &[u8], raw: &mut [u8], q: usize, rs2: usize, x0: us
 /// Unfilters the `len` bytes at `p`, where the cursor is (position `i` of the data at
 /// `off + i` in `buf`).
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 fn unfilter_span<const BPP: usize>(
     g: &Geometry,
     cur: &Cursor,
@@ -2137,7 +2127,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                 for _ in 0..len {
                     let l = st.prep::<BPP, IMAGE>(raw, buf, false);
                     let s = io.sym(l.t, 0);
-                    l.finish::<true>(s, raw, buf, st.at(st.p));
+                    l.finish(s, raw, buf, st.at(st.p));
                     st.p += 1;
                 }
                 emit(&mut [], &mut ([0; 288], [0; 32]), &buf[g.pad..st.at(st.p)], st.base)?;
@@ -2219,7 +2209,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                     let l = st.prep::<BPP, IMAGE>(raw, buf, true);
                     let s = io.sym(l.t, 0);
                     if s != ESC || io.bit(T_ESC, 0) == 0 {
-                        let v = l.finish::<true>(s, raw, buf, st.at(st.p));
+                        let v = l.finish(s, raw, buf, st.at(st.p));
                         *tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)? = Token::Lit(v);
                         lf[v as usize] += 1;
                         st.p += 1;
@@ -2263,13 +2253,7 @@ impl Pixel {
     /// The prediction of filter `ft`.
     #[inline(always)]
     fn fp(&self, ft: u8) -> u8 {
-        match ft {
-            1 => self.a,
-            2 => self.b,
-            3 => ((self.a as u16 + self.b as u16) >> 1) as u8,
-            4 => filter::paeth(self.a, self.b, self.c),
-            _ => 0,
-        }
+        filter::predict(ft, self.a, self.b, self.c)
     }
 }
 
@@ -2416,18 +2400,16 @@ impl Lit {
         if self.act == u32::MAX { ACT } else { bucket(self.act) }
     }
 
-    /// Applies symbol `s`: stores the bytes (decoder) and returns the filtered byte. `at`
+    /// Applies symbol `s`: stores the bytes and returns the filtered byte. `at`
     /// is the position's offset in the padded data (below its length).
     #[inline(always)]
-    fn finish<const DEC: bool>(&self, s: u32, raw: &mut [u8], buf: &mut [u8], at: usize) -> u8 {
+    fn finish(&self, s: u32, raw: &mut [u8], buf: &mut [u8], at: usize) -> u8 {
         let v = self.pred.wrapping_add(unzigzag(s));
         let f = v.wrapping_sub(self.fp);
-        if DEC {
-            if self.q != usize::MAX {
-                put(raw, self.q, v);
-            }
-            put(buf, at, f);
+        if self.q != usize::MAX {
+            put(raw, self.q, v);
         }
+        put(buf, at, f);
         f
     }
 }

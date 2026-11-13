@@ -27,21 +27,27 @@ const GIVE_UP_MIN: u64 = 1 << 20;
 const GIVE_UP_AFTER: u64 = 4;
 const GIVE_UP_RATIO: (u64, u64) = (5, 4);
 
-/// An image's data beyond its pixels' values.
+/// What an image's codes do not tell.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
-pub struct Data {
-    /// The pixels, in the order of the stream.
-    pub pixels: Vec<u8>,
-    pub codes: Vec<u16>,
+struct Rest {
     /// The bits above the last code's in its byte.
-    pub pad: u8,
+    pad: u8,
     /// The bytes after that one.
-    pub after: Vec<u8>,
+    after: Vec<u8>,
     /// The sizes of the whole sub-blocks.
-    pub sizes: Vec<u8>,
+    sizes: Vec<u8>,
     /// Where the chain is cut by the end of the file: the size of the sub-block cut, and how
     /// many of its bytes there are (0 and 0 where it is cut after a whole one).
-    pub cut: Option<(u8, u8)>,
+    cut: Option<(u8, u8)>,
+}
+
+/// An image's data beyond its pixels' values.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+struct Data {
+    /// The pixels, in the order of the stream.
+    pixels: Vec<u8>,
+    codes: Vec<u16>,
+    rest: Rest,
 }
 
 /// An image as the skeleton tells it.
@@ -379,7 +385,7 @@ pub fn write(codes: &[u16], min: u8) -> Result<BitWriter> {
 
 /// Codes what an image's codes do not tell: the padding of their last byte, the bytes after
 /// it, and the sizes of the sub-blocks.
-fn code_rest(c: &mut impl Coder, x: &mut Ctx, bits: usize, d: &mut Data, encoding: bool) -> Result<()> {
+fn code_rest(c: &mut impl Coder, x: &mut Ctx, bits: usize, d: &mut Rest, encoding: bool) -> Result<()> {
     let pad_bits = ((8 - bits % 8) % 8) as u32;
     if pad_bits > 0 && !c.bit(&mut x.pad, d.pad == 0, Cat::Layout) {
         d.pad = c.raw(pad_bits, d.pad as u32, Cat::Layout) as u8;
@@ -477,14 +483,14 @@ fn code(c: &mut Enc, sk: &[u8], at: &[usize], data: &[Data]) -> Result<u64> {
     let mut model = Model::new(area.min(MAX_PIXELS), screen);
     let mut trie = Trie::new();
     let mut total = 0u64;
-    let lzw = Some(data.iter().map(chain_bits).sum::<u64>()).filter(|&b| b >= GIVE_UP_MIN);
+    let lzw = Some(data.iter().map(|d| chain_bits(&d.rest)).sum::<u64>()).filter(|&b| b >= GIVE_UP_MIN);
     let mut done = 0;
     let mut most = 0;
     for (s, d) in shapes.iter().zip(data) {
         if !(2..=8).contains(&s.min) {
             return Err(corrupt());
         }
-        let mut d = d.clone();
+        let mut rest = d.rest.clone();
         most = most.max(held(s, d.pixels.len()));
         let area = (s.width * s.height) as u32;
         let np = if c.bit(&mut x.whole, d.pixels.len() == area as usize, Cat::Layout) {
@@ -501,9 +507,9 @@ fn code(c: &mut Enc, sk: &[u8], at: &[usize], data: &[Data]) -> Result<u64> {
         model.image(c, &mut raster, &place);
         walk(c, &mut x, &mut trie, &d.pixels, s.min, Some(&d.codes), |_| Ok(()))?;
         let bits = write(&d.codes, s.min)?.bits();
-        code_rest(c, &mut x, bits, &mut d, true)?;
+        code_rest(c, &mut x, bits, &mut rest, true)?;
         if let Some(all) = lzw {
-            done += chain_bits(&d);
+            done += chain_bits(&rest);
             if done >= all / GIVE_UP_AFTER && c.spent() >> 16 > done * GIVE_UP_RATIO.0 / GIVE_UP_RATIO.1 {
                 return Err(Error("the pixels no smaller than their LZW data"));
             }
@@ -673,7 +679,7 @@ fn chain_into(c: &mut Dec, x: &mut Ctx, w: BitWriter, start: usize) -> Result<Ve
 }
 
 /// Bits of the sub-blocks of the image of `d`.
-fn chain_bits(d: &Data) -> u64 {
+fn chain_bits(d: &Rest) -> u64 {
     8 * (d.sizes.iter().map(|&n| n as u64).sum::<u64>() + d.cut.map_or(0, |(_, n)| n as u64))
 }
 
@@ -698,7 +704,8 @@ fn take(d: &[u8], im: &gif::Image, limit: usize) -> Option<Data> {
     let pad = if dec.end_bit % 8 != 0 { u.bytes[dec.end_bit / 8] >> (dec.end_bit % 8) } else { 0 };
     let whole: usize = u.sizes.iter().map(|&s| s as usize).sum();
     let cut = u.cut.map(|s| (s, (u.bytes.len() - whole) as u8));
-    Some(Data { pixels: dec.pixels, codes: dec.codes, pad, after: u.bytes[end..].to_vec(), sizes: u.sizes, cut })
+    let rest = Rest { pad, after: u.bytes[end..].to_vec(), sizes: u.sizes, cut };
+    Some(Data { pixels: dec.pixels, codes: dec.codes, rest })
 }
 
 /// Splits the GIF file `d` into its skeleton and record; None where it holds no image whose

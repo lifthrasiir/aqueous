@@ -17,7 +17,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 
 /// Whether `d` starts with a GIF file holding an image, as far as its blocks tell.
 pub fn starts(d: &[u8]) -> bool {
-    gif::header(d) && gif::parse(d).is_some_and(|g| !g.images.is_empty())
+    extent(d).is_some()
 }
 
 /// Bytes of the GIF file at the start of `d`, up to its trailer or where its blocks end; None

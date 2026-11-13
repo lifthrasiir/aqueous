@@ -40,12 +40,11 @@ fn main() {
             let mut d = Decoder::new(&bytes);
             let mut prev = 0u32;
             let mut acc = 0u32;
-            for (i, &(tt, _)) in syms.iter().enumerate() {
+            for &(tt, _) in syms.iter() {
                 let t = if dep { ((prev * 7) % nt as u32) as usize } else { tt as usize };
                 let s = d.get(&tables, t);
                 acc = acc.wrapping_add(s);
                 prev = s;
-                let _ = i;
             }
             std::hint::black_box(acc);
             best = best.min(t.elapsed().as_secs_f64());
