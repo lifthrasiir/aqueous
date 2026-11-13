@@ -29,17 +29,6 @@ pub fn index(parts: &[Part]) -> Vec<u8> {
     out
 }
 
-/// The parts of `index`.
-pub fn parts(index: &[u8]) -> Result<Vec<Part>> {
-    let mut at = 0;
-    let mut out = Vec::new();
-    while at < index.len() {
-        let mut get = || varint::get(index, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
-        out.push(Part { kept: get()?, data: get()?, record: get()? });
-    }
-    Ok(out)
-}
-
 /// What `index` cuts the inputs into: for each stream, the bytes kept before it, its data and
 /// its record; and the bytes kept after the last.
 #[allow(clippy::type_complexity)]
@@ -108,7 +97,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     };
     let (streams, tail) = cut(data, records, kept, index)?;
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out = Vec::with_capacity(len);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| corrupt())?;
     if threads <= 1 || streams.len() <= 1 || cfg!(target_family = "wasm") {
         // (the streams one after another on the match finder and chunk made once, for the largest)
         let mut spare = recons::Spare::new(v.window(), 0);

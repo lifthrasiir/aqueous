@@ -12,6 +12,8 @@ const HASH_BITS: u32 = 20;
 /// Positions by a hash of their next 3 bytes: a bucket's newest position, where its bytes are
 /// those, is their newest occurrence (as with LZMA's encoders, which look no further).
 const HASH3_BITS: u32 = 16;
+/// Bits of a hash of two bytes: all of them.
+const HASH2_BITS: u32 = 16;
 /// The key of the chain of matches of medium length.
 pub const MID: usize = 8;
 /// The key of the chain of long matches.
@@ -158,10 +160,18 @@ fn recent(n: usize) -> usize {
     if n >= RECENT_FROM && cfg!(not(target_arch = "wasm32")) { RECENT } else { 1 }
 }
 
+/// The ring of a chain, in positions, for data of `n` bytes and matches at most `reach` back: a
+/// power of two of `reach` at least (a candidate `c` is at least `pos - reach`, and its slot is
+/// taken again only by `c + ring`, which is at least `pos`, not added yet; so a dictionary of 2^n
+/// bytes takes chains of 2^n, not 2^(n+1)), which the chain holds to the data.
+fn ring_of(n: usize, reach: usize) -> usize {
+    reach.clamp(1, n.max(1)).next_power_of_two()
+}
+
 /// Bytes of the tables of a match finder over data of `n` bytes besides its rings.
 #[cfg(not(target_arch = "wasm32"))]
 fn tables(n: usize) -> usize {
-    4 * ((2 * recent(n) + 1) << HASH_BITS) + 4 * (1 << 16) + 4 * (1 << HASH3_BITS)
+    4 * ((2 * recent(n) + 1) << HASH_BITS) + 4 * (1 << HASH2_BITS) + 4 * (1 << HASH3_BITS)
 }
 
 /// The sizes in bytes of the allocations of a match finder in a module (one position of each
@@ -169,11 +179,11 @@ fn tables(n: usize) -> usize {
 /// the order it makes them: the two heads, then each chain's ring, buckets and list of matches
 /// found. They are all it holds (besides the stack's alignment of each to 16 bytes).
 pub fn blocks(n: usize, reach: usize) -> [u64; 11] {
-    let ring = reach.clamp(1, n.max(1)).next_power_of_two().min(n.max(1)) as u64;
+    let ring = ring_of(n, reach).min(n.max(1)) as u64;
     let chain = |w: usize, found: usize| [4 * ring, 4 * ((w << HASH_BITS) as u64 + 15), 8 * found as u64];
     let (short, mid, long) = (chain(1, DEPTH), chain(1, 0), chain(1, DEPTH));
     let [a, b, c, d, e, f, g, h, i] = [short, mid, long].concat().try_into().unwrap();
-    [4 << 16, 4 << HASH3_BITS, a, b, c, d, e, f, g, h, i]
+    [4 << HASH2_BITS, 4 << HASH3_BITS, a, b, c, d, e, f, g, h, i]
 }
 
 /// How far ahead [`Mf::advance`] asks for the buckets it will insert into: the data is all at
@@ -236,11 +246,7 @@ impl Mf {
     /// Bytes of the chains of a match finder of [`Mf::new`].
     #[cfg(not(target_arch = "wasm32"))]
     fn chains(n: usize, reach: usize) -> usize {
-        // A ring of `reach` positions at least: a candidate `c` is at least `pos - reach`, and its
-        // slot is taken again only by `c + ring`, which is at least `pos` (not added yet). So a
-        // dictionary of 2^n bytes takes chains of 2^n, not 2^(n+1).
-        let ring = reach.clamp(1, n.max(1)).next_power_of_two();
-        3 * 4 * ring.min(n.max(1)) + tables(n)
+        3 * 4 * ring_of(n, reach).min(n.max(1)) + tables(n)
     }
 
     /// How many match finders of [`Mf::new`] work at once (at least one; one in a module).
@@ -262,12 +268,12 @@ impl Mf {
 
     /// [`Mf::new`] keeping `w` positions of each hash together (1 or [`RECENT`]).
     fn keeping(n: usize, reach: usize, w: usize) -> Self {
-        let ring = reach.clamp(1, n.max(1)).next_power_of_two();
+        let ring = ring_of(n, reach);
         #[cfg(not(target_arch = "wasm32"))]
         let _admitted = gate::admit(Self::chains(n, reach));
         Mf {
             reach,
-            head2: vec![NONE; 1 << 16],
+            head2: vec![NONE; 1 << HASH2_BITS],
             head3: vec![NONE; 1 << HASH3_BITS],
             short: Chain::new(ring, n, reach, w, DEPTH),
             mid: Chain::new(ring, n, reach, 1, 0),

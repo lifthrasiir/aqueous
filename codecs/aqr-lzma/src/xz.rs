@@ -30,7 +30,7 @@ pub struct Streams {
 }
 
 /// The bytes of the check of each type.
-const CHECK: [usize; 16] = [0, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64];
+pub const CHECK: [usize; 16] = [0, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64];
 
 fn le32(f: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(f.get(at..at + 4)?.try_into().unwrap()))
@@ -95,10 +95,11 @@ fn block(f: &[u8], at: usize, check: usize) -> Option<(Option<Block>, usize)> {
         _ => None,
     };
     let pad = (4 - (stream - at) % 4) % 4;
-    if f.get(stream..stream + pad)?.iter().any(|&b| b != 0) {
+    let padded = stream.checked_add(pad)?;
+    if f.get(stream..padded)?.iter().any(|&b| b != 0) {
         return None;
     }
-    let end = stream + pad + check;
+    let end = padded.checked_add(check)?;
     (end <= f.len()).then_some((lzma2, end))
 }
 

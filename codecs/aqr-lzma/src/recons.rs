@@ -49,8 +49,10 @@ impl Default for Tree9 {
 
 /// Bits of the contexts held in one allocation (`Ctx`): the lengths of the lists of
 /// probabilities, in order.
-pub const CTX_LENS: [usize; 14] =
-    [12 * 64, 12 * 64, 12 * 64, 12 * 8, 64, 64, 8 * 16, 4 * 8, 8 * 512, 8 * 512, 64, 7 * 8, 32, 256];
+pub const CTX_LENS: [usize; 14] = {
+    const ST: usize = lzma::STATES;
+    [ST * 64, ST * 64, ST * 64, ST * 8, 64, 64, 8 * 16, 4 * 8, 8 * 512, 8 * 512, 64, 7 * 8, 32, 256]
+};
 /// The bits of all of them.
 pub const CTX_BITS: usize = {
     let (mut i, mut n) = (0, 0);
@@ -217,44 +219,28 @@ impl Part {
 
 /// The state and the last distances after packet `pk`, from those before it.
 fn step(state: &mut u8, reps: &mut [u32; 4], pk: Packet) {
-    let s = *state;
-    *state = match pk.kind {
-        Kind::Lit if s < 4 => 0,
-        Kind::Lit if s < 10 => s - 3,
-        Kind::Lit => s - 6,
-        Kind::ShortRep => {
-            if s < 7 {
-                9
-            } else {
-                11
-            }
-        }
-        Kind::Match => {
-            if s < 7 {
-                7
-            } else {
-                10
-            }
-        }
-        _ => {
-            if s < 7 {
-                8
-            } else {
-                11
-            }
-        }
-    };
+    let s = *state as usize;
     let k = match pk.kind {
-        Kind::Lit | Kind::ShortRep => return,
+        Kind::Lit => {
+            *state = lzma::after_lit(s) as u8;
+            return;
+        }
+        Kind::ShortRep => {
+            *state = lzma::after_short_rep(s) as u8;
+            return;
+        }
         Kind::Match => 3,
         Kind::Rep0 => 0,
         Kind::Rep1 => 1,
         Kind::Rep2 => 2,
         Kind::Rep3 => 3,
     };
-    let d = if pk.kind == Kind::Match { pk.dist } else { reps[k] };
-    reps.copy_within(0..k, 1);
-    reps[0] = d;
+    let (after, d) = match pk.kind {
+        Kind::Match => (lzma::after_match(s), pk.dist),
+        _ => (lzma::after_rep(s), reps[k]),
+    };
+    *state = after as u8;
+    lzma::push_rep(reps, k, d);
 }
 
 /// What a walk gives: the header of an LZMA2 chunk, where it starts, and the packets in it.
@@ -388,13 +374,7 @@ fn walk<S: Side>(
         let brest = bucket(rl[1].max(rl[2]).max(rl[3]));
         let ctx = state * 64 + bm * 8 + b0;
         if !s.bit(&mut x.is_match[ctx], pk.kind != Kind::Lit, Cat::Type) {
-            state = if state < 4 {
-                0
-            } else if state < 10 {
-                state - 3
-            } else {
-                state - 6
-            };
+            state = lzma::after_lit(state);
             on(&v, Ev::Packet(Packet::LIT))?;
             pos += 1;
             continue;
@@ -415,7 +395,7 @@ fn walk<S: Side>(
                     if rl[0] == 0 {
                         return None;
                     }
-                    state = if state < 7 { 9 } else { 11 };
+                    state = lzma::after_short_rep(state);
                     on(&v, Ev::Packet(Packet::SHORT_REP))?;
                     pos += 1;
                     continue;
@@ -439,9 +419,8 @@ fn walk<S: Side>(
                 return None;
             }
             let d = reps[k];
-            reps.copy_within(0..k, 1);
-            reps[0] = d;
-            state = if state < 7 { 8 } else { 11 };
+            lzma::push_rep(&mut reps, k, d);
+            state = lzma::after_rep(state);
             Packet { kind: [Kind::Rep0, Kind::Rep1, Kind::Rep2, Kind::Rep3][k], len: n as u16, dist: d }
         } else {
             mf.longest(&v, pos, DEPTH, NICE, cap);
@@ -508,9 +487,8 @@ fn walk<S: Side>(
             if d as usize >= pos.min(reach) || v.lcp(pos - d as usize - 1, pos, n) < n {
                 return None;
             }
-            reps.copy_within(0..3, 1);
-            reps[0] = d;
-            state = if state < 7 { 7 } else { 10 };
+            lzma::push_rep(&mut reps, 3, d);
+            state = lzma::after_match(state);
             Packet { kind: Kind::Match, len: n as u16, dist: d }
         };
         on(&v, Ev::Packet(pk))?;
@@ -639,12 +617,20 @@ fn deconstruct_parts(
     Some(out)
 }
 
+/// Bytes of a part's header at least, after the first's: its span and length, a state, four
+/// last distances.
+const PART_HEADER_MIN: u64 = 7;
+
+/// Whether `k` is the number of parts after the first of data of `n` bytes in a body of `body`
+/// bytes.
+fn count_fits(k: usize, n: usize, body: u64) -> bool {
+    k >= 1 && k < n && k as u64 <= body / PART_HEADER_MIN
+}
+
 /// The number of parts of a body of a record cut into them (see [`deconstruct_parts`]) for data
-/// of `n` bytes: the first varint, and one; None where it is not a count of them. Each part
-/// after the first has seven bytes of its header at least.
+/// of `n` bytes: the first varint, and one; None where it is not a count of them.
 fn parts_count(body: &[u8], n: usize) -> Option<usize> {
-    let k =
-        usize::try_from(varint::get(body, &mut 0).ok()?).ok().filter(|&k| k >= 1 && k < n && k <= body.len() / 7)?;
+    let k = usize::try_from(varint::get(body, &mut 0).ok()?).ok().filter(|&k| count_fits(k, n, body.len() as u64))?;
     Some(k + 1)
 }
 
@@ -669,7 +655,7 @@ fn parts_in(body: &[u8], n: usize, reach: usize) -> Option<Vec<PartRec<'_>>> {
         let len = usize::try_from(get(&mut at)?).ok()?;
         let (mut state, mut reps) = (0u8, [0u32; 4]);
         if k > 0 {
-            state = *body.get(at).filter(|&&s| s < 12)?;
+            state = *body.get(at).filter(|&&s| (s as usize) < lzma::STATES)?;
             at += 1;
             for r in &mut reps {
                 *r = u32::try_from(get(&mut at)?).ok().filter(|&r| (r as usize) < reach)?;
@@ -914,7 +900,7 @@ pub fn join_stream(data: &mut dyn Pull, n: usize, rec: &mut Reader, rec_len: u64
             0 | 1 => 1,
             2 | 3 => {
                 let k = usize::try_from(rec.num().ok()?).ok();
-                k.filter(|&k| k >= 1 && k < n && k as u64 <= body / 7)? + 1
+                k.filter(|&k| count_fits(k, n, body))? + 1
             }
             _ => return None,
         };
@@ -930,7 +916,7 @@ pub fn join_stream(data: &mut dyn Pull, n: usize, rec: &mut Reader, rec_len: u64
                 len = rec.num().ok()?;
                 end = pos + span;
                 if k > 0 {
-                    let state = rec.byte().filter(|&s| s < 12)?;
+                    let state = rec.byte().filter(|&s| (s as usize) < lzma::STATES)?;
                     let mut reps = [0u32; 4];
                     for r in &mut reps {
                         *r = u32::try_from(rec.num().ok()?).ok().filter(|&r| (r as usize) < reach)?;

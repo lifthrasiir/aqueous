@@ -1,8 +1,8 @@
-//! aqr-mszip's formulas (see aqr-formula): a CAB file whose MSZIP and stored folders are rebuilt
-//! from their data. An MSZIP folder's blocks are one DEFLATE stream joined (`mszip`), which
-//! aqr-flate's module (`flate-set`, one application for all of them) rebuilds from the data and
-//! a record; [`MODULE`] cuts the blocks back from it, the data blocks' headers kept between
-//! them, and takes a stored folder's blocks from its data. The rest of the file (the header,
+//! aqr-mszip's formulas (see aqr-formula): a CAB file whose MSZIP, LZX and stored folders, or a
+//! CHM file whose LZX section, are rebuilt from their data. An MSZIP folder's blocks are one
+//! DEFLATE stream joined (`mszip`), which aqr-flate's module (`flate-set`, one application for all
+//! of them) rebuilds from the data and a record; [`MODULE`] cuts the blocks back from it, the data
+//! blocks' headers kept between them, and takes a stored folder's blocks from its data. The rest of the file (the header,
 //! folders of other methods, the files, a signature) is kept as it is. The data of a folder is
 //! the contents of its files by their kinds by their names, so that whoever takes the formula may
 //! recompress them in turn and store them once where the same files are archived along with it.
@@ -112,7 +112,11 @@ const ALONE: u64 = 64 << 20;
 
 /// The LZX folders of a window: the window's bits, their streams, and for each where its node
 /// goes among the raw blocks' and its bytes.
-type LzxGroup = (u8, Vec<aqr_lzx::formula::Stream>, Vec<(usize, u64)>);
+struct LzxGroup {
+    bits: u8,
+    streams: Vec<aqr_lzx::formula::Stream>,
+    at: Vec<(usize, u64)>,
+}
 
 /// Whether the data blocks of `f` follow each other, each of some data.
 fn contiguous(f: &Folder) -> bool {
@@ -240,21 +244,21 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                 let raw = f.streams.len();
                 f.push("raw", Vec::new());
                 let data = f.push_by_kind(raw, data, &ends, "cab", OWN_MIN);
-                let g = match lzx.iter().position(|g| g.0 == window_bits) {
+                let g = match lzx.iter().position(|g| g.bits == window_bits) {
                     Some(g) => g,
                     None => {
-                        lzx.push((window_bits, Vec::new(), Vec::new()));
+                        lzx.push(LzxGroup { bits: window_bits, streams: Vec::new(), at: Vec::new() });
                         lzx.len() - 1
                     }
                 };
-                lzx[g].1.push(aqr_lzx::formula::Stream { kept: Node::Concat(Vec::new()), data, record });
-                lzx[g].2.push((raws.len(), packed));
+                lzx[g].streams.push(aqr_lzx::formula::Stream { kept: Node::Concat(Vec::new()), data, record });
+                lzx[g].at.push((raws.len(), packed));
                 raws.push(None);
             }
         }
         pieces.push(span);
     }
-    for (bits, streams, at) in lzx {
+    for LzxGroup { bits, streams, at } in lzx {
         let v = aqr_lzx::lzx::Variant::cab(bits)?;
         // (a stream of long data in an application of its own, which is streamed and applied at
         // once with the others; the rest together)
@@ -407,16 +411,17 @@ pub fn encode_chm_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     entries.sort_by_key(|e| e.offset);
     let mut at = 0u64;
     for e in entries {
-        if e.offset < at || e.offset + e.len > z.len as u64 {
+        let end = e.offset.checked_add(e.len).filter(|&end| end <= z.len as u64);
+        let Some(end) = end.filter(|_| e.offset >= at) else {
             ends.clear();
             at = 0;
             break;
-        }
+        };
         if e.offset > at {
             ends.push((Kind::Unknown, e.offset as usize));
         }
-        ends.push(((opt.kind)(&e.name), (e.offset + e.len) as usize));
-        at = e.offset + e.len;
+        ends.push(((opt.kind)(&e.name), end as usize));
+        at = end;
     }
     if (at as usize) < z.len {
         ends.push((Kind::Unknown, z.len));

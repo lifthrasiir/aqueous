@@ -503,9 +503,12 @@ impl Spare {
         Spare { mf: Some(Box::new(Mf::new(window))), d: Vec::with_capacity(d_cap) }
     }
 
-    /// This thread's last spare, if it is one for `window`.
-    fn parked(window: usize) -> Option<Spare> {
-        SPARE.with(|s| s.borrow_mut().take()).filter(|s| s.mf.as_ref().is_some_and(|mf| mf.prev2.len() == window))
+    /// This thread's last spare if it is one for `window`, else a new one.
+    fn take(window: usize) -> Spare {
+        SPARE
+            .with(|s| s.borrow_mut().take())
+            .filter(|s| s.mf.as_ref().is_some_and(|mf| mf.prev2.len() == window))
+            .unwrap_or_else(|| Spare::new(window, CHUNK))
     }
 
     /// Parks the spare for this thread's next stream (a module keeps its own: none there).
@@ -756,19 +759,12 @@ impl Walker {
 
     /// A walker on this thread's spare (else a new one).
     fn parked(v: Variant, caps: Option<Caps>) -> Walker {
-        let window = v.window();
-        let spare = Spare::parked(window).unwrap_or_else(|| Spare::new(window, CHUNK));
-        Walker::new(spare, v, caps)
-    }
-
-    /// Done: the spare, for the next stream.
-    fn into_spare(self) -> Spare {
-        self.spare
+        Walker::new(Spare::take(v.window()), v, caps)
     }
 
     /// Done: the spare left for this thread's next stream.
     fn park(self) {
-        self.into_spare().park();
+        self.spare.park();
     }
 }
 
@@ -955,8 +951,7 @@ impl Walker {
             } else {
                 // the tokens
                 let wt = cur.as_ref().map(|c| (&c.toks[..], &c.pads[..]));
-                let (mut t, mut fp) = (0, 0);
-                self.tokens(side, &d, feed.n(), at, end, &mut reps, wt, &mut t, &mut fp)?;
+                self.tokens(side, &d, feed.n(), at, end, &mut reps, wt)?;
                 b.toks = self.toks.len();
                 // the trees, against the code of the block's frequencies
                 let (mut fm, mut fl, mut fa) = ([0u32; MAIN_MAX], [0u32; LEN], [0u32; ALIGNED]);
@@ -1112,7 +1107,7 @@ impl Walker {
             let can = zeros >= 4 || same >= 4;
             let run = can && side.bit(&mut c.run[ctx * 3], is_run, Cat::Tree);
             if !run {
-                let sym = (before[i] + 17 - target[i]) % 17;
+                let sym = lzx::delta(before[i], target[i]);
                 if ws.is_some_and(|s| s.sym != sym) {
                     return Err(Error("a pretree symbol not as its lengths say"));
                 }
@@ -1147,11 +1142,7 @@ impl Walker {
             };
             let avail = if sym == 19 { same } else { zeros };
             let full = avail.min(max);
-            let wn = ws.map_or(0, |s| match s.sym {
-                17 => 4 + s.extra as usize,
-                18 => 20 + s.extra as usize,
-                _ => 4 + s.extra as usize,
-            });
+            let wn = ws.map_or(0, |s| s.run());
             let n = if sym == 19 {
                 if full < 5 { 4 } else { 4 + side.bit(&mut c.same5[(lb(same)).min(3)], wn == 5, Cat::Tree) as usize }
             } else if side.bit(&mut c.run_full[(sym - 17) as usize], wn == full, Cat::Tree) {
@@ -1163,7 +1154,7 @@ impl Walker {
                 return Err(corrupt());
             }
             let extra = (n - min) as u8;
-            let then = if sym == 19 { (before[i] + 17 - target[i]) % 17 } else { 0 };
+            let then = if sym == 19 { lzx::delta(before[i], target[i]) } else { 0 };
             if let Some(w) = ws
                 && (w.sym != sym || w.extra != extra || w.then != then)
             {
@@ -1210,21 +1201,21 @@ impl Walker {
         end: usize,
         reps: &mut [u32; 3],
         want: Option<(&[Tok], &[u16])>,
-        t: &mut usize,
-        fp: &mut usize,
     ) -> Result<()> {
         let c = &mut self.ctx;
         let mf = self.spare.mf.as_deref_mut().expect("a match finder");
         let (want, want_pads) = (want.map(|w| w.0), want.map(|w| w.1));
-        let esc_bits = if self.v.cab { self.v.window_bits as u32 } else { 15 };
-        let (toks, pads, fixed) = (&mut self.toks, &mut self.pads, self.fixed);
-        let frame_end = &mut self.frame_end;
+        let esc_bits = self.v.window_bits as u32;
+        let toks = &mut self.toks;
+        let mut pads = Pads { v: &mut self.pads, next: 0, fixed: self.fixed };
+        let (fixed, frame_end) = (self.fixed, &mut self.frame_end);
+        let mut t = 0;
         let mut pos = at;
         while pos < end {
             mf.advance(d, pos);
             let cap = (end - pos).min(MAX_MATCH);
-            let w = want.map(|w| w.get(*t).copied().ok_or_else(corrupt)).transpose()?;
-            *t += 1;
+            let w = want.map(|w| w.get(t).copied().ok_or_else(corrupt)).transpose()?;
+            t += 1;
             let (longest, _) = mf.longest(d, pos, cap);
             let rl: [usize; 3] = std::array::from_fn(|k| {
                 if (reps[k] as usize) <= pos { lcp_up(d, pos - reps[k] as usize, pos, cap) } else { 0 }
@@ -1237,7 +1228,7 @@ impl Walker {
             if !is_match {
                 toks.push(Tok::Lit);
                 pos += 1;
-                pad(side, &mut c.zero[6], frame_end, n, pos, (pads, fp, fixed), want_pads)?;
+                pad(side, &mut c.zero[6], frame_end, n, pos, &mut pads, want_pads)?;
                 continue;
             }
             let (wlen, woff, wrep) = match w {
@@ -1317,7 +1308,7 @@ impl Walker {
             }
             toks.push(Tok::Match { len: len as u16, off: off as u32, rep });
             pos += len;
-            pad(side, &mut c.zero[6], frame_end, n, pos, (pads, fp, fixed), want_pads)?;
+            pad(side, &mut c.zero[6], frame_end, n, pos, &mut pads, want_pads)?;
         }
         Ok(())
     }
@@ -1332,6 +1323,14 @@ fn spill(out: &mut Option<Out<'_>>, w: &mut BitW) -> Option<()> {
     Some(())
 }
 
+/// The padding of a block's frames made so far: the words, and how many of the record's are
+/// taken. With `fixed` they may not outgrow what was reserved.
+struct Pads<'a> {
+    v: &'a mut Vec<u16>,
+    next: usize,
+    fixed: bool,
+}
+
 /// (CAB's) The padding of the frame a token ends at `pos` (where the frame ends before `n`),
 /// against `want`, onto `pads`.
 fn pad(
@@ -1340,17 +1339,17 @@ fn pad(
     frame_end: &mut usize,
     n: usize,
     pos: usize,
-    (pads, fp, fixed): (&mut Vec<u16>, &mut usize, bool),
+    pads: &mut Pads,
     want: Option<&[u16]>,
 ) -> Result<()> {
     if pos >= *frame_end && *frame_end < n {
-        let wp = want.map(|p| p.get(*fp).copied().ok_or_else(corrupt)).transpose()?.unwrap_or(0);
+        let wp = want.map(|p| p.get(pads.next).copied().ok_or_else(corrupt)).transpose()?.unwrap_or(0);
         let v = if side.bit(bit, wp != 0, Cat::Rest) { side.raw(16, wp as u32, Cat::Rest) } else { 0 };
-        if fixed && pads.len() == pads.capacity() {
+        if pads.fixed && pads.v.len() == pads.v.capacity() {
             return Err(Error("more frames than the record counts"));
         }
-        pads.push(v as u16);
-        *fp += 1;
+        pads.v.push(v as u16);
+        pads.next += 1;
         *frame_end = (*frame_end + lzx::FRAME).min(n);
     }
     Ok(())
@@ -1542,10 +1541,7 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
 
 /// [`join`] onto `out`.
 pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
-    let spare = Spare::parked(lzx::WIM.window()).unwrap_or_else(|| Spare::new(lzx::WIM.window(), CHUNK));
-    let (spare, done) = join_in(spare, lzx::WIM, data, record, out);
-    spare.park();
-    done
+    join_stream_onto(data, record, lzx::WIM, out)
 }
 
 /// The stream of `v` (WIM's chunks, or a CAB stream) that `data` and `record` rebuild, onto
@@ -1597,7 +1593,7 @@ pub fn join_stream(
         }
         dec.finish().ok_or_else(corrupt)
     })();
-    (w.into_spare(), done)
+    (w.spare, done)
 }
 
 /// The data and record of stream `src` of `v` (CAB's) of `n` bytes of data. None where it does
@@ -1745,7 +1741,7 @@ impl Want for WantOf<'_, '_> {
 
 /// The stream of `v` that `data` and `record` rebuild, onto `out`.
 pub fn join_stream_onto(data: &[u8], record: &[u8], v: Variant, out: &mut Vec<u8>) -> Result<()> {
-    let spare = Spare::parked(v.window()).unwrap_or_else(|| Spare::new(v.window(), CHUNK));
+    let spare = Spare::take(v.window());
     let (spare, done) = join_in(spare, v, data, record, out);
     spare.park();
     done

@@ -1,9 +1,9 @@
-//! CAB files (MS-CAB) taken apart into the contents of their files, so that those are stored
-//! instead: an MSZIP folder is rebuilt from its data by aqr-flate's module and this crate's
-//! (`mszip-recons`), a stored folder is its data. `mszip` turns a folder's MSZIP blocks into one
-//! DEFLATE stream and back; `cab` reads the container; `formula` is the entry point (see
-//! aqr-formula), with the feature `encode`; `module` is the code of the module, which
-//! `FORMAT.md` specifies.
+//! CAB files (MS-CAB) and CHM files taken apart into the contents of their files, so that those
+//! are stored instead: an MSZIP folder is rebuilt from its data by aqr-flate's module and this
+//! crate's (`mszip-recons`), an LZX folder (or a CHM's LZX section) by aqr-lzx's, a stored folder
+//! is its data. `mszip` turns a folder's MSZIP blocks into one DEFLATE stream and back; `cab` and
+//! `chm` read the containers; `formula` is the entry point (see aqr-formula), with the feature
+//! `encode`; `module` is the code of the module, which `FORMAT.md` specifies.
 
 #[cfg(feature = "encode")]
 pub mod cab;

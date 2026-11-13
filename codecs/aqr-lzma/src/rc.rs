@@ -5,8 +5,9 @@ use crate::stream::{PIECE, Put};
 pub const BITS: u32 = 11;
 pub const ONE: u16 = 1 << BITS;
 pub const HALF: u16 = ONE / 2;
-const MOVE: u32 = 5;
-const TOP: u32 = 1 << 24;
+/// The shift of a probability's adaptation, and the range below which a byte is shifted in.
+pub const MOVE: u32 = 5;
+pub const TOP: u32 = 1 << 24;
 
 /// The side of the coder the model runs on: a decoder ignores the bit it is given and returns
 /// the one it reads, an encoder writes the bit it is given and returns it.
@@ -72,19 +73,21 @@ impl<'a> Encoder<'a> {
         self.low = (self.low & 0x00ff_ffff) << 8;
     }
 
-    pub fn finish(mut self) -> Vec<u8> {
+    fn flush(&mut self) {
         for _ in 0..5 {
             self.shift_low();
         }
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        self.flush();
         self.out
     }
 
     /// [`Encoder::finish`] for an encoder of a sink: what is left goes to it. None where it
     /// refused any.
     pub fn finish_to(mut self) -> Option<()> {
-        for _ in 0..5 {
-            self.shift_low();
-        }
+        self.flush();
         self.spill();
         (!self.failed).then_some(())
     }

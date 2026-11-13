@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use crate::lzma::{END, Error, Kind, Model, Packet, Props};
+use crate::lzma::{self, END, Error, Kind, Model, Packet, Props};
 use crate::mf::Mf;
 use crate::rc::{Decoder, Encoder};
 use crate::recons::{self, Ev, Split};
@@ -144,13 +144,10 @@ pub fn decode(input: &[u8], limit: usize) -> Result<Decoded, Error> {
                 }
                 _ if pk.dist == END => return Err(Error::Corrupt),
                 _ => {
-                    let src = pos.checked_sub(pk.dist as usize + 1).ok_or(Error::Corrupt)?;
                     if pos + pk.len as usize > end {
                         return Err(Error::Corrupt);
                     }
-                    for j in 0..pk.len as usize {
-                        data.push(data[src + j]);
-                    }
+                    lzma::copy_match(data, pk).ok_or(Error::Corrupt)?;
                     seg.packets.push(if pk.kind == Kind::ShortRep { Packet::SHORT_REP } else { pk });
                 }
             }

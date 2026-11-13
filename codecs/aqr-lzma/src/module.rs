@@ -31,7 +31,8 @@ fn decode_with(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize, join: 
     }
     let streams = aqr_common::streams::cut(data, records, index, corrupt)?;
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out = Vec::with_capacity(len);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| corrupt())?;
     if threads <= 1 || streams.len() <= 1 || cfg!(target_family = "wasm") {
         // (a stream's parts on the threads of all)
         for &(data, record) in &streams {

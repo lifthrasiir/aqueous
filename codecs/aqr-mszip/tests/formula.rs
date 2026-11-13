@@ -195,6 +195,12 @@ fn encint(mut v: u64, out: &mut Vec<u8>) {
 /// A CHM file of aqr-lzx's CHM fixture (resets every 2 frames, a window of 64 KiB): two files in
 /// the LZX section, its content, control data and reset table in section 0. The data's length.
 fn chm_file() -> (Vec<u8>, usize) {
+    chm_file_of(|n| [(0, 70000), (70000, n - 70000)])
+}
+
+/// [`chm_file`] with the LZX section's two files (offset and length) that `files` gives for the
+/// length of the section's data.
+fn chm_file_of(files: impl Fn(u64) -> [(u64, u64); 2]) -> (Vec<u8>, usize) {
     let s = std::fs::read(format!("{}/../aqr-lzx/tests/data/greedy.chm-lzx", env!("CARGO_MANIFEST_DIR"))).unwrap();
     let n = u32::from_le_bytes(s[0..4].try_into().unwrap()) as usize;
     let (mut content, mut frames, mut at) = (Vec::new(), Vec::new(), 4);
@@ -225,8 +231,9 @@ fn chm_file() -> (Vec<u8>, usize) {
         format!("{ms}Transform/{{7FC28940-9D31-11D0-9B27-00A0C91E9C7C}}/InstanceData/ResetTable"),
     ];
     let mut entries: Vec<(String, u64, u64, u64)> = vec![("/".into(), 0, 0, 0)];
-    entries.push(("/a.htm".into(), 1, 0, 70000));
-    entries.push(("/img/b.bin".into(), 1, 70000, n as u64 - 70000));
+    let [(a_off, a_len), (b_off, b_len)] = files(n as u64);
+    entries.push(("/a.htm".into(), 1, a_off, a_len));
+    entries.push(("/img/b.bin".into(), 1, b_off, b_len));
     let mut off = 0;
     for (name, len) in names0.iter().zip(sec0) {
         entries.push((name.clone(), 0, off, len as u64));
@@ -264,6 +271,17 @@ fn chm_file() -> (Vec<u8>, usize) {
     d.extend_from_slice(&control);
     d.extend_from_slice(&table);
     (d, n)
+}
+
+/// Files whose offsets and lengths are made to add up to a few bytes (as the 64-bit numbers of the
+/// directory wrap) do not get past the check that they lie in the section.
+#[test]
+fn chm_entries_that_wrap() {
+    let (d, _) = chm_file_of(|n| [(1, u64::MAX), (n - 1, 1)]);
+    let f = formula::encode_chm(&d, 1).expect("a formula");
+    assert!(eval(&f) == d);
+    let contents: usize = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum();
+    assert_eq!(contents, 5 * 32768);
 }
 
 /// A CHM file's LZX section rebuilt by aqr-lzx's module, each reset interval a stream, from the

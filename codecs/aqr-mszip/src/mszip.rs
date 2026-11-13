@@ -280,10 +280,7 @@ fn walk(r: &mut BitR, lit: &Code, dist: &Code) -> Result<usize> {
     let mut n = 0;
     loop {
         match lit.decode(r)? {
-            s @ 0..=255 => {
-                let _ = s;
-                n += 1;
-            }
+            0..=255 => n += 1,
             256 => return Ok(n),
             s @ 257..=285 => {
                 let c = s as usize - 257;
@@ -371,9 +368,6 @@ pub fn join(blocks: &[&[u8]], w: &mut BitW) -> Result<Vec<Joined>> {
     Ok(out)
 }
 
-/// An MSZIP block cut from a joined stream `r` onto `out`: its signature, then `blocks` DEFLATE
-/// blocks, the last final, padded to a byte. Where the last is final in `r` too (the stream's
-/// end), `r` is taken to the next byte.
 /// What [`cut_onto`] takes of an [`aqr_api::stack`] at most besides `out`: the codes of fixed
 /// blocks (kept once made), and those of a dynamic block's header (its code lengths' code and its
 /// codes, of 288 and 32 symbols at most), each of its symbols and its table of `FAST` bits.
@@ -383,6 +377,9 @@ pub fn cut_plan() -> u64 {
     code(288) + code(30) + code(19) + code(288) + code(32)
 }
 
+/// An MSZIP block cut from a joined stream `r` onto `out`: its signature, then `blocks` DEFLATE
+/// blocks, the last final, padded to a byte. Where the last is final in `r` too (the stream's
+/// end), `r` is taken to the next byte.
 pub fn cut_onto(r: &mut BitR, blocks: usize, out: &mut Vec<u8>) -> Result<()> {
     out.extend_from_slice(SIG);
     let mut w = BitW::new(std::mem::take(out));

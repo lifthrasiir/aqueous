@@ -8,10 +8,49 @@ use crate::window::View;
 
 pub const MIN_LEN: u32 = 2;
 pub const MAX_LEN: u32 = 273;
-const STATES: usize = 12;
-const POS_MAX: usize = 16;
+/// The model's states, and the positions in its context (at most `1 << pb`).
+pub const STATES: usize = 12;
+pub const POS_MAX: usize = 16;
 /// The distance of the end marker.
 pub const END: u32 = u32::MAX;
+
+/// The state after a literal, from the state `st` before it.
+#[inline(always)]
+pub const fn after_lit(st: usize) -> usize {
+    if st < 4 {
+        0
+    } else if st < 10 {
+        st - 3
+    } else {
+        st - 6
+    }
+}
+
+/// The state after a match.
+#[inline(always)]
+pub const fn after_match(st: usize) -> usize {
+    if st < 7 { 7 } else { 10 }
+}
+
+/// The state after a repeated match.
+#[inline(always)]
+pub const fn after_rep(st: usize) -> usize {
+    if st < 7 { 8 } else { 11 }
+}
+
+/// The state after a short repeat.
+#[inline(always)]
+pub const fn after_short_rep(st: usize) -> usize {
+    if st < 7 { 9 } else { 11 }
+}
+
+/// Makes `d` the last distance of `reps`, the others after it; `k` is where `d` was among them
+/// (3 for a new distance, which pushes the oldest out).
+#[inline(always)]
+pub fn push_rep(reps: &mut [u32; 4], k: usize, d: u32) {
+    reps.copy_within(0..k, 1);
+    reps[0] = d;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Props {
@@ -134,13 +173,7 @@ pub const fn lit_len(props: Props) -> usize {
 
 impl Model {
     pub fn new(props: Props) -> Self {
-        Self::with_capacity(props, 0)
-    }
-
-    /// [`Model::new`] with room in its literal probabilities for `capacity` of them (at least
-    /// `props`'): [`Model::reset`] then keeps them.
-    pub fn with_capacity(props: Props, capacity: usize) -> Self {
-        Self::with_lit(props, Vec::with_capacity(capacity.max(lit_len(props))))
+        Self::with_lit(props, Vec::with_capacity(lit_len(props)))
     }
 
     /// Back to the model of `props`, in the same memory where its literal probabilities fit.
@@ -226,13 +259,7 @@ impl Model {
                 let i = 7 - (31 - s.leading_zeros());
                 s = s << 1 | c.bit(&mut p[s as usize], byte >> i & 1);
             }
-            self.state = if st < 4 {
-                0
-            } else if st < 10 {
-                st - 3
-            } else {
-                st - 6
-            };
+            self.state = after_lit(st);
             return Packet { kind: Kind::Lit, len: 1, dist: s - 0x100 };
         }
         let len;
@@ -246,7 +273,7 @@ impl Model {
             };
             if c.bit(&mut self.is_rep_g0[st], (k != 0) as u32) == 0 {
                 if c.bit(&mut self.is_rep0_long[st][ps], (pk.kind != Kind::ShortRep) as u32) == 0 {
-                    self.state = if st < 7 { 9 } else { 11 };
+                    self.state = after_short_rep(st);
                     return Packet { kind: Kind::ShortRep, len: 1, dist: self.reps[0] };
                 }
                 kind = Kind::Rep0;
@@ -260,21 +287,19 @@ impl Model {
                 };
                 kind = [Kind::Rep0, Kind::Rep1, Kind::Rep2, Kind::Rep3][k];
                 let d = self.reps[k];
-                self.reps.copy_within(0..k, 1);
-                self.reps[0] = d;
+                push_rep(&mut self.reps, k, d);
             }
             len = code_len(c, &mut self.rep_len, ps, (pk.len as u32).wrapping_sub(MIN_LEN)) + MIN_LEN;
-            self.state = if st < 7 { 8 } else { 11 };
+            self.state = after_rep(st);
         } else {
             len = code_len(c, &mut self.len, ps, (pk.len as u32).wrapping_sub(MIN_LEN)) + MIN_LEN;
-            self.state = if st < 7 { 7 } else { 10 };
+            self.state = after_match(st);
             let d = self.code_dist(c, len, pk.dist);
             kind = Kind::Match;
             if d == END {
                 return Packet { kind, len: len as u16, dist: END };
             }
-            self.reps.copy_within(0..3, 1);
-            self.reps[0] = d;
+            push_rep(&mut self.reps, 3, d);
         }
         Packet { kind, len: len as u16, dist: self.reps[0] }
     }
@@ -298,11 +323,22 @@ pub struct Decoded {
     pub used: usize,
 }
 
+/// Appends the bytes of the match `pk` to `data` (which may overlap what it copies). None where
+/// its distance reaches back past the start.
+pub(crate) fn copy_match(data: &mut Vec<u8>, pk: Packet) -> Option<()> {
+    let src = data.len().checked_sub(pk.dist as usize + 1)?;
+    for j in 0..pk.len as usize {
+        data.push(data[src + j]);
+    }
+    Some(())
+}
+
 /// Decodes a stream of `size` bytes (None: up to the end marker), up to `limit` bytes.
 pub fn decode(input: &[u8], props: Props, size: Option<u64>, limit: usize) -> Result<Decoded, Error> {
     let mut c = Decoder::new(input).ok_or(Error::Corrupt)?;
     let mut m = Model::new(props);
-    let mut data = Vec::with_capacity(size.map_or(input.len() * 4, |s| s as usize).min(limit));
+    let mut data = Vec::new();
+    data.try_reserve_exact(size.map_or(input.len() * 4, |s| s as usize).min(limit)).map_err(|_| Error::Corrupt)?;
     let mut packets = vec![];
     let mut marker = false;
     loop {
@@ -324,13 +360,10 @@ pub fn decode(input: &[u8], props: Props, size: Option<u64>, limit: usize) -> Re
                 break;
             }
             _ => {
-                let src = pos.checked_sub(pk.dist as usize + 1).ok_or(Error::Corrupt)?;
                 if pos + pk.len as usize > limit || size.is_some_and(|s| (pos + pk.len as usize) as u64 > s) {
                     return Err(Error::Corrupt);
                 }
-                for j in 0..pk.len as usize {
-                    data.push(data[src + j]);
-                }
+                copy_match(&mut data, pk).ok_or(Error::Corrupt)?;
                 packets.push(if pk.kind == Kind::ShortRep { Packet::SHORT_REP } else { pk });
             }
         }
@@ -361,9 +394,8 @@ pub fn plausible(input: &[u8], props: Props, n: usize) -> bool {
             Kind::Lit => data.push(pk.dist as u8),
             _ if pk.dist == END => return true,
             _ => {
-                let Some(src) = pos.checked_sub(pk.dist as usize + 1) else { return false };
-                for j in 0..pk.len as usize {
-                    data.push(data[src + j]);
+                if copy_match(&mut data, pk).is_none() {
+                    return false;
                 }
             }
         }

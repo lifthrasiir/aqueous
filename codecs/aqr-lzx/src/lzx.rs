@@ -17,10 +17,8 @@
 /// Bytes of a chunk, and of its window; and of a frame.
 pub const WINDOW: usize = 32768;
 pub const FRAME: usize = 32768;
-/// Position slots of a window of 32 KiB, and of 2 MiB.
-pub const SLOTS: usize = 30;
+/// Position slots of a window of 2 MiB.
 pub const MAX_SLOTS: usize = 50;
-pub const MAIN: usize = 256 + 8 * SLOTS;
 pub const MAIN_MAX: usize = 256 + 8 * MAX_SLOTS;
 pub const LEN: usize = 249;
 pub const ALIGNED: usize = 8;
@@ -129,6 +127,23 @@ pub struct PreSym {
     pub extra: u8,
     /// After 19: the pretree symbol of the value.
     pub then: u8,
+}
+
+impl PreSym {
+    /// The code lengths it covers: a run's (4 and up for 17 and 19, 20 and up for 18), else one.
+    pub fn run(&self) -> usize {
+        let base = match self.sym {
+            17 | 19 => 4,
+            18 => 20,
+            _ => return 1,
+        };
+        base + self.extra as usize
+    }
+}
+
+/// The code length that the pretree symbol `sym` makes of `old`.
+pub fn delta(old: u8, sym: u8) -> u8 {
+    (old + 17 - sym) % 17
 }
 
 /// A block: its type, size and how it says it, and by type its trees and tokens or its bytes.
@@ -388,11 +403,11 @@ fn read_tree(r: &mut BitR, lens: &mut [u8]) -> Option<TreeCode> {
         let (n, v) = match sym {
             17 => {
                 s.extra = r.bits(4) as u8;
-                (4 + s.extra as usize, Some(0))
+                (s.run(), Some(0))
             }
             18 => {
                 s.extra = r.bits(5) as u8;
-                (20 + s.extra as usize, Some(0))
+                (s.run(), Some(0))
             }
             19 => {
                 s.extra = r.bits(1) as u8;
@@ -400,7 +415,7 @@ fn read_tree(r: &mut BitR, lens: &mut [u8]) -> Option<TreeCode> {
                 if s.then > 16 {
                     return None;
                 }
-                (4 + s.extra as usize, Some((lens[i] + 17 - s.then) % 17))
+                (s.run(), Some(delta(lens[i], s.then)))
             }
             _ => (1, None),
         };
@@ -410,7 +425,7 @@ fn read_tree(r: &mut BitR, lens: &mut [u8]) -> Option<TreeCode> {
         }
         match v {
             Some(v) => lens[i..i + n].fill(v),
-            None => lens[i] = (lens[i] + 17 - sym) % 17,
+            None => lens[i] = delta(lens[i], sym),
         }
         i += n;
         t.syms.push(s);
@@ -445,13 +460,13 @@ fn write_tree(w: &mut BitW, t: &TreeCode) -> Option<()> {
 pub fn apply_tree(t: &TreeCode, lens: &mut [u8]) -> Option<()> {
     let mut i = 0;
     for s in &t.syms {
-        let (n, v) = match s.sym {
-            17 => (4 + s.extra as usize, Some(0)),
-            18 => (20 + s.extra as usize, Some(0)),
-            19 => (4 + s.extra as usize, Some((*lens.get(i)? + 17 - s.then) % 17)),
-            sym => (1, Some((*lens.get(i)? + 17 - sym) % 17)),
+        let n = s.run();
+        let v = match s.sym {
+            17 | 18 => 0,
+            19 => delta(*lens.get(i)?, s.then),
+            sym => delta(*lens.get(i)?, sym),
         };
-        lens.get_mut(i..i + n)?.fill(v?);
+        lens.get_mut(i..i + n)?.fill(v);
         i += n;
     }
     (i == lens.len()).then_some(())
@@ -462,12 +477,6 @@ pub struct Lens {
     /// The main tree's lengths (as many as the variant's [`Variant::main`]) and the length tree's.
     pub main: Vec<u8>,
     pub len: [u8; LEN],
-}
-
-impl Default for Lens {
-    fn default() -> Lens {
-        Lens::new(WIM)
-    }
 }
 
 impl Lens {
@@ -743,11 +752,6 @@ pub fn write_as(data: &[u8], parse: &Parse, v: Variant) -> Option<Vec<u8>> {
     let mut w = BitW { out: Vec::with_capacity(data.len() / 2), ..BitW::default() };
     write_onto_as(data, parse, v, &mut w)?;
     Some(w.out)
-}
-
-/// [`fn@write`] onto `w`, whose output is the chunk's alone.
-pub fn write_onto(data: &[u8], parse: &Parse, w: &mut BitW) -> Option<()> {
-    write_onto_as(data, parse, WIM, w)
 }
 
 /// [`write_as`] onto `w`, at a word's start.

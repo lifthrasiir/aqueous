@@ -92,7 +92,7 @@ pub fn parse(d: &[u8]) -> Option<Chm> {
     }
     let dir = usize::try_from(u64_at(d, 0x48)?).ok()?;
     let data = usize::try_from(u64_at(d, 0x58)?).ok()?;
-    if d.get(dir..dir + 4)? != b"ITSP" {
+    if d.get(dir..dir.checked_add(4)?)? != b"ITSP" {
         return None;
     }
     let header = u32_at(d, dir + 8)? as usize;

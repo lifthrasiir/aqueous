@@ -97,11 +97,11 @@ impl Cab {
 }
 
 fn u16_at(d: &[u8], p: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(d.get(p..p + 2)?.try_into().unwrap()))
+    Some(u16::from_le_bytes(d.get(p..p.checked_add(2)?)?.try_into().unwrap()))
 }
 
 fn u32_at(d: &[u8], p: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(d.get(p..p + 4)?.try_into().unwrap()))
+    Some(u32::from_le_bytes(d.get(p..p.checked_add(4)?)?.try_into().unwrap()))
 }
 
 /// A string ending with a zero byte at `*p` (taken past it).

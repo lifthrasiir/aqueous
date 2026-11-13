@@ -318,7 +318,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         return Err(corrupt());
     }
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out = Vec::with_capacity(len);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| corrupt())?;
     let (mut r, mut raw, mut kept) = (BitR::new(joined), raw, kept);
     for b in blocks(index)? {
         match b {
