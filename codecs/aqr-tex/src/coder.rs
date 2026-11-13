@@ -107,6 +107,22 @@ pub trait Side {
     }
 }
 
+/// [`Side::token`] of values below 2^31: the bit length by the tree `t` of 5 bits (32 bits),
+/// then as [`Side::token`] (`next` of 32 bits).
+#[inline]
+pub fn wide_token(s: &mut impl Side, t: &mut [Bit], next: &mut [Bit], v: u32, cat: Cat) -> u32 {
+    let len = s.tree(t, 5, u32::BITS - v.leading_zeros(), cat);
+    match len {
+        0 => 0,
+        1 => 1,
+        _ => {
+            let second = s.bit(&mut next[len as usize], v >> (len - 2) & 1 != 0, cat) as u32;
+            let rest = s.raw(len - 2, v, cat);
+            (2 | second) << (len - 2) | rest
+        }
+    }
+}
+
 pub struct Enc {
     pub c: ArithEncoder,
     /// Bits taken by each [`Cat`], in 1/2^16 bits.

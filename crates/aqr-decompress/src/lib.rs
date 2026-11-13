@@ -321,6 +321,8 @@ pub const BCN: Module = aqr_tex::formula::MODULE;
 /// The blocks of a BC7 texture of a layout (its params), for a container's bytes around them or
 /// for any recompressor that finds them (aqr-tex).
 pub const BC7: Module = aqr_tex::formula::MODULE_BC7;
+/// The blocks of a BC6H texture of a layout (its params), as [`BC7`]'s.
+pub const BC6H: Module = aqr_tex::formula::MODULE_BC6H;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
@@ -488,6 +490,7 @@ const NATIVE: &[Entry] = &[
     entry(CLIP),
     entry(BCN),
     entry(BC7),
+    entry(BC6H),
     entry(PDF),
     entry(SQLITE),
     entry(FASTA),

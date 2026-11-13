@@ -432,6 +432,11 @@ path = "src/bin/bc7-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "bc6h-recons"
+path = "src/bin/bc6h-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "mp3-recons"
 path = "src/bin/mp3-recons.rs"
 required-features = ["wasm"]

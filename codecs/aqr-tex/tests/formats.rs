@@ -59,12 +59,13 @@ fn bc7_random(n: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-/// A smooth RGBA image of `w` × `h`.
-fn image(w: usize, h: usize, seed: u64) -> Vec<[u8; 4]> {
-    let s = seed as f64;
+/// A smooth RGBA image of `w` × `h`, its pixels `scale` times as large (a mipmap of the image of
+/// scale 1).
+fn image(w: usize, h: usize, scale: f64) -> Vec<[u8; 4]> {
+    let s = 0.5;
     (0..w * h)
         .map(|i| {
-            let (x, y) = ((i % w) as f64, (i / w) as f64);
+            let (x, y) = (((i % w) as f64 + 0.5) * scale, ((i / w) as f64 + 0.5) * scale);
             let v = |a: f64, b: f64| (127.5 + 120.0 * ((x * a + y * b) / 40.0 + s).sin()) as u8;
             [v(1.0, 0.3), v(0.4, 1.1), v(-0.7, 0.5), v(0.2, 0.2)]
         })
@@ -142,7 +143,7 @@ fn bc7_smooth_codes_small() {
     let mut mips = 0;
     let (mut mw, mut mh) = (w, h);
     while mw >= 1 && mh >= 1 && mips < 6 {
-        blocks.extend(bc7_encode(&image(mw, mh, mips as u64), mw, mh));
+        blocks.extend(bc7_encode(&image(mw, mh, (1 << mips) as f64), mw, mh));
         mips += 1;
         (mw, mh) = (mw / 2, mh / 2);
     }
@@ -279,4 +280,130 @@ fn containers() {
         container::detect(&a).unwrap().layout,
         Layout { format: Format::Astc { w: 6, h: 5 }, width: 13, height: 7, mips: 1, layers: 1 }
     );
+}
+
+/// Random blocks of BC6H: of every header in turn (the reserved ones too), some repeated.
+fn bc6h_random(n: usize, seed: u64) -> Vec<u8> {
+    let mut r = Rng(seed | 1);
+    let mut out: Vec<u8> = Vec::with_capacity(n * 16);
+    for i in 0..n {
+        if i > 0 && r.next().is_multiple_of(5) {
+            let k = (r.next() as usize % i) * 16;
+            let b: [u8; 16] = out[k..k + 16].try_into().unwrap();
+            out.extend(b);
+            continue;
+        }
+        let mut b = [0u8; 16];
+        for x in b.iter_mut() {
+            *x = r.next() as u8;
+        }
+        b[0] = b[0] & !31 | (r.next() % 32) as u8;
+        out.extend(b);
+    }
+    out
+}
+
+/// BC6H blocks (unsigned) of mode 10 (endpoints of 10 bits, as they are) of a smooth image of
+/// `w` × `h` of the values the endpoints unquantize to, its pixels `scale` times as large.
+fn bc6h_encode(w: usize, h: usize, scale: f64) -> Vec<u8> {
+    use aqr_tex::bptc::quantize;
+    let s = 0.5;
+    let px = |x: usize, y: usize| -> [i32; 3] {
+        let (x, y) = ((x as f64 + 0.5) * scale, (y as f64 + 0.5) * scale);
+        let v = |a: f64, b: f64| (30000.0 + 25000.0 * ((x * a + y * b) / 30.0 + s).sin()) as i32;
+        [v(1.0, 0.2), v(0.3, 0.9), v(-0.5, 0.6)]
+    };
+    let mut out = vec![];
+    for by in 0..h.div_ceil(4) {
+        for bx in 0..w.div_ceil(4) {
+            let p: Vec<[i32; 3]> =
+                (0..16).map(|q| px((bx * 4 + q % 4).min(w - 1), (by * 4 + q / 4).min(h - 1))).collect();
+            let lo: [i32; 3] = std::array::from_fn(|c| quantize(p.iter().map(|v| v[c]).min().unwrap(), 10, false));
+            let hi: [i32; 3] = std::array::from_fn(|c| quantize(p.iter().map(|v| v[c]).max().unwrap(), 10, false));
+            let un = |q: i32| aqr_tex::bptc::unquantize(q, 10, false);
+            let d: [i64; 3] = std::array::from_fn(|c| (un(hi[c]) - un(lo[c])) as i64);
+            let l2: i64 = d.iter().map(|v| v * v).sum::<i64>().max(1);
+            let mut ix: Vec<u32> = p
+                .iter()
+                .map(|v| {
+                    let t: i64 = (0..3).map(|c| (v[c] - un(lo[c])) as i64 * d[c]).sum();
+                    ((t * 15 + l2 / 2) / l2).clamp(0, 15) as u32
+                })
+                .collect();
+            let (mut e0, mut e1) = (lo, hi);
+            if ix[0] >= 8 {
+                (e0, e1) = (e1, e0);
+                ix.iter_mut().for_each(|i| *i = 15 - *i);
+            }
+            let mut v: u128 = 0b00011;
+            let mut at = 5;
+            let mut put = |n: u32, x: u32| {
+                v |= (x as u128) << at;
+                at += n;
+            };
+            for e in [e0, e1] {
+                for c in e {
+                    put(10, c as u32);
+                }
+            }
+            for (q, &i) in ix.iter().enumerate() {
+                put(if q == 0 { 3 } else { 4 }, i);
+            }
+            out.extend(v.to_le_bytes());
+        }
+    }
+    out
+}
+
+#[test]
+fn bc6h_layouts() {
+    for signed in [false, true] {
+        for (size, mips, layers, seed) in [((4, 4), 1, 1, 1), ((13, 7), 3, 2, 2), ((64, 64), 7, 1, 3)] {
+            let l = Layout { format: Format::Bc6h { signed }, width: size.0, height: size.1, mips, layers };
+            let b = bc6h_random(l.len() as usize / 16, seed);
+            round(&l, &b);
+        }
+    }
+    let l = Layout { format: Format::Bc6h { signed: false }, width: 1024, height: 520, mips: 2, layers: 1 };
+    round(&l, &bc6h_random(l.len() as usize / 16, 7));
+}
+
+#[test]
+fn bc6h_smooth_codes_small() {
+    let (w, h) = (256, 128);
+    let (mut blocks, mut mips, mut mw, mut mh) = (vec![], 0, w, h);
+    while mips < 6 {
+        blocks.extend(bc6h_encode(mw, mh, (1 << mips) as f64));
+        mips += 1;
+        (mw, mh) = (mw / 2, mh / 2);
+    }
+    let l = Layout { format: Format::Bc6h { signed: false }, width: w as u32, height: h as u32, mips, layers: 1 };
+    assert_eq!(l.len() as usize, blocks.len());
+    let n = round(&l, &blocks);
+    let z = zstd::bulk::compress(&blocks, 19).unwrap().len();
+    let cost = texture::encode_any(&l, &blocks, 1).2.map(|c| c / 65536 / 8);
+    eprintln!("bc6h smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
+    assert!(n * 10 < z * 9, "{n} against zstd's {z}");
+}
+
+#[test]
+fn dds_of_dx10() {
+    // BC7 (DXGI 98), BC6H unsigned (95) and signed (96), of mipmaps and an array of 2
+    for (format, dxgi) in [(Format::Bc7, 98u32), (Format::Bc6h { signed: false }, 95), (Format::Bc6h { signed: true }, 96)] {
+        let l = Layout { format, width: 24, height: 20, mips: 3, layers: 2 };
+        let b = if dxgi == 98 { bc7_random(l.len() as usize / 16, 3) } else { bc6h_random(l.len() as usize / 16, 4) };
+        let mut d = vec![0u8; 148];
+        d[..4].copy_from_slice(b"DDS ");
+        for (at, v) in [(4, 124u32), (8, 0x2_1007), (12, l.height), (16, l.width), (28, l.mips), (76, 32), (80, 4)] {
+            d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        d[84..88].copy_from_slice(b"DX10");
+        for (at, v) in [(128, dxgi), (132, 3), (136, 0), (140, 2), (144, 0)] {
+            d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        d.extend(&b);
+        assert_eq!(aqr_tex::dds::detect(&d).unwrap().data, aqr_tex::dds::Data::Blocks(l));
+        let f = aqr_tex::formula::encode(&d, 2).unwrap();
+        assert!(eval(&f) == d, "{format:?}");
+    }
 }

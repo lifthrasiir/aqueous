@@ -7,13 +7,13 @@
 
 use aqr_common::arith::Bit;
 
+use crate::Result;
 use crate::bptc::{Block7, MODES, Mode, RESERVED};
 use crate::coder::{Cat, Side};
+use crate::copies::{Copies, Got, NEW, NONE};
 use crate::layout::{Format, Group, Shape};
-use crate::model::{RECENT, Recent};
 use crate::plane::{Plane, Up};
 use crate::texture::Family;
-use crate::{Result, corrupt};
 
 pub struct Bc7;
 
@@ -85,50 +85,13 @@ pub struct Models {
     pbit: Vec<Bit>,
     idx: Vec<Bit>,
     flat: Vec<Bit>,
-    /// Whether the block is the left one, or the upper one, by the choices of those (7 each).
-    copy: Vec<Bit>,
-    /// Whether its head (all but its indices) is the left one's, the upper one's (by their
-    /// choices), or a block's before (by the left one's choice): the cache's, by rank.
-    head: Vec<Bit>,
-    rank: Vec<Bit>,
-    rank_next: Vec<Bit>,
-    /// Whether a block of the cache is the block, its indices too (by the left one's choice).
-    whole: Vec<Bit>,
-    /// The blocks before by the hash of their heads, the last of each head.
-    cache: Recent<[u8; 16]>,
+    /// Blocks as those around or before.
+    copies: Copies<16>,
 }
 
 impl Models {
-    const SIZES: [usize; 16] = [
-        100 * 16,
-        4,
-        3 * 64,
-        2 * 5 * 4,
-        3,
-        RES * 16,
-        RES * 16,
-        2 * 3,
-        IDX[KINDS],
-        FLAT[KINDS],
-        2 * 49,
-        3 * 7,
-        16,
-        16,
-        7,
-        0,
-    ];
+    const SIZES: [usize; 10] = [100 * 16, 4, 3 * 64, 2 * 5 * 4, 3, RES * 16, RES * 16, 2 * 3, IDX[KINDS], FLAT[KINDS]];
 }
-
-/// Where a block comes from, as the contexts of the blocks after tell it: it is the left block,
-/// or the upper one; its head is the left one's, the upper one's, or of the cache; it is new; no
-/// block there.
-const BLOCK_LEFT: u8 = 0;
-const BLOCK_UP: u8 = 1;
-const HEAD_LEFT: u8 = 2;
-const HEAD_UP: u8 = 3;
-const CACHED: u8 = 4;
-const NEW: u8 = 5;
-const NONE: u8 = 6;
 
 /// The bits of block `b` but its indices (all of them of the reserved mode).
 #[inline(always)]
@@ -139,13 +102,6 @@ fn head(b: &[u8; 16]) -> u128 {
         m @ 0..8 => v & ((1u128 << (128 - IXBITS[m as usize])) - 1),
         _ => v,
     }
-}
-
-/// The key of a head in the cache: a hash of its bits.
-#[inline(always)]
-fn key(h: u128) -> u32 {
-    let x = ((h as u64) ^ ((h >> 64) as u64).rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    (x >> 32) as u32 ^ x as u32
 }
 
 /// Buffers of a surface's coding: the fields of its blocks, their bytes and their choices, and
@@ -557,61 +513,30 @@ impl Bc7 {
         let i = by * bw + bx;
         let left = (bx > 0).then(|| (&w.blocks[i - 1], &w.raws[i - 1]));
         let up = (by > 0).then(|| (&w.blocks[i - bw], &w.raws[i - bw]));
-        let lc = if bx > 0 { w.choices[i - 1] } else { NONE } as usize;
-        let uc = if by > 0 { w.choices[i - bw] } else { NONE } as usize;
-        let ctx = lc * 7 + uc;
-        // the block to the left, or above
-        if let Some((l, lr)) = left
-            && s.bit(&mut md.copy[ctx], raw == lr, Cat::Choice)
-        {
-            Self::set(plane, l, bx, by);
-            return Ok((*l, *lr, BLOCK_LEFT));
-        }
-        if let Some((u, ur)) = up.filter(|u| Some(u.1) != left.map(|l| l.1))
-            && s.bit(&mut md.copy[49 + ctx], raw == ur, Cat::Choice)
-        {
-            Self::set(plane, u, bx, by);
-            return Ok((*u, *ur, BLOCK_UP));
-        }
-        // its head: the left one's, the upper one's, of the cache, or new
-        let wh = head(raw);
-        let lh = left.map(|l| head(l.1));
-        let uh = up.map(|u| head(u.1)).filter(|&h| Some(h) != lh);
-        let mut from = None;
-        if let Some(h) = lh
-            && s.bit(&mut md.head[lc], wh == h, Cat::Choice)
-        {
-            from = Some((*left.unwrap().0, h, HEAD_LEFT));
-        } else if let Some(h) = uh
-            && s.bit(&mut md.head[7 + uc], wh == h, Cat::Choice)
-        {
-            from = Some((*up.unwrap().0, h, HEAD_UP));
-        } else {
-            let k = key(wh);
-            let rank = match s.encoding() {
-                true => md.cache.rank(k).filter(|&r| r < RECENT && md.cache.payload(k).map(head) == Some(wh)),
-                false => None,
-            };
-            if s.bit(&mut md.head[14 + lc], rank.is_some(), Cat::Choice) {
-                let r = s.token(&mut md.rank, &mut md.rank_next, rank.unwrap_or(0), Cat::Cache);
-                let (_, c) = md.cache.at_with(r).filter(|_| r < RECENT).ok_or_else(corrupt)?;
-                let c = *c;
-                if s.bit(&mut md.whole[lc], raw == &c, Cat::Choice) {
-                    let b = Block7::read(&c);
-                    Self::set(plane, &b, bx, by);
-                    return Ok((b, c, CACHED));
-                }
-                from = Some((Block7::read(&c), head(&c), CACHED));
-            }
-        }
-        if let Some((mut b, _, choice)) = from {
-            if b.mode == RESERVED {
-                // (a head of the reserved mode is all of its block)
+        let lc = if bx > 0 { w.choices[i - 1] } else { NONE };
+        let uc = if by > 0 { w.choices[i - bw] } else { NONE };
+        match md.copies.code(s, raw, left.map(|l| l.1), up.map(|u| u.1), lc, uc, head)? {
+            Got::Block(c, choice) => {
+                // (of the left or upper block, its fields as they are)
+                let b = match choice {
+                    crate::copies::BLOCK_LEFT => *left.unwrap().0,
+                    crate::copies::BLOCK_UP => *up.unwrap().0,
+                    _ => Block7::read(&c),
+                };
                 Self::set(plane, &b, bx, by);
+                return Ok((b, c, choice));
+            }
+            Got::Head(c, choice) => {
+                let mut b = Block7::read(&c);
+                if b.mode == RESERVED {
+                    // (a head of the reserved mode is all of its block)
+                    Self::set(plane, &b, bx, by);
+                    return Ok((b, c, choice));
+                }
+                Self::indices(s, md, &mut b, want, plane, coarse, bx, by);
                 return Ok((b, b.write(), choice));
             }
-            Self::indices(s, md, &mut b, want, plane, coarse, bx, by);
-            return Ok((b, b.write(), choice));
+            Got::New => {}
         }
         let (left, up) = (left.map(|l| l.0), up.map(|u| u.0));
         let ctx = (Self::mode_ctx(left) * 10 + Self::mode_ctx(up)) * 16;
@@ -670,8 +595,7 @@ impl Family for Bc7 {
 
     fn models(_: Format) -> Models {
         let v = |n| vec![Bit::default(); n];
-        let [mode, same, part, rot, isb, res, res_next, pbit, idx, flat, copy, head, rank, rank_next, whole, _] =
-            Models::SIZES;
+        let [mode, same, part, rot, isb, res, res_next, pbit, idx, flat] = Models::SIZES;
         Models {
             mode: v(mode),
             same: v(same),
@@ -683,18 +607,13 @@ impl Family for Bc7 {
             pbit: v(pbit),
             idx: v(idx),
             flat: v(flat),
-            copy: v(copy),
-            head: v(head),
-            rank: v(rank),
-            rank_next: v(rank_next),
-            whole: v(whole),
-            cache: Recent::new(),
+            copies: Copies::new(),
         }
     }
 
     fn models_plan(_: Format) -> u64 {
-        let bits: u64 = Models::SIZES[..15].iter().map(|&n| aqr_api::stack::block((n * size_of::<Bit>()) as u64)).sum();
-        bits + Recent::<[u8; 16]>::plan()
+        let bits: u64 = Models::SIZES.iter().map(|&n| aqr_api::stack::block((n * size_of::<Bit>()) as u64)).sum();
+        bits + Copies::<16>::plan()
     }
 
     fn copy_models(m: &mut Models, o: &Models) {
@@ -708,12 +627,7 @@ impl Family for Bc7 {
         m.pbit.clone_from(&o.pbit);
         m.idx.clone_from(&o.idx);
         m.flat.clone_from(&o.flat);
-        m.copy.clone_from(&o.copy);
-        m.head.clone_from(&o.head);
-        m.rank.clone_from(&o.rank);
-        m.rank_next.clone_from(&o.rank_next);
-        m.whole.clone_from(&o.whole);
-        m.cache.copy_from(&o.cache);
+        m.copies.copy_from(&o.copies);
     }
 
     fn bufs(_: Format, px: usize) -> Vec<[u8; 4]> {
@@ -798,7 +712,7 @@ impl Family for Bc7 {
                 let (got, bytes, choice) =
                     Self::block(s, md, (&want, &raw), work, (bx, by, bw), &mut plane, up.p.as_ref())?;
                 at.copy_from_slice(&bytes);
-                md.cache.touch_with(key(head(&bytes)), bytes);
+                md.copies.used(head(&bytes), bytes);
                 work.blocks.push(got);
                 work.raws.push(bytes);
                 work.choices.push(choice);

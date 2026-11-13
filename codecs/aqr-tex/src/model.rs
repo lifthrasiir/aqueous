@@ -118,13 +118,20 @@ fn slot(key: u32) -> usize {
     ((key as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40) as usize & (SLOTS - 1)
 }
 
-impl<P: Copy + Default> Default for Recent<P> {
+impl<P: Copy> Default for Recent<P> {
     fn default() -> Self {
         Recent::new()
     }
 }
 
 impl<P: Copy + Default> Recent<P> {
+    /// Uses `key`, now (of the default payload).
+    pub fn touch(&mut self, key: u32) {
+        self.touch_with(key, P::default());
+    }
+}
+
+impl<P: Copy> Recent<P> {
     pub fn new() -> Recent<P> {
         Recent {
             last: vec![(0, EMPTY); SLOTS],
@@ -278,11 +285,6 @@ impl<P: Copy + Default> Recent<P> {
             }
         }
         Some(w * 64 + p as usize)
-    }
-
-    /// Uses `key`, now.
-    pub fn touch(&mut self, key: u32) {
-        self.touch_with(key, P::default());
     }
 
     /// Uses `key` of payload `p`, now.

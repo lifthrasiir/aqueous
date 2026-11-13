@@ -8,12 +8,13 @@ rebuilds the blocks of a texture of a group of block formats from its coded form
   between its endpoints, under contexts of where the pixels around (decoded so far, and those of
   the next smaller mipmap) predict them;
 - `bc7-recons` (§11): BC7, each block as a block around it or before, or its fields (all but
-  its indices as a block's around it or before, or new), its indices as `bcn-recons`'s.
+  its indices as a block's around it or before, or new), its indices as `bcn-recons`'s;
+- `bc6h-recons` (§12): BC6H, as `bc7-recons`.
 
 The document is meant to be complete: an implementation of the modules can be written from it
-alone (with the partition tables of BC7, which are its format's). Sections marked *(encoder)*
-describe the choices this implementation makes when it builds formulas; the modules do not
-depend on them.
+alone (with the partition tables of BC7 and the bit layouts of BC6H, which are their formats').
+Sections marked *(encoder)* describe the choices this implementation makes when it builds
+formulas; the modules do not depend on them.
 
 Contents:
 
@@ -28,6 +29,7 @@ Contents:
 9. [BC2's alpha](#9-bc2s-alpha)
 10. [Encoding](#10-encoding-encoder)
 11. [`bc7-recons`](#11-bc7-recons)
+12. [`bc6h-recons`](#12-bc6h-recons)
 
 ## 1. Conventions
 
@@ -47,7 +49,7 @@ Contents:
 - **Params**, the *layout*:
 
   ```text
-  u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5 (8: BC7, of §11)
+  u8      format   1: BC1, 2: BC2, 3: BC3, 4: BC4, 5: BC5 (8: BC7, of §11; 6, 7: BC6H, of §12)
   varint  W        the width of the largest mipmap, in pixels, 1 to 65536
   varint  H        its height, 1 to 65536
   varint  M        the mipmaps of a layer, 1 to bitlen(max(W, H))
@@ -462,3 +464,103 @@ with base_k the sum of `3·(nb + 1)²·2^b` and fbase_k of `(2^b + 1)²·2^b` ov
   a layout taken in the layout's order: the application's output is cut into its surfaces
   (`Formula::split`), each where the file has it, the bytes between them as they are
   (`tex/container`).
+
+## 12. `bc6h-recons`
+
+- **Module**: name `bc6h-recons`, version 1.
+- **Params**: the layout of §2, of format 6 (BC6H of unsigned half floats) or 7 (signed).
+- **Resources**, **inputs** and **output**: as §2's.
+
+The walk is §5's, of one part (the block); the planes §6's, of 3 channels (R, G, B) of 16 bits:
+the values of §12.1. Its choices, cache and coding are §11's but where told otherwise.
+
+### 12.1 Blocks
+
+A block is 16 bytes, its bits numbered as BC7's. Its *mode* m is that of its header: of its low
+2 bits 00, mode 0; 01, mode 1; else of its low 5 bits, 00010, 00110, 01010, 01110, 10010, 10110,
+11010, 11110, 00011, 00111, 01011, 01111 for modes 2 to 13, and 10011, 10111, 11011, 11111 are
+*reserved* (mode 14). After the header, the fields of the mode: those of the endpoints w, x
+(subset 0), y, z (subset 1) and of the partition, in the order of BC6H's tables of their bits
+(some, of modes 12 and 13, in reverse); then the indices of the pixels p = 0 … 15, of 3 bits
+(modes 0 to 9, of two subsets) or 4 (of one), one bit fewer of an anchor (the partitions, of 5
+bits, are BC7's first 32 of two subsets). Every 128 bits of a mode are a block of it.
+
+Of each mode, W the bits of w's channels and d_c those of the others' (of R, G, B):
+
+| m | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| W | 10 | 7 | 11 | 11 | 11 | 9 | 8 | 8 | 8 | 6 | 10 | 11 | 12 | 16 |
+| d | 5 5 5 | 6 6 6 | 5 4 4 | 4 5 4 | 4 4 5 | 5 5 5 | 6 5 5 | 5 6 5 | 5 5 6 | 6 6 6 | 10 10 10 | 9 9 9 | 8 8 8 | 4 4 4 |
+
+Modes 9 and 10 are not *transformed*: their endpoints are as stored; of the others, x, y and z
+are differences from w. An endpoint's channel as an *integer*: w's is its field, sign-extended
+of signed formats; another's, its field, sign-extended where the format is signed or the mode
+transformed, then of a transformed mode `(v + w) mod 2^W`, sign-extended of signed formats.
+*Unquantized*, of W bits, an integer v is, of unsigned formats: v where W ≥ 15; 0 for 0; 0xFFFF
+for 2^W − 1; else `(v·2^16 + 2^15) >> W`; of signed formats: v where W = 16; else of a = |v|, 0
+for 0, 0x7FFF where a ≥ 2^(W − 1) − 1, else `(a·2^15 + 2^14) >> (W − 1)`, of the sign of v.
+
+Its pixels, which the planes hold: of each channel, `(a·(64 − w) + z·w + 32) >> 6` of the
+endpoints a, z of the pixel's subset unquantized, w the weight of its index (§11.1), plus 0x8000
+of signed formats. A reserved block's pixels are 0 (0x8000 of signed formats).
+
+### 12.2 The choices
+
+As §11.2, the head of a block of mode m < 14 its low 82 bits (of two subsets) or 65 (of one),
+of a reserved block all of it.
+
+### 12.3 New heads
+
+- The mode: `tree_4(mode[(ml·16 + mu)·16 …])` (256 trees), ml and mu the modes of L and U (15
+  where there is none); a value above 14 is 14. Of mode 14: the header's 5 bits, raw (a value
+  that is not a reserved header is 10011), then the 3 bits above them, then bytes 1 to 15, raw;
+  then its pixels are set, and nothing else is coded.
+- The partition, of two subsets: as §11.3, a block fitting where it is not reserved and of two
+  subsets; `same` of 4 bits, else `tree_5(part)`.
+- The endpoints (§12.4), then the indices (§12.5).
+
+### 12.4 Endpoints
+
+For each subset s, predicted endpoints P0 and P1 and their source, as §11.4 of the plane's
+values, of one group of channels (R, G, B); of source 2, 0x8000 in every channel. Then of each
+endpoint e = 0, 1 of the subset (j = 2s + e), its channels in the order G, R, B (slots 0 to 2):
+
+```text
+q      = quantize(P_e,c − bias, W)                      (bias 0x8000 of signed formats, else 0)
+n      = W of j = 0, d_c else
+pred   = q of j = 0 or of a mode not transformed, else q − I0_c (the integer of w's channel c);
+         plus rG (the residual of G of this endpoint) of R and B
+before = class(rG) of R and B; 0 of G of j = 0; class(r0_G) of G else (r0 the residuals of w)
+ctx    = (((source · 3 + prec) · 4 + j) · 3 + slot) · 8 + before   (prec 0, 1, 2 of W ≤ 8, ≤ 11, more)
+v      = wtoken(res[ctx·32 …], res_next[ctx·32 …])                (864 pairs of 32 bits)
+```
+
+with `class(r)` the bit length of |r|, up to 7, and `wtoken(t, u)` coding v < 2^31 as `token`
+does but its bit length by `tree_5(t)` (u of 32 bits). The residual r is the value of
+[−2^(n − 1), 2^(n − 1)) congruent to `unzz(v)` modulo 2^n, the field `(pred + r) mod 2^n`.
+
+`quantize(u, W)` of unsigned formats: `clamp(u, 0, 2^W − 1)` where W ≥ 15, else
+`clamp(u, 0, 0xFFFF)·2^W >> 16`; of signed formats: u where W = 16, else of the sign of u and of
+magnitude `min(min(|u|, 0x7FFF)·2^(W − 1) >> 15, 2^(W − 1) − 1)`.
+
+### 12.5 Indices
+
+The endpoints E_j unquantized, plus 0x8000 of signed formats; b = 3 (two subsets) or 4 (one).
+Of each subset, a line: `D = E_2s+1 − E_2s`, `l2 = |D|²`; where l2 > 0, `contrast` = 0 (l2 ≤
+10^4), 1 (≤ 10^6) or 2, `scale` = 14 (b = 3) or 15 (b = 4), `nb = scale + 3`, and
+
+```text
+bucket(Q) = clamp(floor((Σ_c (Q_c − E_2s,c) · D_c · scale + floor(l2 / 2)) / l2) + 1, 0, nb − 1)
+```
+
+Then the pixels p = 0 … 15 in turn, Q1 and Q2 as §11.5, each's index as §11.5's of one set
+(where p is an anchor, by the tree from node 2), of the trees `idx[base + ((contrast·(nb + 1) +
+a)·(nb + 1) + c)·2^b …]` (base 0 of b = 3, 3·18²·8 of b = 4) or, where l2 = 0, `flat[fbase +
+(left·(2^b + 1) + above)·2^b …]` (fbase 0 of b = 3, 9·9·8 of b = 4). Then pixel p is set in the
+plane: `(E_2s,c·(64 − w) + E_2s+1,c·w + 32) >> 6` of each channel.
+
+### 12.6 Encoding *(encoder)*
+
+- DDS files of a DX10 header of DXGI formats 94 and 95 are BC6H unsigned, of 96 signed; KTX files
+  of OpenGL's internal formats 0x8E8F (unsigned) and 0x8E8E (signed), KTX 2 of Vulkan's 143 and
+  144, PVR 3 of pixel format 14 (signed by its channel type), as §11.6.

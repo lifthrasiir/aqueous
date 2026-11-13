@@ -1,7 +1,8 @@
 # aqr-tex
 
 Block-compressed textures rebuilt bit for bit from one coded stream (`FORMAT.md`), a module for
-each group of formats: `bcn-recons` of BC1 to BC5 (DXT1–DXT5, ATI1, ATI2), `bc7-recons` of BC7.
+each group of formats: `bcn-recons` of BC1 to BC5 (DXT1–DXT5, ATI1, ATI2), `bc7-recons` of BC7,
+`bc6h-recons` of BC6H.
 The containers are taken apart around them: DDS files (the header and whatever follows the blocks
 kept as they are), and KTX, KTX 2, PVR (version 3) and astcenc's `.astc` files (the bytes between
 their surfaces kept, the module's output cut into the surfaces where the file has them), the
@@ -10,8 +11,8 @@ uncompressed 8-, 24- and 32-bit pixels go surface by surface to aqr-raw's `raste
 
 The modules know nothing of containers: a recompressor that finds blocks of a known layout in a
 format of its own (an engine's bundles: Unity's textures in aqr-bundle) applies them the same
-way (`formula::apply`). BC6H, ETC1, ETC2, EAC, PVRTC and ASTC are read in the containers (and
-Unity's textures) but not taken yet.
+way (`formula::apply`). ETC1, ETC2, EAC, PVRTC and ASTC are read in the containers (and Unity's
+textures) but not taken yet.
 
 ## How it does
 
@@ -80,6 +81,15 @@ each as KTX, KTX 2 and DDS (37.3 MB): 4.05 MB, natively and as WebAssembly given
   (which of the left and upper pixels the upper left one is nearer) gained 0.4% for 10% of the
   speed, and is not used.
 
+### BC6H
+
+As BC7 (the same copies, endpoints predicted from the pixels, indices by their buckets), of
+planes of the endpoints unquantized (16 bits, before they are scaled to half floats), the
+endpoints coded as stored (of transformed modes, the differences from the first) against the
+prediction quantized. No real textures of BC6H were at hand (none in the 88 games of Unity
+surveyed): on a smooth texture of mode 10 alone (`tests/formats.rs`), 0.645 of zstd -19, BC7's
+alike 0.51.
+
 ## Design
 
 Measured on the first 400 files of the sample (123 MB) by code length, before the coder was
@@ -135,7 +145,8 @@ written (the bits of each choice are of BC1 unless said):
   the mispredictions it saves), and the decoder's read-ahead on the encoder too. Across stripes, what is left serial bounds one file: the
   mipmaps too small to split (about 6% of a 2048×2048 texture's blocks) and a stripe of each
   split one, about 6.4 times faster than one thread at best for that texture.
-- **Formats.** BC6H, ETC1, ETC2 and EAC, PVRTC, ASTC (their containers are read already).
+- **Formats.** ETC1, ETC2 and EAC, PVRTC, ASTC (their containers are read already).
+- **BC6H** is not measured on real textures (HDR environment maps, light maps).
 - **BC7.** Most of its bits are indices; a model of their levels as an image (residuals from a
   predicted level) rather than the joint buckets of two predictions may do better on 4-bit
   indices. Real textures of mobile formats are missing (the sample is of Unity on Windows).
@@ -170,10 +181,12 @@ let node = formula::apply(&mut its_formula, blocks, &layout, threads);
 | `src/plane.rs` | Planes of 8- or 16-bit samples, their predictions: causal, and the smaller mipmap upsampled |
 | `src/model.rs` | The cache, the models of colours, values and BC2's alpha |
 | `src/bcn.rs` | BC1 to BC5 as a family of the walk: their parts, planes and models |
-| `src/bptc.rs` | BC7's blocks: their fields read and written back, their pixels (bcdec's partition tables) |
-| `src/bc7.rs` | BC7 as a family of the walk: the choices, the models of modes, endpoints and indices |
+| `src/bptc.rs` | BC7's and BC6H's blocks: their fields read and written back, their pixels (bcdec's partition tables and BC6H's layouts) |
+| `src/copies.rs` | Blocks as those around or before (the choices, the cache of heads), of BC7 and BC6H |
+| `src/bc7.rs` | BC7 as a family of the walk: the models of modes, endpoints and indices |
+| `src/bc6h.rs` | BC6H as a family of the walk, as BC7 |
 | `src/texture.rs` | The walk over a texture's surfaces (of any family of formats), the stripes and their threads |
 | `src/module.rs`, `src/formula.rs` | The modules, and formulas of DDS files and the other containers |
 | `tests/dds.rs` | Every format and layout (mipmaps, cube maps, DX10 arrays, odd sizes), stripes on any number of threads, pixels, trailers, files not taken, corrupted inputs |
-| `tests/formats.rs` | The other groups (BC7): random blocks of every mode, stripes, smooth textures; the containers |
+| `tests/formats.rs` | The other groups (BC7, BC6H): random blocks of every mode, stripes, smooth textures; the containers, DDS's DX10 |
 | `examples/bench.rs` | `aqr-tex-bench` |

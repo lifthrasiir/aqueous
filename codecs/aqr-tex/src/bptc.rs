@@ -1,7 +1,8 @@
-//! BPTC's blocks (BC7; FORMAT.md, "BC7"): their fields as they are laid out, read and written
-//! back (every block of a mode is the fields of that mode, so that reading and writing are
-//! inverses), and what a block decodes to. The partitions' tables are those of `bcdec.h` (Sergii
-//! Kudlai, the Unlicense).
+//! BPTC's blocks (BC7 and BC6H; FORMAT.md, "`bc7-recons`", "`bc6h-recons`"): their fields as
+//! they are laid out, read and written back (every block of a mode is the fields of that mode,
+//! so that reading and writing are inverses), and what a block decodes to. The partitions'
+//! tables, and the layouts of BC6H's modes, are those of `bcdec.h` (Sergii Kudlai, the
+//! Unlicense).
 
 /// The subset of each pixel p (bits 2p, 2p + 1) of each partition of two subsets.
 pub const P2: [u32; 64] = [
@@ -388,6 +389,505 @@ pub fn rotate(px: &mut [u8; 4], r: u8) {
     }
 }
 
+/// A segment of a BC6H mode's fields: the field (endpoint `e` · 3 + channel `c`, or 12 the
+/// partition), the lowest of its bits there, how many, and whether they are stored in reverse.
+type Seg = (u8, u8, u8, bool);
+
+const fn s(f: u8, lo: u8, n: u8) -> Seg {
+    (f, lo, n, false)
+}
+
+const fn rev(f: u8, lo: u8, n: u8) -> Seg {
+    (f, lo, n, true)
+}
+
+// (fields: rw gw bw = 0 1 2, rx gx bx = 3 4 5, ry gy by = 6 7 8, rz gz bz = 9 10 11, d = 12)
+const S0: &[Seg] = &[
+    s(7, 4, 1),
+    s(8, 4, 1),
+    s(11, 4, 1),
+    s(0, 0, 10),
+    s(1, 0, 10),
+    s(2, 0, 10),
+    s(3, 0, 5),
+    s(10, 4, 1),
+    s(7, 0, 4),
+    s(4, 0, 5),
+    s(11, 0, 1),
+    s(10, 0, 4),
+    s(5, 0, 5),
+    s(11, 1, 1),
+    s(8, 0, 4),
+    s(6, 0, 5),
+    s(11, 2, 1),
+    s(9, 0, 5),
+    s(11, 3, 1),
+    s(12, 0, 5),
+];
+const S1: &[Seg] = &[
+    s(7, 5, 1),
+    s(10, 4, 1),
+    s(10, 5, 1),
+    s(0, 0, 7),
+    s(11, 0, 1),
+    s(11, 1, 1),
+    s(8, 4, 1),
+    s(1, 0, 7),
+    s(8, 5, 1),
+    s(11, 2, 1),
+    s(7, 4, 1),
+    s(2, 0, 7),
+    s(11, 3, 1),
+    s(11, 5, 1),
+    s(11, 4, 1),
+    s(3, 0, 6),
+    s(7, 0, 4),
+    s(4, 0, 6),
+    s(10, 0, 4),
+    s(5, 0, 6),
+    s(8, 0, 4),
+    s(6, 0, 6),
+    s(9, 0, 6),
+    s(12, 0, 5),
+];
+const S2: &[Seg] = &[
+    s(0, 0, 10),
+    s(1, 0, 10),
+    s(2, 0, 10),
+    s(3, 0, 5),
+    s(0, 10, 1),
+    s(7, 0, 4),
+    s(4, 0, 4),
+    s(1, 10, 1),
+    s(11, 0, 1),
+    s(10, 0, 4),
+    s(5, 0, 4),
+    s(2, 10, 1),
+    s(11, 1, 1),
+    s(8, 0, 4),
+    s(6, 0, 5),
+    s(11, 2, 1),
+    s(9, 0, 5),
+    s(11, 3, 1),
+    s(12, 0, 5),
+];
+const S3: &[Seg] = &[
+    s(0, 0, 10),
+    s(1, 0, 10),
+    s(2, 0, 10),
+    s(3, 0, 4),
+    s(0, 10, 1),
+    s(10, 4, 1),
+    s(7, 0, 4),
+    s(4, 0, 5),
+    s(1, 10, 1),
+    s(10, 0, 4),
+    s(5, 0, 4),
+    s(2, 10, 1),
+    s(11, 1, 1),
+    s(8, 0, 4),
+    s(6, 0, 4),
+    s(11, 0, 1),
+    s(11, 2, 1),
+    s(9, 0, 4),
+    s(7, 4, 1),
+    s(11, 3, 1),
+    s(12, 0, 5),
+];
+const S4: &[Seg] = &[
+    s(0, 0, 10),
+    s(1, 0, 10),
+    s(2, 0, 10),
+    s(3, 0, 4),
+    s(0, 10, 1),
+    s(8, 4, 1),
+    s(7, 0, 4),
+    s(4, 0, 4),
+    s(1, 10, 1),
+    s(11, 0, 1),
+    s(10, 0, 4),
+    s(5, 0, 5),
+    s(2, 10, 1),
+    s(8, 0, 4),
+    s(6, 0, 4),
+    s(11, 1, 1),
+    s(11, 2, 1),
+    s(9, 0, 4),
+    s(11, 4, 1),
+    s(11, 3, 1),
+    s(12, 0, 5),
+];
+const S5: &[Seg] = &[
+    s(0, 0, 9),
+    s(8, 4, 1),
+    s(1, 0, 9),
+    s(7, 4, 1),
+    s(2, 0, 9),
+    s(11, 4, 1),
+    s(3, 0, 5),
+    s(10, 4, 1),
+    s(7, 0, 4),
+    s(4, 0, 5),
+    s(11, 0, 1),
+    s(10, 0, 4),
+    s(5, 0, 5),
+    s(11, 1, 1),
+    s(8, 0, 4),
+    s(6, 0, 5),
+    s(11, 2, 1),
+    s(9, 0, 5),
+    s(11, 3, 1),
+    s(12, 0, 5),
+];
+const S6: &[Seg] = &[
+    s(0, 0, 8),
+    s(10, 4, 1),
+    s(8, 4, 1),
+    s(1, 0, 8),
+    s(11, 2, 1),
+    s(7, 4, 1),
+    s(2, 0, 8),
+    s(11, 3, 1),
+    s(11, 4, 1),
+    s(3, 0, 6),
+    s(7, 0, 4),
+    s(4, 0, 5),
+    s(11, 0, 1),
+    s(10, 0, 4),
+    s(5, 0, 5),
+    s(11, 1, 1),
+    s(8, 0, 4),
+    s(6, 0, 6),
+    s(9, 0, 6),
+    s(12, 0, 5),
+];
+const S7: &[Seg] = &[
+    s(0, 0, 8),
+    s(11, 0, 1),
+    s(8, 4, 1),
+    s(1, 0, 8),
+    s(7, 5, 1),
+    s(7, 4, 1),
+    s(2, 0, 8),
+    s(10, 5, 1),
+    s(11, 4, 1),
+    s(3, 0, 5),
+    s(10, 4, 1),
+    s(7, 0, 4),
+    s(4, 0, 6),
+    s(10, 0, 4),
+    s(5, 0, 5),
+    s(11, 1, 1),
+    s(8, 0, 4),
+    s(6, 0, 5),
+    s(11, 2, 1),
+    s(9, 0, 5),
+    s(11, 3, 1),
+    s(12, 0, 5),
+];
+const S8: &[Seg] = &[
+    s(0, 0, 8),
+    s(11, 1, 1),
+    s(8, 4, 1),
+    s(1, 0, 8),
+    s(8, 5, 1),
+    s(7, 4, 1),
+    s(2, 0, 8),
+    s(11, 5, 1),
+    s(11, 4, 1),
+    s(3, 0, 5),
+    s(10, 4, 1),
+    s(7, 0, 4),
+    s(4, 0, 5),
+    s(11, 0, 1),
+    s(10, 0, 4),
+    s(5, 0, 6),
+    s(8, 0, 4),
+    s(6, 0, 5),
+    s(11, 2, 1),
+    s(9, 0, 5),
+    s(11, 3, 1),
+    s(12, 0, 5),
+];
+const S9: &[Seg] = &[
+    s(0, 0, 6),
+    s(10, 4, 1),
+    s(11, 0, 1),
+    s(11, 1, 1),
+    s(8, 4, 1),
+    s(1, 0, 6),
+    s(7, 5, 1),
+    s(8, 5, 1),
+    s(11, 2, 1),
+    s(7, 4, 1),
+    s(2, 0, 6),
+    s(10, 5, 1),
+    s(11, 3, 1),
+    s(11, 5, 1),
+    s(11, 4, 1),
+    s(3, 0, 6),
+    s(7, 0, 4),
+    s(4, 0, 6),
+    s(10, 0, 4),
+    s(5, 0, 6),
+    s(8, 0, 4),
+    s(6, 0, 6),
+    s(9, 0, 6),
+    s(12, 0, 5),
+];
+const S10: &[Seg] = &[s(0, 0, 10), s(1, 0, 10), s(2, 0, 10), s(3, 0, 10), s(4, 0, 10), s(5, 0, 10)];
+const S11: &[Seg] =
+    &[s(0, 0, 10), s(1, 0, 10), s(2, 0, 10), s(3, 0, 9), s(0, 10, 1), s(4, 0, 9), s(1, 10, 1), s(5, 0, 9), s(2, 10, 1)];
+const S12: &[Seg] = &[
+    s(0, 0, 10),
+    s(1, 0, 10),
+    s(2, 0, 10),
+    s(3, 0, 8),
+    rev(0, 10, 2),
+    s(4, 0, 8),
+    rev(1, 10, 2),
+    s(5, 0, 8),
+    rev(2, 10, 2),
+];
+const S13: &[Seg] = &[
+    s(0, 0, 10),
+    s(1, 0, 10),
+    s(2, 0, 10),
+    s(3, 0, 4),
+    rev(0, 10, 6),
+    s(4, 0, 4),
+    rev(1, 10, 6),
+    s(5, 0, 4),
+    rev(2, 10, 6),
+];
+
+/// A BC6H mode: its header (2 bits, or 5) and their value, its subsets, the bits of the first
+/// endpoint's channels (W) and of the others' (of R, G, B), whether those are differences from
+/// the first (transformed), and its fields' segments.
+#[derive(Debug, Clone, Copy)]
+pub struct Mode6 {
+    pub header: u8,
+    pub hbits: u32,
+    pub ns: usize,
+    pub w: u32,
+    pub d: [u32; 3],
+    pub transformed: bool,
+    pub segs: &'static [Seg],
+}
+
+const fn mode6(
+    header: u8,
+    hbits: u32,
+    ns: usize,
+    w: u32,
+    d: [u32; 3],
+    transformed: bool,
+    segs: &'static [Seg],
+) -> Mode6 {
+    Mode6 { header, hbits, ns, w, d, transformed, segs }
+}
+
+pub const MODES6: [Mode6; 14] = [
+    mode6(0b00, 2, 2, 10, [5, 5, 5], true, S0),
+    mode6(0b01, 2, 2, 7, [6, 6, 6], true, S1),
+    mode6(0b00010, 5, 2, 11, [5, 4, 4], true, S2),
+    mode6(0b00110, 5, 2, 11, [4, 5, 4], true, S3),
+    mode6(0b01010, 5, 2, 11, [4, 4, 5], true, S4),
+    mode6(0b01110, 5, 2, 9, [5, 5, 5], true, S5),
+    mode6(0b10010, 5, 2, 8, [6, 5, 5], true, S6),
+    mode6(0b10110, 5, 2, 8, [5, 6, 5], true, S7),
+    mode6(0b11010, 5, 2, 8, [5, 5, 6], true, S8),
+    mode6(0b11110, 5, 2, 6, [6, 6, 6], false, S9),
+    mode6(0b00011, 5, 1, 10, [10, 10, 10], false, S10),
+    mode6(0b00111, 5, 1, 11, [9, 9, 9], true, S11),
+    mode6(0b01011, 5, 1, 12, [8, 8, 8], true, S12),
+    mode6(0b01111, 5, 1, 16, [4, 4, 4], true, S13),
+];
+
+/// The mode of a BC6H block of a reserved header (`10011`, `10111`, `11011`, `11111`): its bits
+/// are kept as they are.
+pub const RESERVED6: u8 = 14;
+
+/// A BC6H block's fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Block6 {
+    /// 0 to 13, or [`RESERVED6`].
+    pub mode: u8,
+    pub partition: u8,
+    /// Endpoint `e`'s channels R, G, B as stored: the first's of W bits, the others' of theirs.
+    pub v: [[u16; 3]; 4],
+    pub ix: [u8; 16],
+    /// The bytes of a block of a reserved mode.
+    pub raw: [u8; 16],
+}
+
+/// `v`'s low `n` bits in reverse.
+fn reversed(v: u32, n: u8) -> u32 {
+    v.reverse_bits() >> (32 - n as u32)
+}
+
+impl Block6 {
+    pub fn info(&self) -> &'static Mode6 {
+        &MODES6[self.mode as usize]
+    }
+
+    /// The mode of a block starting with byte `b0`.
+    pub fn mode_of(b0: u8) -> u8 {
+        match b0 & 3 {
+            m @ (0 | 1) => m,
+            _ => MODES6.iter().position(|m| m.hbits == 5 && m.header == b0 & 31).map_or(RESERVED6, |m| m as u8),
+        }
+    }
+
+    /// The subset of pixel `p`, and whether it is an anchor.
+    #[inline(always)]
+    pub fn subset(&self, p: usize) -> (usize, bool) {
+        subset(self.info().ns, self.partition as usize, p)
+    }
+
+    /// The bits of the indices of the block's mode.
+    pub fn index_bits(&self) -> u32 {
+        if self.info().ns == 2 { 3 } else { 4 }
+    }
+
+    /// The fields of block `b`.
+    pub fn read(b: &[u8; 16]) -> Block6 {
+        let mut x = Block6 { mode: Self::mode_of(b[0]), ..Default::default() };
+        if x.mode == RESERVED6 {
+            x.raw = *b;
+            return x;
+        }
+        let m = *x.info();
+        let mut r = Bits::of(b);
+        r.get(m.hbits);
+        for &(f, lo, n, back) in m.segs {
+            let v = r.get(n as u32);
+            let v = if back { reversed(v, n) } else { v };
+            match f {
+                12 => x.partition |= (v << lo) as u8,
+                _ => x.v[f as usize / 3][f as usize % 3] |= (v << lo) as u16,
+            }
+        }
+        let ib = x.index_bits();
+        for p in 0..16 {
+            x.ix[p] = r.get(ib - x.subset(p).1 as u32) as u8;
+        }
+        debug_assert_eq!(r.at, 128);
+        x
+    }
+
+    /// The block of these fields (as [`Block6::read`] gave them).
+    pub fn write(&self) -> [u8; 16] {
+        if self.mode == RESERVED6 {
+            return self.raw;
+        }
+        let m = *self.info();
+        let mut w = Bits::new();
+        w.put(m.hbits, m.header as u32);
+        for &(f, lo, n, back) in m.segs {
+            let v = match f {
+                12 => self.partition as u32,
+                _ => self.v[f as usize / 3][f as usize % 3] as u32,
+            } >> lo;
+            let v = v & ((1 << n) - 1);
+            w.put(n as u32, if back { reversed(v, n) } else { v });
+        }
+        let ib = self.index_bits();
+        for p in 0..16 {
+            w.put(ib - self.subset(p).1 as u32, self.ix[p] as u32);
+        }
+        w.bytes()
+    }
+
+    /// Endpoint `e`'s channels as integers (the first's and the differences sign-extended where
+    /// the format is signed or the mode transformed, the others added to the first), of W bits.
+    pub fn integer(&self, e: usize, signed: bool) -> [i32; 3] {
+        let m = self.info();
+        let sext = |v: i32, n: u32| (v << (32 - n)) >> (32 - n);
+        std::array::from_fn(|c| {
+            let w0 = self.v[0][c] as i32;
+            let w0 = if signed { sext(w0, m.w) } else { w0 };
+            if e == 0 {
+                return w0;
+            }
+            let v = self.v[e][c] as i32;
+            let v = if signed || m.transformed { sext(v, m.d[c]) } else { v };
+            match m.transformed {
+                true => {
+                    let v = (v + w0) & ((1 << m.w) - 1);
+                    if signed { sext(v, m.w) } else { v }
+                }
+                false => v,
+            }
+        })
+    }
+
+    /// The channels of endpoint `e` unquantized: of 16 bits (unsigned), or in −0x7fff to 0x7fff
+    /// (signed).
+    pub fn endpoint(&self, e: usize, signed: bool) -> [i32; 3] {
+        let w = self.info().w;
+        self.integer(e, signed).map(|v| unquantize(v, w, signed))
+    }
+
+    /// The pixels of the block, each channel interpolated between the endpoints unquantized
+    /// (before it is scaled to a half float): of signed formats, 0x8000 added (all 0 or 0x8000 of a
+    /// reserved mode).
+    pub fn pixels(&self, signed: bool) -> [[u16; 3]; 16] {
+        let bias = if signed { 0x8000 } else { 0 };
+        if self.mode == RESERVED6 {
+            return [[bias as u16; 3]; 16];
+        }
+        let m = self.info();
+        let e: [[i32; 3]; 4] = std::array::from_fn(|j| if j < 2 * m.ns { self.endpoint(j, signed) } else { [0; 3] });
+        let w = WEIGHTS[self.index_bits() as usize];
+        std::array::from_fn(|p| {
+            let s = self.subset(p).0;
+            let (a, z, wt) = (e[2 * s], e[2 * s + 1], w[self.ix[p] as usize] as i32);
+            std::array::from_fn(|c| (((a[c] * (64 - wt) + z[c] * wt + 32) >> 6) + bias) as u16)
+        })
+    }
+}
+
+/// An endpoint's channel `v` of `bits` unquantized (as BC6H's decoders do).
+pub fn unquantize(v: i32, bits: u32, signed: bool) -> i32 {
+    if !signed {
+        return match v {
+            _ if bits >= 15 => v,
+            0 => 0,
+            _ if v == (1 << bits) - 1 => 0xffff,
+            _ => ((v << 16) + 0x8000) >> bits,
+        };
+    }
+    if bits >= 16 {
+        return v;
+    }
+    let (s, a) = (v < 0, v.abs());
+    let u = match a {
+        0 => 0,
+        _ if a >= (1 << (bits - 1)) - 1 => 0x7fff,
+        _ => ((a << 15) + 0x4000) >> (bits - 1),
+    };
+    if s { -u } else { u }
+}
+
+/// The integer of `bits` that unquantizes nearest to (or just below) `u` (as [`unquantize`]
+/// gives: of 16 bits, or signed).
+pub fn quantize(u: i32, bits: u32, signed: bool) -> i32 {
+    if !signed {
+        return if bits >= 15 {
+            u.clamp(0, (1 << bits) - 1)
+        } else {
+            ((u.clamp(0, 0xffff) as i64) << bits >> 16) as i32
+        };
+    }
+    if bits >= 16 {
+        return u;
+    }
+    let a = ((u.unsigned_abs().min(0x7fff) as i64) << (bits - 1) >> 15) as i32;
+    let a = a.min((1 << (bits - 1)) - 1);
+    if u < 0 { -a } else { a }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +909,25 @@ mod tests {
             let f = Block7::read(&b);
             assert_eq!(f.mode as usize, m);
             assert_eq!(f.write(), b);
+        }
+        // and BC6H's, of every mode's header (the reserved ones too)
+        let headers: Vec<u8> = (0..32).collect();
+        for i in 0..20000 {
+            let mut b = [0u8; 16];
+            for v in b.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *v = x as u8;
+            }
+            b[0] = b[0] & !31 | headers[i % 32];
+            let f = Block6::read(&b);
+            assert_eq!(f.write(), b, "{i}");
+        }
+        // the segments of each mode cover its bits once
+        for m in MODES6 {
+            let n: u32 = m.segs.iter().map(|s| s.2 as u32).sum::<u32>() + m.hbits;
+            assert_eq!(n + if m.ns == 2 { 46 } else { 63 }, 128);
         }
         // the anchors are of the subsets they are said to be
         for k in 0..64 {
