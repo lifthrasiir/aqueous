@@ -49,6 +49,12 @@ pub const MEMBERS: &str = "lzo/members";
 /// Bytes of streams [`encode_blocks`] splits at once.
 const WINDOW: usize = 32 << 20;
 
+/// Streams of [`encode_blocks`]'s first that are split with both modes of the match finder, the
+/// smaller record kept ([`recons::split`]), and how many must split for the mode they agree on
+/// to be the others'.
+const PROBE: usize = 16;
+const PROBE_AGREE: usize = 4;
+
 /// Bytes of data and streams an application of [`encode_blocks`]'s with `contents` takes at
 /// most (but a stream of more): its data is one content.
 const GROUP: usize = 32 << 20;
@@ -72,18 +78,20 @@ pub struct Block {
 pub fn encode_blocks(input: &[u8], blocks: &[Block], threads: usize, contents: bool) -> Option<Formula> {
     // (split a window of blocks at a time, of [`WINDOW`] bytes of streams: all of a game's data
     // file's split at once took 1.5 GB besides their data)
-    let split_one = |b: &Block| -> Option<recons::Split> {
+    let split_one = |b: &Block, mode: Option<u8>| -> Option<recons::Split> {
         if b.stored {
             return None;
         }
+        let _s = aqr_common::trace::span("lzo-split");
         // (where the data's length is unknown, LZO1X's most: 255 bytes of a match a byte)
         let limit = b.data.unwrap_or(b.len.saturating_mul(256).max(4096));
-        recons::split(&input[b.at..b.at + b.len], limit)
+        recons::split_as(&input[b.at..b.at + b.len], limit, mode)
             .ok()
             .filter(|sp| sp.used == b.len && b.data.is_none_or(|n| sp.data.len() == n))
     };
-    let mut windows = Vec::new();
-    let mut i = 0;
+    // the first [`PROBE`] blocks a window of their own, then windows of [`WINDOW`] bytes
+    let mut windows = vec![0..blocks.len().min(PROBE)];
+    let mut i = windows[0].end;
     while i < blocks.len() {
         let (mut j, mut bytes) = (i, 0);
         while j < blocks.len() && (j == i || bytes + blocks[j].len <= WINDOW) {
@@ -93,12 +101,25 @@ pub fn encode_blocks(input: &[u8], blocks: &[Block], threads: usize, contents: b
         windows.push(i..j);
         i = j;
     }
-    let split_window =
-        |w: &std::ops::Range<usize>| aqr_common::pool::par_map(w.len(), threads, |k| split_one(&blocks[w.start + k]));
+    // (the mode of the match finder that the streams of the first window take, where they all
+    // take one, as the streams of a compressor do: the others made with it alone, rather than
+    // with both to keep the smaller record; a game's data file of 1771 streams took the mode of
+    // records 3.2 times smaller in 1770)
+    let mode: std::cell::Cell<Option<u8>> = Default::default();
+    let split_window = |n: usize, w: &std::ops::Range<usize>| {
+        let m = mode.get();
+        let sp = aqr_common::pool::par_map(w.len(), threads, |k| split_one(&blocks[w.start + k], m));
+        if n == 0 {
+            let mut modes = sp.iter().flatten().map(|sp| sp.record[0]);
+            let first = modes.next();
+            mode.set(first.filter(|&m| sp.iter().flatten().count() >= PROBE_AGREE && modes.all(|n| n == m)));
+        }
+        sp
+    };
     // (whether any splits: the first window that has one, kept for the walk below)
     let mut first: Option<(usize, Vec<Option<recons::Split>>)> = None;
     for (n, w) in windows.iter().enumerate() {
-        let sp = split_window(w);
+        let sp = split_window(n, w);
         if sp.iter().any(Option::is_some) {
             first = Some((n, sp));
             break;
@@ -135,7 +156,7 @@ pub fn encode_blocks(input: &[u8], blocks: &[Block], threads: usize, contents: b
         let sp: Vec<Option<recons::Split>> = match n.cmp(&first_n) {
             std::cmp::Ordering::Less => w.clone().map(|_| None).collect(),
             std::cmp::Ordering::Equal => first_sp.take().unwrap(),
-            std::cmp::Ordering::Greater => split_window(w),
+            std::cmp::Ordering::Greater => split_window(n, w),
         };
         sp.into_iter()
     });

@@ -66,7 +66,7 @@ fn stream(s: &[u8], limit: usize) -> Row {
     r.t_split = t.elapsed().as_secs_f64();
     r.data = sp.data.len();
     r.record = sp.record.len();
-    r.cost = sp.cost;
+    r.cost = recons::costs(&sp.data, &sp.record).unwrap_or_default();
     r.matches = lzo1x::decode(s, limit).map_or(0, |d| d.parse.matches.len());
     let t = Instant::now();
     let back = recons::join(&sp.data, &sp.record);

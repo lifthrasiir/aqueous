@@ -93,6 +93,24 @@ impl<'a> Mf<'a> {
         }
     }
 
+    /// Brings the heads of the chains of `pos` into the cache, for the walk to find them there
+    /// (natively: a load from memory at each position, of a table of 256 KiB each; a game's data
+    /// file's records 6% faster, joined 4.5%).
+    #[inline]
+    fn prefetch(&self, pos: usize) {
+        #[cfg(target_arch = "x86_64")]
+        if pos + 3 <= self.d.len() {
+            use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+            // SAFETY: the indices are within the heads, which are of 2^16 entries
+            unsafe {
+                _mm_prefetch::<_MM_HINT_T0>(self.head2.as_ptr().add(k2(self.d, pos)).cast());
+                _mm_prefetch::<_MM_HINT_T0>(self.head3.as_ptr().add(h3(self.d, pos)).cast());
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = pos;
+    }
+
     /// `c` if it is a position within reach of `pos`.
     #[inline]
     fn reach(c: u32, pos: usize) -> Option<usize> {
@@ -253,6 +271,7 @@ fn walk(
     let mut first = true;
     while pos < d.len() {
         mf.advance(pos);
+        mf.prefetch(pos + 1);
         let Some(c2) = mf.near2(pos) else {
             pos += 1;
             run += 1;
@@ -385,19 +404,27 @@ pub struct Split {
     pub record: Vec<u8>,
     /// Bytes of the stream, up to its end.
     pub used: usize,
-    /// Bits of the record by [`Cat`].
-    pub cost: [f64; CATS],
 }
 
 /// The record of the parse `parse` over `data`, with the match finder of `mode` ([`SKIP`]).
-pub fn record(data: &[u8], parse: &Parse, mode: u8) -> Result<(Vec<u8>, [f64; CATS])> {
-    let mut e = Enc::with(ArithEncoder::new(vec![mode]));
+pub fn record(data: &[u8], parse: &Parse, mode: u8) -> Result<Vec<u8>> {
+    // (not [`costs`]' coder: counting the bits of each kind took a tenth of the time)
+    let mut e = ArithEncoder::new(vec![mode]);
     let mut p = parse.clone();
     walk(&mut e, data, &mut p, true, mode & SKIP != 0, None)?;
     if p != *parse {
         return Err(Error("parse not coded"));
     }
-    Ok((e.c.finish(), e.cost))
+    Ok(e.finish())
+}
+
+/// The bits by [`Cat`] of `record`, a record over `data`.
+pub fn costs(data: &[u8], record: &[u8]) -> Result<[f64; CATS]> {
+    let mode = *record.first().ok_or_else(corrupt)?;
+    let parse = parse(data, record)?;
+    let mut e = Enc::with(ArithEncoder::new(vec![mode]));
+    walk(&mut e, data, &mut parse.clone(), true, mode & SKIP != 0, None)?;
+    Ok(e.cost)
 }
 
 /// Data of a stream coded under both modes to pick one.
@@ -411,23 +438,34 @@ fn mode(data: &[u8], parse: &Parse) -> u8 {
         k += 1;
     }
     let p = Parse { matches: parse.matches[..k].to_vec(), tail: 0, first_short: parse.first_short };
-    let size = |mode| record(&data[..at], &p, mode).map_or(usize::MAX, |r| r.0.len());
+    let size = |mode| record(&data[..at], &p, mode).map_or(usize::MAX, |r| r.len());
     if size(0) <= size(SKIP) { 0 } else { SKIP }
 }
 
 /// Splits the LZO1X stream at the start of `s` into its data (at most `limit` bytes) and record.
 pub fn split(s: &[u8], limit: usize) -> Result<Split> {
+    split_as(s, limit, None)
+}
+
+/// [`split`], the record made with the match finder of mode `given` where one is (or of the
+/// other where the parse is not coded with it), rather than of the smaller record: for the
+/// streams of a compressor, which take the same mode.
+pub fn split_as(s: &[u8], limit: usize, given: Option<u8>) -> Result<Split> {
     let dec = lzo1x::decode(s, limit)?;
     if lzo1x::encode(&dec.data, &dec.parse) != s[..dec.used] {
         return Err(Error("stream not given back"));
     }
+    if let Some(m) = given {
+        let record = record(&dec.data, &dec.parse, m).or_else(|_| record(&dec.data, &dec.parse, m ^ SKIP))?;
+        return Ok(Split { data: dec.data, record, used: dec.used });
+    }
     // a stream of no more data than the trial's: its records under both modes, the smaller
     // (the trial would code them as much again: a game's data file of thousands of small
     // streams spent a third of its time on it)
-    let (record, cost) = if dec.data.len() <= TRIAL {
+    let record = if dec.data.len() <= TRIAL {
         match (record(&dec.data, &dec.parse, 0), record(&dec.data, &dec.parse, SKIP)) {
             (Ok(a), Ok(b)) => {
-                if a.0.len() <= b.0.len() {
+                if a.len() <= b.len() {
                     a
                 } else {
                     b
@@ -439,7 +477,7 @@ pub fn split(s: &[u8], limit: usize) -> Result<Split> {
     } else {
         record(&dec.data, &dec.parse, mode(&dec.data, &dec.parse)).or_else(|_| record(&dec.data, &dec.parse, SKIP))?
     };
-    Ok(Split { data: dec.data, record, used: dec.used, cost })
+    Ok(Split { data: dec.data, record, used: dec.used })
 }
 
 /// The parse that `record` codes over `data`.
