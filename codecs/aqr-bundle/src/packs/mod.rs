@@ -7,65 +7,118 @@
 //! stored as it would derived. The README ("Packs of game engines") tells of what each reader
 //! takes.
 //!
-//! The formats are named `<engine>-<extension>`, the names of aqr-compress's formats and the
-//! prefixes of the streams' classes: [`Pack::GodotPck`], [`Pack::UnityBundle`],
-//! [`Pack::UnrealPak`], [`Pack::SourceVpk`].
+//! The formats are named `<engine>-<extension>` (or `<middleware>-`, `<tool>-`), the names of
+//! aqr-compress's formats and the prefixes of the streams' classes ([`Pack::name`]).
 
-pub mod godot;
-pub mod unity;
-pub mod unreal;
-pub mod vpk;
+/// CRI's `@UTF` tables, which its ACBs and CPKs are.
+pub mod cri_utf;
 
 use aqr_disk::File;
 use aqr_formula::{Formula, Kind};
 
-/// The packs read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pack {
-    /// Godot's `.pck` (`GDPC`, versions 1 to 4).
-    GodotPck,
-    /// Unity's AssetBundle (`UnityFS`): the nodes in blocks stored uncompressed.
-    UnityBundle,
-    /// Unreal Engine 4 and 5's `.pak` (versions 1 to 11).
-    UnrealPak,
-    /// Valve's VPK of the Source engine (versions 1 and 2): the files in the directory file.
-    SourceVpk,
+/// The packs, each `Variant = "name", module;` (its reader `module::starts` and `module::files`):
+/// the enum, [`Pack::ALL`], [`Pack::name`], [`Pack::starts`] and [`Pack::files`].
+macro_rules! packs {
+    ($($(#[$doc:meta])* $v:ident = $name:literal, $m:ident;)*) => {
+        $(pub mod $m;)*
+
+        /// The packs read.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Pack {
+            $($(#[$doc])* $v,)*
+        }
+
+        impl Pack {
+            pub const ALL: [Pack; [$(stringify!($v)),*].len()] = [$(Pack::$v),*];
+
+            /// Its name, `<engine>-<extension>`: of aqr-compress's format, and the prefix of the
+            /// classes of its formula's streams.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Pack::$v => $name,)*
+                }
+            }
+
+            /// Whether `d` starts like (or, for a format known by its end, ends like) a pack of
+            /// it.
+            pub fn starts(self, d: &[u8]) -> bool {
+                match self {
+                    $(Pack::$v => $m::starts(d),)*
+                }
+            }
+
+            /// The files of pack `d` with their extents in it, or None where it is not one (or
+            /// its directory is encrypted, or does not read).
+            pub fn files(self, d: &[u8]) -> Option<Vec<File>> {
+                match self {
+                    $(Pack::$v => $m::files(d),)*
+                }
+            }
+        }
+    };
 }
 
-impl Pack {
-    pub const ALL: [Pack; 4] = [Pack::GodotPck, Pack::UnityBundle, Pack::UnrealPak, Pack::SourceVpk];
-
-    /// Its name, `<engine>-<extension>`: of aqr-compress's format, and the prefix of the classes
-    /// of its formula's streams.
-    pub fn name(self) -> &'static str {
-        match self {
-            Pack::GodotPck => "godot-pck",
-            Pack::UnityBundle => "unity-bundle",
-            Pack::UnrealPak => "unreal-pak",
-            Pack::SourceVpk => "source-vpk",
-        }
-    }
-
-    /// Whether `d` starts like (or, for a `.pak`, ends like) a pack of it.
-    pub fn starts(self, d: &[u8]) -> bool {
-        match self {
-            Pack::GodotPck => godot::starts(d),
-            Pack::UnityBundle => unity::starts(d),
-            Pack::UnrealPak => unreal::footer(d).is_some(),
-            Pack::SourceVpk => vpk::starts(d),
-        }
-    }
-
-    /// The files of pack `d` with their extents in it, or None where it is not one (or its
-    /// directory is encrypted).
-    pub fn files(self, d: &[u8]) -> Option<Vec<File>> {
-        match self {
-            Pack::GodotPck => godot::files(d),
-            Pack::UnityBundle => unity::files(d),
-            Pack::UnrealPak => unreal::files(d),
-            Pack::SourceVpk => vpk::files(d),
-        }
-    }
+packs! {
+    /// Godot's `.pck` (`GDPC`, versions 1 to 4).
+    GodotPck = "godot-pck", godot;
+    /// Unity's AssetBundle (`UnityFS`): the nodes in blocks stored uncompressed.
+    UnityBundle = "unity-bundle", unity;
+    /// Unreal Engine 4 and 5's `.pak` (versions 1 to 11), known by its footer.
+    UnrealPak = "unreal-pak", unreal;
+    /// Valve's VPK of the Source engine (versions 1 and 2): the files in the directory file.
+    SourceVpk = "source-vpk", vpk;
+    /// Unreal Engine 3's packages (`.upk`, `.u`, `.umap`) and texture caches (`.tfc`): exports,
+    /// thumbnails, or compressed chunks
+    UnrealUpk = "unreal-upk", unreal_upk;
+    /// FMOD Studio's banks (`.bank`, RIFF `FEV `): the FSB5 banks of their sound data
+    FmodBank = "fmod-bank", fmod_bank;
+    /// Audiokinetic Wwise's SoundBanks (`.bnk`): the media of `DIDX`/`DATA`
+    WwiseBnk = "wwise-bnk", wwise_bnk;
+    /// Audiokinetic Wwise's file packages (`.pck`, `AKPK`): banks and streamed files
+    WwisePck = "wwise-pck", wwise_pck;
+    /// Microsoft XACT's wave banks (`.xwb`): the waves' play regions
+    XactXwb = "xact-xwb", xact_xwb;
+    /// CRI's AFS2 archives (`.awb`): HCA and ADX streams
+    CriAwb = "cri-awb", cri_awb;
+    /// CRI's cue sheets (`.acb`, `@UTF`): the streams of the AFS2 archive they hold
+    CriAcb = "cri-acb", cri_acb;
+    /// CRI's CPK archives: files of their `TOC` (or `ITOC`), CRILAYLA ones compressed
+    CriCpk = "cri-cpk", cri_cpk;
+    /// CRI's old AFS archives
+    CriAfs = "cri-afs", cri_afs;
+    /// Bethesda's BSA archives (Morrowind, versions 103 to 105)
+    BethesdaBsa = "bethesda-bsa", bethesda_bsa;
+    /// Bethesda's BA2 archives (`BTDX`, `GNRL` and `DX10`)
+    BethesdaBa2 = "bethesda-ba2", bethesda_ba2;
+    /// EA's BIG archives (`BIGF`, `BIG4`)
+    EaBig = "ea-big", ea_big;
+    /// Ren'Py's archives (`RPA-3.0`, `RPA-2.0`)
+    RenpyRpa = "renpy-rpa", renpy_rpa;
+    /// Kirikiri's XP3 archives
+    KirikiriXp3 = "kirikiri-xp3", kirikiri_xp3;
+    /// Capcom MT Framework's ARC archives
+    MtfArc = "mtf-arc", mtf_arc;
+    /// Sony's PSARC archives (`PSAR`)
+    SonyPsarc = "sony-psarc", sony_psarc;
+    /// Unity's serialized files (`.assets`, `globalgamemanagers`, `levelN`, versions 9 to 22):
+    /// their objects
+    UnityAssets = "unity-assets", unity_assets;
+    /// Unity's `.resource` files: FSB5 banks and videos back to back
+    UnityResource = "unity-resource", unity_resource;
+    /// GameMaker's `data.win` and `audiogroupN.dat` (`FORM`): textures and sounds
+    GamemakerWin = "gamemaker-win", gamemaker_win;
+    /// Chromium's resource packs (`.pak`, versions 4 and 5; Electron's and NW.js's games)
+    ChromiumPak = "chromium-pak", chromium_pak;
+    /// id Software's Quake and Quake II packs (`PACK`)
+    QuakePak = "quake-pak", quake_pak;
+    /// id Software's Doom WADs (`IWAD`, `PWAD`)
+    DoomWad = "doom-wad", doom_wad;
+    /// Quake's texture WADs (`WAD2`)
+    QuakeWad = "quake-wad2", quake_wad;
+    /// Half-Life's texture WADs (`WAD3`)
+    HlWad = "hl-wad3", hl_wad;
+    /// Garry's Mod's addons (`GMAD`)
+    GmodGma = "gmod-gma", gmod_gma;
 }
 
 /// The pack `d` is, if any: [`Pack::starts`] of the first that holds.
@@ -84,7 +137,9 @@ pub fn encode_with(pack: Pack, d: &[u8], kind: fn(&[u8]) -> Kind) -> Option<Form
 /// directory file: [`vpk::archive_files`]).
 pub fn encode_files(pack: Pack, d: &[u8], files: &[File], kind: fn(&[u8]) -> Kind) -> Option<Formula> {
     let pieces = aqr_disk::pieces(d, files);
-    if !pieces.iter().any(|p| p.file.is_some()) {
+    // (none where no file has contents, or one file is all of it: its contents would be the pack
+    // again, detected again, without end, as a chunk of Unreal's starts as a file of chunks does)
+    if !pieces.iter().any(|p| p.file.is_some()) || matches!(&pieces[..], [p] if p.file.is_some()) {
         return None;
     }
     let opt = aqr_disk::formula::Options { kind, prefix: pack.name(), ..Default::default() };
@@ -127,4 +182,16 @@ fn within(d: &[u8], start: u64, len: u64) -> Option<std::ops::Range<usize>> {
 fn cstr(d: &[u8], at: usize) -> Option<(&[u8], usize)> {
     let n = d.get(at..)?.iter().position(|&b| b == 0)?;
     Some((&d[at..at + n], at + n + 1))
+}
+
+/// The data of the zlib stream at the start of `d` (anything may follow it), if it holds at most
+/// `max` bytes; None where the stream is no zlib stream (a header with a dictionary, wrong check
+/// bits), is damaged or the data is longer. For the indexes that packs compress.
+fn zlib_inflate(d: &[u8], max: usize) -> Option<Vec<u8>> {
+    let (a, b) = (*d.first()?, *d.get(1)?);
+    if a & 0x0f != 8 || b & 0x20 != 0 || !(a as u32 * 256 + b as u32).is_multiple_of(31) {
+        return None;
+    }
+    let flat = aqr_flate::inflate::parse_segments_max(&d[2..], usize::MAX, max, 0, false).ok()?;
+    Some(flat.data.to_vec())
 }

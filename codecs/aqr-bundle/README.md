@@ -62,9 +62,9 @@ the application, of its kind by its name, and the rest (headers, directories, pa
 file points at, what is encrypted) is the stream `{format}/rest`, the pack their concatenation.
 What a directory holds that follows from the contents (offsets, sizes, the copies of Unreal's
 entries before their data) is about 0.01% to 0.1% of a pack: a module deriving it would cost an
-archive more than it saves. The formats are named `<engine>-<extension>` (the formats of
-aqr-compress and the prefixes of the classes), as one extension is several engines' (Godot's and
-Wwise's `.pck`, Unreal's and Quake's `.pak`):
+archive more than it saves. The formats are named `<engine>-<extension>` (or the middleware's or
+tool's: the formats of aqr-compress and the prefixes of the classes), as one extension is several
+engines' (Godot's and Wwise's `.pck`, Unreal's and Quake's `.pak`):
 
 - `godot-pck`: Godot's `.pck` (`GDPC`), versions 1 (Godot 3) to 4 (4.4 on: the directory at the
   end). Not read: an encrypted directory; encrypted files are the rest. A pack embedded in an
@@ -80,10 +80,50 @@ Wwise's `.pck`, Unreal's and Quake's `.pak`):
 - `source-vpk`: Valve's VPK, versions 1 and 2. A directory file's own files (preload bytes and
   data); its archives (`NAME_000.vpk`, …, of no header) are taken apart by its tree where they
   are archived along with it (aqr-compress's `vpk`: planned before the batches, by their names).
+- `unity-assets`: Unity's serialized files (`.assets`, `sharedassetsN.assets`,
+  `globalgamemanagers`, `levelN`, the `CAB-*` of bundles), versions 9 to 22 of either byte order,
+  their type trees skipped: each object a file `<path id>.<class>` (`tex2d`, `mesh`,
+  `audioclip`, ...). Of no magic: its header checked against the data, tried after every other
+  format. Not read: versions below 9. The `.resS` files the objects stream from are not split
+  (their offsets are the last fields of each class's own layout).
+- `unity-resource`: Unity's `.resource` files: FSB5 banks (and the videos, WebM and MP4, of
+  VideoClips) back to back, where more than one bank (a bank alone is aqr-fsb's).
+- `unreal-upk`: Unreal Engine 3's packages (`.upk`, `.u`, `.umap`) and texture caches (`.tfc`):
+  the exports (`Outer/Name.Class`) and thumbnails of a package stored as it is (the exports' table
+  as of versions 865 to 893, else none); the compressed chunks of others, files of zlib or of
+  compressed contents (LZO, LZX: `Opaque`).
+- `fmod-bank`: FMOD Studio's banks (RIFF `FEV `): the FSB5 banks of their `SND ` chunks.
+- `wwise-bnk`: Wwise's SoundBanks: the media of `DIDX`/`DATA` (`<id>.wem`). `wwise-pck`: Wwise's
+  file packages (`AKPK`): banks and streamed files (unverified on real files).
+- `xact-xwb`: XACT's wave banks (`WBND`, versions 42 on): the waves' play regions, raw (`.pcm`,
+  `.adpcm`, `.xwma`, `.xma`).
+- `cri-awb`: CRI's AFS2 archives (HCA, ADX); `cri-acb`: the AFS2 archive a cue sheet (`@UTF`)
+  holds; `cri-cpk`: CPK archives' `TOC` (or `ITOC`), CRILAYLA files compressed; `cri-afs`: AFS
+  archives (the last two unverified on real files). `cri_utf` reads their `@UTF` tables.
+- `gamemaker-win`: GameMaker's `data.win` and `audiogroupN.dat`: the textures of `TXTR` (PNG,
+  QOI, bzip2 of QOI) and the sounds of `AUDO`.
+- `chromium-pak`: Chromium's resource packs (versions 4 and 5: Electron's and NW.js's games),
+  brotli resources compressed. Read, but not looked for by aqr-compress: of no magic, and their
+  small members (gzip, text, PNG) archived apart code worse than the pack scanned (60 packs:
+  10.78 -> 11.17 MB).
+- Unverified on real files (no sample on this machine), each from its format's public
+  descriptions: `quake-pak` (`PACK`), `doom-wad` (`IWAD`/`PWAD`), `quake-wad2`, `hl-wad3`,
+  `gmod-gma`, `bethesda-bsa` (Morrowind, 103 to 105), `bethesda-ba2` (`GNRL`, and `DX10`
+  textures of stored chunks), `ea-big`, `renpy-rpa` (its pickled index read), `kirikiri-xp3`,
+  `mtf-arc`, `sony-psarc`.
+
+The members' names give their kinds: of Wwise's media, its Vorbis `.wem` and the others
+`.wav`; CRI's HCA (`.hca`) is of compressed data by its name (aqr-compress), as files of their own
+a scan's fallbacks took it for samples and coded it worse (SE_Kinetic.acb 93.96 -> 97.00 MB).
+Both are of codecs a recompressor could take (Wwise's Vorbis as aqr-fsb does FSB5's, HCA's
+MDCT), which is left.
+
+A pack whose one file is all of it has no formula: its contents would be it again (a chunk of an
+Unreal 3 texture cache, alone, starts as a cache does).
 
 Compressed data is left for separate work: Unity's LZ4 blocks (LZ4HC, which aqr-lz4 does not
 reproduce) and LZMA, the zlib blocks of Unreal's entries rebuilt as streams of their own (rather
-than found by the scan), Oodle not at all.
+than found by the scan), Unreal 3's LZO chunks (raw LZO1X blocks: aqr-lzo), Oodle not at all.
 
 ## Tests
 

@@ -73,7 +73,7 @@ const OTHER_EXTS: &[(Kind, &[&str])] = &[
     (
         Kind::Compressed,
         &[
-            "zst", "br", "mp4", "m4a", "m4v", "opus", "aac", "webp", "avif", "heic", "heif", "jxl", "jp2",
+            "zst", "br", "mp4", "m4a", "m4v", "opus", "hca", "aac", "webp", "avif", "heic", "heif", "jxl", "jp2",
             "woff2",
         ],
     ),
@@ -217,7 +217,8 @@ formats! {
         exts: &["webm", "mkv", "mka", "mk3d", "mks"],
         regions: Some(aqr_mkv::formula::regions),
     }
-    /// AVI file with DivX 3 video (aqr-div3: the frames under a context model, module `div3-recons`), known by its
+    /// AVI file with DivX 3 video (aqr-div3: the frames under a context model, module
+    /// `div3-recons`), known by its
     /// header list: not looked for in other data.
     Div3 = "div3" {
         recompressor: Pure(aqr_div3::formula::encode),
@@ -466,7 +467,8 @@ formats! {
         exts: &["gguf"],
         cost: 4,
     }
-    /// PyTorch's file of `torch.save`, of the ZIP format (aqr-tensors: its storages of floats, by its
+    /// PyTorch's file of `torch.save`, of the ZIP format (aqr-tensors: its storages of floats, by
+    /// its
     /// pickle), known by its first entry: at the start of data only.
     Pth = "pth" {
         recompressor: PureWith(crate::tensors),
@@ -627,6 +629,188 @@ formats! {
     UnrealPak = "unreal-pak" {
         recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnrealPak, d)),
         // slices of the input, and the names of the index
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Unreal Engine 3's packages (`.upk`, `.u`, `.umap`) and texture caches (`.tfc`): exports,
+    /// thumbnails, or compressed chunks (aqr-bundle's `packs`): at the start of data only.
+    UnrealUpk = "unreal-upk" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnrealUpk, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// FMOD Studio's banks (`.bank`, RIFF `FEV `): the FSB5 banks of their sound data (aqr-bundle's
+    /// `packs`): at the start of data only.
+    FmodBank = "fmod-bank" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::FmodBank, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Audiokinetic Wwise's SoundBanks (`.bnk`): the media of `DIDX`/`DATA` (aqr-bundle's `packs`):
+    /// at the start of data only.
+    WwiseBnk = "wwise-bnk" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::WwiseBnk, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Audiokinetic Wwise's file packages (`.pck`, `AKPK`): banks and streamed files (aqr-bundle's
+    /// `packs`): at the start of data only.
+    WwisePck = "wwise-pck" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::WwisePck, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Microsoft XACT's wave banks (`.xwb`): the waves' play regions (aqr-bundle's `packs`): at the
+    /// start of data only.
+    XactXwb = "xact-xwb" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::XactXwb, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// CRI's AFS2 archives (`.awb`): HCA and ADX streams (aqr-bundle's `packs`): at the start of
+    /// data only.
+    CriAwb = "cri-awb" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::CriAwb, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// CRI's cue sheets (`.acb`, `@UTF`): the streams of the AFS2 archive they hold (aqr-bundle's
+    /// `packs`): at the start of data only.
+    CriAcb = "cri-acb" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::CriAcb, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// CRI's CPK archives: files of their `TOC` (or `ITOC`), CRILAYLA ones compressed (aqr-bundle's
+    /// `packs`): at the start of data only.
+    CriCpk = "cri-cpk" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::CriCpk, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// CRI's old AFS archives (aqr-bundle's `packs`): at the start of data only.
+    CriAfs = "cri-afs" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::CriAfs, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Bethesda's BSA archives (Morrowind, versions 103 to 105) (aqr-bundle's `packs`): at the
+    /// start of data only.
+    BethesdaBsa = "bethesda-bsa" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::BethesdaBsa, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Bethesda's BA2 archives (`BTDX`, `GNRL` and `DX10`) (aqr-bundle's `packs`): at the start of
+    /// data only.
+    BethesdaBa2 = "bethesda-ba2" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::BethesdaBa2, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// EA's BIG archives (`BIGF`, `BIG4`) (aqr-bundle's `packs`): at the start of data only.
+    EaBig = "ea-big" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::EaBig, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Ren'Py's archives (`RPA-3.0`, `RPA-2.0`) (aqr-bundle's `packs`): at the start of data only.
+    RenpyRpa = "renpy-rpa" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::RenpyRpa, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Kirikiri's XP3 archives (aqr-bundle's `packs`): at the start of data only.
+    KirikiriXp3 = "kirikiri-xp3" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::KirikiriXp3, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Capcom MT Framework's ARC archives (aqr-bundle's `packs`): at the start of data only.
+    MtfArc = "mtf-arc" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::MtfArc, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Sony's PSARC archives (`PSAR`) (aqr-bundle's `packs`): at the start of data only.
+    SonyPsarc = "sony-psarc" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::SonyPsarc, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Unity's serialized files (`.assets`, `globalgamemanagers`, `levelN`, versions 9 to 22):
+    /// their objects (aqr-bundle's `packs`): at the start of data only.
+    UnityAssets = "unity-assets" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnityAssets, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Unity's `.resource` files: FSB5 banks and videos back to back (aqr-bundle's `packs`): at the
+    /// start of data only.
+    UnityResource = "unity-resource" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::UnityResource, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// GameMaker's `data.win` and `audiogroupN.dat` (`FORM`): textures and sounds (aqr-bundle's
+    /// `packs`): at the start of data only.
+    GamemakerWin = "gamemaker-win" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::GamemakerWin, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// id Software's Quake and Quake II packs (`PACK`) (aqr-bundle's `packs`): at the start of data
+    /// only.
+    QuakePak = "quake-pak" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::QuakePak, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// id Software's Doom WADs (`IWAD`, `PWAD`) (aqr-bundle's `packs`): at the start of data only.
+    DoomWad = "doom-wad" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::DoomWad, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Quake's texture WADs (`WAD2`) (aqr-bundle's `packs`): at the start of data only.
+    QuakeWad = "quake-wad2" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::QuakeWad, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Half-Life's texture WADs (`WAD3`) (aqr-bundle's `packs`): at the start of data only.
+    HlWad = "hl-wad3" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::HlWad, d)),
+        // slices of the input
+        heap: 0.0,
+        bundle: true,
+    }
+    /// Garry's Mod's addons (`GMAD`) (aqr-bundle's `packs`): at the start of data only.
+    GmodGma = "gmod-gma" {
+        recompressor: Cx(|d, _, _, _, _| crate::bundle::pack(aqr_bundle::packs::Pack::GmodGma, d)),
+        // slices of the input
         heap: 0.0,
         bundle: true,
     }

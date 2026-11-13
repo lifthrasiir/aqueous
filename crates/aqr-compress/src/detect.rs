@@ -122,6 +122,28 @@ static ROWS: &[Row] = {
         start(GodotPck, aqr_bundle::packs::godot::starts),
         start(UnityBundle, aqr_bundle::packs::unity::starts),
         start(SourceVpk, aqr_bundle::packs::vpk::starts),
+        start(GmodGma, aqr_bundle::packs::gmod_gma::starts),
+        start(HlWad, aqr_bundle::packs::hl_wad::starts),
+        start(QuakeWad, aqr_bundle::packs::quake_wad::starts),
+        start(DoomWad, aqr_bundle::packs::doom_wad::starts),
+        start(GamemakerWin, aqr_bundle::packs::gamemaker_win::starts),
+        start(UnityResource, aqr_bundle::packs::unity_resource::starts),
+        start(SonyPsarc, aqr_bundle::packs::sony_psarc::starts),
+        start(MtfArc, aqr_bundle::packs::mtf_arc::starts),
+        start(KirikiriXp3, aqr_bundle::packs::kirikiri_xp3::starts),
+        start(RenpyRpa, aqr_bundle::packs::renpy_rpa::starts),
+        start(EaBig, aqr_bundle::packs::ea_big::starts),
+        start(BethesdaBa2, aqr_bundle::packs::bethesda_ba2::starts),
+        start(BethesdaBsa, aqr_bundle::packs::bethesda_bsa::starts),
+        start(CriAfs, aqr_bundle::packs::cri_afs::starts),
+        start(CriCpk, aqr_bundle::packs::cri_cpk::starts),
+        start(CriAcb, aqr_bundle::packs::cri_acb::starts),
+        start(CriAwb, aqr_bundle::packs::cri_awb::starts),
+        start(XactXwb, aqr_bundle::packs::xact_xwb::starts),
+        start(WwisePck, aqr_bundle::packs::wwise_pck::starts),
+        start(WwiseBnk, aqr_bundle::packs::wwise_bnk::starts),
+        start(FmodBank, aqr_bundle::packs::fmod_bank::starts),
+        start(UnrealUpk, aqr_bundle::packs::unreal_upk::starts),
         start(Chm, aqr_mszip::formula::starts_chm),
         // (a whole file, not in other data)
         start(Sqlite, sqlite_header),
@@ -158,13 +180,15 @@ static ROWS: &[Row] = {
         anywhere(Egg, Of(&[b"EG"]), aqr_egg::formula::starts),
         anywhere(Rar, Of(&[b"Ra"]), aqr_rar::formula::starts),
         start(GitPack, aqr_git::pack::starts),
+        // (after git's packs, which start `PACK` as Quake's do)
+        start(QuakePak, aqr_bundle::packs::quake_pak::starts),
         magic(Gzip, &[(0, &[0x1f, 0x8b, 8])]),
         // (a fixed block first only at the start: see `zlib_header`)
         anywhere(Zlib, Pairs::Fn(zlib_pair), |d| zlib_header(d, false)),
         start(Zlib, |d| zlib_header(d, true)),
         // (known by its footer: its end would be that of the data)
         start(LevelDb, aqr_snappy::leveldb::is_table),
-        start(UnrealPak, |d| aqr_bundle::packs::unreal::footer(d).is_some()),
+        start(UnrealPak, aqr_bundle::packs::unreal::starts),
         // (before raw: that takes TIFF files of uncompressed samples, and no CR2 or DNG of lossless ones)
         start(JpegLossless, aqr_jpeg::lformula::starts),
         // Two bytes (or DICOM's group 8) are too weak a signature to look for in other data.
@@ -203,6 +227,10 @@ static ROWS: &[Row] = {
         start(Jsonl, aqr_jsonl::formula::starts),
         start(Xsv, aqr_xsv::formula::starts),
         start(Text, aqr_wrt::formula::starts),
+        // (of no magic, its header checked against the length: after every other; Chromium's
+        // resource packs, of no magic either, are not looked for: archived apart, their small
+        // gzip, text and PNG members coded worse than the pack scanned, 10.78 -> 11.17 MB of 60)
+        start(UnityAssets, aqr_bundle::packs::unity_assets::starts),
     ]
 };
 

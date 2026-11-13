@@ -42,6 +42,11 @@ pub struct Footer {
     pub encrypted: bool,
 }
 
+/// Whether `d` ends as a pak does ([`footer`]).
+pub fn starts(d: &[u8]) -> bool {
+    footer(d).is_some()
+}
+
 /// The footer of `d`, if it ends as a pak does.
 pub fn footer(d: &[u8]) -> Option<Footer> {
     // (the bytes after the magic: 40 before version 8, then 4 or 5 names, and version 9's byte)

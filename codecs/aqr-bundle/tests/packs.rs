@@ -410,8 +410,13 @@ fn source_vpks() {
     let names: Vec<&[u8]> = files.iter().map(|f| &f.name[..]).collect();
     assert_eq!(names, [b"data/b.bin"]);
     assert_eq!(&archive[files[0].extents[0].clone()], &c[3].1[..]);
-    let f = packs::encode_files(Pack::SourceVpk, &archive, &files, |_| Kind::Unknown).unwrap();
-    rebuilds(&f, &archive);
+    // (its one file all of it: no formula, which would give the same data again)
+    assert!(packs::encode_files(Pack::SourceVpk, &archive, &files, |_| Kind::Unknown).is_none());
+    // with bytes the tree tells of no file after it, the file a content of its own
+    let mut longer = archive.clone();
+    longer.extend_from_slice(b"padding no file holds");
+    let f = packs::encode_files(Pack::SourceVpk, &longer, &files, |_| Kind::Unknown).unwrap();
+    rebuilds(&f, &longer);
 }
 
 /// No pack is read of data cut short or of no pack.

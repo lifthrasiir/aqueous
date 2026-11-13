@@ -186,6 +186,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-disk",
+ "aqr-flate",
  "aqr-formula",
  "aqr-lz4",
  "zstd",

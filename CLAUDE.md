@@ -123,10 +123,11 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   asar, inno, ole, isc, vorbis, ogg, mkv, lzx, xpress, lznt1, div3, ac3, tensors, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
   crate with a `FORMAT.md` belongs here. Disk images are aqr-disk's (partition tables, containers,
   the formula; `docs/disk-image-design.md`), their file systems read by aqr-iso, aqr-fat, aqr-ntfs,
-  aqr-ext, aqr-apfs and aqr-hfs (no FORMAT.md: aqr-disk's tells). Game engines' packs are aqr-bundle's
-  `packs` (aqr-disk's formula, no module), formats named `<engine>-<extension>` (`godot-pck`,
-  `unity-bundle`, `unreal-pak`, `source-vpk`; aqr-compress's `vpk.rs` plans a VPK's archives by its
-  directory file). `aqr-flate` underlies everything that uses DEFLATE. The workspace
+  aqr-ext, aqr-apfs and aqr-hfs (no FORMAT.md: aqr-disk's tells). Game engines' and middleware's packs are
+  aqr-bundle's `packs` (aqr-disk's formula, no module), formats named `<engine>-<extension>` or the
+  middleware's or tool's (`godot-pck`, `unity-assets`, `unreal-upk`, `wwise-bnk`, `cri-awb`,
+  `bethesda-ba2`, …: `packs/mod.rs`'s `packs!`); aqr-compress's `vpk.rs` plans a VPK's archives by
+  its directory file. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
   of slow measurements).
