@@ -89,7 +89,14 @@ pub fn is_text(d: &[u8]) -> bool {
 
 /// Whether `d` is text but for at most 1 in 1000 of its bytes (escapes of a terminal, say).
 pub fn mostly_text(d: &[u8]) -> bool {
-    d.iter().filter(|&&c| !text_byte(c)).count() <= d.len() / 1000
+    // (counted a piece at a time, ending at the first over the bound: it is asked of every file
+    // of a batch, on one thread, and most are not text)
+    let bound = d.len() / 1000;
+    let mut n = 0;
+    d.chunks(4096).all(|p| {
+        n += p.iter().filter(|&&c| !text_byte(c)).count();
+        n <= bound
+    })
 }
 
 /// Whether `d` is a file this crate takes: of at least [`MIN_LEN`] bytes, [`mostly_text`] as
