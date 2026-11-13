@@ -1845,6 +1845,12 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
         });
         match child {
             Some((n, child)) => {
+                // (`AQR_SCAN_DUMP`: each file found, for a measurement; not in builds for
+                // distribution)
+                #[cfg(not(aqr_dist))]
+                if std::env::var_os("AQR_SCAN_DUMP").is_some() {
+                    eprintln!("SCAN\t{}\t{depth}\t{p}\t{n}\t{:?}", d.len(), format);
+                }
                 found.push((p, n, child));
                 p += n;
             }

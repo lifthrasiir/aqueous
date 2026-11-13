@@ -120,11 +120,57 @@ fn family_key(name: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (dir.to_vec(), stem.to_ascii_lowercase())
 }
 
+/// The plan of a file of layouts: lines of a path, an offset and a size (tab-separated), a
+/// member each, stored members; a content is planned whose name ends with the path (`/` or
+/// `\` alike, case aside), its members in order, overlapping ones left out.
+#[cfg(not(aqr_dist))]
+fn given<S: Source + ?Sized>(src: &S, file: &std::path::Path) -> Plan {
+    let norm =
+        |s: &[u8]| -> Vec<u8> { s.iter().map(|&b| if b == b'\\' { b'/' } else { b.to_ascii_lowercase() }).collect() };
+    let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("AQR_PAK_LAYOUT {}: {e}", file.display()));
+    let mut by_path: HashMap<Vec<u8>, Vec<(usize, usize)>> = HashMap::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut f = line.split('\t');
+        let (Some(p), Some(o), Some(s)) = (f.next(), f.next(), f.next()) else { panic!("AQR_PAK_LAYOUT: {line:?}") };
+        let (o, s) = (o.trim().parse().expect("offset"), s.trim().parse().expect("size"));
+        by_path.entry(norm(p.as_bytes())).or_default().push((o, s));
+    }
+    let mut plan = Plan::default();
+    for c in 0..src.len() {
+        let name = norm(src.name(c));
+        let Some(ms) = by_path.iter().find(|(p, _)| name.ends_with(p)).map(|(_, m)| m) else { continue };
+        let mut ms = ms.clone();
+        ms.sort_unstable();
+        let len = src.size(c) as usize;
+        let mut members = Vec::with_capacity(ms.len());
+        let mut end = 0;
+        for (o, s) in ms {
+            if s > 0 && o >= end && o + s <= len {
+                members.push((o, s));
+                end = o + s;
+            }
+        }
+        if !members.is_empty() {
+            plan.by_content.insert(c, Layout { members, lzo: false });
+        }
+    }
+    if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
+        eprintln!("paks: {} data files given by {}", plan.len(), file.display());
+    }
+    plan
+}
+
 /// The plan of the contents of `src` ([`Plan`]): empty where nothing is to be taken apart.
 pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::Stop>, threads: usize) -> Plan {
     // (`AQR_PAKS=0`: none, for a comparison)
     if std::env::var_os("AQR_PAKS").is_some_and(|v| v == "0") {
         return Plan::default();
+    }
+    // (`AQR_PAK_LAYOUT=FILE`: the layouts in FILE, not inferred, for the ideal a measurement
+    // of the inference is against; not in builds for distribution)
+    #[cfg(not(aqr_dist))]
+    if let Some(p) = std::env::var_os("AQR_PAK_LAYOUT") {
+        return given(src, std::path::Path::new(&p));
     }
     let t0 = Instant::now();
     // (`AQR_PAK_VERBOSE=2`: each family looked at too)
@@ -242,6 +288,18 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S, stop: Option<&crate::archive::St
             t0.elapsed().as_secs_f64() * 1e3,
             heads_time.as_secs_f64() * 1e3
         );
+    }
+    // (`AQR_PAK_DUMP=FILE`: the plan written as `AQR_PAK_LAYOUT` reads it)
+    #[cfg(not(aqr_dist))]
+    if let Some(p) = std::env::var_os("AQR_PAK_DUMP") {
+        let mut out = String::new();
+        for (&c, layout) in &plan.by_content {
+            let name = String::from_utf8_lossy(src.name(c));
+            for &(o, s) in &layout.members {
+                out.push_str(&format!("{name}\t{o}\t{s}\n"));
+            }
+        }
+        std::fs::write(&p, out).unwrap_or_else(|e| panic!("AQR_PAK_DUMP: {e}"));
     }
     plan
 }
