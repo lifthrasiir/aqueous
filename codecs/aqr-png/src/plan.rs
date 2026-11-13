@@ -112,6 +112,9 @@ fn image(rec: &[u8], len: usize, ih: &Option<Ihdr>, keep: bool, streamed: bool) 
         }
         r.bits(8);
         let ntrail = r.gamma().ok()? as usize;
+        if ntrail > layout.len() * 8 {
+            return None;
+        }
         for _ in 0..ntrail {
             r.bits(8);
         }
@@ -344,7 +347,7 @@ pub fn set(
     for i in 0..n {
         parents.push(match get_varint(params, &mut at).ok()? {
             0 => None,
-            p if p as usize <= i => Some(p as usize - 1),
+            p if usize::try_from(p).is_ok_and(|p| p <= i) => Some(p as usize - 1),
             _ => return None,
         });
     }
@@ -361,7 +364,9 @@ pub fn set(
     // the parents, the sizes, the unpacked inputs, the depths, the files' places, the output, the
     // files of a depth
     let k = n as u64;
-    [8 * k, 8 * k, 8 * k, 8 * k, 8 * k, 4 * k, 4 * k, sizes.iter().sum(), 4 * k].into_iter().for_each(|b| m.take(b));
+    [8 * k, 8 * k, 8 * k, 8 * k, 8 * k, 4 * k, 4 * k, sizes.iter().try_fold(0u64, |a, &s| a.checked_add(s))?, 4 * k]
+        .into_iter()
+        .for_each(|b| m.take(b));
     // a file of `threads` threads on the stack of `m`: its parent's references, then the file
     let file = |m: &mut Sim, i: usize, threads: usize, tail: bool| -> Option<()> {
         if let Some(p) = parents[i] {
@@ -494,4 +499,32 @@ pub fn part(initial: u64, inputs: &[u64], (sk, index, heads): (&[u8], &[u8], &[u
     run_batch(&mut m, &mut batch);
     let (instance, tasks) = m.plans(1);
     (at == index.len() && from == heads.len()).then_some((instance, tasks[0]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rans::BitW;
+
+    /// A damaged layout with a trailing-byte count far beyond its size is refused at once.
+    #[test]
+    fn huge_trailing_count_is_refused() {
+        let mut w = BitW::default();
+        w.bits(1, 0); // image
+        w.gamma(0); // spans
+        w.gamma(0); // one stream
+        w.bits(16, 0);
+        w.gamma(0); // no blocks
+        w.bits(1, 1); // std_last
+        w.bits(8, 0);
+        w.gamma(u32::MAX - 1);
+        let layout = w.finish();
+        let mut rec = vec![1u8, layout.len() as u8];
+        rec.extend_from_slice(&layout);
+        rec.push(0); // headers
+        let ih = Ihdr { width: 1, height: 1, depth: 8, color: 0, compression: 0, filter: 0, interlace: 0 };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(image(&rec, 1, &Some(ih), false, false).is_none()));
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(1)), Ok(true));
+    }
 }

@@ -50,7 +50,7 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
     for i in 0..n {
         parents.push(match codec::get_varint(params, &mut at)? {
             0 => None,
-            p if p as usize <= i => Some(p as usize - 1),
+            p if usize::try_from(p).is_ok_and(|p| p <= i) => Some(p as usize - 1),
             _ => return Err(corrupt()),
         });
     }
