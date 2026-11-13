@@ -180,12 +180,12 @@ fn lzo_literals(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// An index and its data file of `n` LZO1X members.
-fn family(rng: &mut Rng, n: usize) -> (Vec<u8>, Vec<u8>) {
+/// An index and its data file of `n` LZO1X members of `base` bytes and up to 3000 more.
+fn family(rng: &mut Rng, n: usize, base: usize) -> (Vec<u8>, Vec<u8>) {
     let (mut data, mut index) = (Vec::new(), b"IDXv\x01\x00\x00\x00".to_vec());
     index.extend((n as u64).to_le_bytes());
     for _ in 0..n {
-        let len = 200 + rng.below(3000) as usize;
+        let len = base + rng.below(3000) as usize;
         let text: Vec<u8> = (0..len).map(|_| b"lorem ipsum dolor sit amet "[rng.below(27) as usize]).collect();
         let stream = lzo_literals(&text);
         index.extend(rng.next().to_le_bytes());
@@ -200,9 +200,20 @@ fn family(rng: &mut Rng, n: usize) -> (Vec<u8>, Vec<u8>) {
 /// LZO1X; its template holds for families of 5 members and of 1.
 #[test]
 fn index_and_data() {
+    index_and_data_of(200);
+}
+
+/// The same with members of 15 KB, a data file of 5 MB (the first row was missed: the
+/// template learned started a row late, past the end of the smaller families' tables).
+#[test]
+fn index_and_data_big() {
+    index_and_data_of(15_000);
+}
+
+fn index_and_data_of(base: usize) {
     use aqr_infer_pak::template;
     let mut rng = Rng(11);
-    let (index, data) = family(&mut rng, 300);
+    let (index, data) = family(&mut rng, 300, base);
     let files = [File { name: "a.idx".into(), data: &index }, File { name: "a.dat".into(), data: &data }];
     let (dirs, _) = infer(&files, &Options::default());
     let what: Vec<_> = dirs.iter().map(|d| (d.owner.clone(), d.target.clone(), d.members.len(), d.codec)).collect();
@@ -210,7 +221,7 @@ fn index_and_data() {
     assert_eq!((dirs[0].target.as_str(), dirs[0].members.len()), ("a.dat", 300));
     let t = template::learn(&files, 0, &dirs).unwrap();
     for n in [5, 1] {
-        let (index, data) = family(&mut rng, n);
+        let (index, data) = family(&mut rng, n, base);
         let files = [File { name: "b.idx".into(), data: &index }, File { name: "b.dat".into(), data: &data }];
         let dirs = template::verify(&t, &files, 0).unwrap_or_else(|| panic!("{n} members: does not hold"));
         assert_eq!(dirs[0].members.len(), n);

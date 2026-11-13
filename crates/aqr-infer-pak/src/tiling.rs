@@ -88,6 +88,18 @@ fn binomial_bits(n: usize, fit: f64, ctrl: f64) -> f64 {
     n as f64 * (p1 * (p1 / p0).log2() + (1.0 - p1) * ((1.0 - p1) / (1.0 - p0)).log2())
 }
 
+/// [`rooms`] of offsets whose first `edge` (0 or 1: a row before the table) are no others'
+/// bound: such a row's member only below all the others', its room up to the lowest.
+fn edge_rooms(offs: &[u64], edge: usize, l: u64) -> Vec<Option<u64>> {
+    let mut rm = rooms(&offs[edge..], l);
+    if edge > 0 {
+        let lo = offs[edge..].iter().copied().filter(|&o| o < l).min();
+        let r = lo.filter(|&lo| offs[0] < lo).map(|lo| lo - offs[0]);
+        rm.insert(0, r);
+    }
+    rm
+}
+
 /// Each row's room: up to the next distinct offset (None for the last and those out of range).
 pub(crate) fn rooms(offs: &[u64], l: u64) -> Vec<Option<u64>> {
     let mut u: Vec<u64> = offs.iter().copied().filter(|&o| o < l).collect();
@@ -194,7 +206,11 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
     // first those whose last member (at the greatest offset, over all rows) ends at the end of
     // the target by a size near it, then those whose last member or greatest offset come
     // nearest the end
-    let all: Vec<i64> = (0..n as i64).collect();
+    // the rows tested: the table's and the one before it, as its start found may be late by
+    // less than a record (its first row's fields before it: an index of 16-byte rows after a
+    // 16-byte header found from byte 27)
+    let before = (t.start >= t.k) as i64;
+    let all: Vec<i64> = (-before..n as i64).collect();
     let mut ranked: Vec<(bool, u64, Field)> = offs
         .iter()
         .map(|&(d, off)| {
@@ -226,7 +242,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
     let take = (2_000_000 / n.max(1)).clamp(32, 64);
     for &(_, _, off) in ranked.iter().take(take) {
         let o = off.values(b, t, &all);
-        let rm = rooms(&o, l);
+        let rm = edge_rooms(&o, before as usize, l);
         let members: Vec<(i64, u64)> = all.iter().zip(&rm).filter_map(|(&r, x)| x.map(|x| (r, x))).collect();
         if members.len() < MINROWS {
             continue;
@@ -319,15 +335,16 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
                 (best, bi, bj) = (cur, ci, i + 1);
             }
         }
-        if bj < n && rm[bj].is_none() {
+        if bj < all.len() && rm[bj].is_none() {
             bj += 1; // the last member (its room unknown) right after the run
         }
         if bj - bi < MINROWS {
             continue;
         }
-        let tt = Table { start: t.start + bi * t.k, end: t.start + bj * t.k, ..*t };
+        let at = |i: usize| (t.start as i64 + (i as i64 - before) * k) as usize;
+        let tt = Table { start: at(bi), end: at(bj), ..*t };
         // its rooms again, from its own offsets
-        let rm2 = rooms(&o[bi..bj], l);
+        let rm2 = edge_rooms(&o[bi..bj], (before as usize).saturating_sub(bi), l);
         let mem2: Vec<(usize, u64)> = (0..bj - bi).filter_map(|i| rm2[i].map(|r| (bi + i, r))).collect();
         if mem2.len() < MINROWS {
             continue;
