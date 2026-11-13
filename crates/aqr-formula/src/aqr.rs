@@ -49,7 +49,7 @@ pub use listing::{Applied, Listed};
 pub use locate::{block_at, footer_of, locate, trim};
 pub use mirror::Mirroring;
 pub use rewrite::{History, Rewritten, rewrite, rewrite_as};
-pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill};
+pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill, precompress_leaves};
 pub use tree::{
     Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Status, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone,
     archive_key_name, diagnostic, entry_key_name, name_bytes, name_from,
@@ -1804,7 +1804,10 @@ impl Encoder {
                 let threads = self.threads;
                 aqr_common::pool::par_map(large.len(), threads, |i| one(large[i], threads))
             }
-            false => large.into_iter().map(|t| one(t, self.threads.min(LARGE_THREADS))).collect(),
+            false => {
+                let each = self.threads.min(LARGE_THREADS);
+                aqr_common::pool::par_map(large.len(), self.threads / each, |i| one(large[i], each))
+            }
         };
         made.extend(aqr_common::pool::par_map(small.len(), self.threads, |i| one(small[i], 1)));
         let (mut kept, mut levels) = (self.streams.borrow_mut(), self.levels.borrow_mut());

@@ -1802,7 +1802,14 @@ fn analyze(
     crate::memory::note_kept(&f, opt.application_bound, u64::MAX);
     notes.send(Note::Analyzed(i));
     let Cx { enc, .. } = cx;
-    laid(f, files, enc, memo, opt)
+    let mut a = laid(f, files, enc, memo, opt);
+    // (its streams compressed now, on the workers free, rather than by the writer as it comes
+    // to the batch: the writer verified a batch and only then compressed the next, which the
+    // workers waited for; The Crew's 766 MB in two batches, 6 of 12.6 s)
+    let _s = aqr_common::trace::span("encode");
+    a.enc.on_precompress(Some(notes.encoding(i)));
+    aqr::precompress_leaves(&a.enc, &a.f, &a.leaves).expect("zstd");
+    a
 }
 
 /// Batch `i` of `files` (by index, the data of each in `data`) below level 2, where nothing is

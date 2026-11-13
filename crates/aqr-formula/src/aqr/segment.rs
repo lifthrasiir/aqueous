@@ -483,11 +483,8 @@ impl SegmentWriter {
         let roots: Vec<usize> = (0..leaves.len()).map(|i| find(&mut group, i)).collect();
 
         // the streams compressed at once, then laid out
-        let mut written = vec![false; f.streams.len()];
-        uses.iter().for_each(|u| u.streams.iter().for_each(|&st| written[st] = true));
-        let todo: Vec<&crate::Stream> =
-            (0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect();
-        enc.precompress(&todo)?;
+        let written = written(f, &uses);
+        enc.precompress(&(0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect::<Vec<_>>())?;
 
         let level = enc.base_level();
         let mut b = Batch {
@@ -928,6 +925,21 @@ struct Uses {
     modules: Vec<Module>,
     resources: Vec<Resource>,
     module_bytes: Vec<(Module, std::sync::Arc<[u8]>)>,
+}
+
+/// Of each stream of `f`, whether leaves of `uses` take it.
+fn written(f: &Formula, uses: &[Uses]) -> Vec<bool> {
+    let mut written = vec![false; f.streams.len()];
+    uses.iter().for_each(|u| u.streams.iter().for_each(|&st| written[st] = true));
+    written
+}
+
+/// Compresses the streams of `f` that [`SegmentWriter::batch`] writes of `leaves`, as it does
+/// ([`Encoder::precompress`]), beforehand: a batch made ready while another is written.
+pub fn precompress_leaves(enc: &Encoder, f: &Formula, leaves: &[Leaf]) -> Result<()> {
+    let uses: Vec<Uses> = leaves.iter().map(|l| uses(f, l)).collect();
+    let written = written(f, &uses);
+    enc.precompress(&(0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect::<Vec<_>>())
 }
 
 fn uses(f: &Formula, leaf: &Leaf) -> Uses {
