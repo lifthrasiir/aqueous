@@ -256,10 +256,10 @@ pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
             c[i + 1] = c[i] + f[i];
         }
         let mut dk = vec![0f32; nb];
-        for i in 0..nb {
+        for (i, d) in dk.iter_mut().enumerate() {
             let a = i.saturating_sub(r / 2);
             let z = (i + r - r / 2).min(nb);
-            dk[i] = (c[z] - c[a]) / (z - a).max(1) as f32;
+            *d = (c[z] - c[a]) / (z - a).max(1) as f32;
         }
         dk
     });

@@ -252,7 +252,7 @@ fn no_directory_of_a_sibling() {
     let mut f = b"OBJS\0\0\0\x15".to_vec();
     f.extend((n as u32).to_le_bytes());
     f.extend(table);
-    while f.len() % 4096 != 0 {
+    while !f.len().is_multiple_of(4096) {
         f.push(0);
     }
     f.extend(rng.bytes(pre));

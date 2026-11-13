@@ -16,10 +16,6 @@ pub enum Codec {
 }
 
 impl Codec {
-    pub fn from_name(name: &str) -> Option<Codec> {
-        [Codec::Zstd, Codec::Zlib, Codec::Deflate, Codec::Lzo1x, Codec::Lz4Block].into_iter().find(|c| c.name() == name)
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Codec::Zstd => "zstd",
@@ -35,10 +31,16 @@ fn whole(src: &[u8], used: usize) -> bool {
     used + 16 >= src.len() && used <= src.len() && src[used..].iter().all(|&x| x == 0)
 }
 
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+fn is_zstd(src: &[u8]) -> bool {
+    src.starts_with(&ZSTD_MAGIC)
+}
+
 fn zstd_frames(src: &[u8]) -> Option<(Vec<u8>, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
-    while src.len() - i >= 4 && src[i..i + 4] == [0x28, 0xb5, 0x2f, 0xfd] {
+    while src.len() - i >= 4 && src[i..i + 4] == ZSTD_MAGIC {
         let n = zstd::zstd_safe::find_frame_compressed_size(&src[i..]).ok()?;
         let cap = match zstd::zstd_safe::get_frame_content_size(&src[i..]) {
             Ok(Some(c)) if (c as usize) <= LIMIT => c as usize,
@@ -79,8 +81,7 @@ pub fn probe(src: &[u8], hints: &[u64]) -> Option<(Codec, Vec<u8>)> {
         && src[0] & 0x0f == 8
         && src[0] >> 4 <= 7
         && (src[0] as u32 * 256 + src[1] as u32).is_multiple_of(31);
-    if src.len() >= 4
-        && src[..4] == [0x28, 0xb5, 0x2f, 0xfd]
+    if is_zstd(src)
         && let Some((d, used)) = zstd_frames(src)
         && whole(src, used)
     {
@@ -115,7 +116,7 @@ pub fn probe(src: &[u8], hints: &[u64]) -> Option<(Codec, Vec<u8>)> {
 
 /// A member's decoded size without decoding it, where its codec's header tells.
 pub fn decoded_size(src: &[u8]) -> Option<u64> {
-    if src.len() >= 4 && src[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+    if is_zstd(src) {
         let n = zstd::zstd_safe::find_frame_compressed_size(src).ok()?;
         if n + 16 >= src.len() {
             return zstd::zstd_safe::get_frame_content_size(src).ok().flatten();
@@ -127,7 +128,7 @@ pub fn decoded_size(src: &[u8]) -> Option<u64> {
 /// The decoded size a zstd member's frame header tells, its bounds known (only the header is
 /// read: a pak's chunks are each touched once, of a file mapped and maybe not yet read).
 pub fn zstd_header_size(src: &[u8]) -> Option<u64> {
-    if src.len() >= 4 && src[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+    if is_zstd(src) {
         zstd::zstd_safe::get_frame_content_size(&src[..src.len().min(18)]).ok().flatten()
     } else {
         None
