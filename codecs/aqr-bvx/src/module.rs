@@ -25,7 +25,11 @@ pub fn plan(params: &[u8], inputs: &[u64], len: u64) -> Option<u64> {
     let code: u64 = recons::TABLES_HEAP.into_iter().map(block).sum();
     let write = match c.lmd {
         0 => 0,
-        _ => plan::each_block_heap(&c).into_iter().chain(bvx::WRITE_V2_HEAP).map(block).sum(),
+        _ => plan::each_block_heap(&c)?
+            .into_iter()
+            .chain(bvx::WRITE_V2_HEAP)
+            .map(block)
+            .try_fold(0u64, |a, b| a.checked_add(b))?,
     };
     whole(params.len() as u64, &[], inputs).checked_add(held)?.checked_add(code.max(write))
 }

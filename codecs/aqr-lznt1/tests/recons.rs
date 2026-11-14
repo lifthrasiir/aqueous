@@ -366,3 +366,15 @@ fn units_of_other_lengths_do_not_split() {
     let f = fixture("ntfs-text");
     assert!(recons::split(&[(&f.units[0].0, 1000)]).is_err());
 }
+
+#[test]
+fn join_stops_at_its_limit() {
+    let f = fixture(FIXTURES[0]);
+    let cs = refs(&f.units);
+    let sp = recons::split(&cs).unwrap();
+    let want = recons::join(&sp.data, &sp.record).unwrap();
+    let mut out = Vec::new();
+    recons::join_onto(&sp.data, &sp.record, &mut out, want.len()).unwrap();
+    assert_eq!(out, want);
+    assert!(recons::join_onto(&sp.data, &sp.record, &mut Vec::new(), want.len() / 2).is_err());
+}

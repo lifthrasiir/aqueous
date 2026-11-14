@@ -358,9 +358,10 @@ pub fn blocks(data: &[u8], plan: &Plan) -> Result<Vec<Block>> {
 }
 
 /// Bytes that [`each_block`] takes of the heap for the counts `c`: an LZFSE block's triples and
-/// literals.
-pub fn each_block_heap(c: &Counts) -> [u64; 2] {
-    [12 * c.lmd as u64, c.lits as u64]
+/// literals; None where they overflow a stack's blocks.
+pub fn each_block_heap(c: &Counts) -> Option<[u64; 2]> {
+    let heap = [(c.lmd as u64).checked_mul(12)?, c.lits as u64];
+    heap.iter().all(|&n| n < 1 << 62).then_some(heap)
 }
 
 /// The blocks of `plan` over `data` given to `f` in turn, each with where its data starts. The
@@ -371,8 +372,10 @@ pub fn each_block(
     c: &Counts,
     f: &mut dyn FnMut(View<'_>, usize) -> Result<()>,
 ) -> Result<()> {
-    let mut lmd: Vec<[u32; 3]> = Vec::with_capacity(c.lmd);
-    let mut lits: Vec<u8> = Vec::with_capacity(c.lits);
+    // (room for the counts, but no more than the data holds: a triple takes a byte of it at least,
+    // and the literals are its bytes with a block's pad of 3 at most)
+    let mut lmd: Vec<[u32; 3]> = Vec::with_capacity(c.lmd.min(data.len()));
+    let mut lits: Vec<u8> = Vec::with_capacity(c.lits.min(data.len() + 3));
     let (mut most_lmd, mut most_lits) = (0, 0);
     let (mut zd, mut freqs) = (plan.zd.iter(), plan.freqs.iter());
     let mut done = 0;

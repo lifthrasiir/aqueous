@@ -537,7 +537,7 @@ fn blocks<'a>(data: &'a [u8], record: &'a [u8]) -> Result<(u8, Vec<Piece<'a>>)> 
         return Err(corrupt());
     }
     at += 1;
-    let size = varint::get(record, &mut at).map_err(|_| corrupt())? as usize;
+    let size = usize::try_from(varint::get(record, &mut at).map_err(|_| corrupt())?).map_err(|_| corrupt())?;
     if size == 0 || size > BLOCK {
         return Err(corrupt());
     }
@@ -549,7 +549,7 @@ fn blocks<'a>(data: &'a [u8], record: &'a [u8]) -> Result<(u8, Vec<Piece<'a>>)> 
         match kind {
             1 => blocks.push((piece, None)),
             0 => {
-                let n = varint::get(record, &mut at).map_err(|_| corrupt())? as usize;
+                let n = usize::try_from(varint::get(record, &mut at).map_err(|_| corrupt())?).map_err(|_| corrupt())?;
                 let r = record.get(at..at.checked_add(n).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
                 at += n;
                 blocks.push((piece, Some(r)));

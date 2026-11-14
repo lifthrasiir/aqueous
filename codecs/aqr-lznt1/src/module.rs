@@ -99,7 +99,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     } else {
         let join = |i: usize| {
             let mut out = Vec::new();
-            recons::join_onto(streams[i].1, streams[i].2, &mut out).map(|_| out)
+            recons::join_onto(streams[i].1, streams[i].2, &mut out, len).map(|_| out)
         };
         for (o, s) in aqr_common::pool::par_map(streams.len(), threads, join).into_iter().zip(&streams) {
             out.extend_from_slice(s.0);

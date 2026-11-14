@@ -835,13 +835,13 @@ pub fn block_toks(size: usize) -> usize {
 /// The stream that `data` and `record` rebuild.
 pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len() / 2 + 64);
-    join_onto(data, record, &mut out)?;
+    join_onto(data, record, &mut out, usize::MAX)?;
     Ok(out)
 }
 
-/// [`join`] onto `out`.
-pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
-    let (spare, done) = join_in(Spare::parked().unwrap_or_default(), data, record, out, usize::MAX);
+/// [`join`] onto `out`, which fails where it would pass `limit` bytes.
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()> {
+    let (spare, done) = join_in(Spare::parked().unwrap_or_default(), data, record, out, limit);
     spare.park();
     done
 }

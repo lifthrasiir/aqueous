@@ -374,6 +374,7 @@ fn block(r: &mut Bits, level: u8, last: &mut Vec<u8>) -> Result<usize> {
     let mut front: Vec<u8> = (0..seq.len()).map(|i| i as u8).collect();
     let (mut run, mut weight) = (0usize, 1usize);
     let mut rle_syms = 0;
+    let mut ended = false;
     'groups: for &t in &selectors {
         let tab = &tables[t as usize];
         for _ in 0..GROUP {
@@ -397,6 +398,7 @@ fn block(r: &mut Bits, level: u8, last: &mut Vec<u8>) -> Result<usize> {
                 weight = 1;
             }
             if sym == eob {
+                ended = true;
                 break 'groups;
             }
             if last.len() >= max {
@@ -413,8 +415,7 @@ fn block(r: &mut Bits, level: u8, last: &mut Vec<u8>) -> Result<usize> {
             return Err(Error("truncated"));
         }
     }
-    // (the last group ends with EOB, which the loop breaks at)
-    if last.is_empty() || r.overrun() || run > 0 {
+    if !ended || last.is_empty() || r.overrun() || run > 0 {
         return Err(corrupt());
     }
     Ok(rle_syms)
@@ -470,4 +471,36 @@ fn unrle(last: &[u8], links: &[u32], orig: u32, out: &mut Vec<u8>, max_data: usi
         return Err(corrupt());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aqr_common::msb::BitWriter;
+
+    /// A block's body (after its header) of two symbols in use, one group of 50 symbols that are
+    /// MTF values, the last of them the EOB where `eob`.
+    fn body(eob: bool) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.put(0x8000, 16);
+        w.put(0xC000, 16);
+        w.put(2, 3);
+        w.put(1, 15);
+        w.put(0, 1);
+        for _ in 0..2 {
+            w.put(2, 5);
+            w.put(0, 4);
+        }
+        for k in 0..50 {
+            w.put(if eob && k == 49 { 3 } else { 2 }, 2);
+        }
+        w.finish()
+    }
+
+    #[test]
+    fn a_block_needs_its_eob() {
+        let mut last = Vec::new();
+        assert_eq!(block(&mut Bits::new(&body(true), 0), 1, &mut last).ok(), Some(49));
+        assert!(block(&mut Bits::new(&body(false), 0), 1, &mut last).is_err());
+    }
 }

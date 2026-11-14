@@ -1,8 +1,8 @@
 //! A plan's counts above what its data could hold are not reserved before they are found wrong,
 //! rather than aborting the process on an allocation of terabytes.
 
-use aqr_bvx::plan::Counts;
-use aqr_bvx::recons;
+use aqr_bvx::plan::{self, Counts, Plan};
+use aqr_bvx::{module, recons};
 
 /// A global allocator that remembers the largest single request of each thread, and refuses
 /// (as an exhausted heap does) those of 1 GiB and above: the aborted allocation is how a count
@@ -58,4 +58,21 @@ fn counts_beyond_the_data() {
     let (r, most) = big_alloc::largest(|| recons::plan(&data, &[], &c));
     assert!(r.is_err());
     assert!(most < (64 << 20), "{most} bytes reserved");
+}
+
+#[test]
+fn triple_counts_beyond_the_data() {
+    let big = 1usize << 36;
+    let c = Counts { parts: 0, segs: 0, matches: 0, freqs: 0, zd: 0, lmd: big, lits: big };
+    let mut out = Vec::new();
+    let (r, most) = big_alloc::largest(|| plan::join(&[0u8; 16], &Plan::default(), &c, &mut out));
+    assert!(r.is_err());
+    assert!(most < (64 << 20), "{most} bytes reserved");
+}
+
+#[test]
+fn plan_of_counts_that_overflow() {
+    let big = usize::MAX / 8;
+    let c = Counts { parts: 0, segs: 0, matches: 0, freqs: 0, zd: 0, lmd: big, lits: 0 };
+    assert_eq!(module::plan(&c.params(), &[0, 0], 0), None);
 }
