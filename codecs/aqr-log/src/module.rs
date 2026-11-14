@@ -117,7 +117,7 @@ pub fn plan(params: &[u8], inputs: &[u64], len: u64) -> Option<u64> {
         whole(params.len() as u64, &[], inputs)
             + block(TEMPLATE_BYTES * p.templates as u64)
             + block(COLUMN_BYTES * p.columns as u64)
-            + 2 * block(8 * p.numbers as u64)
+            + 2 * block(16 * p.numbers as u64)
             + block(SCRATCH as u64)
             + block(len),
     )
@@ -265,8 +265,8 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
         return Err(corrupt());
     }
     // (taken in the order of the plan)
-    let mut prev: Vec<i64> = Vec::with_capacity(p.numbers);
-    let mut cur: Vec<i64> = Vec::with_capacity(p.numbers);
+    let mut prev: Vec<(i64, i32)> = Vec::with_capacity(p.numbers);
+    let mut cur: Vec<(i64, i32)> = Vec::with_capacity(p.numbers);
     let mut scratch: Vec<u8> = Vec::with_capacity(SCRATCH);
     let mut out = Out { v: Vec::with_capacity(len), cap: len };
     let mut lines = 0usize;
@@ -295,17 +295,28 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
                     }
                     m => {
                         let r = varint::unzz(get(&mut c.nums)?);
+                        // (the descriptor first: a prediction is at the scale of the number)
+                        let was = c.scale;
+                        if m == M_NUM {
+                            descriptor(c)?;
+                        }
+                        let to = c.scale;
                         let v = match c.pred {
                             P_RAW => r,
-                            P_COLUMN => c.prev.wrapping_add(r),
-                            _ => prev.get(cur.len()).copied().unwrap_or(0).wrapping_add(r),
+                            P_COLUMN => rescale(c.prev, was, to).wrapping_add(r),
+                            _ => {
+                                let (q, qs) = prev.get(cur.len()).copied().unwrap_or((0, 0));
+                                rescale(q, qs, to).wrapping_add(r)
+                            }
                         };
                         c.prev = v;
-                        cur.push(v);
+                        cur.push((v, to));
                         if m == M_DIGITS {
                             digits(&mut out, v, byte(&mut c.widths)?)?;
                         } else {
-                            number(&mut out, &mut scratch, c, v)?;
+                            scratch.clear();
+                            aqr_num::put(&mut scratch, v, c.scale, c.mode, c.flags);
+                            out.put(&scratch)?;
                         }
                     }
                 }
@@ -345,8 +356,9 @@ fn digits(out: &mut Out, v: i64, width: u8) -> Result<()> {
     out.put(&buf[if w == 0 { i } else { MAX_DIGITS - w }..])
 }
 
-/// Appends the whole number `v` of column `c`: its descriptor from `types` (and `desc`).
-fn number(out: &mut Out, scratch: &mut Vec<u8>, c: &mut Column, v: i64) -> Result<()> {
+/// Reads the descriptor of the next whole number of column `c` from `types` (and `desc`): it
+/// is the column's from then on.
+fn descriptor(c: &mut Column) -> Result<()> {
     match byte(&mut c.types)? {
         K_SAME if c.has => {}
         K_NEW => {
@@ -359,7 +371,12 @@ fn number(out: &mut Out, scratch: &mut Vec<u8>, c: &mut Column, v: i64) -> Resul
         }
         _ => return Err(corrupt()),
     }
-    scratch.clear();
-    aqr_num::put(scratch, v, c.scale, c.mode, c.flags);
-    out.put(scratch)
+    Ok(())
+}
+
+/// `x`, an integer at scale `from`, at scale `to`: times ten to the (at most 18th) power of the
+/// change where it grows (wrapping), else divided by it, truncated toward zero.
+#[inline]
+fn rescale(x: i64, from: i32, to: i32) -> i64 {
+    aqr_num::fixed::rescale(x, from, to)
 }

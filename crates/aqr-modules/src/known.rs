@@ -330,7 +330,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "jsonl-recons",
         version: 2,
-        sha512_256: hex("500a56017296b7be0163aa4657229dc5dbf460bbb917ad60913d7b205ba3cf71"),
+        sha512_256: hex("d58ee90cac3211c0eb20e285dda1b205b4a4ee209db45a1c2f5d26f88d205449"),
         block: include_bytes!("../wasm/jsonl-recons.block"),
     },
     Known {
@@ -348,7 +348,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "log-recons",
         version: 1,
-        sha512_256: hex("8798194ab2a5a1851c85e55f0ecd3b94b97329002d872a234065de27ba39b9c6"),
+        sha512_256: hex("1f2fbd3776010b60df0adec7ca8874041cb34114061796878704f235efaee6b7"),
         block: include_bytes!("../wasm/log-recons.block"),
     },
     Known {
@@ -408,7 +408,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "obj-recons",
         version: 1,
-        sha512_256: hex("073b2cbac111cbb2c3814508df91410b56efd08f85e95f515d0acbeae76f0dc1"),
+        sha512_256: hex("ffba01f311a016c2636c4ffa7b87de03e10b9b91323fde933e0ffc0aa9f77761"),
         block: include_bytes!("../wasm/obj-recons.block"),
     },
     Known {
@@ -576,7 +576,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "xsv-recons",
         version: 1,
-        sha512_256: hex("d6b792c3dbe563951e77c1d2130c5f4c7e37c56c24419b3c704fb2d0d54a241a"),
+        sha512_256: hex("4a8afdf38e02692bf3ee47a2d2a35a052987cf7ece5782ed072622c808b8905c"),
         block: include_bytes!("../wasm/xsv-recons.block"),
     },
     Known {

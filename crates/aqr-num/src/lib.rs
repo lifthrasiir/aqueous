@@ -42,8 +42,11 @@ pub const M_GEN: u8 = dec::mode(dec::R_GEN, dec::SRC_DEC);
 /// their digits after the point ("i" for none, "#" without an integer part, "-" for a
 /// negative zero), others as `[f32:|f64:]render[P][E][-]` ("E" for three-digit exponents).
 pub fn describe(mode: u8, f: u8) -> String {
-    if is_fixed(mode) {
+    if is_fixed(mode) || render_of(mode) == dec::R_FIXP {
         let mut s = String::from(if comma_of(mode) { "," } else { "" });
+        if !is_fixed(mode) {
+            s += "p";
+        }
         if f & fixed::F_NEGZ != 0 {
             s += "-";
         }
@@ -53,7 +56,7 @@ pub fn describe(mode: u8, f: u8) -> String {
         return s + &if f & fixed::F_POINT != 0 { format!("{}", f & fixed::F_FRAC) } else { "i".into() };
     }
     let src = ["", "f32:", "f64:"][(src_of(mode) as usize).min(2)];
-    let r = ["", "g", "e", "py", "js", "pos"][(render_of(mode) as usize).min(5)];
+    let r = ["", "g", "e", "py", "js", "pos", "fixp"][(render_of(mode) as usize).min(6)];
     let p = if matches!(render_of(mode), dec::R_GEN | dec::R_SCI) {
         format!("{}", f & general::G_PREC)
     } else {
@@ -108,6 +111,9 @@ mod tests {
                         continue;
                     }
                     let p = f & general::G_PREC;
+                    if render_of(mode) == dec::R_FIXP && s > (f & fixed::F_FRAC) as i32 {
+                        continue; // more digits than the format's: another format codes them
+                    }
                     let d = dec::Dec::from_scaled(v, s);
                     if render_of(mode) == dec::R_SCI && d.m.ilog10() >= p as u32 {
                         continue; // %e keeps the first P digits
@@ -116,13 +122,18 @@ mod tests {
                         continue;
                     };
                     // Negative zero is meaningless for other values.
-                    assert_eq!(f2, f & !general::G_NEGZ, "{}", String::from_utf8_lossy(&out));
+                    // (padded fixed: nor does "no integer part" tell where there is one, or a negative zero a number)
+                    let (f2, want) = match render_of(mode) {
+                        dec::R_FIXP => (f2 & !(fixed::F_NOINT | fixed::F_NEGZ), f & !(fixed::F_NOINT | fixed::F_NEGZ)),
+                        _ => (f2, f & !general::G_NEGZ),
+                    };
+                    assert_eq!(f2, want, "{mode:#x} {f:#x} v {v} s {s} {}", String::from_utf8_lossy(&out));
                     assert_eq!(dec::Dec::from_scaled(v2, s2), d);
                     back += 1;
                 }
             }
         }
-        assert_eq!(n, 1052);
+        assert_eq!(n, 1204);
         assert!(back > 4000, "{back} coded back");
     }
 
@@ -183,6 +194,48 @@ mod tests {
         assert!(valid(M_FIX | 0x40, f));
         assert!(!valid(0x80, 0) && !valid(0xC0, 0) && !valid(0x30, 0));
         assert!(encode(b"1,2,3", comma(mode(dec::R_POS, dec::SRC_DEC)), 0, false, 0, &mut tmp).is_none());
+    }
+
+    /// Padded fixed (`%.Nf` of a decimal with the scale of its last digit): the integer is that
+    /// of the digits without the zeros the format pads.
+    #[test]
+    fn padded_fixed() {
+        let mut tmp = vec![];
+        let m = mode(dec::R_FIXP, dec::SRC_DEC);
+        for (t, v, s) in [
+            ("42283.58000000", 4228358, 2),
+            ("0.00012000", 12, 5),
+            ("-0.00000000", 0, 3),
+            ("1500.0", 1500, 0),
+            ("5", 5, 0),
+            ("0.5", 5, 1),
+            ("-.250", -25, 2),
+            ("0.000", 0, 3),
+            ("12.", 12, 0),
+        ] {
+            for c in [0, 0x40] {
+                let tok = if c != 0 { t.replace('.', ",") } else { t.to_string() };
+                let (v2, s2, f) = encode(tok.as_bytes(), m | c, 0, false, 3, &mut tmp).unwrap_or_else(|| panic!("{t}"));
+                assert_eq!((v2, s2), (v, if v == 0 { 3.min((f & fixed::F_FRAC) as i32) } else { s }), "{t}");
+                assert!(valid(m | c, f), "{t}");
+                let mut o = vec![];
+                put(&mut o, v2, s2, m | c, f);
+                assert_eq!(std::str::from_utf8(&o).unwrap(), tok);
+            }
+        }
+        // (a scale past the format's digits prints them all; zeros are appended to others)
+        let mut o = vec![];
+        put(&mut o, 1234, 3, m, 2 | fixed::F_POINT);
+        assert_eq!(o, b"1.234");
+        o.clear();
+        put(&mut o, 12, -3, m, 1 | fixed::F_POINT);
+        assert_eq!(o, b"12000.0");
+        // not of other tokens
+        for t in ["1e5", "01.5", "+1", "1.2.3", "nan"] {
+            assert!(encode(t.as_bytes(), m, 0, false, 0, &mut tmp).is_none(), "{t}");
+        }
+        // sources other than decimal are invalid
+        assert!(!valid(mode(dec::R_FIXP, dec::SRC_F64), 0));
     }
 
     #[test]

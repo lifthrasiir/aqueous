@@ -98,6 +98,54 @@ pub fn put(out: &mut Vec<u8>, m: i64, f: u8) {
     }
 }
 
+/// Appends the token of the decimal `v` × 10^-`s` in padded format `f` (one `valid_fmt`
+/// accepts): as `put` prints `v` with N = `f & F_FRAC` digits after the point, except that `v`
+/// is at scale `s`, not N: zeros are appended to its digits to make N (none if `s` ≥ N: all `s`
+/// digits of `v` come after the point, the token having a point (printed also where bit 5 is
+/// clear) and more digits than N; where `s` < 0 the zeros make the integer part longer).
+pub fn put_padded(out: &mut Vec<u8>, v: i64, s: i32, f: u8) {
+    let n = (f & F_FRAC) as i32;
+    let zeros = (n - s).max(0) as usize;
+    let frac = n.max(s).max(0) as usize;
+    let mut digits = [0u8; 20];
+    let d = crate::dec::digits(v.unsigned_abs(), &mut digits);
+    let at = d.len() + zeros;
+    // (the digits and the zeros, left-padded to the digits of the integer part and the fraction)
+    let min = if f & F_NOINT != 0 { frac } else { frac + 1 };
+    let total = at.max(min);
+    if v < 0 || (v == 0 && f & F_NEGZ != 0) {
+        out.push(b'-');
+    }
+    for i in 0..total {
+        if frac > 0 && i == total - frac {
+            out.push(b'.');
+        }
+        // (digit i of the padded integer, from its start)
+        let k = i as isize - (total - at) as isize;
+        out.push(if k < 0 || k as usize >= d.len() { b'0' } else { d[k as usize] });
+    }
+    if f & F_POINT != 0 && frac == 0 {
+        // (a point with no digits after it: "12.")
+        out.push(b'.');
+    }
+}
+
+/// The integer and scale of the token `parse` took as `m` and `f`, in padded format: the
+/// scale of its last nonzero digit within the fraction (so that `put_padded` prints the
+/// token), or `prev_scale` within 0..=N for a zero.
+pub fn unpad(m: i64, f: u8, prev_scale: i32) -> (i64, i32) {
+    let n = (f & F_FRAC) as i32;
+    if m == 0 {
+        return (0, prev_scale.clamp(0, n));
+    }
+    let (mut v, mut s) = (m, n);
+    while s > 0 && v % 10 == 0 {
+        v /= 10;
+        s -= 1;
+    }
+    (v, s)
+}
+
 /// Scales (digits after the point) are kept in this range; outside it a token is not coded.
 pub const MIN_SCALE: i32 = -60;
 pub const MAX_SCALE: i32 = 60;

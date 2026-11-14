@@ -26,7 +26,7 @@ how `D` is split into `v` and `s`.
 
 ### Descriptor
 
-`mode` = render | source << 4 | comma << 6; bit 7 is zero. Valid pairs (1052 in all, twice
+`mode` = render | source << 4 | comma << 6; bit 7 is zero. Valid pairs (1204 in all, twice
 those below: each with or without the decimal comma):
 
 | render | | sources | flags `f` |
@@ -37,6 +37,7 @@ those below: each with or without the decimal comma):
 | 3 | Python `repr` | any | 0, or 64 (negative zero) |
 | 4 | JavaScript `toString` | any | 0 or 64 |
 | 5 | positional (Rust `Display`) | any | 0 or 64 |
+| 6 | padded fixed `%.Nf` | decimal | as fixed |
 
 Sources: 0 decimal (the value is `D`), 1 `f32`, 2 `f64`.
 
@@ -54,6 +55,16 @@ bit 6 needs N > 0.
 `D` = `v` × 10^-N (`s` is not used). The token is `-` if `v` < 0, or `v` = 0 with bit 7;
 then the decimal digits of |`v`|, left-padded with zeros to N + 1 digits (N with bit 6);
 the point (bit 5) goes before the last N.
+
+### Padded fixed
+
+The same tokens as fixed with N = bits 0-4, but the integer `v` is at the scale `s`, not at N:
+`D` = `v` × 10^-`s`. The token is as fixed prints the digits of `v` followed by max(0, N − `s`)
+zeros, with max(N, `s`, 0) digits after the point (more than N where `s` > N, a token that
+has a point then also with bit 5 clear; with `s` < 0 the integer part gets the extra zeros) and
+the other flags as in fixed. An encoder codes a fixed token with `s` the scale of its last
+nonzero digit within the fraction, so that `42283.58000000` is `v` = 4228358, `s` = 2, N = 8:
+the zeros a writer pads are not in the integer.
 
 ### Values
 
@@ -130,7 +141,7 @@ samples, the encoder's choices.
 
 | File | Contents |
 |---|---|
-| `src/fixed.rs` | Fixed tokens, scales |
+| `src/fixed.rs` | Fixed and padded fixed tokens, scales |
 | `src/general.rs` | `%g` of decimals |
 | `src/dec.rs` | Decimals, floats, renders, coding a token in a mode |
 | `src/style.rs` | Mode of a group of numbers, fallbacks (encoder) |

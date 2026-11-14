@@ -22,6 +22,8 @@ pub const R_SCI: u8 = 2;
 pub const R_PY: u8 = 3;
 pub const R_JS: u8 = 4;
 pub const R_POS: u8 = 5;
+/// Padded fixed: `%.Nf` of a decimal given at the scale of its last digit (`fixed::put_padded`).
+pub const R_FIXP: u8 = 6;
 pub const SRC_DEC: u8 = 0;
 pub const SRC_F32: u8 = 1;
 pub const SRC_F64: u8 = 2;
@@ -63,7 +65,7 @@ pub fn valid(mode: u8, f: u8) -> bool {
         return false;
     }
     match r {
-        R_FIX => s == SRC_DEC && fixed::valid_fmt(f),
+        R_FIX | R_FIXP => s == SRC_DEC && fixed::valid_fmt(f),
         R_GEN | R_SCI => {
             s <= SRC_F64 && (1..=19).contains(&(f & G_PREC)) && f & 128 == 0 && (r == R_SCI || f & G_PREC <= 17)
         }
@@ -474,6 +476,9 @@ fn put_dotted(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
     if r == R_FIX {
         return fixed::put(out, v, f);
     }
+    if r == R_FIXP {
+        return fixed::put_padded(out, v, s, f);
+    }
     if r == R_GEN && src == SRC_DEC {
         return general::put_gen(out, v, s, f);
     }
@@ -528,6 +533,13 @@ pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32, tmp: &mut 
         return encode(d, mode & !COMMA, p, exp3, prev_scale, tmp);
     }
     let (r, src) = (render_of(mode), src_of(mode));
+    if r == R_FIXP {
+        let (m, f) = fixed::parse(t)?;
+        let (v, s) = fixed::unpad(m, f, prev_scale);
+        tmp.clear();
+        fixed::put_padded(tmp, v, s, f);
+        return (tmp[..] == *t).then_some((v, s, f));
+    }
     if r == R_GEN && src == SRC_DEC {
         return general::parse_gen(t, p, prev_scale, exp3, tmp);
     }

@@ -2,7 +2,7 @@
 //! and the coding of a token in a style with fallbacks. Not part of the format: whatever
 //! the encoder picks, a number decodes from its descriptor alone.
 
-use crate::dec::{self, R_FIX, R_GEN, R_JS, R_POS, R_PY, R_SCI, SRC_DEC, SRC_F32, SRC_F64};
+use crate::dec::{self, R_FIX, R_FIXP, R_GEN, R_JS, R_POS, R_PY, R_SCI, SRC_DEC, SRC_F32, SRC_F64};
 use crate::{M_GEN, fixed, general};
 
 /// How the encoder writes a group of numbers first: a mode (`dec`), the precision for
@@ -65,19 +65,27 @@ fn cost(t: &[u8], st: Style, dom: u8, prev: &mut i32, tmp: &mut Vec<u8>) -> usiz
 /// Where more of the tokens print their decimal separator as a comma than as a point, the style
 /// is of the comma modes (`dec::COMMA`), chosen from the tokens as if with points.
 pub fn choose(toks: &[(usize, &[u8])]) -> Style {
+    choose_with(toks, false)
+}
+
+/// [`choose`] where `padded` allows padded fixed too (render `R_FIXP`): for a container whose
+/// predictions of an integer from the previous number's take the change of scale in (aqr-log's
+/// rescaling), and that does not give a zero the scale of the number before it, which padded
+/// fixed has within its format's digits.
+pub fn choose_with(toks: &[(usize, &[u8])], padded: bool) -> Style {
     let sep = |t: &[u8], c: u8| t.contains(&c) && t.iter().any(u8::is_ascii_digit);
     let commas = toks.iter().filter(|t| sep(t.1, b',')).count();
     if commas > toks.iter().filter(|t| sep(t.1, b'.')).count() {
         let swapped: Vec<Vec<u8>> =
             toks.iter().map(|t| t.1.iter().map(|&c| if c == b',' { b'.' } else { c }).collect()).collect();
         let toks: Vec<(usize, &[u8])> = toks.iter().zip(&swapped).map(|(t, d)| (t.0, &d[..])).collect();
-        let st = choose_dotted(&toks);
+        let st = choose_dotted(&toks, padded);
         return Style { mode: st.mode | dec::COMMA, ..st };
     }
-    choose_dotted(toks)
+    choose_dotted(toks, padded)
 }
 
-fn choose_dotted(toks: &[(usize, &[u8])]) -> Style {
+fn choose_dotted(toks: &[(usize, &[u8])], padded: bool) -> Style {
     let mut hist = [0usize; 19];
     let mut maxsig = 1u8;
     let mut sci_p = 1u8;
@@ -101,6 +109,7 @@ fn choose_dotted(toks: &[(usize, &[u8])]) -> Style {
     let s = |r, src, p| Style { mode: dec::mode(r, src), p, exp3 };
     let cands = [
         Style::default(),
+        s(R_FIXP, SRC_DEC, 0),
         s(R_GEN, SRC_DEC, maxsig),
         s(R_SCI, SRC_DEC, sci_p),
         s(R_PY, SRC_DEC, 0),
@@ -117,7 +126,7 @@ fn choose_dotted(toks: &[(usize, &[u8])]) -> Style {
     let mut prev = vec![0i32; ts.iter().map(|&(j, _)| j + 1).max().unwrap_or(0)];
     let mut best = (usize::MAX, Style::default());
     let mut tmp = Vec::with_capacity(64);
-    for c in cands {
+    for c in cands.into_iter().filter(|c| padded || dec::render_of(c.mode) != R_FIXP) {
         let mut cost_c = 0;
         prev.fill(0);
         for &(j, t) in ts {
@@ -162,7 +171,7 @@ mod tests {
 
     #[test]
     fn chooses_the_writer() {
-        assert_eq!(pick(&["1.000000 -2.500000 0.125000", "0.333333 4.000000 -0.000000"]).mode, R_FIX);
+        assert_eq!(pick(&["1.234567 -2.500001 0.125987", "0.333333 4.000001 -0.000009"]).mode, R_FIX);
         // %.17g of doubles
         let st = pick(&["0.10000000000000001 12.759518999999999 -2.470218", "39.257838999999997 1 0"]);
         assert_eq!((st.mode, st.p), (dec::mode(R_GEN, SRC_F64), 17));
@@ -177,7 +186,7 @@ mod tests {
     #[test]
     fn chooses_the_decimal_comma() {
         // fixed
-        let st = pick(&["1,000000 -2,500000 0,125000", "0,333333 4,000000 -0,000000"]);
+        let st = pick(&["1,234567 -2,500001 0,125987", "0,333333 4,000001 -0,000009"]);
         assert_eq!(st.mode, 0x40);
         let mut tmp = vec![];
         assert_eq!(st.encode(b"1,50", 0, &mut tmp), Some((150, 2, 0x40, 2 | fixed::F_POINT)));
@@ -201,6 +210,21 @@ mod tests {
         }
         // points win a tie
         assert_eq!(pick(&["1.5 2,5"]).mode & 0x40, 0);
+    }
+
+    #[test]
+    fn chooses_padded_fixed() {
+        // %.8f of prices of two decimals: the integers are those of the digits
+        let lines = ["42283.58000000 0.00012000 1", "42298.62000000 0.00012000 2", "42320.50000000 0.00500000 3"];
+        let toks: Vec<(usize, &[u8])> =
+            lines.iter().flat_map(|l| l.split(' ').map(str::as_bytes).enumerate()).collect();
+        assert_eq!(choose(&toks).mode, R_FIX);
+        let st = choose_with(&toks, true);
+        assert_eq!(st.mode, dec::mode(dec::R_FIXP, SRC_DEC));
+        let mut tmp = vec![];
+        assert_eq!(st.encode(b"42298.62000000", 0, &mut tmp).map(|r| (r.0, r.1)), Some((4229862, 2)));
+        // zeros of fixed digits that are not padding stay: plain fixed where the scale does not change
+        assert_eq!(pick(&["1.250 3.141 2.718", "0.577 1.414 1.732", "6.022 6.626 9.109"]).mode, R_FIX);
     }
 
     #[test]

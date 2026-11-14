@@ -103,6 +103,15 @@ that was not kept as it is (0 if it had fewer, or there was none). k counts from
 slots of the marks digits and number of the line's template. The value is the column's
 previous value from then on, whatever its pred.
 
+A number has a *scale*: that of its descriptor (for a number slot, whose descriptor is
+read before the value), 0 for a digit run. p and q are taken at the scale of the number
+they predict: p as `rescale(p, a, b)` with a the scale of the column's previous number
+(0 before the first) and b that of this one, and q as `rescale(q, c, b)` with c the scale
+q had in its line. `rescale(x, a, b)` is aqr-num's `fixed::rescale`: x × 10^min(b − a, 18),
+wrapping in 64 bits, where b ≥ a, else x divided by 10^min(a − b, 18), truncated toward zero.
+(The scale is that of a descriptor of padded fixed or of `%g`, which vary from number to
+number, so that a change of scale does not spoil the prediction.)
+
 ## 4. Rebuilding the file
 
 Each line of `layout`, in order, is rebuilt and followed by a LF, except the last if `flags` bit
@@ -114,7 +123,8 @@ to its LF. A line of template i is the template's bytes with each mark replaced:
   `widths` nonzero, left-padded with zeros to w digits (an error unless the digits of v are
   fewer than w, and w at most 18);
 - **number**: the integer v at the scale s of the column's descriptor (mode, f) as
-  `types` says (§3), printed as aqr-num specifies (its README, "Specification").
+  `types` says (§3), printed as aqr-num specifies (its README, "Specification"; the modes
+  include its decimal comma and padded fixed).
 
 Every stream must be read to its end, every column's part too; a line that would make the file
 longer than declared is an error, and so is a file shorter.
@@ -135,7 +145,21 @@ longer than declared is an error, and so is a file shorter.
   so that its heap holds the segment's counts and the streams.
 - **Lines.** A line holding a mark byte, or one that would give a template past the limits
   (T 65,536, C 262,144, the templates 64 MiB), is kept as it is. A line is cut into tokens at
-  each single space (so empty tokens exist; a CR before the LF is in the last token).
+  each byte of the segment's *separators* (so empty tokens exist; a CR before the LF is in the
+  last token), which stay in the template as they are: a space, `;` and TAB always, and `,`
+  unless the segment's numbers have a decimal comma. That is told from the first 256 KiB of
+  the segment (cut at a line's end) by tokens, cut at spaces, `;` and TABs only: a token is a
+  *point number* if it is an optional sign, digits, a point and at least a digit, then an
+  optional exponent (`e` or `E` and at least one more byte); a *comma number* is the same with a
+  comma. A comma number of exactly three digits after the comma and not more than three
+  digits before it, the first of them not a zero, with no exponent (`1,234`), may be a
+  thousands grouping: it is counted for that; the other comma numbers (`0,418`, `18,5`,
+  `1234,567`, `1,5e3`) are counted for the decimal comma. The numbers have a decimal comma
+  if the comma numbers (not those) outnumber the point numbers and are at least as many as
+  the groupings. (In a comma-separated table the tokens are lines or fields with several
+  commas, none of them a comma number; in a `;`-separated table of a European locale, `4,216` is
+  one.) A point is also a decimal point where the locale has a comma, in a token that has one
+  (never both).
 - **Tokens.** The *form* of a token is the token with each run of digits replaced by one
   mark. In the order:
   1. a token that is a whole number (below) is a **number** slot;
@@ -144,10 +168,11 @@ longer than declared is an error, and so is a file shorter.
      include numbers' tokens), is a **word** slot;
   3. else the token's bytes are in the template, each run of digits a **digits** slot.
 - **Whole numbers.** A token of at most 40 bytes, starting with a digit, a sign or a point,
-  that aqr-num's `fixed::parse` takes, or, if it holds only digits, `.`, `e`, `E`, `+` and `-`
-  and at least a digit, that a style from `style::choose` on that token alone codes such that
-  `aqr_num::put` prints the same bytes. A column's style is chosen by `style::choose` from its
-  first 512 numbers' tokens; each token is coded in it (`Style::encode`, a zero taking the
+  that aqr-num's `fixed::parse` takes (with its comma as a point where the token has one, and
+  no point: fixed in the comma mode), or, if it holds only digits, `.`, `,`, `e`, `E`, `+` and
+  `-` and at least a digit, that a style from `style::choose_with` on that token alone codes such that
+  `aqr_num::put` prints the same bytes. A column's style is chosen by `style::choose_with` (padded fixed allowed) from its
+  first 512 numbers' tokens, in the comma modes where its tokens have commas; each token is coded in it (`Style::encode`, a zero taking the
   scale of the column's previous number) where that prints it back, else as it is a number
   alone. A change of descriptor is a 2 of `types`.
 - **Predictors.** Of a column, the one whose `nums` part zstd -1 compresses smallest (ties

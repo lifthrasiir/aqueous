@@ -1,7 +1,8 @@
 # aqr-log
 
 Lines of text (logs, tables of numbers between spaces) rebuilt bit for bit from a *template* for
-each line and its fields stored column by column. A line is cut into tokens at its spaces; a
+each line and its fields stored column by column. A line is cut into tokens at its spaces, `;`, TABs
+and commas (not commas where the numbers have a decimal comma); a
 token that is a whole number ([`aqr-num`](../../crates/aqr-num): `-0.05`, `12.50`, `1.5E-07`) is a
 slot of the template coded as an integer and how it was printed; a token whose form (its digit
 runs masked) is rare in the file is a word kept as it is in its column; any other token stays in
@@ -68,5 +69,3 @@ plan is checked to the page by `log_plans_hold` in aqr-decompress's `tests/wasm.
 - Times as numbers (`Dec 10 06:55:46`, `[01/Jul/1995:00:00:01 -0400]`, `00:59:16.02785`): a
   pattern and an integer (docs/log-design.md §4); the same in aqr-xsv.
 - Fields at positions of words (Drain's clusters) beyond the rare-form rule.
-- The decimals of a token inside a word (`4.216;0.418`) as whole numbers; a table of `;` or
-  commas is aqr-xsv's.

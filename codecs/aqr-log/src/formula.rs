@@ -13,7 +13,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 use aqr_num::fixed;
-use aqr_num::style::{Style, choose};
+use aqr_num::style::{Style, choose_with};
 
 use crate::module::{
     K_NEW, K_SAME, M_DIGITS, M_NUM, M_TEXT, MAX_COLUMNS, MAX_DIGITS, MAX_TEMPLATE_BYTES, MAX_TEMPLATES, P_COLUMN,
@@ -57,6 +57,54 @@ pub const SEGMENT: usize = 64 << 20;
 
 /// The longest token that may be a whole number.
 const MAX_NUMBER: usize = 40;
+
+/// The bytes of a segment's start that the locale of its numbers is told from.
+const LOCALE_SAMPLE: usize = 256 << 10;
+
+/// The bytes that cut a line into tokens: a space, `;` and TAB always, and `,` unless the
+/// segment's numbers have a decimal comma ([`decimal_comma`]).
+fn separators(seg: &[u8]) -> [bool; 256] {
+    let mut sep = [false; 256];
+    for b in [b' ', b';', b'\t'] {
+        sep[b as usize] = true;
+    }
+    sep[b',' as usize] = !decimal_comma(seg);
+    sep
+}
+
+/// Whether the numbers of a segment, from its first [`LOCALE_SAMPLE`] bytes, are written with a
+/// decimal comma: tokens (cut at spaces, `;` and TAB) that are a whole number with a comma, such
+/// as `4,216` or `-0,05`, outnumber those with a point, and are not likelier a thousands
+/// grouping. A comma followed by exactly three digits, after one to three digits not starting
+/// with a zero (`1,234`), may be either: those count for grouping, and the others (`0,418`,
+/// `18,5`, `1234,567`) for the decimal comma, which must be at least as many.
+fn decimal_comma(seg: &[u8]) -> bool {
+    let mut n = seg.len().min(LOCALE_SAMPLE);
+    if n < seg.len() {
+        n = seg[..n].iter().rposition(|&b| b == b'\n').map_or(n, |i| i + 1);
+    }
+    let (mut comma, mut grouping, mut point) = (0usize, 0usize, 0usize);
+    for line in lines_of(&seg[..n]) {
+        for t in line.split(|&b| matches!(b, b' ' | b';' | b'\t')) {
+            // (a number: a sign, digits, one point or comma, digits, an exponent)
+            let t = t.strip_prefix(b"-").or_else(|| t.strip_prefix(b"+")).unwrap_or(t);
+            let int = t.iter().take_while(|b| b.is_ascii_digit()).count();
+            let Some(&sep @ (b'.' | b',')) = t.get(int) else { continue };
+            let frac = t[int + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
+            let rest = &t[int + 1 + frac..];
+            let exp = rest.is_empty() || (matches!(rest[0], b'e' | b'E') && rest.len() > 1);
+            if frac == 0 || !exp || t.len() > MAX_NUMBER {
+                continue;
+            }
+            match sep {
+                b'.' => point += 1,
+                _ if frac == 3 && (1..=3).contains(&int) && t[0] != b'0' && rest.is_empty() => grouping += 1,
+                _ => comma += 1,
+            }
+        }
+    }
+    comma > point && comma >= grouping
+}
 
 /// Whether `d` is a file this crate takes: of at least [`MIN_LEN`] bytes, of at least
 /// [`MIN_LINES`] lines at its start of which 9 in 10 or more are not kept as they are.
@@ -148,15 +196,28 @@ impl Scratch {
         if !numeric(t) {
             return None;
         }
-        if let Some((v, f)) = fixed::parse(t) {
-            return Some((v, (f & fixed::F_FRAC) as i32, aqr_num::M_FIX, f));
+        // (a decimal comma: the fixed token with the comma as its point)
+        let comma = t.contains(&b',');
+        let dotted: Vec<u8>;
+        let fixed_of = if comma {
+            dotted = t.iter().map(|&b| if b == b',' { b'.' } else { b }).collect();
+            if t.contains(&b'.') {
+                return None;
+            }
+            &dotted[..]
+        } else {
+            t
+        };
+        if let Some((v, f)) = fixed::parse(fixed_of) {
+            let mode = aqr_num::M_FIX | if comma { aqr_num::COMMA } else { 0 };
+            return Some((v, (f & fixed::F_FRAC) as i32, mode, f));
         }
-        if !t.iter().all(|b| matches!(b, b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'))
+        if !t.iter().all(|b| matches!(b, b'0'..=b'9' | b'.' | b',' | b'e' | b'E' | b'+' | b'-'))
             || !t.iter().any(u8::is_ascii_digit)
         {
             return None;
         }
-        let r = choose(&[(0, t)]).encode(t, 0, &mut self.tmp)?;
+        let r = choose_with(&[(0, t)], true).encode(t, 0, &mut self.tmp)?;
         self.exact(t, r)
     }
 }
@@ -173,6 +234,8 @@ struct Classifier {
     /// The forms (hashes) of the tokens and how many times each is in the segment.
     counts: FxMap<u64, u32>,
     rare: u32,
+    /// The bytes that cut a line into tokens.
+    sep: [bool; 256],
     /// The templates' ids (from 1), by their bytes; the stream `templates`; the first column of
     /// each (by id - 1); the mark of each column; the most numbers of a template.
     index: FxMap<Vec<u8>, u32>,
@@ -190,6 +253,7 @@ struct Classifier {
 impl Classifier {
     /// The counts of the forms of `seg`'s tokens.
     fn new(seg: &[u8]) -> Classifier {
+        let sep = separators(seg);
         let mut counts: FxMap<u64, u32> = FxMap::default();
         let mut lines = 0usize;
         for line in lines_of(seg) {
@@ -197,7 +261,7 @@ impl Classifier {
             if memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, line).is_some() {
                 continue;
             }
-            for t in line.split(|&b| b == b' ') {
+            for t in line.split(|&b| sep[b as usize]) {
                 *counts.entry(form(t).0).or_default() += 1;
             }
         }
@@ -205,6 +269,7 @@ impl Classifier {
         Classifier {
             counts,
             rare,
+            sep,
             index: FxMap::default(),
             tbytes: Vec::new(),
             col0: Vec::new(),
@@ -227,14 +292,12 @@ impl Classifier {
         self.slots.clear();
         let mut at = 0;
         loop {
-            let end = memchr::memchr(b' ', &line[at..]).map_or(line.len(), |i| at + i);
-            if at > 0 {
-                self.tpl.push(b' ');
-            }
+            let end = line[at..].iter().position(|&b| self.sep[b as usize]).map_or(line.len(), |i| at + i);
             self.token(&line[at..end], at);
             if end == line.len() {
                 break;
             }
+            self.tpl.push(line[end]);
             at = end + 1;
         }
         if let Some(&id) = self.index.get(&self.tpl[..]) {
@@ -318,6 +381,8 @@ struct Col {
     desc: Vec<u8>,
     style: Style,
     prev: i64,
+    /// The scale of the column's previous number (0 before the first, and for digit runs).
+    prev_scale: i32,
     last: Option<(u8, u8, i32)>,
     count: usize,
 }
@@ -392,10 +457,10 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
                 (0, &sm.bytes[at - n as usize..at])
             })
             .collect();
-        c.style = choose(&toks);
+        c.style = choose_with(&toks, true);
     }
     // the third: the fields
-    let (mut prev, mut cur): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
+    let (mut prev, mut cur): (Vec<(i64, i32)>, Vec<(i64, i32)>) = (Vec::new(), Vec::new());
     let mut sc = Scratch::default();
     let mut raw = 0;
     for line in lines_of(seg) {
@@ -413,7 +478,7 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
             let c = &mut cols[c0 + k];
             let t = &line[sl.start..][..sl.len];
             c.count += 1;
-            let v = match sl.kind {
+            let (v, scale) = match sl.kind {
                 M_TEXT => {
                     c.text.extend_from_slice(t);
                     c.text.push(b'\n');
@@ -422,7 +487,7 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
                 M_DIGITS => {
                     // (a width where leading zeros pad it)
                     c.widths.push(if t.len() > 1 && t[0] == b'0' { t.len() as u8 } else { 0 });
-                    t.iter().fold(0i64, |v, &d| v * 10 + (d - b'0') as i64)
+                    (t.iter().fold(0i64, |v, &d| v * 10 + (d - b'0') as i64), 0)
                 }
                 _ => {
                     let last = c.last.map_or(0, |l| l.2);
@@ -436,15 +501,17 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
                         c.desc.extend_from_slice(&[mode, f]);
                         varint::put_signed(&mut c.desc, scale as i64);
                     }
-                    v
+                    (v, scale)
                 }
             };
-            let line_ref = prev.get(cur.len()).copied().unwrap_or(0);
+            // (the predictions at the scale of the number)
+            let (q, qs) = prev.get(cur.len()).copied().unwrap_or((0, 0));
             varint::put_signed(&mut c.by[0], v);
-            varint::put_signed(&mut c.by[1], v.wrapping_sub(c.prev));
-            varint::put_signed(&mut c.by[2], v.wrapping_sub(line_ref));
+            varint::put_signed(&mut c.by[1], v.wrapping_sub(fixed::rescale(c.prev, c.prev_scale, scale)));
+            varint::put_signed(&mut c.by[2], v.wrapping_sub(fixed::rescale(q, qs, scale)));
             c.prev = v;
-            cur.push(v);
+            c.prev_scale = scale;
+            cur.push((v, scale));
         }
         std::mem::swap(&mut prev, &mut cur);
     }
@@ -664,6 +731,55 @@ mod tests {
         let d = "12:05:09 a\n12:15:59 b\n".repeat(100);
         let f = roundtrip(d.as_bytes());
         assert!(f.streams[6].data.contains(&2));
+    }
+
+    /// Tokens are cut at `;`, TAB and `,` too, `,` excepted where the numbers have a decimal comma.
+    #[test]
+    fn separators() {
+        let mut rng = aqr_common::rng::Rng::new(11);
+        let (mut a, mut b, mut c) = (String::new(), String::new(), String::new());
+        for i in 0..3000 {
+            let (x, y, z) = (rng.below(2000), rng.below(1000), 4000 + i * 3 + rng.below(3));
+            a += &format!("16/12/2006;17:24:00;{},{:03};{},{:02};{z},{}\n", x / 10, x % 1000, y / 100, y % 100, y % 10);
+            b += &format!("{i},{x}.{y:03},{z}.5,-{y}.25\tk{}\n", i % 3);
+            c += &format!("{i},\"a b\",{x}.{y:03};{y}\n");
+        }
+        let at = |t: &str| String::from_utf8_lossy(&roundtrip(t.as_bytes()).streams[2].data).into_owned();
+        // semicolons, decimal commas: the numbers are whole tokens
+        let t = at(&a);
+        assert!(t.contains("\x01/\x01/\x01;\x01:\x01:\x01;\x03;\x03;\x03\n"), "{t:?}");
+        // decimal points: commas and TABs cut
+        let t = at(&b);
+        assert!(t.contains("\x03,\x03,\x03,\x03\t"), "{t:?}");
+        let t = at(&c);
+        assert!(t.contains("\x03,"), "{t:?}");
+    }
+
+    /// Fixed numbers whose writer pads zeros are padded fixed (integers of their digits); a change
+    /// of scale predicts from the previous number at the new scale.
+    #[test]
+    fn padded_numbers() {
+        let mut rng = aqr_common::rng::Rng::new(5);
+        let (mut d, mut price) = (String::new(), 4_228_358i64);
+        for i in 0..4000 {
+            price += rng.below(301) as i64 - 150;
+            let q = rng.below(100000);
+            d += &format!(
+                "{},{}.{:02}000000,{}.{:05}000,{}\n",
+                1704067200000i64 + i * 60000,
+                price / 100,
+                price % 100,
+                q / 1000,
+                q % 1000,
+                i % 7
+            );
+        }
+        let f = roundtrip(d.as_bytes());
+        // (padded fixed, mode 6, of the price: not the values at 8 decimals)
+        assert!(f.streams[8].data.contains(&6), "{:?}", &f.streams[8].data[..20]);
+        assert!(f.streams[5].data.len() < 4000 * 8, "{}", f.streams[5].data.len());
+        // a line before at another scale, an integer after a decimal
+        roundtrip("x 1.50 1.5\ny 1 2.25\nz 0.1 3\nx 100 0.5\n".repeat(50).as_bytes());
     }
 
     #[test]
