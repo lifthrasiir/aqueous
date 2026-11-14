@@ -7,7 +7,7 @@
 
 use aqr_api::stack::{Sim, block};
 
-use crate::codec::{Coding, GroupDef, Head, Span, get_head, group_split};
+use crate::codec::{Coding, GroupDef, Head, MAX_FILE, Span, get_head, group_split};
 use crate::composite::{self, Report, RowRenderer};
 use crate::module::wasm;
 use crate::rans::Tables;
@@ -31,7 +31,7 @@ pub fn decode(
     if !params.is_empty() || inputs.len() != 4 {
         return None;
     }
-    let total = usize::try_from(len).ok().filter(|&t| t as u64 <= 1 << 42)?;
+    let total = usize::try_from(len).ok().filter(|&t| t as u64 <= MAX_FILE)?;
     let Head { spans, groups, .. } = &get_head(head, total).ok()?;
     let mut m = Sim::new(initial);
     m.take(aqr_api::stack::whole(0, &[], inputs));

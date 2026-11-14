@@ -3,6 +3,7 @@
 //! research, the same in symbols of static tables), the zlib streams made again ([`zlib`]), and
 //! the module `clip-recons` ([`module`], `formula`; FORMAT.md).
 
+#[cfg(feature = "encode")]
 pub mod clip;
 pub mod dynamic;
 #[cfg(feature = "encode")]

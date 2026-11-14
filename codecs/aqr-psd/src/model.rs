@@ -374,8 +374,8 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
     let mut x = 1;
     let mut after_run = false;
     while x + 1 < w {
-        // Run mode: where the left sample equals the 33 above from the upper left on, the
-        // number of following samples equal to it, in chunks of up to 254 (255 continues).
+        // Run mode: where the left sample equals the upper left one and the 4 above from x on,
+        // the number of following samples equal to it, in chunks of up to 254 (255 continues).
         if !TOP && !after_run {
             let v = p[x - 1];
             if run_above(q.up, x, v) {
@@ -424,12 +424,17 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
     }
 }
 
+/// How a color plane of a row is dealt with.
+const ABSENT: u8 = 0;
+const CODED: u8 = 1;
+const KNOWN: u8 = 2;
+
 /// The three color planes of a row, coded pixel by pixel (R, G, B at x, then x + 1): the
 /// planes are independent chains of dependencies, which the CPU can overlap. Plane 0 is coded
-/// if `how[0] == 1`, walked for its residuals if 2; planes 1 and 2 are coded if their `how`
-/// is 1, given (known) if 2, and absent (copied after the row) if 0. A run is where every
-/// plane there equals its left sample over the 33 above (from the upper left), as many pixels
-/// as they all equal it.
+/// if `how[0]` is [`CODED`], walked for its residuals if [`KNOWN`]; planes 1 and 2 are coded if
+/// their `how` is [`CODED`], given if [`KNOWN`], and [`ABSENT`] (copied after the row) if not.
+/// A run is where every plane there equals its left sample, the upper left one and the 4 above
+/// from x on, as many pixels as they all equal it.
 struct Colors<'a, 'b> {
     p: [&'b mut [u8]; 3],
     res: [&'b mut [u8]; 3],
@@ -474,11 +479,11 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
             };
         }
         match how[0] {
-            1 => one!(c, C, q0, p0, r0, false, 0),
+            CODED => one!(c, C, q0, p0, r0, false, 0),
             _ => one!(&mut Passthrough, Passthrough, q0, p0, r0, false, 0),
         }
         let f = r0[x];
-        if !HINT && how[1] == 1 && how[2] == 1 {
+        if !HINT && how[1] == CODED && how[2] == CODED {
             let (q, p, r) = ([q1, q2], [&mut *p1, &mut *p2], [&mut *r1, &mut *r2]);
             match (left, right) {
                 (true, true) => code_pair::<C, ALPHA, TOP, true, true>(c, q, p, r, x, f, vis),
@@ -488,10 +493,10 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
             }
             return;
         }
-        if how[1] == 1 {
+        if how[1] == CODED {
             one!(c, C, q1, p1, r1, true, f);
         }
-        if how[2] == 1 {
+        if how[2] == CODED {
             one!(c, C, q2, p2, r2, true, f);
         }
     };
@@ -503,7 +508,7 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
         // here equal to it (in chunks of up to 254; 255 continues).
         if HINT && !TOP && !after_run {
             let m = |p: &[u8], q: &Rows| p[x - 1] == q.hc[x - 1] && q.up[x] == q.hp[x];
-            if m(p0, q0) && (how[1] == 0 || m(p1, q1)) && (how[2] == 0 || m(p2, q2)) {
+            if m(p0, q0) && (how[1] == ABSENT || m(p1, q1)) && (how[2] == ABSENT || m(p2, q2)) {
                 let t = HRUN_BASE + (q0.up[x + 1] == q0.hp[x + 1]) as usize;
                 let mut n = 0;
                 loop {
@@ -512,10 +517,10 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
                     } else {
                         let end = (x + n + 255).min(w);
                         let mut a = count_same(&p0[x + n..end], &q0.hc[x + n..end]);
-                        if how[1] != 0 {
+                        if how[1] != ABSENT {
                             a = a.min(count_same(&p1[x + n..end], &q1.hc[x + n..end]));
                         }
-                        if how[2] != 0 {
+                        if how[2] != ABSENT {
                             a = a.min(count_same(&p2[x + n..end], &q2.hc[x + n..end]));
                         }
                         a
@@ -523,13 +528,13 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
                     let s = (c.code(t, avail as u8) as usize).min(w - x - n);
                     if C::DECODES {
                         let r = x + n..x + n + s;
-                        if how[0] == 1 {
+                        if how[0] == CODED {
                             p0[r.clone()].copy_from_slice(&q0.hc[r.clone()]);
                         }
-                        if how[1] == 1 {
+                        if how[1] == CODED {
                             p1[r.clone()].copy_from_slice(&q1.hc[r.clone()]);
                         }
-                        if how[2] == 1 {
+                        if how[2] == CODED {
                             p2[r.clone()].copy_from_slice(&q2.hc[r]);
                         }
                     }
@@ -553,11 +558,11 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
                     .is_some_and(|s| u32::from_ne_bytes(s[1..5].try_into().unwrap()) == u32::from_ne_bytes([s[0]; 4]))
             };
             if flat(q0)
-                && (how[1] == 0 || flat(q1))
-                && (how[2] == 0 || flat(q2))
+                && (how[1] == ABSENT || flat(q1))
+                && (how[2] == ABSENT || flat(q2))
                 && p0[x - 1] == q0.up[x - 1]
-                && (how[1] == 0 || p1[x - 1] == q1.up[x - 1])
-                && (how[2] == 0 || p2[x - 1] == q2.up[x - 1])
+                && (how[1] == ABSENT || p1[x - 1] == q1.up[x - 1])
+                && (how[2] == ABSENT || p2[x - 1] == q2.up[x - 1])
             {
                 let v = [p0[x - 1], p1[x - 1], p2[x - 1]];
                 let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize * RUN_CTX + run_ctx(stretch_above(q0.up, x, v[0]));
@@ -568,23 +573,23 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
                     } else {
                         let end = (x + n + 255).min(w);
                         let mut a = crate::packbits::count_equal(&p0[x + n..end], v[0]);
-                        if how[1] != 0 {
+                        if how[1] != ABSENT {
                             a = a.min(crate::packbits::count_equal(&p1[x + n..end], v[1]));
                         }
-                        if how[2] != 0 {
+                        if how[2] != ABSENT {
                             a = a.min(crate::packbits::count_equal(&p2[x + n..end], v[2]));
                         }
                         a
                     };
                     let s = (c.code(t, avail as u8) as usize).min(w - x - n);
                     if C::DECODES {
-                        if how[0] == 1 {
+                        if how[0] == CODED {
                             p0[x + n..x + n + s].fill(v[0]);
                         }
-                        if how[1] == 1 {
+                        if how[1] == CODED {
                             p1[x + n..x + n + s].fill(v[1]);
                         }
-                        if how[2] == 1 {
+                        if how[2] == CODED {
                             p2[x + n..x + n + s].fill(v[2]);
                         }
                     }
@@ -687,14 +692,9 @@ impl GroupCoder {
     }
 
     /// Planes in coding order within a row: alpha (if any), then the color planes.
-    pub fn order(planes: usize, has_alpha: bool) -> Vec<usize> {
+    pub fn order(planes: usize, has_alpha: bool) -> impl Iterator<Item = usize> {
         let colors = planes - has_alpha as usize;
-        let mut o = Vec::with_capacity(planes);
-        if has_alpha {
-            o.push(colors);
-        }
-        o.extend(0..colors);
-        o
+        has_alpha.then_some(colors).into_iter().chain(0..colors)
     }
 
     /// Codes row `k` of `rows` on its own, as a plane of `kind`.
@@ -778,11 +778,11 @@ impl GroupCoder {
             let w = self.w;
             let how: [u8; 3] = std::array::from_fn(|k| {
                 if self.coded(k) {
-                    1
+                    CODED
                 } else if k == 0 || self.same_as[k].is_none() {
-                    2
+                    KNOWN
                 } else {
-                    0
+                    ABSENT
                 }
             });
             let (cr, ar) = rows.split_at_mut(3);
@@ -808,7 +808,7 @@ impl GroupCoder {
                 run_t: RUN_BASE,
             };
             let (alpha, hinted, top) = (self.has_alpha, hint_rows.is_some(), self.top);
-            if how[0] == 1 || how[1] == 1 || how[2] == 1 {
+            if how[0] == CODED || how[1] == CODED || how[2] == CODED {
                 code_colors_any(c, &mut k, alpha, hinted, top);
             } else {
                 code_colors_any(&mut Passthrough, &mut k, alpha, hinted, top);
@@ -858,14 +858,13 @@ pub struct Recorder<'o> {
     /// Symbol counts of the chunk, per table.
     counts: Vec<[u32; 256]>,
     out: &'o mut Vec<u8>,
-    pub chunks: usize,
     /// Symbols coded so far.
     pub total: usize,
 }
 
 impl<'o> Recorder<'o> {
     pub fn new(out: &'o mut Vec<u8>) -> Self {
-        Recorder { syms: Vec::with_capacity(CHUNK), counts: vec![[0; 256]; TABLES], out, chunks: 0, total: 0 }
+        Recorder { syms: Vec::with_capacity(CHUNK), counts: vec![[0; 256]; TABLES], out, total: 0 }
     }
 
     /// Writes the recorded symbols as a chunk: symbol count, tables, rANS stream.
@@ -892,7 +891,6 @@ impl<'o> Recorder<'o> {
         o.extend_from_slice(&body);
         self.total += self.syms.len();
         self.syms.clear();
-        self.chunks += 1;
     }
 
     /// Writes what is left (the stream ends after the last chunk). Returns the number of
@@ -918,9 +916,7 @@ impl Coder for Recorder<'_> {
 }
 
 fn unused() -> Vec<u32> {
-    let mut f = vec![0u32; 256];
-    f[0] = rans::PROB_SCALE;
-    f
+    UNUSED.to_vec()
 }
 
 /// Decodes symbols chunk by chunk.

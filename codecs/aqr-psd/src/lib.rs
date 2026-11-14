@@ -13,6 +13,7 @@ pub mod formula;
 pub mod model;
 pub mod module;
 pub mod packbits;
+#[cfg(feature = "encode")]
 pub mod pixels;
 #[cfg(feature = "encode")]
 pub mod plan;

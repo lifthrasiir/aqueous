@@ -19,7 +19,7 @@
 //! by their differences.
 
 use crate::bits;
-use crate::image::Coded;
+use crate::image::{Coded, half_octave};
 use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 
 /// Levels at most.
@@ -44,14 +44,12 @@ const MANT_LENS: usize = 24;
 const MANT_NODES: usize = MANT_LENS << MODELLED;
 /// Contexts of those bits: of the three bands at eight level classes, the borders and the
 /// last level.
-const MANT_CONTEXTS: usize = 3 * 8 + 2;
+const MANT_CONTEXTS: usize = MANT_TOP + 1;
 
-/// The half octave of `t`: 0, 1, then two buckets per octave.
+/// The half octave of `t`, up to the last bucket.
 #[inline(always)]
 fn bucket(t: u64) -> usize {
-    let l = 64 - t.leading_zeros();
-    let b = if l < 2 { l as usize } else { (2 * l - 1 + ((t >> (l - 2)) & 1) as u32) as usize };
-    b.min(BUCKETS - 1)
+    half_octave(t).min(BUCKETS - 1)
 }
 
 #[inline(always)]
@@ -77,8 +75,8 @@ fn mant_ctx(band: usize, lv: usize) -> usize {
     band * 8 + lv.min(7)
 }
 
-const MANT_BORDER: usize = 24;
-const MANT_TOP: usize = 25;
+const MANT_BORDER: usize = 3 * 8;
+const MANT_TOP: usize = MANT_BORDER + 1;
 
 /// The adaptive models, alike on both sides.
 struct Models {
@@ -234,6 +232,17 @@ impl Bands {
     }
 }
 
+/// The coded coefficients of a block of values `a00 a01 / a10 a11` (`hc`, `hx'`, `hy'`), and its
+/// value at the next level.
+#[inline(always)]
+fn coefs(a00: i64, a01: i64, a10: i64, a11: i64) -> ([i64; 3], i64) {
+    let hx = a11 + a10 - a01 - a00;
+    let hy = a11 - a10 + a01 - a00;
+    let hc = a11 - a10 - a01 + a00;
+    let p = hc & 1;
+    ([hc, (hx - p) >> 1, (hy - p) >> 1], (a00 + a01 + a10 + a11) >> 2)
+}
+
 /// The bands of a level's blocks, and the next level's values.
 fn transform(v: &[i64], l: &Level) -> (Bands, Vec<i64>) {
     let (bw, bh) = l.blocks();
@@ -244,17 +253,12 @@ fn transform(v: &[i64], l: &Level) -> (Bands, Vec<i64>) {
         let r0 = (l.py + 2 * i) * l.w + l.px;
         let r1 = r0 + l.w;
         for j in 0..bw {
-            let (a00, a01, a10, a11) = (v[r0 + 2 * j], v[r0 + 2 * j + 1], v[r1 + 2 * j], v[r1 + 2 * j + 1]);
-            let hx = a11 + a10 - a01 - a00;
-            let hy = a11 - a10 + a01 - a00;
-            let hc = a11 - a10 - a01 + a00;
-            let h0 = a00 + a01 + a10 + a11;
-            let p = hc & 1;
+            let ([hc, hx, hy], h0) = coefs(v[r0 + 2 * j], v[r0 + 2 * j + 1], v[r1 + 2 * j], v[r1 + 2 * j + 1]);
             let k = i * bw + j;
             b.c[0][k] = hc;
-            b.c[1][k] = (hx - p) >> 1;
-            b.c[2][k] = (hy - p) >> 1;
-            next[k] = h0 >> 2;
+            b.c[1][k] = hx;
+            b.c[2][k] = hy;
+            next[k] = h0;
         }
     }
     (b, next)
@@ -322,9 +326,7 @@ fn border(v: &[i64], l: &Level, mut f: impl FnMut(usize, i64)) {
     for y in 0..l.h {
         for x in 0..l.w {
             if !l.in_blocks(x, y) {
-                let mut pred = 0;
-                border_pred(v, l, x, y, &mut pred);
-                f(y * l.w + x, pred);
+                f(y * l.w + x, border_pred(v, l, x, y));
             }
         }
     }
@@ -333,9 +335,9 @@ fn border(v: &[i64], l: &Level, mut f: impl FnMut(usize, i64)) {
 /// The prediction of the border's value at `(x, y)`: the value below it if that is of a
 /// block, else above, else left, else right if of a block, else 0.
 #[inline]
-fn border_pred(v: &[i64], l: &Level, x: usize, y: usize, pred: &mut i64) {
+fn border_pred(v: &[i64], l: &Level, x: usize, y: usize) -> i64 {
     let at = y * l.w + x;
-    *pred = if y + 1 < l.h && l.in_blocks(x, y + 1) {
+    if y + 1 < l.h && l.in_blocks(x, y + 1) {
         v[at + l.w]
     } else if y > 0 {
         v[at - l.w]
@@ -345,7 +347,7 @@ fn border_pred(v: &[i64], l: &Level, x: usize, y: usize, pred: &mut i64) {
         v[at + 1]
     } else {
         0
-    };
+    }
 }
 
 /// The cost of a level's bands at a phase, as the sum of the coefficients' bit lengths.
@@ -357,13 +359,19 @@ fn cost(v: &[i64], l: &Level) -> u64 {
         let r0 = (l.py + 2 * i) * l.w + l.px;
         let r1 = r0 + l.w;
         for j in 0..bw {
-            let (a00, a01, a10, a11) = (v[r0 + 2 * j], v[r0 + 2 * j + 1], v[r1 + 2 * j], v[r1 + 2 * j + 1]);
-            let hc = a11 - a10 - a01 + a00;
-            let p = hc & 1;
-            sum += bits(hc) + bits((a11 + a10 - a01 - a00 - p) >> 1) + bits((a11 - a10 + a01 - a00 - p) >> 1);
+            let (c, _) = coefs(v[r0 + 2 * j], v[r0 + 2 * j + 1], v[r1 + 2 * j], v[r1 + 2 * j + 1]);
+            sum += c.map(bits).iter().sum::<u64>();
         }
     }
     sum
+}
+
+/// A level as the encoder holds it: its phase, bands and the differences of its border's values
+/// from their predictions.
+struct EncLevel {
+    level: Level,
+    bands: Bands,
+    edge: Vec<i64>,
 }
 
 /// Codes the `w` × `h` values `v`.
@@ -371,7 +379,7 @@ pub fn encode(v: Vec<i64>, w: usize, h: usize) -> Coded {
     assert_eq!(v.len(), w * h);
     // the levels, from the finest: each its bands (without the next level's values) and the
     // differences of its border's values from their predictions
-    let mut levels: Vec<(Level, Bands, Vec<i64>)> = Vec::new();
+    let mut levels: Vec<EncLevel> = Vec::new();
     let mut cur = v;
     let (mut cw, mut ch) = (w, h);
     while splits(cw, ch, levels.len()) {
@@ -381,12 +389,12 @@ pub fn encode(v: Vec<i64>, w: usize, h: usize) -> Coded {
         border(&cur, &l, |at, pred| edge.push(cur[at].wrapping_sub(pred)));
         cur = next;
         (cw, ch) = l.blocks();
-        levels.push((l, b, edge));
+        levels.push(EncLevel { level: l, bands: b, edge });
     }
     let mut e = Encoder { m: Models::new(), ac: ArithEncoder::new(Vec::new()), raw: bits::Writer::default() };
     // the phases, from the finest level, then the last level's values, by their differences
     let mut ph = e.m.phase;
-    for (l, _, _) in &levels {
+    for EncLevel { level: l, .. } in &levels {
         e.bit(l.px == 1, &mut ph[0]);
         e.bit(l.py == 1, &mut ph[1]);
     }
@@ -400,8 +408,8 @@ pub fn encode(v: Vec<i64>, w: usize, h: usize) -> Coded {
     }
     // the levels, from the coarsest: bands, border
     for lv in (0..levels.len()).rev() {
-        let (l, b, edge) = &levels[lv];
-        let up = levels.get(lv + 1).map(|(l, b, _)| (l, b));
+        let EncLevel { level: l, bands: b, edge } = &levels[lv];
+        let up = levels.get(lv + 1).map(|u| (&u.level, &u.bands));
         let (bw, bh) = l.blocks();
         for k in 0..bw * bh {
             for band in 0..3 {
@@ -501,8 +509,7 @@ pub fn decode(model: &[u8], raw: &[u8], w: usize, h: usize) -> crate::Result<Vec
         for y in 0..l.h {
             for x in 0..l.w {
                 if !l.in_blocks(x, y) {
-                    let mut pred = 0;
-                    border_pred(values, &l, x, y, &mut pred);
+                    let pred = border_pred(values, &l, x, y);
                     let dv = d.get(BORDER + bucket(prev), MANT_BORDER);
                     prev = dv.unsigned_abs();
                     values[y * l.w + x] = pred.wrapping_add(dv);

@@ -13,6 +13,7 @@
 //! The encoder codes a listed pixel as new where that is cheaper by the counts of the chunk so
 //! far (the decoder follows the mode).
 
+use crate::dynamic::{ACT, CROSS, LIST, RUN_CTX, RUN_LOOK, SLOTS, bucket, med};
 use crate::tile::{AREA, Layout, SIDE};
 use aqr_common::rans32;
 use aqr_common::varint;
@@ -25,8 +26,6 @@ type BitR<'a> = rans32::BitR<'a, false>;
 /// Symbols per chunk of the stream, each chunk with tables of its own.
 pub const CHUNK: usize = 1 << 20;
 
-const LIST: usize = 256;
-const RUN_LOOK: usize = 4;
 const KIND: usize = 0;
 /// Modes: copies of the four neighbours, the list, new.
 const MODE: usize = KIND + 1;
@@ -34,11 +33,7 @@ const MODE_CTX: usize = 2 * 16 * 4 * 4;
 const M_LIST: u8 = 4;
 const M_NEW: u8 = 5;
 const PLACE: usize = MODE + MODE_CTX;
-const SLOTS: usize = 5;
-const ACT: usize = 8;
-const CROSS: usize = 4;
 const RESIDUAL: usize = PLACE + 1;
-const RUN_CTX: usize = 8;
 const FULL: usize = RESIDUAL + SLOTS * 2 * ACT * CROSS;
 const LENGTH: usize = FULL + RUN_CTX;
 pub const TABLES: usize = LENGTH + RUN_CTX;
@@ -204,23 +199,6 @@ impl Sym for Player<'_> {
     fn cost(&self, _: usize, _: u8) -> f32 {
         0.0
     }
-}
-
-#[inline]
-fn med(a: u8, b: u8, c: u8) -> u8 {
-    let (lo, hi) = (a.min(b), a.max(b));
-    if c >= hi {
-        lo
-    } else if c <= lo {
-        hi
-    } else {
-        a.wrapping_add(b).wrapping_sub(c)
-    }
-}
-
-#[inline]
-fn bucket(v: u32, n: usize) -> usize {
-    ((32 - v.leading_zeros()) as usize).min(n - 1)
 }
 
 /// Slots of the index of [`Ring`].

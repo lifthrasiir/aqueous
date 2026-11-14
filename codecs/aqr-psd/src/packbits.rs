@@ -7,6 +7,7 @@
 //! (e.g. the one of the `tori29umai` set) do the same over the whole row at once with runs
 //! of 3 or more.
 
+#[cfg(feature = "encode")]
 use crate::pixels::unpackbits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,7 @@ impl Sink for Vec<u8> {
     }
 }
 
+#[cfg(feature = "encode")]
 /// Checks tokens against an encoded row, by their headers only: the row being its decoding,
 /// tokens of the same kinds and lengths are the same bytes.
 struct Verify<'a> {
@@ -94,6 +96,7 @@ struct Verify<'a> {
     pos: usize,
 }
 
+#[cfg(feature = "encode")]
 impl Sink for Verify<'_> {
     #[inline(always)]
     fn run(&mut self, k: usize, _v: u8) -> bool {
@@ -199,6 +202,7 @@ pub fn encode(enc: Encoder, row: &[u8], out: &mut Vec<u8>) {
     encode_into(enc, row, out);
 }
 
+#[cfg(feature = "encode")]
 /// Whether `enc` encodes `row` as `encoded`, given that `row` is the decoding of `encoded`
 /// (faster than encoding and comparing: nothing is written).
 pub fn reproduces(enc: Encoder, row: &[u8], encoded: &[u8]) -> bool {
@@ -206,19 +210,21 @@ pub fn reproduces(enc: Encoder, row: &[u8], encoded: &[u8]) -> bool {
     encode_into(enc, row, &mut v) && v.pos == encoded.len()
 }
 
+#[cfg(feature = "encode")]
 /// Splits `data` (row byte counts, then rows) of `rows` rows into the encoded rows.
 pub fn rows(data: &[u8], rows: usize, count_bytes: usize) -> Option<Vec<&[u8]>> {
     let mut p = rows * count_bytes;
     let mut out = Vec::with_capacity(rows);
     for r in 0..rows {
         let c = data.get(r * count_bytes..(r + 1) * count_bytes)?;
-        let n = c.iter().fold(0usize, |n, &b| n << 8 | b as usize);
+        let n = crate::rows::count(c, count_bytes, 0);
         out.push(data.get(p..p + n)?);
         p += n;
     }
     Some(out)
 }
 
+#[cfg(feature = "encode")]
 /// Positions where an encoded row breaks a token although an encoder working over the whole
 /// row would not have: a run followed by more of the same byte, or a literal shorter than
 /// 128 followed by a literal or a 2-byte run.
@@ -240,6 +246,7 @@ pub fn forced_splits(src: &[u8], out: &mut Vec<usize>) {
     }
 }
 
+#[cfg(feature = "encode")]
 /// The Photoshop tile cut best explaining the token breaks of `encoded` rows.
 fn infer_tiles(encoded: &[&[u8]]) -> Encoder {
     let mut splits = Vec::new();
@@ -249,6 +256,7 @@ fn infer_tiles(encoded: &[&[u8]]) -> Encoder {
     infer_tiles_from(splits)
 }
 
+#[cfg(feature = "encode")]
 /// The Photoshop tile cut best explaining token breaks at `splits` (see [`forced_splits`]).
 pub fn infer_tiles_from(mut splits: Vec<usize>) -> Encoder {
     splits.sort_unstable();
@@ -280,6 +288,7 @@ pub fn infer_tiles_from(mut splits: Vec<usize>) -> Encoder {
     Encoder::Photoshop { phase, period }
 }
 
+#[cfg(feature = "encode")]
 /// Candidate encoders, most likely first, after the tile cut inferred for a channel.
 pub fn candidates_after(tiles: Encoder) -> Vec<Encoder> {
     let mut v = vec![tiles];
@@ -291,6 +300,7 @@ pub fn candidates_after(tiles: Encoder) -> Vec<Encoder> {
     v
 }
 
+#[cfg(feature = "encode")]
 /// The decoded length of PackBits `src`, or None if it is malformed.
 pub fn decoded_len(mut src: &[u8]) -> Option<usize> {
     let mut n = 0;
@@ -311,11 +321,13 @@ pub fn decoded_len(mut src: &[u8]) -> Option<usize> {
     Some(n)
 }
 
+#[cfg(feature = "encode")]
 /// Candidate encoders for a channel, most likely first.
 pub fn candidates(encoded: &[&[u8]]) -> Vec<Encoder> {
     candidates_after(infer_tiles(encoded))
 }
 
+#[cfg(feature = "encode")]
 /// The encoder reproducing most of `encoded` rows, and how many it reproduces. Rows that do
 /// not decode count as not reproduced.
 pub fn identify(encoded: &[&[u8]]) -> (Encoder, usize) {
@@ -338,6 +350,7 @@ pub fn identify(encoded: &[&[u8]]) -> (Encoder, usize) {
     (enc, encoded.len() - bad.len())
 }
 
+#[cfg(feature = "encode")]
 /// The encoder reproducing most of `encoded` rows from their decoded `rows`, and the rows
 /// it does not reproduce.
 pub fn identify_rows(encoded: &[&[u8]], rows: &[&[u8]]) -> (Encoder, Vec<usize>) {

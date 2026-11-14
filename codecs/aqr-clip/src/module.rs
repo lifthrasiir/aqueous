@@ -52,9 +52,9 @@ fn u64be(d: &[u8], p: usize) -> Result<usize> {
 /// where it ends.
 fn string_is(d: &[u8], p: usize, s: &str) -> Option<usize> {
     let n = u32be(d, p).ok()? as usize;
-    let units = d.get(p + 4..p + 4 + 2 * n)?;
-    (n == s.len() && units.as_chunks::<2>().0.iter().zip(s.bytes()).all(|(u, c)| u[0] == 0 && u[1] == c))
-        .then_some(p + 4 + 2 * n)
+    let end = p.checked_add(4)?.checked_add(n.checked_mul(2)?)?;
+    let units = d.get(p + 4..end)?;
+    (n == s.len() && units.as_chunks::<2>().0.iter().zip(s.bytes()).all(|(u, c)| u[0] == 0 && u[1] == c)).then_some(end)
 }
 
 /// The end of the string at `p`.
@@ -67,8 +67,8 @@ fn string_end(d: &[u8], p: usize) -> Result<usize> {
     Ok(end)
 }
 
-const BEGIN: &str = "BlockDataBeginChunk";
-const END: &str = "BlockDataEndChunk";
+pub(crate) const BEGIN: &str = "BlockDataBeginChunk";
+pub(crate) const END: &str = "BlockDataEndChunk";
 
 /// The walk over `src`: the file itself where `whole`, else its skeleton. A tile is modelled
 /// where its block holds a tile of a known layout (256×256) and `modelled` says so (called for
@@ -238,7 +238,8 @@ fn walk<'a>(
                         return Err(invalid("block"));
                     }
                     let layout = Layout::of(f[1] as usize).filter(|_| f[2] == 256 && f[3] == 256);
-                    let z = if whole { src.get(r + 8..r + 8 + zl).ok_or_else(|| invalid("truncated"))? } else { &[] };
+                    let after = r.checked_add(8).and_then(|r| r.checked_add(zl)).ok_or_else(|| invalid("truncated"))?;
+                    let z = if whole { src.get(r + 8..after).ok_or_else(|| invalid("truncated"))? } else { &[] };
                     match layout {
                         Some(l) if modelled(l, z) => {
                             out.keep(r + 8 - q);
@@ -246,7 +247,7 @@ fn walk<'a>(
                             r += 8 + if whole { zl } else { 0 };
                             (from, absent) = (r, zl);
                         }
-                        _ => r += 8 + zl,
+                        _ => r = after,
                     }
                 }
                 let e = string_is(src, r, END).ok_or_else(|| invalid("block end"))?;
@@ -264,7 +265,7 @@ fn walk<'a>(
                     .checked_mul(es)
                     .and_then(|b| b.checked_add(hs))
                     .and_then(|b| b.checked_add(r - q))
-                    .filter(|&t| q + t <= src.len())
+                    .filter(|&t| q.checked_add(t).is_some_and(|e| e <= src.len()))
                     .ok_or_else(|| invalid("table"))?;
                 out.keep(t);
                 q += t;

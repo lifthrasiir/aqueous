@@ -166,15 +166,14 @@ fn rice(f: &mut Formula, d: &[u8], l: &Layout) -> Option<Vec<Node>> {
     if !p.rebuilt.iter().any(|&r| r) {
         return None;
     }
-    let spans = tiled::spans(l, &p.rows)?;
-    let coded = tiled::pixels_kept(d, l, &spans, &p.rebuilt, &mut vec![0; p.image.len()]);
+    let coded = tiled::coded(l, &p.rebuilt, p.image.len());
     let known = (!coded.iter().all(|&c| c)).then(|| coded.iter().map(|&c| !c).collect::<Vec<_>>());
     let shape = image::Shape { width: l.width(), bits: l.rice.bits(), signed: l.rice.bytepix > 1 };
     let (mode, c) = image::encode_best(&p.image, shape, known.as_deref());
     if !module::within(p.image.len() as u64, c.model.len() + c.raw.len()) {
         return None;
     }
-    let codes = tiled::encode_codes(l, &p.rebuilt, &p.image, &p.codes);
+    let codes = tiled::encode_codes(l, &p.rebuilt, &p.image, &p.codes)?;
     let inputs = vec![
         f.push_as("fits/rows", Kind::Table, p.rows),
         f.push("fits/residue", p.residue),

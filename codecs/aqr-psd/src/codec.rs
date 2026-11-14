@@ -26,18 +26,18 @@ use aqr_common::varint;
 #[cfg(feature = "encode")]
 use aqr_formula::Formula;
 
-#[track_caller]
+#[cfg_attr(feature = "encode", track_caller)]
 fn corrupt() -> Error {
+    // (the module has no environment)
+    #[cfg(feature = "encode")]
     if std::env::var_os("PSDR_DEBUG").is_some() {
         eprintln!("corrupt at {}", std::panic::Location::caller());
     }
     Error("corrupt input".into())
 }
 
-#[cfg(feature = "encode")]
-fn put_varint(out: &mut Vec<u8>, v: u64) {
-    varint::put(out, v)
-}
+/// The largest file taken (a bound on what a header may claim).
+pub(crate) const MAX_FILE: u64 = 1 << 42;
 
 fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
     varint::get(src, at).map_err(|_| corrupt())
@@ -58,7 +58,7 @@ fn get_u8(src: &[u8], at: &mut usize) -> Result<u8> {
 /// `usize::MAX` as 0, anything else shifted by one.
 #[cfg(feature = "encode")]
 fn put_opt(out: &mut Vec<u8>, v: usize) {
-    put_varint(out, if v == usize::MAX { 0 } else { v as u64 + 1 });
+    varint::put(out, if v == usize::MAX { 0 } else { v as u64 + 1 });
 }
 
 fn get_opt(src: &[u8], at: &mut usize) -> Result<usize> {
@@ -186,18 +186,23 @@ pub(crate) struct GroupDef {
     pub(crate) hinted: bool,
 }
 
-/// Checks the row counts of RLE data against its length, and a sample of rows (every
-/// `every`th) decoding to `w` bytes; other rows are checked as they are decoded. Returns the
-/// bytes of each plane's rows and the token breaks of the sample, for encoder identification.
+/// The shape of RLE data: `planes` planes of `h` rows of `w` bytes, each row's byte count in
+/// `cb` bytes.
 #[cfg(feature = "encode")]
-fn check_rle(
-    src: &[u8],
+#[derive(Clone, Copy)]
+struct RleShape {
     planes: usize,
     w: usize,
     h: usize,
     cb: usize,
-    every: usize,
-) -> Option<(Vec<usize>, Vec<usize>)> {
+}
+
+/// Checks the row counts of RLE data against its length, and a sample of rows (every
+/// `every`th) decoding to `w` bytes; other rows are checked as they are decoded. Returns the
+/// bytes of each plane's rows and the token breaks of the sample, for encoder identification.
+#[cfg(feature = "encode")]
+fn check_rle(src: &[u8], shape: RleShape, every: usize) -> Option<(Vec<usize>, Vec<usize>)> {
+    let RleShape { planes, w, h, cb } = shape;
     let rows = planes * h;
     let counts = src.get(..rows * cb)?;
     let mut pos = rows * cb;
@@ -234,8 +239,9 @@ fn all_splits(src: &[u8], rows: usize, cb: usize) -> Vec<usize> {
 /// How many of a sample of rows (every `rows / 32`th) each candidate encoder reproduces, and
 /// the rows sampled (that decode to `w` bytes).
 #[cfg(feature = "encode")]
-fn sample_hits(cands: &[Encoder], src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> (Vec<usize>, usize) {
+fn sample_hits(cands: &[Encoder], src: &[u8], shape: RleShape) -> (Vec<usize>, usize) {
     const SAMPLE: usize = 32;
+    let RleShape { planes, w, h, cb } = shape;
     let rows = planes * h;
     let step = rows.div_ceil(SAMPLE).max(1);
     let mut starts = vec![0usize; rows + 1];
@@ -264,21 +270,14 @@ fn sample_hits(cands: &[Encoder], src: &[u8], planes: usize, w: usize, h: usize,
 /// them, and so does the tile cut inferred from all rows: the span is then not worth coding,
 /// its rows being stored as they are (as exceptions) besides.
 #[cfg(feature = "encode")]
-fn rank_candidates(
-    cands: Vec<Encoder>,
-    src: &[u8],
-    planes: usize,
-    w: usize,
-    h: usize,
-    cb: usize,
-) -> Option<Vec<Encoder>> {
-    let (hits, sampled) = sample_hits(&cands, src, planes, w, h, cb);
+fn rank_candidates(cands: Vec<Encoder>, src: &[u8], shape: RleShape) -> Option<Vec<Encoder>> {
+    let (hits, sampled) = sample_hits(&cands, src, shape);
     let mut order: Vec<usize> = (0..cands.len()).collect();
     order.sort_by_key(|&k| std::cmp::Reverse(hits[k]));
     let mut ranked: Vec<Encoder> = order.iter().map(|&k| cands[k]).collect();
     if 2 * hits[order[0]] < sampled {
-        let full = packbits::infer_tiles_from(all_splits(src, planes * h, cb));
-        if ranked.contains(&full) || 2 * sample_hits(&[full], src, planes, w, h, cb).0[0] < sampled {
+        let full = packbits::infer_tiles_from(all_splits(src, shape.planes * shape.h, shape.cb));
+        if ranked.contains(&full) || 2 * sample_hits(&[full], src, shape).0[0] < sampled {
             return None;
         }
         ranked.insert(0, full);
@@ -319,12 +318,13 @@ fn plan_span<'a>(
         }
         Compression::Rle => {
             let cb = if psb { 4 } else { 2 };
+            let shape = RleShape { planes, w, h, cb };
             let t0 = std::time::Instant::now();
-            let (plane_lens, splits) = check_rle(src, planes, w, h, cb, 8)?;
+            let (plane_lens, splits) = check_rle(src, shape, 8)?;
             let t1 = std::time::Instant::now();
             let candidates = packbits::candidates_after(packbits::infer_tiles_from(splits));
             let t2 = std::time::Instant::now();
-            let candidates = rank_candidates(candidates, src, planes, w, h, cb)?;
+            let candidates = rank_candidates(candidates, src, shape)?;
             PLAN_TIMES.add([(t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), t2.elapsed().as_secs_f64(), 0.0]);
             (Coding::Rle { count_bytes: cb, encoder: candidates[0], plane_lens, exceptions: Vec::new() }, candidates)
         }
@@ -560,8 +560,7 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>
     // an earlier group, or earlier in a row of the same group.
     let mut at = vec![(usize::MAX, 0usize); spans.len()];
     for (gi, g) in groups.iter().enumerate() {
-        let order = GroupCoder::order(g.planes.len(), g.has_alpha);
-        for (rank, &k) in order.iter().enumerate() {
+        for (rank, k) in GroupCoder::order(g.planes.len(), g.has_alpha).enumerate() {
             at[g.planes[k].0] = (gi, rank);
         }
     }
@@ -599,7 +598,7 @@ fn put_encoder(out: &mut Vec<u8>, e: Encoder) {
         }
         Encoder::Greedy { min_run, split_rest } => {
             out.push(1 + split_rest as u8);
-            put_varint(out, min_run as u64);
+            varint::put(out, min_run as u64);
         }
     }
 }
@@ -632,14 +631,14 @@ const MAX_PLANES: usize = 64;
 /// format: its bytes are an input of the module.
 #[cfg(feature = "encode")]
 fn put_head(o: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef]) {
-    put_varint(o, spans.len() as u64);
+    varint::put(o, spans.len() as u64);
     for s in spans {
-        put_varint(o, s.gap as u64);
-        put_varint(o, (s.end - s.start) as u64);
+        varint::put(o, s.gap as u64);
+        varint::put(o, (s.end - s.start) as u64);
         let dims = |o: &mut Vec<u8>| {
-            put_varint(o, s.planes as u64);
-            put_varint(o, s.w as u64);
-            put_varint(o, s.h as u64);
+            varint::put(o, s.planes as u64);
+            varint::put(o, s.w as u64);
+            varint::put(o, s.h as u64);
         };
         match &s.coding {
             Coding::Raw => {
@@ -651,31 +650,31 @@ fn put_head(o: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef]) {
                 dims(o);
                 put_encoder(o, *encoder);
                 for &l in plane_lens {
-                    put_varint(o, l as u64);
+                    varint::put(o, l as u64);
                 }
-                put_varint(o, exceptions.len() as u64);
+                varint::put(o, exceptions.len() as u64);
                 let mut pr = 0;
                 for (r, bytes) in exceptions {
-                    put_varint(o, (r - pr) as u64);
+                    varint::put(o, (r - pr) as u64);
                     pr = *r;
-                    put_varint(o, bytes.len() as u64);
+                    varint::put(o, bytes.len() as u64);
                     o.extend_from_slice(bytes);
                 }
             }
             Coding::Nested => o.push(16),
             Coding::Copy { of } => {
                 o.push(32);
-                put_varint(o, *of as u64);
+                varint::put(o, *of as u64);
             }
         }
     }
-    put_varint(o, groups.len() as u64);
+    varint::put(o, groups.len() as u64);
     for g in groups {
-        put_varint(o, g.planes.len() as u64);
+        varint::put(o, g.planes.len() as u64);
         o.push(g.has_alpha as u8 | (g.hinted as u8) << 1);
         for (k, &(s, p)) in g.planes.iter().enumerate() {
-            put_varint(o, s as u64);
-            put_varint(o, p as u64);
+            varint::put(o, s as u64);
+            varint::put(o, p as u64);
             put_opt(o, g.same_as[k].unwrap_or(usize::MAX));
         }
     }
@@ -694,7 +693,7 @@ pub(crate) struct Head<'a> {
 /// positions in the output.
 pub(crate) fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
     let mut at = 0;
-    if total as u64 > 1 << 42 {
+    if total as u64 > MAX_FILE {
         return Err(corrupt());
     }
     let n = get_usize(src, &mut at)?;
@@ -1511,7 +1510,7 @@ fn decode_rows_piped(
         batch_channels(if has_in { PIPE_DEPTH + 2 } else { 0 }, || Batch::new(per, w, &known, hn));
     let (out_full_tx, out_full_rx, out_free_tx, out_free_rx) =
         batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &vec![true; ns], 0));
-    let timing = std::env::var_os("PSDR_STATS").is_some();
+    let timing = cfg!(feature = "encode") && std::env::var_os("PSDR_STATS").is_some();
     aqr_common::pool::scope_in(workers, |sc| {
         let reader = has_in.then(|| {
             sc.spawn(move || -> Result<()> {
@@ -1730,7 +1729,7 @@ fn decode_group(
     let mut hint_rows = model::zero_rows(if g.hinted { n } else { 0 }, w);
     let mut rows = model::zero_rows(n, w);
     let mut buf = Vec::with_capacity(row_room(w));
-    let timing = std::env::var_os("PSDR_STATS").is_some();
+    let timing = cfg!(feature = "encode") && std::env::var_os("PSDR_STATS").is_some();
     let mut t = [0f64; 4];
     // (the clock read only if timing: WebAssembly has none)
     let mut clock = timing.then(std::time::Instant::now);
@@ -1797,7 +1796,7 @@ pub(crate) fn decode_formula(
     len: u64,
     threads: usize,
 ) -> Result<Vec<u8>> {
-    let total = usize::try_from(len).ok().filter(|&t| t as u64 <= 1 << 42).ok_or_else(corrupt)?;
+    let total = usize::try_from(len).ok().filter(|&t| t as u64 <= MAX_FILE).ok_or_else(corrupt)?;
     // (the file first, then the head's vectors above it: they are freed before it is given back)
     let mut out = vec![0u8; total];
     let Head { spans, groups, .. } = &get_head(head, total)?;

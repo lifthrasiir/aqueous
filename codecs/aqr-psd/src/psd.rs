@@ -21,7 +21,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn err<T>(s: impl Into<String>) -> Result<T> {
+pub(crate) fn err<T>(s: impl Into<String>) -> Result<T> {
     Err(Error(s.into()))
 }
 
@@ -551,7 +551,7 @@ pub fn linked(psd: &Psd, d: &[u8]) -> Vec<Linked> {
                     .windows(magic.len())
                     .position(|w| w == magic)
                     .map(|k| from + k)
-                    .filter(|&s| s + dl <= end && dl > 0);
+                    .filter(|&s| s.checked_add(dl).is_some_and(|e| e <= end) && dl > 0);
                 if let Some(s) = found {
                     out.push(Linked { file_type: ft, data: s..s + dl });
                 }

@@ -21,10 +21,6 @@ pub struct Shape {
 }
 
 impl Shape {
-    pub fn valid(&self) -> bool {
-        self.width > 0 && (1..=32).contains(&self.bits)
-    }
-
     #[inline(always)]
     pub fn value(&self, x: u32) -> i64 {
         if self.signed { ((x << (32 - self.bits)) as i32 >> (32 - self.bits)) as i64 } else { x as i64 }
@@ -47,6 +43,9 @@ pub struct Coded {
 const ACT: usize = 48;
 /// Lengths of a residual in bits, 0 to 32, as a tree of 6 bits.
 const LEN_TREE: usize = 64;
+/// Contexts of the first bits after the leading one: by activity (a quarter as fine) and by
+/// length 0 to 32.
+const SECOND: usize = ACT / 4 * 33;
 /// Bits after a residual's leading one that are coded with adaptive bits, at most.
 const MODELLED: u32 = 1;
 /// Contexts of the bias correction.
@@ -80,7 +79,7 @@ const _: () = assert!(size_of::<Bit>() as u64 == BIT_BYTES && size_of::<(i64, i3
 pub fn decode_plan(width: usize) -> u64 {
     use aqr_api::stack::block;
     block(BIT_BYTES * (LEN_TREE * ACT) as u64)
-        + block(BIT_BYTES * ((12 * 33) << MODELLED) as u64)
+        + block(BIT_BYTES * (SECOND << MODELLED) as u64)
         + block(BIAS_BYTES * BIAS as u64)
         + 2 * block(width as u64 + 2)
 }
@@ -95,6 +94,13 @@ struct Pred {
 #[inline(always)]
 fn len_of(v: u64) -> u32 {
     64 - v.leading_zeros()
+}
+
+/// The half octave of `t`: 0, 1, then two buckets per octave.
+#[inline(always)]
+pub(crate) fn half_octave(t: u64) -> usize {
+    let l = len_of(t);
+    if l < 2 { l as usize } else { (2 * l - 1 + ((t >> (l - 2)) & 1) as u32) as usize }
 }
 
 /// A gradient quantised to −4..=4 against the noise.
@@ -116,7 +122,7 @@ impl Model {
         Model {
             s,
             len: vec![Bit::default(); LEN_TREE * ACT],
-            second: vec![Bit::default(); (12 * 33) << MODELLED],
+            second: vec![Bit::default(); SECOND << MODELLED],
             bias: vec![(0, 0); BIAS],
             elen: [vec![0; s.width + 2], vec![0; s.width + 2]],
             noise: 16,
@@ -153,10 +159,7 @@ impl Model {
         let g = (a - c).unsigned_abs() + (b - c).unsigned_abs() + (b - d).unsigned_abs();
         let e = (1u64 << now[x]) + (1u64 << prev[x + 1]) + (1u64 << prev[x + 2]) - 3;
         let t = g + 2 * e;
-        // half octaves
-        let l = len_of(t);
-        let act = if l < 2 { l as usize } else { (2 * l - 1 + ((t >> (l - 2)) & 1) as u32) as usize };
-        Pred { pred, act: act.min(ACT - 1), bias }
+        Pred { pred, act: half_octave(t).min(ACT - 1), bias }
     }
 
     /// The residual of pixel `p` against `pr`, wrapped to the pixels' bits, zigzagged.

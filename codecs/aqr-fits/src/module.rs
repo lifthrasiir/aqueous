@@ -128,7 +128,7 @@ pub fn image(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let p = Pixels::from_bytes(params).ok_or_else(corrupt)?;
     let &[model, raw] = inputs else { return Err(corrupt()) };
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    // (no more pixels than 64 a byte coded)
+    // (at most 256 pixels per byte coded plus 64)
     if len % p.bytes() != 0 || !within(len as u64, model.len() + raw.len()) {
         return Err(corrupt());
     }

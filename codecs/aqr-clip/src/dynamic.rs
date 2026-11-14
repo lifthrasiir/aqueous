@@ -75,7 +75,7 @@ static COST: std::sync::LazyLock<[f32; 4096]> =
     std::sync::LazyLock::new(|| std::array::from_fn(|i| -((i as f32 + 0.5) / 4096.0).log2()));
 
 /// Pixels of the row above that must equal the left one for a run.
-const RUN_LOOK: usize = 4;
+pub(crate) const RUN_LOOK: usize = 4;
 
 /// Pixels kept in the list.
 pub const LIST: usize = 256;
@@ -86,19 +86,14 @@ const CANDS: usize = 4;
 const COPY_CTX: usize = 2 * 16 * 4;
 /// Contexts of a run: whether in the first row, whether the stretch above reaches the end of
 /// the row, and whether the last run was as long as its stretch.
-const RUN_CTX: usize = 8;
+pub(crate) const RUN_CTX: usize = 8;
 /// Bits of the Elias-gamma code: the unary part, and the bits below the leading one by length.
 const GAMMA: usize = 12;
 
+#[derive(Default)]
 struct Gamma {
     unary: [Bit; GAMMA],
     low: [[Bit; GAMMA]; GAMMA],
-}
-
-impl Default for Gamma {
-    fn default() -> Self {
-        Gamma { unary: [Bit::default(); GAMMA], low: [[Bit::default(); GAMMA]; GAMMA] }
-    }
 }
 
 /// Codes `v` (below 2^(GAMMA - 1) - 1).
@@ -138,9 +133,9 @@ pub enum Escape {
 }
 
 /// Contexts of [`Escape::Med`]: by sample, transparency, activity and G's residual.
-const SLOTS: usize = 5;
-const ACT: usize = 8;
-const CROSS: usize = 4;
+pub(crate) const SLOTS: usize = 5;
+pub(crate) const ACT: usize = 8;
+pub(crate) const CROSS: usize = 4;
 
 /// Samples' trees of [`Escape::Left`].
 const TREES: usize = 10;
@@ -176,7 +171,7 @@ pub struct Model {
 }
 
 #[inline]
-fn med(a: u8, b: u8, c: u8) -> u8 {
+pub(crate) fn med(a: u8, b: u8, c: u8) -> u8 {
     let (lo, hi) = (a.min(b), a.max(b));
     if c >= hi {
         lo
@@ -188,7 +183,7 @@ fn med(a: u8, b: u8, c: u8) -> u8 {
 }
 
 #[inline]
-fn bucket(v: u32, n: usize) -> usize {
+pub(crate) fn bucket(v: u32, n: usize) -> usize {
     ((32 - v.leading_zeros()) as usize).min(n - 1)
 }
 

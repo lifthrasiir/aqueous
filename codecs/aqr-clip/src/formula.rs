@@ -115,8 +115,10 @@ fn encode_at(input: &[u8], threads: usize) -> Option<Formula> {
         varint::put(&mut index, back as u64);
         next = i + 1;
     }
-    for s in &streams {
+    let mut tiles = Vec::with_capacity(streams.iter().map(Vec::len).sum());
+    for s in streams {
         varint::put(&mut index, s.len() as u64);
+        tiles.extend_from_slice(&s);
     }
     let mut params = Vec::new();
     varint::put(&mut params, BATCH as u64);
@@ -124,7 +126,7 @@ fn encode_at(input: &[u8], threads: usize) -> Option<Formula> {
     let mut f = Formula::default();
     let skeleton = f.push_content("clip/skeleton", Kind::Unknown, skeleton);
     let index = f.push("clip/index", index);
-    let tiles = f.push_as("clip/tiles", Kind::Compressed, streams.concat());
+    let tiles = f.push_as("clip/tiles", Kind::Compressed, tiles);
     let database = if database.is_empty() {
         f.push("clip/database", Vec::new())
     } else {

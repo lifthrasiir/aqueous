@@ -1,31 +1,14 @@
 //! Decoding of channel and composite image data into planes.
 
-use crate::psd::{Compression, Error, Psd, Result};
-
-fn err<T>(s: impl Into<String>) -> Result<T> {
-    Err(Error(s.into()))
-}
+use crate::psd::{Compression, Error, Psd, Result, err};
+use crate::{packbits, rows};
 
 /// Appends the PackBits decoding of `src` to `out`; returns false if `src` is malformed.
-pub fn unpackbits(mut src: &[u8], out: &mut Vec<u8>) -> bool {
-    while let [h, rest @ ..] = src {
-        let h = *h as i8;
-        if h >= 0 {
-            let k = h as usize + 1;
-            if rest.len() < k {
-                return false;
-            }
-            out.extend_from_slice(&rest[..k]);
-            src = &rest[k..];
-        } else if h != -128 {
-            let Some(&b) = rest.first() else { return false };
-            out.resize(out.len() + (1 - h as isize) as usize, b);
-            src = &rest[1..];
-        } else {
-            src = rest;
-        }
-    }
-    true
+pub fn unpackbits(src: &[u8], out: &mut Vec<u8>) -> bool {
+    let Some(n) = packbits::decoded_len(src) else { return false };
+    let at = out.len();
+    out.resize(at + n, 0);
+    rows::unpackbits_into(src, &mut out[at..])
 }
 
 // (aqr-flate's `Data` is `Vec<u8>` itself without `encode`)

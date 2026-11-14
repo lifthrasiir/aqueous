@@ -34,12 +34,12 @@ use aqr_clip::tile::{self, AREA, Class, Layout, SIDE};
 use aqr_clip::zlib::inflate;
 use aqr_clip::{clip, r#static};
 use aqr_common::arith::{ArithDecoder, ArithEncoder};
+use aqr_common::pool;
 use aqr_formula::Formula;
 use aqr_formula::aqr::{self, Level};
 use aqr_psd::model::{GroupCoder, Recorder};
 use aqr_raw::image::raster;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -308,25 +308,9 @@ fn batch(l: Layout, zs: &[&[u8]], check: bool) -> Sizes {
     s
 }
 
-/// Runs `f` over `0..n` on `threads` threads, the results in order.
-fn par<T: Send>(n: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let next = AtomicUsize::new(0);
-    let out: Mutex<Vec<Option<T>>> = Mutex::new((0..n).map(|_| None).collect());
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n.max(1)) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    let r = f(i);
-                    out.lock().unwrap()[i] = Some(r);
-                }
-            });
-        }
-    });
-    out.into_inner().unwrap().into_iter().map(|r| r.unwrap()).collect()
+/// The number following option `-t` or `-b`.
+fn count<'a>(it: &mut impl Iterator<Item = &'a String>) -> usize {
+    it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())
 }
 
 fn bench(args: &[String]) {
@@ -334,8 +318,8 @@ fn bench(args: &[String]) {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "-t" => threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
-            "-b" => per = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-t" => threads = count(&mut it),
+            "-b" => per = count(&mut it),
             "-c" => check = true,
             _ => files.push(a.clone()),
         }
@@ -353,7 +337,7 @@ fn bench(args: &[String]) {
             continue;
         };
         // classes first, then batches of each
-        let classes = par(p.found.len(), threads, |i| {
+        let classes = pool::par_map(p.found.len(), threads, |i| {
             let f = &p.found[i];
             tile::classify(f.layout, &inflate(f.zlib, f.layout.bytes()).expect("inflate"))
         });
@@ -362,7 +346,7 @@ fn bench(args: &[String]) {
             groups.entry((f.layout, c)).or_default().push(f.zlib);
         }
         let jobs: Vec<(Key, &[&[u8]])> = groups.iter().flat_map(|(k, v)| v.chunks(per).map(move |c| (*k, c))).collect();
-        let sizes = par(jobs.len(), threads, |i| batch(jobs[i].0.0, jobs[i].1, check));
+        let sizes = pool::par_map(jobs.len(), threads, |i| batch(jobs[i].0.0, jobs[i].1, check));
         let mut by: BTreeMap<Key, Sizes> = BTreeMap::new();
         for (j, s) in jobs.iter().zip(sizes) {
             *by.entry(j.0).or_default() += s;
@@ -473,8 +457,8 @@ fn speed(args: &[String]) {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "-t" => threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
-            "-b" => per = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-t" => threads = count(&mut it),
+            "-b" => per = count(&mut it),
             "-u" => unique = true,
             "-m" => match it.next().map(String::as_str) {
                 Some("dynamic") => stat = false,
@@ -517,7 +501,7 @@ fn speed(args: &[String]) {
 
     let heads = AtomicUsize::new(0);
     let t = Instant::now();
-    let coded = par(jobs.len(), threads, |i| {
+    let coded = pool::par_map(jobs.len(), threads, |i| {
         let (l, zs) = (jobs[i].0, &jobs[i].1);
         let mut c = Instant::now();
         let tiles: Vec<Vec<u8>> = zs.iter().map(|z| inflate(z, l.bytes()).expect("inflate")).collect();
@@ -547,7 +531,7 @@ fn speed(args: &[String]) {
     let size: usize = coded.iter().map(|c| c.0.len()).sum();
 
     let t = Instant::now();
-    let dec = par(jobs.len(), threads, |i| {
+    let dec = pool::par_map(jobs.len(), threads, |i| {
         let (l, zs) = (jobs[i].0, &jobs[i].1);
         let mut c = Instant::now();
         let (mut px, mut tiles) = (vec![0u64; AREA], Vec::with_capacity(zs.len()));
@@ -624,7 +608,7 @@ fn formula(args: &[String]) {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "-t" => threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-t" => threads = count(&mut it),
             _ => files.push(a.clone()),
         }
     }

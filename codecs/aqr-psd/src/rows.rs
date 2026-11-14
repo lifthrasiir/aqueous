@@ -1,10 +1,6 @@
 //! Row by row access to the planes of pixel data, without decoding whole planes.
 
-use crate::psd::{Compression, Error, Psd, Result};
-
-fn err<T>(s: &str) -> Result<T> {
-    Err(Error(s.into()))
-}
+use crate::psd::{Compression, Error, Psd, Result, err};
 
 /// Decodes PackBits `src` into exactly `out`; false if malformed or of another length.
 pub fn unpackbits_into(mut src: &[u8], out: &mut [u8]) -> bool {

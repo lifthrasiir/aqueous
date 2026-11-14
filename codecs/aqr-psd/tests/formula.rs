@@ -115,6 +115,26 @@ fn same_bytes_other_size_is_no_copy() {
     check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, 0, &[0, 1]));
 }
 
+/// `file` with the last of its layers clipped (to the one below it).
+fn clip_last_layer(mut file: Vec<u8>) -> Vec<u8> {
+    let tag = b"8BIMnorm\xff\x00\x08\x00";
+    let at = file.windows(tag.len()).rposition(|w| w == tag).expect("a layer record");
+    file[at + 9] = 1;
+    file
+}
+
+#[test]
+fn clipped_layer_outside_the_canvas() {
+    // A clipped layer wholly right of, or left of, the canvas: its columns on the canvas are none.
+    let (w, h) = (120, 20);
+    for left in [500, -400] {
+        let mut ls = layers(w, h, true);
+        let channels = ls[0].channels.iter().map(|(id, d)| (*id, d[..500].to_vec())).collect();
+        ls.push(Layer { top: 0, left, w: 50, h: 10, channels, mask: None });
+        check(&clip_last_layer(psd(w, h, &ls, packbits::NO_TILES, 0, &[])));
+    }
+}
+
 #[test]
 fn layer_outside_the_canvas() {
     // Layers right of, below and left of the canvas; the composite is rendered as hint.
@@ -354,6 +374,16 @@ fn with_linked(file: &[u8], files: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
     let new_len = (m_end - m_len_at - 4 + tag.len()) as u32;
     out[m_len_at..m_len_at + 4].copy_from_slice(&new_len.to_be_bytes());
     out
+}
+
+#[test]
+fn linked_file_of_absurd_length_is_none() {
+    // The length of the embedded file wraps the end of its range around, to a place before it.
+    let mut file = with_linked(&small_psd(0), &[(b"png ", &png(20, 10))]);
+    let at = file.windows(8).position(|w| w == b"png \0\0\0\0").unwrap() + 8;
+    file[at..at + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+    let psd = aqr_psd::parse(&file).unwrap();
+    assert!(aqr_psd::psd::linked(&psd, &file).is_empty());
 }
 
 fn small_psd(seed: usize) -> Vec<u8> {

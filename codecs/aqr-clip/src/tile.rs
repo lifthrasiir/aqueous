@@ -7,6 +7,7 @@
 //!
 //! A pixel is all of its samples at once, packed into a `u64` (plane first, a byte each).
 
+#[cfg(feature = "encode")]
 use std::collections::HashSet;
 
 pub const SIDE: usize = 256;
@@ -43,6 +44,7 @@ impl Layout {
         AREA * self.samples()
     }
 
+    #[cfg(feature = "encode")]
     pub fn name(self) -> &'static str {
         match self {
             Layout::Color => "color",
@@ -86,6 +88,7 @@ pub fn unpixels(l: Layout, px: &[u64], t: &mut Vec<u8>) {
 }
 
 /// Tiles by how many distinct pixels they have.
+#[cfg(feature = "encode")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Class {
     /// All bytes zero.
@@ -100,6 +103,7 @@ pub enum Class {
     Full,
 }
 
+#[cfg(feature = "encode")]
 impl Class {
     pub const ALL: [Class; 5] = [Class::Zero, Class::Const, Class::Few, Class::Palette, Class::Full];
 
@@ -114,6 +118,7 @@ impl Class {
     }
 }
 
+#[cfg(feature = "encode")]
 pub fn classify(l: Layout, t: &[u8]) -> Class {
     if t.iter().all(|&b| b == 0) {
         return Class::Zero;

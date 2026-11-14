@@ -244,6 +244,16 @@ enum Op {
     Layer(usize),
 }
 
+/// A layer's user mask: its rows, its rectangle (top, left, width, height) and the value outside.
+struct MaskRows<'a> {
+    rows: PlaneRows<'a>,
+    top: i64,
+    left: i64,
+    w: usize,
+    h: usize,
+    default: u8,
+}
+
 /// What a pixel layer needs per row.
 struct LayerRows<'a> {
     top: i64,
@@ -252,8 +262,7 @@ struct LayerRows<'a> {
     h: usize,
     rgb: [PlaneRows<'a>; 3],
     alpha: Option<PlaneRows<'a>>,
-    /// The user mask: rows, rectangle (top, left, width, height), default value.
-    mask: Option<(PlaneRows<'a>, i64, i64, usize, usize, u8)>,
+    mask: Option<MaskRows<'a>>,
     clip: bool,
     /// Whether clipped layers follow (this one's coverage clips them).
     base: bool,
@@ -375,14 +384,14 @@ impl<'a> RowRenderer<'a> {
                 && mk.flags & 2 == 0
             {
                 let c = &l.channels[j];
-                mask = Some((
-                    ch(j)?,
-                    mk.rect.top as i64,
-                    mk.rect.left as i64,
-                    c.width as usize,
-                    c.height as usize,
-                    mk.default_color,
-                ));
+                mask = Some(MaskRows {
+                    rows: ch(j)?,
+                    top: mk.rect.top as i64,
+                    left: mk.rect.left as i64,
+                    w: c.width as usize,
+                    h: c.height as usize,
+                    default: mk.default_color,
+                });
             }
             if !l.hidden() {
                 if blend_fn(&l.blend).is_none() {
@@ -449,7 +458,7 @@ impl<'a> RowRenderer<'a> {
                 Op::Layer(i) => rows[i].as_ref(),
                 _ => None,
             })
-            .map(|l| l.w.max(l.mask.as_ref().map_or(0, |m| m.3)))
+            .map(|l| l.w.max(l.mask.as_ref().map_or(0, |m| m.w)))
             .max()
             .unwrap_or(0);
         // (a level of canvas for each group open at once, and the file's)
@@ -555,13 +564,13 @@ impl<'a> RowRenderer<'a> {
                     }
                     if l.clip {
                         let (c0, c1) = self.clip_range;
-                        if c0.max(x0) >= c1.min(x1) {
+                        if lx0 < lx1 && c0.max(x0) >= c1.min(x1) {
                             ab[lx0..lx1].fill(0);
                         }
                     }
                     let mut seen = lx0 < lx1 && ab[lx0..lx1].iter().any(|&v| v != 0);
                     // Coverage: alpha times mask, into the alpha buffer (layer coordinates).
-                    if let Some((m, mt, ml, mw, mh, def)) = &mut l.mask {
+                    if let Some(MaskRows { rows: m, top: mt, left: ml, w: mw, h: mh, default: def }) = &mut l.mask {
                         let my = y as i64 - *mt;
                         let inside = my >= 0 && my < *mh as i64;
                         if inside {

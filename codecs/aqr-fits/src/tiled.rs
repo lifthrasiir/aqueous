@@ -99,7 +99,10 @@ impl Layout {
             && self.dims.iter().chain(&self.tile).all(|&d| d > 0)
             && self.pixels().is_some_and(|n| n < 1 << 40)
             && self.tile.iter().try_fold(1u64, |a, &t| a.checked_mul(t)).is_some_and(|n| n < 1 << 32)
-            && self.row.checked_mul(self.rows).is_some_and(|t| t <= self.heap && self.field + self.desc() <= self.row)
+            && self
+                .row
+                .checked_mul(self.rows)
+                .is_some_and(|t| t <= self.heap && self.field.checked_add(self.desc()).is_some_and(|e| e <= self.row))
             && self.heap <= self.len
     }
 
@@ -348,6 +351,21 @@ pub fn pixels_kept(d: &[u8], l: &Layout, spans: &[Span], rebuilt: &[bool], image
     coded
 }
 
+/// Which of the `pixels` pixels are of the model: those of the rebuilt tiles (as
+/// [`pixels_kept`] returns).
+#[cfg(feature = "encode")]
+pub fn coded(l: &Layout, rebuilt: &[bool], pixels: usize) -> Vec<bool> {
+    let mut coded = vec![false; pixels];
+    let mut runs = Vec::with_capacity(l.largest_runs() as usize);
+    for (i, _) in rebuilt.iter().enumerate().filter(|&(_, &r)| r) {
+        l.runs(i as u64, &mut runs);
+        for &(off, len) in &runs {
+            coded[off..off + len].fill(true);
+        }
+    }
+    coded
+}
+
 /// The data unit of layout `l` from its rows, its residue, which tiles are rebuilt, the image
 /// (all its pixels) and the codes of the rebuilt tiles' blocks; also the spans.
 pub fn layout(l: &Layout, rows: &[u8], residue: &[u8], rebuilt: &[bool]) -> Option<(Vec<u8>, Vec<Span>)> {
@@ -363,7 +381,7 @@ pub fn layout(l: &Layout, rows: &[u8], residue: &[u8], rebuilt: &[bool]) -> Opti
         if !r {
             continue;
         }
-        let gap = s.start - d.len();
+        let gap = s.start.checked_sub(d.len())?;
         d.extend_from_slice(residue.get(from..from + gap)?);
         from += gap;
         d.resize(s.start + s.len, 0);
@@ -424,7 +442,7 @@ pub(crate) const CODE_TREE: usize = 32;
 
 /// The codes of the rebuilt tiles' blocks coded, each in the context of the code that codes
 /// its block the shortest ([`rice::shortest`]). The image is known when they are decoded.
-pub fn encode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], codes: &[u8]) -> Vec<u8> {
+pub fn encode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], codes: &[u8]) -> Option<Vec<u8>> {
     let mut ac = ArithEncoder::new(Vec::new());
     let mut m = vec![Bit::default(); CODE_TREE * CODE_TREE];
     let mut c = codes.iter();
@@ -439,8 +457,8 @@ pub fn encode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], codes: &[u8]) -
             node = node * 2 + bit as usize;
         }
         Some(())
-    });
-    ac.finish()
+    })?;
+    Some(ac.finish())
 }
 
 /// The codes of [`encode_codes`].

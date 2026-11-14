@@ -17,13 +17,6 @@ pub struct Field {
     pub name: Option<String>,
 }
 
-impl Field {
-    /// Bytes of an element: of the type, of a descriptor for `P` (8) and `Q` (16); 0 for bits.
-    pub fn width(&self) -> usize {
-        width(self.ty).unwrap_or(0)
-    }
-}
-
 /// Bytes of an element of type `ty`, None for bits (`X`) and types not known.
 fn width(ty: u8) -> Option<usize> {
     Some(match ty {

@@ -15,6 +15,8 @@
 //!
 //! Strings are a u32 count of UTF-16BE units, then the units. Integers are big-endian.
 
+use crate::module::{BEGIN, END};
+
 pub struct Chunk<'a> {
     pub kind: [u8; 4],
     /// Where the body starts in the file.
@@ -84,9 +86,6 @@ fn string(d: &[u8], p: usize) -> Option<(String, usize)> {
     let units: Vec<u16> = s.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)).collect();
     Some((String::from_utf16(&units).ok()?, p + 4 + 2 * n))
 }
-
-const BEGIN: &str = "BlockDataBeginChunk";
-const END: &str = "BlockDataEndChunk";
 
 /// Whether data of an `Exta` chunk starts as block data.
 pub fn is_block_data(data: &[u8]) -> bool {
