@@ -341,12 +341,14 @@ optimization picked by hash.
   says they pay; integers and packed bytes as lanes. Every dtype of the containers is taken. A
   `.pth` is read by its central directory and the persistent ids of its pickle
   (a small machine of the opcodes, nothing else of the pickle). Speed is the point (the files
-  are tens of GB): aim at 500 MB/s through `aqr`. What bounds it now is the archive's: the coded
-  streams probed by zstd whole (`How::Light`), and the writing and verification of a large file
-  on one thread. Samples are in `F:\Software\bai-models`, `F:\Software\lmstudio-models` and
-  `F:\Data\sam_vit_h_4b8939.pth` (F32), used in place (never copied); safetensors from Hugging
-  Face (and checkpoints dequantised from them) in `F:\Data\aqr-corpus\tensors`. Left (its
-  README's Status).
+  are tens of GB): aim at 500 MB/s through `aqr` (492 MB/s on tenz's 11 models, 2026-11-14). What
+  bounds it now is the archive's: the coded streams probed by zstd whole (`How::Light`), and each
+  segment's side stream planned by itself (its README's Status). Samples are in
+  `F:\Software\bai-models`, `F:\Software\lmstudio-models` and `F:\Data\sam_vit_h_4b8939.pth`
+  (F32), used in place (never copied); safetensors from Hugging Face (and checkpoints
+  dequantised from them) and the models of tenz's README (github.com/nsiddiqui248/tenz, a GGUF
+  compressor of context models: about 4 points smaller than aqr-tensors on quantised GGUF) in
+  `F:\Data\aqr-corpus\tensors`. Left (its README's Status).
 - aqr-log (lines of text: logs, tables of numbers; `log-recons`): each line a template (timestamps
   found in it, by aqr-num's `time` patterns, are slots of the mark 0x04 with their pattern; the
   rest cut into tokens at spaces, or by what the first MiB codes smaller at `;`, TAB and `,` too,

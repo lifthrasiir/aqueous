@@ -71,7 +71,7 @@ The formula is the concatenation of the header, then the tensor data to the end 
 - the rest in *segments* of about 16 MiB, each an application of `tensors-recons` whose runs
   (§4) are the tensors' parts and the bytes between them in turn: a tensor is cut between
   segments at its chunks (§4.2 to §4.5). The streams of each application are `tensors/syms` and
-  `tensors/raw` (compressed already) and `tensors/side`.
+  `tensors/raw` (compressed already) and `tensors/side`, each kept apart (a block of its own).
 
 A tensor's part of fewer than 4096 bytes is a run of bytes as they are (§4.1), and so is one
 whose coded form is estimated (by the tables' costs) at 98.5% of its bytes or more: noise, or

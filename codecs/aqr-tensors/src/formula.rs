@@ -686,6 +686,11 @@ pub fn encode_sealing<T: Send>(
                 part.push_as(SIDE, Kind::Unknown, c.side),
             ];
             part.root = Node::apply(MODULE, c.params, inputs, (b - a) as u64);
+            // (each of a segment's streams a block of its own, encoded with the segment, on its
+            // worker: the side streams of all of them a stream of the archive, whose blocks of
+            // 128 MiB were compressed one at a time as they filled, held up the segments; at
+            // 0.25-1.25 s each of the order the blocks are written in, most of gemma-4-31B's time)
+            part.streams.iter_mut().for_each(|s| s.apart = true);
             let t = made(&mut part, &input[a..b]);
             (part, t)
         });

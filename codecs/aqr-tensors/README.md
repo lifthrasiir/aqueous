@@ -115,6 +115,17 @@ The 5.3 GB Q4_K_M: 18.65 -> 13.1–13.5 s, resident peak 15.89 -> 1.26 GB, spill
 15.8 MB, the archive 5,131,102,954 -> 5,131,401,818 B (the room's spacer, and the blocks in the
 order they filled).
 
+Then (2026-11-14), the file is read once for its checksum and its content hash together, the
+content hash on all the threads, and verifying compares with those, not reading it again; the
+archive's blocks stored as they are are hashed in place on all the threads, not copied four at
+a time; and each segment's `tensors/side` is a block of its own, encoded on the segment's worker
+(the side streams had been one stream of the archive, whose 128 MiB blocks were compressed one
+at a time as they filled, on the thread that seals, the segments waiting: 0.3 s each for a
+Q4_K_M, 1.25 s for Gemma's Q4_0 scales at a higher zstd level). On the 11 files of tenz's
+README (0.4–17.65 GB, 35.26 GB in all), `aqr -c` 109.6 -> 71.7 s (322 -> 492 MB/s), `aqr -K`
+22.4 -> 18.4 s, the archives -0.06% to +0.02%: gemma-4-31B-it-QAT Q4_0 62.9 -> 38.2 s,
+Qwen2.5-7B Q4_K_M 11.9 -> 8.0 s.
+
 A `.pth` is a ZIP archive of stored entries: its pickle `data.pkl` first, then each storage an
 entry `data/KEY`. The storages are found by the central directory and the persistent ids of the
 pickle (`('storage', torch.FloatStorage, KEY, …, NUMEL)`), read by a machine of the opcodes that
@@ -186,8 +197,14 @@ Left:
   (not to standard output, encrypted, or mirrored).
 - Within the archive, the streams coded are compressed at zstd's probe level all the same,
   whole, to see whether they would save (`How::Light`), which costs as many thread-seconds as
-  the coding; and the archive's writing and verification of a large file are mostly on one
-  thread (see "How it does").
+  the coding (most of it the long-distance matching: zstd -1 alone is 3.4 times faster). Not
+  probing `tensors/syms` would make Qwen2.5-7B 8.65 -> 7.57 s, but 1.19 MB larger: two of its
+  blocks save 4.2% (rows repeated near each other, which zstd -1 finds without it).
+- Each segment's `tensors/side` is planned by itself (`plan_of`: a sample tried at five levels),
+  four times the thread-seconds of compressing it (Qwen2.5-7B: 13.6 of 17.1); gemma-4-31B's take
+  most of its 38 s. Alike streams of a class planned once, deterministically, would take that.
+- Reading the file through (its checksum on one thread, 4–5 GB/s) and verifying the archive
+  (its blocks hashed, decoded where they are compressed) take 2–3 s of Gemma's 38.
 - A grid's values one at a time in Wasm (SIMD128 has no conversion to F16; BF16's and F32's
   would take a lookup of 16 values by byte shuffles, as NEON's does).
 - Grids: their coding (0.8–0.9 GB/s on 16 threads) is under the 500 MB/s through `aqr` where
