@@ -63,7 +63,7 @@ fn main() {
     assert_eq!(at, d.len());
     let mb = d.len() as f64 / 1e6;
     let coded: u64 =
-        sizes.iter().filter(|(k, _)| k.as_str() != "gguf/header" && k.as_str() != "tensors/data").map(|(_, v)| v).sum();
+        sizes.iter().filter(|(k, _)| !k.ends_with("/header") && k.as_str() != "tensors/data").map(|(_, v)| v).sum();
     println!(
         "{path}: {mb:.1} MB, {} applications of {:.1} MB -> {:.1} MB ({:.4})",
         apps.len(),

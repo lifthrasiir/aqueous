@@ -31,12 +31,13 @@ pub struct Table {
 impl Table {
     /// The table of frequencies `freq`, which must add up to [`PROB`].
     pub fn new(freq: [u32; 16]) -> Result<Table> {
+        // (the sum in 64 bits: frequencies of 32 may wrap in 32)
+        if freq.iter().map(|&f| f as u64).sum::<u64>() != PROB as u64 {
+            return Err(corrupt());
+        }
         let mut cum = [0; 17];
         for s in 0..16 {
             cum[s + 1] = cum[s] + freq[s];
-        }
-        if cum[16] != PROB {
-            return Err(corrupt());
         }
         Ok(Table { freq, cum })
     }
@@ -84,13 +85,6 @@ impl Table {
     }
 }
 
-/// The order-0 entropy of `counts`, in bits.
-pub fn entropy(counts: &[u64; 16]) -> f64 {
-    let total: u64 = counts.iter().sum();
-    let t = total as f64;
-    counts.iter().filter(|&&c| c > 0).map(|&c| c as f64 * (t / c as f64).log2()).sum()
-}
-
 /// The encoder: groups gathered in order ([`Encoder::group`]), coded at the end, last first.
 #[derive(Default)]
 pub struct Encoder {
@@ -135,11 +129,6 @@ impl Encoder {
         self.groups.extend(std::iter::repeat_n((table, LANES as u8), syms.len() / LANES));
     }
 
-    /// The symbols gathered.
-    pub fn symbols(&self) -> usize {
-        self.syms.len()
-    }
-
     /// Where the encoder is: its symbols and groups so far, to go back to ([`Encoder::rewind`]).
     pub fn mark(&self) -> (usize, usize) {
         (self.syms.len(), self.groups.len())
@@ -170,11 +159,6 @@ impl Encoder {
         if !n.is_multiple_of(LANES) {
             self.groups.push((table, (n % LANES) as u8));
         }
-    }
-
-    /// The symbols from `mark` on.
-    pub fn since(&self, mark: (usize, usize)) -> &[u8] {
-        &self.syms[mark.0..]
     }
 
     /// The stream of the groups, with `tables` (every symbol coded must have a frequency in its
@@ -942,6 +926,20 @@ mod tests {
             assert_eq!(t.cum[16], PROB);
             assert!((0..16).all(|s| (counts[s] > 0) == (t.freq[s] > 0)));
         }
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    /// Frequencies whose sum wraps to `PROB` are no table.
+    #[test]
+    fn wrapping_frequencies() {
+        let mut freq = [0u32; 16];
+        freq[0] = u32::MAX;
+        freq[1] = PROB + 1;
+        assert!(Table::new(freq).is_err());
     }
 }
 

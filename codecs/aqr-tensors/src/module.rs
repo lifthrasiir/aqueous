@@ -214,7 +214,7 @@ fn run(
     let mut total = 0u64;
     while at < params.len() {
         let r = Run::read(params, &mut at, sc.grid.len())?;
-        total = total.checked_add(r.len()).filter(|&t| t <= size).ok_or_else(corrupt)?;
+        total = r.len().and_then(|n| total.checked_add(n)).filter(|&t| t <= size).ok_or_else(corrupt)?;
         if let Run::Raw(n) = r {
             let mut put = Ok(());
             let all = side.each(n, |p| {
@@ -252,9 +252,8 @@ fn run(
             }
         }
     }
-    let written = total;
     out.flush()?;
-    if written != size || dec.is_some_and(|d| !d.finish()) || !words.done() || !raw.done() || !side.done() {
+    if total != size || dec.is_some_and(|d| !d.finish()) || !words.done() || !raw.done() || !side.done() {
         return Err(corrupt());
     }
     Ok(())
@@ -509,7 +508,9 @@ fn grid(
                 side.exact(d).ok_or_else(corrupt)?;
             } else {
                 let (g, qs, s, z) = (&sc.grid[..k], &q[i..i + span], f32::from_bits(s), sc.zeros[tc]);
-                crate::gridval::values(f, g, qs, s, z, r.zero, d);
+                // SAFETY: the indices are below `k` (checked above, or the table's alphabet),
+                // `g` is of `k` values, and `d` of the span's elements' bytes.
+                unsafe { crate::gridval::values(f, g, qs, s, z, r.zero, d) };
             }
             i += span;
             col += span as u64;

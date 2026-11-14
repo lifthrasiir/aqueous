@@ -6,7 +6,7 @@ use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::grid;
 use crate::layout::{self, FLOAT_CHUNK, Float, FloatRun, LANES_CHUNK, LanesRun, Part, Quant, Run};
-use crate::rans::{self, Encoder, Table};
+use crate::rans::{Encoder, Table};
 use crate::tensors::{self, Data, Tensor, Tensors};
 
 pub use crate::module::decode;
@@ -34,11 +34,6 @@ pub const SEGMENT: usize = 16 << 20;
 pub const LONG_RAW: usize = 1 << 20;
 /// A tensor (or a part of one in a segment) of fewer bytes is not coded.
 pub const MIN_CODED: usize = 4096;
-
-/// Whether `d` starts as a file of tensors this crate takes: GGUF, `torch.save`'s or safetensors.
-pub fn starts(d: &[u8]) -> bool {
-    tensors::starts(d).is_some()
-}
 
 /// A span of the file in a segment: bytes as they are, or of a tensor coded (its index in the
 /// file's).
@@ -755,9 +750,4 @@ pub fn encode_sealing<T: Send>(
 /// Whether formula `f` is one of [`encode`]'s, or holds one.
 pub fn is(f: &Formula) -> bool {
     f.streams.iter().any(|s| s.class == SYMS)
-}
-
-/// The order-0 entropy of the symbols of `counts`, in bits (for the bench's reports).
-pub fn entropy(counts: &[u64; 16]) -> f64 {
-    rans::entropy(counts)
 }

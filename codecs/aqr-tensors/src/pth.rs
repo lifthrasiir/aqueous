@@ -53,13 +53,13 @@ fn entries(d: &[u8]) -> Option<Vec<Entry<'_>>> {
         if d[loc..loc + 4] != *b"PK\x06\x07" {
             return None;
         }
-        let rec = usize::try_from(u64_at(d, loc + 8)?).ok()?;
+        let rec = usize::try_from(u64_at(d, loc + 8)?).ok().filter(|&r| r <= d.len())?;
         if d.get(rec..rec + 4)? != b"PK\x06\x06" {
             return None;
         }
         (count, cd) = (u64_at(d, rec + 32)?, u64_at(d, rec + 48)?);
     }
-    let mut at = usize::try_from(cd).ok()?;
+    let mut at = usize::try_from(cd).ok().filter(|&a| a <= d.len())?;
     // (an entry of the central directory is at least 46 bytes)
     if count > (d.len().saturating_sub(at) / 46) as u64 {
         return None;
@@ -91,7 +91,7 @@ fn entries(d: &[u8]) -> Option<Vec<Entry<'_>>> {
             x += 4 + len;
         }
         at = x_end + cl;
-        let local = usize::try_from(local).ok()?;
+        let Some(local) = usize::try_from(local).ok().filter(|&l| l <= d.len()) else { continue };
         if method != 0 || csize != size || d.get(local..local + 4) != Some(b"PK\x03\x04") {
             continue;
         }
@@ -113,6 +113,24 @@ enum V<'a> {
     Global(&'a [u8], &'a [u8]),
     Tuple(Rc<[V<'a>]>),
     Other,
+}
+
+/// Tuples nested deeper than this are not kept (a persistent id's are two deep at most): dropping
+/// a pickle's of any depth would recurse as deep.
+const TUPLE_DEPTH: usize = 4;
+
+impl<'a> V<'a> {
+    fn depth(&self) -> usize {
+        match self {
+            V::Tuple(t) => 1 + t.iter().map(V::depth).max().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// The tuple of `t`, or `Other` where it nests too deep.
+    fn tuple(t: Rc<[V<'a>]>) -> V<'a> {
+        if t.iter().any(|v| v.depth() >= TUPLE_DEPTH) { V::Other } else { V::Tuple(t) }
+    }
 }
 
 /// A storage that a pickle names: its key, its type's name (`FloatStorage`, say) and its elements.
@@ -174,13 +192,13 @@ fn storages(p: &[u8]) -> Option<Vec<Storage<'_>>> {
             b't' => {
                 let m = to_mark(&mut stack, &mut marks)?;
                 let t: Rc<[V]> = stack.drain(m..).collect();
-                stack.push(V::Tuple(t));
+                stack.push(V::tuple(t));
             }
             0x85..=0x87 => {
                 let n = (op - 0x84) as usize;
                 let m = stack.len().checked_sub(n)?;
                 let t: Rc<[V]> = stack.drain(m..).collect();
-                stack.push(V::Tuple(t));
+                stack.push(V::tuple(t));
             }
             // BINUNICODE, SHORT_BINUNICODE, BINUNICODE8, and the bytes' and strings' alike
             b'X' | 0x8c | 0x8d | b'T' | b'U' | b'B' | b'C' | 0x8e | 0x96 => {
@@ -328,6 +346,16 @@ mod tests {
 
     /// A pickle as `torch.save` writes it (protocol 2): the ids of two storages, the second's
     /// strings and type got from the memo.
+    #[test]
+    fn nested_tuples() {
+        // (a hostile pickle of tuples in tuples must not overflow the stack when dropped)
+        let mut p = vec![0x80, 2, b')'];
+        p.extend(std::iter::repeat_n(0x85, 1 << 20));
+        p.push(b'.');
+        let t = std::thread::Builder::new().stack_size(1 << 20).spawn(move || storages(&p).is_some());
+        assert!(t.unwrap().join().unwrap());
+    }
+
     #[test]
     fn ids() {
         let mut p = vec![0x80, 2, b'}', b'q', 0, b'('];

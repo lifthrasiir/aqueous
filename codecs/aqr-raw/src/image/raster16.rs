@@ -120,7 +120,7 @@ struct Near {
 }
 
 impl Near {
-    /// Of sample `x` (of a row of `rs` samples, `bpp` to a pixel), `prev` the row before, if any.
+    /// Of sample `x` (`bpp` samples to a pixel), `prev` the row before, if any.
     #[inline(always)]
     fn of(cur: &[u16], prev: Option<&[u16]>, x: usize, bpp: usize) -> Near {
         let left = x >= bpp;
@@ -284,7 +284,6 @@ fn put_chunk(pred: Pred, syms: &[(u8, u8)], bits: Vec<u8>, out: &mut Vec<u8>) {
     out.extend_from_slice(&bits);
 }
 
-/// Decodes the raster of layout `f` from `coded` and `pad` into `out` (appending).
 /// Bytes that [`decode`] takes of [`aqr_api::stack`] for layout `f` and an output reserved for
 /// `len` bytes, in its blocks' order: the output, the rows of samples and residuals, a chunk's
 /// frequencies and its tables.
@@ -295,6 +294,7 @@ pub fn decode_plan(f: &Format, len: u64) -> u64 {
     block(len) + 4 * row + block(4 * (TABLES * TOKENS) as u64) + block(lut) + block(fc)
 }
 
+/// Decodes the raster of layout `f` from `coded` and `pad` into `out` (appending).
 pub fn decode(coded: &[u8], pad: &[u8], f: Format, out: &mut Vec<u8>) -> Result<(), Error> {
     let corrupt = Error("corrupt raster");
     if !f.valid() {

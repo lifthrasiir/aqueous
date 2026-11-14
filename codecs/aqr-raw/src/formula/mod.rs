@@ -4,6 +4,7 @@
 //! application ([`encode`]); IMA ADPCM blocks (of WAV) are aqr-ima's `ima-recons`'. A recompressor that finds samples in a format of its own puts
 //! them into its formula the same way ([`apply`]). FORMAT.md describes the modules in full.
 
+mod banded;
 pub mod pcm;
 pub mod raster;
 pub mod raster16;

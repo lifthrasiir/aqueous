@@ -606,19 +606,20 @@ fn put_classes(out: &mut Vec<u8>, c: usize, class: &[u8; 16]) {
 }
 
 impl Run {
-    /// Bytes of its output.
-    pub fn len(&self) -> u64 {
-        match self {
-            Run::Raw(n) => *n,
-            Run::Float(r) => r.n * r.f.bytes() as u64,
-            Run::Quant { q, blocks, .. } => blocks * q.block() as u64,
-            Run::Lanes(r) => r.n * r.w as u64,
-            Run::Grid(r) => r.n * r.f.bytes() as u64,
-        }
+    /// Bytes of its output (`None` where they do not fit in 64 bits).
+    pub fn len(&self) -> Option<u64> {
+        let (n, unit) = match self {
+            Run::Raw(n) => (*n, 1),
+            Run::Float(r) => (r.n, r.f.bytes() as u64),
+            Run::Quant { q, blocks, .. } => (*blocks, q.block() as u64),
+            Run::Lanes(r) => (r.n, r.w as u64),
+            Run::Grid(r) => (r.n, r.f.bytes() as u64),
+        };
+        n.checked_mul(unit)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.len() == Some(0)
     }
 
     /// The tag of the run.
@@ -1180,6 +1181,14 @@ pub fn quant_side(q: Quant, blocks: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A count of elements whose bytes do not fit in 64 bits is no run.
+    #[test]
+    fn run_lengths_overflow() {
+        let blocks = 1 << 63;
+        assert_eq!(Run::Quant { q: Quant::Q4_0, blocks, tables: vec![] }.len(), None);
+        assert_eq!(Run::Raw(5).len(), Some(5));
+    }
 
     #[test]
     fn blocks() {

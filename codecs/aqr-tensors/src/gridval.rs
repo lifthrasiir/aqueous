@@ -10,17 +10,21 @@ use crate::layout::{self, Float};
 
 /// The elements of indices `qs` (each below `g.len()`) of grid `g`, scale `s` and zero point `z`
 /// (where `zero`), of type `f`, into `dst` (`f`'s bytes for each).
-pub fn values(f: Float, g: &[f32], qs: &[u8], s: f32, z: f32, zero: bool, dst: &mut [u8]) {
+///
+/// # Safety
+///
+/// Every index of `qs` is below `g.len()` (the vector kernels read the grid unchecked), and `dst`
+/// is `qs.len()` elements' bytes.
+pub unsafe fn values(f: Float, g: &[f32], qs: &[u8], s: f32, z: f32, zero: bool, dst: &mut [u8]) {
     #[cfg(target_arch = "x86_64")]
     if avx2() && (qs.len() >= 32 || f == Float::F16) {
-        // SAFETY: the processor has AVX2 and F16C ([`avx2`]); the indices are below the grid's
-        // length, and `dst` is of their elements' bytes.
+        // SAFETY: the processor has AVX2 and F16C ([`avx2`]); the indices and `dst` are as the
+        // caller's.
         return unsafe { x86::values(f, g, qs, s, z, zero, dst) };
     }
     #[cfg(target_arch = "aarch64")]
     if neon(f, g.len(), qs.len()) {
-        // SAFETY: the indices are below the grid's length, and `dst` is of their elements' bytes
-        // (AArch64 has NEON always).
+        // SAFETY: the indices and `dst` are as the caller's (AArch64 has NEON always).
         return unsafe { neon::values(f, g, qs, s, z, zero, dst) };
     }
     one_at_a_time(f, g, qs, s, z, zero, dst)
@@ -250,7 +254,7 @@ mod tests {
                         let qs: Vec<u8> = (0..1001).map(|_| r.below(k as u64) as u8).collect();
                         let mut a = vec![0u8; qs.len() * f.bytes()];
                         let mut b = a.clone();
-                        values(f, &g, &qs, s, 0.5, zero, &mut a);
+                        unsafe { values(f, &g, &qs, s, 0.5, zero, &mut a) };
                         for (i, &q) in qs.iter().enumerate() {
                             let v = layout::grid_value(f, g[q as usize], s, 0.5, zero);
                             b[i * f.bytes()..(i + 1) * f.bytes()].copy_from_slice(&v.to_le_bytes()[..f.bytes()]);
@@ -280,16 +284,16 @@ mod timing {
                 let mut d = vec![0u8; qs.len() * f.bytes()];
                 for span in [4usize, 8, 16, 32, 128] {
                     // (through pointers, as the module calls them: of `f` not known)
-                    type Values = fn(Float, &[f32], &[u8], f32, f32, bool, &mut [u8]);
+                    type Values = unsafe fn(Float, &[f32], &[u8], f32, f32, bool, &mut [u8]);
                     let (one_at_a_time, values): (Values, Values) = std::hint::black_box((one_at_a_time, values));
                     let time = |one: bool, d: &mut [u8]| {
                         let at = std::time::Instant::now();
                         for _ in 0..4 {
                             for (q, d) in qs.chunks(span).zip(d.chunks_mut(span * f.bytes())) {
                                 if one {
-                                    one_at_a_time(f, &g, q, 1.5e-3, 0.0, false, d);
+                                    unsafe { one_at_a_time(f, &g, q, 1.5e-3, 0.0, false, d) };
                                 } else {
-                                    values(f, &g, q, 1.5e-3, 0.0, false, d);
+                                    unsafe { values(f, &g, q, 1.5e-3, 0.0, false, d) };
                                 }
                             }
                         }

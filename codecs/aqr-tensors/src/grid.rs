@@ -77,10 +77,9 @@ fn e2m1() -> Vec<f32> {
     (0..16).map(|c| if c < 8 { m[c] } else { -m[c - 8] }).collect()
 }
 
-/// The values of a float of `e` bits of exponent, `m` of mantissa and bias `bias` (no infinities)
+/// The values of a float of `m` bits of mantissa and bias `bias` (no infinities)
 /// of magnitudes' codes below `codes`, index `2c + sign` that of code `c`.
-fn minifloat(e: u32, m: u32, bias: i32, codes: u32) -> Vec<f32> {
-    let _ = e;
+fn minifloat(m: u32, bias: i32, codes: u32) -> Vec<f32> {
     let mut v = Vec::new();
     for c in 0..codes {
         let (ex, ma) = ((c >> m) as i32, (c & ((1 << m) - 1)) as f64 / (1 << m) as f64);
@@ -119,10 +118,10 @@ pub fn grids() -> &'static [Grid] {
             Grid::new("nf4", nf4.to_vec(), false),
             Grid::new("int4", (0..16i32).map(|c| (c << 28 >> 28) as f32).collect(), false),
             Grid::new("uint4", (0..16).map(|c| c as f32).collect(), true),
-            Grid::new("e4m3", minifloat(4, 3, 7, 127), false),
-            Grid::new("e5m2", minifloat(5, 2, 15, 124), false),
-            Grid::new("e2m3", minifloat(2, 3, 1, 32), false),
-            Grid::new("e3m2", minifloat(3, 2, 3, 32), false),
+            Grid::new("e4m3", minifloat(3, 7, 127), false),
+            Grid::new("e5m2", minifloat(2, 15, 124), false),
+            Grid::new("e2m3", minifloat(3, 1, 32), false),
+            Grid::new("e3m2", minifloat(2, 3, 32), false),
             // (zigzag: 2v for v ≥ 0, -2v - 1 below)
             Grid::new(
                 "int8",
@@ -408,8 +407,8 @@ fn distinct(blocks: u64, b: u64, value: impl Fn(u64, u64) -> u64) -> f64 {
 pub const MIN_ELEMENTS: u64 = 1 << 15;
 
 /// Whether tensor `d` of `f` (rows of `row`, 0 where not known) is the values of a grid in tiles,
-/// and of which, by a sample of it; `float_bits` the bits a float comes to as the floats' coding
-/// would have it (about, of the sample). None where no structure of a grid is seen, or none would
+/// and of which, by a sample of it, comparing the bits it comes to with those the floats' coding
+/// would take (about, of the sample). None where no structure of a grid is seen, or none would
 /// come to less.
 pub fn detect(f: Float, d: &[u8], row: u64) -> Option<Cfg> {
     if !matches!(f, Float::Bf16 | Float::F16 | Float::F32) {
@@ -486,7 +485,7 @@ pub fn detect(f: Float, d: &[u8], row: u64) -> Option<Cfg> {
         shapes.push((128, 128));
     }
     let mut ga = Gather::new();
-    let mut qs = vec![0u8; 0];
+    let mut qs = Vec::new();
     // (the bits an element comes to, about, of grid `gi` in tiles of `br` by `bc`: on `bands`
     // bands of tiles spread over the rows, of about `budget` elements each; None where fewer
     // than half the elements fit)

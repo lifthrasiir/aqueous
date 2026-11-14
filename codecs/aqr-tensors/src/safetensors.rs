@@ -189,7 +189,7 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
         {
             // (a row in elements of the data: of complex numbers, two floats each)
             let row = match what {
-                Data::Float(f, _) if elem > 0 => last * elem / f.bytes() as u64,
+                Data::Float(f, _) if elem > 0 => last.checked_mul(elem)? / f.bytes() as u64,
                 Data::Lanes(..) if elem > 0 => last,
                 _ => 0,
             };
