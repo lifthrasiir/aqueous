@@ -374,6 +374,8 @@ impl Applier {
     /// order (spec, "Extraction"). Fails where its permissions or times cannot be set, or its
     /// owner where asked.
     pub fn apply(&self, path: &Path, kind: Kind, x: &Extra) -> Result<(), String> {
+        #[cfg(not(unix))]
+        let _ = kind;
         let x = &*x.instants();
         let err = |e: std::io::Error| format!("{}: {e}", path.display());
         // (the attributes the forks are written as)
