@@ -159,8 +159,8 @@ fn pax_time(v: &[u8]) -> Option<Time> {
     }
     Some(match (neg, nanos) {
         (false, _) => Time::new(secs, nanos),
-        (true, 0) => Time::new(-secs, 0),
-        (true, n) => Time::new(-secs - 1, 1_000_000_000 - n),
+        (true, 0) => Time::new(secs.checked_neg()?, 0),
+        (true, n) => Time::new(secs.checked_neg()?.checked_sub(1)?, 1_000_000_000 - n),
     })
 }
 
@@ -178,7 +178,7 @@ fn pax_records(d: &[u8]) -> Result<Records, String> {
         }
         let sp = d[at..].iter().position(|&b| b == b' ').ok_or_else(bad)?;
         let len: usize = std::str::from_utf8(&d[at..at + sp]).ok().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
-        let rec = d.get(at + sp + 1..at + len).filter(|r| r.last() == Some(&b'\n')).ok_or_else(bad)?;
+        let rec = at.checked_add(len).and_then(|e| d.get(at + sp + 1..e)).filter(|r| r.last() == Some(&b'\n')).ok_or_else(bad)?;
         let rec = &rec[..rec.len() - 1];
         let eq = rec.iter().position(|&b| b == b'=').ok_or_else(bad)?;
         out.push((rec[..eq].to_vec(), rec[eq + 1..].to_vec()));

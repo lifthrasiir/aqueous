@@ -79,6 +79,11 @@ pub struct Listing<'d> {
 const CHECKED: u64 = 64 << 20;
 
 /// Whether `folder` has an AES coder.
+/// The sum of `sizes`, `None` where it overflows.
+fn total(sizes: &[u64]) -> Option<u64> {
+    sizes.iter().try_fold(0u64, |a, &n| a.checked_add(n))
+}
+
 fn encrypted(folder: &Folder) -> bool {
     folder.coders.iter().any(|c| c.id == SEVENZ_AES_ID)
 }
@@ -377,7 +382,7 @@ impl<'d> Listing<'d> {
     fn decode(&self, f: usize, threads: usize) -> Result<Vec<Vec<u8>>, Error> {
         let data = folder_data(self.d, &self.main, &self.packs, &self.spans, f, threads, self.pass.as_deref())?;
         let sizes = &self.main.subs[f];
-        if sizes.iter().sum::<u64>() != data.len() as u64 {
+        if total(sizes) != Some(data.len() as u64) {
             return Err("a folder not of its files' sizes".into());
         }
         let first: usize = self.main.subs[..f].iter().map(Vec::len).sum();
@@ -465,12 +470,12 @@ impl<'d> Listing<'d> {
         tick: &dyn Fn(u64),
     ) -> Result<(), Error> {
         let parts = self.parts(f)?;
-        let size: usize = parts.iter().map(|p| p.1).sum();
-        if Some(size as u64) != self.main.folders[f].size() {
+        let size = parts.iter().try_fold(0usize, |a, p| a.checked_add(p.1));
+        let Some(size) = size.filter(|&n| Some(n as u64) == self.main.folders[f].size()) else {
             return Err("a coder's output not of its size".into());
-        }
+        };
         let sizes = &self.main.subs[f];
-        if sizes.iter().sum::<u64>() != size as u64 {
+        if total(sizes) != Some(size as u64) {
             return Err("a folder not of its files' sizes".into());
         }
         let ends: Vec<usize> = sizes

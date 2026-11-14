@@ -112,6 +112,11 @@ fn win_attrs(a: u8) -> Option<u32> {
     Some(a as u32 & DOS_KEPT & WIN_ATTRS_ALLOWED).filter(|&a| a != 0)
 }
 
+/// The sizes of the files of `u` together, `None` where that overflows.
+fn files_size(u: &Unit) -> Option<usize> {
+    u.files.iter().try_fold(0usize, |a, f| a.checked_add(f.size))
+}
+
 fn size_of(n: u64) -> Option<usize> {
     usize::try_from(n).ok()
 }
@@ -393,7 +398,7 @@ impl<'d> Listing<'d> {
                 v
             }
         };
-        if u.files.iter().map(|f| f.size).sum::<usize>() != data.len() {
+        if files_size(u) != Some(data.len()) {
             return Err(at("data not of the files' sizes".into()));
         }
         if let [f] = &u.files[..] {
@@ -424,6 +429,9 @@ impl<'d> Listing<'d> {
         want: &dyn Fn(usize) -> bool,
         give: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), String>,
     ) -> Result<(), String> {
+        if files_size(u).is_none() {
+            return Err("data not of the files' sizes".into());
+        }
         let starts: Vec<usize> = u.files.iter().scan(0, |at, f| Some(std::mem::replace(at, *at + f.size))).collect();
         let (Some(first), Some(last)) = ((0..u.files.len()).find(|&k| want(k)), (0..u.files.len()).rfind(|&k| want(k)))
         else {

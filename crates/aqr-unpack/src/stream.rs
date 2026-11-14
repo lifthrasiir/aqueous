@@ -186,7 +186,7 @@ fn xz_blocks(d: &[u8]) -> Result<(Vec<XzBlock>, u64), String> {
             for _ in 0..(hb[1] & 3) + 1 {
                 let id = get(&mut q)?;
                 let len = get(&mut q)? as usize;
-                let props = fields.get(q..q + len).ok_or_else(|| bad("a damaged block header"))?;
+                let props = q.checked_add(len).and_then(|e| fields.get(q..e)).ok_or_else(|| bad("a damaged block header"))?;
                 q += len;
                 chain.push((id, props));
             }
