@@ -171,6 +171,16 @@ The pattern prints, in the order of its items, the fields of an instant of the p
 Gregorian calendar, whose weekday is derived from its date (a pattern with `a` prints the
 weekday the date has). Dates without a year are of the year 2000, a leap year.
 
+### Zones
+
+A zone (`-0400`, `+09:00`, `Z`) is not an item: it is literal bytes of the pattern (`d/b/Y:H:M:S -0400`,
+`Y-m-d\TH:M:S+09:00`, `Y-m-d\TH:M:S\Z`), and the integer is the time as printed, the local time,
+not an instant. A different offset is a different pattern, so a log of one offset has one pattern
+and the offset costs nothing in the integers; a value of the offset that varies per timestamp is
+not coded (its digits stay text or digit runs, as before). A zone item would have needed a
+second value beside the integer, or to put the offset in it, and only a log that changes zones
+within a column would gain.
+
 ### The integer
 
 With *n* the digits of the fraction (0 without one), the ticks are those of the finest unit
@@ -204,6 +214,10 @@ zero, nor a fixed one fewer digits).
 
 `times::Times` finds timestamps in a line or a field (`find`): their pattern, and the integer
 `time::parse` gives; aqr-log cuts lines by them, and aqr-xsv takes the fields that are one.
+A zone after the time is found and added to the pattern as literals where it is `Z`, or a sign and
+an offset of `hh:mm` or `hhmm` (at most 14 hours, minutes a multiple of 15), with a space before the sign
+or not, and followed by no letter or digit.
+
 Where every time of a pattern in a column is at the same time of day, `time::clock_of` and
 `fold_clock` give the pattern with the clock's items replaced by the literal bytes they print
 (`Y-m-d H:M` of `00:00` becomes `Y-m-d 00:00`, with `\` before a letter), and the integers

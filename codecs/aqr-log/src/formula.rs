@@ -1230,10 +1230,10 @@ mod tests {
         let tpl = String::from_utf8_lossy(&f.streams[2].data).into_owned();
         for p in [
             "\x04Y-m-d H:M:St.6\x04 \x03 \x03\n",
-            "\x04d/b/Y:H:M:St.6\x04",
+            "\x04d/b/Y:H:M:St.6 -0400\x04] \"GET /x",
             "[\x04a b d H:M:St.6 Y\x04] [error]",
             "\x04b e H:M:St.6\x04 host sshd[",
-            "\x04Y-m-d\\TH:M:St.6\x04Z,\x04h:M:St.6\x04",
+            "\x04Y-m-d\\TH:M:St.6\\Z\x04,\x04h:M:St.6\x04",
             "\x04d.m.Y H:M\x04;\x04H:M:St.6\x04 ip",
         ] {
             assert!(tpl.contains(p), "{p:?} in {tpl:?}");

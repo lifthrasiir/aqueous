@@ -517,7 +517,7 @@ mod tests {
     /// text among them) are times: the text holds the header and the odd ones only.
     #[test]
     fn times() {
-        let mut s = String::from("id,day,at,span,iso,midnight\n");
+        let mut s = String::from("id,day,at,span,iso,midnight,zoned\n");
         let mut t = 1_696_000_000i64;
         for i in 0..2000 {
             t += 37 + (i * 7919) % 1000;
@@ -526,7 +526,7 @@ mod tests {
             let (h, mi, se) = (secs / 3600, secs / 60 % 60, secs % 60);
             let odd = i % 400 == 7;
             s += &format!(
-                "{i},\"{y:04}-{m:02}-{d:02} {h:02}:{mi:02}\",{h:02}:{mi:02}:{se:02},{},{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{se:02}.{:03},\"{y:04}-{m:02}-{d:02} 00:00\"\n",
+                "{i},\"{y:04}-{m:02}-{d:02} {h:02}:{mi:02}\",{h:02}:{mi:02}:{se:02},{},{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{se:02}.{:03},\"{y:04}-{m:02}-{d:02} 00:00\",{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{se:02}{}\n",
                 if i % 50 == 3 {
                     String::new()
                 } else if odd {
@@ -534,7 +534,8 @@ mod tests {
                 } else {
                     format!("{d:02}/{m:02}/{y:04}")
                 },
-                i % 1000
+                i % 1000,
+                if i % 3 == 0 { "-05:00" } else { "Z" }
             );
         }
         let f = roundtrip(s.as_bytes(), &csv());

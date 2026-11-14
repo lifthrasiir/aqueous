@@ -186,8 +186,11 @@ longer than declared is an error, and so is a file shorter.
     one digit (`h`) too;
   - syslog's `b e H:M:S` (and `b D H:M:S`) and ctime's `a b d H:M:S Y` (and with `e`), and RFC
     5322's `a, d b Y H:M:S` (a weekday and a date: the date must have it).
-  A zone (`-0400`, `+02:00`, `Z`) after a time stays in the template as it is and in digit
-  runs. The fraction a segment writes is told from the first 256 KiB: of the `H:M:S` followed
+  A zone after a time (` -0400`, `-0400`, `+02:00`, `Z`: a sign and an offset `hh:mm` or `hhmm`
+  of at most 14 hours and a multiple of 15 minutes, with a space before the sign or not, or `Z`, at
+  the end of a token) is part of the timestamp, as literal bytes at the end of its pattern
+  (`d/b/Y:H:M:S -0400`, `Y-m-d\TH:M:S\Z`: aqr-num's README, "Zones"): the time stays local, as
+  printed, and an offset that differs is a pattern of its own;   not hold (a comma and a digit after it, say) the zone is template text as before. The fraction a segment writes is told from the first 256 KiB: of the `H:M:S` followed
   by a point or a comma and 1 to 9 digits, those digits' counts: one count, always that many
   digits (`f`); several, a trimmed fraction of the most (`t`); none, no fraction; the point is
   the likelier of `.` and `,`. A time of another fraction than the segment's is of its own

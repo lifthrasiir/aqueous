@@ -561,33 +561,59 @@ impl Times {
     /// before the digits of a fraction).
     fn check(&mut self, b: &[u8], i: usize) -> Option<Span> {
         let (k, v, n) = self.try_pat(b, i)?;
-        self.span(b, i, k, v, n)
+        // (a zone after the time is literal bytes of the pattern, where the time's text is
+        // followed by one and the longer pattern is a time as well)
+        let z = zone_at(&b[i + n..]);
+        if z > 0 {
+            let len = self.pat.len();
+            for &c in &b[i + n..i + n + z] {
+                if c.is_ascii_alphabetic() {
+                    self.pat.push(b'\\');
+                }
+                self.pat.push(c);
+            }
+            // (the zone's bytes are the text's own: the integer and the exactness are the time's)
+            if let Some(k) = self.compiled()
+                && self.comp[k].is_some()
+                && let Some(sp) = self.span(b, i, k, v, n + z, true)
+            {
+                return Some(sp);
+            }
+            self.pat.truncate(len);
+        }
+        self.span(b, i, k, v, n, false)
     }
 
     /// The pattern `self.pat` (made if it is not yet) read at `b[i]`: its index of `comp`, the
     /// integer and the length, if it is a time that prints back as the bytes.
     fn try_pat(&mut self, b: &[u8], i: usize) -> Option<(usize, i64, usize)> {
-        let k = match self.index.get(&self.pat[..]) {
+        let k = self.compiled()?;
+        let c = self.comp[k].as_ref()?;
+        let (v, n) = c.exact(&self.pat, &b[i..], &mut self.out)?;
+        Some((k, v, n))
+    }
+
+    /// The index of `comp` of the pattern `self.pat`, which is made if it is not yet (a `None`
+    /// there where it is no pattern).
+    fn compiled(&mut self) -> Option<usize> {
+        Some(match self.index.get(&self.pat[..]) {
             Some(&k) => k,
             None => {
                 self.comp.push(Compiled::new(&self.pat));
                 self.index.insert(self.pat.clone(), self.comp.len() - 1);
                 self.comp.len() - 1
             }
-        };
-        let c = self.comp[k].as_ref()?;
-        let (v, n) = c.exact(&self.pat, &b[i..], &mut self.out)?;
-        Some((k, v, n))
+        })
     }
 
     /// The span at `b[i]` of the pattern `self.pat` (index `k` of `comp`) of the integer `v` and
     /// `n` bytes, if it ends at the end of a token (not by a letter, a digit, `_` or `:`, and
-    /// not before the digits of a fraction).
-    fn span(&mut self, b: &[u8], i: usize, k: usize, v: i64, n: usize) -> Option<Span> {
+    /// not before the digits of a fraction, unless it ends with a zone).
+    fn span(&mut self, b: &[u8], i: usize, k: usize, v: i64, n: usize, zoned: bool) -> Option<Span> {
         let end = i + n;
         if let Some(&c) = b.get(end) {
             let zulu = c == b'Z' && b.get(end + 1).is_none_or(|d| !d.is_ascii_alphanumeric());
-            let fraction = matches!(c, b'.' | b',') && b.get(end + 1).is_some_and(u8::is_ascii_digit);
+            let fraction = !zoned && matches!(c, b'.' | b',') && b.get(end + 1).is_some_and(u8::is_ascii_digit);
             if (c.is_ascii_alphanumeric() && !zulu) || matches!(c, b'_' | b':') || fraction {
                 return None;
             }
@@ -599,6 +625,27 @@ impl Times {
             self.pats.len() as u32 - 1
         });
         Some(Span { start: i, end, pat: id, v })
+    }
+}
+
+/// The length of a zone at the start of `t` (0: none): `Z`, or a sign and a quarter-hour offset
+/// of at most 14 hours (`-0400`, `+09:00`), with a space before the sign or not; at the end of a
+/// token (no letter or digit after it).
+fn zone_at(t: &[u8]) -> usize {
+    let sp = (t.first() == Some(&b' ')) as usize;
+    let end_ok = |n: usize| t.get(n).is_none_or(|c| !c.is_ascii_alphanumeric());
+    match t.get(sp) {
+        Some(b'Z') if sp == 0 && end_ok(1) => 1,
+        Some(b'+' | b'-') if digits(t, sp + 1, 2) => {
+            let colon = (t.get(sp + 3) == Some(&b':')) as usize;
+            let n = sp + 3 + colon;
+            if !digits(t, n, 2) || !end_ok(n + 2) {
+                return 0;
+            }
+            let (h, m) = (num(t, sp + 1, 2), num(t, n, 2));
+            if h <= 14 && m % 15 == 0 && m < 60 { n + 2 } else { 0 }
+        }
+        _ => 0,
     }
 }
 
@@ -634,6 +681,54 @@ mod tests {
         let (v, n) = time::parse(pat, t)?;
         let mut out = Vec::new();
         (time::put(&mut out, pat, v) && out[..] == t[..n]).then_some((v, n))
+    }
+
+    /// A zone after a time (` -0400`, `+09:00`, `+0900`, `Z`) is literal bytes of the pattern, and
+    /// part of the span; the integer is the time as printed. Offsets that are none (hour 15 or
+    /// more, minutes not a quarter), a space and no sign, and a word after it are not zones.
+    #[test]
+    fn zones() {
+        let mut t = Times::new(b"");
+        for (line, pat, zone) in [
+            ("[01/Jul/1995:00:00:01 -0400] \"GET /", "d/b/Y:H:M:S -0400", " -0400"),
+            ("2023-10-12T08:30:00+09:00 x", "Y-m-d\\TH:M:S+09:00", "+09:00"),
+            ("2023-10-12T08:30:00+0900 x", "Y-m-d\\TH:M:S+0900", "+0900"),
+            ("2023-10-12T08:30:00Z x", "Y-m-d\\TH:M:S\\Z", "Z"),
+            ("2023-10-12 08:30:00.123 +05:45", "Y-m-d H:M:Sf.3 +05:45", " +05:45"),
+            ("2023-10-12T08:30+01:00", "Y-m-d\\TH:M+01:00", "+01:00"),
+            ("Dec 10 06:55:46 -0500 host", "b e H:M:S -0500", " -0500"),
+        ] {
+            t.find(line.as_bytes());
+            let [sp] = t.spans[..] else { panic!("{line}: {:?}", t.spans) };
+            assert_eq!(String::from_utf8_lossy(t.pattern(sp.pat)), pat, "{line}");
+            assert_eq!(&line[sp.start..sp.end].ends_with(zone), &true, "{line}");
+            let mut out = Vec::new();
+            assert!(time::put(&mut out, pat.as_bytes(), sp.v));
+            assert_eq!(out, line.as_bytes()[sp.start..sp.end], "{line}");
+        }
+        // (the segment writes trimmed fractions of 6 digits: the pattern has one, and the zone)
+        let mut t = Times::new(b"2023-10-12 08:30:00.123456\n2023-10-12 08:30:00.12\n");
+        t.find(b"\"2023-10-12T08:30:00Z,x");
+        assert_eq!(t.spans.len(), 1);
+        assert_eq!(t.pattern(t.spans[0].pat), b"Y-m-d\\TH:M:St.6\\Z");
+        // (a comma after the zone is no fraction's)
+        t.find(b"\"20231012\",2023-10-12T08:30:00Z,8:30:01");
+        assert_eq!(t.spans.len(), 2);
+        assert_eq!(t.pattern(t.spans[0].pat), b"Y-m-d\\TH:M:St.6\\Z");
+        for line in [
+            "08:30:00 -1500 x",
+            "08:30:00 -0410 x",
+            "08:30:00 -04 x",
+            "08:30:00 0400 x",
+            "08:30:00 -0400x",
+            "08:30:00 -04000",
+            "08:30:00Zulu",
+        ] {
+            t.find(line.as_bytes());
+            for sp in &t.spans {
+                assert!(sp.end <= 8, "{line} {:?}", sp);
+            }
+        }
     }
 
     #[test]
