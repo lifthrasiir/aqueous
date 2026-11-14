@@ -1,12 +1,15 @@
 //! Zstandard frames ([RFC 8878]) taken apart by their structure, so that an archive keeps them
 //! as they are and gives what they hold to the files having the same: the blocks of a frame are
 //! what an archive's Patch instruction decompresses (of an empty source), the frame's content
-//! split from it ([`formula`], with the feature `encode`). No compressor is reproduced, as
-//! rebuilding a frame from its content would gain little: the frame is already about as small
-//! as the archive would make the content.
+//! split from it ([`formula`], with the feature `encode`). A frame is not rebuilt from its
+//! content in general, as that would gain little: the frame is already about as small as the
+//! archive would make the content. Where many small frames are of the same compressor (the
+//! blobs of a database), [`compress`] emulates libzstd's, so that their contents are what is
+//! stored.
 //!
 //! [RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
 
+pub mod compress;
 #[cfg(feature = "encode")]
 pub mod formula;
 
@@ -190,6 +193,7 @@ fn header(d: &[u8], at: usize) -> Option<Header> {
 /// its header tells if it does and has its checksum if it has one: None where a frame has a
 /// dictionary, does not decompress, or holds more than [`CONTENT_MAX`], or they hold more
 /// than `limit` in all.
+#[cfg(feature = "encode")]
 pub fn decode(d: &[u8], fr: &Frames, limit: u64) -> Option<(Vec<u8>, Vec<u64>)> {
     let (mut out, mut lens) = (Vec::new(), Vec::new());
     for f in fr.frames() {

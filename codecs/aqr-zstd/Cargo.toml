@@ -8,8 +8,12 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`); without it, the structure of frames alone.
-encode = ["dep:aqr-formula"]
+encode = ["dep:aqr-formula", "dep:zstd"]
 
 [dependencies]
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-zstd = "0.13"
+zstd = { version = "0.13", optional = true }
+
+[[example]]
+name = "zcheck"
+required-features = ["encode"]

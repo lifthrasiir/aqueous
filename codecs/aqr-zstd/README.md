@@ -25,6 +25,22 @@ aqr-compress takes it in an archive of several files (`crates/aqr-compress/src/z
 file is put in a batch with the files its content holds (the members of a tar archive, or the
 whole: `together`), and those files are taken from its frames.
 
+## The compressor emulated
+
+`compress::compress(content, 3)` makes the frame libzstd (1.5.x) writes of `content` at level 3
+(`ZSTD_compress`, or a stream ended at once with its size pledged: no dictionary, no checksum),
+byte for byte: the parameters of the level for the size, the double-fast match finder, the
+literals' Huffman coding and the sequences' FSE coding with libzstd's choices of tables and
+block types. It is written from what is known of libzstd's behaviour and checked against it as
+a black box (Python's `compression.zstd`, the `zstd` crate's); libzstd's code is not read. It
+needs no `encode`, so modules can make frames. Not emulated: other strategies' levels, and
+contents of 256 KiB or more, whose blocks libzstd may split (`None`).
+
+Checked on Distant Horizons' databases (`F:\Data\aqr-corpus\minecraft-world-sample`, blobs of
+zstd-jni at level 3): every one of The End's 805,720 frames and samples of 33,392 (the Nether)
+and 26,376 (the Overworld) made again, at 457 MB/s (The End, content ratio 9.5) and 178 MB/s
+(the others, 2.8) on one thread of a Ryzen 7 9700X (`examples/zcheck.rs`).
+
 ## Results
 
 Measured on 2026-11-09 on an Apple M4 (load about 3), `aqr -c` at the default level, 10 threads:
@@ -48,7 +64,7 @@ libarchive's source tree (1581 files, 20.98 MB) beside its tar archive as `zstd 
 ## Tests
 
 ```sh
-cargo rt -p aqr-zstd                                  # frames parsed, ranges taken (through an archive)
+cargo rt -p aqr-zstd                                  # frames parsed, ranges taken (through an archive), made again by compress
 cargo rt -p aqr-compress --test archive zstd_held_once # files beside a .tar.zst and a .zst of two frames
 ```
 
@@ -69,4 +85,6 @@ Not yet:
 - The decoder streaming a patch's output (it makes it whole): frames over the bound are not used.
 - Frames with a dictionary (a Patch instruction has none), and of more than 2^31 bytes.
 - Rebuilding a frame where its content would archive much smaller than it (`zstd -1` of text,
-  say): not done, as above.
+  say): only by `compress` for others' formats (level 3), not for `.zst` files. Levels of the
+  fast strategy (1, 2), and the block splitting of contents of 256 KiB or more, are not
+  emulated.
