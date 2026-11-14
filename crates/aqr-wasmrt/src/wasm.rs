@@ -30,6 +30,7 @@ pub use interp::{load, load_bounded, load_released, set_interpreter, warm_up};
 pub(crate) type Decoded<T> = std::result::Result<T, Failure>;
 
 /// The custom section of a module's task slots.
+#[cfg(feature = "wasmtime")]
 pub(crate) const TASK_SLOTS: &str = "aqr_task_slots";
 
 /// A memory imported by a module.
