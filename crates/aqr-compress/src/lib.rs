@@ -706,47 +706,18 @@ pub trait Sink: Write {
     }
 }
 
-/// `d` written to `f` at offset `at`.
-pub(crate) fn write_all_at(f: &std::fs::File, d: &[u8], at: u64) -> io::Result<()> {
-    #[cfg(unix)]
-    return std::os::unix::fs::FileExt::write_all_at(f, d, at);
-    #[cfg(windows)]
-    {
-        let (mut at, mut d) = (at, d);
-        while !d.is_empty() {
-            match std::os::windows::fs::FileExt::seek_write(f, d, at)? {
-                0 => return Err(io::ErrorKind::WriteZero.into()),
-                n => (at, d) = (at + n as u64, &d[n..]),
-            }
-        }
-        Ok(())
-    }
-}
-
 /// A file written at offsets ([`Sink::place`]).
 pub struct Placing(std::fs::File);
 
 impl Placing {
     fn read_at(&self, at: u64, d: &mut [u8]) -> io::Result<()> {
-        #[cfg(unix)]
-        return std::os::unix::fs::FileExt::read_exact_at(&self.0, d, at);
-        #[cfg(windows)]
-        {
-            let (mut at, mut d) = (at, d);
-            while !d.is_empty() {
-                match std::os::windows::fs::FileExt::seek_read(&self.0, d, at)? {
-                    0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-                    n => (at, d) = (at + n as u64, &mut d[n..]),
-                }
-            }
-            Ok(())
-        }
+        aqr_common::fsio::read_exact_at(&self.0, d, at)
     }
 }
 
 impl aqr::sink::Place for Placing {
     fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
-        write_all_at(&self.0, d, at)
+        aqr_common::fsio::write_all_at(&self.0, d, at)
     }
 }
 

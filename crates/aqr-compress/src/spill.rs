@@ -217,10 +217,10 @@ impl StoreWriter for Region {
             d.chunks(BOUNCE).enumerate().try_for_each(|(i, c)| {
                 copy.clear();
                 copy.extend_from_slice(c);
-                crate::write_all_at(&self.segment.file, &copy, at + (i * BOUNCE) as u64)
+                aqr_common::fsio::write_all_at(&self.segment.file, &copy, at + (i * BOUNCE) as u64)
             })
         } else {
-            crate::write_all_at(&self.segment.file, d, at)
+            aqr_common::fsio::write_all_at(&self.segment.file, d, at)
         };
         if written.is_err() {
             return false;
@@ -288,7 +288,7 @@ impl Spill {
         }
         sparse(&file)?;
         file.set_len(n as u64)?;
-        crate::write_all_at(&file, &MAGIC, 0)?;
+        aqr_common::fsio::write_all_at(&file, &MAGIC, 0)?;
         // SAFETY: the file is this segment's alone, written only by the positioned writes of its
         // regions' writers (each its own bytes), read by its regions after
         let map = unsafe { MmapOptions::new().len(n).map(&file)? };

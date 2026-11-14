@@ -171,20 +171,7 @@ fn zero(d: &[u8]) -> bool {
 }
 
 fn write_at(f: &File, at: u64, d: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    return std::os::unix::fs::FileExt::write_all_at(f, d, at);
-    #[cfg(windows)]
-    {
-        let (mut at, mut d) = (at, d);
-        while !d.is_empty() {
-            let n = std::os::windows::fs::FileExt::seek_write(f, d, at)?;
-            if n == 0 {
-                return Err(io::ErrorKind::WriteZero.into());
-            }
-            (at, d) = (at + n as u64, &d[n..]);
-        }
-        Ok(())
-    }
+    aqr_common::fsio::write_all_at(f, d, at)
 }
 
 /// Marks `f` sparse, where files are (NTFS). Where it fails, the holes are written with zeros by

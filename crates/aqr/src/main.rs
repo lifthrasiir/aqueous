@@ -282,6 +282,7 @@ use aqr_compress::{Options, compress_formula_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
 use aqr_formula::aqr::{self, Entry, EntryNode, Failure, Tree, name_bytes, name_from};
+pub(crate) use aqr_common::text::hex;
 use aqr_l10n::size;
 use meta::{os_bytes, os_from};
 use view::Ticking;
@@ -1469,11 +1470,6 @@ fn bound_of(v: &str) -> Result<u64, String> {
         "unlimited" => Ok(u64::MAX),
         v => size_of(v).map(|n| n as u64).ok_or("--application-bound takes a size (256M, 1G, ...) or unlimited".into()),
     }
-}
-
-/// Bytes `b` as lowercase hexadecimal.
-pub(crate) fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// The ending of a noun counted `n`: `s` unless it is one.
@@ -2894,16 +2890,7 @@ fn sync_file(f: &fs::File) -> std::io::Result<()> {
 
 /// Writes `bytes` at `at` of `f` (written over), its position left at its end.
 fn write_at(f: &fs::File, at: u64, bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    std::os::unix::fs::FileExt::write_all_at(f, bytes, at)?;
-    #[cfg(windows)]
-    {
-        let (mut at, mut b) = (at, bytes);
-        while !b.is_empty() {
-            let n = std::os::windows::fs::FileExt::seek_write(f, b, at)?;
-            (at, b) = (at + n as u64, &b[n..]);
-        }
-    }
+    aqr_common::fsio::write_all_at(f, bytes, at)?;
     // (Windows moves it)
     std::io::Seek::seek(&mut &*f, std::io::SeekFrom::End(0)).map(|_| ())
 }

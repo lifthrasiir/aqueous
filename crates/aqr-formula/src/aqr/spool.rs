@@ -52,7 +52,7 @@ impl Spool {
             Some(f) => f,
             None => self.file.insert(spool_file()?),
         };
-        write_at(f, d, self.written)?;
+        aqr_common::fsio::write_all_at(f, d, self.written)?;
         self.written += d.len() as u64;
         Ok(())
     }
@@ -68,7 +68,7 @@ impl Spool {
         }
         let n = (self.written - self.read).min(PIECE as u64) as usize;
         let mut p = vec![0; n];
-        read_at(self.file.as_ref().expect("a file of bytes written"), &mut p, self.read)?;
+        aqr_common::fsio::read_exact_at(self.file.as_ref().expect("a file of bytes written"), &mut p, self.read)?;
         self.read += n as u64;
         if self.read == self.written {
             // (all of it taken: the file's space given back, and the memory taken again)
@@ -111,36 +111,6 @@ fn spool_file() -> io::Result<File> {
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn write_at(f: &File, d: &[u8], at: u64) -> io::Result<()> {
-    std::os::unix::fs::FileExt::write_all_at(f, d, at)
-}
-
-#[cfg(unix)]
-fn read_at(f: &File, d: &mut [u8], at: u64) -> io::Result<()> {
-    std::os::unix::fs::FileExt::read_exact_at(f, d, at)
-}
-
-#[cfg(windows)]
-fn write_at(f: &File, mut d: &[u8], mut at: u64) -> io::Result<()> {
-    while !d.is_empty() {
-        let n = std::os::windows::fs::FileExt::seek_write(f, d, at)?;
-        (d, at) = (&d[n..], at + n as u64);
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn read_at(f: &File, mut d: &mut [u8], mut at: u64) -> io::Result<()> {
-    while !d.is_empty() {
-        match std::os::windows::fs::FileExt::seek_read(f, d, at)? {
-            0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-            n => (d, at) = (&mut d[n..], at + n as u64),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
