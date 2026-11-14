@@ -336,10 +336,10 @@ fn cut<'a>(
 /// Bytes of data from which a stream gets threads of its own: two segments.
 pub(crate) const LARGE: usize = 2 << 20;
 
-/// `f(item, threads)` on `0..sizes.len()`, by `threads` threads, the largest by `sizes` first
-/// (on WebAssembly, those of at least [`LARGE`] first): those of at least [`LARGE`] with all of them (segments are rebuilt in parallel, but a stream is
-/// parsed on one), then the others with one each, all side by side, so that the small fill the
-/// threads a large one leaves idle. On WebAssembly they run as tasks
+/// `f(item, threads)` on `0..sizes.len()`, by `threads` threads, the largest by `sizes` first.
+/// Those of at least [`LARGE`] go with all the threads (segments are rebuilt in parallel, but a
+/// stream is parsed on one), then the others with one each, all side by side, so that the small
+/// fill the threads a large one leaves idle. On WebAssembly they run as tasks
 /// (`aqr_common::pool::par_map_apart`): those of at least [`LARGE`] a task each, the others
 /// together, a task for each [`LARGE`] of them or so (a task costs an instance).
 fn par_jobs<R: Send + aqr_common::wire::Wire>(
@@ -764,7 +764,9 @@ fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -
                     return Err(Error::Corrupt);
                 };
                 for k in run.streams(g) {
-                    let (s, rest) = b.split_at_checked(run.lens[k].2).ok_or(Error::Corrupt)?;
+                    let (s, rest) = b
+                        .split_at_checked(run.lens[k].stream)
+                        .ok_or(Error::Corrupt)?;
                     derived.put(&data[run.data(k)], s.len(), &mut derive);
                     if derived.before() {
                         out.write(&derive)?;
@@ -810,10 +812,19 @@ pub(crate) fn group_starts(sizes: impl Iterator<Item = usize> + Clone) -> Vec<us
 /// A run of small streams of [`decode_part`], decoded a group at a time (of [`LARGE`] bytes of
 /// data at most, or one stream), their data and records held one after another.
 struct Run {
-    /// Each stream's data, record and stream, as `usize`, and where its data and record start.
-    lens: Vec<(usize, usize, usize, usize, usize)>,
+    lens: Vec<RunStream>,
     /// Where each group starts (and the run's end).
     starts: Vec<usize>,
+}
+
+/// A stream of a [`Run`]: the lengths of its data, record and stream, as `usize`, and where its data and
+/// record start.
+pub(crate) struct RunStream {
+    data: usize,
+    record: usize,
+    stream: usize,
+    data_at: usize,
+    record_at: usize,
 }
 
 impl Run {
@@ -822,15 +833,17 @@ impl Run {
         let (mut d0, mut r0) = (0, 0);
         let mut v = Vec::with_capacity(lens.len());
         for &(d, r, s) in lens {
-            v.push((d as usize, r as usize, s as usize, d0, r0));
+            v.push(RunStream {
+                data: d as usize,
+                record: r as usize,
+                stream: s as usize,
+                data_at: d0,
+                record_at: r0,
+            });
             (d0, r0) = (d0 + d as usize, r0 + r as usize);
         }
-        let starts = Run::starts_of(lens.iter().map(|l| l.0 as usize));
+        let starts = group_starts(lens.iter().map(|l| l.0 as usize));
         Run { lens: v, starts }
-    }
-
-    fn starts_of(sizes: impl Iterator<Item = usize> + Clone) -> Vec<usize> {
-        group_starts(sizes)
     }
 
     fn groups(&self) -> usize {
@@ -842,7 +855,7 @@ impl Run {
     }
 
     fn data(&self, k: usize) -> std::ops::Range<usize> {
-        self.lens[k].3..self.lens[k].3 + self.lens[k].0
+        self.lens[k].data_at..self.lens[k].data_at + self.lens[k].data
     }
 
     /// Bytes of a group's result: its streams' and a byte, and what writing reserves past them
@@ -852,10 +865,15 @@ impl Run {
         1 + self
             .streams(g)
             .map(|k| {
-                let (d, r, s, ..) = self.lens[k];
-                s.min(
+                let RunStream {
+                    data,
+                    record,
+                    stream,
+                    ..
+                } = self.lens[k];
+                stream.min(
                     8usize
-                        .saturating_mul(d.saturating_add(r))
+                        .saturating_mul(data.saturating_add(record))
                         .saturating_add(64),
                 )
             })
@@ -868,7 +886,13 @@ impl Run {
         let mut out = Vec::with_capacity(self.result_room(g));
         out.push(0);
         for k in self.streams(g) {
-            let (d, r, s, d0, r0) = self.lens[k];
+            let RunStream {
+                data: d,
+                record: r,
+                stream: s,
+                data_at: d0,
+                record_at: r0,
+            } = self.lens[k];
             let start = out.len();
             out = match crate::reconstruct_onto(&data[d0..d0 + d], &records[r0..r0 + r], m, 1, out)
             {

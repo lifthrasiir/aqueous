@@ -137,14 +137,6 @@ impl<T: Copy + Default, const N: usize> Short<T, N> {
         }
         self.n = n as u16;
     }
-
-    pub fn truncate(&mut self, n: usize) {
-        self.n = self.n.min(n as u16);
-    }
-
-    pub fn clear(&mut self) {
-        self.n = 0;
-    }
 }
 
 impl<T: Copy + Default, const N: usize> Default for Short<T, N> {

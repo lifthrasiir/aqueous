@@ -315,32 +315,30 @@ pub fn write(
     }
     w.bits(1, 0);
     let (hlit, hdist) = (h.hlit as usize, h.hdist as usize);
-    // The closest candidate (the first among equals): differences, index, lengths.
-    type Closest = (usize, usize, (Lens288, Lens288));
-    let mut best: Option<Closest>;
-    // The recipe's lengths first. Without exact candidates last time, they are all there is
+    // The closest candidate (the first among equals): differences, index, lengths. The
+    // recipe's lengths first. Without exact candidates last time, they are all there is
     // to it (searching is costly), short of a periodic look.
     let pred = cut(&ll, &d, hlit, hdist);
     let diffs = pred.iter().zip(&h.lens).filter(|(a, b)| a != b).count();
-    best = Some((diffs, recipe.lens, (ll, d)));
+    let mut best = (diffs, recipe.lens, (ll, d));
     let search = diffs > 0 && (recipe.exact || recipe.since >= RESEARCH);
     recipe.since += 1;
-    for k in (0..FEW).filter(|_| search) {
-        let (ll, d) = lens_candidate(k, lf, df).unwrap();
-        let pred = cut(&ll, &d, hlit, hdist);
-        let diffs = pred.iter().zip(&h.lens).filter(|(a, b)| a != b).count();
-        if diffs == 0 || (k < FEW && best.as_ref().is_none_or(|b| diffs < b.0)) {
-            best = Some((diffs, k, (ll, d)));
-            if diffs == 0 {
-                break;
+    if search {
+        for k in 0..FEW {
+            let (ll, d) = lens_candidate(k, lf, df).unwrap();
+            let pred = cut(&ll, &d, hlit, hdist);
+            let diffs = pred.iter().zip(&h.lens).filter(|(a, b)| a != b).count();
+            if diffs < best.0 {
+                best = (diffs, k, (ll, d));
+                if diffs == 0 {
+                    break;
+                }
             }
         }
-    }
-    if search {
         recipe.since = 0;
-        recipe.exact = best.as_ref().is_some_and(|b| b.0 == 0);
+        recipe.exact = best.0 == 0;
     }
-    let (_, k, (ll, d)) = best.unwrap();
+    let (_, k, (ll, d)) = best;
     put_gamma(w, k as u64);
     recipe.lens = k;
     put_field(
@@ -462,12 +460,8 @@ pub fn read_freqs(
     if k < 2 {
         recipe.cl = k;
     }
-    let hclen = get_field(
-        r,
-        natural_hclen(&cands[k.min(1) * (k < 2) as usize]) as u32 - 4,
-        4,
-    )? as usize
-        + 4;
+    // (an explicit code, 2, predicts its length from the first candidate)
+    let hclen = get_field(r, natural_hclen(&cands[k & 1]) as u32 - 4, 4)? as usize + 4;
     let order = &CL_ORDER[..hclen];
     let mut cl_lens = [0u8; 19];
     for &s in order {

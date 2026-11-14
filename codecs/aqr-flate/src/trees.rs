@@ -252,10 +252,7 @@ pub fn smooth_brotli(counts: &mut [u64]) {
 /// zopfli's / ECT's run-length coding of `lens` (FORMAT.md, "Run-length codings") with the
 /// flags `use_16`, `use_17`, `use_18`, `fuse_8` and `fuse_7`.
 pub fn encode_tree(lens: &[u8], [use_16, use_17, use_18, fuse_8, fuse_7]: [bool; 5]) -> Ops {
-    let op = |sym: u8, extra: usize| RleOp {
-        sym,
-        extra: extra as u8,
-    };
+    let op = RleOp::new;
     let mut out = Ops::new();
     let mut i = 0;
     while i < lens.len() {

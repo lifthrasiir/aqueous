@@ -8,13 +8,13 @@
 //! table sees it (for the contexts of a predicted match), and zlib emulation, which predicts
 //! the tokens (class 2) for as long as it can follow them.
 
-use super::arith::{ArithDecoder, ArithEncoder};
 use super::code;
 use super::table::Cands;
 use super::tokens::{self, Corr, DIST_IDX, DIST_RANK, DIST_RAW, K_ALT258, LEN_DELTA, LEN_FRESH};
 use crate::deflate::Token;
 use crate::zlib::{Emulator, Followed};
 use crate::{Error, Result};
+use aqr_common::arith::{ArithDecoder, ArithEncoder};
 
 /// Classes: no candidate in the rule's table, a candidate, zlib's prediction.
 pub const CLASSES: usize = 3;
@@ -188,15 +188,25 @@ pub trait Backend {
     }
 }
 
-pub struct Enc(ArithEncoder);
+/// The encoder; a coder that coded nothing writes nothing.
+pub struct Enc {
+    e: ArithEncoder,
+    used: bool,
+}
 
 impl Enc {
     pub fn new() -> Self {
-        Enc(ArithEncoder::new())
+        Enc {
+            e: ArithEncoder::new(Vec::new()),
+            used: false,
+        }
     }
 
     pub fn finish(self) -> Vec<u8> {
-        self.0.finish()
+        match self.used {
+            true => self.e.finish(),
+            false => Vec::new(),
+        }
     }
 }
 
@@ -209,7 +219,8 @@ impl Default for Enc {
 impl Backend for Enc {
     #[inline]
     fn code(&mut self, p1: u32, bit: bool) -> bool {
-        self.0.encode(bit, p1);
+        self.used = true;
+        self.e.encode(bit, p1);
         bit
     }
 }

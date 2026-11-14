@@ -32,19 +32,30 @@ enum Heads {
     Direct(Vec<u32>),
 }
 
+/// Bits of the keys of [`Heads::Direct`].
+pub(crate) const DIRECT_BITS: u32 = 24;
+
+/// Bits of the slots of the hash table of [`Heads`] for `n` positions, or none where the
+/// direct table is used.
+pub(crate) fn head_slot_bits(n: usize) -> Option<u32> {
+    if n > 1 << 22 {
+        return None;
+    }
+    // At most a quarter full (fewer probes), unless that takes more than 4M slots
+    // (32 MiB); never more than half full.
+    let keys = n.saturating_sub(2);
+    let slots = (4 * keys).min(1 << 22).max(2 * keys);
+    Some(slots.next_power_of_two().max(1024).trailing_zeros())
+}
+
 impl Heads {
     fn new(n: usize) -> Heads {
-        if n > 1 << 22 {
-            return Heads::Direct(vec![0; 1 << 24]);
-        }
-        // At most a quarter full (fewer probes), unless that takes more than 4M slots
-        // (32 MiB); never more than half full.
-        let keys = n.saturating_sub(2);
-        let slots = (4 * keys).min(1 << 22).max(2 * keys);
-        let bits = slots.next_power_of_two().max(1024).trailing_zeros();
-        Heads::Hash {
-            table: vec![0; 1 << bits],
-            bits,
+        match head_slot_bits(n) {
+            None => Heads::Direct(vec![0; 1 << DIRECT_BITS]),
+            Some(bits) => Heads::Hash {
+                table: vec![0; 1 << bits],
+                bits,
+            },
         }
     }
 
@@ -114,10 +125,10 @@ fn key(data: &[u8], i: usize) -> Option<u32> {
 
 /// Links kept for positions within this distance of the last one linked: the window, plus
 /// the lookahead of a search behind it, plus the positions linked ahead of it.
-const RING: usize = 1 << 17;
+pub(crate) const RING: usize = 1 << 17;
 
 /// Positions linked past a search at once; [`RING`] covers them and the window.
-const LINK_AHEAD: usize = 8192;
+pub(crate) const LINK_AHEAD: usize = 8192;
 
 /// The chains near the positions searched last.
 struct Chain {
@@ -499,15 +510,6 @@ impl Matcher {
             true
         });
         found
-    }
-
-    /// Whether `d[p - dist..]` matches `d[p..]` for `len` bytes.
-    pub fn valid(d: &[u8], p: usize, len: usize, dist: usize) -> bool {
-        dist >= 1
-            && dist <= p
-            && dist <= WINDOW
-            && p + len <= d.len()
-            && (0..len).all(|i| d[p - dist + i] == d[p + i])
     }
 }
 

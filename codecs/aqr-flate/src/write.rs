@@ -7,6 +7,7 @@ use std::ops::Range;
 use crate::deflate::{Block, Body, Stream, Token};
 use crate::huffman::{self, CL_ORDER, DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA, RleOp};
 use crate::{Error, Result};
+use aqr_common::pool::par_map;
 
 struct Bits {
     out: Vec<u8>,
@@ -288,7 +289,7 @@ impl Writer {
                 (start, n) = (i + 1, 0);
             }
         }
-        let written = crate::par_map(runs.len(), threads, |j| -> Result<Option<Writer>> {
+        let written = par_map(runs.len(), threads, |j| -> Result<Option<Writer>> {
             let run = &blocks[runs[j].clone()];
             if stored(&run[0].0) {
                 return Ok(None);

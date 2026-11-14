@@ -12,6 +12,18 @@ use crate::matchfind::{Found, MAX_MATCH, Matcher, WINDOW};
 /// [`MIN_BITS`]).
 const HASH_BITS: u32 = 15;
 const MIN_BITS: u32 = 10;
+/// Bits of the hashes for a range of `span` positions.
+pub(crate) const fn hash_bits(span: usize) -> u32 {
+    let bits = span.next_power_of_two().trailing_zeros();
+    if bits < MIN_BITS {
+        MIN_BITS
+    } else if bits > HASH_BITS {
+        HASH_BITS
+    } else {
+        bits
+    }
+}
+
 /// Entries per bucket of the second table.
 const LW: usize = 1;
 
@@ -22,7 +34,7 @@ pub type Entries = crate::deflate::Short<usize, 16>;
 const ANY: usize = 0;
 /// Entries of the chain ring (twice the window, so that a link is never overwritten while
 /// its position is within the window of any position searched).
-const CHAIN: usize = 2 * WINDOW;
+pub(crate) const CHAIN: usize = 2 * WINDOW;
 
 /// What corrections need of a table: the candidates of a position, and the ranks of
 /// distances beyond them (if the rule asks for them).
@@ -358,10 +370,7 @@ impl Core {
         rank: bool,
     ) -> Self {
         let span = end.saturating_sub(start.saturating_sub(WINDOW)).max(1);
-        let bits = span
-            .next_power_of_two()
-            .trailing_zeros()
-            .clamp(MIN_BITS, HASH_BITS);
+        let bits = hash_bits(span);
         let own = key != 3 || inner.is_some();
         Core {
             bits,

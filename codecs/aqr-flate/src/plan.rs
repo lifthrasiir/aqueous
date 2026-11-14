@@ -12,7 +12,8 @@ use crate::module::{LARGE, RUN};
 use crate::tokens::{Kind, Rule};
 use crate::{Coding, Shape};
 
-/// Bytes of what the module holds, on WebAssembly (checked there by assertions).
+/// Bytes of what the module holds, on WebAssembly (`SHAPE` to `SCOPE` and `RUN` checked there
+/// by assertions, the others by the `plans_hold` tests).
 pub mod wasm {
     /// A block's shape in the layout, a segment, a token, a block to write and its tokens (and
     /// the shape it is made of), a rule, a static coding's model.
@@ -204,9 +205,8 @@ enum How {
 /// `decode_into` takes them), of data from position `off` on, `len` bytes of it at hand: the
 /// emulator, the adaptive model, the table or chain.
 fn decoder(st: &Stream, s: &Seg, off: u64, len: u64) -> u64 {
-    use crate::matchfind::WINDOW;
-    const RING: u64 = 1 << 17;
-    const LINK_AHEAD: u64 = 8192;
+    use crate::matchfind::{DIRECT_BITS, LINK_AHEAD, RING, WINDOW, head_slot_bits};
+    use crate::table::{CHAIN, hash_bits};
     let window = WINDOW as u64;
     let (start, end) = (s.pos - off, s.end - off);
     let rule = &st.rule;
@@ -214,14 +214,14 @@ fn decoder(st: &Stream, s: &Seg, off: u64, len: u64) -> u64 {
         Kind::Literals | Kind::Runs => 0,
         Kind::Search => {
             let span = end.saturating_sub(start.saturating_sub(window)).max(1);
-            let bits = span.next_power_of_two().trailing_zeros().clamp(10, 15);
+            let bits = hash_bits(span as usize);
             let own = rule.key != 3 || rule.inner != crate::tokens::INNER_ALL;
             let mut t = block(4 * ((rule.ways as u64) << bits));
             if rule.long > 0 {
                 t += block(4 << bits);
             }
             if rule.rank {
-                t += block(4 * (2 * window).min((span + 1).next_power_of_two()));
+                t += block(4 * (CHAIN as u64).min((span + 1).next_power_of_two()));
                 if own {
                     t += block(4 << bits);
                 }
@@ -231,16 +231,12 @@ fn decoder(st: &Stream, s: &Seg, off: u64, len: u64) -> u64 {
         Kind::Chain => {
             // Matcher::single_range: the links, and the heads of Heads::new
             let first = start.saturating_sub(window);
-            let span = (end + LINK_AHEAD + 1).min(len) - first;
-            let heads = match span > 1 << 22 {
-                true => 4 << 24,
-                false => {
-                    let keys = span.saturating_sub(2);
-                    let slots = (4 * keys).min(1 << 22).max(2 * keys);
-                    8 << slots.next_power_of_two().max(1024).trailing_zeros()
-                }
+            let span = (end + LINK_AHEAD as u64 + 1).min(len) - first;
+            let heads = match head_slot_bits(span as usize) {
+                None => 4 << DIRECT_BITS,
+                Some(bits) => 8 << bits,
             };
-            block(4 * (2 * RING).min(len + 1)) + block(heads)
+            block(4 * (2 * RING as u64).min(len + 1)) + block(heads)
         }
     };
     let emu = match st.zlib {
@@ -417,11 +413,7 @@ pub fn plan(
     let k = lens.len() as u64;
     let profile = crate::record_profile(records).ok()?;
     let threads = crate::module::SET_THREADS;
-    let mut m = Mem {
-        top: initial,
-        high: initial,
-        classes: Vec::new(),
-    };
+    let mut m = Mem::new(initial);
     // the params, the resources and the index copied, the lengths, what is derived, the model
     m.take(params.len() as u64);
     m.take(resources[0]);
@@ -436,11 +428,8 @@ pub fn plan(
     m.take(wasm::RULE * crate::profile_data(profile).ok()?.rules.len() as u64);
     match profile >= crate::ADAPTIVE {
         true => {
-            (
-                m.take(2 * crate::adapt::NUM as u64),
-                m.take(crate::adapt::NUM as u64),
-            )
-                .0
+            m.take(2 * crate::adapt::NUM as u64);
+            m.take(crate::adapt::NUM as u64);
         }
         false => m.take(wasm::MODEL * crate::tokens::FIELDS as u64),
     }
@@ -490,11 +479,7 @@ pub fn plan(
             );
             let most = (a..b)
                 .map(|s| {
-                    let mut sub = Mem {
-                        top: 0,
-                        high: 0,
-                        classes: Vec::new(),
-                    };
+                    let mut sub = Mem::default();
                     rebuild(&mut sub, &streams[s], How::Onto);
                     sub.high
                 })

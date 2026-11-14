@@ -27,7 +27,6 @@
 //!   lookahead and zlib emulation ([`adapt`], profiles from [`ADAPTIVE`] on).
 
 pub mod adapt;
-mod arith;
 pub mod bits;
 pub mod code;
 pub mod deflate;
@@ -123,6 +122,7 @@ use crate::bits::{BitReader, BitWriter};
 use crate::deflate::{Block, Body, Stream, Token};
 use crate::zlib::{Checkpoint, Emulator, Followed};
 use adapt::{Backend, Priors};
+use aqr_common::pool::par_map;
 use code::{get_usize, get_varint, put_gamma, put_varint};
 pub use tokens::Rule;
 use tokens::{FIELDS, Range};
@@ -290,11 +290,6 @@ impl Default for Options {
     }
 }
 
-/// Bits written so far.
-fn w_bits(w: &BitWriter) -> usize {
-    w.bit_len()
-}
-
 /// The built-in default models of the correction fields (`model/models.txt`): one
 /// line per field, the rounded frequencies of its symbols.
 pub fn default_models() -> &'static [code::Model; FIELDS] {
@@ -307,7 +302,7 @@ pub fn default_models() -> &'static [code::Model; FIELDS] {
             lines
                 .next()
                 .and_then(code::Model::parse)
-                .unwrap_or_else(code::Model::uniform)
+                .expect("built-in models are valid")
         })
     })
 }
@@ -577,6 +572,17 @@ type Pass<'a> = (usize, &'a std::sync::atomic::AtomicUsize);
 static ONCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 impl Flat {
+    /// The whole stream as one range.
+    fn whole_range(&self) -> Range<'_> {
+        Range {
+            first: 0,
+            count: self.tokens.len(),
+            pos: 0,
+            end: self.data.len(),
+            skips: &self.skips,
+        }
+    }
+
     /// Tells that `part` of the data is coded in pass `pass` ([`aqr_common::progress`]): as
     /// that share of the data, each pass of several taking its own.
     fn tell(&self, part: std::ops::Range<usize>, pass: Pass) {
@@ -845,7 +851,7 @@ impl<'a> Parsed<'a> {
         } else {
             rec.cost() / 8.0 * self.f.data.len() as f64 / covered as f64
         };
-        Ok(w_bits(&w).div_ceil(8) + c.headers.len() + corrections as usize)
+        Ok(w.bit_len().div_ceil(8) + c.headers.len() + corrections as usize)
     }
 
     /// Deconstructs the stream with `opts` (those it was parsed with), as
@@ -1164,10 +1170,10 @@ fn deconstruct_parsed(
             }
         }
         let defaults = default_models();
-        let before = w_bits(&w);
+        let before = w.bit_len();
         let models: [code::Model; FIELDS] =
             std::array::from_fn(|k| code::Model::choose(&counts[k], &defaults[k], &mut w));
-        report.tables = (w_bits(&w) - before).div_ceil(8);
+        report.tables = (w.bit_len() - before).div_ceil(8);
         let bodies = par_map(segs.len(), threads, |i| segs[i].write(&models));
         put_gamma(&mut w, segs.len() as u64);
         for (i, ((s, r), body)) in segs.iter().zip(&ranges).zip(&bodies).enumerate() {
@@ -1625,15 +1631,9 @@ fn zlib_params<'a>(
 /// if the emulation cannot resume at a segment's start (it would only serve the first one).
 fn zlib_ranges<'a>(f: &'a Flat, p: zlib::Params, ranges: &[Range<'a>]) -> Vec<Range<'a>> {
     if p.resumable() || ranges.len() <= 1 {
-        ranges.iter().map(|r| Range { ..*r }).collect()
+        ranges.to_vec()
     } else {
-        vec![Range {
-            first: 0,
-            count: f.tokens.len(),
-            pos: 0,
-            end: f.data.len(),
-            skips: &f.skips,
-        }]
+        vec![f.whole_range()]
     }
 }
 
@@ -2075,6 +2075,17 @@ impl Prepared {
         }
     }
 
+    /// The whole of it as one range.
+    fn range(&self) -> Range<'_> {
+        Range {
+            first: 0,
+            count: self.tokens.len(),
+            pos: 0,
+            end: self.data.len(),
+            skips: &self.skips,
+        }
+    }
+
     /// Bytes of data covered.
     pub fn bytes(&self) -> usize {
         self.data.len()
@@ -2085,44 +2096,24 @@ impl Prepared {
         self.cost_limited(rule, usize::MAX)
     }
 
-    /// Codes the tokens under `rule` into `c`, as one range.
-    pub fn code<C: tokens::Corr>(&self, rule: Rule, c: &mut C) -> Result<()> {
-        let range = Range {
-            first: 0,
-            count: self.tokens.len(),
-            pos: 0,
-            end: self.data.len(),
-            skips: &self.skips,
-        };
-        tokens::code_range(c, &self.data, rule, &range, Some(&self.tokens), None)?;
-        Ok(())
-    }
-
     /// Codes the tokens under several [`tokens::Kind::Chain`] rules at once, one coder each
     /// ([`tokens::code_chains`]).
     fn code_chains<C: tokens::Corr>(&self, rules: &[Rule], cs: &mut [C]) -> Result<()> {
-        let range = Range {
-            first: 0,
-            count: self.tokens.len(),
-            pos: 0,
-            end: self.data.len(),
-            skips: &self.skips,
-        };
-        tokens::code_chains(cs, &self.data, rules, &range, &self.tokens, None)
+        tokens::code_chains(cs, &self.data, rules, &self.range(), &self.tokens, None)
     }
 
     fn cost_limited(&mut self, rule: Rule, limit: usize) -> Result<f64> {
-        let range = Range {
-            first: 0,
-            count: self.tokens.len(),
-            pos: 0,
-            end: self.data.len(),
-            skips: &self.skips,
-        };
         let mut rec = tokens::Recorder::default();
         rec.limit = limit;
         rec.count_only = true;
-        let r = tokens::code_range(&mut rec, &self.data, rule, &range, Some(&self.tokens), None);
+        let r = tokens::code_range(
+            &mut rec,
+            &self.data,
+            rule,
+            &self.range(),
+            Some(&self.tokens),
+            None,
+        );
         r?;
         Ok(rec.cost())
     }
@@ -2136,13 +2127,6 @@ pub fn analyze(raw: &[u8], rules: &[Rule], prefix: usize) -> Result<((u64, u64),
     let mut p = Prepared::from_flat(&f, prefix);
     let costs = rules.iter().map(|&r| p.cost(r)).collect::<Result<_>>()?;
     Ok((fp, costs, p.bytes()))
-}
-
-/// Estimated cost in bits of each rule over the first `prefix` bytes of data of a raw stream,
-/// for deriving rule catalogs.
-pub fn rule_costs(raw: &[u8], rules: &[Rule], prefix: usize) -> Result<Vec<f64>> {
-    let mut p = Prepared::new(raw, prefix)?;
-    rules.iter().map(|&r| p.cost(r)).collect()
 }
 
 /// Blocks: type, then the token count (same as the previous block's, the remaining tokens,
@@ -2619,6 +2603,22 @@ enum To {
     Onto(Vec<u8>),
 }
 
+/// A segment of a record, as [`rebuild`] reads it.
+#[derive(Clone, Copy)]
+struct Seg<'a> {
+    /// Its first token's index and the number of its tokens.
+    first: usize,
+    count: usize,
+    /// Its misses by class (static profiles).
+    misses: [usize; 2],
+    /// Its data position.
+    pos: usize,
+    /// Its coded body.
+    body: &'a [u8],
+    /// The emulator's state it starts from.
+    cp: Option<Checkpoint>,
+}
+
 /// Where [`reconstruct_into`] gives the stream it rebuilds, a piece at a time.
 type Pieces<'a> = &'a mut dyn FnMut(&[u8]);
 
@@ -2644,8 +2644,8 @@ fn rebuild(
         _ => return Err(Error::Corrupt),
     };
     let mut at = 2;
-    let main_len = get_varint(meta, &mut at)? as usize;
-    let hdr_len = get_varint(meta, &mut at)? as usize;
+    let main_len = usize::try_from(get_varint(meta, &mut at)?).map_err(|_| Error::Corrupt)?;
+    let hdr_len = usize::try_from(get_varint(meta, &mut at)?).map_err(|_| Error::Corrupt)?;
     let main = meta
         .get(at..at.checked_add(main_len).ok_or(Error::Corrupt)?)
         .ok_or(Error::Corrupt)?;
@@ -2689,7 +2689,6 @@ fn rebuild(
         models = Some(m);
     }
     let nseg = get_usize(r, n + 1)?;
-    // (first token, count, misses, position, body, emulator state)
     // (a segment takes a bit at least: room for no more than the record has bits)
     let mut segs = Vec::with_capacity(nseg.min(r.bits_left()));
     let mut first = 0;
@@ -2708,11 +2707,18 @@ fn rebuild(
         };
         let body = meta.get(at..at + len).ok_or(Error::Corrupt)?;
         at += len;
-        segs.push((first, count, misses, pos, body, cp));
+        segs.push(Seg {
+            first,
+            count,
+            misses,
+            pos,
+            body,
+            cp,
+        });
         first += count;
     }
     let total = first;
-    if at != meta.len() || segs.windows(2).any(|s| s[0].3 > s[1].3) {
+    if at != meta.len() || segs.windows(2).any(|s| s[0].pos > s[1].pos) {
         return Err(Error::Corrupt);
     }
 
@@ -2756,8 +2762,15 @@ fn rebuild(
     // segment `i` decoded of `data`, the data from position `off` on (its positions so many
     // less), its tokens appended to `out`: where it ends
     let decode_into = |i: usize, data: &[u8], off: usize, out: &mut Vec<Token>| -> Result<usize> {
-        let (first, count, misses, pos, body, cp) = segs[i];
-        let end = segs.get(i + 1).map_or(n, |s| s.3);
+        let Seg {
+            first,
+            count,
+            misses,
+            pos,
+            body,
+            cp,
+        } = segs[i];
+        let end = segs.get(i + 1).map_or(n, |s| s.pos);
         let range = Range {
             first,
             count,
@@ -2799,7 +2812,7 @@ fn rebuild(
     };
     #[cfg(not(target_family = "wasm"))]
     let decode = |i: usize, data: &[u8], off: usize| -> Result<(Vec<Token>, usize)> {
-        let mut out = Vec::with_capacity(segs[i].1);
+        let mut out = Vec::with_capacity(segs[i].count);
         let p = decode_into(i, data, off, &mut out)?;
         Ok((out, p))
     };
@@ -2840,7 +2853,7 @@ fn rebuild(
     // (reserved at the first, after the first batch's tasks are spawned)
     let most = segs
         .chunks(batch)
-        .map(|b| b.iter().map(|s| s.1).sum::<usize>())
+        .map(|b| b.iter().map(|s| s.count).sum::<usize>())
         .max()
         .unwrap_or(0);
     let round = total.min(held_most(&counts) + most);
@@ -2863,7 +2876,7 @@ fn rebuild(
     let into_pending =
         |s0: usize, data: &[u8], off: usize, pending: &mut Vec<Token>| -> Result<(usize, usize)> {
             let s1 = (s0 + batch).min(segs.len());
-            let check = |i: usize, p: usize| match p == segs.get(i + 1).map_or(p, |s| s.3) {
+            let check = |i: usize, p: usize| match p == segs.get(i + 1).map_or(p, |s| s.pos) {
                 true => Ok(p),
                 false => Err(Error::Corrupt),
             };
@@ -2878,7 +2891,7 @@ fn rebuild(
                 return Ok((s1, end));
             }
             let task = |j: usize| {
-                let mut t = Vec::with_capacity(segs[s0 + j].1);
+                let mut t = Vec::with_capacity(segs[s0 + j].count);
                 match decode_into(s0 + j, data, off, &mut t) {
                     Ok(p) => {
                         let mut b = Vec::with_capacity(9 + 5 * t.len());
@@ -2916,10 +2929,13 @@ fn rebuild(
     // last one (see BACK)
     let reads = |s0: usize| {
         let s1 = (s0 + batch).min(segs.len());
-        let lo = segs[s0].3.saturating_sub(BACK) / ALIGN * ALIGN;
+        let lo = segs[s0].pos.saturating_sub(BACK) / ALIGN * ALIGN;
         (
             lo,
-            segs.get(s1).map_or(n, |s| s.3).saturating_add(AHEAD).min(n),
+            segs.get(s1)
+                .map_or(n, |s| s.pos)
+                .saturating_add(AHEAD)
+                .min(n),
         )
     };
     let whole = match &src {
@@ -2930,7 +2946,7 @@ fn rebuild(
     if let Source::Pulled(p) = &mut src
         && cfg!(target_family = "wasm")
     {
-        p.reserve(pull_room(n, segs.len(), |i| segs[i].3, batch));
+        p.reserve(pull_room(n, segs.len(), |i| segs[i].pos, batch));
     }
     // the next batch is decoded while the blocks of this one are written (before them, on a
     // single thread), the data of both held where it is pulled; on WebAssembly, with the data
@@ -2981,7 +2997,10 @@ fn rebuild(
                         Source::Pulled(p) => (&p.buf[..], p.at),
                     };
                     let (s1, e) = into_pending(s0, data, off, &mut pending)?;
-                    (decoded, end) = (decoded + segs[s0..s1].iter().map(|s| s.1).sum::<usize>(), e);
+                    (decoded, end) = (
+                        decoded + segs[s0..s1].iter().map(|s| s.count).sum::<usize>(),
+                        e,
+                    );
                     (s0, s1)
                 };
                 if s1 < segs.len() {
@@ -3004,7 +3023,7 @@ fn rebuild(
                 #[cfg(not(target_family = "wasm"))]
                 for (i, r) in (s0..s1).zip(results) {
                     let (t, p) = r?;
-                    if p != segs.get(i + 1).map_or(p, |s| s.3) {
+                    if p != segs.get(i + 1).map_or(p, |s| s.pos) {
                         return Err(Error::Corrupt);
                     }
                     decoded += t.len();
@@ -3202,11 +3221,6 @@ fn rebuild(
     }
 }
 
-/// `f(0..n)` on up to `threads` threads, in order.
-fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    aqr_common::pool::par_map(n, threads, f)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3317,20 +3331,12 @@ mod tests {
 const _: () = {
     use plan::wasm;
     assert!(size_of::<Shape>() == wasm::SHAPE as usize);
-    assert!(
-        size_of::<(
-            usize,
-            usize,
-            [usize; 2],
-            usize,
-            &[u8],
-            Option<zlib::Checkpoint>
-        )>() == wasm::SEG as usize
-    );
+    assert!(size_of::<Seg>() == wasm::SEG as usize);
     assert!(size_of::<Token>() == wasm::TOKEN as usize);
     assert!(size_of::<(Shape, std::ops::Range<usize>)>() == wasm::READY as usize);
     assert!(size_of::<(deflate::Block, std::ops::Range<usize>)>() == wasm::BLOCK as usize);
     assert!(size_of::<Rule>() == wasm::RULE as usize);
     assert!(size_of::<code::Model>() == wasm::MODEL as usize);
     assert!(aqr_common::pool::SCOPE_BYTES == wasm::SCOPE as usize);
+    assert!(size_of::<module::RunStream>() == wasm::RUN as usize);
 };

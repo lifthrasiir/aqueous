@@ -157,6 +157,7 @@ impl std::str::FromStr for Rule {
         let mut r = Rule::default();
         for kv in s.split(',') {
             let num = |v: &str| v.parse::<u16>().map_err(|_| bad());
+            let num8 = |v: &str| u8::try_from(num(v)?).map_err(|_| bad());
             match kv.split_once('=') {
                 None if kv == "literals" => r.kind = Kind::Literals,
                 None if kv == "runs" => r.kind = Kind::Runs,
@@ -172,18 +173,18 @@ impl std::str::FromStr for Rule {
                 None if kv == "far" => r.far_len = r.far_len.max(3),
                 None if kv == "starts" => r.inner = 0,
                 None if kv == "rank" => r.rank = true,
-                Some(("key", v)) => r.key = num(v)? as u8,
-                Some(("ways", v)) => r.ways = num(v)? as u8,
-                Some(("long", v)) => r.long = num(v)? as u8,
+                Some(("key", v)) => r.key = num8(v)?,
+                Some(("ways", v)) => r.ways = num8(v)?,
+                Some(("long", v)) => r.long = num8(v)?,
                 Some(("inner", v)) => r.inner = num(v)?,
                 Some(("lazy", v)) => r.lazy = num(v)?,
-                Some(("margin", v)) => r.margin = num(v)? as u8,
-                Some(("min", v)) => r.min_len = num(v)? as u8,
+                Some(("margin", v)) => r.margin = num8(v)?,
+                Some(("min", v)) => r.min_len = num8(v)?,
                 Some(("far", v)) => {
                     r.far_len = r.far_len.max(3);
                     r.far_dist = num(v)?;
                 }
-                Some(("farlen", v)) => r.far_len = num(v)? as u8,
+                Some(("farlen", v)) => r.far_len = num8(v)?,
                 Some(("window", v)) => r.window = num(v)?,
                 _ => return Err(bad()),
             }
@@ -407,6 +408,7 @@ pub(crate) fn unzigzag(v: u32) -> i32 {
 
 /// Where a run of tokens starts. Stored blocks interrupt the tokens: `skips` lists, by
 /// global token index, how many bytes they cover before that token.
+#[derive(Clone, Copy)]
 pub struct Range<'a> {
     pub first: usize,
     pub count: usize,
@@ -645,7 +647,7 @@ fn dist_index(t: &mut dyn Cands, d: &[u8], p: usize, dist: usize) -> u32 {
     t.index_of(d, p, dist).map_or(0, |i| i as u32 + 1)
 }
 
-/// A miss's end in [`Recorder::ops`], plus its class (field numbers are below).
+/// A miss's end in [`Recorder::ops`], plus its class (field numbers are above).
 const MISS: u8 = 0x80;
 
 /// Records the corrections while deconstructing.
@@ -987,4 +989,27 @@ fn valid(d: &[u8], p: usize, len: usize, dist: usize) -> bool {
         && dist <= WINDOW
         && p + len <= d.len()
         && common(d, p - dist, p, len) == len
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A number that does not fit its field is refused, not wrapped to a small one.
+    #[test]
+    fn rule_numbers_out_of_range() {
+        let ok: Rule = "key=3,ways=2".parse().unwrap();
+        assert_eq!((ok.key, ok.ways), (3, 2));
+        for bad in [
+            "key=259,ways=2",
+            "key=3,ways=257",
+            "key=3,ways=2,long=257",
+            "key=3,ways=2,min=260",
+        ] {
+            assert!(bad.parse::<Rule>().is_err(), "{bad}");
+        }
+        for bad in ["key=3,ways=2,margin=256", "key=3,ways=2,far,farlen=259"] {
+            assert!(bad.parse::<Rule>().is_err(), "{bad}");
+        }
+    }
 }

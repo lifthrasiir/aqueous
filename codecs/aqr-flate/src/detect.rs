@@ -395,13 +395,6 @@ pub fn plausible(stream: &dyn Tokens, data: &[u8], p: Params, hints: &Hints) -> 
         && trial(stream, data, p, TRIAL_TOKENS, 0).is_some()
 }
 
-/// The best zlib parameters for `stream`, if it looks like zlib's output at all. Candidates
-/// are emulated over growing prefixes (successive halving): only those tied for the fewest
-/// misses go on, until one is left or the whole stream has been covered.
-pub fn detect(stream: &dyn Tokens, data: &[u8]) -> Option<Detection> {
-    detect_among(stream, data, candidates(stream))
-}
-
 /// Other memLevels that `stream` allows when it has no full block to tell it by (memLevel
 /// only sets the hash size and the block size, so this matters for single-block streams).
 pub fn mem_alternatives(stream: &dyn Tokens) -> Vec<u8> {
@@ -419,7 +412,7 @@ pub fn mem_alternatives(stream: &dyn Tokens) -> Vec<u8> {
         .collect()
 }
 
-/// [`detect_among`], then, if the best candidate is not exact over the whole stream and its
+/// The best of `candidates` (see `detect_among_followed`), then, if the best candidate is not exact over the whole stream and its
 /// memLevel was only guessed, the same candidate with the other possible memLevels.
 pub fn detect_refined(
     stream: &dyn Tokens,
@@ -466,22 +459,6 @@ pub fn detect_refined_at<'a>(
     Some((best.d, Some(best.into_followed())))
 }
 
-/// The usual settings among `candidates`: levels 6 (zlib's default), 9 and 1, and the
-/// Huffman-only and RLE strategies, with the most likely memLevel (the first candidate's).
-pub fn common(candidates: Vec<Params>) -> Vec<Params> {
-    let mem = candidates.first().map(|p| p.mem);
-    candidates
-        .into_iter()
-        .filter(|p| Some(p.mem) == mem)
-        .filter(|p| match p.strategy {
-            Strategy::HuffmanOnly | Strategy::Rle => true,
-            Strategy::Default | Strategy::Fixed => matches!(p.level, 1 | 6 | 9),
-            Strategy::Filtered => false,
-        })
-        .collect()
-}
-
-/// [`detect`] restricted to `candidates`.
 /// Emulation units for `candidates`: deflate_slow candidates sharing windowBits and memLevel
 /// together (see `MultiSlow`), unless stored blocks would make their states diverge.
 fn units<'a>(
@@ -521,26 +498,9 @@ fn units<'a>(
     units
 }
 
-/// The first of `candidates` (in their order) that predicts the first `TRIAL_TOKENS`
-/// tokens without a miss: a cheap guess, to be verified by coding the whole stream.
-pub fn first_exact(stream: &dyn Tokens, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
-    let mut found: Vec<(usize, Detection)> = vec![];
-    for mut u in units(stream, data, candidates, &[]) {
-        u.run(stream, TRIAL_TOKENS, 0);
-        found.extend(u.detections().filter(|(_, d)| d.misses == 0));
-    }
-    found.into_iter().min_by_key(|&(i, _)| i).map(|(_, d)| d)
-}
-
-pub fn detect_among(
-    stream: &dyn Tokens,
-    data: &[u8],
-    candidates: Vec<Params>,
-) -> Option<Detection> {
-    detect_among_followed(stream, data, candidates, &[]).map(|(d, _)| d)
-}
-
-/// [`detect_among`], and the emulation of the candidate found as far as it went.
+/// The best of `candidates`: emulated over growing prefixes (successive halving): only those tied for
+/// the fewest misses go on, until one is left or the whole stream has been covered. The emulation
+/// of the one found, as far as it went, goes with it.
 fn detect_among_followed<'a>(
     stream: &dyn Tokens,
     data: &'a [u8],

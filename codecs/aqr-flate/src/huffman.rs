@@ -247,6 +247,13 @@ pub struct RleOp {
 }
 
 impl RleOp {
+    pub fn new(sym: u8, extra: usize) -> RleOp {
+        RleOp {
+            sym,
+            extra: extra as u8,
+        }
+    }
+
     pub fn extra_bits(sym: u8) -> u32 {
         match sym {
             16 => 2,
@@ -259,8 +266,7 @@ impl RleOp {
     /// Number of code lengths this op covers.
     pub fn count(self) -> usize {
         match self.sym {
-            16 => 3 + self.extra as usize,
-            17 => 3 + self.extra as usize,
+            16 | 17 => 3 + self.extra as usize,
             18 => 11 + self.extra as usize,
             _ => 1,
         }
@@ -270,10 +276,7 @@ impl RleOp {
 /// zlib's run-length coding of one tree's lengths (FORMAT.md, "Run-length codings"),
 /// appended to `out`.
 pub fn rle_zlib(lens: &[u8], out: &mut Ops) {
-    let op = |sym: u8, extra: usize| RleOp {
-        sym,
-        extra: extra as u8,
-    };
+    let op = RleOp::new;
     let mut i = 0;
     let mut previous = None;
     let mut limits = match lens.first() {
@@ -314,10 +317,7 @@ pub fn rle_zlib(lens: &[u8], out: &mut Ops) {
 /// libdeflate's run-length coding of the concatenated lengths (FORMAT.md, "Run-length
 /// codings"), appended to `out`.
 pub fn rle_libdeflate(lens: &[u8], out: &mut Ops) {
-    let op = |sym: u8, extra: usize| RleOp {
-        sym,
-        extra: extra as u8,
-    };
+    let op = RleOp::new;
     for run in lens.chunk_by(|a, b| a == b) {
         let v = run[0];
         let mut rest = run.len();
