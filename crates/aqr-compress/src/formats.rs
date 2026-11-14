@@ -902,13 +902,13 @@ formats! {
     /// sample is clearly smaller than the text's.
     Log = "log" {
         recompressor: Pure(aqr_log::formula::encode),
-        // segments of 64 MiB, the streams whole (heap peaks of `aqr -c --stats` on logs: openssh
-        // 73 MB 80.7 MB = 1.10 per byte, intel_lab 151 MB 171 MB = 1.14, nasa 205 MB 219 MB = 1.07,
-        // apache 5 MB 10.4 MB = 2.0, the templates and columns being a share of a small input's),
-        // 1.3 for the largest ratio of the inputs that count
-        // (the segments are coded at once on the threads: the heap peaks stay, the segments' streams
-        // being what the allowance counts; the resident peak of nasa 738 -> 830 MB)
-        heap: 1.3,
+        // segments of 64 MiB (up to 4 at once, each holding the timestamps and templates of its
+        // lines for its passes), the streams whole (heap peaks of `aqr -c --stats` on logs:
+        // openssh 73 MB 85 MB = 1.16 per byte, intel_lab 151 MB 233 MB = 1.54, nasa 205 MB
+        // 302 MB = 1.47, household_power 133 MB 259 MB = 1.95, apache 5 MB 7 MB = 1.4: the
+        // working memory of the segments is a share of a smaller input's), 2.0 for the largest
+        // ratio of the inputs that count
+        heap: 2.0,
         text: true,
     }
     /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.

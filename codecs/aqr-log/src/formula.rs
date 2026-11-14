@@ -56,6 +56,10 @@ const RARE_PER: usize = 500;
 /// and the module hold of a file at once.
 pub const SEGMENT: usize = 64 << 20;
 
+/// The most segments coded at once: each holds its working memory (the counts of its tokens'
+/// forms, the timestamps and templates of its lines, its streams) on top of the input.
+const AT_ONCE: usize = 4;
+
 /// Whether `line` has a byte that marks a template (such a line is kept as it is).
 fn has_mark(line: &[u8]) -> bool {
     memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, line).is_some() || memchr::memchr(M_TIME, line).is_some()
@@ -253,7 +257,8 @@ struct Splitter {
     /// there were, and all of them. Not kept beyond [`CACHE_LINES`] lines and [`CACHE_SPANS`]
     /// timestamps; the lines after are found again.
     seen: Vec<(u32, u32)>,
-    kept: Vec<Span>,
+    kept: Vec<[u32; 3]>,
+    kept_v: Vec<i64>,
     /// The lines cut in this pass so far, and where their timestamps are in `kept`.
     cursor: usize,
     next: usize,
@@ -261,7 +266,7 @@ struct Splitter {
     recording: bool,
 }
 
-/// The most lines, and timestamps, that a segment's are kept for.
+/// The most lines, and timestamps (20 bytes each), that a segment's are kept for.
 const CACHE_LINES: usize = 4 << 20;
 const CACHE_SPANS: usize = 2 << 20;
 
@@ -277,6 +282,7 @@ impl Splitter {
             pieces: Vec::new(),
             seen: Vec::new(),
             kept: Vec::new(),
+            kept_v: Vec::new(),
             cursor: 0,
             next: 0,
             recording: true,
@@ -292,9 +298,13 @@ impl Splitter {
             self.times.find(line);
             let n = self.times.spans.len();
             if at == self.seen.len() && at < CACHE_LINES && self.kept.len() + n <= CACHE_SPANS {
+                // (a span is of a line that fits in 32 bits, which its length tells)
                 if let Ok(len) = u32::try_from(line.len()) {
                     self.seen.push((len, n as u32));
-                    self.kept.extend_from_slice(&self.times.spans);
+                    for sp in &self.times.spans {
+                        self.kept.push([sp.start as u32, sp.end as u32, sp.pat]);
+                        self.kept_v.push(sp.v);
+                    }
                 }
             }
             return;
@@ -303,7 +313,13 @@ impl Splitter {
             Some(&(len, n)) if len as usize == line.len() => {
                 let n = n as usize;
                 self.times.spans.clear();
-                self.times.spans.extend_from_slice(&self.kept[self.next..self.next + n]);
+                let (kept, vs) = (&self.kept[self.next..self.next + n], &self.kept_v[self.next..self.next + n]);
+                self.times.spans.extend(kept.iter().zip(vs).map(|(&[start, end, pat], &v)| Span {
+                    start: start as usize,
+                    end: end as usize,
+                    pat,
+                    v,
+                }));
                 self.next += n;
             }
             _ => {
@@ -916,7 +932,7 @@ pub fn encode_in(input: &[u8], segment_len: usize, check: bool, threads: usize) 
         }
         cuts.push(end);
     }
-    let done = aqr_common::pool::par_map(cuts.len() - 1, threads, |k| {
+    let done = aqr_common::pool::par_map(cuts.len() - 1, threads.min(AT_ONCE), |k| {
         let mut s = Streams::default();
         let (params, raw) = segment(&input[cuts[k]..cuts[k + 1]], cuts[k + 1] == input.len(), &mut s);
         (s, params, raw)
