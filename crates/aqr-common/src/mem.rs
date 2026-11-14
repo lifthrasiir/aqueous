@@ -189,6 +189,10 @@ pub const MAPPED_MIN: usize = 1 << 20;
 /// decompression of 4.4 GB in use took 7.5 GB). A growing block is extended in place where the
 /// pages after it are free, as the system's realloc does. Registered by the binaries.
 ///
+/// On Windows, the system's allocator, but for blocks of [`cache::MIN`] to [`cache::MAX`]
+/// bytes, a few of which each thread keeps as they are freed, for the next it allocates of
+/// their size ([`cache`]).
+///
 /// Elsewhere the system's allocator alone: glibc's reuses the large blocks it keeps, where
 /// mapping each anew faulted in every page of it (4 KiB on x86-64) and unmapping took the
 /// process's lock of mappings and flushed the other threads' TLBs. On 10gb `aqr -K` (then `-t`; 4 threads
@@ -217,6 +221,143 @@ mod mapped {
     }
 }
 
+/// The blocks a thread keeps as they are freed, of sizes rounded up to a quarter of a power of
+/// two, at most [`cache::PER_CLASS`] of each size and [`cache::HELD_MAX`] bytes in all, until
+/// it allocates another of the size or ends. Windows' heap gives the pages of such blocks back
+/// as they are freed, so that a block allocated anew faults its pages in again, and threads
+/// doing so wait for each other: aqr-minecraft's encoding (zlib's emulator made anew for each
+/// chunk's stream) went from 49.8 MB/s on one thread to 10.0 MB/s a thread on 16 (a Ryzen 7
+/// 9700X). The bytes kept are not counted as the heap's.
+#[cfg(windows)]
+pub mod cache {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::UnsafeCell;
+
+    /// The sizes of the blocks kept: from `MIN` bytes, below `MAX`.
+    pub const MIN: usize = 32 << 10;
+    pub const MAX: usize = 4 << 20;
+    const LOG_MIN: u32 = MIN.trailing_zeros();
+    const CLASSES: usize = 4 * (MAX.trailing_zeros() - LOG_MIN) as usize + 1;
+    pub const PER_CLASS: usize = 4;
+    pub const HELD_MAX: usize = 4 << 20;
+    /// The alignment of the blocks (the system's own: those of more are not kept).
+    const ALIGN: usize = 16;
+
+    /// Whether blocks of layout `l` are kept.
+    #[inline]
+    pub fn of(l: Layout) -> bool {
+        (MIN..MAX).contains(&l.size()) && l.align() <= ALIGN
+    }
+
+    /// The class of a block of `n` bytes ([`of`]), and the bytes of the blocks of it.
+    #[inline]
+    pub fn class(n: usize) -> (usize, usize) {
+        let o = usize::BITS - 1 - (n - 1).leading_zeros();
+        let base = 1usize << o;
+        let q = ((n - base) * 4).div_ceil(base);
+        ((o + 1 - LOG_MIN) as usize * 4 + q - 4, base + q * (base / 4))
+    }
+
+    fn layout(size: usize) -> Layout {
+        // SAFETY: a size above 0, a power of two
+        unsafe { Layout::from_size_align_unchecked(size, ALIGN) }
+    }
+
+    struct Cache {
+        held: usize,
+        counts: [u8; CLASSES],
+        blocks: [[*mut u8; PER_CLASS]; CLASSES],
+    }
+
+    impl Drop for Cache {
+        fn drop(&mut self) {
+            for c in 0..CLASSES {
+                let size = (MIN << (c / 4)) / 4 * (4 + c % 4);
+                for &p in &self.blocks[c][..self.counts[c] as usize] {
+                    // SAFETY: allocated by the system as of this layout, and kept here alone
+                    unsafe { System.dealloc(p, layout(size)) };
+                }
+            }
+        }
+    }
+
+    thread_local! {
+        static CACHE: UnsafeCell<Cache> = const {
+            UnsafeCell::new(Cache { held: 0, counts: [0; CLASSES], blocks: [[std::ptr::null_mut(); PER_CLASS]; CLASSES] })
+        };
+    }
+
+    /// A block of layout `l` ([`of`]), zeroed where `zeroed`.
+    ///
+    /// # Safety
+    /// As [`GlobalAlloc::alloc`].
+    pub unsafe fn alloc(l: Layout, zeroed: bool) -> *mut u8 {
+        let (c, size) = class(l.size());
+        // SAFETY: nothing allocates within, so that the cache is not taken twice
+        let kept = CACHE.try_with(|k| unsafe {
+            let k = &mut *k.get();
+            let n = k.counts[c] as usize;
+            (n > 0).then(|| {
+                k.counts[c] -= 1;
+                k.held -= size;
+                k.blocks[c][n - 1]
+            })
+        });
+        match kept {
+            Ok(Some(p)) => {
+                if zeroed {
+                    // SAFETY: a block of `size` bytes, at least `l.size()`
+                    unsafe { std::ptr::write_bytes(p, 0, l.size()) };
+                }
+                p
+            }
+            // SAFETY: a layout of a size above 0
+            _ if zeroed => unsafe { System.alloc_zeroed(layout(size)) },
+            _ => unsafe { System.alloc(layout(size)) },
+        }
+    }
+
+    /// Block `p` of layout `l` ([`of`]) freed: kept, or given back.
+    ///
+    /// # Safety
+    /// As [`GlobalAlloc::dealloc`].
+    pub unsafe fn dealloc(p: *mut u8, l: Layout) {
+        let (c, size) = class(l.size());
+        // SAFETY: as in `alloc`
+        let kept = CACHE.try_with(|k| unsafe {
+            let k = &mut *k.get();
+            let n = k.counts[c] as usize;
+            let keep = n < PER_CLASS && k.held + size <= HELD_MAX;
+            if keep {
+                k.blocks[c][n] = p;
+                k.counts[c] += 1;
+                k.held += size;
+            }
+            keep
+        });
+        if kept != Ok(true) {
+            // SAFETY: allocated by `alloc` (or `realloc`) as of this layout
+            unsafe { System.dealloc(p, layout(size)) }
+        }
+    }
+
+    /// Block `p` of layout `l` made `n` bytes, one of the two of a size kept ([`of`]).
+    ///
+    /// # Safety
+    /// As [`GlobalAlloc::realloc`].
+    pub unsafe fn realloc(p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        // SAFETY: of the block's alignment, as the caller guarantees
+        let nl = unsafe { Layout::from_size_align_unchecked(n, l.align()) };
+        let have = if of(l) { layout(class(l.size()).1) } else { l };
+        let want = if of(nl) { class(n).1 } else { n };
+        if want == have.size() {
+            return p;
+        }
+        // SAFETY: the block's layout as it was allocated, of the same alignment
+        unsafe { System.realloc(p, have, want) }
+    }
+}
+
 impl Mapped {
     #[inline]
     fn mapped(l: Layout) -> bool {
@@ -230,12 +371,20 @@ impl Mapped {
         if Self::mapped(l) {
             return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
         }
+        #[cfg(windows)]
+        if cache::of(l) {
+            return unsafe { cache::alloc(l, false) };
+        }
         unsafe { System.alloc(l) }
     }
     unsafe fn raw_alloc_zeroed(&self, l: Layout) -> *mut u8 {
         #[cfg(target_vendor = "apple")]
         if Self::mapped(l) {
             return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
+        }
+        #[cfg(windows)]
+        if cache::of(l) {
+            return unsafe { cache::alloc(l, true) };
         }
         unsafe { System.alloc_zeroed(l) }
     }
@@ -245,11 +394,19 @@ impl Mapped {
             // SAFETY: mapped by `alloc` as of this size, and the caller's no more
             return unsafe { mapped::unmap(p, mapped::round(l.size())) };
         }
+        #[cfg(windows)]
+        if cache::of(l) {
+            return unsafe { cache::dealloc(p, l) };
+        }
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn raw_realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         // SAFETY (all): `l` is the block's layout, `n` its new size, of the same alignment
         let nl = unsafe { Layout::from_size_align_unchecked(n, l.align()) };
+        #[cfg(windows)]
+        if cache::of(l) || cache::of(nl) {
+            return unsafe { cache::realloc(p, l, n) };
+        }
         let (old, new) = (Self::mapped(l), Self::mapped(nl));
         if !old && !new {
             return unsafe { System.realloc(p, l, n) };
@@ -353,5 +510,43 @@ mod tests {
                 a.dealloc(q, Layout::from_size_align(to, 8).unwrap());
             }
         }
+    }
+
+    /// The classes of the blocks kept; blocks of their sizes grown and shrunk across classes and
+    /// bounds, freed and taken again (zeroed where asked), on threads at once.
+    #[cfg(windows)]
+    #[test]
+    fn cached() {
+        assert_eq!(cache::class(cache::MIN), (0, cache::MIN));
+        assert_eq!(cache::class(cache::MIN + 1), (1, cache::MIN / 4 * 5));
+        assert_eq!(cache::class(2 * cache::MIN), (4, 2 * cache::MIN));
+        assert_eq!(cache::class(cache::MAX - 1).1, cache::MAX);
+        for n in (cache::MIN..cache::MAX).step_by(997) {
+            let (c, size) = cache::class(n);
+            assert!(size >= n && size - n <= size / 5 && cache::class(size) == (c, size), "{n}");
+            assert_eq!(size, (cache::MIN << (c / 4)) / 4 * (4 + c % 4), "{n}");
+        }
+        let a = &Mapped;
+        std::thread::scope(|s| {
+            for t in 0..4usize {
+                s.spawn(move || {
+                    for round in 0..300usize {
+                        let sizes = [1000, 40_000, 70_000 + round, 1 << 20, 3 << 20, 5 << 20, cache::MIN];
+                        let (from, to) = (sizes[(round + t) % 7], sizes[(round * 3 + t / 2) % 7]);
+                        let l = Layout::from_size_align(from, 8).unwrap();
+                        // SAFETY: blocks of these layouts, written and read within them
+                        unsafe {
+                            let p = a.alloc_zeroed(l);
+                            assert!(std::slice::from_raw_parts(p, from).iter().all(|&b| b == 0), "{from}");
+                            (0..from).step_by(97).for_each(|i| *p.add(i) = (i + t) as u8);
+                            let q = a.realloc(p, l, to);
+                            assert!((0..from.min(to)).step_by(97).all(|i| *q.add(i) == (i + t) as u8));
+                            std::ptr::write_bytes(q, 0xff, to);
+                            a.dealloc(q, Layout::from_size_align(to, 8).unwrap());
+                        }
+                    }
+                });
+            }
+        });
     }
 }

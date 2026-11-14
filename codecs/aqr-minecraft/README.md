@@ -46,12 +46,12 @@ emulation at level 6, memory level 8 (`check`).
   MB of them 125 whole streams), against 17.2 MB of current streams: the tails are of old
   versions, and only 7% of their bytes are found in the current streams (32-byte windows), so
   they are kept. `mca/kept` is of no kind, so the archive's scan finds the whole streams in it.
-- Speed: on this Windows machine encoding stops scaling past four threads (49.8 MB/s a thread
-  on one, 10.0 on sixteen: `check` on 40 End regions); with a global allocator keeping freed
-  blocks of 32 KiB and more for the thread, 35.8 on sixteen. The emulator's buffers (window,
-  heads, links, tokens) are made anew for each stream, and Windows' heap gives large blocks
-  back to the system as they are freed. This is aqr's allocator (aqr-common's `Mapped` is the
-  system's on Windows), not this crate's.
+- Speed: on Windows encoding stopped scaling past four threads (49.8 MB/s a thread on one,
+  10.0 on sixteen: `check` on 40 End regions), as zlib's emulator makes its buffers (window,
+  heads, links, tokens) anew for each stream and Windows' heap gives large blocks back as they
+  are freed. aqr's allocator now keeps a few such blocks for each thread (aqr-common's
+  `mem::cache`): The End through `aqr` 64-70 -> 27-28 s, `-K` 4.9 -> 3.9 s (the table's
+  speeds are from before).
 
 ## Memory
 
