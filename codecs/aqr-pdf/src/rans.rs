@@ -20,11 +20,7 @@ pub fn write_table(w: &mut BitW, counts: &[u32]) -> Vec<u32> {
     rans32::write_table::<PROB_BITS, true>(w, counts)
 }
 
-pub fn read_table(r: &mut BitR, n: usize) -> Result<Vec<u32>> {
-    Ok(rans32::read_table::<PROB_BITS, true>(r, n)?)
-}
-
-/// [`read_table`], the frequencies appended to `out`.
+/// The frequencies of `n` symbols, appended to `out`.
 pub fn read_table_into(r: &mut BitR, n: usize, out: &mut Vec<u32>) -> Result<()> {
     Ok(rans32::read_table_into::<PROB_BITS, true>(r, n, out)?)
 }

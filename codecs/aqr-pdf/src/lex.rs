@@ -104,12 +104,6 @@ impl<'a> Parser<'a> {
         &self.s[st..self.pos]
     }
 
-    /// A keyword or other regular token, after white space.
-    pub fn keyword(&mut self) -> &'a [u8] {
-        self.skip_ws();
-        self.regular()
-    }
-
     pub fn object(&mut self) -> Option<Obj<'a>> {
         self.object_at(0)
     }

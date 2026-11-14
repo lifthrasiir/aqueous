@@ -158,15 +158,18 @@ fn long_key(u: &[u8], ue: &[u8], r: i64) -> Option<Vec<u8>> {
     }
     let mut key = ue.get(..32)?.to_vec();
     // AES-256 in CBC mode without padding, with a zero IV
-    let aes = aes::Aes256::new_from_slice(&h(ksalt)).ok()?;
-    let mut prev = [0u8; 16];
-    for c in key.as_chunks_mut::<16>().0 {
+    cbc_decrypt(&aes::Aes256::new_from_slice(&h(ksalt)).ok()?, [0; 16], &mut key);
+    Some(key)
+}
+
+/// Decrypts the whole blocks of `d` in CBC mode, `iv` first.
+fn cbc_decrypt(aes: &impl BlockDecrypt, mut prev: [u8; 16], d: &mut [u8]) {
+    for c in d.as_chunks_mut::<16>().0 {
         let ct = *c;
         aes.decrypt_block(GenericArray::from_mut_slice(c));
         c.iter_mut().zip(&prev).for_each(|(x, p)| *x ^= p);
         prev = ct;
     }
-    Some(key)
 }
 
 /// Algorithm 2.B of the empty password: a hash of `salt` by rounds of AES-128 and the SHA-2
@@ -213,16 +216,10 @@ impl Standard {
         }
         let (iv, body) = data.split_at(16);
         let mut d = body.to_vec();
-        let mut prev: [u8; 16] = iv.try_into().ok()?;
-        let dec = |c: &mut [u8]| match n {
-            16 => aes::Aes128::new_from_slice(&k[..16]).unwrap().decrypt_block(GenericArray::from_mut_slice(c)),
-            _ => aes::Aes256::new_from_slice(&k[..32]).unwrap().decrypt_block(GenericArray::from_mut_slice(c)),
-        };
-        for c in d.as_chunks_mut::<16>().0 {
-            let ct = *c;
-            dec(c);
-            c.iter_mut().zip(&prev).for_each(|(x, p)| *x ^= p);
-            prev = ct;
+        let prev: [u8; 16] = iv.try_into().ok()?;
+        match n {
+            16 => cbc_decrypt(&aes::Aes128::new_from_slice(&k[..16]).unwrap(), prev, &mut d),
+            _ => cbc_decrypt(&aes::Aes256::new_from_slice(&k[..32]).unwrap(), prev, &mut d),
         }
         let pad = *d.last()? as usize;
         if !(1..=16).contains(&pad) || d[d.len() - pad..].iter().any(|&b| b as usize != pad) {

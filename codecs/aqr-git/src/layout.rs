@@ -60,9 +60,8 @@ impl Writer {
     pub fn rebuilt(&mut self, t: u8, size: u64, header: &[u8], base: &[u8], zlib: [u8; 2]) {
         self.count += 1;
         let mut tag = t | REBUILT;
-        let mut h = Vec::new();
-        pack::put_header(t, size, &mut h);
-        if h != header {
+        let (h, n) = pack::header(t, size);
+        if h[..n] != *header {
             tag |= HEADER_KEPT;
             self.kept.extend_from_slice(header);
         }

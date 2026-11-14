@@ -34,12 +34,7 @@ pub fn starts(d: &[u8]) -> bool {
 /// Bytes of the container at the start of `d`: a `mozlz4` file up to the end of its block, or
 /// a frame; None where its structure does not hold.
 pub fn extent(d: &[u8]) -> Option<usize> {
-    if d.starts_with(&MOZLZ4) {
-        let n = u32::from_le_bytes(*d.get(8..)?.first_chunk()?) as usize;
-        Some(12 + block::end(&d[12..], n)?)
-    } else {
-        frame::end(d)
-    }
+    if d.starts_with(&MOZLZ4) { Some(mozlz4_block(d)?.1) } else { frame::end(d) }
 }
 
 /// The formula rebuilding `input`, or None where it is not a container this module takes or
@@ -54,9 +49,14 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     }
 }
 
-fn mozlz4(d: &[u8]) -> Option<Formula> {
+/// The inflated length and the end of the block of the `mozlz4` file `d`.
+fn mozlz4_block(d: &[u8]) -> Option<(usize, usize)> {
     let n = u32::from_le_bytes(*d.get(8..)?.first_chunk()?) as usize;
-    let end = 12 + block::end(&d[12..], n)?;
+    Some((n, 12 + block::end(&d[12..], n)?))
+}
+
+fn mozlz4(d: &[u8]) -> Option<Formula> {
+    let (n, end) = mozlz4_block(d)?;
     let blk = &d[12..end];
     let mut data = Vec::with_capacity(n);
     block::decode(blk, &mut data, 0, n).ok()?;

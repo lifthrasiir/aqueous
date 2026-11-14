@@ -29,7 +29,14 @@ use std::cell::Cell;
 /// Literals 0-255, then length codes 0-28 (symbols 257-285).
 pub const LIT_ALPHA: usize = 256 + 29;
 pub const DIST_ALPHA: usize = 30;
-const STRIDE: usize = 288;
+/// Literal/length and distance symbols of a DEFLATE header's codes (what `header::read_freqs` takes).
+const LL_SYMS: usize = 288;
+const D_SYMS: usize = 32;
+/// The end-of-block symbol, and the length codes of 258 (285) and of 257 with 31 extra (284).
+const END_OF_BLOCK: usize = 256;
+const LEN_258: usize = 285;
+const LEN_258_ALT: usize = 284;
+const STRIDE: usize = LL_SYMS;
 /// Distance tables per class (by length code, capped).
 const DIST_CTX: usize = 8;
 /// Literal contexts at the finest resolution: the byte before.
@@ -271,6 +278,10 @@ fn tiles(px: Pixels) -> bool {
 /// Bytes of data a window keeps behind its position when it slides: a match goes at most
 /// 32 KiB back, the pixel model a row, a pixel and a byte (MED of the byte before).
 pub(crate) const WINDOW: usize = 1 << 15;
+/// Bytes of history a window of data laid out as `px` keeps.
+fn keep_for(px: Option<Pixels>) -> usize {
+    px.map_or(WINDOW, |p| WINDOW.max(p.stride.saturating_add(p.bpp + 1)))
+}
 /// Bytes a window moves on by at least before it slides.
 pub(crate) const STEP: usize = 1 << 18;
 
@@ -291,7 +302,7 @@ impl Window {
     /// A window for data laid out as `px` if given, of `plain` bytes at most if given (the room
     /// for them, or for the most it holds before it slides, reserved).
     pub fn new(px: Option<Pixels>, plain: Option<usize>) -> Window {
-        let keep = px.map_or(WINDOW, |p| WINDOW.max(p.stride.saturating_add(p.bpp + 1)));
+        let keep = keep_for(px);
         Window {
             data: Vec::with_capacity(plain.map_or(0, |p| Window::most(keep, p))),
             off: 0,
@@ -824,9 +835,9 @@ impl<'a> Cursor<'_, 'a> {
     /// frequencies.
     #[inline(always)]
     fn tokens<M: LitModel>(&mut self, n: usize, m: &mut M, tokens: &mut Vec<Token>) -> Result<Freqs> {
-        let mut lf = [0u32; 288];
-        let mut df = [0u32; 32];
-        lf[256] = 1;
+        let mut lf = [0u32; LL_SYMS];
+        let mut df = [0u32; D_SYMS];
+        lf[END_OF_BLOCK] = 1;
         tokens.clear();
         tokens.reserve(n);
         let mut left = n;
@@ -896,7 +907,7 @@ impl<'a> Cursor<'_, 'a> {
 }
 
 /// A block's symbol frequencies, as [`header::read_freqs`] takes them.
-type Freqs = ([u32; 288], [u32; 32]);
+type Freqs = ([u32; LL_SYMS], [u32; D_SYMS]);
 
 /// Rebuilds the blocks of a stream through `cur` by `w` onto `out`, with the literal model `m`: each
 /// block is written once its tokens are decoded, the matches at `alts` (token indices) sent
@@ -930,8 +941,8 @@ fn rebuild<M: LitModel>(
                 Some(Token::Match { len: 258, alt258, .. }) => *alt258 = true,
                 _ => return Err(Error::Corrupt),
             }
-            lf[285] -= 1;
-            lf[284] += 1;
+            lf[LEN_258] -= 1;
+            lf[LEN_258_ALT] += 1;
         }
         if let Body::Dynamic { header, .. } = &mut b.body {
             *header = header::read_freqs(headers, &lf, &df, recipe).map_err(|_| Error::Corrupt)?;
@@ -1023,8 +1034,7 @@ pub fn read_layout(l: &mut BitR, bits: usize, plain: usize) -> Result<StreamLayo
 /// Bytes of the window of a stream of `plain` bytes of data laid out as `px` (when it is
 /// made).
 pub fn window_room(px: Option<Pixels>, plain: usize) -> usize {
-    let keep = px.map_or(WINDOW, |p| WINDOW.max(p.stride.saturating_add(p.bpp + 1)));
-    Window::most(keep, plain)
+    Window::most(keep_for(px), plain)
 }
 
 /// Bytes a block's header takes at most, and the bits held back and the end of block after.

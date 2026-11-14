@@ -303,7 +303,6 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         return None;
     }
     let flate_len = streams + derived.len();
-    let streams_len = streams;
     let inflated = data.len() as u64;
     // (the input the first stream, the kinds' after the others)
     let mut f = Formula::default();
@@ -317,7 +316,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let data = f.push_by_kind(0, data, &kinds, "git-pack", OWN_MIN);
     let a = aqr_flate::formula::apply(profile, data, records, index, flate_len as u64, Derived::Zlib).ok()?;
     // (the streams and what is derived of them apart, so that both are taken in order)
-    let [streams, table]: [Node; 2] = f.split(a, vec![streams_len as u64, derived.len() as u64]).try_into().ok()?;
+    let [streams, table]: [Node; 2] = f.split(a, vec![streams as u64, derived.len() as u64]).try_into().ok()?;
     f.root = Node::apply(MODULE, Vec::new(), vec![streams, table, layout, kept], input.len() as u64);
     Some(Encoded { formula: f, inflated, adaptive: profile != opt.profile })
 }

@@ -70,7 +70,8 @@ impl Frames {
 /// Whether `d` starts like a Zstandard frame: its magic number, a frame header and the header
 /// of its first block that hold. The rest of the frame may be past the end of `d`.
 pub fn starts(d: &[u8]) -> bool {
-    d.starts_with(&MAGIC) && header(d, 0).is_some_and(|h| d.get(h.0..h.0 + 3).is_some_and(|b| b[0] >> 1 & 3 != 3))
+    d.starts_with(&MAGIC)
+        && header(d, 0).is_some_and(|h| d.get(h.blocks_at..h.blocks_at + 3).is_some_and(|b| b[0] >> 1 & 3 != 3))
 }
 
 /// The frames and skippable frames from the start of `d`, as long as their structure holds
@@ -105,7 +106,7 @@ fn skippable(d: &[u8], at: usize) -> Option<Piece> {
 
 /// The frame at `at` of `d`, if its structure holds.
 fn frame(d: &[u8], at: usize) -> Option<Frame> {
-    let (mut p, fhd, dict, content, window) = header(d, at)?;
+    let Header { blocks_at: mut p, descriptor: fhd, dict, content, window } = header(d, at)?;
     let block_max = window.min(BLOCK_MAX as u64) as usize;
     let start = p;
     let mut bound = 0u64;
@@ -138,9 +139,21 @@ fn frame(d: &[u8], at: usize) -> Option<Frame> {
     Some(Frame { at: at..p, blocks, dict, content, bound })
 }
 
-/// The header of the frame at `at` of `d`: where its blocks start, its descriptor, dictionary
-/// ID, content size if told, and window size.
-fn header(d: &[u8], at: usize) -> Option<(usize, u8, u32, Option<u64>, u64)> {
+/// The header of a frame.
+struct Header {
+    /// Where its blocks start.
+    blocks_at: usize,
+    /// Its descriptor byte.
+    descriptor: u8,
+    /// The dictionary ID.
+    dict: u32,
+    /// The content size, if told.
+    content: Option<u64>,
+    window: u64,
+}
+
+/// The header of the frame at `at` of `d`.
+fn header(d: &[u8], at: usize) -> Option<Header> {
     let fhd = *d.get(at + 4)?;
     // (the reserved bit)
     if fhd & 0x08 != 0 {
@@ -170,7 +183,7 @@ fn header(d: &[u8], at: usize) -> Option<(usize, u8, u32, Option<u64>, u64)> {
         _ => Some(u64::from_le_bytes(fcs)),
     };
     let window = window.or(content)?;
-    Some((p, fhd, u32::from_le_bytes(dict), content, window))
+    Some(Header { blocks_at: p, descriptor: fhd, dict: u32::from_le_bytes(dict), content, window })
 }
 
 /// The contents of the frames of `fr` (in `d`), one after another, each one of a size that

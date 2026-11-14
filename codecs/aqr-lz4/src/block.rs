@@ -128,25 +128,6 @@ impl Sink for Vec<u8> {
     }
 }
 
-/// A sink that checks the bytes against `expect` as they come.
-struct Compare<'a> {
-    expect: &'a [u8],
-    at: usize,
-}
-
-impl Sink for Compare<'_> {
-    fn put(&mut self, b: &[u8]) -> bool {
-        let end = self.at + b.len();
-        let ok = self.expect.get(self.at..end) == Some(b);
-        self.at = end;
-        ok
-    }
-
-    fn len(&self) -> usize {
-        self.at
-    }
-}
-
 /// Puts the continuation bytes of a length field of 15 or more (`v` is what lies past 15).
 fn put_extra<S: Sink>(out: &mut S, mut v: usize) -> bool {
     const FULL: [u8; 64] = [255; 64];
@@ -268,14 +249,6 @@ impl Compressor {
         let mut out = Vec::with_capacity(capacity.min(bound(src.len())));
         Compressor::default().compress_into(src, usize::MAX, acceleration, &mut out)?;
         Ok(out)
-    }
-
-    /// Whether [`Compressor::compress_fast`] gives `expect`, found without compressing past
-    /// the first difference.
-    pub fn reproduces_fast(src: &[u8], acceleration: u32, expect: &[u8]) -> bool {
-        let mut cmp = Compare { expect, at: 0 };
-        matches!(Compressor::default().compress_into(src, usize::MAX, acceleration, &mut cmp), Ok(true))
-            && cmp.at == expect.len()
     }
 
     /// `src` in a block of at most `cap` bytes (FORMAT.md §3.2-§3.4), keeping this state for

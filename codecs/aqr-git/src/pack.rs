@@ -72,12 +72,6 @@ pub fn put_header(t: u8, size: u64, out: &mut Vec<u8>) {
     out.extend_from_slice(&h[..n]);
 }
 
-/// The bytes of an ofs-delta's distance at the start of `b`: bytes while bit 7 is set, then one
-/// more, within 10.
-pub fn ofs_len(b: &[u8]) -> Option<usize> {
-    header_len(b)
-}
-
 /// Whether `h` is a zlib header (RFC 1950) of DEFLATE without a preset dictionary.
 pub fn zlib_header(h: [u8; 2]) -> bool {
     h[0] & 15 == 8 && h[0] >> 4 <= 7 && h[1] & 0x20 == 0 && (h[0] as u16 * 256 + h[1] as u16).is_multiple_of(31)
@@ -141,7 +135,8 @@ fn entry_at(d: &[u8], p: usize) -> Option<Entry> {
     let b = p + h;
     let z = b + match t {
         COMMIT | TREE | BLOB | TAG => 0,
-        OFS_DELTA => ofs_len(d.get(b..)?)?,
+        // (an ofs-delta's distance is continued as a header's size is)
+        OFS_DELTA => header_len(d.get(b..)?)?,
         REF_DELTA => ID,
         _ => return None,
     };

@@ -1,6 +1,7 @@
 //! The code of the module (see `formula`, and FORMAT.md), which needs no aqr-formula, so that
 //! aqr-modules builds it into its Wasm module.
 
+use aqr_common::cursor::take;
 use aqr_common::packed;
 
 use crate::crypt::Crypt;
@@ -96,6 +97,15 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     o.finish(cur.sk)
 }
 
+/// The most an item's inflated length is of its file's (DEFLATE's limit, 1032 bytes for a bit).
+const MAX_EXPANSION: usize = 1032;
+
+/// The most bytes per pixel of an item's layout.
+const MAX_BPP: usize = 64;
+
+/// The most bytes in a row of an item's layout.
+const MAX_STRIDE: usize = if (1u64 << 34) < usize::MAX as u64 { 1 << 34 } else { usize::MAX };
+
 /// The items of `table` (of a file of `len` bytes), calling `stream` for each token stream with
 /// its inflated length and pixel layout (bytes per pixel and stride); None where the table is
 /// no table. What the memory plan and the decoder both count by.
@@ -143,10 +153,10 @@ pub fn scan_table_with(
                     t.bytes(2).ok()?;
                 }
                 t.u8().ok().filter(|&c| (c as usize) < CLASSES.len())?;
-                let n = t.upto(len.saturating_mul(1032)).ok()?;
+                let n = t.upto(len.saturating_mul(MAX_EXPANSION)).ok()?;
                 let px = if flags & 4 != 0 {
-                    let bpp = t.upto(64).ok()? as u64;
-                    Some((bpp, t.upto((1u64 << 34).min(usize::MAX as u64) as usize).ok()? as u64))
+                    let bpp = t.upto(MAX_BPP).ok()? as u64;
+                    Some((bpp, t.upto(MAX_STRIDE).ok()? as u64))
                 } else {
                     None
                 };
@@ -257,14 +267,6 @@ enum Op<'a> {
     Bytes(&'a [u8]),
 }
 
-/// The next `n` bytes of `v` from `at`.
-fn take<'a>(v: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
-    let end = at.checked_add(n).filter(|&e| e <= v.len()).ok_or(Error::Corrupt)?;
-    let r = &v[*at..end];
-    *at = end;
-    Ok(r)
-}
-
 /// The item `at` of `items`, the next.
 fn next<'a>(items: &[&'a [u8]], at: &mut usize) -> Result<&'a [u8]> {
     let item = *items.get(*at).ok_or(Error::Corrupt)?;
@@ -288,12 +290,9 @@ fn flate_fields<'a>(t: &mut Reader<'a>, len: usize) -> Result<FlateFields<'a>> {
     if c >= CLASSES.len() {
         return Err(Error::Corrupt);
     }
-    let n = t.upto(len.saturating_mul(1032))?;
-    let px = if flags & 4 != 0 {
-        Some(tok::Pixels { bpp: t.upto(64)?, stride: t.upto((1u64 << 34).min(usize::MAX as u64) as usize)? })
-    } else {
-        None
-    };
+    let n = t.upto(len.saturating_mul(MAX_EXPANSION))?;
+    let px =
+        if flags & 4 != 0 { Some(tok::Pixels { bpp: t.upto(MAX_BPP)?, stride: t.upto(MAX_STRIDE)? }) } else { None };
     Ok((hdr, c, n, px, flags & 2 != 0))
 }
 

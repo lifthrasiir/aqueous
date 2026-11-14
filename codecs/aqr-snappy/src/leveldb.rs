@@ -9,6 +9,8 @@ use crate::{Error, Result, corrupt, crc32c};
 /// The last 8 bytes of a table (`kTableMagicNumber`, little endian).
 pub const MAGIC: [u8; 8] = 0xdb47_7524_8b80_fb57u64.to_le_bytes();
 pub const FOOTER: usize = 48;
+/// Bytes of the footer before the magic: the two handles, padded.
+const HANDLES: usize = FOOTER - MAGIC.len();
 /// Type byte and masked CRC after each block.
 pub const TRAILER: usize = 5;
 
@@ -32,13 +34,13 @@ pub fn is_table(d: &[u8]) -> bool {
 /// The metaindex and index handles of the footer of `d`.
 fn footer(d: &[u8]) -> Result<[(usize, usize); 2]> {
     let f = d.len().checked_sub(FOOTER).map(|p| &d[p..]).ok_or_else(corrupt)?;
-    if f[40..] != MAGIC {
+    if f[HANDLES..] != MAGIC {
         return Err(Error("not a LevelDB table"));
     }
     let mut p = 0;
     let mut handle = || -> Result<(usize, usize)> {
-        let off = varint::get(&f[..40], &mut p).map_err(|_| corrupt())? as usize;
-        let size = varint::get(&f[..40], &mut p).map_err(|_| corrupt())? as usize;
+        let off = varint::get(&f[..HANDLES], &mut p).map_err(|_| corrupt())? as usize;
+        let size = varint::get(&f[..HANDLES], &mut p).map_err(|_| corrupt())? as usize;
         (off.checked_add(size).and_then(|e| e.checked_add(TRAILER)).is_some_and(|e| e <= d.len() - FOOTER))
             .then_some((off, size))
             .ok_or_else(corrupt)
@@ -185,7 +187,7 @@ pub fn build_in(data: &[u8], layout: &[u8], kept: &[u8], hash: Hash, capacity: u
         varint::put(&mut out, off as u64);
         varint::put(&mut out, size as u64);
     }
-    out.resize(at + 40, 0);
+    out.resize(at + HANDLES, 0);
     out.extend_from_slice(&MAGIC);
     Ok(out)
 }

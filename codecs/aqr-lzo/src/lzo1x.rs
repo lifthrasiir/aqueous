@@ -87,7 +87,7 @@ impl Reader<'_> {
         Ok(b as u32)
     }
 
-    /// A length of `bits` bits in `field`, continued in bytes where it is 0.
+    /// A length in `field`, which `mask` is the largest value of, continued in bytes where it is 0.
     #[inline]
     fn len(&mut self, field: u32, mask: u32) -> Result<u32> {
         if field != 0 {

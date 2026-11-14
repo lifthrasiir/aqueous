@@ -47,7 +47,6 @@ fn blocks_of_liblz4() {
         block::decode(blk, &mut data, 0, n).unwrap();
         assert_eq!(data.len(), n);
         assert!(Compressor::compress_fast(&data, a).unwrap() == blk, "{name}: compressed otherwise");
-        assert!(Compressor::reproduces_fast(&data, a, blk), "{name}");
         assert_eq!(formula::extent(&d), Some(d.len()));
         // an acceleration not tried is found only where a smaller one compresses the same
         let Some(f) = formula::encode(&d, 1) else {

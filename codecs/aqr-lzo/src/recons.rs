@@ -198,19 +198,27 @@ struct Ctx {
     form: Vec<Bit>,
 }
 
+/// Bits of each context set of [`Ctx`] (what `join_plan` counts too), and the rows of `short`.
+const START_BITS: usize = 8 * 12 * 12 * 4;
+const PAIR_BITS: usize = 8 * 9;
+const FULL_BITS: usize = 4 * 12;
+const SHORT_ROWS: usize = 12;
+const FAR_BITS: usize = 5 * 12;
+const FORM_BITS: usize = 2 * 8;
+
 impl Ctx {
     fn new() -> Self {
         let v = |n| vec![Bit::default(); n];
         Ctx {
-            start: v(8 * 12 * 12 * 4),
+            start: v(START_BITS),
             first_short: Bit::default(),
-            pair: v(8 * 9),
-            full: v(4 * 12),
-            short: vec![[Bit::default(); 64]; 12],
+            pair: v(PAIR_BITS),
+            full: v(FULL_BITS),
+            short: vec![[Bit::default(); 64]; SHORT_ROWS],
             longer: [Bit::default(); 64],
-            far: v(5 * 12),
+            far: v(FAR_BITS),
             dist_bits: [Bit::default(); 64],
-            form: v(2 * 8),
+            form: v(FORM_BITS),
         }
     }
 }
@@ -509,7 +517,6 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// [`join`] appended to `out`, written as the parse is decoded (which is not held).
 /// What [`join_onto`] takes of an [`aqr_api::stack`] at most besides `out` (on WebAssembly): the
 /// match finder's rings, the coder's contexts, and the pairs of a position, in that order.
 pub fn join_plan() -> u64 {
@@ -518,10 +525,14 @@ pub fn join_plan() -> u64 {
     // (a pair of `usize`s, on 32 bits)
     const PAIR: u64 = 8;
     let rings = 4 * block(RING as u64 * 4);
-    let ctx = [8 * 12 * 12 * 4, 8 * 9, 4 * 12, 12 * 64, 5 * 12, 2 * 8].iter().map(|&n| block(n * BIT)).sum::<u64>();
+    let ctx = [START_BITS, PAIR_BITS, FULL_BITS, SHORT_ROWS * 64, FAR_BITS, FORM_BITS]
+        .iter()
+        .map(|&n| block(n as u64 * BIT))
+        .sum::<u64>();
     rings + ctx + block((DEPTH as u64 + 1) * PAIR)
 }
 
+/// [`join`] appended to `out`, written as the parse is decoded (which is not held).
 pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
     let mut w = lzo1x::Writer::new(data, out);
     let mut p = Parse::default();

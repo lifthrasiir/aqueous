@@ -1,7 +1,5 @@
 //! FlateDecode streams: the zlib wrapper around the DEFLATE data.
 
-use aqr_flate::inflate::{self, Sink};
-
 /// Whether `b` starts with a zlib header (deflate, no preset dictionary).
 pub fn zlib_header(b: &[u8]) -> bool {
     b.len() >= 2
@@ -12,51 +10,6 @@ pub fn zlib_header(b: &[u8]) -> bool {
 }
 
 pub use aqr_common::adler32::hash as adler32;
-
-/// The shape of a FlateDecode stream's data, from a parse that keeps nothing.
-#[derive(Debug, Clone, Copy)]
-pub struct Shape {
-    /// Bytes of zlib header (0 for a bare DEFLATE stream, or 2).
-    pub hdr: usize,
-    /// Bytes of DEFLATE data.
-    pub deflate: usize,
-    /// Bytes of inflated data.
-    pub plain: usize,
-    pub tokens: usize,
-    /// The 4 bytes after the DEFLATE data could be its Adler-32 (checked when coding).
-    pub room_adler: bool,
-}
-
-#[derive(Default)]
-struct Count {
-    plain: usize,
-    tokens: usize,
-}
-
-impl Sink for Count {
-    #[inline(always)]
-    fn lit(&mut self, _: u8) {
-        self.plain += 1;
-        self.tokens += 1;
-    }
-    #[inline(always)]
-    fn mat(&mut self, len: u16, _: u16, _: bool) {
-        self.plain += len as usize;
-        self.tokens += 1;
-    }
-    fn stored(&mut self, b: &[u8]) {
-        self.plain += b.len();
-    }
-}
-
-/// Measures a stream without inflating it.
-pub fn shape(data: &[u8]) -> Option<Shape> {
-    let hdr = if zlib_header(data) { 2 } else { 0 };
-    let mut c = Count::default();
-    let l = inflate::parse_into(&data[hdr..], usize::MAX, &mut c).ok()?;
-    let deflate = data.len() - hdr - l.stream.trailing.len();
-    Some(Shape { hdr, deflate, plain: c.plain, tokens: c.tokens, room_adler: l.stream.trailing.len() >= 4 })
-}
 
 /// Inflated bytes per DEFLATE byte, estimated from the first block's header: the expected
 /// bytes and bits of a symbol when a code of length `l` has probability 2^-l. `None` if

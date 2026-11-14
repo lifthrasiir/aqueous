@@ -44,8 +44,8 @@ fn header_len(flg: u8) -> usize {
 /// The frame at the start of `d`, decoded. A frame with a dictionary is not decoded, nor one
 /// whose header checksum is wrong; checksums of the data are not checked.
 pub fn decode(d: &[u8]) -> Result<Frame> {
-    let (flg, bd) = match d {
-        [0x04, 0x22, 0x4d, 0x18, flg, bd, ..] => (*flg, *bd),
+    let (flg, bd) = match d.strip_prefix(&MAGIC) {
+        Some([flg, bd, ..]) => (*flg, *bd),
         _ => return Err(Error("not an LZ4 frame")),
     };
     let max = block_max(bd).filter(|_| flg_valid(flg)).ok_or_else(corrupt)?;
