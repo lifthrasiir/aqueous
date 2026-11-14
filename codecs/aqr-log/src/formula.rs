@@ -13,13 +13,13 @@ use std::hash::{BuildHasherDefault, Hasher};
 use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 use aqr_num::style::{Style, choose_with};
+use aqr_num::times::{Span, Times};
 use aqr_num::{dec, fixed};
 
 use crate::module::{
     K_NEW, K_SAME, M_DIGITS, M_NUM, M_TEXT, M_TIME, MAX_COLUMNS, MAX_DIGITS, MAX_TEMPLATE_BYTES, MAX_TEMPLATES,
     P_COLUMN, P_LINE, P_RAW, Params,
 };
-use crate::times::{Span, Times};
 
 pub use crate::module::decode;
 

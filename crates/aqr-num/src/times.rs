@@ -1,8 +1,40 @@
-//! The encoder's side of times: timestamps found in a line, as spans of its bytes with an
-//! aqr-num pattern and the integer it prints (FORMAT.md, section 5).
+//! The encoder's side of times: timestamps found in a line (or a field), as spans of its bytes
+//! with a pattern ([`crate::time`], README "Times") and the integer it prints. Shared by aqr-log
+//! (timestamps anywhere in a line) and aqr-xsv (a field that is one).
 
-use crate::formula::FxMap;
-use aqr_num::time::{self, MONTHS, NO_YEAR, WEEKDAYS};
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+use crate::time::{self, MONTHS, NO_YEAR, WEEKDAYS};
+
+/// A quick hasher of a pattern's bytes (Fx's multiplication, the result mixed).
+#[derive(Default)]
+struct Fx(u64);
+
+const K: u64 = 0x517c_c1b7_2722_0a95;
+
+impl Hasher for Fx {
+    fn finish(&self) -> u64 {
+        let h = self.0 ^ (self.0 >> 32);
+        (h.wrapping_mul(K) ^ (h >> 29)).wrapping_mul(K)
+    }
+    fn write(&mut self, b: &[u8]) {
+        let (words, r) = b.as_chunks::<8>();
+        for w in words {
+            self.write_u64(u64::from_le_bytes(*w));
+        }
+        if !r.is_empty() {
+            let mut w = [0u8; 8];
+            w[..r.len()].copy_from_slice(r);
+            self.write_u64(u64::from_le_bytes(w) ^ (r.len() as u64) << 56);
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(K);
+    }
+}
+
+type FxMap<Key, V> = HashMap<Key, V, BuildHasherDefault<Fx>>;
 
 /// A timestamp in a line: its bytes `start..end`, its pattern (an index of [`Times::pattern`])
 /// and its integer.
@@ -303,7 +335,7 @@ impl Times {
         let (mut first, mut second) = (0u32, 0u32);
         for line in sample.split(|&b| b == b'\n') {
             let mut at = 0;
-            while let Some(i) = memchr::memchr(b':', &line[at..]) {
+            while let Some(i) = line[at..].iter().position(|&b| b == b':') {
                 let p = at + i;
                 at = p + 1;
                 // dd:dd:dd[.,]digits

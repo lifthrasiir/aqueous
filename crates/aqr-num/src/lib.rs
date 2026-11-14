@@ -10,6 +10,7 @@
 //! - [`dec`]: decimals and binary floats; the renders (`%g`, `%e`, Python `repr`,
 //!   JavaScript `toString`, positional), and the coding of a token in a given mode.
 //! - [`time`]: times printed by a pattern, as one integer.
+//! - [`times`]: the encoder's finding of times in a line or a field.
 //! - [`style`]: the encoder's choice of mode for a group of numbers, and its fallbacks.
 //!
 //! ```
@@ -31,6 +32,7 @@ pub mod fixed;
 pub mod general;
 pub mod style;
 pub mod time;
+pub mod times;
 
 pub use dec::{COMMA, comma_of, encode, is_fixed, mode, put, render_of, src_of, valid};
 pub use fixed::{MAX_SCALE, MIN_SCALE};
