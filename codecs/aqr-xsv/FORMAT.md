@@ -2,9 +2,9 @@
 
 This document specifies the module `xsv-recons` of aqr-formula entry formulas. The module
 rebuilds a delimited text table (CSV, TSV, the `;` and `|` variants, USV) from its fields, stored
-column by column: text as it is, and numbers as integers with how they were printed. The
-document is meant to be complete, with [aqr-num](../../crates/aqr-num/README.md) for the numbers: an
-implementation of the module can be written from the two. Sections marked *(encoder)* describe
+column by column: text as it is, and numbers and times as integers with how they were printed. The
+document is meant to be complete, with [aqr-num](../../crates/aqr-num/README.md) for the numbers and
+times: an implementation of the module can be written from the two. Sections marked *(encoder)* describe
 the choices this implementation makes when it builds formulas; the module does not depend on
 them.
 
@@ -25,7 +25,7 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `xsv-recons`, version 1.
+- **Module**: name `xsv-recons`, version 2 (version 1 has no times: kind 3 below).
 - **Params**:
 
   ```text
@@ -74,7 +74,7 @@ the records in order.
   number of a new descriptor. Other kinds are errors.
 - **text**: of each text field of a column, its bytes (unquoted: within the quotes, a doubled
   quote made single), then a zero byte.
-- **desc**: of each number of a new descriptor, the descriptor and scale:
+- **desc**: of each number of a new descriptor (kind 2), the descriptor and scale:
 
   ```text
   u8       mode
@@ -83,9 +83,20 @@ the records in order.
   ```
 
   (mode, f) must be valid (aqr-num's README, "Descriptor"). It is the column's descriptor from
-  then on; a number of the column's descriptor before the first is an error.
-- **nums**: of each number of a column, an svarint: its integer v where `pred` is 0, else v − p
-  (wrapping, in 64 bits), p being the integer of the column's previous number (0 for the first).
+  then on; a number of the column's descriptor before the first is an error. Of each time of a
+  new pattern (kind 3), the pattern:
+
+  ```text
+  u8       n        the pattern's bytes, 1 to 64
+  n bytes  pattern
+  ```
+
+  which must be valid (aqr-num's README, "Times"), and is the column's descriptor from then
+  on. A column has one descriptor at a time, a number's or a time's: a field of kind 1 is of
+  whichever was given last.
+- **nums**: of each number or time of a column, an svarint: its integer v (of the number, or the
+  ticks of the time) where `pred` is 0, else v − p (wrapping, in 64 bits), p being the integer of
+  the column's previous number or time (0 for the first).
 
 ## 4. Rebuilding the file
 
@@ -97,7 +108,9 @@ none), CR LF, or nothing. A field is, of its column, the next byte of `types` an
 - text: the next bytes of `text` up to a zero byte (which is not part of the field), every
   `quote` byte doubled where the field is quoted;
 - a number: the integer v (from `nums`) at the scale s of the descriptor (mode, f), printed as
-  aqr-num specifies (its README, "Specification").
+  aqr-num specifies (its README, "Specification");
+- a time: the integer v (from `nums`) printed by the pattern as aqr-num specifies (its README,
+  "Times"); an integer that the pattern cannot print is an error.
 
 The file is the records, one after the other. Every stream must be read to its end, every
 column's parts too; a record that would make the file longer than declared is an error.
@@ -127,6 +140,16 @@ column's parts too; a record that would make the file longer than declared is an
   in the style aqr-num's `style::choose` picks for the column from its first 512 such fields
   (with fallbacks as `Style::encode` has them), where they print back to the same bytes; zero
   takes the scale of the column's previous number. Others are text.
+- **Times.** Of a column, the first 64 fields (within the quotes) that start with a digit or a
+  capital letter, are at most 64 bytes and, for a time, have one of `:`, `/`, `-`, `.` or a space,
+  are looked at by aqr-num's `times::Times` (README, "Encoder conventions"): the column is of times
+  where at least half of those fields (at least one) are, as a whole, one timestamp of a pattern
+  that prints them back and has no fraction of a second (the digits' noise would go into the integers of the seconds, where aqr-log keeps them a column of their own); then every field that is one (no doubled quote in it) is a time, the
+  others numbers or text as before, and the fields that are times are left out of the sample the
+  number style is chosen from. Where all the times of one pattern are of the same time of day
+  (`00:00` in `2023-10-12 00:00`), the pattern has the time of day's items replaced by the bytes
+  they print (`Y-m-d\ 00:00`: aqr-num's `time::clock_of` and `fold_clock`) and the integers are days,
+  not minutes. The pattern is given (kind 3) when it differs from the column's descriptor.
 - **Predictors.** Of a column, the one whose `nums` part zstd -1 compresses smaller.
 - **Segments.** A file whose records start past 64 MiB (`formula::SEGMENT`) from the first of
   a segment is cut there, at a record's start (a quoted field holding line ends is within its

@@ -401,6 +401,55 @@ pub fn parse(pat: &[u8], t: &[u8]) -> Option<(i64, usize)> {
     Some((i64::try_from(x).ok()?, ti))
 }
 
+/// Where the time of day of a pattern is, for an encoder to take what is constant out of the
+/// integers: for `pat` (valid, with a date and a time of day whose items follow one another
+/// with only literals between), the bytes `first..last` holding the clock's items, and the
+/// ticks of a day. None where the pattern has no date or no time of day, or the items of date
+/// and time are mixed.
+pub fn clock_of(pat: &[u8]) -> Option<(std::ops::Range<usize>, i64)> {
+    let sh = shape(pat)?;
+    if !sh.date || !sh.hour {
+        return None;
+    }
+    let (mut first, mut last, mut at) = (None, 0, 0);
+    while at < pat.len() {
+        let (it, n) = item(&pat[at..])?;
+        match it {
+            Item::Hour2 | Item::Hour | Item::Minute | Item::Second | Item::Frac(..) => {
+                first.get_or_insert(at);
+                last = at + n;
+            }
+            Item::Lit(_) => {}
+            // (a date item after the clock's first)
+            _ if first.is_some() => return None,
+            _ => {}
+        }
+        at += n;
+    }
+    let ticks = 24 * if sh.minute { 60 } else { 1 } * if sh.second { 60 } else { 1 } * 10i64.pow(sh.frac);
+    Some((first?..last, ticks))
+}
+
+/// The pattern `pat` with its clock (`clock_of`) replaced by the literal bytes that it prints
+/// for the time of day `tod` (ticks into the day), so that the integers of the new pattern are
+/// the days: `v.div_euclid(ticks)` for every `v` of that time of day. None where `tod` is out of
+/// the day or the pattern is too long.
+pub fn fold_clock(pat: &[u8], clock: std::ops::Range<usize>, tod: i64) -> Option<Vec<u8>> {
+    let mut text = Vec::new();
+    if !put(&mut text, &pat[clock.clone()], tod) {
+        return None;
+    }
+    let mut out = pat[..clock.start].to_vec();
+    for b in text {
+        if b.is_ascii_alphabetic() || b == b'\\' {
+            out.push(b'\\');
+        }
+        out.push(b);
+    }
+    out.extend_from_slice(&pat[clock.end..]);
+    (out.len() <= MAX_PATTERN && valid(&out)).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +533,34 @@ mod tests {
         assert_eq!(print_of("H:M:St.3", v).unwrap(), "00:00:01.5");
         let (v, _) = parse(b"Y-m-d H:M:S", b"2023-01-01 00:00:00").unwrap();
         assert_eq!(print_of("Y-m-d H:M:S", v).unwrap(), "2023-01-01 00:00:00");
+    }
+
+    #[test]
+    fn folded_clock() {
+        for (pat, text, days) in [
+            ("Y-m-d H:M", "2023-10-12 00:00", 19642),
+            ("Y-m-d H:M:S", "2023-10-12 00:00:00", 19642),
+            ("Y-m-d H:M:St.6", "2023-10-12 00:00:00", 19642),
+            ("Y-m-d\\TH:M:S\\Z", "2023-10-12T00:00:00Z", 19642),
+            ("d/m/Y h", "12/10/2023 0", 19642),
+        ] {
+            let (clock, ticks) = clock_of(pat.as_bytes()).unwrap_or_else(|| panic!("{pat}"));
+            let folded = fold_clock(pat.as_bytes(), clock, 0).unwrap();
+            assert!(valid(&folded), "{pat}");
+            let (v, n) = parse(pat.as_bytes(), text.as_bytes()).unwrap();
+            assert_eq!(n, text.len());
+            assert_eq!(v.div_euclid(ticks), days, "{pat}");
+            assert_eq!(print_of(std::str::from_utf8(&folded).unwrap(), days).as_deref(), Some(text), "{pat}");
+        }
+        // another time of day, with letters and a backslash among the literals
+        let (clock, ticks) = clock_of(b"Y-m-d H:M\\h").unwrap();
+        let folded = fold_clock(b"Y-m-d H:M\\h", clock, 13 * 60 + 5).unwrap();
+        assert_eq!(ticks, 1440);
+        assert_eq!(print_of(std::str::from_utf8(&folded).unwrap(), 7).as_deref(), Some("1970-01-08 13:05h"));
+        // no date, no time of day, a date between the clock's items
+        for pat in ["H:M:S", "Y-m-d", "d H:M Y", "a b d H:M:S Y"] {
+            assert!(clock_of(pat.as_bytes()).is_none(), "{pat}");
+        }
     }
 
     #[test]

@@ -16,6 +16,9 @@ pub const K_TEXT: u8 = 0;
 pub const K_NUM: u8 = 1;
 /// A number of a descriptor given (`desc`).
 pub const K_NEW: u8 = 2;
+/// A time of a pattern given (`desc`); from then on the column's descriptor, which kind 1 also
+/// takes: the integer of a time is of the pattern, that of a number of the number's.
+pub const K_TIME: u8 = 3;
 
 /// The end of a record: the terminator (LF where the dialect has none), CR LF (only where it
 /// has none), or nothing (the last record of a file).
@@ -88,6 +91,16 @@ pub struct View<'a> {
     pub desc: &'a [u8],
 }
 
+/// What a column's numbers are printed by, from the last descriptor given.
+#[derive(Clone, Copy)]
+enum Last<'a> {
+    None,
+    /// A number: mode, flags and scale.
+    Num(u8, u8, i32),
+    /// A time: its pattern (in the column's part of `desc`).
+    Time(&'a [u8]),
+}
+
 /// A column's parts of the streams, read from the front, and its state.
 #[repr(C)]
 struct Column<'a> {
@@ -96,8 +109,8 @@ struct Column<'a> {
     text: &'a [u8],
     nums: &'a [u8],
     desc: &'a [u8],
-    /// The descriptor (mode, flags, scale) of the column's previous number, if any.
-    last: Option<(u8, u8, i32)>,
+    /// The descriptor of the column's previous number or time, if any.
+    last: Last<'a>,
     prev: i64,
 }
 
@@ -152,7 +165,7 @@ pub fn build(d: &Dialect, ncols: usize, v: View, len: usize) -> Result<Vec<u8>> 
             text: take(&mut text, n[1])?,
             nums: take(&mut nums, n[2])?,
             desc: take(&mut desc, n[3])?,
-            last: None,
+            last: Last::None,
             prev: 0,
         });
     }
@@ -221,20 +234,39 @@ fn field(d: &Dialect, c: &mut Column, out: &mut Vec<u8>) -> Result<()> {
                 None => out.extend_from_slice(s),
             }
         }
-        k @ (K_NUM | K_NEW) => {
-            if k == K_NEW {
-                let (mode, f) = (byte(&mut c.desc)?, byte(&mut c.desc)?);
-                let s = aqr_common::varint::unzz(get(&mut c.desc)?);
-                if !aqr_num::valid(mode, f) || !(aqr_num::MIN_SCALE as i64..=aqr_num::MAX_SCALE as i64).contains(&s) {
-                    return Err(corrupt());
+        k @ (K_NUM | K_NEW | K_TIME) => {
+            match k {
+                K_NEW => {
+                    let (mode, f) = (byte(&mut c.desc)?, byte(&mut c.desc)?);
+                    let s = aqr_common::varint::unzz(get(&mut c.desc)?);
+                    if !aqr_num::valid(mode, f) || !(aqr_num::MIN_SCALE as i64..=aqr_num::MAX_SCALE as i64).contains(&s)
+                    {
+                        return Err(corrupt());
+                    }
+                    c.last = Last::Num(mode, f, s as i32);
                 }
-                c.last = Some((mode, f, s as i32));
+                K_TIME => {
+                    let n = byte(&mut c.desc)? as u64;
+                    let pat = take(&mut c.desc, n)?;
+                    if !aqr_num::time::valid(pat) {
+                        return Err(corrupt());
+                    }
+                    c.last = Last::Time(pat);
+                }
+                _ => {}
             }
-            let (mode, f, s) = c.last.ok_or_else(corrupt)?;
             let r = aqr_common::varint::unzz(get(&mut c.nums)?);
             let v = if c.pred == P_DELTA { c.prev.wrapping_add(r) } else { r };
+            match c.last {
+                Last::None => return Err(corrupt()),
+                Last::Num(mode, f, s) => aqr_num::put(out, v, s, mode, f),
+                Last::Time(pat) => {
+                    if !aqr_num::time::put(out, pat, v) {
+                        return Err(corrupt());
+                    }
+                }
+            }
             c.prev = v;
-            aqr_num::put(out, v, s, mode, f);
         }
         _ => return Err(corrupt()),
     }

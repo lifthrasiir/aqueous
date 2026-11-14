@@ -5,13 +5,15 @@
 use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 use aqr_num::style::{Style, choose};
+use aqr_num::time;
+use aqr_num::times::Times;
 
 use crate::parse::{self, Field, Record, Table};
-use crate::table::{Dialect, K_NEW, K_NUM, K_TEXT, MAX_COLUMNS, P_DELTA, P_RAW};
+use crate::table::{Dialect, K_NEW, K_NUM, K_TEXT, K_TIME, MAX_COLUMNS, P_DELTA, P_RAW};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("xsv-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("xsv-recons", 2).with_plan(memory);
 
 /// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -29,6 +31,107 @@ const SAMPLE: usize = 64 << 10;
 
 /// The tokens of a column that its numbers' style is chosen from.
 const STYLE_SAMPLE: usize = 512;
+
+/// The fields of a column that tell whether it is of times (and how they are written).
+const TIME_SAMPLE: usize = 64;
+
+/// What a column's fields are printed by, from the last descriptor given.
+#[derive(Clone, PartialEq, Eq)]
+enum Last {
+    None,
+    Num(u8, u8, i32),
+    Time(Vec<u8>),
+}
+
+/// The times of a column, found by the encoder: the patterns, and for each field of the column
+/// whether it is one, its pattern's index and its integer. None where the column is not of
+/// times: at least half of the first [`TIME_SAMPLE`] fields starting with a digit or a capital
+/// are. Where every time of a pattern is at the same time of day (`00:00`), the pattern holds
+/// that as literals, and the integers are days.
+fn column_times(d: &[u8], t: &Table, ids: &[usize], q: Option<u8>) -> Option<ColumnTimes> {
+    let starts = |c: &[u8]| matches!(c.first(), Some(b'0'..=b'9' | b'A'..=b'Z')) && c.len() <= 64;
+    let mut tmp = Vec::new();
+    let mut sample = Vec::new();
+    let mut n = 0;
+    for &i in ids {
+        let c = content(d, &t.fields[i], q, &mut tmp);
+        if starts(c) && c.iter().any(|b| matches!(b, b':' | b'/' | b'-' | b'.' | b' ')) {
+            sample.extend_from_slice(c);
+            sample.push(b'\n');
+            n += 1;
+            if n == TIME_SAMPLE {
+                break;
+            }
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let mut times = Times::new(&sample);
+    let whole = |times: &mut Times, c: &[u8]| {
+        times.find(c);
+        match &times.spans[..] {
+            // (a fraction of a second is not taken: its digits are noise that the seconds' changes
+            // are coded with, where aqr-log keeps them a column of their own)
+            [sp] if sp.start == 0 && sp.end == c.len() && times.fraction(sp.pat) == 0 => Some((sp.pat, sp.v)),
+            _ => None,
+        }
+    };
+    let (mut seen, mut hit) = (0, 0);
+    for &i in ids {
+        let c = content(d, &t.fields[i], q, &mut tmp);
+        if starts(c) {
+            seen += 1;
+            hit += whole(&mut times, c).is_some() as usize;
+            if seen == TIME_SAMPLE {
+                break;
+            }
+        }
+    }
+    if hit * 2 < seen || hit == 0 {
+        return None;
+    }
+    let mut found: Vec<Option<(u32, i64)>> = ids
+        .iter()
+        .map(|&i| {
+            let f = &t.fields[i];
+            let c = content(d, f, q, &mut tmp);
+            (!f.escaped && starts(c)).then(|| whole(&mut times, c)).flatten()
+        })
+        .collect();
+    // the ids of `times` that are the patterns of the column's fields; each folded where it can be
+    let mut ids_seen: Vec<u32> = found.iter().flatten().map(|f| f.0).collect();
+    ids_seen.sort_unstable();
+    ids_seen.dedup();
+    let mut pats = Vec::new();
+    let mut at = std::collections::HashMap::new();
+    for id in ids_seen {
+        let pat = times.pattern(id).to_vec();
+        let mut folded = None;
+        if let Some((clock, ticks)) = time::clock_of(&pat) {
+            let mut vs = found.iter().flatten().filter(|f| f.0 == id).map(|f| f.1.rem_euclid(ticks));
+            let tod = vs.next().unwrap();
+            if vs.all(|v| v == tod)
+                && let Some(p) = time::fold_clock(&pat, clock, tod)
+            {
+                folded = Some((p, ticks));
+            }
+        }
+        at.insert(id, (pats.len() as u32, folded.as_ref().map_or(1, |f| f.1)));
+        pats.push(folded.map_or(pat, |f| f.0));
+    }
+    for f in found.iter_mut().flatten() {
+        let (k, ticks) = at[&f.0];
+        *f = (k, f.1.div_euclid(ticks));
+    }
+    Some(ColumnTimes { pats, found })
+}
+
+/// A column's times (`column_times`).
+struct ColumnTimes {
+    pats: Vec<Vec<u8>>,
+    found: Vec<Option<(u32, i64)>>,
+}
 
 /// The dialect of `d`, told from its start.
 fn dialect_of(d: &[u8]) -> Option<Dialect> {
@@ -103,10 +206,15 @@ fn packed(b: &[u8]) -> usize {
 fn column(d: &[u8], t: &Table, ids: &[usize], q: Option<u8>, s: &mut Streams) {
     let (types0, text0, desc0) = (s.types.len(), s.text.len(), s.desc.len());
     let mut tmp = Vec::new();
+    let times = column_times(d, t, ids, q);
+    let time_of = |k: usize| times.as_ref().and_then(|t| t.found[k]);
     let mut toks: Vec<(usize, &[u8])> = Vec::new();
-    for &i in ids {
+    for (k, &i) in ids.iter().enumerate() {
         let f = &t.fields[i];
         if !f.escaped && numeric(&d[f.start..f.end]) && d[f.start..f.end].iter().any(u8::is_ascii_digit) {
+            if time_of(k).is_some() {
+                continue;
+            }
             toks.push((0, &d[f.start..f.end]));
             if toks.len() == STYLE_SAMPLE {
                 break;
@@ -115,36 +223,50 @@ fn column(d: &[u8], t: &Table, ids: &[usize], q: Option<u8>, s: &mut Streams) {
     }
     let style: Style = choose(&toks);
     let mut vals = Vec::new();
-    let mut last: Option<(u8, u8, i32)> = None;
+    let mut last = Last::None;
     let mut scratch = Vec::with_capacity(64);
     let mut back = Vec::with_capacity(64);
-    for &i in ids {
+    for (k, &i) in ids.iter().enumerate() {
         let f = &t.fields[i];
         let c = content(d, f, q, &mut tmp);
-        let num = match numeric(c) {
-            true => style.encode(c, last.map_or(0, |l| l.2), &mut scratch).filter(|&(v, sc, mode, fl)| {
-                back.clear();
-                aqr_num::put(&mut back, v, sc, mode, fl);
-                back == c
-            }),
-            false => None,
-        };
-        let kind = match num {
-            Some((v, sc, mode, fl)) => {
-                vals.push(v);
-                if last == Some((mode, fl, sc)) {
-                    K_NUM
-                } else {
-                    last = Some((mode, fl, sc));
-                    s.desc.extend_from_slice(&[mode, fl]);
-                    varint::put_signed(&mut s.desc, sc as i64);
-                    K_NEW
-                }
+        let kind = if let Some((id, v)) = time_of(k) {
+            let pat = &times.as_ref().unwrap().pats[id as usize][..];
+            vals.push(v);
+            if matches!(&last, Last::Time(p) if p == pat) {
+                K_NUM
+            } else {
+                last = Last::Time(pat.to_vec());
+                s.desc.push(pat.len() as u8);
+                s.desc.extend_from_slice(pat);
+                K_TIME
             }
-            None => {
-                s.text.extend_from_slice(c);
-                s.text.push(0);
-                K_TEXT
+        } else {
+            let last_scale = if let Last::Num(_, _, sc) = last { sc } else { 0 };
+            let num = match numeric(c) {
+                true => style.encode(c, last_scale, &mut scratch).filter(|&(v, sc, mode, fl)| {
+                    back.clear();
+                    aqr_num::put(&mut back, v, sc, mode, fl);
+                    back == c
+                }),
+                false => None,
+            };
+            match num {
+                Some((v, sc, mode, fl)) => {
+                    vals.push(v);
+                    if last == Last::Num(mode, fl, sc) {
+                        K_NUM
+                    } else {
+                        last = Last::Num(mode, fl, sc);
+                        s.desc.extend_from_slice(&[mode, fl]);
+                        varint::put_signed(&mut s.desc, sc as i64);
+                        K_NEW
+                    }
+                }
+                None => {
+                    s.text.extend_from_slice(c);
+                    s.text.push(0);
+                    K_TEXT
+                }
             }
         };
         s.types.push(kind << 1 | f.quoted as u8);
@@ -391,6 +513,39 @@ mod tests {
         }
     }
 
+    /// Date and time fields (quoted or not, of several patterns in a column, empty ones and
+    /// text among them) are times: the text holds the header and the odd ones only.
+    #[test]
+    fn times() {
+        let mut s = String::from("id,day,at,span,iso,midnight\n");
+        let mut t = 1_696_000_000i64;
+        for i in 0..2000 {
+            t += 37 + (i * 7919) % 1000;
+            let (days, secs) = (t.div_euclid(86400), t.rem_euclid(86400));
+            let (y, m, d) = aqr_num::time::civil_from_days(days);
+            let (h, mi, se) = (secs / 3600, secs / 60 % 60, secs % 60);
+            let odd = i % 400 == 7;
+            s += &format!(
+                "{i},\"{y:04}-{m:02}-{d:02} {h:02}:{mi:02}\",{h:02}:{mi:02}:{se:02},{},{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{se:02}.{:03},\"{y:04}-{m:02}-{d:02} 00:00\"\n",
+                if i % 50 == 3 {
+                    String::new()
+                } else if odd {
+                    "n/a".into()
+                } else {
+                    format!("{d:02}/{m:02}/{y:04}")
+                },
+                i % 1000
+            );
+        }
+        let f = roundtrip(s.as_bytes(), &csv());
+        // (the header, the five odd or empty fields, and the column of fractions of a second: as
+        // text, 23 bytes and a zero each, as the one integer of seconds and the fraction together
+        // codes worse than aqr-log's two columns)
+        assert!((2000 * 24..2000 * 24 + 200).contains(&f.streams[4].data.len()), "{}", f.streams[4].data.len());
+        let f = encode(s.as_bytes(), 1).unwrap();
+        assert_eq!(eval(&f, s.len()).unwrap(), s.as_bytes());
+    }
+
     /// The file of a formula of segments (an application, or a Concat of them).
     fn eval_segments(f: &Formula) -> Vec<u8> {
         let apply = |n: &Node| {
@@ -472,7 +627,7 @@ mod tests {
 
     #[test]
     fn corrupt_input() {
-        let s = "a,b,c\n1,\"x\"\"y\",2.5\n".repeat(10);
+        let s = "a,b,c,d\n1,\"x\"\"y\",2.5,\"2023-10-12 00:00\"\n".repeat(10);
         let f = roundtrip(s.as_bytes(), &csv());
         let Node::Apply(a) = &f.root else { panic!() };
         let mut rng = aqr_common::rng::Rng::new(5);
@@ -487,5 +642,24 @@ mod tests {
             let inputs: Vec<&[u8]> = streams.iter().map(|s| &s[..]).collect();
             let _ = decode(&a.params, &inputs, s.len() as u64, 1);
         }
+        // a pattern that is invalid, one that is cut short, a time no pattern prints
+        let dia = csv();
+        let at = |desc: &[u8], nums: &[u8]| {
+            // one field of a new time: the columns' lengths of types, text, nums and desc
+            let columns = [0, 1, 0, nums.len() as u8, desc.len() as u8];
+            let inputs: [&[u8]; 7] = [b"\x06", b"", &columns, b"\x06", b"", nums, desc];
+            decode(&dia.to_params(1), &inputs, 10, 1).map_err(|_| ())
+        };
+        for (desc, nums) in [
+            (&b"\x0cY-m-d H:M:Sx"[..], &b"\x00"[..]), // no pattern
+            (b"\x06Y-m-d", b"\x00"),                  // cut short
+            (b"\x05Y-m-dH", b"\x00"),                 // bytes left
+            (b"\x00", b"\x00"),                       // empty
+            (b"\x05Y-m-d", b"\xfe\xff\xff\xff\x0f"),  // a time no date has
+            (b"\x05Y-m-d", b""),                      // no integer
+        ] {
+            assert_eq!(at(desc, nums), Err(()), "{desc:?}");
+        }
+        assert_eq!(at(b"\x05Y-m-d", b"\x00").unwrap(), b"1970-01-01");
     }
 }

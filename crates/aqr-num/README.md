@@ -202,6 +202,13 @@ length, if it is a valid date whose weekday (if the pattern has `a`) is right; t
 codes it where `put` prints the same bytes (a trimmed fraction does not print a trailing
 zero, nor a fixed one fewer digits).
 
+`times::Times` finds timestamps in a line or a field (`find`): their pattern, and the integer
+`time::parse` gives; aqr-log cuts lines by them, and aqr-xsv takes the fields that are one.
+Where every time of a pattern in a column is at the same time of day, `time::clock_of` and
+`fold_clock` give the pattern with the clock's items replaced by the literal bytes they print
+(`Y-m-d H:M` of `00:00` becomes `Y-m-d 00:00`, with `\` before a letter), and the integers
+are the days (the ticks of a day, from `clock_of`, divided flooring).
+
 ## Testing
 
 ```sh

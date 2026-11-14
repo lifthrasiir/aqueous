@@ -6403,7 +6403,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lha-recons.wasm" title="crates/aqr-modules/wasm/lha-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lha/FORMAT.md" title="codecs/aqr-lha/FORMAT.md">R</a>
     <tr>
-      <td><code>eea061480d5b9c5947e90798d20ba87be8bfaa3461f320b4488abd9fe6e73fab</code>
+      <td><code>e161fcc12f75b191bdefc91644ff58d69564f617c9d739ddd73787e31ce78ff2</code>
       <td>log-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/log-recons.wasm" title="crates/aqr-modules/wasm/log-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-log/FORMAT.md" title="codecs/aqr-log/FORMAT.md">R</a>
@@ -6593,8 +6593,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/xpress-recons.wasm" title="crates/aqr-modules/wasm/xpress-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-xpress/FORMAT.md" title="codecs/aqr-xpress/FORMAT.md">R</a>
     <tr>
-      <td><code>4a8afdf38e02692bf3ee47a2d2a35a052987cf7ece5782ed072622c808b8905c</code>
-      <td>xsv-recons@1
+      <td><code>7f03046f7c9a10d59a5e8a7b829414bc4e1cd657055107635214db4bd81f8486</code>
+      <td>xsv-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/xsv-recons.wasm" title="crates/aqr-modules/wasm/xsv-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-xsv/FORMAT.md" title="codecs/aqr-xsv/FORMAT.md">R</a>
     <tr>

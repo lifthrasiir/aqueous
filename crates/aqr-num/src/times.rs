@@ -468,7 +468,8 @@ impl Times {
     /// A date of pattern `date` of `len` bytes at `b[i]`: with a time of day after it (a space,
     /// `T` or `:` between), or alone.
     fn dated(&mut self, b: &[u8], i: usize, date: &[u8], len: usize) -> Option<Span> {
-        let j = *b.get(i + len)?;
+        // (a date that ends the text is alone)
+        let j = b.get(i + len).copied().unwrap_or(0);
         let joiner: &[u8] = match j {
             b' ' => b" ",
             b'T' => b"\\T",
@@ -559,6 +560,13 @@ impl Times {
     /// bytes and ends at the end of a token (not by a letter, a digit, `_` or `:`, and not
     /// before the digits of a fraction).
     fn check(&mut self, b: &[u8], i: usize) -> Option<Span> {
+        let (k, v, n) = self.try_pat(b, i)?;
+        self.span(b, i, k, v, n)
+    }
+
+    /// The pattern `self.pat` (made if it is not yet) read at `b[i]`: its index of `comp`, the
+    /// integer and the length, if it is a time that prints back as the bytes.
+    fn try_pat(&mut self, b: &[u8], i: usize) -> Option<(usize, i64, usize)> {
         let k = match self.index.get(&self.pat[..]) {
             Some(&k) => k,
             None => {
@@ -569,6 +577,13 @@ impl Times {
         };
         let c = self.comp[k].as_ref()?;
         let (v, n) = c.exact(&self.pat, &b[i..], &mut self.out)?;
+        Some((k, v, n))
+    }
+
+    /// The span at `b[i]` of the pattern `self.pat` (index `k` of `comp`) of the integer `v` and
+    /// `n` bytes, if it ends at the end of a token (not by a letter, a digit, `_` or `:`, and
+    /// not before the digits of a fraction).
+    fn span(&mut self, b: &[u8], i: usize, k: usize, v: i64, n: usize) -> Option<Span> {
         let end = i + n;
         if let Some(&c) = b.get(end) {
             let zulu = c == b'Z' && b.get(end + 1).is_none_or(|d| !d.is_ascii_alphanumeric());
