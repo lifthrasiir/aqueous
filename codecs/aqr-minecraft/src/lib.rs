@@ -3,6 +3,7 @@
 //! emulation of zlib, so that the archive stores the data instead. `formula` is the entry point
 //! (see aqr-formula); `FORMAT.md` specifies the module; `region` reads the files.
 
+pub mod dh;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod layout;

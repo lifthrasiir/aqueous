@@ -25,3 +25,10 @@ zstd = { version = "0.13", optional = true }
 name = "aqr-minecraft"
 path = "src/main.rs"
 required-features = ["encode"]
+
+[dev-dependencies]
+aqr-sqlite = { path = "../aqr-sqlite" }
+
+[[example]]
+name = "dhcheck"
+required-features = ["encode"]

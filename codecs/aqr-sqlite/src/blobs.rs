@@ -7,11 +7,20 @@ use std::ops::Range;
 use crate::page::{Geom, T_INDEX_INTERIOR, T_INDEX_LEAF, T_TABLE_INTERIOR, T_TABLE_LEAF, be16, be32, hdr_off};
 use crate::varint::get_sqlite;
 
-/// A blob of a record: the pieces of the file it is, in order.
+/// A blob of a record: the pieces of the file it is, in order; of which record (its b-tree's root
+/// page, and its place among the records walked) and column; and the record's first columns where
+/// they are integers ([`KEY`] of them, else 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blob {
     pub pieces: Vec<Range<usize>>,
+    pub root: u32,
+    pub record: u32,
+    pub column: u16,
+    pub key: [i64; KEY],
 }
+
+/// The record's first columns told of its blobs ([`Blob::key`]).
+pub const KEY: usize = 3;
 
 impl Blob {
     pub fn len(&self) -> usize {
@@ -71,6 +80,9 @@ struct Walk<'a> {
     roots: Option<Vec<u32>>,
     /// Pages left to walk.
     budget: usize,
+    /// The b-tree walked, and the records walked so far.
+    root: u32,
+    records: u32,
 }
 
 impl<'a> Walk<'a> {
@@ -85,6 +97,7 @@ impl<'a> Walk<'a> {
     }
 
     fn tree(&mut self, root: u32) {
+        self.root = root;
         let mut stack = vec![root];
         while let Some(pg) = stack.pop() {
             let base = (pg as usize).wrapping_sub(1).wrapping_mul(self.g.psize);
@@ -168,6 +181,9 @@ impl<'a> Walk<'a> {
         }
         let mut at = hl;
         let mut column = 0;
+        let mut key = [0i64; KEY];
+        let record = self.records;
+        self.records += 1;
         while q < hl {
             let Some((s, k)) = get_sqlite(&header[q..]) else { return };
             q += k;
@@ -178,20 +194,30 @@ impl<'a> Walk<'a> {
                 6 | 7 => 8,
                 _ => (s as usize - 12) / 2,
             };
+            // (an integer of 1 to 8 bytes, or 0 and 1 of no bytes)
+            let int = match s {
+                1..=6 => {
+                    let b = pay.read(self.f, at, n);
+                    Some(b.iter().fold(0i64, |v, &x| v << 8 | x as i64) << (64 - 8 * n) >> (64 - 8 * n))
+                }
+                8 | 9 => Some(s as i64 - 8),
+                _ => None,
+            };
+            if column < KEY {
+                key[column] = int.unwrap_or(0);
+            }
             if let Some(roots) = &mut self.roots
                 && column == 3
-                && (1..=4).contains(&s)
+                && let Some(v) = int.filter(|_| (1..=4).contains(&s))
+                && v > 0
             {
-                let b = pay.read(self.f, at, n);
-                let v = b.iter().fold(0i64, |v, &x| v << 8 | x as i64) << (64 - 8 * n) >> (64 - 8 * n);
-                if v > 0 {
-                    roots.push(v as u32);
-                }
+                roots.push(v as u32);
             }
             if s >= 12 && s % 2 == 0 && n >= self.min && self.roots.is_none() {
                 let start = pay.read(self.f, at, 16);
                 if (self.want)(&start) {
-                    self.out.push(Blob { pieces: pay.range(at, n) });
+                    let (root, column) = (self.root, column as u16);
+                    self.out.push(Blob { pieces: pay.range(at, n), root, record, column, key });
                 }
             }
             at += n;
@@ -224,6 +250,8 @@ fn walk(f: &[u8], min: usize, want: &dyn Fn(&[u8]) -> bool, pages: usize) -> Opt
         want,
         roots: Some(Vec::new()),
         budget: pages,
+        root: 1,
+        records: 0,
     };
     w.tree(1);
     let roots = w.roots.take().unwrap_or_default();
