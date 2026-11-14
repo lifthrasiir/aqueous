@@ -293,6 +293,10 @@ pub const GIT_PACK: Module = aqr_git::formula::MODULE;
 /// follows and the pack's length; inputs: [`GIT_PACK`]'s, and the ids of the entries in order.
 pub const GIT_PACK_INDEX: Module = aqr_git::formula::INDEX_MODULE;
 
+/// A Minecraft region file rebuilt from its chunks' data, their zlib streams made again.
+/// Params: the zlib parameters; inputs: the header, the layout, the data and the bytes kept.
+pub const MCA: Module = aqr_minecraft::formula::MODULE;
+
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
@@ -486,6 +490,7 @@ const NATIVE: &[Known] = &[
     entry(ASAR),
     entry(GIT_PACK),
     entry(GIT_PACK_INDEX),
+    entry(MCA),
     entry(PNG),
     entry(PNG_AGAINST),
     entry(PNG_SET),

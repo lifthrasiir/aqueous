@@ -33,6 +33,7 @@ aqr-mkv = { path = "../../codecs/aqr-mkv" }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
 aqr-fits = { path = "../../codecs/aqr-fits" }
 aqr-git = { path = "../../codecs/aqr-git" }
+aqr-minecraft = { path = "../../codecs/aqr-minecraft" }
 aqr-hdf5 = { path = "../../codecs/aqr-hdf5" }
 aqr-apfs = { path = "../../codecs/aqr-apfs" }
 aqr-disk = { path = "../../codecs/aqr-disk" }

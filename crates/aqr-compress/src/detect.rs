@@ -184,6 +184,8 @@ static ROWS: &[Row] = {
         anywhere(Egg, Of(&[b"EG"]), aqr_egg::formula::starts),
         anywhere(Rar, Of(&[b"Ra"]), aqr_rar::formula::starts),
         start(GitPack, aqr_git::pack::starts),
+        // (of no magic: its locations checked against the file)
+        start(Mca, aqr_minecraft::region::starts),
         // (after git's packs, which start `PACK` as Quake's do)
         start(QuakePak, aqr_bundle::packs::quake_pak::starts),
         magic(Gzip, &[(0, &[0x1f, 0x8b, 8])]),

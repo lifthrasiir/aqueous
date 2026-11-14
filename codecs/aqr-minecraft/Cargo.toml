@@ -1,0 +1,27 @@
+[package]
+name = "aqr-minecraft"
+version = "0.1.0"
+edition = "2024"
+description = "Minecraft's region files (.mca) rebuilt bit for bit from their chunks' data, the zlib streams made again by aqr-flate's emulation of zlib"
+publish = false
+
+[features]
+default = ["encode"]
+# The formula (`formula`) and the tool; without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula", "dep:flate2", "dep:zstd"]
+
+[dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
+zstd = { version = "0.13", optional = true }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[bin]]
+name = "aqr-minecraft"
+path = "src/main.rs"
+required-features = ["encode"]

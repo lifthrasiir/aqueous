@@ -1690,6 +1690,38 @@ fn git_pack_file() {
     assert!(!modules(&recompress(&x, &all())).contains(&"git-pack-recons"));
 }
 
+/// A Minecraft region file of `n` chunks, each a zlib stream at level 6 (as Minecraft writes
+/// them), laid out backwards, as aqr-minecraft's region files.
+fn mca(n: usize) -> Vec<u8> {
+    use aqr_minecraft::region::{HEADER, SECTOR};
+    let mut d = vec![0; HEADER];
+    for i in (0..n).rev() {
+        let z = aqr_minecraft::layout::zlib_onto(&prose(3000 + 500 * i), Default::default(), Vec::new()).unwrap();
+        let at = d.len();
+        d.extend(((z.len() + 1) as u32).to_be_bytes());
+        d.push(aqr_minecraft::region::ZLIB);
+        d.extend_from_slice(&z);
+        d.resize(d.len().next_multiple_of(SECTOR), 0);
+        let l = ((at / SECTOR) as u32) << 8 | ((d.len() - at) / SECTOR) as u32;
+        d[4 * i..][..4].copy_from_slice(&l.to_be_bytes());
+    }
+    d
+}
+
+/// A region file goes to aqr-minecraft, which makes its zlib streams again itself, at the start
+/// of a file only.
+#[test]
+fn mca_file() {
+    let d = mca(30);
+    assert_eq!(aqr_compress::detect(&d), Some(aqr_compress::Format::Mca));
+    assert_eq!(aqr_compress::kind_by_name(b"region/r.0.-1.mca"), aqr_formula::Kind::Format("mca"));
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), ["mca-recons"]);
+    let mut x = b"some bytes first".to_vec();
+    x.extend_from_slice(&d);
+    assert!(!modules(&recompress(&x, &all())).contains(&"mca-recons"));
+}
+
 /// An HDF5 file goes to aqr-hdf5, its deflated chunks to aqr-flate (a dataset of floats by
 /// aqr-hdf5's float model), also in other data.
 #[test]

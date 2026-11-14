@@ -470,6 +470,19 @@ formats! {
         heap: 12.0,
         extent: aqr_git::pack::extent,
     }
+    /// Minecraft's region file (`.mca`, aqr-minecraft: its chunks' zlib streams made again of
+    /// their data), known by its locations, checked against the file: a whole file, not looked
+    /// for in other data.
+    Mca = "mca" {
+        recompressor: Pure(aqr_minecraft::formula::encode),
+        // the chunks' data inflated (18 times the file in the End, 7 in the others), held twice
+        // as it is gathered
+        heap: 48.0,
+        exts: &["mca"],
+        // the streams inflated and made again: some 70 thread-ms a MB of the Overworld's and
+        // the Nether's files, 200 of the End's (`aqr-minecraft check`, a Ryzen 7 9700X)
+        cost: 100,
+    }
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta = "fasta" {

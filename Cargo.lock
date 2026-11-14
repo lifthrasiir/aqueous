@@ -283,6 +283,7 @@ dependencies = [
  "aqr-lz4",
  "aqr-lzma",
  "aqr-lzo",
+ "aqr-minecraft",
  "aqr-mkv",
  "aqr-mp3",
  "aqr-mszip",
@@ -357,6 +358,7 @@ dependencies = [
  "aqr-lznt1",
  "aqr-lzo",
  "aqr-lzx",
+ "aqr-minecraft",
  "aqr-modules",
  "aqr-mp3",
  "aqr-msadpcm",
@@ -510,6 +512,7 @@ dependencies = [
  "aqr-lznt1",
  "aqr-lzo",
  "aqr-lzx",
+ "aqr-minecraft",
  "aqr-modules",
  "aqr-mp3",
  "aqr-msadpcm",
@@ -1227,6 +1230,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-minecraft"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-flate",
+ "aqr-formula",
+ "flate2",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-mkv"
 version = "0.1.0"
 dependencies = [
@@ -1271,6 +1286,7 @@ dependencies = [
  "aqr-lznt1",
  "aqr-lzo",
  "aqr-lzx",
+ "aqr-minecraft",
  "aqr-mp3",
  "aqr-msadpcm",
  "aqr-mszip",
@@ -1366,6 +1382,7 @@ dependencies = [
  "aqr-lznt1",
  "aqr-lzo",
  "aqr-lzx",
+ "aqr-minecraft",
  "aqr-mp3",
  "aqr-msadpcm",
  "aqr-mszip",

@@ -360,6 +360,7 @@ pub const NATIVE: &[Native] = &[
         ),
         |p, _, i, n, t| aqr_git::module::decode_index(p, i, n, t).map_err(err),
     ),
+    threaded("mca-recons", |p, _, i, n, t| aqr_minecraft::module::decode(p, i, n, t).map_err(err)),
     threaded("png-recons", |p, _, i, n, t| aqr_png::module::decode(p, i, n, t).map_err(err)),
     bare("png-against", |p, _, i, n, t| aqr_png::module::decode_against(p, i, n, t).map_err(err)),
     bare("png-set", |p, _, i, n, t| aqr_png::module::decode_set(p, i, n, t).map_err(err)),

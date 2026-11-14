@@ -124,7 +124,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, zstd, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
+  git, minecraft, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, zstd, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
   asar, inno, ole, isc, vorbis, ogg, wwise, ima, msadpcm, mkv, lzx, xpress, lznt1, div3, ac3, tensors, log, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
   crate with a `FORMAT.md` belongs here. Disk images are aqr-disk's (partition tables, containers,
   the formula; `docs/disk-image-design.md`), their file systems read by aqr-iso, aqr-fat, aqr-ntfs,
@@ -212,8 +212,8 @@ optimization picked by hash.
 - Whole modules take their inputs at once; part modules (`entry! … windows(…)`, spec "Module
   execution") stream them through windows of fixed pages, so their memory does not grow with
   the data. Big streams' modules are part modules (lzma, bz2, lz4, snappy, git, exe, png, flac,
-  pcm, mp3, fasta, bundle, bcj, mszip, lzx, flate-set, flate-inflate, prores, div3, ac3); natively lzma, lzx, bz2, png,
-  mp3, flac and pcm still decode whole on threads (`Run::Threaded`), not held to the plan.
+  pcm, mp3, fasta, bundle, bcj, mszip, lzx, flate-set, flate-inflate, prores, div3, ac3, mca); natively lzma, lzx, bz2, png,
+  mp3, flac, pcm and mca still decode whole on threads (`Run::Threaded`), not held to the plan.
 - No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
 - Model data (aqr-flate's) is a resource, not embedded in the module.
 - Threads in Wasm: fork-join tasks (`aqr_spawn(class, count, records, arg, n)`, the only spawn;
@@ -368,6 +368,12 @@ optimization picked by hash.
   units and addresses in aqr-xsv, Drain-style clusters.
   aqr-xsv codes date and time columns (module 2, patterns as aqr-log's), and both take zones
   after a time as literal bytes of the pattern and digit groups (`1.187,25`, aqr-num mode bit 7).
+- aqr-minecraft (Java Edition's region files, `.mca`; `mca-recons`): each chunk's zlib stream made
+  again of its NBT by aqr-flate's zlib emulation (Minecraft writes level 6: every chunk of the
+  18 GB sample world), the header and the stale bytes Minecraft leaves in freed sectors kept. A
+  part module, a chunk at a time. Samples: `F:\Data\aqr-corpus\minecraft-world-sample` (its
+  Distant Horizons databases are for later: aqr-sqlite). Left (its README's Status): the NBT
+  itself (palettes unpacked, light from the blocks), LZ4 chunks.
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by

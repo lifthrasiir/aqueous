@@ -5788,6 +5788,55 @@ fn git_plans_hold() {
     assert!((36.0..36.1).contains(&per_entry), "{per_entry} bytes for an entry");
 }
 
+/// A region file of `n` chunks of zlib (level 6) of data of `size(i)` bytes, every seventh stored
+/// as it is and every eleventh LZ4's (kept), laid out backwards, with stale bytes after every
+/// third stream.
+fn mca_file(n: usize, size: impl Fn(usize) -> usize) -> Vec<u8> {
+    use aqr_minecraft::region::{HEADER, LZ4, NONE, SECTOR, ZLIB};
+    let p = aqr_flate::zlib::Params::default();
+    let mut f = vec![0; HEADER];
+    for i in (0..n).rev() {
+        let words = b"sections Name minecraft:stone minecraft:air ";
+        let d: Vec<u8> = (0..size(i)).map(|k| words[(k * 7 + i) % words.len()] ^ (k % 251 == 0) as u8).collect();
+        let (t, body) = match i {
+            _ if i % 11 == 10 => (LZ4, d[..d.len() / 3].to_vec()),
+            _ if i % 7 == 6 => (NONE, d),
+            _ => (ZLIB, aqr_minecraft::layout::zlib_onto(&d, p, Vec::new()).unwrap()),
+        };
+        let at = f.len();
+        f.extend(((body.len() + 1) as u32).to_be_bytes());
+        f.push(t);
+        f.extend_from_slice(&body);
+        let end = f.len().next_multiple_of(SECTOR);
+        f.extend((f.len()..end).map(|k| if i % 3 == 0 { k as u8 | 1 } else { 0 }));
+        let l = ((at / SECTOR) as u32) << 8 | ((end - at) / SECTOR) as u32;
+        f[4 * i..][..4].copy_from_slice(&l.to_be_bytes());
+        f[SECTOR + 4 * i..][..4].copy_from_slice(&(1_700_000_000 + i as u32).to_be_bytes());
+    }
+    f
+}
+
+/// mca-recons (a part module) lays its memory out as a stack, its limit its plan: a chunk at a
+/// time, the plan of the largest rebuilt (here one of 3 MB of data, of streams of many blocks),
+/// the same natively and as WebAssembly.
+#[test]
+fn mca_plans_hold() {
+    let files = [
+        ("one", mca_file(1, |_| 100)),
+        ("many", mca_file(300, |i| 200 + 397 * i)),
+        ("large", mca_file(20, |i| if i == 4 { 3 << 20 } else { 30_000 })),
+    ];
+    let archive = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for (what, d) in files {
+        let f = aqr_minecraft::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
+        let c = archive.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{what}");
+        let w = decode_wasm(&c);
+        assert!(w.as_ref().is_ok_and(|w| *w == d), "{what}: {:?}", w.err());
+        plan_holds(&format!("mca {what}"), f, &d);
+    }
+}
+
 /// pdb-symbols lays its memory out as a stack, its limit its plan: of modules of blocks nested
 /// shallow and deep, their lines inlinee lines of few inlinees and of many.
 #[test]
