@@ -591,4 +591,10 @@ pub const KNOWN: &[Known] = &[
         sha512_256: hex("60b2944db28669697e24767170b5914cf04a7111bf84c7f044c76781b38238a1"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },
+    Known {
+        name: "zstd-frames",
+        version: 1,
+        sha512_256: hex("1d8087f725c1dd6847001053205a6fdd4d54f870feba0978e6c7bce7f54d1ecc"),
+        block: include_bytes!("../wasm/zstd-frames.block"),
+    },
 ];

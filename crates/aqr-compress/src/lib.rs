@@ -3051,6 +3051,14 @@ fn disk(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     Some(f)
 }
 
+/// The formula of a SQLite database whose blobs are Zstandard frames ([`Format::SqliteZstd`]):
+/// those that libzstd's emulation makes again at level 3, of aqr-zstd's `zstd-frames`.
+fn sqlite_zstd(d: &[u8], threads: usize) -> Option<Formula> {
+    let blobs = aqr_sqlite::blobs::blobs(d, 64, &|h| h.starts_with(&aqr_zstd::MAGIC))?;
+    let frames: Vec<_> = blobs.into_iter().map(|b| b.pieces).collect();
+    aqr_zstd::formula::frames_in(d, &frames, 3, Kind::Table, threads)
+}
+
 /// The recompressor of `format` ([`formats::Spec::recompressor`]).
 fn recompressor(format: Format) -> Recompressor {
     format.spec().recompressor

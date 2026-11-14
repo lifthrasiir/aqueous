@@ -6243,3 +6243,63 @@ fn lossless_jpeg_plan_holds_widely() {
         }
     }
 }
+
+/// A file of `n` frames of libzstd at level 3, each cut into pieces put among bytes of no frame
+/// in an order of their own (as a database's overflow pages), and the frames' pieces.
+fn zstd_frames_file(n: usize, big: usize, seed: u64) -> (Vec<u8>, Vec<Vec<std::ops::Range<usize>>>) {
+    let mut s = seed;
+    let mut r = |n: usize| {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s % n as u64) as usize
+    };
+    let mut pieces = Vec::new();
+    for i in 0..n {
+        let len = if i == 0 { big } else { [0, 10, 300, 5000, 40_000][r(5)] + r(100) };
+        let step = 1 + r(7);
+        let content: Vec<u8> = (0..len).map(|k| (k / step) as u8 ^ (k % 3 == 0) as u8).collect();
+        let z = aqr_zstd::compress::compress(&content, 3).unwrap();
+        let (mut at, mut k) = (0, 0);
+        while at < z.len() {
+            let m = (1 + r(4092)).min(z.len() - at);
+            pieces.push((i, k, z[at..at + m].to_vec()));
+            at += m;
+            k += 1;
+        }
+    }
+    for i in (1..pieces.len()).rev() {
+        let j = i.saturating_sub(r(40));
+        pieces.swap(i, j);
+    }
+    let mut d = Vec::new();
+    let mut ranges: Vec<Vec<(usize, std::ops::Range<usize>)>> = vec![Vec::new(); n];
+    for (i, k, b) in pieces {
+        for _ in 0..r(20) {
+            d.push(r(256) as u8);
+        }
+        ranges[i].push((k, d.len()..d.len() + b.len()));
+        d.extend_from_slice(&b);
+    }
+    let frames = ranges
+        .into_iter()
+        .map(|mut v| {
+            v.sort_by_key(|p| p.0);
+            v.into_iter().map(|p| p.1).collect()
+        })
+        .collect();
+    (d, frames)
+}
+
+/// zstd-frames lays its memory out as a stack, its limit its plan: of the largest content, the
+/// pool of the frames open and how many are: of one frame, of many, and of a large one.
+#[test]
+fn zstd_frames_plans_hold() {
+    for (what, n, big) in [("one", 1, 3000), ("many", 300, 20_000), ("large", 20, 250_000)] {
+        let (d, frames) = zstd_frames_file(n, big, 5 + n as u64);
+        let f = aqr_zstd::formula::frames_in(&d, &frames, 3, aqr_formula::Kind::Table, 2).expect(what);
+        let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{what}");
+        plan_holds(&format!("zstd-frames {what}"), f, &d);
+    }
+}

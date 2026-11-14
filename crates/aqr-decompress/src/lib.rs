@@ -297,6 +297,11 @@ pub const GIT_PACK_INDEX: Module = aqr_git::formula::INDEX_MODULE;
 /// Params: the zlib parameters; inputs: the header, the layout, the data and the bytes kept.
 pub const MCA: Module = aqr_minecraft::formula::MODULE;
 
+/// A file of bytes kept and of Zstandard frames made again of their contents by libzstd's
+/// emulation. Params: the level and the sizes of what it holds; inputs: the layout, the bytes
+/// kept, the contents' lengths and the contents.
+pub const ZSTD_FRAMES: Module = aqr_zstd::formula::FRAMES;
+
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
@@ -491,6 +496,7 @@ const NATIVE: &[Known] = &[
     entry(GIT_PACK),
     entry(GIT_PACK_INDEX),
     entry(MCA),
+    entry(ZSTD_FRAMES),
     entry(PNG),
     entry(PNG_AGAINST),
     entry(PNG_SET),
@@ -1029,6 +1035,15 @@ impl Loaded for NativeLoaded<'_> {
         self.part().is_some()
     }
 
+    /// A module streamed where its application is long ([`Run::Streamed`]) is, of its output
+    /// alone (its inputs' lengths are not told here).
+    fn is_part_of(&self, sizes: &[u64]) -> bool {
+        match native_of(self.module).map(|e| e.run) {
+            Some(Run::Streamed(_, _, streamed)) => streamed(&[], sizes.iter().sum()),
+            _ => self.is_part(),
+        }
+    }
+
     fn apply_part(
         &self,
         params: &[u8],
@@ -1039,7 +1054,10 @@ impl Loaded for NativeLoaded<'_> {
         memory_limit: u64,
         task_limits: &[u64],
     ) -> aqr::Decoded<()> {
-        let Some(entry) = self.part() else { return Err(Failure::Resource("not a part module".into())) };
+        let entry = match native_of(self.module).map(|e| e.run) {
+            Some(Run::Part(entry, _) | Run::Streamed(entry, ..)) => entry,
+            _ => return Err(Failure::Resource("not a part module".into())),
+        };
         let lens: Vec<u64> = inputs.iter().map(|i| i.len()).collect();
         // (a plan reading the inputs' contents has them pulled, those short of the memory limit)
         let pulled = Pulled::new(inputs, memory_limit);

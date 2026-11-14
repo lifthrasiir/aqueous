@@ -385,6 +385,7 @@ dependencies = [
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
+ "aqr-zstd",
  "sha2",
  "wat",
 ]
@@ -537,6 +538,7 @@ dependencies = [
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
+ "aqr-zstd",
 ]
 
 [[package]]
@@ -1309,6 +1311,7 @@ dependencies = [
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
+ "aqr-zstd",
  "sha2",
 ]
 
@@ -1405,6 +1408,7 @@ dependencies = [
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
+ "aqr-zstd",
 ]
 
 [[package]]
@@ -1807,7 +1811,10 @@ dependencies = [
 name = "aqr-zstd"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
+ "aqr-common",
  "aqr-formula",
+ "aqr-sqlite",
  "zstd",
 ]
 

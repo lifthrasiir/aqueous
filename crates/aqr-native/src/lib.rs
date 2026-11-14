@@ -361,6 +361,24 @@ pub const NATIVE: &[Native] = &[
         |p, _, i, n, t| aqr_git::module::decode_index(p, i, n, t).map_err(err),
     ),
     threaded("mca-recons", |p, _, i, n, t| aqr_minecraft::module::decode(p, i, n, t).map_err(err)),
+    streamed(
+        "zstd-frames",
+        aqr_api::emu::Entry::part(
+            &[
+                Input(0, aqr_zstd::frames::SMALL_WINDOW),
+                Input(1, aqr_zstd::frames::WINDOW),
+                Input(2, aqr_zstd::frames::SMALL_WINDOW),
+                Input(3, aqr_zstd::frames::WINDOW),
+                Output(0, aqr_zstd::frames::WINDOW),
+            ],
+            6,
+            |a| aqr_zstd::frames::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
+        ),
+        |p, _, i, n, t| aqr_zstd::frames::decode(p, i, n, t).map_err(err),
+        // (whole of an output of 64 MiB at most, its contents some ten times that at most; else
+        // streamed, natively its frames made on threads ahead of where they are put all the same)
+        |_, len| len > 64 << 20,
+    ),
     threaded("png-recons", |p, _, i, n, t| aqr_png::module::decode(p, i, n, t).map_err(err)),
     bare("png-against", |p, _, i, n, t| aqr_png::module::decode_against(p, i, n, t).map_err(err)),
     bare("png-set", |p, _, i, n, t| aqr_png::module::decode_set(p, i, n, t).map_err(err)),

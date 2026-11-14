@@ -367,6 +367,18 @@ formats! {
         exts: &["pdf"],
         extent: |d| Some(extent::pdf(d)),
     }
+    /// SQLite database whose blobs are mostly Zstandard frames of libzstd at level 3 (Distant
+    /// Horizons' LODs, say), as [`crate::detect`] samples it: the frames made again of their
+    /// contents by aqr-zstd's `zstd-frames`, the rest of the file kept.
+    SqliteZstd = "sqlite-zstd" {
+        recompressor: Pure(crate::sqlite_zstd),
+        // (the frames' pieces and the layout, a few in a hundred of the file; the contents and
+        // the bytes kept go to the store as they are made, a batch of frames at a time)
+        heap: 0.2,
+        // (the frames decompressed and made again: 120 thread-ms a MB of The End's database, a
+        // Ryzen 7 9700X)
+        cost: 120,
+    }
     Sqlite = "sqlite" {
         recompressor: Pure(aqr_sqlite::formula::encode),
         heap: 9.0,

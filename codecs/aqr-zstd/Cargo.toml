@@ -11,9 +11,20 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:zstd"]
 
 [dependencies]
+aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
+aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 zstd = { version = "0.13", optional = true }
 
+[dev-dependencies]
+aqr-sqlite = { path = "../aqr-sqlite" }
+zstd = "0.13"
+
+# libzstd's frames made again: of pairs of contents and frames, and of a database's blobs
 [[example]]
 name = "zcheck"
+required-features = ["encode"]
+
+[[example]]
+name = "dbframes"
 required-features = ["encode"]

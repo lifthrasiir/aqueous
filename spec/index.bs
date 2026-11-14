@@ -6607,6 +6607,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td>zip-recons@6
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/zip-recons.wasm" title="crates/aqr-modules/wasm/zip-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-zip/FORMAT.md" title="codecs/aqr-zip/FORMAT.md">R</a>
+    <tr>
+      <td><code>1d8087f725c1dd6847001053205a6fdd4d54f870feba0978e6c7bce7f54d1ecc</code>
+      <td>zstd-frames@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/zstd-frames.wasm" title="crates/aqr-modules/wasm/zstd-frames.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-zstd/FORMAT.md" title="codecs/aqr-zstd/FORMAT.md">R</a>
   </tbody>
 </table>
 

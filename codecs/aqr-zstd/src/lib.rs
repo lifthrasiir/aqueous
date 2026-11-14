@@ -9,9 +9,12 @@
 //!
 //! [RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
 
+extern crate alloc;
+
 pub mod compress;
 #[cfg(feature = "encode")]
 pub mod formula;
+pub mod frames;
 
 use std::ops::Range;
 

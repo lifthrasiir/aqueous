@@ -41,6 +41,41 @@ zstd-jni at level 3): every one of The End's 805,720 frames and samples of 33,39
 and 26,376 (the Overworld) made again, at 457 MB/s (The End, content ratio 9.5) and 178 MB/s
 (the others, 2.8) on one thread of a Ryzen 7 9700X (`examples/zcheck.rs`).
 
+## Frames in other data: `zstd-frames`
+
+The module `zstd-frames` (FORMAT.md) makes a file of frames in pieces again: the bytes kept, and
+each frame made of its content by `compress` where its first piece is, held in a pool until its
+last piece is put. aqr-compress takes it for SQLite databases whose blobs are frames
+(`sqlite-zstd`, the blobs found by aqr-sqlite's `blobs`), as Distant Horizons' are.
+
+```rust
+let f = aqr_zstd::formula::frames_in(&file, &frames, 3, Kind::Table, threads); // frames: each its pieces
+```
+
+Natively the module makes the frames on threads, 2048 at a time ahead of where they are put; in
+WebAssembly one at a time. `examples/dbframes.rs` takes a database's frames through it.
+
+Distant Horizons' databases of `F:\Data\aqr-corpus\minecraft-world-sample`, `aqr` at the
+default level (verified), a Ryzen 7 9700X, 16 threads:
+
+| database | input | before | `aqr` | compress | test (`-K`) |
+|---|---|---|---|---|---|
+| The End | 594.31 MB | 509.13 MB (85.7%) | **420.61 MB** (70.8%) | 30.0 s | 5.3 s, 113 MB/s, heap 329 MB |
+| the Nether | 3.36 GB | | **2.99 GB** (89.2%) | 101 s | 20.3 s, 165 MB/s, heap 521 MB |
+| the Overworld | 6.46 GB | | **5.98 GB** (92.5%) | 156 s | 32.7 s, 198 MB/s, heap 749 MB |
+
+- The End's 805,720 frames (491 MB) hold 5.05 GB; the layout is 3.0 MB and the bytes kept
+  103 MB (the pages, the other columns, the tables of chunks' hashes).
+- Their pieces: overflow chains go back and forth over the file, so that 38% of The End's frame
+  bytes and 68% of the Nether's are of frames whose pieces are out of the file's order, and at
+  most 1,882 frames (19 MB of pool) are open at once in The End, 2,541 (93 MB) in the Nether.
+- The Nether gains little: its blobs' contents (2.8 times them) compress hardly better than the
+  frames did; what gains is the contents' structure (Distant Horizons' columns of points) and
+  the coarser LODs that the finer ones make (aqr-minecraft's Status).
+- Compressing, the heap peaks at 1.34, 3.95 and 6.78 GB, most of it the archive's zstd of the
+  contents (9.4 GB of them in the Nether, 18 GB in the Overworld), past the budget: what the
+  archive holds of a long stream as it codes it, not the module's (the stats' "zstd").
+
 ## Results
 
 Measured on 2026-11-09 on an Apple M4 (load about 3), `aqr -c` at the default level, 10 threads:

@@ -147,6 +147,7 @@ static ROWS: &[Row] = {
         start(UnrealUpk, aqr_bundle::packs::unreal_upk::starts),
         start(Chm, aqr_mszip::formula::starts_chm),
         // (a whole file, not in other data)
+        start(SqliteZstd, sqlite_zstd),
         start(Sqlite, sqlite_header),
         magic(Pdf, &[(0, b"%PDF-")]),
         magic(Psd, &[(0, b"8BPS")]),
@@ -317,6 +318,20 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
 /// A SQLite database header: the magic string, a page size, and the fields that must have one
 /// value (the file format's versions 1 or 2, payload fractions 64, 32 and 32). SQLite's code
 /// holds the magic string too.
+/// A SQLite database (of [`sqlite_header`]) whose blobs are a quarter of the pages that the first
+/// 1024 pages walked of its b-trees are, at least, in Zstandard frames.
+fn sqlite_zstd(d: &[u8]) -> bool {
+    const PAGES: usize = 1024;
+    sqlite_header(d)
+        && aqr_sqlite::blobs::sample(d, 64, &|h| h.starts_with(&aqr_zstd::MAGIC), PAGES).is_some_and(|(b, pages)| {
+            let psize = match u16::from_be_bytes([d[16], d[17]]) {
+                1 => 65536,
+                p => p as usize,
+            };
+            pages > 0 && 4 * b.iter().map(|b| b.len()).sum::<usize>() >= pages * psize
+        })
+}
+
 fn sqlite_header(d: &[u8]) -> bool {
     let Some(h) = d.first_chunk::<24>().filter(|h| h.starts_with(b"SQLite format 3\0")) else { return false };
     let size = u16::from_be_bytes([h[16], h[17]]);

@@ -1402,6 +1402,47 @@ fn sqlite_whole() {
     assert!(formats(&roundtrip(&[&b"some data before "[..], &db].concat(), &all())).is_empty());
 }
 
+/// A database made by the sqlite3 tool of `sql` given on its standard input (None without the
+/// tool).
+fn sqlite_db_of(sql: &str) -> Option<Vec<u8>> {
+    let path = std::env::temp_dir().join(format!("aqr-compress-test-in-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut c = std::process::Command::new("sqlite3")
+        .arg(&path)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    c.stdin.take().unwrap().write_all(sql.as_bytes()).unwrap();
+    let out = c.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let d = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    Some(d)
+}
+
+/// A database whose blobs are frames of libzstd at level 3 (as Distant Horizons' are), in pages
+/// of overflow chains: the frames made again of their contents by zstd-frames, the rest kept.
+#[test]
+fn sqlite_zstd_whole() {
+    let mut sql = String::from("create table t(a integer primary key, b blob, c blob);\n");
+    for i in 0..200usize {
+        let content: Vec<u8> = (0..2000 + 37 * i).map(|k| ((k / (1 + i % 5)) ^ (k % 7 * i)) as u8).collect();
+        let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let z = aqr_zstd::compress::compress(&content, 3).unwrap();
+        let small = aqr_zstd::compress::compress(&content[..300], 3).unwrap();
+        sql += &format!("insert into t values({i}, x'{}', x'{}');\n", hex(&z), hex(&small));
+    }
+    let Some(db) = sqlite_db_of(&sql) else { return };
+    let f = roundtrip(&db, &all());
+    assert_eq!(modules(&f), [aqr_decompress::ZSTD_FRAMES.name]);
+    // (one of plain blobs is aqr-sqlite's)
+    let plain = sqlite_db_of("create table t(a integer primary key, b blob);
+        with recursive n(i) as (select 1 union all select i + 1 from n where i < 300)
+        insert into t select i, randomblob(1000) from n;");
+    assert!(!modules(&roundtrip(&plain.unwrap(), &all())).contains(&aqr_decompress::ZSTD_FRAMES.name));
+}
+
 /// What recompressors know of their data refines what is made of it: the data of a gzip member
 /// by its name, the contents of a ZIP archive's entries by theirs, a PDF file's streams by
 /// what they are.

@@ -73,6 +73,16 @@ Left:
   block framing), gzip (type 1); chunks in files of their own (`c.X.Z.mcc`) are zlib files, which
   aqr-compress takes as such.
 - In WebAssembly the module makes the chunks one after another; tasks would spread them.
-- Distant Horizons' `DistantHorizons.sqlite` (zstd level 3 blobs, the coarser LODs derived from
-  the finer).
+- Distant Horizons' `DistantHorizons.sqlite` (10.4 GB of the sample's 18 GB): its blobs, frames
+  of zstd-jni at level 3, are made again of their contents by aqr-zstd's `zstd-frames`
+  (aqr-compress's `sqlite-zstd`; aqr-zstd's README has the numbers). Left, of the contents (some
+  9 times the frames in The End, 3 in the others): the table `FullData`'s columns of points
+  (`Data`, and the sides `*AdjData`: a varint count for each column, then each point's id with
+  two flags, its height, its bottom against the one above, its light) coded by a model of their
+  own rather than by the archive's zstd; and the coarser levels (`DetailLevel` 1 to 8, 31% of
+  the blobs' bytes, 44% in The End) made of the finer: a parent's column is the 2x2 merge of its
+  children's (each point the most common id among the four columns at its height, the light
+  averaged of that id), then culled of the points hidden by opaque neighbours, which is exact
+  but for which ids are opaque (to be stored); its mapping, generation steps and compression
+  modes follow from the children's too.
 - Bedrock Edition worlds (LevelDB).

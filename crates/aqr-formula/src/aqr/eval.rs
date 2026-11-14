@@ -707,7 +707,10 @@ pub(super) fn run<'a>(
         let a = block(a);
         super::apply(env, p.modules[a.module], a, inputs, &resources(a))
     };
-    let part = |a: Ap<'_, 'a>| loaded(block(a)).is_ok_and(|l| l.is_part());
+    let part = |a: Ap<'_, 'a>| {
+        let a = block(a);
+        loaded(a).is_ok_and(|l| l.is_part_of(&a.output_sizes))
+    };
     let apply_part = |a: Ap<'_, 'a>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
         let a = block(a);
         super::within_limit(a, p.modules[a.module])?;
@@ -1338,7 +1341,10 @@ pub(super) fn hashed(
         let a = block(a);
         super::apply(env, p.modules[a.module], a, inputs, &resources(a))
     };
-    let part = |a: Ap<'_, '_>| loaded(block(a)).is_ok_and(|l| l.is_part());
+    let part = |a: Ap<'_, '_>| {
+        let a = block(a);
+        loaded(a).is_ok_and(|l| l.is_part_of(&a.output_sizes))
+    };
     let apply_part = |a: Ap<'_, '_>, ins: &mut [&mut dyn PartIn], outs: &mut [&mut dyn PartOut]| {
         let a = block(a);
         super::within_limit(a, p.modules[a.module])?;

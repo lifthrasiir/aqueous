@@ -3,6 +3,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
+pub mod blobs;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod index;

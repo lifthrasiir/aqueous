@@ -1,9 +1,10 @@
 # aqr-zstd format
 
-aqr-zstd has no module and stores nothing of its own: a Zstandard file ([RFC 8878]) stays as it
-is, and what its frames hold is taken from them by the archive's own instructions (spec, "Patch
-instruction", "Split instruction"). This document describes the formulas it makes, so that what
-they hold is clear; a decoder needs nothing beyond the spec.
+A Zstandard file ([RFC 8878]) stays as it is, and what its frames hold is taken from them by the
+archive's own instructions (spec, "Patch instruction", "Split instruction"): the first part of
+this document describes the formulas made of it, so that what they hold is clear; a decoder needs
+nothing beyond the spec. The module `zstd-frames` ([below](#the-module-zstd-frames)) makes frames
+in other data (a database's blobs) again of their contents.
 
 [RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
 
@@ -69,3 +70,78 @@ taken in the formula block that makes them), in the order of their pieces.
   the longest; each file once. A file of frames gives to others and takes from none.
 - A file whose content is not taken is archived as before: the file of frames, its content not
   looked at further.
+
+## The module `zstd-frames`
+
+`zstd-frames` version 1 is a part module (spec, "Module execution"): a file of bytes kept and of
+Zstandard frames that libzstd wrote, each frame made again of its content by the compressor of
+libzstd that it emulates (`src/compress`), and put where its pieces are. A frame's pieces may be
+anywhere in the file and in any order (a database's blobs, on pages of overflow chains), so a
+frame is made where its first piece in the file is and held until all of it is put.
+
+### Params
+
+| field | type | |
+|---|---|---|
+| level | u8 | the compression level of libzstd the frames are of: 3 |
+| content | varint | the most bytes of a frame's content |
+| pool | varint | bytes of the pool of the frames open (below) |
+| open | varint | the most frames open at once |
+
+Everything is LEB128 varints. The params must be exactly these; `content` is at most 262143
+(2^18 - 1), the most emulated: libzstd may cut the blocks of more otherwise than at 128 KiB.
+
+### Inputs
+
+0. the layout (below);
+1. the bytes kept, one after another in the order of the file;
+2. the contents' lengths, a varint each, in the order the frames are made;
+3. the contents, one after another in that order.
+
+### The frames
+
+The frame of a content is what libzstd 1.5.x's `ZSTD_compress` writes of it at the level, with no
+dictionary: its parameters those of the level for the content's size (the size known), a frame
+header with the content's size and no checksum, blocks of 128 KiB, the double-fast match finder,
+the literals and sequences coded as libzstd chooses. The emulation (`compress::compress`) is the
+reference of these choices; frames of any other compressor are kept as bytes.
+
+### The layout
+
+A layout is steps one after another, each a varint `tag`, of `n = tag >> 2` bytes put, by
+`tag & 3`:
+
+- 0, bytes kept: the next `n` bytes of input 1;
+- 1, a new frame: the next frame is made, of the next length of input 2 and that many bytes of
+  input 3, and opened (the newest of the frames open); then a varint `delta`, and the `n` bytes of
+  the frame from `delta` are put;
+- 2, a piece of a frame open: varints `j` and `delta`; the `n` bytes of the `j`-th newest frame
+  open (0 the newest) from `next + delta` are put, where `next` is where the last piece put of it
+  ended.
+
+`delta` is zigzag (`(v >> 1) ^ -(v & 1)`). The bytes put must be in the frame. A frame is closed
+(it is no longer open, and the frames after it move up a place) once as many bytes are put of it
+as it has. Once the layout is done, every input must be taken whole, no frame open, and the
+bytes put the output's length; anything else is corrupt.
+
+The frames open are held in a pool of `pool` bytes: each takes a block of its length rounded up to
+64 bytes, the first free span (by place) that it fits, else the end of those taken; a closed frame
+gives its block back, joined with the free spans next to it. A layout whose frames would take more
+than `pool` bytes of the pool, or more than `open` frames open at once, is corrupt. (The encoder
+tells the most its layout takes, of the same steps.)
+
+### Memory
+
+The module lays its memory out as a stack (aqr-api's `stack`): the params, the readers' pieces of
+its inputs, the frames open and the free spans, the pool, a content and a frame, and a compressor
+for contents of up to `content` bytes (its tables and buffers, made once). Its plan
+(`frames::plan`) is of the params alone.
+
+### Encoder choices (informative)
+
+- aqr-compress takes a SQLite database whose blobs are mostly frames (`sqlite-zstd`: a quarter of
+  the first 1024 pages walked of its b-trees at least), its blobs found by aqr-sqlite's `blobs`
+  (each blob's pieces: on its b-tree page, then on its overflow pages).
+- A frame is taken where it decompresses, and the emulation makes it again byte for byte, and its
+  pieces are apart from the others'. Where the frames open at once would be more than 96 MiB (or
+  their pool more than 160 MiB), those closing last are left out, as bytes kept.

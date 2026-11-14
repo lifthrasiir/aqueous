@@ -68,6 +68,7 @@ aqr-flac = { path = "../../codecs/aqr-flac", default-features = false }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
 aqr-git = { path = "../../codecs/aqr-git", default-features = false }
 aqr-minecraft = { path = "../../codecs/aqr-minecraft", default-features = false }
+aqr-zstd = { path = "../../codecs/aqr-zstd", default-features = false }
 aqr-infer-recs = { path = "../../codecs/aqr-infer-recs", default-features = false }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg", default-features = false }
 aqr-lz4 = { path = "../../codecs/aqr-lz4", default-features = false }

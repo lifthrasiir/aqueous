@@ -44,6 +44,7 @@ aqr-fits = { path = "../../codecs/aqr-fits" }
 aqr-hdf5 = { path = "../../codecs/aqr-hdf5" }
 aqr-git = { path = "../../codecs/aqr-git" }
 aqr-minecraft = { path = "../../codecs/aqr-minecraft" }
+aqr-zstd = { path = "../../codecs/aqr-zstd" }
 aqr-flac = { path = "../../codecs/aqr-flac" }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg" }
 aqr-lz4 = { path = "../../codecs/aqr-lz4" }

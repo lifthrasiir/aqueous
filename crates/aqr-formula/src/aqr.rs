@@ -2605,6 +2605,13 @@ pub trait Loaded: Send + Sync {
         false
     }
 
+    /// Whether an application of it of outputs of `sizes` bytes is applied as a part module:
+    /// by default as [`Loaded::is_part`] tells, whatever the sizes.
+    fn is_part_of(&self, sizes: &[u64]) -> bool {
+        let _ = sizes;
+        self.is_part()
+    }
+
     /// An application as a part module: its inputs pulled as it requests them, its outputs (of
     /// `sizes` bytes) pushed as it commits them, all of them by the time it returns.
     // ([`Loaded::apply`]'s arguments, and the outputs)

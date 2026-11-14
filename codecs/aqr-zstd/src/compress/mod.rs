@@ -70,44 +70,122 @@ pub fn params(level: i32, size: usize) -> Option<Params> {
 /// The frame libzstd writes of `src` at `level` (`ZSTD_compress`): None where the level or
 /// the size is not emulated.
 pub fn compress(src: &[u8], level: i32) -> Option<Vec<u8>> {
-    let cp = params(level, src.len())?;
-    if src.len() >= 256 << 10 {
-        return None;
+    let mut out = Vec::new();
+    Compressor::new(src.len()).compress(src, level, &mut out).then_some(out)
+}
+
+/// The most bytes of content that are emulated: libzstd may split the blocks of more.
+pub const CONTENT_MAX: usize = (256 << 10) - 1;
+
+/// The most bytes a frame of `n` bytes of content takes: its header and blocks, a block raw
+/// where it does not compress.
+pub const fn frame_max(n: usize) -> usize {
+    18 + n + 3 * (n.div_ceil(128 << 10) + 1)
+}
+
+/// A compressor of frames ([`Compressor::compress`]) whose buffers are made once, for contents
+/// of up to the size it is made for, so that what it takes does not change from frame to frame:
+/// [`Compressor::memory`] bytes, and a few KiB at a time beyond them.
+pub struct Compressor {
+    st: State,
+    body: Vec<u8>,
+    max: usize,
+}
+
+impl Compressor {
+    /// For contents of up to `max` bytes (at most [`CONTENT_MAX`]).
+    pub fn new(max: usize) -> Self {
+        let max = max.min(CONTENT_MAX);
+        let (hash, chain) = Self::logs(max);
+        let block = max.min(128 << 10);
+        let st = State {
+            cp: params(3, 0).unwrap(),
+            long: Vec::with_capacity(1 << hash),
+            short: Vec::with_capacity(1 << chain),
+            rep: [1, 4, 8],
+            entropy: Entropy { huf: None, huf_repeat: Repeat::None },
+            seqs: Vec::with_capacity(block / 4 + 1),
+            lits: Vec::with_capacity(block),
+            codes: [
+                Vec::with_capacity(block / 4 + 1),
+                Vec::with_capacity(block / 4 + 1),
+                Vec::with_capacity(block / 4 + 1),
+            ],
+        };
+        Compressor { st, body: Vec::with_capacity(2 * block + 64), max }
     }
-    let mut out = Vec::with_capacity(src.len() / 2 + 64);
-    header(&mut out, &cp, src.len() as u64);
-    if src.is_empty() {
-        out.extend_from_slice(&[1, 0, 0]);
-        return Some(out);
-    }
-    let mut st = State::new(&cp);
-    let block_max = (128usize << 10).min(1 << cp.window_log);
-    let mut at = 0;
-    let mut first = true;
-    let mut body = Vec::new();
-    while at < src.len() {
-        let end = (at + block_max).min(src.len());
-        let last = (end == src.len()) as u32;
-        body.clear();
-        let len = end - at;
-        match st.block(src, at, end, first, &mut body) {
-            Coded::Raw => {
-                out.extend_from_slice(&le24(last | (len as u32) << 3));
-                out.extend_from_slice(&src[at..end]);
-            }
-            Coded::Rle => {
-                out.extend_from_slice(&le24(last | 1 << 1 | (len as u32) << 3));
-                out.push(src[at]);
-            }
-            Coded::Compressed => {
-                out.extend_from_slice(&le24(last | 2 << 1 | (body.len() as u32) << 3));
-                out.extend_from_slice(&body);
+
+    /// The largest logs of the tables of contents of up to `max` bytes.
+    fn logs(max: usize) -> (u32, u32) {
+        let (mut h, mut c) = (0, 0);
+        for n in [max, 16 << 10, 128 << 10] {
+            if let Some(p) = params(3, n.min(max)) {
+                h = h.max(p.hash_log);
+                c = c.max(p.chain_log);
             }
         }
-        first = false;
-        at = end;
+        (h, c)
     }
-    Some(out)
+
+    /// The bytes that a compressor for contents of up to `max` bytes takes, its buffers and the
+    /// most it takes besides while compressing (its tables of codes, not more than 16 KiB),
+    /// of blocks of `block(n)` bytes for a buffer of `n` bytes (`aqr_api::stack::block`, say).
+    pub fn memory(max: usize, block: impl Fn(u64) -> u64) -> u64 {
+        let max = max.min(CONTENT_MAX);
+        let (hash, chain) = Self::logs(max);
+        let b = max.min(128 << 10) as u64;
+        let seqs = b / 4 + 1;
+        block(4 << hash)
+            + block(4 << chain)
+            + block(12 * seqs)
+            + block(b)
+            + 3 * block(seqs)
+            + block(2 * b + 64)
+            + (16 << 10)
+    }
+
+    /// The frame libzstd writes of `src` at `level`, appended to `out`: false (nothing
+    /// appended) where the level, or the size, is not emulated, or `src` is longer than the
+    /// compressor is for.
+    pub fn compress(&mut self, src: &[u8], level: i32, out: &mut Vec<u8>) -> bool {
+        let Some(cp) = params(level, src.len()) else { return false };
+        if src.len() > self.max {
+            return false;
+        }
+        header(out, &cp, src.len() as u64);
+        if src.is_empty() {
+            out.extend_from_slice(&[1, 0, 0]);
+            return true;
+        }
+        let st = &mut self.st;
+        st.reset(&cp);
+        let block_max = (128usize << 10).min(1 << cp.window_log);
+        let mut at = 0;
+        let mut first = true;
+        while at < src.len() {
+            let end = (at + block_max).min(src.len());
+            let last = (end == src.len()) as u32;
+            self.body.clear();
+            let len = end - at;
+            match st.block(src, at, end, first, &mut self.body) {
+                Coded::Raw => {
+                    out.extend_from_slice(&le24(last | (len as u32) << 3));
+                    out.extend_from_slice(&src[at..end]);
+                }
+                Coded::Rle => {
+                    out.extend_from_slice(&le24(last | 1 << 1 | (len as u32) << 3));
+                    out.push(src[at]);
+                }
+                Coded::Compressed => {
+                    out.extend_from_slice(&le24(last | 2 << 1 | (self.body.len() as u32) << 3));
+                    out.extend_from_slice(&self.body);
+                }
+            }
+            first = false;
+            at = end;
+        }
+        true
+    }
 }
 
 fn le24(v: u32) -> [u8; 3] {
@@ -168,6 +246,8 @@ struct State {
     entropy: Entropy,
     seqs: Vec<Seq>,
     lits: Vec<u8>,
+    /// The codes of the sequences: literal lengths, match lengths, offsets.
+    codes: [Vec<u8>; 3],
 }
 
 /// Positions in the window are indices from 2 (`ZSTD_WINDOW_START_INDEX`); 0 is no entry.
@@ -219,16 +299,15 @@ fn count(s: &[u8], mut a: usize, mut b: usize, end: usize) -> usize {
 }
 
 impl State {
-    fn new(cp: &Params) -> Self {
-        State {
-            cp: *cp,
-            long: vec![0; 1 << cp.hash_log],
-            short: vec![0; 1 << cp.chain_log],
-            rep: [1, 4, 8],
-            entropy: Entropy { huf: None, huf_repeat: Repeat::None },
-            seqs: Vec::new(),
-            lits: Vec::new(),
-        }
+    /// Ready for a frame of the parameters `cp`.
+    fn reset(&mut self, cp: &Params) {
+        self.cp = *cp;
+        self.long.clear();
+        self.long.resize(1 << cp.hash_log, 0);
+        self.short.clear();
+        self.short.resize(1 << cp.chain_log, 0);
+        self.rep = [1, 4, 8];
+        self.entropy = Entropy { huf: None, huf_repeat: Repeat::None };
     }
 
     /// `ZSTD_compressBlock_internal`.
@@ -434,7 +513,7 @@ impl State {
             out.push(0xFF);
             out.extend_from_slice(&((nb_seq - 0x7F00) as u16).to_le_bytes());
         }
-        if nb_seq > 0 && sequences(out, &self.seqs).is_none() {
+        if nb_seq > 0 && sequences(out, &self.seqs, &mut self.codes).is_none() {
             return false;
         }
         let max = len - ((len >> 6) + 2);
@@ -693,16 +772,21 @@ fn table(out: &mut Vec<u8>, codes: &[u8], k: &Kind) -> (u8, CTable, usize) {
 
 /// The sequences section after its count (`ZSTD_buildSequencesStatistics`,
 /// `ZSTD_encodeSequences`): None where the block is kept raw for old decoders' sake.
-fn sequences(out: &mut Vec<u8>, seqs: &[Seq]) -> Option<()> {
+fn sequences(out: &mut Vec<u8>, seqs: &[Seq], codes: &mut [Vec<u8>; 3]) -> Option<()> {
     let n = seqs.len();
-    let llc: Vec<u8> = seqs.iter().map(|q| code_of(&LL_BASE, q.ll)).collect();
-    let mlc: Vec<u8> = seqs.iter().map(|q| code_of(&ML_BASE, q.ml)).collect();
-    let ofc: Vec<u8> = seqs.iter().map(|q| highbit(q.off_base) as u8).collect();
+    let [llc, mlc, ofc] = codes;
+    llc.clear();
+    llc.extend(seqs.iter().map(|q| code_of(&LL_BASE, q.ll)));
+    mlc.clear();
+    mlc.extend(seqs.iter().map(|q| code_of(&ML_BASE, q.ml)));
+    ofc.clear();
+    ofc.extend(seqs.iter().map(|q| highbit(q.off_base) as u8));
+    let (llc, mlc, ofc) = (&llc[..], &mlc[..], &ofc[..]);
     let head = out.len();
     out.push(0);
-    let (llt, ll_t, ll_n) = table(out, &llc, &LL);
-    let (oft, of_t, of_n) = table(out, &ofc, &OF);
-    let (mlt, ml_t, ml_n) = table(out, &mlc, &ML);
+    let (llt, ll_t, ll_n) = table(out, llc, &LL);
+    let (oft, of_t, of_n) = table(out, ofc, &OF);
+    let (mlt, ml_t, ml_n) = table(out, mlc, &ML);
     out[head] = (llt << 6) + (oft << 4) + (mlt << 2);
     let last_count =
         [(llt, ll_n), (oft, of_n), (mlt, ml_n)].iter().filter(|t| t.0 == 2).map(|t| t.1).next_back().unwrap_or(0);
