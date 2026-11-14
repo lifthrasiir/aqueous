@@ -438,9 +438,9 @@ impl Astc {
         let wbits = WEIGHT_RANGES[wr].size(nw);
         let extra = if np > 1 && b.sel != 0 { 3 * np as u32 - 4 } else { 0 };
         let start = if np == 1 { 17 } else { 29 };
-        let ccs_at = 128 - wbits - extra - 2 * dual as u32;
+        let ccs_at = 128 - wbits as i32 - extra as i32 - 2 * dual as i32;
         let nv: u32 = (0..np as usize).map(|p| 2 * astc::pairs(b.cem[p])).sum();
-        let avail = ccs_at as i32 - start as i32;
+        let avail = ccs_at - start as i32;
         if nv > 18 || nw > 64 || avail < (13 * nv).div_ceil(5) as i32 {
             return Err(corrupt());
         }
@@ -451,7 +451,7 @@ impl Astc {
         Self::colours(s, md, ranks, &mut b, want, left, up, a, at);
         // the bits no field holds, as they are
         let end = start + COLOUR_RANGES[cr].size(nv);
-        (b.unused_at, b.unused_n) = (end as u8, (ccs_at - end) as u8);
+        (b.unused_at, b.unused_n) = (end as u8, (ccs_at - end as i32) as u8);
         for k in 0..b.unused_n as u32 {
             let v = s.bit(&mut md.unused[k.min(7) as usize], want.unused >> k & 1 != 0, Cat::Mode);
             b.unused |= (v as u128) << k;

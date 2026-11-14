@@ -542,8 +542,8 @@ pub fn legal(b: &[u8; 16], (fw, fh): (u32, u32)) -> Option<u32> {
             (0..np).map(|i| 2 * (sel - 1 + (enc >> i & 1) + 1)).sum()
         }
     };
-    let avail = 128 - wbits - extra - 2 * dual as u32 - start;
-    (nv <= 18 && avail >= (13 * nv).div_ceil(5)).then_some(wbits)
+    let avail = 128 - wbits as i32 - extra as i32 - 2 * dual as i32 - start;
+    (nv <= 18 && avail >= (13 * nv).div_ceil(5) as i32).then_some(wbits)
 }
 
 impl Block {
