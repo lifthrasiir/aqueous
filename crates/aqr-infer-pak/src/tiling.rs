@@ -564,7 +564,7 @@ pub fn members(b: &[u8], c: &Cand, l: u64) -> Vec<Member> {
                     s[i]
                 } else if let Some(x) = s2.as_ref().filter(|x| fits(room, x[i])) {
                     x[i]
-                } else if rm[i].is_none() && o[i] + s[i] <= l {
+                } else if rm[i].is_none() && s[i] <= l - o[i] {
                     s[i] // the last member: its room runs to the end of the target
                 } else {
                     continue;
@@ -579,7 +579,7 @@ pub fn members(b: &[u8], c: &Cand, l: u64) -> Vec<Member> {
                 .map(|r| {
                     let s = size.get(b, t, r);
                     let m = Member { offset: at, size: s, row: r };
-                    at += s.div_ceil(*align) * align;
+                    at = at.saturating_add(s.div_ceil(*align).saturating_mul(*align));
                     m
                 })
                 .collect()

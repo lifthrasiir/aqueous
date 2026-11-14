@@ -162,7 +162,7 @@ pub fn decode_in_place<'a>(
     let mut at = 0usize;
     for m in &ms {
         let (o, s) = (m.offset as usize, m.size as usize);
-        if o < at || o + s > src.len() {
+        if o < at || o.checked_add(s).is_none_or(|e| e > src.len()) {
             continue;
         }
         if o > at && src[at..o].iter().any(|&x| x != 0) {

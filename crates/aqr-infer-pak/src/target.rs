@@ -73,13 +73,13 @@ impl<'a> Target<'a> {
         match &self.kind {
             Kind::File => {
                 let a = (o as usize).min(self.data.len());
-                let z = ((o + n) as usize).min(self.data.len());
+                let z = (o.saturating_add(n) as usize).min(self.data.len());
                 self.data[a..z].to_vec()
             }
             Kind::Decoded { parts, starts, cache, src, .. } => {
                 let mut out = Vec::with_capacity(n as usize);
                 let mut i = starts.partition_point(|&s| s <= o).saturating_sub(1);
-                let (mut o, end) = (o, o + n);
+                let (mut o, end) = (o, o.saturating_add(n));
                 while o < end && i < parts.len() {
                     let p = &parts[i];
                     let chunk: Rc<Vec<u8>> = {

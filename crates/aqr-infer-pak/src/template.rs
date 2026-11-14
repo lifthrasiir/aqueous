@@ -209,7 +209,9 @@ pub fn verify(t: &Template, files: &[File], key: usize) -> Option<Vec<Directory>
             let b = files[owner].data;
             let start = match d.anchor {
                 Anchor::At(s) => Some(s),
-                Anchor::After { dir, gap } => starts[dir].zip(counted[dir]).map(|(s, r)| s + r * t.dirs[dir].k + gap),
+                Anchor::After { dir, gap } => starts[dir]
+                    .zip(counted[dir])
+                    .and_then(|(s, r)| r.checked_mul(t.dirs[dir].k)?.checked_add(s)?.checked_add(gap)),
             };
             starts[i] = start;
             counted[i] = d.count.map(|c| read_count(b, &c) as usize);
@@ -231,16 +233,24 @@ pub fn verify(t: &Template, files: &[File], key: usize) -> Option<Vec<Directory>
                 (Some(s), _) => s,
                 (None, Anchor::At(s)) => s,
                 (None, Anchor::After { dir, gap }) => match tables[dir] {
-                    Some(u) => u.end + gap,
+                    Some(u) => u.end.checked_add(gap)?,
                     None => continue,
                 },
             };
             let b = files[owner].data;
+            if start > b.len() {
+                return None;
+            }
             let rows = counted[i];
             // (the record's start learned is its first field's: the last row may run past the
             // file's end by less than a record, its fields in it)
             let last_field = fields_of(&d.layout).iter().map(|f| f.end()).max().unwrap_or(d.k as i64);
-            if rows.is_some_and(|r| r > 0 && (start + (r - 1) * d.k) as i64 + last_field > b.len() as i64) {
+            let past = |r: usize| {
+                let last =
+                    (r - 1).checked_mul(d.k).and_then(|x| x.checked_add(start)).and_then(|x| i64::try_from(x).ok());
+                last.and_then(|x| x.checked_add(last_field)).is_none_or(|e| e > b.len() as i64)
+            };
+            if rows.is_some_and(|r| r > 0 && past(r)) {
                 why(format!("dir {i}: {rows:?} rows from {start:#x} past the end"));
                 return None;
             }
@@ -386,7 +396,7 @@ fn explicit(b: &[u8], t: &Table, off: &Field, size: &Field, alt: Option<&Field>,
         let room = rm[i];
         let ok = |x: u64| match room {
             Some(r) => tiling::fits(r, x),
-            None => o[i] + x <= l, // the last member: its room runs to the end
+            None => x <= l - o[i], // the last member: its room runs to the end
         };
         let pick = if ok(s[i]) { Some(s[i]) } else { s2.as_ref().map(|x| x[i]).filter(|&x| ok(x)) };
         if let Some(sz) = pick {
