@@ -164,6 +164,15 @@ fn others<'a>(s: &mut &'a [u8], m: u64, n: u64) -> Result<Option<&'a [u8]>> {
     if m & 1 == 0 { Ok(None) } else { take(s, n.div_ceil(8)).map(Some) }
 }
 
+/// The count of members of an object read from `s` (a count `m` of members and whether there are
+/// separators not of the style, in bit 0), and those separators' bits (two more than members).
+fn members<'a>(s: &mut &'a [u8]) -> Result<(u64, Option<&'a [u8]>)> {
+    let m = get(s)?;
+    let n = m >> 1;
+    let bits = others(s, m, (2 * n).checked_add(2).ok_or_else(corrupt)?)?;
+    Ok((n, bits))
+}
+
 /// The space after a container's opening, where `bits` tells (bit 0).
 #[inline]
 fn open(bits: Option<&[u8]>, out: &mut Vec<u8>) {
@@ -360,9 +369,7 @@ impl<'a> Decoder<'a> {
         out.push(b'{');
         let path = &mut self.paths[p as usize];
         let (n, bits) = if path.flags & F_MAP != 0 {
-            let m = get(&mut path.shapes)?;
-            let n = m >> 1;
-            let bits = others(&mut path.shapes, m, 2 * n + 2)?;
+            let (n, bits) = members(&mut path.shapes)?;
             open(bits, out);
             for i in 0..n {
                 let path = &mut self.paths[p as usize];
@@ -435,9 +442,7 @@ impl<'a> Decoder<'a> {
     /// A key list of path `p` defined, its members' paths found or made in order.
     fn define(&mut self, p: u32) -> Result<u32> {
         let shapes = &mut self.paths[p as usize].shapes;
-        let m = get(shapes)?;
-        let n = m >> 1;
-        let bits = others(shapes, m, 2 * n + 2)?;
+        let (n, bits) = members(shapes)?;
         let at = self.members.len() as u32;
         for _ in 0..n {
             let key = zstring(&mut self.keys)?;
@@ -623,4 +628,22 @@ pub fn build(params: &[u8], v: View, len: usize) -> Result<Vec<u8>> {
         return Err(corrupt());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn members_of_a_huge_count() {
+        let mut p = Vec::new();
+        varint::put(&mut p, u64::MAX);
+        // (the separators' bits of 2^63 members: more than any stream)
+        let mut s = &p[..];
+        assert!(members(&mut s).is_err());
+        // (a few members, the bits there)
+        let mut s = &[3 << 1 | 1, 0b101][..];
+        assert_eq!(members(&mut s).unwrap().0, 3);
+        assert_eq!(s.len(), 0);
+    }
 }

@@ -285,6 +285,8 @@ const GAP: usize = 1 << 20;
 /// the first byte that does not continue a character of UTF-8: the parts then code to other
 /// bytes, but still to the same text, each on its own.
 pub(crate) fn split(d: &[u8], size: usize, apart: impl Fn(u8) -> bool, after: usize) -> Vec<&[u8]> {
+    // (parts of no bytes would never end)
+    let size = size.max(1);
     let mut out = Vec::new();
     let mut at = 0;
     while d.len() - at > size {
@@ -754,6 +756,17 @@ pub fn decode(params: &[u8], dict: &[u8], text: &[u8], len: usize, threads: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_of_no_size() {
+        // (a cut that makes no progress would never end: run apart)
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let d = b"abc\nde";
+            let _ = tx.send((split(d, 0, |b| b == b'a', 0).concat() == d, split(d, 0, |b| b == b'x', 0).concat() == d));
+        });
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).ok(), Some((true, true)));
+    }
     use aqr_common::rng::Rng;
 
     /// `d` coded with its own dictionary, decoded back.

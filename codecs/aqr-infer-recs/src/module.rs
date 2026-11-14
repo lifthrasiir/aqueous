@@ -86,7 +86,7 @@ impl Rule {
     /// The length of the entry at p.
     pub fn length(&self, data: &[u8], p: usize) -> usize {
         let a = self.align as u64;
-        ((self.b as u64 + self.value(data, p)).div_ceil(a) * a) as usize
+        usize::try_from((self.b as u64 + self.value(data, p)).div_ceil(a) * a).unwrap_or(usize::MAX)
     }
 
     pub fn describe(&self) -> String {
@@ -153,7 +153,8 @@ pub fn parse_fields(p: &[u8]) -> Result<(usize, usize, Vec<Field>)> {
         varint::get(p, at).map_err(|_| corrupt()).and_then(|v| usize::try_from(v).map_err(|_| corrupt()))
     };
     let (n, k, count) = (get(&mut at)?, get(&mut at)?, get(&mut at)?);
-    if count > k {
+    // (each field takes a byte of the params at least)
+    if count > k || count > p.len() - at {
         return Err(corrupt());
     }
     let mut fields = Vec::with_capacity(count);
@@ -225,6 +226,11 @@ const FLOAT_BYTES: u64 = 24;
 #[cfg(target_family = "wasm")]
 const _: () = assert!(size_of::<Field>() as u64 == FIELD_BYTES && size_of::<Float>() as u64 == FLOAT_BYTES);
 
+/// `n` records of `k` bytes, None where they are too many for any memory.
+fn bytes_of(n: usize, k: usize) -> Option<u64> {
+    (n as u64).checked_mul(k as u64).filter(|&b| b < 1 << 62)
+}
+
 /// The memory plan of `recs-fields` ([`aqr_api::stack`]): what it takes beyond its initial memory
 /// at most, of `params` and planes of `planes` bytes: what `aqr_api::whole` copies, the fields,
 /// the records, and on top of them the values of the field a field refers to (8 bytes a
@@ -233,8 +239,8 @@ pub fn fields_plan(params: &[u8], planes: u64) -> Option<u64> {
     use aqr_api::stack::{block, whole};
     let (n, k, fields) = parse_fields(params).ok()?;
     let refs = fields.iter().any(|f| matches!(f.how, How::Sub(_) | How::XorRef(_)));
-    let n = n as u64;
-    let own = block(FIELD_BYTES * fields.len() as u64) + block(n * k as u64) + if refs { block(8 * n) } else { 0 };
+    let recs = bytes_of(n, k)?;
+    let own = block(FIELD_BYTES * fields.len() as u64) + block(recs) + if refs { block(bytes_of(n, 8)?) } else { 0 };
     Some(whole(params.len() as u64, &[], &[planes]) + own)
 }
 
@@ -268,7 +274,8 @@ pub fn parse_entries(p: &[u8]) -> Result<(usize, usize, Rule)> {
         *x = usize::try_from(varint::get(p, &mut at).map_err(|_| corrupt())?).map_err(|_| corrupt())?;
     }
     let [n, head, kind, d, b, align] = v;
-    if at != p.len() || kind >= KINDS.len() || !(1..=4096).contains(&align) {
+    // (`b` beside a length of 32 bits: no sum of them overflows)
+    if at != p.len() || kind >= KINDS.len() || !(1..=4096).contains(&align) || b > u32::MAX as usize {
         return Err(corrupt());
     }
     let r = Rule { d, kind, b, align };
@@ -396,7 +403,8 @@ pub fn parse_floats(p: &[u8]) -> Result<(usize, usize, Vec<Float>)> {
         varint::get(p, at).map_err(|_| corrupt()).and_then(|v| usize::try_from(v).map_err(|_| corrupt()))
     };
     let (n, k, count) = (get(&mut at)?, get(&mut at)?, get(&mut at)?);
-    if count > k / 4 {
+    // (each float takes 10 bytes of the params)
+    if count > k / 4 || count > (p.len() - at) / 10 {
         return Err(corrupt());
     }
     let mut floats = Vec::with_capacity(count);
@@ -464,7 +472,7 @@ pub fn unlift(lifted: &[u8], n: usize, k: usize, floats: &[Float]) -> Option<Vec
 pub fn floats_plan(params: &[u8], lifted: u64) -> Option<u64> {
     use aqr_api::stack::{block, whole};
     let (n, k, floats) = parse_floats(params).ok()?;
-    let own = block(FLOAT_BYTES * floats.len() as u64) + block((n * k) as u64);
+    let own = block(FLOAT_BYTES * floats.len() as u64) + block(bytes_of(n, k)?);
     Some(whole(params.len() as u64, &[], &[lifted]) + own)
 }
 
@@ -476,4 +484,49 @@ pub fn decode_floats(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8
         return Err(corrupt());
     }
     unlift(lifted, n, k, &floats).ok_or_else(corrupt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(vs: &[u64], tail: &[u8]) -> Vec<u8> {
+        let mut p = Vec::new();
+        for &v in vs {
+            varint::put(&mut p, v);
+        }
+        p.extend_from_slice(tail);
+        p
+    }
+
+    #[test]
+    fn counts_past_the_params() {
+        // (more fields than the params have bytes: no room reserved for them)
+        assert!(parse_fields(&params(&[0, 1 << 60, 1 << 59], &[])).is_err());
+        assert!(parse_floats(&params(&[0, 1 << 60, 1 << 57], &[])).is_err());
+        assert!(fields_plan(&params(&[0, 1 << 60, 1 << 59], &[]), 0).is_none());
+        // (and as many as they have do)
+        assert_eq!(parse_fields(&params(&[2, 2, 2], &[0, 0])).unwrap().2.len(), 2);
+    }
+
+    #[test]
+    fn plans_of_huge_records() {
+        // 2^62 records of 4 bytes: the size of the records does not fit
+        let fields = params(&[1 << 62, 4, 1], &[2]);
+        assert!(parse_fields(&fields).is_ok());
+        assert!(fields_plan(&fields, 0).is_none());
+        let floats = params(&[1 << 62, 4, 1, 0], &[0; 9]);
+        assert!(parse_floats(&floats).is_ok());
+        assert!(floats_plan(&floats, 0).is_none());
+        // (a field that refers to another: 8 bytes a record)
+        let refs = params(&[1 << 61, 8, 2], &[0b0000_0001, 3 << 3 | 1, 0]);
+        assert!(fields_plan(&refs, 0).is_none());
+    }
+
+    #[test]
+    fn entries_of_huge_lengths() {
+        // a length field that makes the entry longer than any memory
+        let p = params(&[1, 1, 0, 0, u64::MAX, 4096], &[]);
+        assert!(decode_entries(&p, &[&[0xff], &[]], 1).is_err());
+    }
 }

@@ -104,7 +104,11 @@ pub fn within(n: u64, coded: usize) -> bool {
 pub fn float_plan(params: &[u8], inputs: &[u64], len: u64) -> Option<u64> {
     use aqr_api::stack::{block, whole};
     let p = Floats::from_bytes(params)?;
+    // (the samples, 8 bytes each and twice over, within a `u64`)
     let n = p.samples()? as u64;
+    if n >= 1 << 58 {
+        return None;
+    }
     let decoding = float::decode_plan(n, p.order as u64);
     let output = 2 * block(8 * n) + block(len);
     Some(whole(params.len() as u64, &[], inputs) + decoding.max(output))
@@ -119,7 +123,9 @@ pub fn float(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let n = p.samples().ok_or_else(corrupt)?;
     let bits = float::decode(coefs, model, raw, n, p.wide, p.shift as u32, p.order as usize).ok_or_else(corrupt)?;
     let mut out = Vec::with_capacity(len as usize);
-    for c in bits.chunks(p.elements as usize) {
+    // (on 32 bits, `elements` of 2^32 and more with no chunk at all)
+    let elements = usize::try_from(p.elements).map_err(|_| corrupt())?;
+    for c in bits.chunks(elements) {
         p.chunk_of(c, &mut out);
     }
     Ok(out)

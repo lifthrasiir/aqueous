@@ -109,3 +109,19 @@ fn float_module_corrupted() {
     assert!(aqr_hdf5::module::float(&p.to_bytes()[..3], &[&coefs, &[0; 100], &[]], len).is_err());
     assert!(aqr_hdf5::module::float(&p.to_bytes(), &[&coefs, &[0; 10], &[]], len + 8).is_err());
 }
+
+/// The plan of params whose samples take more memory than a `u64` counts: none.
+#[test]
+fn float_plan_of_huge_params() {
+    let p = |chunks| aqr_hdf5::module::Floats {
+        chunks,
+        elements: 1,
+        wide: true,
+        be: false,
+        shuffle: false,
+        shift: 0,
+        order: 0,
+    };
+    assert!(aqr_hdf5::module::float_plan(&p(1 << 61).to_bytes(), &[0, 0, 0], 0).is_none());
+    assert!(aqr_hdf5::module::float_plan(&p(1 << 10).to_bytes(), &[0, 0, 0], 8 << 10).is_some());
+}
