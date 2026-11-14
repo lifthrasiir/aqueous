@@ -483,6 +483,7 @@ dependencies = [
  "aqr-dll-sha1",
  "aqr-dll-sha2",
  "aqr-dll-snappy",
+ "aqr-dll-tex",
  "aqr-dll-walk",
  "aqr-dll-wrt",
  "aqr-dll-xxhash-rust",
@@ -608,7 +609,6 @@ dependencies = [
  "aqr-dll-sha1",
  "aqr-dll-sha2",
  "aqr-exe",
- "bytemuck",
 ]
 
 [[package]]
@@ -797,9 +797,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-dll-tex"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-tex",
+]
+
+[[package]]
 name = "aqr-dll-walk"
 version = "0.1.0"
 dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
  "aqr-dll-rt",
  "aqr-walk",
 ]
@@ -812,9 +824,6 @@ dependencies = [
  "aqr-dll-common",
  "aqr-dll-rt",
  "aqr-wrt",
- "zstd",
- "zstd-safe",
- "zstd-sys",
 ]
 
 [[package]]
@@ -1826,12 +1835,6 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 dependencies = [
  "allocator-api2",
 ]
-
-[[package]]
-name = "bytemuck"
-version = "1.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
 name = "cbc"

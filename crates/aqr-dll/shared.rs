@@ -23,6 +23,7 @@ extern crate aqr_dll_rt;
 extern crate aqr_dll_sha1;
 extern crate aqr_dll_sha2;
 extern crate aqr_dll_snappy;
+extern crate aqr_dll_tex;
 extern crate aqr_dll_walk;
 extern crate aqr_dll_wrt;
 extern crate aqr_dll_xxhash_rust;

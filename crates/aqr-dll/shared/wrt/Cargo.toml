@@ -13,6 +13,3 @@ aqr-dll-cfg-if = { path = "../cfg-if" }
 aqr-dll-common = { path = "../common" }
 aqr-dll-rt = { path = "../rt" }
 aqr-wrt = { path = "../../../../codecs/aqr-wrt", default-features = false }
-zstd = { version = "=0.13.3", default-features = false }
-zstd-safe = { version = "=7.3.0", default-features = false }
-zstd-sys = { version = "=2.1.2", default-features = false }

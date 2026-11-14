@@ -9,5 +9,7 @@ publish = false
 crate-type = ["dylib"]
 
 [dependencies]
+aqr-dll-cfg-if = { path = "../cfg-if" }
+aqr-dll-common = { path = "../common" }
 aqr-dll-rt = { path = "../rt" }
 aqr-walk = { path = "../../../aqr-walk", default-features = false }

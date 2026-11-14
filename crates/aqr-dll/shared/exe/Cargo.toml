@@ -15,4 +15,3 @@ aqr-dll-rt = { path = "../rt" }
 aqr-dll-sha1 = { path = "../sha1" }
 aqr-dll-sha2 = { path = "../sha2" }
 aqr-exe = { path = "../../../../codecs/aqr-exe", default-features = false }
-bytemuck = { version = "=1.25.2", default-features = false }

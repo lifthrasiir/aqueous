@@ -35,6 +35,7 @@ aqr-dll-rt = { path = "shared/rt" }
 aqr-dll-sha1 = { path = "shared/sha1" }
 aqr-dll-sha2 = { path = "shared/sha2" }
 aqr-dll-snappy = { path = "shared/snappy" }
+aqr-dll-tex = { path = "shared/tex" }
 aqr-dll-walk = { path = "shared/walk" }
 aqr-dll-wrt = { path = "shared/wrt" }
 aqr-dll-xxhash-rust = { path = "shared/xxhash-rust" }
