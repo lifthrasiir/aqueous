@@ -190,3 +190,34 @@ fn channel_ownership() {
     fails(&outside_gang::ENTRY, "outside its gang");
     assert!(apply(&made_by_task::ENTRY, &[b""], &[], b"", &[0]).is_ok());
 }
+
+aqr_api::entry! {
+    // a spawn of as many tasks as the limit and as many more as the input is long
+    whole fn many_tasks(params_len, in0_len, size) {
+        let f = |_: usize, _: &mut Vec<u8>| {};
+        drop(unsafe { task::spawn(aqr_api::MAX_TASKS + in0_len as usize - 1, &f) });
+    }
+}
+
+aqr_api::entry! {
+    // channels made, one more than the limit by the input's length, never given to a gang
+    whole fn many_channels(params_len, in0_len, size) {
+        for _ in 0..aqr_api::MAX_CHANNELS + in0_len as usize - 1 {
+            chan::channel(1);
+        }
+    }
+}
+
+/// More tasks than a host allows at once, or more channels, are a resource failure; the limit
+/// itself is not (the channels').
+#[test]
+fn limits_of_the_host() {
+    // (not at the limit: that is a thread for each, which takes seconds)
+    let f = apply(&many_tasks::ENTRY, &[b"xx"], &[], b"", &[0]).unwrap_err();
+    assert!(f.resource && f.what.contains("tasks"), "{f}");
+    // (made and never given to a gang: that failure, when the limit is not exceeded)
+    let f = apply(&many_channels::ENTRY, &[b"x"], &[], b"", &[0]).unwrap_err();
+    assert!(!f.resource && f.what.contains("not given to a gang"), "{f}");
+    let f = apply(&many_channels::ENTRY, &[b"xx"], &[], b"", &[0]).unwrap_err();
+    assert!(f.resource && f.what.contains("channels"), "{f}");
+}

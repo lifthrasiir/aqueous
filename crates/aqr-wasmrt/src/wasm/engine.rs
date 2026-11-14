@@ -408,6 +408,23 @@ impl std::fmt::Display for OverLimit {
 
 impl std::error::Error for OverLimit {}
 
+/// A limit of the host exceeded by a host function ([`aqr_api::MAX_TASKS`], [`aqr_api::MAX_CHANNELS`]):
+/// a resource failure.
+#[derive(Debug)]
+struct Exceeded(String);
+
+impl std::fmt::Display for Exceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Exceeded {}
+
+fn exceeded<T>(msg: String) -> wasmtime::Result<T> {
+    Err(wasmtime::Error::new(Exceeded(msg)))
+}
+
 /// A violation of a host function.
 #[derive(Debug)]
 struct Violation(String);
@@ -458,6 +475,8 @@ struct App {
     memory_peaks: Vec<AtomicU64>,
     exec: Arc<Exec>,
     chans: Mutex<Vec<Chan>>,
+    /// The tasks spawned and not yet taken ([`aqr_api::MAX_TASKS`] at most).
+    tasks: AtomicU64,
     /// The identity of the next task (0 is the application's instance).
     next: AtomicU64,
     /// The failure of a task, which ends the application.
@@ -638,6 +657,11 @@ fn spawn(c: &mut Caller<'_, State>, class: usize, start: Start, arg: u32, n: u32
     // (a task spawns only classes above its own: none waits holding a slot)
     if !earlier && s.task && class <= s.class {
         return violation(format!("a task of class {} spawning one of class {class}", s.class));
+    }
+    // (a pending task has no memory: its record is what the limit counts)
+    let pending = s.app.tasks.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+    if pending > aqr_api::MAX_TASKS as u64 {
+        return exceeded(format!("more than {} tasks spawned and not taken", aqr_api::MAX_TASKS));
     }
     let gang = s.c.0.gang[class];
     let limit = s.app.task_limits.get(class).copied().unwrap_or(u64::MAX);
@@ -912,6 +936,8 @@ fn violation<T>(msg: String) -> wasmtime::Result<T> {
 fn failure(store: &Store<State>, e: wasmtime::Error) -> Failure {
     let f = if e.is::<OverLimit>() {
         over_limit()
+    } else if let Some(x) = e.downcast_ref::<Exceeded>() {
+        Failure::Resource(x.0.clone())
     } else if let Some(v) = e.downcast_ref::<Violation>() {
         Failure::Invalid(v.0.clone())
     } else if let Some(TaskFailed(f)) = e.downcast_ref() {
@@ -1212,6 +1238,7 @@ impl Shared {
             memory_peaks: c.slots.iter().map(|_| AtomicU64::new(0)).collect(),
             exec: exec.clone(),
             chans: Mutex::default(),
+            tasks: AtomicU64::new(0),
             next: AtomicU64::new(1),
             failed: Mutex::default(),
         });
@@ -1593,6 +1620,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 };
                 w.data_mut(&mut c)[range].copy_from_slice(&r[..len as u32 as usize]);
                 c.data_mut().spawned[h as u32 as usize][i as u32 as usize] = None;
+                c.data().app.tasks.fetch_sub(1, Ordering::Relaxed);
                 Ok(())
             },
         ),
@@ -1601,6 +1629,9 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 return violation(format!("aqr_chan({cap})"));
             }
             let mut chans = c.data().app.chans.lock().unwrap();
+            if chans.len() >= aqr_api::MAX_CHANNELS {
+                return exceeded(format!("more than {} channels made", aqr_api::MAX_CHANNELS));
+            }
             chans.push(Chan {
                 cap: cap as usize,
                 msgs: VecDeque::new(),

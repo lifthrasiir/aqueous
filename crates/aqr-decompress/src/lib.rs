@@ -13,6 +13,7 @@ use aqr_formula::Resource;
 use aqr_formula::aqr::{self, Failure, Loaded, PartIn, PartOut, Runner};
 use sha2::{Digest, Sha512_256};
 
+use aqr_api::emu::SliceFeed;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
 #[cfg(feature = "wasm")]
 use aqr_wasmrt::wasm;
@@ -420,22 +421,22 @@ use aqr_native::Run;
 /// [`Loaded::apply_part`], and whole by `aqr_api`'s emulation), and whether it takes resources
 /// (those that do not are given none).
 #[derive(Clone, Copy)]
-struct Entry {
+struct Known {
     module: Module,
     resources: bool,
-    decode: Run,
+    run: Run,
 }
 
-/// The [`Entry`] of `module`: aqr-native's of its name (a module with none does not build).
-const fn entry(module: Module) -> Entry {
+/// The [`Known`] of `module`: aqr-native's of its name (a module with none does not build).
+const fn entry(module: Module) -> Known {
     match aqr_native::find(module.name) {
-        Some(n) => Entry { module, resources: n.resources, decode: n.run },
+        Some(n) => Known { module, resources: n.resources, run: n.run },
         None => panic!("a module with no entry in aqr-native"),
     }
 }
 
 /// Every module of this crate, as it runs natively (aqr-native's entry of its name).
-const NATIVE: &[Entry] = &[
+const NATIVE: &[Known] = &[
     entry(X86),
     entry(X86_REMAP),
     entry(ARM64),
@@ -574,12 +575,8 @@ fn registered_module(hash: &[u8; 32]) -> aqr::Decoded<Vec<u8>> {
     let k = aqr_modules::KNOWN
         .iter()
         .find(|k| &k.sha512_256 == hash)
-        .ok_or_else(|| Failure::Resource(format!("registered module {} not known", hex(hash))))?;
+        .ok_or_else(|| Failure::Resource(format!("registered module {} not known", aqr_common::text::hex(hash))))?;
     aqr::module_of_block_data(k.block).ok_or_else(|| Failure::Invalid("a registered module block is invalid".into()))
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// What a module's imports say of its memories, read once: the pages of its working memory as
@@ -659,12 +656,17 @@ pub fn identify(wasm: &[u8]) -> Option<String> {
     known(wasm).map(|m| m.to_string())
 }
 
+/// How `m` runs natively.
+fn native_of(m: Module) -> Option<&'static Known> {
+    NATIVE.iter().find(|e| e.module == m)
+}
+
 /// Whether the module named `name` (without its version) is a part module (in Wasm, applied as its
 /// inputs stream; natively some are applied whole, on threads).
 pub fn is_part(name: &str) -> bool {
     NATIVE
         .iter()
-        .any(|e| e.module.name == name && matches!(e.decode, Run::Part(..) | Run::Threaded(..) | Run::Streamed(..)))
+        .any(|e| e.module.name == name && matches!(e.run, Run::Part(..) | Run::Threaded(..) | Run::Streamed(..)))
 }
 
 /// The Wasm module of `m` that aqr-modules built, for [`aqr::Encoder::with_modules`].
@@ -942,19 +944,10 @@ impl<'a> NativeLoaded<'a> {
 
     /// The entry point of its code as a part module, where it is one.
     fn part(&self) -> Option<aqr_api::emu::Entry> {
-        NATIVE.iter().find(|e| e.module == self.module).and_then(|e| match e.decode {
+        native_of(self.module).and_then(|e| match e.run {
             Run::Part(entry, _) => Some(entry),
             Run::Whole(_) | Run::Threaded(..) | Run::Streamed(..) => None,
         })
-    }
-}
-
-/// The message of a failure of `aqr_api`'s emulation: what went wrong, and the module's last
-/// message before it.
-fn emulated(f: aqr_api::emu::Failure) -> String {
-    match f.log {
-        Some(log) => format!("{}: {}", f.what, String::from_utf8_lossy(&log)),
-        None => f.what,
     }
 }
 
@@ -1019,7 +1012,7 @@ fn streamed(
     let r = aqr_api::emu::apply_streaming(entry, &mut feeds, resources, params, &mut drains, sizes);
     match (failed.into_inner(), r) {
         (Some(f), _) => Err(f),
-        (None, r) => r.map_err(|f| Failure::Invalid(emulated(f))),
+        (None, r) => r.map_err(|f| Failure::Invalid(f.to_string())),
     }
 }
 
@@ -1136,41 +1129,23 @@ impl Native {
         inputs: &[&[u8]],
         len: u64,
     ) -> std::result::Result<Vec<u8>, String> {
-        let e = NATIVE.iter().find(|e| e.module == m).ok_or("unknown module")?;
+        let e = native_of(m).ok_or("unknown module")?;
         if !e.resources && !resources.is_empty() {
             return Err("resources given".into());
         }
-        match e.decode {
+        match e.run {
             Run::Whole(decode) | Run::Part(_, Some(decode)) | Run::Threaded(decode) | Run::Streamed(_, decode, _) => {
                 decode(params, resources, inputs, len, self.threads.max(1))
             }
             Run::Part(entry, None) => {
                 // (the inputs pulled from the slices as the module asks, not copied whole)
-                struct Slice<'a>(&'a [u8], u64);
-                impl aqr_api::emu::Feed for Slice<'_> {
-                    fn len(&self) -> u64 {
-                        self.0.len() as u64
-                    }
-                    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> std::result::Result<(), String> {
-                        put(&self.0[self.1 as usize..hi as usize]);
-                        self.1 = hi;
-                        Ok(())
-                    }
-                }
-                struct Out(Vec<u8>);
-                impl aqr_api::emu::Drain for Out {
-                    fn push(&mut self, d: &[u8]) -> std::result::Result<(), String> {
-                        self.0.extend_from_slice(d);
-                        Ok(())
-                    }
-                }
-                let mut feeds: Vec<Slice> = inputs.iter().map(|i| Slice(i, 0)).collect();
+                let mut feeds: Vec<SliceFeed> = inputs.iter().map(|i| SliceFeed::new(i)).collect();
                 let mut feeds: Vec<&mut dyn aqr_api::emu::Feed> = feeds.iter_mut().map(|f| f as _).collect();
-                let mut out = Out(Vec::with_capacity(usize::try_from(len).map_err(|_| "too long")?));
+                let mut out = Vec::with_capacity(usize::try_from(len).map_err(|_| "too long")?);
                 traced();
                 aqr_api::emu::apply_streaming(&entry, &mut feeds, resources, params, &mut [&mut out], &[len])
-                    .map_err(emulated)?;
-                Ok(out.0)
+                    .map_err(|f| f.to_string())?;
+                Ok(out)
             }
         }
     }
@@ -1183,7 +1158,7 @@ impl Modules for Native {
     }
 
     fn is_part(&self, a: &Apply) -> bool {
-        match NATIVE.iter().find(|e| e.module == a.module).map(|e| e.decode) {
+        match native_of(a.module).map(|e| e.run) {
             Some(Run::Streamed(_, _, streamed)) => {
                 let lens: Vec<u64> = a.inputs.iter().map(aqr_formula::Node::len).collect();
                 a.resources.is_empty() && streamed(&lens, a.len)
@@ -1193,7 +1168,7 @@ impl Modules for Native {
     }
 
     fn apply_part(&self, a: &Apply, inputs: &mut [&mut dyn PartIn], output: &mut dyn PartOut) -> Result<()> {
-        let Some(Run::Streamed(entry, ..)) = NATIVE.iter().find(|e| e.module == a.module).map(|e| e.decode) else {
+        let Some(Run::Streamed(entry, ..)) = native_of(a.module).map(|e| e.run) else {
             return Err(Error::new(format!("{}: not a module applied streamed", a.module)));
         };
         let _s = aqr_common::trace::span(a.module.name);
@@ -1212,10 +1187,7 @@ impl Modules for Native {
         if all.len() as u64 != a.len {
             return Err(Error::new(format!("{} made {} bytes, not {}", a.module, all.len(), a.len)));
         }
-        match (s.split, &s.sizes[..]) {
-            (false, &[_]) => Ok(vec![all]),
-            (_, sizes) => split_outputs(a.module, all, sizes).map_err(Error::new),
-        }
+        split_outputs(a.module, all, &s.sizes).map_err(Error::new)
     }
 }
 

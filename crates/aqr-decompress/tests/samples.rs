@@ -1,4 +1,4 @@
-//! The modules' memory plans (`Module::plan_in_pages`) against what their
+//! The modules' memory plans (`Module::plan_for`) against what their
 //! applications take as WebAssembly, on the samples of `scripts/module-memory.sh` (in
 //! `cache/memory/samples`, made by the script): ignored where they are not there.
 

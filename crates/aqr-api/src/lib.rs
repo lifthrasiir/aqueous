@@ -136,6 +136,19 @@ pub fn trap() -> ! {
     sys::trap()
 }
 
+/// The most tasks an application may have spawned and not yet taken (`aqr_take`), as one
+/// `aqr_spawn` or all together: a pending task has no memory, so the memory limit does not count it,
+/// and each costs the host a record (some 300 bytes). A limit of the host, whose excess is a
+/// resource failure. The modules of aqr spawn a task for each stripe, band, tile or image of an
+/// application, or group of 2 MiB of streams: thousands at most in the applications seen. (A
+/// sandbox's worker does not survive a million pending tasks: its own limits end it.)
+pub const MAX_TASKS: usize = 1 << 16;
+
+/// The most channels an application may make (`aqr_chan`), none being freed before it ends: a limit of
+/// the host as [`MAX_TASKS`] is. The modules of aqr make 129 at most (the audio pipelines' of 64
+/// workers: two for each and one more), prores's stripes 32.
+pub const MAX_CHANNELS: usize = 1 << 12;
+
 #[cfg(not(target_family = "wasm"))]
 use emu::sys;
 #[cfg(target_family = "wasm")]

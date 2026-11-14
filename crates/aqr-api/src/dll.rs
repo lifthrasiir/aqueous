@@ -2,7 +2,7 @@
 //! applies its entry point under [`emu`](crate::emu) in the library itself, on the bytes the
 //! caller gives, and the caller's side of it (crates/aqr-dll-shim).
 //!
-//! The library exports two functions:
+//! The library exports these functions:
 //!
 //! - `aqr_dll_info`, an [`InfoFn`]: what module it is.
 //! - `aqr_dll_apply`, an [`ApplyFn`]: an application, its outputs written into the caller's
@@ -12,6 +12,10 @@
 //!   inputs pulled through the caller's callbacks ([`PartIn`]) as the module requests them and
 //!   its outputs pushed ([`PartOut`]) as it commits them, so that a big stream is never held
 //!   whole; returning as `aqr_dll_apply` does.
+//! - `aqr_dll_decode`, a [`DecodeFn`]: the module's native decoding of whole inputs, where it has
+//!   one (see [`Info::run`]).
+//! - `aqr_dll_streamed`, a [`StreamedFn`]: whether an application is to be streamed (see
+//!   [`RUN_STREAMED`]).
 //!
 //! The library holds a copy of the module's code and of everything it uses (or links against the
 //! shared libraries that do, crates/aqr-dll/layout.py): the standard library among them, its own
@@ -188,11 +192,8 @@ pub unsafe fn decode(
     error: SliceMut,
     error_len: *mut usize,
 ) -> u32 {
-    let list = |p: *const Slice, n: usize| match n {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(p, n) }.iter().map(|s| unsafe { s.get() }).collect::<Vec<_>>(),
-    };
-    let (params, resources, inputs) = (unsafe { params.get() }, list(resources, n_resources), list(inputs, n_inputs));
+    let (params, resources, inputs) =
+        (unsafe { params.get() }, unsafe { slices(resources, n_resources) }, unsafe { slices(inputs, n_inputs) });
     let out = unsafe { output.get() };
     let len = out.len() as u64;
     let r = catch_unwind(AssertUnwindSafe(|| decode(params, &resources, &inputs, len, threads.max(1))));
@@ -213,10 +214,7 @@ pub unsafe fn decode(
 /// # Safety
 /// As [`StreamedFn`] is called.
 pub unsafe fn streamed(streamed: fn(&[u64], u64) -> bool, lens: *const u64, n_lens: usize, len: u64) -> u32 {
-    let lens = match n_lens {
-        0 => &[][..],
-        n => unsafe { std::slice::from_raw_parts(lens, n) },
-    };
+    let lens = unsafe { array(lens, n_lens) };
     catch_unwind(|| streamed(lens, len)).unwrap_or(false) as u32
 }
 
@@ -273,15 +271,9 @@ pub unsafe fn apply(
     error: SliceMut,
     error_len: *mut usize,
 ) -> u32 {
-    let list = |p: *const Slice, n: usize| match n {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(p, n) }.iter().map(|s| unsafe { s.get() }).collect::<Vec<_>>(),
-    };
-    let outs: &[SliceMut] = match n_outputs {
-        0 => &[],
-        n => unsafe { std::slice::from_raw_parts(outputs, n) },
-    };
-    let (params, resources, inputs) = (unsafe { params.get() }, list(resources, n_resources), list(inputs, n_inputs));
+    let outs: &[SliceMut] = unsafe { array(outputs, n_outputs) };
+    let (params, resources, inputs) =
+        (unsafe { params.get() }, unsafe { slices(resources, n_resources) }, unsafe { slices(inputs, n_inputs) });
     let sizes: Vec<u64> = outs.iter().map(|o| o.len as u64).collect();
     // (a panic past the emulation's own, which must not unwind out of the library)
     let r = catch_unwind(AssertUnwindSafe(|| emu::apply(entry, &inputs, &resources, params, &sizes)));
@@ -292,10 +284,29 @@ pub unsafe fn apply(
             }
             return 0;
         }
-        Ok(Err(f)) => message(f),
+        Ok(Err(f)) => f.to_string(),
         Err(_) => "panicked".to_owned(),
     };
     unsafe { fail(&msg, error, error_len) }
+}
+
+/// The `n` items at `p`: none where `n` is 0, whatever `p` is.
+///
+/// # Safety
+/// `p` points to `n` items alive for `'a` (or `n` is 0).
+unsafe fn array<'a, T>(p: *const T, n: usize) -> &'a [T] {
+    match n {
+        0 => &[],
+        n => unsafe { std::slice::from_raw_parts(p, n) },
+    }
+}
+
+/// The bytes of the `n` [`Slice`]s at `p`.
+///
+/// # Safety
+/// As [`array`] and [`Slice::get`] of each.
+unsafe fn slices<'a>(p: *const Slice, n: usize) -> Vec<&'a [u8]> {
+    unsafe { array(p, n) }.iter().map(|s| unsafe { s.get() }).collect()
 }
 
 /// Writes `msg` (as much as fits) into `error`, its length into `*error_len`: 1, a failure.
@@ -307,14 +318,6 @@ unsafe fn fail(msg: &str, error: SliceMut, error_len: *mut usize) -> u32 {
         unsafe { *error_len = n };
     }
     1
-}
-
-/// The message of failure `f` of the emulation.
-fn message(f: emu::Failure) -> String {
-    match f.log {
-        Some(log) => format!("{}: {}", f.what, String::from_utf8_lossy(&log)),
-        None => f.what,
-    }
 }
 
 /// A [`PartIn`] as the emulation pulls it.
@@ -380,23 +383,10 @@ pub unsafe fn apply_part(
     if !items(resources.cast(), n_resources) || !items(inputs.cast(), n_inputs) || !items(outputs.cast(), n_outputs) {
         return unsafe { fail("null items", error, error_len) };
     }
-    let slice = |p: *const Slice, n: usize| match n {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(p, n) }.iter().map(|s| unsafe { s.get() }).collect::<Vec<_>>(),
-    };
-    let resources = slice(resources, n_resources);
-    let mut ins: Vec<In> = match n_inputs {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(inputs, n) }.iter().map(|&p| In(p)).collect(),
-    };
-    let mut outs: Vec<Out> = match n_outputs {
-        0 => Vec::new(),
-        n => unsafe { std::slice::from_raw_parts(outputs, n) }.iter().map(|&p| Out(p)).collect(),
-    };
-    let sizes: &[u64] = match n_outputs {
-        0 => &[],
-        n => unsafe { std::slice::from_raw_parts(sizes, n) },
-    };
+    let resources = unsafe { slices(resources, n_resources) };
+    let mut ins: Vec<In> = unsafe { array(inputs, n_inputs) }.iter().map(|&p| In(p)).collect();
+    let mut outs: Vec<Out> = unsafe { array(outputs, n_outputs) }.iter().map(|&p| Out(p)).collect();
+    let sizes: &[u64] = unsafe { array(sizes, n_outputs) };
     let params = unsafe { params.get() };
     let r = catch_unwind(AssertUnwindSafe(|| {
         let mut ins: Vec<&mut dyn Feed> = ins.iter_mut().map(|i| i as &mut dyn Feed).collect();
@@ -405,7 +395,7 @@ pub unsafe fn apply_part(
     }));
     let msg = match r {
         Ok(Ok(())) => return 0,
-        Ok(Err(f)) => message(f),
+        Ok(Err(f)) => f.to_string(),
         Err(_) => "panicked".to_owned(),
     };
     unsafe { fail(&msg, error, error_len) }

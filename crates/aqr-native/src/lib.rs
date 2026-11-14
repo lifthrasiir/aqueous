@@ -7,9 +7,11 @@
 //! The entries are by the modules' names: a module's native code is that of the version its
 //! codec crate makes (aqr-decompress's modules, and aqr-modules' binaries).
 
+use aqr_api::Window::{self, Input, Output};
+
 /// A module's native decoding of whole inputs: the parameters, the resources, the inputs, the
 /// output's length and the threads it may use; the output.
-pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> Result<Vec<u8>, String>;
+pub use aqr_api::dll::NativeDecode as Decode;
 
 /// Whether a module applied as a part module is to be streamed rather than applied whole, by the
 /// lengths of its inputs and its output ([`Run::Streamed`]).
@@ -88,6 +90,12 @@ const fn by_emulation(name: &'static str, entry: aqr_api::emu::Entry) -> Native 
     Native { name, resources: false, run: Run::Part(entry, None) }
 }
 
+/// [`Native`] of a part module run natively by `decode` on whole inputs, or by the emulation of
+/// `entry` where `streamed` says so (see [`Run::Streamed`]).
+const fn streamed(name: &'static str, entry: aqr_api::emu::Entry, decode: Decode, streamed: Streamed) -> Native {
+    Native { name, resources: false, run: Run::Streamed(entry, decode, streamed) }
+}
+
 /// [`Native`] of a module that is a part module in Wasm but natively is applied whole, on threads.
 const fn threaded(name: &'static str, decode: Decode) -> Native {
     Native { name, resources: false, run: Run::Threaded(decode) }
@@ -96,6 +104,19 @@ const fn threaded(name: &'static str, decode: Decode) -> Native {
 /// [`threaded`] of a module taking resources.
 const fn threaded_takes(name: &'static str, decode: Decode) -> Native {
     Native { name, resources: true, run: Run::Threaded(decode) }
+}
+
+/// The windows of `inputs` inputs and `outputs` outputs (`N` in all), each of `pages` pages.
+const fn same<const N: usize>(inputs: u32, outputs: u32, pages: u32) -> [Window; N] {
+    assert!(N == (inputs + outputs) as usize);
+    let mut windows = [Input(0, pages); N];
+    let mut k = 0;
+    while k < N {
+        let i = k as u32;
+        windows[k] = if i < inputs { Input(i, pages) } else { Output(i - inputs, pages) };
+        k += 1;
+    }
+    windows
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -108,15 +129,9 @@ macro_rules! bra {
         part(
             $name,
             false,
-            aqr_api::emu::Entry {
-                kind: aqr_api::emu::Kind::Part,
-                windows: &[
-                    aqr_api::Window::Input(0, aqr_bcj::module::BRA_WINDOW),
-                    aqr_api::Window::Output(0, aqr_bcj::module::BRA_WINDOW),
-                ],
-                arity: 3,
-                call: |a| aqr_bcj::module::bra_part(aqr_bcj::bra::Arch::$arch, a[0], a[1], a[2]),
-            },
+            aqr_api::emu::Entry::part(&same::<2>(1, 1, aqr_bcj::module::BRA_WINDOW), 3, |a| {
+                aqr_bcj::module::bra_part(aqr_bcj::bra::Arch::$arch, a[0], a[1], a[2])
+            }),
             |p, _, i, n, _| aqr_bcj::module::bra(aqr_bcj::bra::Arch::$arch, p, i, n).map_err(err),
         )
     };
@@ -128,15 +143,9 @@ macro_rules! swap {
         part(
             $name,
             false,
-            aqr_api::emu::Entry {
-                kind: aqr_api::emu::Kind::Part,
-                windows: &[
-                    aqr_api::Window::Input(0, aqr_bcj::module::SWAP_WINDOW),
-                    aqr_api::Window::Output(0, aqr_bcj::module::SWAP_WINDOW),
-                ],
-                arity: 3,
-                call: |a| aqr_bcj::module::swap_part($width, a[0], a[1], a[2]),
-            },
+            aqr_api::emu::Entry::part(&same::<2>(1, 1, aqr_bcj::module::SWAP_WINDOW), 3, |a| {
+                aqr_bcj::module::swap_part($width, a[0], a[1], a[2])
+            }),
             |p, _, i, n, _| aqr_bcj::module::swap($width, p, i, n).map_err(err),
         )
     };
@@ -147,65 +156,27 @@ pub const NATIVE: &[Native] = &[
     part(
         "exe-recons/x86",
         true,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(1, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(2, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(3, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(4, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(5, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(6, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(7, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(8, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(9, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(10, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(11, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Input(12, aqr_exe::module::X86_WINDOW),
-                aqr_api::Window::Output(0, aqr_exe::module::X86_WINDOW),
-            ],
-            arity: 16,
-            call: |a| {
-                aqr_exe::module::x86_part(
-                    a[0],
-                    a[1],
-                    [a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]],
-                    a[15],
-                )
-            },
-        },
+        aqr_api::emu::Entry::part(&same::<14>(13, 1, aqr_exe::module::X86_WINDOW), 16, |a| {
+            aqr_exe::module::x86_part(
+                a[0],
+                a[1],
+                [a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]],
+                a[15],
+            )
+        }),
         |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err),
     ),
     takes("exe-recons/x86-remap", |p, r, i, n, _| aqr_exe::module::x86_remap(p, r, i, n).map_err(err)),
     part(
         "exe-recons/arm64",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(1, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(2, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(3, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(4, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(5, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(6, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(7, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(8, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(9, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Input(10, aqr_exe::module::ARM64_WINDOW),
-                aqr_api::Window::Output(0, aqr_exe::module::ARM64_WINDOW),
-            ],
-            arity: 13,
-            call: |a| {
-                aqr_exe::module::arm64_part(
-                    a[0],
-                    [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]],
-                    a[12],
-                )
-            },
-        },
+        aqr_api::emu::Entry::part(&same::<12>(11, 1, aqr_exe::module::ARM64_WINDOW), 13, |a| {
+            aqr_exe::module::arm64_part(
+                a[0],
+                [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]],
+                a[12],
+            )
+        }),
         |p, _, i, n, _| aqr_exe::module::arm64(p, i, n).map_err(err),
     ),
     bare("exe-recons/arm64-remap", |p, _, i, n, _| aqr_exe::module::arm64_remap(p, i, n).map_err(err)),
@@ -213,16 +184,9 @@ pub const NATIVE: &[Native] = &[
     part(
         "exe-recons/macho-codesign",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_exe::module::MACHO_CODESIGN_WINDOW),
-                aqr_api::Window::Input(1, aqr_exe::module::MACHO_CODESIGN_WINDOW),
-                aqr_api::Window::Output(0, aqr_exe::module::MACHO_CODESIGN_WINDOW),
-            ],
-            arity: 4,
-            call: |a| aqr_exe::module::macho_codesign_part(a[0], [a[1], a[2]], a[3]),
-        },
+        aqr_api::emu::Entry::part(&same::<3>(2, 1, aqr_exe::module::MACHO_CODESIGN_WINDOW), 4, |a| {
+            aqr_exe::module::macho_codesign_part(a[0], [a[1], a[2]], a[3])
+        }),
         |p, _, i, n, _| aqr_exe::module::macho_codesign(p, i, n).map_err(err),
     ),
     bare("exe-recons/cil", |p, _, i, n, _| aqr_exe::module::cil(p, i, n).map_err(err)),
@@ -231,45 +195,32 @@ pub const NATIVE: &[Native] = &[
     part(
         "flate-set",
         true,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_flate::module::SET_WINDOW),
-                aqr_api::Window::Input(1, aqr_flate::module::SET_RECORDS_WINDOW),
-                aqr_api::Window::Input(2, aqr_flate::module::SET_RECORDS_WINDOW),
-                aqr_api::Window::Output(0, aqr_flate::module::SET_WINDOW),
+        aqr_api::emu::Entry::part(
+            &[
+                Input(0, aqr_flate::module::SET_WINDOW),
+                Input(1, aqr_flate::module::SET_RECORDS_WINDOW),
+                Input(2, aqr_flate::module::SET_RECORDS_WINDOW),
+                Output(0, aqr_flate::module::SET_WINDOW),
             ],
-            arity: 7,
-            call: |a| aqr_flate::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
-        },
+            7,
+            |a| aqr_flate::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+        ),
         |p, r, i, n, t| aqr_flate::module::decode(p, r, i, n, t).map_err(err),
     ),
     part(
         "flate-inflate",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_flate::module::INFLATE_WINDOW),
-                aqr_api::Window::Output(0, aqr_flate::module::INFLATE_WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_flate::module::inflate_part(a[0], a[1], a[2]),
-        },
+        aqr_api::emu::Entry::part(&same::<2>(1, 1, aqr_flate::module::INFLATE_WINDOW), 3, |a| {
+            aqr_flate::module::inflate_part(a[0], a[1], a[2])
+        }),
         |p, _, i, n, _| aqr_flate::module::inflate(p, i, n).map_err(err),
     ),
     part(
         "lz4-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_lz4::part::WINDOW),
-                aqr_api::Window::Output(0, aqr_lz4::part::WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_lz4::part::decode_part(a[0], a[1], a[2]),
-        },
+        aqr_api::emu::Entry::part(&same::<2>(1, 1, aqr_lz4::part::WINDOW), 3, |a| {
+            aqr_lz4::part::decode_part(a[0], a[1], a[2])
+        }),
         |p, _, i, n, t| aqr_lz4::module::decode(p, i, n, t).map_err(err),
     ),
     threaded("lzma-recons", |p, _, i, n, t| aqr_lzma::module::decode(p, i, n, t).map_err(err)),
@@ -285,32 +236,17 @@ pub const NATIVE: &[Native] = &[
     part(
         "bcj-delta",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_bcj::module::DELTA_WINDOW),
-                aqr_api::Window::Output(0, aqr_bcj::module::DELTA_WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_bcj::module::delta_part(a[0], a[1], a[2]),
-        },
+        aqr_api::emu::Entry::part(&same::<2>(1, 1, aqr_bcj::module::DELTA_WINDOW), 3, |a| {
+            aqr_bcj::module::delta_part(a[0], a[1], a[2])
+        }),
         |p, _, i, n, _| aqr_bcj::module::delta(p, i, n).map_err(err),
     ),
     part(
         "bcj2",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Input(1, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Output(0, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Output(1, aqr_bcj::module::BCJ2_WINDOW),
-                aqr_api::Window::Output(2, aqr_bcj::module::BCJ2_WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_bcj::module::bcj2_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
+        aqr_api::emu::Entry::part(&same::<5>(2, 3, aqr_bcj::module::BCJ2_WINDOW), 6, |a| {
+            aqr_bcj::module::bcj2_part(a[0], a[1], a[2], a[3], a[4], a[5])
+        }),
         |p, _, i, n, _| aqr_bcj::module::bcj2(p, i, n).map_err(err),
     ),
     swap!("bcj-swap2", 2),
@@ -323,157 +259,105 @@ pub const NATIVE: &[Native] = &[
     bare("bvx-recons", |p, _, i, n, t| aqr_bvx::module::decode(p, i, n, t).map_err(err)),
     threaded("bz2-recons", |p, _, i, n, t| aqr_bz2::module::decode(p, i, n, t).map_err(err)),
     threaded("bz2-alz-recons", |p, _, i, n, t| aqr_bz2::module::decode_alz(p, i, n, t).map_err(err)),
-    Native {
-        name: "lzx-recons",
-        resources: false,
-        run: Run::Streamed(
-            aqr_api::emu::Entry {
-                kind: aqr_api::emu::Kind::Part,
-                windows: &[
-                    aqr_api::Window::Input(0, aqr_lzx::module::WINDOW),
-                    aqr_api::Window::Input(1, aqr_lzx::module::WINDOW),
-                    aqr_api::Window::Input(2, aqr_lzx::module::WINDOW),
-                    aqr_api::Window::Input(3, 1),
-                    aqr_api::Window::Output(0, aqr_lzx::module::WINDOW),
-                ],
-                arity: 6,
-                call: |a| aqr_lzx::module::decode_part(a[0], [a[1], a[2], a[3], a[4]], a[5]),
-            },
-            |p, _, i, n, t| aqr_lzx::module::decode(p, i, n, t).map_err(err),
-            |lens, _| aqr_lzx::module::streamed(lens),
+    streamed(
+        "lzx-recons",
+        aqr_api::emu::Entry::part(
+            &[
+                Input(0, aqr_lzx::module::WINDOW),
+                Input(1, aqr_lzx::module::WINDOW),
+                Input(2, aqr_lzx::module::WINDOW),
+                Input(3, 1),
+                Output(0, aqr_lzx::module::WINDOW),
+            ],
+            6,
+            |a| aqr_lzx::module::decode_part(a[0], [a[1], a[2], a[3], a[4]], a[5]),
         ),
-    },
+        |p, _, i, n, t| aqr_lzx::module::decode(p, i, n, t).map_err(err),
+        |lens, _| aqr_lzx::module::streamed(lens),
+    ),
     bare("xpress-recons", |p, _, i, n, t| aqr_xpress::module::decode(p, i, n, t).map_err(err)),
     bare("lznt1-recons", |p, _, i, n, t| aqr_lznt1::module::decode(p, i, n, t).map_err(err)),
     part(
         "mszip-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_mszip::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_mszip::module::WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_mszip::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
+        aqr_api::emu::Entry::part(&same::<5>(4, 1, aqr_mszip::module::WINDOW), 6, |a| {
+            aqr_mszip::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5])
+        }),
         |p, _, i, n, _| aqr_mszip::module::decode(p, i, n).map_err(err),
     ),
     part(
         "div3-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_div3::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_div3::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_div3::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_div3::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_div3::module::WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_div3::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
+        aqr_api::emu::Entry::part(&same::<5>(4, 1, aqr_div3::module::WINDOW), 6, |a| {
+            aqr_div3::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5])
+        }),
         |p, _, i, n, t| aqr_div3::native::decode(p, i, n, t).map_err(err),
     ),
     part(
         "ac3-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_ac3::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_ac3::module::WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_ac3::module::decode_part(a[0], a[1], a[2]),
-        },
+        aqr_api::emu::Entry::part(&same::<2>(1, 1, aqr_ac3::module::WINDOW), 3, |a| {
+            aqr_ac3::module::decode_part(a[0], a[1], a[2])
+        }),
         |p, _, i, n, t| aqr_ac3::native::decode(p, i, n, t).map_err(err),
     ),
     part(
         "snappy-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_snappy::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_snappy::module::WINDOW),
-            ],
-            arity: 3,
-            call: |a| aqr_snappy::module::decode_part(a[0], a[1], a[2]),
-        },
+        aqr_api::emu::Entry::part(&same::<2>(1, 1, aqr_snappy::module::WINDOW), 3, |a| {
+            aqr_snappy::module::decode_part(a[0], a[1], a[2])
+        }),
         |p, _, i, n, t| aqr_snappy::module::decode(p, i, n, t).map_err(err),
     ),
     bare("leveldb-recons", |p, _, i, n, t| aqr_snappy::module::decode_table(p, i, n, t).map_err(err)),
     part(
         "zip-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_zip::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_zip::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_zip::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_zip::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_zip::module::WINDOW),
-            ],
-            arity: 6,
-            call: |a| aqr_zip::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
+        aqr_api::emu::Entry::part(&same::<5>(4, 1, aqr_zip::module::WINDOW), 6, |a| {
+            aqr_zip::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5])
+        }),
         |p, _, i, n, t| aqr_zip::module::decode(p, i, n, t).map_err(err),
     ),
     part(
         "bundle-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_bundle::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_bundle::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_bundle::module::WINDOW),
-            ],
-            arity: 4,
-            call: |a| aqr_bundle::module::decode_part(a[0], a[1], a[2], a[3]),
-        },
+        aqr_api::emu::Entry::part(&same::<3>(2, 1, aqr_bundle::module::WINDOW), 4, |a| {
+            aqr_bundle::module::decode_part(a[0], a[1], a[2], a[3])
+        }),
         |p, _, i, n, t| aqr_bundle::module::decode(p, i, n, t).map_err(err),
     ),
     bare("asar-recons", |p, _, i, n, t| aqr_asar::module::decode(p, i, n, t).map_err(err)),
     part(
         "git-pack-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_git::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(2, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(3, aqr_git::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_git::module::WINDOW),
+        aqr_api::emu::Entry::part(
+            &[
+                Input(0, aqr_git::module::WINDOW),
+                Input(1, aqr_git::module::SMALL_WINDOW),
+                Input(2, aqr_git::module::SMALL_WINDOW),
+                Input(3, aqr_git::module::WINDOW),
+                Output(0, aqr_git::module::WINDOW),
             ],
-            arity: 6,
-            call: |a| aqr_git::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
-        },
+            6,
+            |a| aqr_git::module::decode_part(a[0], a[1], a[2], a[3], a[4], a[5]),
+        ),
         |p, _, i, n, t| aqr_git::module::decode(p, i, n, t).map_err(err),
     ),
     part(
         "git-pack-index-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_git::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(2, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Input(3, aqr_git::module::WINDOW),
-                aqr_api::Window::Input(4, aqr_git::module::SMALL_WINDOW),
-                aqr_api::Window::Output(0, aqr_git::module::WINDOW),
+        aqr_api::emu::Entry::part(
+            &[
+                Input(0, aqr_git::module::WINDOW),
+                Input(1, aqr_git::module::SMALL_WINDOW),
+                Input(2, aqr_git::module::SMALL_WINDOW),
+                Input(3, aqr_git::module::WINDOW),
+                Input(4, aqr_git::module::SMALL_WINDOW),
+                Output(0, aqr_git::module::WINDOW),
             ],
-            arity: 7,
-            call: |a| aqr_git::module::decode_index_part(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
-        },
+            7,
+            |a| aqr_git::module::decode_index_part(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+        ),
         |p, _, i, n, t| aqr_git::module::decode_index(p, i, n, t).map_err(err),
     ),
     threaded("png-recons", |p, _, i, n, t| aqr_png::module::decode(p, i, n, t).map_err(err)),
@@ -498,35 +382,17 @@ pub const NATIVE: &[Native] = &[
     part(
         "fasta-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(3, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Input(4, aqr_fasta::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_fasta::module::WINDOW),
-            ],
-            arity: 7,
-            call: |a| aqr_fasta::module::decode_part(a[0], [a[1], a[2], a[3], a[4], a[5]], a[6]),
-        },
+        aqr_api::emu::Entry::part(&same::<6>(5, 1, aqr_fasta::module::WINDOW), 7, |a| {
+            aqr_fasta::module::decode_part(a[0], [a[1], a[2], a[3], a[4], a[5]], a[6])
+        }),
         |p, _, i, n, t| aqr_fasta::module::decode(p, i, n, t).map_err(err),
     ),
     part(
         "tensors-recons",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_tensors::module::WINDOW),
-                aqr_api::Window::Input(1, aqr_tensors::module::WINDOW),
-                aqr_api::Window::Input(2, aqr_tensors::module::WINDOW),
-                aqr_api::Window::Output(0, aqr_tensors::module::WINDOW),
-            ],
-            arity: 5,
-            call: |a| aqr_tensors::module::decode_part(a[0], [a[1], a[2], a[3]], a[4]),
-        },
+        aqr_api::emu::Entry::part(&same::<4>(3, 1, aqr_tensors::module::WINDOW), 5, |a| {
+            aqr_tensors::module::decode_part(a[0], [a[1], a[2], a[3]], a[4])
+        }),
         |p, _, i, n, t| aqr_tensors::module::decode(p, i, n, t).map_err(err),
     ),
     bare("dex-recons", |p, _, i, n, _| aqr_dex::module::decode(p, i, n).map_err(err)),
@@ -537,38 +403,13 @@ pub const NATIVE: &[Native] = &[
     part(
         "pdb-types",
         false,
-        aqr_api::emu::Entry {
-            kind: aqr_api::emu::Kind::Part,
-            windows: &[
-                aqr_api::Window::Input(0, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(1, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(2, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(3, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(4, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(5, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(6, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(7, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(8, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(9, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(10, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(11, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Input(12, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(0, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(1, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(2, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(3, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(4, aqr_pdb::module::TYPES_WINDOW),
-                aqr_api::Window::Output(5, aqr_pdb::module::TYPES_WINDOW),
-            ],
-            arity: 20,
-            call: |a| {
-                aqr_pdb::module::types_part(
-                    a[0],
-                    [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13]],
-                    [a[14], a[15], a[16], a[17], a[18], a[19]],
-                )
-            },
-        },
+        aqr_api::emu::Entry::part(&same::<19>(13, 6, aqr_pdb::module::TYPES_WINDOW), 20, |a| {
+            aqr_pdb::module::types_part(
+                a[0],
+                [a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13]],
+                [a[14], a[15], a[16], a[17], a[18], a[19]],
+            )
+        }),
         |p, _, i, n, _| aqr_pdb::module::types(p, i, n).map_err(err),
     ),
     bare("arsc-recons", |p, _, i, n, _| aqr_arsc::module::decode(p, i, n).map_err(err)),

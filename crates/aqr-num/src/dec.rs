@@ -143,20 +143,24 @@ pub fn parse_dec(t: &[u8]) -> Option<Dec> {
         return parse_dec_slow(t);
     }
     if i < t.len() {
-        if !matches!(t[i], b'e' | b'E') {
-            return None;
-        }
-        i += 1;
-        let en = t.get(i) == Some(&b'-');
-        i += matches!(t.get(i), Some(b'-' | b'+')) as usize;
-        let d = &t[i..];
-        if d.is_empty() || d.len() > 4 || !d.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        let x = d.iter().fold(0i32, |a, &c| a * 10 + (c - b'0') as i32);
-        e += if en { -x } else { x };
+        e += parse_exp(&t[i..])?;
     }
     Some(Dec::new(neg, m, e))
+}
+
+/// The exponent `(e|E)[+|-]digits` that makes all of `t`, of at most 4 digits.
+fn parse_exp(t: &[u8]) -> Option<i32> {
+    let (&(b'e' | b'E'), t) = t.split_first()? else { return None };
+    let (neg, d) = match t.split_first() {
+        Some((b'-', d)) => (true, d),
+        Some((b'+', d)) => (false, d),
+        _ => (false, t),
+    };
+    if d.is_empty() || d.len() > 4 || !d.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let x = d.iter().fold(0i32, |a, &c| a * 10 + (c - b'0') as i32);
+    Some(if neg { -x } else { x })
 }
 
 /// `parse_dec` for more than 19 digits (leading and trailing zeros not counted).
@@ -194,18 +198,7 @@ fn parse_dec_slow(t: &[u8]) -> Option<Dec> {
         return None;
     }
     if i < t.len() {
-        if !matches!(t[i], b'e' | b'E') {
-            return None;
-        }
-        i += 1;
-        let en = t.get(i) == Some(&b'-');
-        i += matches!(t.get(i), Some(b'-' | b'+')) as usize;
-        let d = &t[i..];
-        if d.is_empty() || d.len() > 4 || !d.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        let x = d.iter().fold(0i32, |a, &c| a * 10 + (c - b'0') as i32);
-        e += if en { -x } else { x };
+        e += parse_exp(&t[i..])?;
     }
     Some(Dec::new(neg, m, e + zeros as i32))
 }
@@ -361,6 +354,16 @@ fn put_exp(out: &mut Vec<u8>, e: i32, width: usize, plus: bool) {
     out.extend_from_slice(d);
 }
 
+/// Digits `d` as `d.ddd` and an exponent `e` of `width` digits at least, with a sign.
+fn put_sci(out: &mut Vec<u8>, d: &[u8], e: i32, width: usize) {
+    out.push(d[0]);
+    if d.len() > 1 {
+        out.push(b'.');
+        out.extend_from_slice(&d[1..]);
+    }
+    put_exp(out, e, width, true);
+}
+
 /// Positional digits `d` with exponent `e` (of the first digit), no trailing zeros added
 /// past the point; `int_point` adds ".0" to integers.
 fn put_positional(out: &mut Vec<u8>, d: &[u8], e: i32, int_point: bool) {
@@ -410,12 +413,7 @@ fn put_rendered(out: &mut Vec<u8>, r: u8, f: u8, neg: bool, m: u64, e: i32) {
         }
         R_GEN => {
             if !zero && (e < -4 || e >= p as i32) {
-                out.push(ds[0]);
-                if ds.len() > 1 {
-                    out.push(b'.');
-                    out.extend_from_slice(&ds[1..]);
-                }
-                put_exp(out, e, w, true);
+                put_sci(out, ds, e, w);
             } else {
                 put_positional(out, ds, e, false);
             }
@@ -424,24 +422,14 @@ fn put_rendered(out: &mut Vec<u8>, r: u8, f: u8, neg: bool, m: u64, e: i32) {
             if zero || (-4..16).contains(&e) {
                 put_positional(out, ds, e, true);
             } else {
-                out.push(ds[0]);
-                if ds.len() > 1 {
-                    out.push(b'.');
-                    out.extend_from_slice(&ds[1..]);
-                }
-                put_exp(out, e, 2, true);
+                put_sci(out, ds, e, 2);
             }
         }
         R_JS => {
             if zero || (-6..21).contains(&e) {
                 put_positional(out, ds, e, false);
             } else {
-                out.push(ds[0]);
-                if ds.len() > 1 {
-                    out.push(b'.');
-                    out.extend_from_slice(&ds[1..]);
-                }
-                put_exp(out, e, 1, true);
+                put_sci(out, ds, e, 1);
             }
         }
         _ => put_positional(out, ds, e, false),

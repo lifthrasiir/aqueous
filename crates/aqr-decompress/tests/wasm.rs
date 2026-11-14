@@ -541,7 +541,7 @@ fn bcj2_plans_hold() {
 /// [`plan_holds`] of an application of several outputs, the first of the formula's (`f.shared[0]`),
 /// whose outputs the root takes: a module that takes no tasks.
 fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
-    let pages = |n: u64| n.div_ceil(65536) * 65536;
+    let pages = aqr_api::stack::pages;
     let a = f.shared[0].apply().unwrap().clone();
     let sizes = f.shared[0].sizes.clone();
     let inputs: Vec<Vec<u8>> = (a.inputs.iter())
@@ -2369,6 +2369,52 @@ fn tasks_of_regions() {
     invalid(apply_v2(&regions(Some(2)), &[b"ab"], &[2], u64::MAX, &[u64::MAX, u64::MAX]), "class 2");
 }
 
+/// A module that makes `spawns` (each a count of tasks of one class, spawned and not taken) and
+/// `chans` channels, and then traps.
+fn flood(spawns: &[usize], chans: usize) -> String {
+    let spawns: String = spawns
+        .iter()
+        .map(|n| {
+            format!(
+                "(drop (call $spawn (i32.const 0) (i32.const 1) (i32.const 0x200) (i32.const 0) (i32.const {n})))"
+            )
+        })
+        .collect();
+    format!(
+        r#"(module {MEMORIES} {CHANS}
+            (@custom "aqr_task_slots" "\08")
+            (import "aqr" "aqr_spawn" (func $spawn (param i32 i32 i32 i32 i32) (result i32)))
+            (func (export "aqr_task") (param i32 i32))
+            (func (export "aqr_apply_whole") (param i64) (param i64) (param i64)
+                (local $i i32)
+                ;; the record: from 0 the 64 KiB of the working memory, to 0
+                (i32.store (i32.const 0x204) (i32.const 0x10000))
+                (loop $next (if (i32.lt_u (local.get $i) (i32.const {chans})) (then
+                    (drop (call $chan (i32.const 1)))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br $next))))
+                {spawns}
+                unreachable))"#
+    )
+}
+
+/// The host's limits on the tasks spawned and not taken, and on the channels of an application
+/// (`aqr_api::MAX_TASKS`, `MAX_CHANNELS`): going over them is a resource failure, not an invalid
+/// archive; the limits themselves are allowed (and the module's trap after is the invalid one).
+#[test]
+fn spawn_and_chan_limits() {
+    let (tasks, chans) = (aqr_api::MAX_TASKS, aqr_api::MAX_CHANNELS);
+    let run = |spawns: &[usize], chans: usize| apply_v2(&flood(spawns, chans), &[b""], &[0], u64::MAX, &[u64::MAX]);
+    invalid(run(&[tasks], 0), "unreachable");
+    assert!(matches!(run(&[tasks + 1], 0), Err(Failure::Resource(_))));
+    // all the tasks of the application not taken
+    invalid(run(&[tasks / 2, tasks / 2], 0), "unreachable");
+    assert!(matches!(run(&[tasks / 2, tasks / 2 + 1], 0), Err(Failure::Resource(_))));
+    // (the channels, none given to a gang: the earlier Apply's would take them with no gang)
+    invalid(run(&[], chans), "unreachable");
+    assert!(matches!(run(&[], chans + 1), Err(Failure::Resource(_))));
+}
+
 /// `wat` (written for the earlier `aqr_spawn`, `$spawn` of an argument and a count) with the
 /// current `aqr_spawn`, of one region of all of the working memory as aqr-api's tasks start,
 /// and `$spawnc` of a class besides.
@@ -2569,7 +2615,7 @@ fn plan_holds_bounded(
     queued: impl Fn(&aqr_formula::Usage) -> u64,
     bounded: bool,
 ) {
-    let pages = |n: u64| n.div_ceil(65536) * 65536;
+    let pages = aqr_api::stack::pages;
     let Node::Apply(a) = &f.root else { panic!("{what}: not an application") };
     // (an input of another node evaluated natively)
     let inputs: Vec<Vec<u8>> = (a.inputs.iter())

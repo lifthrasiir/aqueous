@@ -15,6 +15,8 @@ use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Once, OnceLock};
 
+use crate::stack::pages;
+
 /// What a host that traces its threads (`aqr_common::trace`, which this crate cannot use: it is
 /// a dependency of that one on Wasm) gives [`set_tracing`].
 pub struct Tracing {
@@ -67,15 +69,34 @@ pub struct Entry {
     pub call: fn(&[u64]),
 }
 
-/// An invalid archive failure, with what went wrong and the last `aqr_log` message before it.
+impl Entry {
+    /// The entry point of a part module of `windows`, taking `arity` lengths.
+    pub const fn part(windows: &'static [crate::Window], arity: usize, call: fn(&[u64])) -> Entry {
+        Entry { kind: Kind::Part, windows, arity, call }
+    }
+}
+
+/// A failure of an application, with what went wrong and the last `aqr_log` message before it:
+/// an invalid archive's, or a resource failure's (a limit of the host exceeded: `resource`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub what: String,
     pub log: Option<Vec<u8>>,
+    pub resource: bool,
+}
+
+impl std::fmt::Display for Failure {
+    /// What went wrong, then the module's last message before it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.log {
+            Some(log) => write!(f, "{}: {}", self.what, String::from_utf8_lossy(log)),
+            None => f.write_str(&self.what),
+        }
+    }
 }
 
 fn failure(what: String) -> Failure {
-    Failure { what, log: None }
+    Failure { what, log: None, resource: false }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,8 +107,12 @@ pub(crate) enum MemId {
     Resource(u32),
 }
 
-/// The payload of a panic signalling an error to the invocation.
-struct Trap(String);
+/// The payload of a panic signalling an error to the invocation: a violation (an invalid
+/// archive), or a limit of the host exceeded (a resource failure).
+struct Trap {
+    msg: String,
+    resource: bool,
+}
 
 /// An input of a part module's application streamed ([`apply_streaming`]): pulled as the
 /// module requests it.
@@ -103,22 +128,54 @@ pub trait Feed {
     }
 }
 
+/// An input given as a slice, pulled from it as the module asks (not copied whole).
+pub struct SliceFeed<'a> {
+    data: &'a [u8],
+    at: u64,
+}
+
+impl<'a> SliceFeed<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        SliceFeed { data, at: 0 }
+    }
+}
+
+impl Feed for SliceFeed<'_> {
+    fn len(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> Result<(), String> {
+        put(&self.data[self.at as usize..hi as usize]);
+        self.at = hi;
+        Ok(())
+    }
+}
+
 /// An output of a part module's application streamed ([`apply_streaming`]): taking its bytes
 /// as the module commits them.
 pub trait Drain {
     fn push(&mut self, d: &[u8]) -> Result<(), String>;
 }
 
-/// The data of an input: of its own, or pulled.
+impl Drain for Vec<u8> {
+    fn push(&mut self, d: &[u8]) -> Result<(), String> {
+        self.extend_from_slice(d);
+        Ok(())
+    }
+}
+
+/// The data of an input: the memory of a whole module's (sized to fit, and the data's length),
+/// or a part module's, pulled.
 enum In {
-    Data(Vec<u8>),
+    Whole(Vec<u8>, u64),
     Pull(&'static mut dyn Feed),
 }
 
 impl In {
     fn len(&self) -> u64 {
         match self {
-            In::Data(d) => d.len() as u64,
+            In::Whole(_, len) => *len,
             In::Pull(f) => f.len(),
         }
     }
@@ -145,13 +202,15 @@ struct Host {
     resources: Vec<Vec<u8>>,
     inputs: Vec<Vec<u8>>,
     outputs: Vec<Vec<u8>>,
-    /// The data of the inputs and their visible ranges, and the outputs so far, for a part
-    /// module.
+    /// The data of the inputs and their visible ranges, and the outputs so far (what a part
+    /// module requests and commits).
     data: Vec<In>,
     visible: Vec<(u64, u64)>,
     committed: Vec<Committed>,
     sizes: Vec<u64>,
     last_log: Option<Vec<u8>>,
+    /// The channels it made.
+    chans: usize,
     /// How deep within tasks the code runs, and the empty memory they see.
     task: u32,
     empty: Vec<u8>,
@@ -172,14 +231,13 @@ thread_local! {
 
 fn sized_to_fit(data: &[u8]) -> Vec<u8> {
     let mut mem = data.to_vec();
-    mem.resize(data.len().div_ceil(65536) * 65536, 0);
+    mem.resize(pages(data.len() as u64) as usize, 0);
     mem
 }
 
 /// A memory of zeros sized to fit `len` bytes, within `window` pages where given.
 fn zeros(len: usize, window: Option<u64>) -> Vec<u8> {
-    let pages = (len.div_ceil(65536) as u64).min(window.unwrap_or(u64::MAX));
-    vec![0; pages as usize * 65536]
+    vec![0; pages(len as u64).min(window.map_or(u64::MAX, |w| w * 65536)) as usize]
 }
 
 /// Applies the module `entry` to `inputs`, `resources` and `params` with the declared output sizes
@@ -191,26 +249,26 @@ pub fn apply(
     params: &[u8],
     sizes: &[u64],
 ) -> Result<Vec<Vec<u8>>, Failure> {
-    let data = inputs.iter().map(|i| In::Data(i.to_vec())).collect();
+    if entry.kind == Kind::Part {
+        let mut feeds: Vec<SliceFeed> = inputs.iter().map(|i| SliceFeed::new(i)).collect();
+        let mut feeds: Vec<&mut dyn Feed> = feeds.iter_mut().map(|f| f as _).collect();
+        let mut outputs: Vec<Vec<u8>> = sizes.iter().map(|_| Vec::new()).collect();
+        let mut drains: Vec<&mut dyn Drain> = outputs.iter_mut().map(|o| o as _).collect();
+        apply_streaming(entry, &mut feeds, resources, params, &mut drains, sizes)?;
+        return Ok(outputs);
+    }
+    let data = inputs.iter().map(|i| In::Whole(sized_to_fit(i), i.len() as u64)).collect();
     let committed = sizes.iter().map(|_| Committed::Kept(Vec::new())).collect();
     let host = run(entry, data, committed, resources, params, sizes)?;
-    let outputs: Vec<Vec<u8>> = match entry.kind {
-        Kind::Whole => host
-            .outputs
-            .into_iter()
-            .zip(sizes)
-            .map(|(mut o, &s)| {
-                o.truncate(s as usize);
-                o
-            })
-            .collect(),
-        Kind::Part => (host.committed.into_iter())
-            .map(|c| match c {
-                Committed::Kept(d) => d,
-                Committed::Pushed(..) => unreachable!("kept"),
-            })
-            .collect(),
-    };
+    let outputs: Vec<Vec<u8>> = host
+        .outputs
+        .into_iter()
+        .zip(sizes)
+        .map(|(mut o, &s)| {
+            o.truncate(s as usize);
+            o
+        })
+        .collect();
     for (j, (o, &size)) in outputs.iter().zip(sizes).enumerate() {
         if o.len() as u64 != size {
             return Err(failure(format!("output {j} of {} bytes, not {size}", o.len())));
@@ -257,7 +315,7 @@ pub fn apply_streaming(
 /// Runs `entry` on the host of inputs `data` and outputs `committed`: the host once it returns.
 fn run(
     entry: &Entry,
-    data: Vec<In>,
+    mut data: Vec<In>,
     committed: Vec<Committed>,
     resources: &[&[u8]],
     params: &[u8],
@@ -273,7 +331,6 @@ fn run(
         }));
     });
 
-    let whole = entry.kind == Kind::Whole;
     if sizes.is_empty() {
         return Err(failure("no output".into()));
     }
@@ -286,10 +343,10 @@ fn run(
         kind: entry.kind,
         params: sized_to_fit(params),
         resources: resources.iter().map(|r| sized_to_fit(r)).collect(),
-        inputs: (data.iter().enumerate())
-            .map(|(k, i)| match (whole, i) {
-                (true, In::Data(d)) => sized_to_fit(d),
-                _ => zeros(i.len() as usize, crate::Window::of(entry.windows, false, k as u32)),
+        inputs: (data.iter_mut().enumerate())
+            .map(|(k, i)| match i {
+                In::Whole(mem, _) => std::mem::take(mem),
+                In::Pull(f) => zeros(f.len() as usize, crate::Window::of(entry.windows, false, k as u32)),
             })
             .collect(),
         outputs: (sizes_usize.iter().enumerate())
@@ -300,6 +357,7 @@ fn run(
         committed,
         sizes: sizes.to_vec(),
         last_log: None,
+        chans: 0,
         task: 0,
         empty: Vec::new(),
     };
@@ -316,8 +374,8 @@ fn run(
         Err(failure(format!("entry point takes {} arguments, not {}", entry.arity, args.len())))
     } else {
         panic::catch_unwind(AssertUnwindSafe(|| (entry.call)(&args))).map_err(|payload| {
-            if let Some(Trap(msg)) = payload.downcast_ref() {
-                failure(msg.clone())
+            if let Some(Trap { msg, resource }) = payload.downcast_ref() {
+                Failure { resource: *resource, ..failure(msg.clone()) }
             } else if let Some(msg) = payload.downcast_ref::<&str>() {
                 failure(format!("trap: {msg}"))
             } else if let Some(msg) = payload.downcast_ref::<String>() {
@@ -341,7 +399,12 @@ fn run(
 }
 
 fn trap(msg: String) -> ! {
-    panic::panic_any(Trap(msg))
+    panic::panic_any(Trap { msg, resource: false })
+}
+
+/// Traps for a limit of the host exceeded: a resource failure.
+fn exceeded(msg: String) -> ! {
+    panic::panic_any(Trap { msg, resource: true })
 }
 
 /// The host of a task of an application of `kind`.
@@ -358,6 +421,7 @@ fn task_host(kind: Kind) -> Host {
         committed: Vec::new(),
         sizes: Vec::new(),
         last_log: None,
+        chans: 0,
         task: 1,
         empty: Vec::new(),
     }
@@ -538,12 +602,22 @@ pub(crate) mod sys {
 
     pub fn copy_to_output(j: u32, id: MemId, dst: u64, src: u64, len: u64) {
         with(|h| {
-            let mem = h.mem(id)?;
-            let bytes = mem[range(mem.len(), src, len)?].to_vec();
-            let out = h.mem(MemId::Output(j))?;
-            let r = range(out.len(), dst, len)?;
-            out[r].copy_from_slice(&bytes);
-            Ok(())
+            let from = range(h.mem(id)?.len(), src, len)?;
+            if id == MemId::Output(j) {
+                let out = h.mem(id)?;
+                let to = range(out.len(), dst, len)?;
+                out.copy_within(from, to.start);
+                return Ok(());
+            }
+            // (the source taken out of its place, to read it while the output is written)
+            let bytes = std::mem::take(h.mem(id)?);
+            let copied = h.mem(MemId::Output(j)).and_then(|out| {
+                let to = range(out.len(), dst, len)?;
+                out[to].copy_from_slice(&bytes[from]);
+                Ok(())
+            });
+            *h.mem(id)? = bytes;
+            copied
         })
     }
 
@@ -576,7 +650,7 @@ pub(crate) mod sys {
                 }
             };
             match &mut h.data[k as usize] {
-                In::Data(d) => put(&d[hi_k as usize..hi as usize]),
+                In::Whole(..) => unreachable!("a whole module requests nothing"),
                 In::Pull(f) => f.pull(hi, &mut put)?,
             }
             h.visible[k as usize].1 = hi;
@@ -636,6 +710,9 @@ pub(crate) mod sys {
         n: usize,
         gang: bool,
     ) -> Vec<Option<std::thread::JoinHandle<Vec<u8>>>> {
+        if n > crate::MAX_TASKS {
+            super::exceeded(format!("{n} tasks spawned at once, over {}", crate::MAX_TASKS));
+        }
         struct Send(crate::task::Record);
         // SAFETY: the closure `rec` refers to is `Sync`, and outlives the threads
         unsafe impl std::marker::Send for Send {}
@@ -696,6 +773,12 @@ pub(crate) mod sys {
 
     #[cfg(feature = "alloc")]
     pub fn chan(cap: u32) -> u32 {
+        if let Some(h) = super::current() {
+            h.chans += 1;
+            if h.chans > crate::MAX_CHANNELS {
+                super::exceeded(format!("more than {} channels made", crate::MAX_CHANNELS));
+            }
+        }
         let mut chans = super::CHANS.write().unwrap_or_else(|e| e.into_inner());
         chans.push(std::sync::Arc::new(super::Shared {
             state: std::sync::Mutex::new(super::Chan {

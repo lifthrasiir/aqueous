@@ -6,7 +6,7 @@
 //!
 //! Columns: the module, m (the outputs' bytes), I (the parameters', resources' and inputs'
 //! bytes), the peak of the working memories, that peak over m, and the module's plan of it
-//! (`Module::plan_in_pages`, in bytes) over the peak, `!` where it is below the peak;
+//! (`Module::plan_for`, in bytes) over the peak, `!` where it is below the peak;
 //! and the memory limit declared over the total (the peak and the memories imported), `-` for
 //! none; then the most the application's instance held and what the native measurement
 //! (`aqr_common::meter`) took for it, and the most one task held and the native measurement's
