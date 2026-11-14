@@ -352,14 +352,18 @@ optimization picked by hash.
   rest cut into tokens at spaces, or by what the first MiB codes smaller at `;`, TAB and `,` too,
   `,` not where the numbers have a decimal comma; a token that is a whole number of aqr-num a
   number slot, a token of a form rare in the segment a word, any other kept with its digit runs as
-  slots) and the fields in columns by (template, slot), numbers as they are or as changes from the
-  column's previous value or the line before's same slot, taken at the scale of the number (a
-  time with a fraction is two columns). It is a whole module, 64 MiB segments, its plan
+  slots; an IPv4 address in a token is the slot 0x05, a 32-bit integer) and the fields in columns by
+  (template, slot), numbers as they are or as changes from the column's previous value or the
+  line before's same slot, taken at the scale of the number (a time with a fraction is two
+  columns), divided by the column's unit (their gcd) where that pays, an address also as an index
+  into the 64 most recent addresses of all the address columns; a CR before the LF is a byte of
+  the template, not of the last token. It is a whole module, 64 MiB segments, its plan
   exact from the params' counts (templates, columns, numbers of a template). aqr-compress's
-  `table` (lib.rs) chooses it for text by coding the first MiB: where aqr-log's streams (zstd -3)
-  are no larger than the text's (and aqr-xsv's, where that takes it too: the smaller of the
-  two); prose and code come out at 120% and are left to aqr-wrt. Left (its README and
-  `docs/log-design.md` section 4): CRLF's CR as part of the last token, Drain-style clusters, columns where numbers lose to digit runs.
+  `table` (lib.rs) chooses it for text by coding a sample (the text up to 2 MiB, else 8 windows of
+  256 KiB spread from start to end): where aqr-log's streams (zstd -3) are no larger than the
+  text's (and aqr-xsv's, where that takes it too: the smaller of the two); prose and code come out
+  at 120% and are left to aqr-wrt. Left (its README and `docs/log-design.md` section 4): IPv6,
+  units and addresses in aqr-xsv, Drain-style clusters.
   aqr-xsv codes date and time columns (module 2, patterns as aqr-log's), and both take zones
   after a time as literal bytes of the pattern and digit groups (`1.187,25`, aqr-num mode bit 7).
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module

@@ -13,7 +13,7 @@ its digit runs slots of integers (zero padding in a width byte). A column is the
 values of one slot of one template, each number as it is, as the change from the column's
 previous one, or as the change from the same slot of the line before (taken at the scale of the
 number, which varies in padded fixed and `%g`), whichever zstd packs smaller. A time with a fraction
-is two columns, the seconds and the fraction. Lines that cannot be so (a byte 0x01 to 0x04 in them, or past the limits) are kept as
+is two columns, the seconds and the fraction. An IPv4 address is a slot too (a 32-bit integer, also as an index into the 64 addresses seen last), a column's integers are divided by their common divisor where that pays (quarters of a megawatt-hour), and a CR before the LF belongs to the template. Lines that cannot be so (a byte 0x01 to 0x05 in them, or past the limits) are kept as
 they are, so any file round-trips.
 
 ```rust
@@ -24,7 +24,8 @@ let f = formula::encode(&log, 1 /* threads */).unwrap();
 ```
 
 aqr-compress takes text as lines of templates where its first lines are such (`formula::starts`),
-and only where the streams of its first MiB, compressed by zstd -3, are no larger than the MiB
+and only where the streams of a sample (the file up to 2 MiB, else 8 windows of 256 KiB from its
+start to its end), compressed by zstd -3, are no larger than the sample
 itself (prose and source code come to 120% and more), and then against aqr-xsv by the same
 measure (the smaller of the two); everything else of text goes to aqr-jsonl, aqr-xsv or
 aqr-wrt as before. The streams of words, of templates and of the lines kept are text, which
@@ -71,15 +72,12 @@ plan is checked to the page by `log_plans_hold` in aqr-decompress's `tests/wasm.
 | File | Contents |
 |---|---|
 | `src/formula.rs` | The module's formula of a file: templates, columns, predictors (encoder) |
-| `src/times.rs` | Timestamps found in a line, with their patterns (encoder) |
 | `src/module.rs` | Params, limits, and the file rebuilt from its streams (the module's code), its plan |
 | `examples/bench.rs` | Sizes of the streams, speeds, round trip |
 
 ## Next steps
 
-- The same times in aqr-xsv (whose date and time columns are text).
-- Epoch seconds and milliseconds (`1704067200000`) as times, zones (`-0400`) in the pattern.
-- Thousands grouping (`1.187,25`, `1,234`) as part of numbers.
-- Choosing between a number and its digit runs where a fraction is low in entropy (`,00 ,25
-  ,50 ,75`), and the modes of padded fixed, by the same trial as the separators'.
+- Epoch seconds and milliseconds (`1704067200000`) as times.
+- IPv6 addresses, and an address with the port after it as one integer; the same units and
+  addresses in aqr-xsv.
 - Fields at positions of words (Drain's clusters) beyond the rare-form rule.
