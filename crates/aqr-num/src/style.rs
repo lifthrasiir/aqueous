@@ -21,6 +21,26 @@ impl Style {
     /// to zero (not fixed); `tmp` scratch space.
     #[inline]
     pub fn encode(&self, t: &[u8], prev_scale: i32, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8, u8)> {
+        if dec::group_of(self.mode) {
+            // (digit groups: the token without them in the style without, and the groups kept where the
+            // mode prints them and it prints back; a token that is not grouped as the mode prints is
+            // coded in the style without, as a change of the descriptor)
+            let plain = Style { mode: self.mode & !dec::GROUP, ..*self };
+            let mut buf = [0u8; dec::DOTTED];
+            let sep = if dec::comma_of(self.mode) { b'.' } else { b',' };
+            if let Some(u) = dec::ungroup(t, sep, &mut buf)
+                && let Some((v, s, m, f)) = plain.encode(u, prev_scale, tmp)
+                && matches!(dec::render_of(m), R_FIX | R_FIXP | R_POS)
+            {
+                let m = m | dec::GROUP;
+                tmp.clear();
+                dec::put(tmp, v, s, m, f);
+                if tmp[..] == *t {
+                    return Some((v, s, m, f));
+                }
+            }
+            return plain.encode(t, prev_scale, tmp);
+        }
         if dec::comma_of(self.mode) {
             // (the decimal comma: the token as a number with a point, in the comma modes)
             let mut buf = [0u8; dec::DOTTED];
@@ -76,6 +96,9 @@ pub fn choose(toks: &[(usize, &[u8])]) -> Style {
 /// zeros are few: a container may choose between the style given and one without padding by
 /// coding a sample both ways (aqr-log does).
 pub fn choose_with(toks: &[(usize, &[u8])], padded: bool) -> Style {
+    if let Some(st) = choose_grouped(toks, padded) {
+        return st;
+    }
     let sep = |t: &[u8], c: u8| t.contains(&c) && t.iter().any(u8::is_ascii_digit);
     let commas = toks.iter().filter(|t| sep(t.1, b',')).count();
     if commas > toks.iter().filter(|t| sep(t.1, b'.')).count() {
@@ -86,6 +109,50 @@ pub fn choose_with(toks: &[(usize, &[u8])], padded: bool) -> Style {
         return Style { mode: st.mode | dec::COMMA, ..st };
     }
     choose_dotted(toks, padded)
+}
+
+/// The style of tokens written with digit groups (`dec::GROUP`), if the sample has them: of a
+/// decimal comma and points between the groups (`1.187,25`), or of a decimal point and commas
+/// (`1,234.56`), whichever the sample has more of (a tie goes to the comma). A token is evidence
+/// where its integer part is grouped as `dec::put` prints it (with one separator or more) and
+/// the other decimal separator and a digit are after it (`1.187,25`; not `1.187.234`, which an IP
+/// address or a version also is); the evidence must outnumber the tokens whose integer part has
+/// four digits or more with no groups (the sample is of a column that groups all of them, or none).
+fn choose_grouped(toks: &[(usize, &[u8])], padded: bool) -> Option<Style> {
+    let (mut de, mut en, mut flat) = (0usize, 0usize, 0usize);
+    let mut buf = [0u8; dec::DOTTED];
+    for &(_, t) in toks {
+        let at = (t.first() == Some(&b'-')) as usize;
+        let digits = t[at..].iter().take_while(|c| c.is_ascii_digit()).count();
+        flat += (digits >= 4) as usize;
+        for (sep, dec_sep, n) in [(b'.', b',', &mut de), (b',', b'.', &mut en)] {
+            let end = at + t[at..].iter().take_while(|&&c| c.is_ascii_digit() || c == sep).count();
+            let seps = t[at..end].iter().filter(|&&c| c == sep).count();
+            let after = t.get(end) == Some(&dec_sep) && t.get(end + 1).is_some_and(u8::is_ascii_digit);
+            if seps >= 1 && after && dec::ungroup(&t[..end], sep, &mut buf).is_some() {
+                *n += 1;
+            }
+        }
+    }
+    if de.max(en) <= flat || de.max(en) == 0 {
+        return None;
+    }
+    let german = de >= en;
+    let sep = if german { b'.' } else { b',' };
+    let plain: Vec<Vec<u8>> = toks
+        .iter()
+        .map(|&(_, t)| {
+            let mut u = dec::ungroup(t, sep, &mut buf).unwrap_or(t).to_vec();
+            if german {
+                u.iter_mut().for_each(|c| *c = if *c == b',' { b'.' } else { *c });
+            }
+            u
+        })
+        .collect();
+    let dotted: Vec<(usize, &[u8])> = toks.iter().zip(&plain).map(|(t, u)| (t.0, &u[..])).collect();
+    let st = choose_dotted(&dotted, padded);
+    matches!(dec::render_of(st.mode), R_FIX | R_FIXP | R_POS)
+        .then(|| Style { mode: st.mode | dec::GROUP | if german { dec::COMMA } else { 0 }, ..st })
 }
 
 fn choose_dotted(toks: &[(usize, &[u8])], padded: bool) -> Style {

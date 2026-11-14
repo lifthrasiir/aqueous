@@ -139,7 +139,8 @@ column's parts too; a record that would make the file longer than declared is an
 - **Numbers.** Fields that start with a digit, a sign or a point, of at most 40 bytes, are coded
   in the style aqr-num's `style::choose` picks for the column from its first 512 such fields
   (with fallbacks as `Style::encode` has them), where they print back to the same bytes; zero
-  takes the scale of the column's previous number. Others are text.
+  takes the scale of the column's previous number. Others are text. Digit groups (`1.187,25`,
+  `1,234.56`) are part of the number where the style has them (aqr-num's mode bit 7).
 - **Times.** Of a column, the first 64 fields (within the quotes) that start with a digit or a
   capital letter, are at most 64 bytes and, for a time, have one of `:`, `/`, `-`, `.` or a space,
   are looked at by aqr-num's `times::Times` (README, "Encoder conventions"): the column is of times

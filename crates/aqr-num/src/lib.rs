@@ -34,7 +34,7 @@ pub mod style;
 pub mod time;
 pub mod times;
 
-pub use dec::{COMMA, comma_of, encode, is_fixed, mode, put, render_of, src_of, valid};
+pub use dec::{COMMA, GROUP, comma_of, encode, group_of, is_fixed, mode, put, render_of, src_of, valid};
 pub use fixed::{MAX_SCALE, MIN_SCALE};
 
 /// Fixed (`%.Nf`-like) numbers: their scale is in the flags.
@@ -77,6 +77,7 @@ pub fn describe(mode: u8, f: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dec::{SRC_DEC, SRC_F64};
 
     fn xorshift(r: &mut u64) -> u64 {
         *r ^= *r << 13;
@@ -137,7 +138,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(n, 1204);
+        assert_eq!(n, 1520);
         assert!(back > 4000, "{back} coded back");
     }
 
@@ -196,7 +197,9 @@ mod tests {
         put(&mut o, v, 2, M_FIX | 0x40, f);
         assert_eq!(o, b"-0,05");
         assert!(valid(M_FIX | 0x40, f));
-        assert!(!valid(0x80, 0) && !valid(0xC0, 0) && !valid(0x30, 0));
+        assert!(!valid(0x30 | 0x40, 0) && !valid(0x30, 0));
+        // (a group's bit is valid for the fixed and positional renders only)
+        assert!(valid(0x80, 0) && valid(0xC0, 0) && !valid(0x81, 3) && !valid(0xC3, 0));
         assert!(encode(b"1,2,3", comma(mode(dec::R_POS, dec::SRC_DEC)), 0, false, 0, &mut tmp).is_none());
     }
 
@@ -240,6 +243,94 @@ mod tests {
         }
         // sources other than decimal are invalid
         assert!(!valid(mode(dec::R_FIXP, dec::SRC_F64), 0));
+    }
+
+    /// Digits grouped by threes (mode bit 7): the separator is a comma, or a point with the decimal
+    /// comma, the integer part only; a token is coded in a mode with groups where it has them as it
+    /// would print them, and a style of groups codes the tokens that are not grouped in the style
+    /// without.
+    #[test]
+    fn digit_groups() {
+        let mut tmp = vec![];
+        let fix = |n: u8| n | fixed::F_POINT;
+        for (mode, f, v, s, want) in [
+            (M_FIX | GROUP, fix(2), 123456789, 2, "1,234,567.89"),
+            (M_FIX | GROUP, fix(2), -100000, 2, "-1,000.00"),
+            (M_FIX | GROUP, fix(2), 99999, 2, "999.99"),
+            (M_FIX | GROUP, 0, 1000, 0, "1,000"),
+            (M_FIX | GROUP, 0, 999, 0, "999"),
+            (M_FIX | GROUP | COMMA, fix(2), 118725, 2, "1.187,25"),
+            (M_FIX | GROUP | COMMA, fix(2), -123456789012, 2, "-1.234.567.890,12"),
+            (M_FIX | GROUP | COMMA, fix(1) | fixed::F_NOINT, 5, 1, ",5"),
+            (mode(dec::R_FIXP, SRC_DEC) | GROUP, fix(3), 4228358, 2, "42,283.580"),
+            (mode(dec::R_POS, SRC_DEC) | GROUP, 0, 1234567, 3, "1,234.567"),
+            (mode(dec::R_POS, SRC_F64) | GROUP | COMMA, 0, 12345678, -2, "1.234.567.800"),
+        ] {
+            assert!(valid(mode, f), "{want}");
+            let mut o = vec![];
+            put(&mut o, v, s, mode, f);
+            assert_eq!(std::str::from_utf8(&o).unwrap(), want);
+            let st = style::Style { mode, p: 0, exp3: false };
+            let (v2, s2, m2, f2) = st.encode(want.as_bytes(), s, &mut tmp).unwrap_or_else(|| panic!("{want}"));
+            assert_eq!(m2, mode, "{want}");
+            let mut o = vec![];
+            put(&mut o, v2, s2, m2, f2);
+            assert_eq!(std::str::from_utf8(&o).unwrap(), want);
+            // (ungrouped, it is not printed as the mode does)
+            let sep = if mode & COMMA != 0 { '.' } else { ',' };
+            let plain = want.replace(sep, "");
+            if plain.len() > want.len() - want.matches(sep).count() || want.contains(sep) {
+                // (the style codes it, in another mode)
+                let (_, _, m3, _) = st.encode(plain.as_bytes(), s, &mut tmp).unwrap_or((0, 0, 0, 0));
+                assert_ne!(m3, mode, "{plain}");
+            }
+        }
+        // groups that are not as put prints them
+        for (mode, t) in [
+            (M_FIX | GROUP, "1234.5"),
+            (M_FIX | GROUP, "1,23.4"),
+            (M_FIX | GROUP, "12,34"),
+            (M_FIX | GROUP, "1,2345.0"),
+            (M_FIX | GROUP, ",234.5"),
+            (M_FIX | GROUP, "1,234,.5"),
+            (M_FIX | GROUP, "1.187,25"),
+            (M_FIX | GROUP | COMMA, "1,187.25"),
+            (M_FIX | GROUP | COMMA, "1.18,25"),
+            (M_FIX | GROUP | COMMA, "1.187.25"),
+            (M_FIX | GROUP | COMMA, "1.1875,2"),
+        ] {
+            assert!(encode(t.as_bytes(), mode, 0, false, 0, &mut tmp).is_none(), "{t}");
+        }
+        // the style of a sample
+        let pick = |toks: &[&str]| {
+            let toks: Vec<(usize, &[u8])> = toks.iter().map(|t| (0, t.as_bytes())).collect();
+            style::choose(&toks)
+        };
+        let de = pick(&["1.187,25", "12,5", "-3.456.789,00", "999,99", "0,5"]);
+        assert_eq!(de.mode & (COMMA | GROUP), COMMA | GROUP);
+        let en = pick(&["1,234.56", "12.5", "-3,456,789.00", "999.99", "0.5"]);
+        assert_eq!(en.mode & (COMMA | GROUP), GROUP);
+        for (st, toks) in [
+            (de, ["1.187,25", "12,5", "999,00", "1187,25", "-1.000,00"]),
+            (en, ["1,187.25", "12.5", "999.00", "1187.25", "-1,000.00"]),
+        ] {
+            for t in toks {
+                let (v, s, m, f) = st.encode(t.as_bytes(), 0, &mut tmp).unwrap_or_else(|| panic!("{t}"));
+                let mut o = vec![];
+                put(&mut o, v, s, m, f);
+                assert_eq!(std::str::from_utf8(&o).unwrap(), t);
+            }
+        }
+        assert_eq!(de.encode(b"1187,25", 0, &mut tmp).unwrap().2 & GROUP, 0);
+        assert_eq!(de.encode(b"999,00", 0, &mut tmp).unwrap().2 & GROUP, GROUP);
+        // one separator and no decimal one is a decimal point or comma; four digits and none are flat
+        assert_eq!(pick(&["1.187", "2.345", "12,5"]).mode & GROUP, 0);
+        // (IP addresses and versions are not integers: no decimal after the groups)
+        assert_eq!(pick(&["173.234.131.186", "10.123.456.789"]).mode & GROUP, 0);
+        assert_eq!(pick(&["1.187.234", "2,345,678", "12.5"]).mode & GROUP, 0);
+        assert_eq!(pick(&["1,234", "5,678"]).mode & GROUP, 0);
+        assert_eq!(pick(&["1.187,25", "1234,5", "5678,9"]).mode & GROUP, 0);
+        assert_eq!(pick(&["1.5", "2.25", "1234.5"]).mode & GROUP, 0);
     }
 
     #[test]

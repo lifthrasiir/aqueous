@@ -26,8 +26,8 @@ how `D` is split into `v` and `s`.
 
 ### Descriptor
 
-`mode` = render | source << 4 | comma << 6; bit 7 is zero. Valid pairs (1204 in all, twice
-those below: each with or without the decimal comma):
+`mode` = render | source << 4 | comma << 6 | group << 7. Valid pairs (1520 in all: those below with
+or without the decimal comma, and, for the renders 0, 5 and 6, with or without digit groups):
 
 | render | | sources | flags `f` |
 |---|---|---|---|
@@ -46,6 +46,16 @@ point: every `.` that the layouts below print (a fixed token's point, `%g`'s, `%
 positional and shortest forms', `repr`'s `.0`) is `,` instead (`4,216`, `-0,05`, `1,5e-07`,
 `1,0`). Nothing else changes: no digit grouping, the exponent and sign as they are, the value
 the same. A mode with bit 7 set is invalid.
+
+Digit groups: with mode bit 7 (0x80) set, in a fixed, positional or padded fixed render, the
+digits of the integer part are in groups of three counted from the right, with a separator
+between two groups: a comma, or a point where the mode has the decimal comma (`1,234,567.89`,
+`1.187,25`, `-1.234.567,5`). An integer part of up to three digits has no separator (the same
+descriptor prints `5,25` and `1.187,25`), a sign is before the first group, and nothing else
+changes: the fraction, a point with no digits after it, the digits of a zero or padded integer
+part (`0,5`: one digit). The bit is invalid in the other renders (`%g`, `%e`, `repr`,
+`toString`: they have exponents); the positional render takes it with any source. The integer
+`v` is the value as without groups.
 
 Fixed format flags: the point is present if bit 5 is set, else N = 0 and bit 6 is clear;
 bit 6 needs N > 0.
@@ -110,10 +120,23 @@ zeros.
 
 ### Encoder conventions (not normative)
 
+A grouping mode (`dec::GROUP`) codes a token whose integer part is grouped as it prints (one to three
+digits, then groups of three each after the separator, none for at most three digits: `dec::ungroup`)
+as the token without the groups, in the mode without the bit, and keeps it if it prints back. A style
+(`style::choose`) of groups is picked where the sample has more tokens that show their groups than
+tokens with an integer part of four digits or more that do not: of a decimal comma and point groups
+(`1.187,25`) or a decimal point and comma groups (`1,234.56`), whichever has more evidence (a tie
+goes to the comma), where a token is evidence if its integer part is grouped and the other decimal
+separator and a digit are after it (`1.187,25`; not `1.187` or `1.187.234`, which may be a decimal, an
+IP address or a version). The
+tokens of that style that are not grouped as the mode prints them (a column that has a `1187,25`
+among the `1.187,25`) are coded in the style without groups, the descriptor changing for them.
+Other group separators (a space, `'`, the Indian lakh) are not coded.
+
 A comma mode (`dec::COMMA`) codes only tokens with no point: the token with its commas as
 points is coded as the mode without the bit says, and kept if it prints back (with the comma)
 to the same bytes. `style::choose` picks the comma modes where more tokens (with a digit) of
-the sample have a comma than a point (a tie goes to points), choosing from the tokens with
+the sample have a comma than a point (a tie goes to points; groups are tried first), choosing from the tokens with
 points; `Style::encode` of such a style gives the comma modes, fixed included, and no mode to
 a token with a point.
 

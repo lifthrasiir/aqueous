@@ -359,7 +359,9 @@ optimization picked by hash.
   `table` (lib.rs) chooses it for text by coding the first MiB: where aqr-log's streams (zstd -3)
   are no larger than the text's (and aqr-xsv's, where that takes it too: the smaller of the
   two); prose and code come out at 120% and are left to aqr-wrt. Left (its README and
-  `docs/log-design.md` section 4): times in aqr-xsv, epoch times, thousands grouping.
+  `docs/log-design.md` section 4): CRLF's CR as part of the last token, Drain-style clusters, columns where numbers lose to digit runs.
+  aqr-xsv codes date and time columns (module 2, patterns as aqr-log's), and both take zones
+  after a time as literal bytes of the pattern and digit groups (`1.187,25`, aqr-num mode bit 7).
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by

@@ -6,7 +6,7 @@ each line and its fields stored column by column. A timestamp (`Dec 10 06:55:46`
 template coded as one integer by a pattern ([`aqr-num`](../../crates/aqr-num)'s "Times"). The rest of a
 line is cut into tokens at its spaces (and, where the first MiB of streams comes out smaller,
 at `;`, TABs and commas, but not commas where the numbers have a decimal comma); a token that is a
-whole number (`-0.05`, `4,216`, `12.50`, `1.5E-07`, `42283.58000000`, as aqr-num prints them) is a
+whole number (`-0.05`, `4,216`, `1.187,25`, `12.50`, `1.5E-07`, `42283.58000000`, as aqr-num prints them) is a
 slot coded as an integer and how it was printed; a token whose form (its digit runs masked) is
 rare in the file is a word kept as it is in its column; any other token stays in the template,
 its digit runs slots of integers (zero padding in a width byte). A column is the

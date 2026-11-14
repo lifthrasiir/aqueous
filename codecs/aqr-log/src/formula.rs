@@ -104,6 +104,20 @@ fn decimal_comma(seg: &[u8]) -> bool {
         for t in line.split(|&b| matches!(b, b' ' | b';' | b'\t')) {
             // (a number: a sign, digits, one point or comma, digits, an exponent)
             let t = t.strip_prefix(b"-").or_else(|| t.strip_prefix(b"+")).unwrap_or(t);
+            // (groups of three digits with points before a decimal comma: `1.187,25`)
+            if let Some((head, tail)) = t.iter().position(|&b| b == b',').map(|c| (&t[..c], &t[c + 1..]))
+                && head.contains(&b'.')
+            {
+                let mut groups = head.split(|&b| b == b'.');
+                let first = groups.next().unwrap_or(&[]);
+                let grouped = (1..=3).contains(&first.len())
+                    && first.iter().all(u8::is_ascii_digit)
+                    && groups.all(|g| g.len() == 3 && g.iter().all(u8::is_ascii_digit));
+                if grouped && !tail.is_empty() && tail.iter().all(u8::is_ascii_digit) {
+                    comma += 1;
+                }
+                continue;
+            }
             let int = t.iter().take_while(|b| b.is_ascii_digit()).count();
             let Some(&sep @ (b'.' | b',')) = t.get(int) else { continue };
             let frac = t[int + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
@@ -212,19 +226,18 @@ impl Scratch {
         if !numeric(t) {
             return None;
         }
-        // (a decimal comma: the fixed token with the comma as its point)
+        // (a decimal comma: the fixed token with the comma as its point; with a point as well,
+        // digit groups perhaps, which the style of the token tells)
         let comma = t.contains(&b',');
+        let grouped = comma && t.contains(&b'.');
         let dotted: Vec<u8>;
         let fixed_of = if comma {
             dotted = t.iter().map(|&b| if b == b',' { b'.' } else { b }).collect();
-            if t.contains(&b'.') {
-                return None;
-            }
             &dotted[..]
         } else {
             t
         };
-        if let Some((v, f)) = fixed::parse(fixed_of) {
+        if !grouped && let Some((v, f)) = fixed::parse(fixed_of) {
             let mode = aqr_num::M_FIX | if comma { aqr_num::COMMA } else { 0 };
             return Some((v, (f & fixed::F_FRAC) as i32, mode, f));
         }
@@ -1119,6 +1132,37 @@ mod tests {
         assert!(t.contains("\x03,\x03,\x03,\x03\t"), "{t:?}");
         let t = wide(&c);
         assert!(t.contains("\x03,"), "{t:?}");
+    }
+
+    /// Numbers with digit groups (`1.187,25` where the numbers have a decimal comma) are number
+    /// slots with a grouping descriptor (mode bits 6 and 7); the small ones of the same column
+    /// (no group) are numbers of the same descriptor.
+    #[test]
+    fn digit_groups() {
+        let mut rng = aqr_common::rng::Rng::new(3);
+        let group = |x: u64| {
+            let s = format!("{x:03}");
+            let (int, frac) = s.split_at(s.len() - 2);
+            let mut g = String::new();
+            for (i, c) in int.chars().enumerate() {
+                if i > 0 && (int.len() - i) % 3 == 0 {
+                    g.push('.');
+                }
+                g.push(c);
+            }
+            format!("{g},{frac}")
+        };
+        let mut d = String::new();
+        for i in 0..3000u64 {
+            let (x, y) = (rng.below(900_000_000), rng.below(100_000));
+            d += &format!("{:02}.01.2019 00:00;{};{};{},{}\n", i % 28 + 1, group(x), group(y), i % 7, i % 100);
+        }
+        let f = roundtrip(d.as_bytes());
+        let t = String::from_utf8_lossy(&f.streams[2].data).into_owned();
+        assert!(t.contains("\x04d.m.Y H:M\x04;\x03;\x03;\x03\n"), "{t:?}");
+        // (the descriptors: fixed with a comma and groups, 0xC0)
+        assert!(f.streams[8].data.contains(&0xC0), "{:?}", &f.streams[8].data[..20.min(f.streams[8].data.len())]);
+        assert!(f.streams[5].data.len() < 3000 * 14, "{}", f.streams[5].data.len());
     }
 
     /// Fixed numbers whose writer pads zeros are padded fixed (integers of their digits); a change

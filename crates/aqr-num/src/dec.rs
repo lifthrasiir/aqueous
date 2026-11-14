@@ -46,6 +46,17 @@ pub const fn src_of(mode: u8) -> u8 {
 /// Mode bit 6: the point is printed as a comma (`4,216`, `1,5e-07`). Nothing else changes.
 pub const COMMA: u8 = 0x40;
 
+/// Mode bit 7: the digits of the integer part are in groups of three, with a separator between
+/// them: a comma, or a point where the mode has the decimal comma (`1,234.56`, `1.187,25`). Of
+/// fixed, padded fixed and positional renders only.
+pub const GROUP: u8 = 0x80;
+
+/// Whether a mode prints the integer part in groups.
+#[inline]
+pub const fn group_of(mode: u8) -> bool {
+    mode & GROUP != 0
+}
+
 /// Whether a mode prints the point as a comma.
 #[inline]
 pub const fn comma_of(mode: u8) -> bool {
@@ -61,7 +72,7 @@ pub const fn is_fixed(mode: u8) -> bool {
 /// Whether a mode and flags (the second byte of a template item) can be rendered.
 pub fn valid(mode: u8, f: u8) -> bool {
     let (r, s) = (render_of(mode), src_of(mode));
-    if mode & 0x80 != 0 {
+    if group_of(mode) && !matches!(r, R_FIX | R_FIXP | R_POS) {
         return false;
     }
     match r {
@@ -459,16 +470,40 @@ fn put_rendered(out: &mut Vec<u8>, r: u8, f: u8, neg: bool, m: u64, e: i32) {
 /// Appends the token for `v` at scale `s` in `mode` with flags `f` (a pair `valid`
 /// accepts).
 pub fn put(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
-    if !comma_of(mode) {
+    if mode & (COMMA | GROUP) == 0 {
         return put_dotted(out, v, s, mode, f);
     }
     let from = out.len();
-    put_dotted(out, v, s, mode & !COMMA, f);
-    for b in &mut out[from..] {
-        if *b == b'.' {
-            *b = b',';
+    put_dotted(out, v, s, mode & !(COMMA | GROUP), f);
+    if comma_of(mode) {
+        for b in &mut out[from..] {
+            if *b == b'.' {
+                *b = b',';
+            }
         }
     }
+    if group_of(mode) {
+        group(out, from, if comma_of(mode) { b'.' } else { b',' });
+    }
+}
+
+/// The integer part of the token `out[from..]` in groups of three digits (those from the right),
+/// with `sep` between them.
+fn group(out: &mut Vec<u8>, from: usize, sep: u8) {
+    let at = from + (out.get(from) == Some(&b'-')) as usize;
+    let n = out[at..].iter().take_while(|c| c.is_ascii_digit()).count();
+    if n < 4 {
+        return;
+    }
+    let tail = out.split_off(at);
+    out.extend_from_slice(&tail[..n % 3]);
+    for (i, d) in tail[n % 3..n].chunks(3).enumerate() {
+        if i > 0 || n % 3 > 0 {
+            out.push(sep);
+        }
+        out.extend_from_slice(d);
+    }
+    out.extend_from_slice(&tail[n..]);
 }
 
 fn put_dotted(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
@@ -526,6 +561,15 @@ fn put_dotted(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
 /// scale given to zero; `exp3` the exponent width for tokens without an exponent. `tmp` is
 /// scratch space.
 pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8)> {
+    if group_of(mode) {
+        // (a grouping mode codes the token without its groups, and keeps it if it prints back)
+        let mut buf = [0u8; DOTTED];
+        let u = ungroup(t, if comma_of(mode) { b'.' } else { b',' }, &mut buf)?;
+        let (v, s, f) = encode(u, mode & !GROUP, p, exp3, prev_scale, tmp)?;
+        tmp.clear();
+        put(tmp, v, s, mode, f);
+        return (tmp[..] == *t).then_some((v, s, f));
+    }
     if comma_of(mode) {
         // (a comma mode codes the token with its comma as a point; a point is not its own)
         let mut buf = [0u8; DOTTED];
@@ -622,6 +666,32 @@ pub(crate) fn dotted<'a>(t: &[u8], buf: &'a mut [u8; DOTTED]) -> Option<&'a [u8]
         *o = if c == b',' { b'.' } else { c };
     }
     Some(b)
+}
+
+/// Token `t` without the groups of its integer part, in `buf`: the digits of the integer part
+/// (after a sign) are one to three, then groups of three each after `sep` (no `sep` at all
+/// for at most three digits), as [`put`] prints them. None if they are not, or `t` is longer
+/// than [`DOTTED`].
+pub(crate) fn ungroup<'a>(t: &[u8], sep: u8, buf: &'a mut [u8; DOTTED]) -> Option<&'a [u8]> {
+    if t.len() > DOTTED {
+        return None;
+    }
+    let at = (t.first() == Some(&b'-')) as usize;
+    let end = at + t[at..].iter().take_while(|&&c| c.is_ascii_digit() || c == sep).count();
+    let mut n = at;
+    buf[..at].copy_from_slice(&t[..at]);
+    for (groups, g) in t[at..end].split(|&c| c == sep).enumerate() {
+        // (the first group of 1 to 3 digits, the others of 3; the integer part may be empty)
+        let ok = if groups == 0 { g.len() <= 3 && (!g.is_empty() || end == at) } else { g.len() == 3 };
+        if !ok {
+            return None;
+        }
+        buf[n..n + g.len()].copy_from_slice(g);
+        n += g.len();
+    }
+    let m = t.len() - end;
+    buf[n..n + m].copy_from_slice(&t[end..]);
+    Some(&buf[..n + m])
 }
 
 /// `d` rounded to `n` significant digits (half up).

@@ -547,6 +547,43 @@ mod tests {
         assert_eq!(eval(&f, s.len()).unwrap(), s.as_bytes());
     }
 
+    /// Numbers with digit groups (`1.187,25` of a decimal comma, `1,234.56` quoted in a CSV) are
+    /// numbers, small ones of the same column (no group) too, and one that is not grouped as the
+    /// rest (`1187,25`) as well.
+    #[test]
+    fn digit_groups() {
+        let semi = Dialect { delim: b";".to_vec(), quote: Some(b'"'), term: vec![] };
+        let (mut a, mut b) = (String::from("id;x;y\n"), String::from("id,x,y\n"));
+        let group = |x: i64, sep: char, dec: char| {
+            let s = format!("{:03}", x.abs());
+            let (int, frac) = s.split_at(s.len() - 2);
+            let int = if int.is_empty() { "0" } else { int };
+            let mut g = String::new();
+            for (i, c) in int.chars().enumerate() {
+                if i > 0 && (int.len() - i) % 3 == 0 {
+                    g.push(sep);
+                }
+                g.push(c);
+            }
+            format!("{}{g}{dec}{frac}", if x < 0 { "-" } else { "" })
+        };
+        for i in 0..2000i64 {
+            let x = (i * i * 37) % 9_000_000 - 500;
+            let y = (i * 7919) % 100_000;
+            a += &format!(
+                "{i};{};{}\n",
+                if i == 7 { format!("{x},50") } else { group(x, '.', ',') },
+                group(y, '.', ',')
+            );
+            b += &format!("{i},\"{}\",\"{}\"\n", group(x, ',', '.'), group(y, ',', '.'));
+        }
+        for (t, dia) in [(&a, &semi), (&b, &csv())] {
+            let f = roundtrip(t.as_bytes(), dia);
+            // (the text holds the header and the one number not grouped as the others only)
+            assert!(f.streams[4].data.len() < 100, "{}", f.streams[4].data.len());
+        }
+    }
+
     /// The file of a formula of segments (an application, or a Concat of them).
     fn eval_segments(f: &Formula) -> Vec<u8> {
         let apply = |n: &Node| {

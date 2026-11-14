@@ -129,7 +129,7 @@ to its LF. A line of template i is the template's bytes with each mark replaced:
   columns have a scale of 0.
 - **number**: the integer v at the scale s of the column's descriptor (mode, f) as
   `types` says (§3), printed as aqr-num specifies (its README, "Specification"; the modes
-  include its decimal comma and padded fixed).
+  include its decimal comma, padded fixed and digit groups).
 
 Every stream must be read to its end, every column's part too; a line that would make the file
 longer than declared is an error, and so is a file shorter.
@@ -168,10 +168,14 @@ longer than declared is an error, and so is a file shorter.
   thousands grouping: it is counted for that; the other comma numbers (`0,418`, `18,5`,
   `1234,567`, `1,5e3`) are counted for the decimal comma. The numbers have a decimal comma if
   the comma numbers (not those) outnumber the point numbers and are at least as many as the
-  groupings. (In a comma-separated table the tokens are lines or fields with several commas,
+  groupings. A token that is a comma number with groups of three digits between points before
+  the comma (`1.187,25`, `-3.456.789,0`: one to three digits, then groups of three after a
+  point) counts for the decimal comma too, where the first count above would have skipped it.
+  (In a comma-separated table the tokens are lines or fields with several commas,
   none of them a comma number; in a `;`-separated table of a European locale, `4,216` is one.)
-  A token with a point is coded as a number also where the locale has a comma (never one
-  with both).
+  A token with a point is coded as a number also where the locale has a comma, and one with
+  both is a number where its groups are those aqr-num prints (`1.187,25`; an encoder's choice
+  of the column's style: aqr-num's README, "Encoder conventions"), else not.
 - **Times.** A timestamp starts at a digit or a capital letter that follows no letter, digit,
   `.`, `:`, `_` or `+`, and ends before no letter or digit (but a `Z` that ends a word), `_`
   or `:`, nor before the digits of a fraction after a point or comma. It is one of these
