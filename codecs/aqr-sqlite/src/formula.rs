@@ -20,8 +20,6 @@ fn memory(u: &Usage<'_>) -> Option<aqr_formula::Plan> {
 pub struct Options {
     /// Rebuild the file from the streams and compare (no formula on a mismatch).
     pub verify: bool,
-    /// No formula if the transform panics (off to find such bugs).
-    pub catch: bool,
     /// Threads (1: everything on the calling thread). The streams are the same whatever the
     /// number.
     pub threads: usize,
@@ -29,7 +27,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { verify: true, catch: true, threads: 1 }
+        Options { verify: true, threads: 1 }
     }
 }
 
@@ -41,14 +39,10 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 
 /// `encode` with `opt`.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
-    let enc = if opt.catch {
-        std::panic::catch_unwind(|| transform::encode_threads(input, opt.threads)).ok().flatten()
-    } else {
-        transform::encode_threads(input, opt.threads)
-    }?;
+    let enc = transform::encode_threads(input, opt.threads)?;
     // (the file rebuilt, to check it where `verify`, and for the sizes that decoding takes)
     let run = || transform::check(&enc.geom, input, &enc.streams);
-    let (ok, sizes) = if opt.catch { std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).ok()? } else { run() };
+    let (ok, sizes) = run();
     if opt.verify && !ok {
         return None;
     }

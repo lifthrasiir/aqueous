@@ -31,10 +31,9 @@ fn bands(height: usize, stride: usize, band: usize) -> Vec<usize> {
 /// [`super::raster::apply_in`]: the application giving `samples` (exactly the raster of `fmt`)
 /// in bands of about `band` bytes, `threads` coded at a time, its inputs pushed to `f`.
 pub fn apply_in<F: Layout>(f: &mut Formula, samples: &[u8], fmt: F, threads: usize, band: usize) -> Option<Node> {
-    let encode = |b: &[u8], fmt: F| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| F::encode(b, fmt)));
     let rows = bands(fmt.height(), fmt.stride(), band);
     if let [_] = rows[..] {
-        let (coded, pad) = encode(samples, fmt).ok()??;
+        let (coded, pad) = F::encode(samples, fmt)?;
         let inputs = vec![f.push_as(F::CODED, Kind::Compressed, coded), f.push(F::PADDING, pad)];
         return Some(Node::apply(F::MODULE, fmt.to_bytes(), inputs, samples.len() as u64));
     }
@@ -53,7 +52,7 @@ pub fn apply_in<F: Layout>(f: &mut Formula, samples: &[u8], fmt: F, threads: usi
         let n = threads.max(1).min(bands.len() - first);
         let done = aqr_common::pool::par_map(n, threads, |i| {
             let (fmt, b) = bands[first + i];
-            let c = encode(b, fmt).ok()?;
+            let c = F::encode(b, fmt);
             aqr_common::progress::done(b);
             c
         });

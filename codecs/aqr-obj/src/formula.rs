@@ -8,7 +8,6 @@ pub use crate::codec::PORTION;
 use crate::codec::{self, AC_STREAMS, MAX_BLOCK, Options, Streams};
 use crate::varint::put_uv;
 use aqr_formula::{Formula, Module, Node};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub use crate::module::decode;
 
@@ -115,7 +114,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     if input.is_empty() {
         return None;
     }
-    catch_unwind(AssertUnwindSafe(|| encode_portions(input, opt))).ok().flatten()
+    encode_portions(input, opt)
 }
 
 /// Where the portions of `input` end, each of `portion` bytes at most, about: at a line start,

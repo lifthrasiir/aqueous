@@ -32,8 +32,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 }
 
 fn encode_at(input: &[u8], depth: u32) -> Option<Formula> {
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| try_encode(input, depth)));
-    r.ok()?.ok().filter(|f| size(f) < input.len())
+    try_encode(input, depth).ok().filter(|f| size(f) < input.len())
 }
 
 /// Bytes of all streams of `f`.

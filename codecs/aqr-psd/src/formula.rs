@@ -96,8 +96,7 @@ pub fn regions(input: &[u8]) -> Option<Vec<Region>> {
 
 /// [`encode`] for a file `depth` deep in the embedded files of another.
 pub(crate) fn encode_at(input: &[u8], depth: usize, par: &Par) -> Option<Formula> {
-    let parts =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec::formula_parts(input, depth, par))).ok()??;
+    let parts = codec::formula_parts(input, depth, par)?;
     let mut f = Formula::default();
     let head = f.push("psd/head", parts.head);
     let skeleton = f.push("psd/skeleton", parts.skeleton);

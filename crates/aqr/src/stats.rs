@@ -32,6 +32,10 @@
 //! - `contents`, by content (the item of the samples): `path`, `kind` (the format it starts
 //!   like, `-` for none), `len`, and where compressed `archived` (bytes of the archive that are
 //!   its), `same_as` (the content it is the same as) and `modules`;
+//! - `fallbacks` (compressing only): the recompressions not used or given up, and the applications
+//!   kept over the bound, each `module` (of a recompression given up for its heap or for a panic,
+//!   the format), `needed` and `bytes`, `kept`, `heap` and `panicked` (whether a recompression
+//!   panicked: its `message` follows, and its `needed` is 0; none in JSON of aqr before it);
 //! - `trace`: `interval` (seconds between samples, as it ended), `workers`, `labels` (by id:
 //!   name and whether of waiting), `stacks` (by id: label ids, the outermost first; 0 is none,
 //!   idle), `threads` (name and whether a worker of the pool; the others are the threads of part
@@ -279,7 +283,7 @@ pub struct Run {
     pub contents: Vec<Content>,
     /// Compressing: the recompressions given up, and the applications kept, for the bound of
     /// `--application-bound`, and the recompressions given up for their heap
-    /// ([`aqr_compress::fallbacks`]).
+    /// and for a panic ([`aqr_compress::fallbacks`]).
     pub fallbacks: Vec<aqr_compress::Fallback>,
     pub trace: Trace,
 }
@@ -654,13 +658,24 @@ fn outliers(run: &Run) -> String {
         }
     }
     // the applications over the bound of --application-bound: their recompressions given up
-    // (and the recompressions given up for their heap)
-    let mut by_module: std::collections::BTreeMap<(&str, bool, bool), (u64, u64, u64)> = Default::default();
+    // (and the recompressions given up for their heap, and those that panicked)
+    type Tally<'a> = std::collections::BTreeMap<(&'a str, bool, bool, Option<&'a str>), (u64, u64, u64)>;
+    let mut by_module = Tally::default();
     for f in &run.fallbacks {
-        let e = by_module.entry((f.module, f.kept, f.heap)).or_default();
+        let e = by_module.entry((f.module, f.kept, f.heap, f.panicked.then_some(&f.message[..]))).or_default();
         (e.0, e.1, e.2) = (e.0 + 1, e.1 + f.bytes, e.2.max(f.needed));
     }
-    for ((module, kept, heap), (n, bytes, most)) in by_module {
+    for ((module, kept, heap, message), (n, bytes, most)) in by_module {
+        if let Some(message) = message {
+            say(
+                &mut out,
+                format!(
+                    "{module}: {n} recompressions panicked ({} of data kept as they are): {message}",
+                    size(bytes as f64)
+                ),
+            );
+            continue;
+        }
         if heap {
             say(
                 &mut out,
@@ -775,7 +790,16 @@ fn json(run: &Run, partial: bool) -> String {
         array(&mut o, &run.fallbacks, |o, f| {
             *o += "{\"module\":";
             string(o, f.module);
-            _ = write!(o, ",\"needed\":{},\"bytes\":{},\"kept\":{},\"heap\":{}}}", f.needed, f.bytes, f.kept, f.heap);
+            _ = write!(
+                o,
+                ",\"needed\":{},\"bytes\":{},\"kept\":{},\"heap\":{},\"panicked\":{}",
+                f.needed, f.bytes, f.kept, f.heap, f.panicked
+            );
+            if f.panicked {
+                *o += ",\"message\":";
+                string(o, &f.message);
+            }
+            o.push('}');
         });
     }
     let t = &run.trace;

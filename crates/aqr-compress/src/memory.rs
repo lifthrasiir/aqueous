@@ -94,7 +94,8 @@ pub(crate) fn bound_of(bound: Option<u64>, module: Module) -> u64 {
 }
 
 /// A recompression not used, or an application kept, for its minimal bound over the bound; or a
-/// recompression given up for the heap it took ([`Fallback::heap`]): what [`fallbacks`] tells.
+/// recompression given up for the heap it took ([`Fallback::heap`]) or for a panic
+/// ([`Fallback::panicked`]): what [`fallbacks`] tells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fallback {
     /// The module of the application; of a recompression given up for its heap, the format.
@@ -111,6 +112,11 @@ pub struct Fallback {
     /// The recompression gave up as it took more heap than one may
     /// ([`aqr_common::allowance`], of [`aqr_common::budget::attempt_limit`]).
     pub heap: bool,
+    /// The recompression panicked (a bug of the recompressor), its `module` the format, `needed`
+    /// 0; the data was kept as it is.
+    pub panicked: bool,
+    /// The panic's message; empty unless `panicked`.
+    pub message: String,
 }
 
 /// A minimal bound told exactly, for logs: its bytes, and MiB rounded up (never less than it
@@ -154,13 +160,43 @@ pub(crate) fn exceeding(f: &Formula, m: &(impl Modules + Sync), bound: Option<u6
 
 /// Records a recompression given up for the data of `bytes` bytes.
 pub(crate) fn gave_up(module: Module, needed: u64, bytes: u64) {
-    FALLBACKS.lock().unwrap().push(Fallback { module: module.name, needed, bytes, kept: false, heap: false });
+    FALLBACKS.lock().unwrap().push(Fallback {
+        module: module.name,
+        needed,
+        bytes,
+        kept: false,
+        heap: false,
+        panicked: false,
+        message: String::new(),
+    });
 }
 
 /// Records a recompression as `format` (its name) given up for its heap, of `used` bytes as it
 /// did, for the data of `bytes` bytes.
 pub(crate) fn gave_up_heap(format: &'static str, used: u64, bytes: u64) {
-    FALLBACKS.lock().unwrap().push(Fallback { module: format, needed: used, bytes, kept: false, heap: true });
+    FALLBACKS.lock().unwrap().push(Fallback {
+        module: format,
+        needed: used,
+        bytes,
+        kept: false,
+        heap: true,
+        panicked: false,
+        message: String::new(),
+    });
+}
+
+/// Records a recompression as `format` (its name) that panicked with `message`, for the data of
+/// `bytes` bytes.
+pub(crate) fn panicked(format: &'static str, message: String, bytes: u64) {
+    FALLBACKS.lock().unwrap().push(Fallback {
+        module: format,
+        needed: 0,
+        bytes,
+        kept: false,
+        heap: false,
+        panicked: true,
+        message,
+    });
 }
 
 /// Records the applications of `f`, whose limits are declared, that are over the bound under
@@ -176,6 +212,8 @@ pub(crate) fn note_kept(f: &Formula, bound: Option<u64>, bytes: u64) {
                 bytes: a.len.min(bytes),
                 kept: true,
                 heap: false,
+                panicked: false,
+                message: String::new(),
             });
         }
     }

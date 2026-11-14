@@ -259,7 +259,7 @@ fn fuzz(args: &[String]) {
         }
     }
     std::panic::set_hook(Box::new(|_| {}));
-    let opt = Options { verify: false, catch: false, ..Default::default() };
+    let opt = Options { verify: false, ..Default::default() };
     let (mut runs, mut bad) = (0, 0);
     for f in &files {
         let src = std::fs::read(f).expect("read");

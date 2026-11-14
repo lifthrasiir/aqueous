@@ -44,7 +44,7 @@ pub const CONTAINER: &str = "tex/container";
 /// The formula of DDS file `input`, or `None` where it is not one this crate takes ([`dds`]).
 /// It is the same whatever `threads` is.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    let found = std::panic::catch_unwind(|| dds::detect(input)).ok()??;
+    let found = dds::detect(input)?;
     let (start, end) = (found.start, found.start + found.data.len() as usize);
     let mut f = Formula::default();
     let mut parts = vec![f.push(HEADER, input[..start].to_vec())];
@@ -81,7 +81,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// layout's order), its output cut into the surfaces, each where the file has it, and the bytes
 /// between them as they are. It is the same whatever `threads` is.
 pub fn encode_container(input: &[u8], threads: usize) -> Option<Formula> {
-    let found = std::panic::catch_unwind(|| container::detect(input)).ok()??;
+    let found = container::detect(input)?;
     let pieces = found.pieces(input.len())?;
     let blocks: Vec<u8> = pieces.iter().flat_map(|&(s, n)| &input[s..s + n]).copied().collect();
     let mut f = Formula::default();
@@ -109,10 +109,9 @@ pub fn encode_container(input: &[u8], threads: usize) -> Option<Formula> {
 }
 
 /// The application giving `blocks`, exactly the blocks of layout `l`, its inputs pushed to `f`.
-/// None where the coder panics. It is the same whatever `threads`
-/// is.
+/// It is the same whatever `threads` is.
 pub fn apply(f: &mut Formula, blocks: &[u8], l: &Layout, threads: usize) -> Option<Node> {
-    let (main, apart, _) = std::panic::catch_unwind(|| texture::encode_any(l, blocks, threads)).ok()?;
+    let (main, apart, _) = texture::encode_any(l, blocks, threads);
     let inputs =
         vec![f.push_as("bcn/coded", Kind::Compressed, main), f.push_as("bcn/stripes", Kind::Compressed, apart)];
     Some(Node::apply(module(l.format.group()), l.to_bytes(), inputs, blocks.len() as u64))

@@ -42,12 +42,12 @@ pub fn resource() -> Resource {
 }
 
 /// The application giving `samples` (whole sample frames of `fmt`), its inputs pushed to `f`.
-/// None for no samples, or where the coder panics.
+/// None for no samples.
 pub fn apply(f: &mut Formula, samples: &[u8], fmt: Format, threads: usize) -> Option<Node> {
     if samples.is_empty() {
         return None;
     }
-    let c = std::panic::catch_unwind(|| pcm::encode_threads(samples, fmt, threads)).ok()??;
+    let c = pcm::encode_threads(samples, fmt, threads)?;
     let [raw0, raw1] = c.raw;
     let slots = c.streams.into_iter().chain([c.words, raw0, raw1]).map(Cow::into_owned);
     let inputs = slots.zip(CLASSES).map(|(s, (class, kind))| f.push_as(class, kind, s)).collect();

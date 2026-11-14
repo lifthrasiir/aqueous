@@ -21,14 +21,14 @@ pub const TRAILER: &str = "raw/trailer";
 /// The formula of `input`, a container that [`container::detect`] takes apart. None where it
 /// is not one, or where its samples are not coded.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    let found = std::panic::catch_unwind(|| container::detect(input)).ok()??;
+    let found = container::detect(input)?;
     encode_found(input, &found, threads)
 }
 
 /// The formula of `input`, data of no format, as 16-bit samples after a header that tells their
 /// size ([`container::sized`]). None where it is not, or where its samples are not coded.
 pub fn encode_sized(input: &[u8], threads: usize) -> Option<Formula> {
-    let found = std::panic::catch_unwind(|| container::sized(input)).ok()??;
+    let found = container::sized(input)?;
     encode_found(input, &found, threads)
 }
 
@@ -67,7 +67,7 @@ pub fn encode_samples(input: &[u8], layout: Layout, threads: usize) -> Option<Fo
 }
 
 /// The application giving `samples` of `layout`, its inputs pushed to `f` as streams. None
-/// where they are not coded (nothing to code, a layout not taken, a panic of the coder).
+/// where they are not coded (nothing to code, a layout not taken).
 pub fn apply(f: &mut Formula, samples: &[u8], layout: Layout, threads: usize) -> Option<Node> {
     match layout {
         Layout::Pcm(fmt) => pcm::apply(f, samples, fmt, threads),

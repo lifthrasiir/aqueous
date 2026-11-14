@@ -1405,11 +1405,7 @@ fn recompress_sealed(
     let f = match ready {
         Some(f) => f,
         None => match recompressor(format) {
-            Recompressor::Cx(r) => {
-                catch_unwind(AssertUnwindSafe(|| attempted(format, d, || r(d, contents, opt, depth, cx))))
-                    .ok()
-                    .flatten()
-            }
+            Recompressor::Cx(r) => attempted(format, d, || r(d, contents, opt, depth, cx)),
             _ => {
                 // (of the file itself, archived directly: its parts sealed as they are made, each
                 // evaluated beforehand on its own)
@@ -1990,7 +1986,7 @@ fn within(d: &[u8], parts: &[Region], opt: &Options, depth: u32, cx: &Cx) -> Vec
 
 /// What the parts of `d`, a file of `format`, are, where its recompressor tells.
 fn regions(format: Format, d: &[u8]) -> Option<Vec<Region>> {
-    catch_unwind(AssertUnwindSafe(|| format.spec().regions.and_then(|r| r(d)))).ok().flatten()
+    caught(format.name(), d.len(), || format.spec().regions.and_then(|r| r(d))).flatten()
 }
 
 /// Which of `parts` (bytes of data and of description each) to keep, so that `base` and the
@@ -2672,28 +2668,30 @@ fn pure(format: Format, d: &[u8], p: &Pure) -> Option<Option<Formula>> {
         if format == Format::Text {
             tests::TEXTS.lock().unwrap().push(d.len());
         }
-        catch_unwind(AssertUnwindSafe(|| {
-            attempted(format, d, || match r {
-                Recompressor::Pure(e) => e(d, p.opt.threads),
-                Recompressor::PureWith(e) => e(d, p),
-                Recompressor::Cx(_) => None,
-            })
-        }))
-        .ok()
-        .flatten()
+        attempted(format, d, || match r {
+            Recompressor::Pure(e) => e(d, p.opt.threads),
+            Recompressor::PureWith(e) => e(d, p),
+            Recompressor::Cx(_) => None,
+        })
     };
     Some(if format == Format::Text { p.once.code(d, code) } else { code() })
 }
 
 /// What `make`, the recompressor of `format` on `d`, makes, within the heap one recompression
 /// may take ([`aqr_common::allowance::attempt`] of [`aqr_common::budget::attempt_limit`], which
-/// those it makes of the contents share): `None` where it gave up past it, which is told
-/// ([`fallbacks`]), as if it did not take the data.
+/// those it makes of the contents share): `None` where it gave up past it, or panicked
+/// ([`caught`]), which is told ([`fallbacks`]), as if it did not take the data.
 fn attempted(format: Format, d: &[u8], make: impl FnOnce() -> Option<Formula>) -> Option<Formula> {
     let limit = aqr_common::budget::attempt_limit();
     #[cfg(test)]
     let (limit, hog) = tests::hog(format, d.len()).map_or((limit, false), |l| (l, true));
+    #[cfg(test)]
+    let bug = tests::panics(format, d.len());
     let make = || {
+        #[cfg(test)]
+        if bug {
+            panic!("a bug of the recompressor");
+        }
         // (more than the limit taken at the start, a reservation of no pages touched, and the
         // check after it, as the next item on the pool would)
         #[cfg(test)]
@@ -2704,10 +2702,28 @@ fn attempted(format: Format, d: &[u8], make: impl FnOnce() -> Option<Formula>) -
         });
         make()
     };
-    match aqr_common::allowance::attempt(limit, make) {
-        Ok(f) => f,
-        Err(e) => {
+    match caught(format.name(), d.len(), || aqr_common::allowance::attempt(limit, make)) {
+        Some(Ok(f)) => f,
+        Some(Err(e)) => {
             memory::gave_up_heap(format.name(), e.used, d.len() as u64);
+            None
+        }
+        None => None,
+    }
+}
+
+/// What `f`, a recompression as `what` (a format's name) of data of `bytes` bytes, makes: `None`
+/// where it panicked, which is told ([`memory::panicked`]) as a bug of the recompressor, the data
+/// kept as it is.
+fn caught<R>(what: &'static str, bytes: usize, f: impl FnOnce() -> R) -> Option<R> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(r) => Some(r),
+        Err(p) => {
+            let message = match p.downcast::<String>() {
+                Ok(s) => *s,
+                Err(p) => p.downcast_ref::<&str>().map_or("a panic of no message", |s| s).to_string(),
+            };
+            memory::panicked(what, message, bytes as u64);
             None
         }
     }
@@ -3060,6 +3076,9 @@ mod tests {
     /// The heap that one recompression told of [`HOGS`] may take.
     const HOG_LIMIT: u64 = 16 << 20;
 
+    /// The recompressor of a format, given data of a length, panics ([`panics`]), on any thread.
+    static PANICS: std::sync::Mutex<Vec<(Format, usize)>> = std::sync::Mutex::new(Vec::new());
+
     /// Held by the tests that look at [`fallbacks`], of the process: one at a time.
     pub(crate) static FALLBACKS_SEEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -3067,6 +3086,45 @@ mod tests {
     /// more at its start ([`HOGS`], [`attempted`]).
     pub(crate) fn hog(format: Format, len: usize) -> Option<u64> {
         HOGS.lock().unwrap().contains(&(format, len)).then_some(HOG_LIMIT)
+    }
+
+    /// Whether the recompressor of `format`, given data of `len` bytes, panics at its start
+    /// ([`PANICS`], [`attempted`]).
+    pub(crate) fn panics(format: Format, len: usize) -> bool {
+        PANICS.lock().unwrap().contains(&(format, len))
+    }
+
+    /// A recompression that panics is told ([`fallbacks`]) and the data is kept as it is (the
+    /// archive giving it back).
+    #[test]
+    fn panic_falls_back() {
+        let text: Vec<u8> =
+            (0..30013).flat_map(|i| format!("line {} of the panicking text\n", i * 7 % 1000).into_bytes()).collect();
+        let mut z = flate2::GzBuilder::new().filename("text.txt").write(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let gz = z.finish().unwrap();
+        let _seen = FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let opt = Options { smaller: false, ..Options::default() };
+        let made = |d: &[u8]| {
+            let f = recompress(d, &opt);
+            assert!(f.eval(&Native::default()).is_ok_and(|b| b == d));
+            f.applies().len()
+        };
+        assert!(made(&gz) > 0);
+        let _ = fallbacks();
+        PANICS.lock().unwrap().push((Format::Gzip, gz.len()));
+        let kept = made(&gz);
+        PANICS.lock().unwrap().clear();
+        assert_eq!(kept, 0, "kept as it is");
+        let told: Vec<_> = fallbacks().into_iter().filter(|f| f.bytes == gz.len() as u64).collect();
+        assert!(
+            told.len() == 1
+                && told[0].module == "gzip"
+                && told[0].panicked
+                && told[0].message == "a bug of the recompressor",
+            "{told:?}"
+        );
+        assert!(!told[0].heap && !told[0].kept);
     }
 
     /// A recompression that takes more heap than one may gives up, and the data is kept as it

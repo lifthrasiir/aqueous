@@ -264,12 +264,12 @@ mod extract;
 mod fold;
 mod info;
 mod ipc;
-mod session;
 mod journal;
 mod list;
 mod meta;
 mod names;
 mod pass;
+mod session;
 mod sfx;
 mod sparse;
 mod stats;
@@ -277,12 +277,12 @@ mod stdio;
 mod stop;
 mod view;
 
+pub(crate) use aqr_common::text::hex;
 use aqr_compress::mapped::Mapper;
 use aqr_compress::{Options, compress_formula_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
 use aqr_formula::aqr::{self, Entry, EntryNode, Failure, Tree, name_bytes, name_from};
-pub(crate) use aqr_common::text::hex;
 use aqr_l10n::size;
 use meta::{os_bytes, os_from};
 use view::Ticking;
@@ -715,8 +715,8 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     let mut argv = all.clone().into_iter();
     let me = argv.next().map(PathBuf::from).unwrap_or_default();
     // (`--stats` alone, no input nor any other option: [`stats::alone`])
-    let stats_alone = argv.len() > 0
-        && all.iter().skip(1).all(|a| a == "--stats" || a.to_string_lossy().starts_with("--stats="));
+    let stats_alone =
+        argv.len() > 0 && all.iter().skip(1).all(|a| a == "--stats" || a.to_string_lossy().starts_with("--stats="));
     let unaqr = me.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("unaqr"));
     // (a command alone: [`complete`])
     let all: Vec<OsString> = all.iter().skip(1).cloned().collect();
@@ -1438,14 +1438,23 @@ fn size_of(s: &str) -> Option<usize> {
 }
 
 /// Tells on standard error the recompressions not used for the bound of `--application-bound`
-/// (and the applications kept over it), by module, and those given up for their heap, by format.
+/// (and the applications kept over it), by module, those given up for their heap, by format, and
+/// those that panicked, by format and message.
 fn tell_fallbacks(fallbacks: &[aqr_compress::Fallback]) {
-    let mut by_module: std::collections::BTreeMap<(&str, bool, bool), (u64, u64, u64)> = Default::default();
+    type Tally<'a> = std::collections::BTreeMap<(&'a str, bool, bool, Option<&'a str>), (u64, u64, u64)>;
+    let mut by_module = Tally::default();
     for f in fallbacks {
-        let e = by_module.entry((f.module, f.kept, f.heap)).or_default();
+        let e = by_module.entry((f.module, f.kept, f.heap, f.panicked.then_some(&f.message[..]))).or_default();
         (e.0, e.1, e.2) = (e.0 + 1, e.1 + f.bytes, e.2.max(f.needed));
     }
-    for ((module, kept, heap), (n, bytes, most)) in by_module {
+    for ((module, kept, heap, message), (n, bytes, most)) in by_module {
+        if let Some(message) = message {
+            eprintln!(
+                "panic: {module}: {n} recompressions panicked, {} of data kept as they are ({message})",
+                size(bytes as f64)
+            );
+            continue;
+        }
         if heap {
             eprintln!(
                 "heap: {module}: {n} recompressions given up, {} of data, {} held as they did (of {} each)",

@@ -51,7 +51,7 @@ impl Layout for Format {
 }
 
 /// The application giving `samples` (exactly the raster of `fmt`), its inputs pushed to `f`.
-/// None where the layout is not taken, or where the coder panics.
+/// None where the layout is not taken.
 pub fn apply(f: &mut Formula, samples: &[u8], fmt: Format) -> Option<Node> {
     apply_in(f, samples, fmt, 1, BAND)
 }

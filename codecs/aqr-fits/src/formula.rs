@@ -104,18 +104,16 @@ fn data(f: &mut Formula, s: &Streams, input: &[u8], h: &Hdu) -> Vec<Node> {
     let d = &input[h.data.clone()];
     let hd = Header::new(&input[h.header.clone()]);
     if d.len() >= MIN_DATA {
-        let coded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Some(l) = Layout::from_header(&hd, d.len() as u64) {
-                rice(f, d, &l)
-            } else if let Some(p) = pixels(&hd) {
-                pixels_node(f, d, p)
-            } else if xtension(&hd).as_deref() == Some("BINTABLE") {
-                bintable(f, s, d, &hd)
-            } else {
-                None
-            }
-        }));
-        if let Ok(Some(n)) = coded {
+        let coded = if let Some(l) = Layout::from_header(&hd, d.len() as u64) {
+            rice(f, d, &l)
+        } else if let Some(p) = pixels(&hd) {
+            pixels_node(f, d, p)
+        } else if xtension(&hd).as_deref() == Some("BINTABLE") {
+            bintable(f, s, d, &hd)
+        } else {
+            None
+        };
+        if let Some(n) = coded {
             return n;
         }
     }

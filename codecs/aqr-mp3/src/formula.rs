@@ -32,18 +32,17 @@ const CLASSES: [(&str, Kind); SLOTS] = [
     ("mp3/rawbits", Kind::Compressed),
 ];
 
-/// The formula of `input`: `None` where the coded form is not smaller (or on a failure).
+/// The formula of `input`: `None` where the coded form is not smaller.
 /// `threads` threads give the same formula.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     if input.len() as u64 > crate::plan::MAX_FILE {
         return None;
     }
-    let c = std::panic::catch_unwind(|| {
-        let c = if threads > 1 && input.len() >= par::PAR_MIN { par::encode(input) } else { codec::encode(input) };
-        let n: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() + c.raw.len();
-        (n + 64 < input.len()).then_some(c)
-    })
-    .ok()??;
+    let c = if threads > 1 && input.len() >= par::PAR_MIN { par::encode(input) } else { codec::encode(input) };
+    let n: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() + c.raw.len();
+    if n + 64 >= input.len() {
+        return None;
+    }
     let mut f = Formula::default();
     let mut slots: Vec<Vec<u8>> = c.streams;
     slots.push(c.words);

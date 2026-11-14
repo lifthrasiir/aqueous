@@ -25,14 +25,9 @@ fn plan(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
         .map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
-/// The formula of `input`, or `None` where it is not a `.clip` file whose structure holds (or
-/// a panic is caught). A tile is modelled where its zlib stream is what [`crate::zlib`] makes
-/// of it.
+/// The formula of `input`, or `None` where it is not a `.clip` file whose structure holds. A tile is modelled where its zlib stream is what
+/// [`crate::zlib`] makes of it.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    std::panic::catch_unwind(|| encode_at(input, threads)).ok().flatten()
-}
-
-fn encode_at(input: &[u8], threads: usize) -> Option<Formula> {
     // the blocks that may be modelled, then which are
     let mut found: Vec<(Layout, &[u8])> = Vec::new();
     pieces(input, true, &mut |l, z| {

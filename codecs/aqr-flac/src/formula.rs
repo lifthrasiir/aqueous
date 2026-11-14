@@ -36,9 +36,9 @@ const CLASSES: [(&str, StreamKind); N_BYTE_STREAMS + 3] = [
 ];
 
 /// The formula of `input`, a FLAC file, on `threads` threads (the formula does not depend
-/// on it). None where the input is not FLAC, or the coder panics.
+/// on it). None where the input is not FLAC.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    let (c, room) = std::panic::catch_unwind(|| codec::encode_threads(input, threads)).ok()??;
+    let (c, room) = codec::encode_threads(input, threads)?;
     let mut f = Formula::default();
     let [raw0, raw1] = c.raw;
     let slots = c.streams.into_iter().chain([c.words, raw0, raw1]).map(Cow::into_owned);

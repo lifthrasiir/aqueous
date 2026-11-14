@@ -36,7 +36,7 @@ pub fn encode_against(input: &[u8], reference: &[u8], threads: usize) -> Option<
 }
 
 /// The parts of `input` for a formula, against `refs` if given, with the records coded `alone`
-/// if known, else coded alone too `also_alone` (no panic gets out).
+/// if known, else coded alone too `also_alone`.
 fn parts(
     input: &[u8],
     threads: usize,
@@ -44,7 +44,7 @@ fn parts(
     alone: Option<&[&[u8]]>,
     also_alone: bool,
 ) -> Option<Parts> {
-    std::panic::catch_unwind(|| codec::formula_parts(input, threads, refs, alone, also_alone)).ok()?
+    codec::formula_parts(input, threads, refs, alone, also_alone)
 }
 
 /// A file's skeleton and the records of its images, as [`encode`] made them.

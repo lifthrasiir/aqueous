@@ -10,7 +10,7 @@ use common::{build, eval};
 /// trip, and that there is a formula. Returns the archive's size.
 fn check(name: &str, db: &[u8]) -> usize {
     use aqr_formula::aqr::{self, Level};
-    let opt = Options { verify: false, catch: false, ..Default::default() };
+    let opt = Options { verify: false, ..Default::default() };
     let f = formula::encode_with(db, &opt).unwrap_or_else(|| panic!("{name}: no formula"));
     assert_eq!(eval(&f, 1).unwrap(), db, "{name}");
     aqr::encode(&f, Some(aqr::checksum(db)), Level::Zstd(3)).unwrap().len()
@@ -159,7 +159,7 @@ fn threads_same_streams() {
     }
     for (name, db) in &dbs {
         for verify in [true, false] {
-            let one = Options { verify, threads: 1, ..Default::default() };
+            let one = Options { verify, threads: 1 };
             let f1 = formula::encode_with(db, &one).unwrap_or_else(|| panic!("{name}: no formula"));
             for threads in [2, 3, 8] {
                 let f = formula::encode_with(db, &Options { threads, ..one }).unwrap();

@@ -32,24 +32,21 @@ pub fn encode_with(input: &[u8], opts: &Options) -> Option<Formula> {
     encode_stats(input, opts, &mut Stats::default())
 }
 
-/// [`encode_with`], and what the encoder did (as of the last attempt, if a panic or a failed
-/// verification made it code the file again).
+/// [`encode_with`], and what the encoder did (as of the last attempt, if a failed verification made
+/// it code the file again).
 pub fn encode_stats(input: &[u8], opts: &Options, st: &mut Stats) -> Option<Formula> {
     let attempt = |o: &Options| {
-        std::panic::catch_unwind(|| {
-            let mut s = Stats::default();
-            let f = encode::try_formula(input, o, &mut s);
-            (f, s)
-        })
-        .ok()
+        let mut s = Stats::default();
+        let f = encode::try_formula(input, o, &mut s);
+        (f, s)
     };
-    let (mut res, mut s) = attempt(opts)?;
+    let (mut res, mut s) = attempt(opts);
     if opts.verify
         && let Some(f) = &res
         && f.eval(&|a: &Apply, i: &[&[u8]]| apply(a, i, opts.threads)).as_deref() != Ok(input)
     {
         let o = Options { tok: false, full: false, png: false, ..opts.clone() };
-        (res, s) = attempt(&o)?;
+        (res, s) = attempt(&o);
     }
     *st = s;
     res

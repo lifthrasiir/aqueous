@@ -65,7 +65,7 @@ pub fn encode(d: &[u8], threads: usize) -> Option<Formula> {
     let choices = match known {
         Some(c) => c,
         None => {
-            let c = std::panic::catch_unwind(|| crate::infer_if(d, LEAST, threads)).ok().flatten();
+            let c = crate::infer_if(d, LEAST, threads);
             let c = c.filter(|c| !c.is_empty()).map(Arc::new);
             let mut k = KNOWN.lock().unwrap();
             let k = k.get_or_insert_with(HashMap::new);

@@ -182,7 +182,11 @@ pub(crate) fn sets(
                     _ => None,
                 })
                 .collect();
-            match aqr_png::formula::encode_set(&files, parents, &alone, opt.threads) {
+            match crate::caught("png-set", files.iter().map(|f| f.len()).sum(), || {
+                aqr_png::formula::encode_set(&files, parents, &alone, opt.threads)
+            })
+            .flatten()
+            {
                 Some(set) => out.push(Set { f: set, members }),
                 None => {
                     // as contents of their own, those with a parent made now
@@ -214,7 +218,10 @@ pub(crate) fn sets(
         // the formulas alone, taken out (and put back if the set is not taken)
         let formulas: Vec<Option<Formula>> = members.iter().map(|&m| children[m].1.take().map(|c| c.f)).collect();
         let alone: usize = formulas.iter().flatten().map(records).sum();
-        let set = aqr_png::formula::encode_set(&files, &parents, &formulas, opt.threads);
+        let set = crate::caught("png-set", files.iter().map(|f| f.len()).sum(), || {
+            aqr_png::formula::encode_set(&files, &parents, &formulas, opt.threads)
+        })
+        .flatten();
         let Some(set) = set.filter(|s| records(s) < alone) else {
             for (&m, f) in members.iter().zip(formulas) {
                 children[m].1 = f.map(Made::from);
