@@ -389,8 +389,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "mca-recons",
-        version: 1,
-        sha512_256: hex("8044f1762bde6917ff3152abd74d303d533b4914b0375bfea99701ef41631cb3"),
+        version: 2,
+        sha512_256: hex("0b7dbca62ccd1bdb88447094e38458d4cad776d4352547fd0396e95ded1a4701"),
         block: include_bytes!("../wasm/mca-recons.block"),
     },
     Known {

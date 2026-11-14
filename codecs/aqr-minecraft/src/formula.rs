@@ -5,14 +5,18 @@
 use aqr_flate::zlib::{Params, Strategy};
 use aqr_formula::{Formula, Kind, Module, Node};
 
+use aqr_common::arith::ArithEncoder;
+
 use crate::layout::{self, CHUNK_HEADER, Chunks, How, Writer};
+use crate::model::{self, Coder, Model, Work};
+use crate::nbt::{self, BLOCKS, There};
 use crate::region::{self, Chunk, HEADER, NONE, ZLIB};
 use crate::{Result, corrupt};
 
 pub use crate::module::decode;
 
 /// A region file made of its chunks' data ([`decode`]), a part module.
-pub const MODULE: Module = Module::new("mca-recons", 1).with_plan(memory);
+pub const MODULE: Module = Module::new("mca-recons", 2).with_plan(memory);
 
 /// The memory of the module: its plan ([`crate::module::plan`]), of its header and layout.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -33,6 +37,80 @@ const SAMPLES: usize = 4;
 struct Done {
     data: Vec<u8>,
     how: How,
+    /// Of an NBT with holes.
+    nbt: Option<Nbt>,
+}
+
+/// An NBT's holes: whether each candidate is one, their payloads' offsets and lengths, and the
+/// skeleton.
+struct Nbt {
+    holes: Vec<bool>,
+    ranges: Vec<(u32, u32)>,
+    skeleton: Vec<u8>,
+}
+
+/// The holes of the NBT `d` (whether each candidate is one) and its skeleton, or None where it is
+/// not an NBT (of [`nbt::parse`]) or has none.
+fn holes(d: &mut [u8], secs: &mut Vec<nbt::Section>, frames: &mut Vec<nbt::Frame>) -> Option<Nbt> {
+    let mut found = Vec::new();
+    nbt::parse(d, &mut There, secs, frames, &mut |c| {
+        found.push(c);
+        Ok(false)
+    })
+    .ok()?;
+    let holes: Vec<bool> = found
+        .iter()
+        .map(|c| match c.kind {
+            BLOCKS => model::blocks_hole(d, &secs[c.section as usize]),
+            _ => !secs[c.section as usize].twice,
+        })
+        .collect();
+    if !holes.contains(&true) {
+        return None;
+    }
+    let ranges: Vec<(u32, u32)> = found.iter().zip(&holes).filter(|(_, h)| **h).map(|(c, _)| (c.at, c.len)).collect();
+    let mut skeleton = Vec::with_capacity(d.len());
+    let mut at = 0;
+    for &(a, len) in &ranges {
+        skeleton.extend_from_slice(&d[at..a as usize]);
+        at = (a + len) as usize;
+    }
+    skeleton.extend_from_slice(&d[at..]);
+    Some(Nbt { holes, ranges, skeleton })
+}
+
+/// The holes of the chunks of a file coded, in order, by one model: each chunk's bytes, or None
+/// where the model does not make its data again.
+fn code(done: &[Done]) -> Option<Vec<Option<Vec<u8>>>> {
+    let (mut m, mut w) = (Model::new(), Work::new());
+    let (mut secs, mut frames) = (Vec::with_capacity(nbt::SECTIONS), nbt::frames());
+    let mut out = Vec::with_capacity(done.len());
+    for d in done {
+        let Some(n) = &d.nbt else {
+            out.push(None);
+            continue;
+        };
+        // the data with its holes zero, filled as they are coded
+        let mut z = d.data.clone();
+        for &(at, len) in &n.ranges {
+            z[at as usize..(at + len) as usize].fill(0);
+        }
+        let mut c = ArithEncoder::new(Vec::new());
+        let mut j = 0;
+        nbt::parse(&mut z, &mut There, &mut secs, &mut frames, &mut |cand| {
+            let h = n.holes[j];
+            j += 1;
+            Ok(c.bit(m.flag(cand.kind), h))
+        })
+        .ok()?;
+        model::chunk(&mut c, &mut m, &mut w, &mut z, &secs, Some(&d.data)).ok()?;
+        if z != d.data {
+            debug_assert!(false, "holes not made again");
+            return None;
+        }
+        out.push(Some(c.finish()));
+    }
+    Some(out)
 }
 
 /// The data of the zlib stream `z`, which must end where `z` does, of at most `max` bytes.
@@ -116,38 +194,33 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let params = find_params(&samples);
     let total = std::sync::atomic::AtomicU64::new(0);
     let done: Vec<Done> = aqr_common::pool::par_map(chunks.len(), threads, |i| {
-        let c = &chunks[i];
-        let at = c.range().start;
-        let len = u32::from_be_bytes(input[at..at + 4].try_into().unwrap()) as usize;
-        let kept = Done { data: Vec::new(), how: How::Kept };
-        match input[at + 4] {
-            NONE => {
-                Done { data: input[at + CHUNK_HEADER..at + 4 + len].to_vec(), how: How::Stored { n: len as u64 - 1 } }
-            }
-            ZLIB => {
-                let (Some(p), Some(z)) = (params, zlib_stream(input, c)) else { return kept };
-                let Some(data) = inflate(z, budget) else { return kept };
-                let sum = total.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed) + data.len() as u64;
-                if sum > budget || layout::zlib_onto(&data, p, Vec::new()).ok().as_deref() != Some(z) {
-                    return kept;
-                }
-                Done { how: How::Rebuilt { n: data.len() as u64, len: z.len() }, data }
-            }
-            _ => kept,
+        let mut d = made(input, &chunks[i], params, budget, &total);
+        if d.how != How::Kept {
+            let (mut secs, mut frames) = (Vec::new(), nbt::frames());
+            d.nbt = holes(&mut d.data, &mut secs, &mut frames);
         }
+        d
     });
     if done.iter().all(|d| d.how == How::Kept) {
         return None;
     }
+    let coded = code(&done)?;
     let mut w = Writer::new(input);
     let mut data = Vec::with_capacity(done.iter().map(|d| d.data.len()).sum());
-    for (c, d) in chunks.iter().zip(&done) {
-        w.chunk(c, d.how);
-        data.extend_from_slice(&d.data);
+    let mut holes = Vec::new();
+    for ((c, d), z) in chunks.iter().zip(&done).zip(&coded) {
+        w.chunk(c, d.how, z.as_ref().map(|z| z.len() as u64));
+        match (&d.nbt, z) {
+            (Some(n), Some(z)) => {
+                data.extend_from_slice(&n.skeleton);
+                holes.extend_from_slice(z);
+            }
+            _ => data.extend_from_slice(&d.data),
+        }
     }
     let (layout, kept) = w.finish();
     // The layout must give the file back with the streams as they are: a check of everything but
-    // zlib's emulation, which is cheap.
+    // zlib's emulation and the model, which is cheap.
     if !check(input, &layout, &chunks, &done, &kept) {
         return None;
     }
@@ -158,8 +231,37 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let layout = f.push_as("mca/layout", Kind::Table, layout);
     let data = f.push_as("mca/data", Kind::Table, data);
     let kept = f.push("mca/kept", kept);
-    f.root = Node::apply(MODULE, layout::params_of(p), vec![header, layout, data, kept], input.len() as u64);
+    let holes = f.push_as("mca/holes", Kind::Compressed, holes);
+    let inputs = vec![header, layout, data, kept, holes];
+    f.root = Node::apply(MODULE, layout::params_of(p), inputs, input.len() as u64);
     Some(f)
+}
+
+/// What becomes of the chunk `c` of `input`: its data (of zlib's stream, made again of the
+/// parameters `params`, or stored), all the chunks' data at most `budget` bytes (`total` so far).
+fn made(input: &[u8], c: &Chunk, params: Option<Params>, budget: u64, total: &std::sync::atomic::AtomicU64) -> Done {
+    {
+        let at = c.range().start;
+        let len = u32::from_be_bytes(input[at..at + 4].try_into().unwrap()) as usize;
+        let kept = Done { data: Vec::new(), how: How::Kept, nbt: None };
+        match input[at + 4] {
+            NONE => Done {
+                data: input[at + CHUNK_HEADER..at + 4 + len].to_vec(),
+                how: How::Stored { n: len as u64 - 1 },
+                nbt: None,
+            },
+            ZLIB => {
+                let (Some(p), Some(z)) = (params, zlib_stream(input, c)) else { return kept };
+                let Some(data) = inflate(z, budget) else { return kept };
+                let sum = total.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed) + data.len() as u64;
+                if sum > budget || layout::zlib_onto(&data, p, Vec::new()).ok().as_deref() != Some(z) {
+                    return kept;
+                }
+                Done { how: How::Rebuilt { n: data.len() as u64, len: z.len() }, data, nbt: None }
+            }
+            _ => kept,
+        }
+    }
 }
 
 /// Whether the layout makes `input` again, of the streams as they are.
@@ -170,12 +272,12 @@ fn check(input: &[u8], layout: &[u8], chunks: &[Chunk], done: &[Done], kept: &[u
         at: usize,
     }
     impl Chunks for Original<'_> {
-        fn rebuilt(&mut self, _: u64, mut out: Vec<u8>) -> Result<Vec<u8>> {
+        fn rebuilt(&mut self, _: u64, _: Option<u64>, mut out: Vec<u8>) -> Result<Vec<u8>> {
             out.extend_from_slice(self.streams.get(self.at).ok_or_else(corrupt)?);
             self.at += 1;
             Ok(out)
         }
-        fn stored(&mut self, _: u64, out: &mut dyn aqr_api::stream::Put) -> Result<()> {
+        fn stored(&mut self, _: u64, _: Option<u64>, out: &mut dyn aqr_api::stream::Put) -> Result<()> {
             let d = self.data.get(self.at).ok_or_else(corrupt)?;
             self.at += 1;
             out.put(d).ok_or_else(corrupt)

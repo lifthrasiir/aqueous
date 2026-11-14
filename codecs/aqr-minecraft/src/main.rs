@@ -34,7 +34,7 @@ fn inputs(f: &Formula) -> Vec<&[u8]> {
         .collect()
 }
 
-const NAMES: [&str; 4] = ["header", "layout", "data", "kept"];
+const NAMES: [&str; 5] = ["header", "layout", "data", "kept", "holes"];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -59,9 +59,9 @@ fn main() {
     // (files at once, each on a thread)
     let (mut enc, mut dec) = (0f64, 0f64);
     let mut input = 0u64;
-    let mut streams = [0u64; 4];
-    let mut batches: [Vec<Vec<u8>>; 4] = Default::default();
-    let mut current: [Vec<u8>; 4] = Default::default();
+    let mut streams = [0u64; 5];
+    let mut batches: [Vec<Vec<u8>>; 5] = Default::default();
+    let mut current: [Vec<u8>; 5] = Default::default();
     let (mut taken, mut failed) = (0, 0);
     let t0 = Instant::now();
     for group in paths.chunks(threads.max(1)) {
@@ -113,7 +113,7 @@ fn main() {
         input as f64 / 1e6 / enc,
         input as f64 / 1e6 / dec
     );
-    for k in 0..4 {
+    for k in 0..5 {
         print!("{:>7}: {:>10.3} MB", NAMES[k], streams[k] as f64 / 1e6);
         if let Some(l) = level {
             let mut b = std::mem::take(&mut batches[k]);

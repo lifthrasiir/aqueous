@@ -4,7 +4,7 @@ use aqr_api::stream::{Reader, Slice};
 use aqr_common::rng::Rng;
 use aqr_flate::zlib::{Params, Strategy};
 use aqr_formula::Node;
-use aqr_minecraft::layout::{self, Streamed};
+use aqr_minecraft::layout::{self, Holes, Source, Streamed};
 use aqr_minecraft::region::{self, EXTERNAL, HEADER, LZ4, NONE, SECTOR, ZLIB};
 use aqr_minecraft::{formula, module};
 
@@ -18,7 +18,12 @@ enum Kind {
     Stored,
     Lz4,
     External,
+    /// The NBT of a chunk of so many sections (`common::chunk`), zlib of level 6, or stored.
+    Nbt,
+    NbtStored,
 }
+
+mod common;
 
 const L6: Params = Params { level: 6, strategy: Strategy::Default, wbits: 15, mem: 8 };
 const L9: Params = Params { level: 9, ..L6 };
@@ -49,8 +54,13 @@ fn region_of(seed: u64, chunks: &[(u16, Kind, usize)], tail: &[u8]) -> Vec<u8> {
     let mut f = vec![0; HEADER];
     for (k, &i) in order.iter().enumerate() {
         let (index, kind, n) = chunks[i];
-        let d = data(&mut rng, n);
+        let d = match kind {
+            Kind::Nbt | Kind::NbtStored => common::chunk(rng.u64(), n),
+            _ => data(&mut rng, n),
+        };
         let (t, body) = match kind {
+            Kind::Nbt => (ZLIB, layout::zlib_onto(&d, L6, Vec::new()).unwrap()),
+            Kind::NbtStored => (NONE, d),
             Kind::Zlib(p) => (ZLIB, layout::zlib_onto(&d, p, Vec::new()).unwrap()),
             Kind::Other => {
                 let mut z = layout::zlib_onto(&d, Params { level: 1, ..L6 }, Vec::new()).unwrap();
@@ -109,10 +119,13 @@ fn both(params: &[u8], ins: &[Vec<u8>], len: u64) -> [Result<Vec<u8>, aqr_minecr
         if ins[0].len() != HEADER {
             return Err(aqr_minecraft::corrupt());
         }
-        let (mut l, mut d, mut k) = (Slice(&ins[1]), Slice(&ins[2]), Slice(&ins[3]));
+        let (mut l, mut d, mut k, mut c) = (Slice(&ins[1]), Slice(&ins[2]), Slice(&ins[3]), Slice(&ins[4]));
         let mut layout = Reader::new(&mut l, 7);
         let mut kept = Reader::new(&mut k, 300);
-        let mut chunks = Streamed { data: Reader::new(&mut d, 1000), left: ins[2].len() as u64, params: p };
+        let (data, coded) = (Reader::new(&mut d, 1000), Reader::new(&mut c, 500));
+        let (left, coded_left) = (ins[2].len() as u64, ins[4].len() as u64);
+        let src = Source { data, coded, left, coded_left, holes: Holes::new() };
+        let mut chunks = Streamed { src, params: p };
         let mut out = Vec::new();
         layout::build_stream(&header, &mut layout, &mut chunks, &mut kept, len, &mut out)?;
         match out.len() as u64 == len {
@@ -156,6 +169,25 @@ fn chunks_of_every_kind_made_again() {
     for tail in [&[0u8; 100][..], &[0; SECTOR][..], &[1, 2, 3][..]] {
         round_trip("tail", &region_of(2, &mixed(), tail));
     }
+}
+
+/// Chunks of NBT: their sections' block states and light coded by the model (the holes, a
+/// stream of their own) and the rest of the NBT kept as the data, of zlib's chunks and stored
+/// ones, among others that are no NBT; made again both ways, and the holes smaller than zstd
+/// would make them.
+#[test]
+fn nbt_holes_coded() {
+    let mut chunks: Vec<(u16, Kind, usize)> = (0..12).map(|i| (i * 3, Kind::Nbt, 4 + i as usize * 2)).collect();
+    chunks.push((100, Kind::NbtStored, 24));
+    chunks.push((200, Kind::Zlib(L6), 3000));
+    chunks.push((300, Kind::Nbt, 0));
+    let file = region_of(11, &chunks, &[]);
+    let ins = round_trip("nbt", &file);
+    let nbt: usize = chunks.iter().filter(|c| c.1 == Kind::Nbt).map(|c| common::chunk(0, c.2).len()).sum();
+    let (data, holes) = (ins[2].len(), ins[4].len());
+    assert!(holes > 0 && data < nbt / 2, "data {data}, holes {holes}, NBT {nbt}");
+    let z = zstd::bulk::compress(&ins[2], 3).unwrap().len();
+    assert!(holes + z < nbt / 8, "the holes {holes} and the data at zstd {z}, of {nbt}");
 }
 
 #[test]

@@ -6438,8 +6438,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lzx-recons.wasm" title="crates/aqr-modules/wasm/lzx-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzx/FORMAT.md" title="codecs/aqr-lzx/FORMAT.md">R</a>
     <tr>
-      <td><code>8044f1762bde6917ff3152abd74d303d533b4914b0375bfea99701ef41631cb3</code>
-      <td>mca-recons@1
+      <td><code>0b7dbca62ccd1bdb88447094e38458d4cad776d4352547fd0396e95ded1a4701</code>
+      <td>mca-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/mca-recons.wasm" title="crates/aqr-modules/wasm/mca-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-minecraft/FORMAT.md" title="codecs/aqr-minecraft/FORMAT.md">R</a>
     <tr>

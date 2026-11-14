@@ -376,9 +376,13 @@ optimization picked by hash.
 - aqr-minecraft (Java Edition's region files, `.mca`; `mca-recons`): each chunk's zlib stream made
   again of its NBT by aqr-flate's zlib emulation (Minecraft writes level 6: every chunk of the
   18 GB sample world), the header and the stale bytes Minecraft leaves in freed sectors kept. A
-  part module, a chunk at a time. Samples: `F:\Data\aqr-corpus\minecraft-world-sample` (its
-  Distant Horizons databases are for later: aqr-sqlite). Left (its README's Status): the NBT
-  itself (palettes unpacked, light from the blocks), LZ4 chunks.
+  part module, a chunk at a time. Version 2 codes the NBT's holes apart (`src/nbt.rs`,
+  `src/model.rs`): the sections' block states (each index as one of its neighbours, a row as the
+  one below) and light (top down, of the light above, west and north and the block's hash) by a
+  binary model kept over a file's chunks; the rest is the chunk's skeleton (42% smaller than v1
+  on the Overworld's regions, compressing 32% and testing 64% slower). Samples:
+  `F:\Data\aqr-corpus\minecraft-world-sample` (its Distant Horizons databases: aqr-zstd's
+  `zstd-frames`). Left (its README's Status): DH's LODs derived, LZ4 chunks, speed.
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by

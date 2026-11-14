@@ -6,7 +6,9 @@
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod layout;
+pub mod model;
 pub mod module;
+pub mod nbt;
 pub mod region;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

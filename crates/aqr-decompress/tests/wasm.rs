@@ -5788,16 +5788,25 @@ fn git_plans_hold() {
     assert!((36.0..36.1).contains(&per_entry), "{per_entry} bytes for an entry");
 }
 
-/// A region file of `n` chunks of zlib (level 6) of data of `size(i)` bytes, every seventh stored
-/// as it is and every eleventh LZ4's (kept), laid out backwards, with stale bytes after every
-/// third stream.
-fn mca_file(n: usize, size: impl Fn(usize) -> usize) -> Vec<u8> {
+/// Chunks' NBT made up (aqr-minecraft's tests').
+#[path = "../../../codecs/aqr-minecraft/tests/common/mod.rs"]
+mod mca_nbt;
+
+/// Data of `n` bytes, as NBT's names.
+fn mca_words(i: usize, n: usize) -> Vec<u8> {
+    let words = b"sections Name minecraft:stone minecraft:air ";
+    (0..n).map(|k| words[(k * 7 + i) % words.len()] ^ (k % 251 == 0) as u8).collect()
+}
+
+/// A region file of `n` chunks of zlib (level 6) of the data `data(i)`, every seventh stored as
+/// it is and every eleventh LZ4's (kept), laid out backwards, with stale bytes after every third
+/// stream.
+fn mca_file(n: usize, data: impl Fn(usize) -> Vec<u8>) -> Vec<u8> {
     use aqr_minecraft::region::{HEADER, LZ4, NONE, SECTOR, ZLIB};
     let p = aqr_flate::zlib::Params::default();
     let mut f = vec![0; HEADER];
     for i in (0..n).rev() {
-        let words = b"sections Name minecraft:stone minecraft:air ";
-        let d: Vec<u8> = (0..size(i)).map(|k| words[(k * 7 + i) % words.len()] ^ (k % 251 == 0) as u8).collect();
+        let d = data(i);
         let (t, body) = match i {
             _ if i % 11 == 10 => (LZ4, d[..d.len() / 3].to_vec()),
             _ if i % 7 == 6 => (NONE, d),
@@ -5818,13 +5827,14 @@ fn mca_file(n: usize, size: impl Fn(usize) -> usize) -> Vec<u8> {
 
 /// mca-recons (a part module) lays its memory out as a stack, its limit its plan: a chunk at a
 /// time, the plan of the largest rebuilt (here one of 3 MB of data, of streams of many blocks),
-/// the same natively and as WebAssembly.
+/// the model of the chunks' NBT and its walks, the same natively and as WebAssembly.
 #[test]
 fn mca_plans_hold() {
     let files = [
-        ("one", mca_file(1, |_| 100)),
-        ("many", mca_file(300, |i| 200 + 397 * i)),
-        ("large", mca_file(20, |i| if i == 4 { 3 << 20 } else { 30_000 })),
+        ("one", mca_file(1, |i| mca_words(i, 100))),
+        ("many", mca_file(300, |i| mca_words(i, 200 + 397 * i))),
+        ("large", mca_file(20, |i| mca_words(i, if i == 4 { 3 << 20 } else { 30_000 }))),
+        ("nbt", mca_file(30, |i| mca_nbt::chunk(i as u64, 1 + i % 24))),
     ];
     let archive = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
     for (what, d) in files {

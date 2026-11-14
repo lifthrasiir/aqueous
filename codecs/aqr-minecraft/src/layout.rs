@@ -4,9 +4,12 @@
 //! and the bytes kept, all taken in order in pieces and the file put in order.
 
 use aqr_api::stream::{Pull, Put, Reader};
+use aqr_common::arith::ArithDecoder;
 use aqr_common::varint;
 use aqr_flate::zlib::{Params, Strategy};
 
+use crate::model::{self, Coder, Model, Work};
+use crate::nbt;
 use crate::region::{self, Chunk, HEADER, NONE, SECTOR, ZLIB};
 use crate::{Result, corrupt};
 
@@ -20,8 +23,11 @@ pub const HOW: u64 = 3;
 /// else zero; the bytes after its stream in its last sector are kept, else zero.
 pub const GAP_KEPT: u64 = 4;
 pub const PAD_KEPT: u64 = 8;
+/// A bit of a tag: the chunk's data is its NBT's skeleton, its holes coded (a varint after the
+/// tag, of the bytes of `coded` they take).
+pub const NBT: u64 = 16;
 /// The tag's bits below the length of the chunk's data (of one made or stored).
-pub const SHIFT: u32 = 4;
+pub const SHIFT: u32 = 5;
 
 /// The last byte of the layout: the bytes after the last chunk are kept, else zero.
 pub const TAIL_KEPT: u8 = 1;
@@ -92,8 +98,9 @@ impl<'a> Writer<'a> {
         zero
     }
 
-    /// The chunk `c`, the next by its sectors, made as `how` tells.
-    pub fn chunk(&mut self, c: &Chunk, how: How) {
+    /// The chunk `c`, the next by its sectors, made as `how` tells, its data's holes `coded` in
+    /// so many bytes where its data is its NBT's skeleton.
+    pub fn chunk(&mut self, c: &Chunk, how: How, coded: Option<u64>) {
         let (r, file) = (c.range(), self.file);
         let mut tag = 0;
         if !self.zero_or_kept(&file[self.at..r.start]) {
@@ -109,7 +116,13 @@ impl<'a> Writer<'a> {
         } else if !self.zero_or_kept(&file[end..r.end]) {
             tag |= PAD_KEPT;
         }
+        if coded.is_some() {
+            tag |= NBT;
+        }
         varint::put(&mut self.layout, tag | how | n << SHIFT);
+        if let Some(c) = coded {
+            varint::put(&mut self.layout, c);
+        }
         self.at = r.end;
     }
 
@@ -124,40 +137,128 @@ impl<'a> Writer<'a> {
 
 /// What [`build_stream`] takes the chunks' data by.
 pub trait Chunks {
-    /// The zlib stream of the next rebuilt chunk, of `n` bytes of data, appended to `out` (the
-    /// buffer of the chunk's sectors, of the length and compression type before the stream).
-    fn rebuilt(&mut self, n: u64, out: Vec<u8>) -> Result<Vec<u8>>;
-    /// The next `n` bytes of data, put to `out`.
-    fn stored(&mut self, n: u64, out: &mut dyn Put) -> Result<()>;
+    /// The zlib stream of the next rebuilt chunk, of `n` bytes of data (its holes `coded` in so
+    /// many bytes, where it is of an NBT's skeleton), appended to `out` (the buffer of the chunk's
+    /// sectors, of the length and compression type before the stream).
+    fn rebuilt(&mut self, n: u64, coded: Option<u64>, out: Vec<u8>) -> Result<Vec<u8>>;
+    /// The next `n` bytes of data (as [`Chunks::rebuilt`]), put to `out`.
+    fn stored(&mut self, n: u64, coded: Option<u64>, out: &mut dyn Put) -> Result<()>;
     /// Whether every byte of data was taken.
     fn done(&mut self) -> bool;
 }
 
-/// The chunks' data taken in order of a stream, each rebuilt chunk's zlib stream made of its data
-/// as it comes: a buffer of its data, then of its sectors, and zlib's emulator, are what a chunk
-/// holds.
-pub struct Streamed<'a> {
+/// The chunks' data taken in order of the streams `data` and `coded`: the data as it is, or an
+/// NBT's skeleton and its holes coded, made again by the model of the file ([`Holes`]).
+pub struct Source<'a> {
     pub data: Reader<'a>,
-    /// The bytes of data not taken yet.
+    pub coded: Reader<'a>,
+    /// The bytes of each not taken yet.
     pub left: u64,
+    pub coded_left: u64,
+    pub holes: Holes,
+}
+
+/// The model of a file's holes, and the buffers of its walks.
+pub struct Holes {
+    pub model: Model,
+    pub work: Work,
+    pub sections: Vec<nbt::Section>,
+    pub frames: Vec<nbt::Frame>,
+}
+
+impl Default for Holes {
+    fn default() -> Self {
+        Holes::new()
+    }
+}
+
+impl Holes {
+    pub fn new() -> Holes {
+        Holes {
+            model: Model::new(),
+            work: Work::new(),
+            sections: Vec::with_capacity(nbt::SECTIONS),
+            frames: nbt::frames(),
+        }
+    }
+}
+
+/// The skeleton's bytes of a [`Reader`].
+struct Skeleton<'r, 'a> {
+    src: &'r mut Reader<'a>,
+    left: &'r mut u64,
+}
+
+impl nbt::Fill for Skeleton<'_, '_> {
+    fn fill(&mut self, d: &mut [u8]) -> Result<()> {
+        *self.left = self.left.checked_sub(d.len() as u64).ok_or_else(corrupt)?;
+        self.src.exact(d).ok_or_else(corrupt)
+    }
+}
+
+impl Source<'_> {
+    /// The next chunk's data, of `n` bytes, its holes `coded` in so many bytes where given.
+    pub fn next(&mut self, n: u64, coded: Option<u64>) -> Result<Vec<u8>> {
+        let mut d = vec![0; usize::try_from(n).map_err(|_| corrupt())?];
+        match coded {
+            None => {
+                self.left = self.left.checked_sub(n).ok_or_else(corrupt)?;
+                self.data.exact(&mut d).ok_or_else(corrupt)?;
+            }
+            Some(c) => {
+                self.coded_left = self.coded_left.checked_sub(c).ok_or_else(corrupt)?;
+                let mut z = vec![0; usize::try_from(c).map_err(|_| corrupt())?];
+                self.coded.exact(&mut z).ok_or_else(corrupt)?;
+                let mut skeleton = Skeleton { src: &mut self.data, left: &mut self.left };
+                decode_holes(&mut self.holes, &z, &mut d, &mut skeleton)?;
+            }
+        }
+        Ok(d)
+    }
+
+    /// Whether every byte of both was taken.
+    pub fn done(&mut self) -> bool {
+        self.left == 0 && self.coded_left == 0 && self.data.done() && self.coded.done()
+    }
+}
+
+/// The NBT `d` made again of its skeleton (of `src`) and its holes coded in `z`.
+pub fn decode_holes(h: &mut Holes, z: &[u8], d: &mut [u8], src: &mut dyn nbt::Fill) -> Result<()> {
+    let mut c = ArithDecoder::new(z);
+    let Holes { model, work, sections, frames } = h;
+    nbt::parse(d, src, sections, frames, &mut |cand| Ok(c.bit(model.flag(cand.kind), false)))?;
+    model::chunk(&mut c, model, work, d, sections, None)?;
+    match c.failed() {
+        false => Ok(()),
+        true => Err(corrupt()),
+    }
+}
+
+/// The chunks' data of a [`Source`], each rebuilt chunk's zlib stream made of its data as it
+/// comes: a buffer of its sectors, then of its data (and of its holes coded), then zlib's
+/// emulator, are what a chunk holds.
+pub struct Streamed<'a> {
+    pub src: Source<'a>,
     pub params: Params,
 }
 
 impl Chunks for Streamed<'_> {
-    fn rebuilt(&mut self, n: u64, out: Vec<u8>) -> Result<Vec<u8>> {
-        self.left = self.left.checked_sub(n).ok_or_else(corrupt)?;
-        let mut d = vec![0; usize::try_from(n).map_err(|_| corrupt())?];
-        self.data.exact(&mut d).ok_or_else(corrupt)?;
+    fn rebuilt(&mut self, n: u64, coded: Option<u64>, out: Vec<u8>) -> Result<Vec<u8>> {
+        let d = self.src.next(n, coded)?;
         zlib_onto(&d, self.params, out)
     }
 
-    fn stored(&mut self, n: u64, out: &mut dyn Put) -> Result<()> {
-        self.left = self.left.checked_sub(n).ok_or_else(corrupt)?;
-        self.data.each(n, |b| out.put(b)).ok_or_else(corrupt)
+    fn stored(&mut self, n: u64, coded: Option<u64>, out: &mut dyn Put) -> Result<()> {
+        if coded.is_some() {
+            let d = self.src.next(n, coded)?;
+            return out.put(&d).ok_or_else(corrupt);
+        }
+        self.src.left = self.src.left.checked_sub(n).ok_or_else(corrupt)?;
+        self.src.data.each(n, |b| out.put(b)).ok_or_else(corrupt)
     }
 
     fn done(&mut self) -> bool {
-        self.left == 0 && self.data.done()
+        self.src.done()
     }
 }
 
@@ -203,17 +304,33 @@ pub fn read_header(src: &mut dyn Pull) -> Result<Vec<u8>> {
     Ok(h)
 }
 
-/// What the tags of the layout tell of each chunk made of its data, in order: the bytes of its data
-/// and whether it is rebuilt (else stored).
-pub fn made(header: &[u8], layout: &[u8], size: u64) -> Result<Vec<(u64, bool)>> {
+/// What the layout tells of a chunk made of its data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Made {
+    /// The bytes of its data, whether it is rebuilt (else stored), and the bytes of its holes
+    /// coded (where its data is an NBT's skeleton).
+    pub n: u64,
+    pub rebuilt: bool,
+    pub coded: Option<u64>,
+    /// Bytes of its sectors.
+    pub sectors: u64,
+}
+
+/// What the layout tells of each chunk made of its data, in order.
+pub fn made(header: &[u8], layout: &[u8], size: u64) -> Result<Vec<Made>> {
     let chunks = region::chunks(header, size / SECTOR as u64).ok_or_else(corrupt)?;
     let mut at = 0;
     let mut v = Vec::new();
-    for _ in &chunks {
+    for c in &chunks {
         let tag = varint::get(layout, &mut at)?;
+        let coded = match tag & NBT != 0 && tag & HOW != KEPT {
+            true => Some(varint::get(layout, &mut at)?),
+            false => None,
+        };
+        let sectors = c.count as u64 * SECTOR as u64;
         match tag & HOW {
             KEPT => {}
-            h => v.push((tag >> SHIFT, h == REBUILT)),
+            h => v.push(Made { n: tag >> SHIFT, rebuilt: h == REBUILT, coded, sectors }),
         }
     }
     Ok(v)
@@ -239,6 +356,10 @@ pub fn build_stream(
         zero_or_kept(tag & GAP_KEPT != 0, r.start - at, kept, out)?;
         let n = tag >> SHIFT;
         let sectors = r.len();
+        let coded = match tag & NBT != 0 && tag & HOW != KEPT {
+            true => Some(layout.num()?),
+            false => None,
+        };
         let used = match tag & HOW {
             KEPT if tag & !GAP_KEPT == 0 => {
                 kept.each(sectors as u64, |b| out.put(b)).ok_or_else(corrupt)?;
@@ -248,7 +369,7 @@ pub fn build_stream(
                 let mut buf = Vec::with_capacity(sectors + aqr_flate::write::TOKEN_SLACK);
                 buf.extend([0; 4]);
                 buf.push(ZLIB);
-                let mut buf = chunks.rebuilt(n, buf)?;
+                let mut buf = chunks.rebuilt(n, coded, buf)?;
                 let len = buf.len().checked_sub(4).filter(|&l| l + 4 <= sectors).ok_or_else(corrupt)?;
                 buf[..4].copy_from_slice(&(len as u32).to_be_bytes());
                 out.put(&buf).ok_or_else(corrupt)?;
@@ -258,7 +379,7 @@ pub fn build_stream(
                 let len = usize::try_from(n).ok().filter(|&n| n <= sectors - CHUNK_HEADER).ok_or_else(corrupt)?;
                 out.put(&((len + 1) as u32).to_be_bytes()).ok_or_else(corrupt)?;
                 out.put(&[NONE]).ok_or_else(corrupt)?;
-                chunks.stored(n, out)?;
+                chunks.stored(n, coded, out)?;
                 len + CHUNK_HEADER
             }
             _ => return Err(corrupt()),
