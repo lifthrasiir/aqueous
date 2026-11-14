@@ -186,8 +186,49 @@ fn write(path: &Path, data: &[u8]) -> Result<(), String> {
     std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// An entry name (WTF-8) as a path component, lossily, with any separators of its own dropped so
-/// that it cannot escape its directory.
+/// An entry name (WTF-8) as a path component, lossily, as a Windows name cannot escape its
+/// directory: separators, `..` and the characters a name cannot have (`<>:"|?*`, controls: a
+/// `C:x` would replace the directory, `x:y` name a stream) as `_`, a dot or a space at its end
+/// as `_`, and `_` before a device's name (`CON`, `NUL.txt`, ...; as `aqr`'s own extraction).
 fn sanitized(name: &[u8]) -> String {
-    String::from_utf8_lossy(name).replace(['/', '\\'], "_").replace("..", "_")
+    let bad = |c: char| c < ' ' || "<>:\"|?*/\\".contains(c);
+    let mut s: String = String::from_utf8_lossy(name).replace(bad, "_").replace("..", "_");
+    if s.ends_with(['.', ' ']) {
+        s.pop();
+        s.push('_');
+    }
+    let stem = s.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    let numbered = |p: &str| {
+        stem.strip_prefix(p).is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']) || ["¹", "²", "³"].contains(&n))
+    };
+    if matches!(&stem[..], "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT") {
+        s.insert(0, '_');
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitized;
+
+    #[test]
+    fn names_stay_in_their_directory() {
+        for (name, want) in [
+            ("a.txt", "a.txt"),
+            ("C:evil", "C_evil"),
+            ("x:ads", "x_ads"),
+            ("\\\\host\\share", "__host_share"),
+            ("..\\..\\x", "____x"),
+            ("a/b", "a_b"),
+            ("what?", "what_"),
+            ("dots..", "dots_"),
+            ("con", "_con"),
+            ("NUL.tar.gz", "_NUL.tar.gz"),
+            ("COM1", "_COM1"),
+            ("COM10", "COM10"),
+            ("console", "console"),
+        ] {
+            assert_eq!(sanitized(name.as_bytes()), want, "{name}");
+        }
+    }
 }
