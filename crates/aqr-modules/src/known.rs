@@ -46,6 +46,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/bc7-recons.block"),
     },
     Known {
+        name: "bcj2",
+        version: 2,
+        sha512_256: hex("e364c14f9288585c0ab8eaf846c8576a94d9f9acfe45459461c308918fb60205"),
+        block: include_bytes!("../wasm/bcj2.block"),
+    },
+    Known {
         name: "bcj-arm",
         version: 2,
         sha512_256: hex("8f3fd3dbf3966a8ecb590084559a4f93bdde14b6a9a50ad4f313e04bffc07dd9"),
@@ -112,12 +118,6 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/bcj-x86.block"),
     },
     Known {
-        name: "bcj2",
-        version: 2,
-        sha512_256: hex("e364c14f9288585c0ab8eaf846c8576a94d9f9acfe45459461c308918fb60205"),
-        block: include_bytes!("../wasm/bcj2.block"),
-    },
-    Known {
         name: "bcn-recons",
         version: 1,
         sha512_256: hex("fc0c88b21c5b9be96204333446e41beb5dfc5c6a65a014eae2c35b6f69e82ca9"),
@@ -160,6 +160,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/dex-recons.block"),
     },
     Known {
+        name: "dh-lods",
+        version: 1,
+        sha512_256: hex("6d4116865f2a131466f5a8b6ec0fc0038aef17c352cdf6537a88eedc6e9735b2"),
+        block: include_bytes!("../wasm/dh-lods.block"),
+    },
+    Known {
         name: "div3-recons",
         version: 2,
         sha512_256: hex("d719e53c14d17fe57c32dcfb145b2cca976e69572a4727aa3e9714e388531c3e"),
@@ -184,6 +190,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/etc-recons.block"),
     },
     Known {
+        name: "exe-recons/arm64",
+        version: 2,
+        sha512_256: hex("78cf95749c7f980cd31edf253aa36afb8bc753cf530eb226fd1a3c5c86e80ae3"),
+        block: include_bytes!("../wasm/exe-recons-arm64.block"),
+    },
+    Known {
         name: "exe-recons/arm64-delta",
         version: 1,
         sha512_256: hex("dbd3de347ffd906cc61c0b1a1fb685e7f1b47c71d2833e00e0c41e16599be597"),
@@ -194,12 +206,6 @@ pub const KNOWN: &[Known] = &[
         version: 1,
         sha512_256: hex("465a349b04736a5d34715cd5217ce5e8665feac7905b245eaeb736dad856d291"),
         block: include_bytes!("../wasm/exe-recons-arm64-remap.block"),
-    },
-    Known {
-        name: "exe-recons/arm64",
-        version: 2,
-        sha512_256: hex("78cf95749c7f980cd31edf253aa36afb8bc753cf530eb226fd1a3c5c86e80ae3"),
-        block: include_bytes!("../wasm/exe-recons-arm64.block"),
     },
     Known {
         name: "exe-recons/cil",
@@ -226,16 +232,16 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/exe-recons-pe-reloc.block"),
     },
     Known {
-        name: "exe-recons/x86-remap",
-        version: 1,
-        sha512_256: hex("7e11d75eff6ea35e5eed13ac5a0f080e5a4ed44923adac59bdd7623863fbb939"),
-        block: include_bytes!("../wasm/exe-recons-x86-remap.block"),
-    },
-    Known {
         name: "exe-recons/x86",
         version: 4,
         sha512_256: hex("dc46cb09845725096eda022eaff56d615ba34fd1483372f042201d86c4648a79"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
+    },
+    Known {
+        name: "exe-recons/x86-remap",
+        version: 1,
+        sha512_256: hex("7e11d75eff6ea35e5eed13ac5a0f080e5a4ed44923adac59bdd7623863fbb939"),
+        block: include_bytes!("../wasm/exe-recons-x86-remap.block"),
     },
     Known {
         name: "fasta-recons",
@@ -358,16 +364,16 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/lz4-recons.block"),
     },
     Known {
-        name: "lzma-recons",
-        version: 4,
-        sha512_256: hex("1c4ca6e00e93af2b880d170010671381d47919e20463bc816b06f9789caaed9b"),
-        block: include_bytes!("../wasm/lzma-recons.block"),
-    },
-    Known {
         name: "lzma2-recons",
         version: 3,
         sha512_256: hex("2d4ab4e49e3847825ce1208edc02e0d397c8afdc9d13350d9ff171ec79fdfa24"),
         block: include_bytes!("../wasm/lzma2-recons.block"),
+    },
+    Known {
+        name: "lzma-recons",
+        version: 4,
+        sha512_256: hex("1c4ca6e00e93af2b880d170010671381d47919e20463bc816b06f9789caaed9b"),
+        block: include_bytes!("../wasm/lzma-recons.block"),
     },
     Known {
         name: "lznt1-recons",
@@ -502,16 +508,16 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/rar5-recons.block"),
     },
     Known {
-        name: "raster-recons-16",
-        version: 1,
-        sha512_256: hex("2e4858b242829592dbdcc037e32ad37c16a96cae44db0aa8dd38dca680370a4c"),
-        block: include_bytes!("../wasm/raster-recons-16.block"),
-    },
-    Known {
         name: "raster-recons",
         version: 1,
         sha512_256: hex("63773d1d5a107c856845be86dc2de897bfd61f9b1f4316a1cf0851082a610ca3"),
         block: include_bytes!("../wasm/raster-recons.block"),
+    },
+    Known {
+        name: "raster-recons-16",
+        version: 1,
+        sha512_256: hex("2e4858b242829592dbdcc037e32ad37c16a96cae44db0aa8dd38dca680370a4c"),
+        block: include_bytes!("../wasm/raster-recons-16.block"),
     },
     Known {
         name: "recs-entries",
@@ -562,16 +568,16 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/wasm-recons.block"),
     },
     Known {
-        name: "wrt-recons-hangul",
-        version: 2,
-        sha512_256: hex("9d5c184ff4736bf54e10966f57542fc74977c9fe2684f1668c05c4d303a59bae"),
-        block: include_bytes!("../wasm/wrt-recons-hangul.block"),
-    },
-    Known {
         name: "wrt-recons",
         version: 3,
         sha512_256: hex("d7a2ad763a9c9ef48cfb8a35ba24b6654e03fa8fbe2879f50109750c8dacc8f8"),
         block: include_bytes!("../wasm/wrt-recons.block"),
+    },
+    Known {
+        name: "wrt-recons-hangul",
+        version: 2,
+        sha512_256: hex("9d5c184ff4736bf54e10966f57542fc74977c9fe2684f1668c05c4d303a59bae"),
+        block: include_bytes!("../wasm/wrt-recons-hangul.block"),
     },
     Known {
         name: "xpress-recons",

@@ -500,6 +500,11 @@ path = "src/bin/mca-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "dh-lods"
+path = "src/bin/dh-lods.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "zstd-frames"
 path = "src/bin/zstd-frames.rs"
 required-features = ["wasm"]

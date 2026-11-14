@@ -1,4 +1,4 @@
-# The `mca-recons` module
+# The `mca-recons` and `dh-lods` modules
 
 This document specifies the module `mca-recons` of aqr-formula entry formulas. The module makes
 a Minecraft region file (Anvil, `.mca`) again bit for bit of its header, the data of its chunks
@@ -9,7 +9,7 @@ application's params: the module stores no DEFLATE of its own. A chunk's data ma
 without the block states and light of its sections (its *skeleton*), those coded apart by a
 model (§4, §5). Sections marked *(encoder)*
 describe the choices this implementation makes when it builds formulas; the module does not
-depend on them.
+depend on them. §8 specifies `dh-lods`, of Distant Horizons' database.
 
 Contents:
 
@@ -20,6 +20,7 @@ Contents:
 5. [The model](#5-the-model)
 6. [Encoding](#6-encoding-encoder)
 7. [Validation](#7-validation)
+8. [The module `dh-lods`](#8-the-module-dh-lods)
 
 ## 1. Conventions
 
@@ -231,3 +232,107 @@ A decoder fails where:
   twice, an index past its palette), or its holes' coder reads past their `h` bytes;
 - a chunk's data does not fit its sectors (`n + 5 > 4096 c`, or `len(z) + 5 > 4096 c`);
 - the inputs end before the output is made, or any of them is not taken up exactly.
+
+## 8. The module `dh-lods`
+
+`dh-lods` version 1 makes the contents of Distant Horizons' blobs (its database's `FullData`),
+one after another, of which aqr-zstd's `zstd-frames` makes their frames: those of the coarser
+levels' sections (*parents*) made of the finer ones' (their *children*), the others stored.
+
+### 8.1 Sections
+
+A row of `FullData` is a section of 64 by 64 columns (column `i = x * 64 + z`), its eight blobs,
+in this order (*blob* 0 to 7): `Data` (the columns of `x` and `z` from 1 to 62), `NorthAdjData`
+(`z` 0), `SouthAdjData` (`z` 63), `EastAdjData` (`x` 63), `WestAdjData` (`x` 0), each of their
+columns with `x` outer and `z` inner; `ColumnGenerationStep` and `ColumnWorldCompressionMode`, a
+byte for each column (in the order of `i`); `Mapping`, a 4-byte count (big endian) and its
+*states*, each a 2-byte length and its bytes. A column is points from the top down, each a
+state (an index of the mapping), a height, the Y of its bottom and its light (a byte).
+
+A blob of columns is: a varint count for each column; for each point, a varint `id << 2 | (light
+!= 0) << 1 | (e != 0)`; for each point its height (a varint); for each point with `e != 0`, `e`
+zigzag (`e = bottom - (b - height)`, `b` the point before's bottom, 0 for the first of the blob);
+for each point of light not 0, its light. The sides overlap at the corners: of a column of two
+sides, the later (in the order of the blobs) is the section's.
+
+A state is *air* where its bytes end with `_DH-BSW_AIR`; it is *opaque* where it is one of the
+module's opaque states (§8.4).
+
+### 8.2 Making a parent
+
+A child's *quadrant* is 32 by 32 columns (`x * 32 + z`): of each, the *merge* of the child's
+columns `(2x, 2z)`, `(2x, 2z + 1)`, `(2x + 1, 2z)`, `(2x + 1, 2z + 1)` (in that order), its
+generation step the least of theirs and its compression mode the most. The merge of four columns:
+
+- The Ys of all their points' bottoms and tops, in order, each once; between each two of them a
+  run, from the lowest. Of each run `[lo, hi)`, `y = lo + floor((hi - lo) / 2)`, and of each of
+  the four columns the point there (bottom <= y < top) or none.
+- The state of the run: of the four, those not air are counted, each as the first of the four
+  (in order) of the same state (none is a state as any other); the first with the most counts.
+  Its light: each nibble the average (rounded down) of those of the four of that state, else of
+  all four.
+- A run of the same state and light as the one below is joined to it (its height added); the
+  points are the runs, from the top down (where there are two at least).
+
+The parent of children `(2x + a, 2z + b)` is the quadrants side by side (`a` along x, `b` along
+z), then *culled*: of each column `(x, z)` of more than one point, in order of `x` then `z`, not
+at a side of the section (`x` or `z` 0 or 63) and of four neighbours `(x +- 1, z)`, `(x, z +- 1)`
+of points: each point, from the bottom up but the bottom one and the top one, opaque between
+an opaque one above and an opaque one below, whose neighbours' points beside it (overlapping
+its Ys, from the bottom up, each neighbour from where the point before stopped) are all opaque
+up to one reaching its top, is taken out and joined into the one above (its height added, its
+bottom the point's). Columns culled before are the neighbours as they are.
+
+A parent's blobs: its mapping the states of its points in the order of their first use (columns
+`i`, each from the top), then its blobs as §8.1 has them; a point of none is corrupt.
+
+A quadrant's bytes: a varint of its mapping's bytes and the mapping (as `Mapping`, of its states
+in the order of their first use), its 1024 columns (a blob of columns, §8.1), its generation
+steps and compression modes (1024 bytes each).
+
+### 8.3 The module
+
+- **Params**: varints of the rows, the states and their bytes, the most points written of a
+  section (of the sides' corners twice), the most points of a column, the most bytes of a
+  quadrant, and the bytes of the pool.
+- **Inputs**: `steps` (class `dh/steps`), `stored` (class `dh/stored`), `opaque` (class
+  `dh/opaque`: the opaque states, as a `Mapping`).
+- **Output**: the contents, of the `len` the application declares.
+
+The steps, each a varint `tag` of `n = tag >> 2`, by `tag & 3`:
+
+- 0, a content stored: the next `n` bytes of `stored`.
+- 1, a content stored that is blob `k` of child row `r` (varints `r` and `k`): put, and kept (in
+  the pool) until the row has all eight; at the eighth, a varint `q`: the child's quadrant is
+  made of them (its bytes `q`, else corrupt), kept in a block of the pool of `q` bytes taken
+  then, and the eight given back.
+- 2, blob `k` of parent row `r` (varints `r` and `k`; `n` 0). At the row's first, four varints
+  of its quadrants' sources (0: the next bytes of `stored`, a varint of their count and the
+  quadrant's bytes; else the quadrant kept of row `source - 1`, its block given back), and a
+  varint 1 where the parent's own quadrant is kept too (else 0): the parent is made (§8.2), its
+  eight blobs kept in blocks taken in order, then its quadrant's. Each such step puts its blob
+  and gives its block back.
+
+The pool is aqr-zstd's (FORMAT.md, "The frames open"): blocks rounded up to 64 bytes, the first
+free span that fits. Once the steps are done, every input must be taken whole, nothing kept, and
+the bytes put the output's length; a block past the pool, a state past the params' or a row
+given twice is corrupt.
+
+The module lays its memory out as a stack: the readers' pieces, the opaque states, the rows,
+the pool, and the buffers of a section, four quadrants, a parent and its blobs, and of a
+child's quadrant's making, all of the params (`lods::plan`). Natively, the children's quadrants
+are made on worker threads, each of its row's mapping alone, put in their blocks before they
+are taken.
+
+### 8.4 Encoding (encoder)
+
+- A row is taken where its eight blobs are frames that zstd-frames makes again. The opaque
+  states are those of the points that the parents' columns do not have of their children's
+  merged columns (in-sample: they are stored). A parent is made where its blobs are made again
+  byte for byte (96% of The End's, 99% of the Nether's).
+- A quadrant comes of its child where the child's last blob (or, of a parent made, its first)
+  comes before the parent's first; else it is stored. A parent none of whose quadrants come of a
+  child is stored.
+- What the pool holds at once is bounded (96 MiB, and the pool 160 MiB): where more would be,
+  the span (a child's from its first blob until its parent is made, a parent's until its last
+  blob) ending last is let go, a child's quadrant then stored, a parent then stored.

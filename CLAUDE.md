@@ -382,7 +382,9 @@ optimization picked by hash.
   binary model kept over a file's chunks; the rest is the chunk's skeleton (42% smaller than v1
   on the Overworld's regions, compressing 32% and testing 64% slower). Samples:
   `F:\Data\aqr-corpus\minecraft-world-sample` (its Distant Horizons databases: aqr-zstd's
-  `zstd-frames`). Left (its README's Status): DH's LODs derived, LZ4 chunks, speed.
+  `zstd-frames`, and `dh-lods`: the parents (coarser LODs) made of the children that come before
+  them in the file, `src/dh.rs`, `src/lods.rs`). Left (its README's Status): the LODs of children
+  after their parents, a model of DH's columns, LZ4 chunks, speed.
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by

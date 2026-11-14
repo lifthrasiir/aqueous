@@ -109,6 +109,13 @@ impl Pool {
         Pool { free: Vec::new(), top: 0, limit, most: 0 }
     }
 
+    /// [`Pool::new`], room for `spans` free spans made at once.
+    pub fn with_spans(limit: u64, spans: usize) -> Pool {
+        let mut p = Pool::new(limit);
+        p.free.reserve_exact(spans);
+        p
+    }
+
     /// A block of `n` bytes: its place, None where it would pass the limit.
     pub fn take(&mut self, n: u64) -> Option<u64> {
         let n = n.div_ceil(GRAIN) * GRAIN;

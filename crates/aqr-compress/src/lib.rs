@@ -3054,7 +3054,11 @@ fn disk(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 /// The formula of a SQLite database whose blobs are Zstandard frames ([`Format::SqliteZstd`]):
 /// those that libzstd's emulation makes again at level 3, of aqr-zstd's `zstd-frames`.
 fn sqlite_zstd(d: &[u8], threads: usize) -> Option<Formula> {
-    let blobs = aqr_sqlite::blobs::blobs(d, 64, &|h| h.starts_with(&aqr_zstd::MAGIC))?;
+    let blobs = aqr_sqlite::blobs::blobs(d, 8, &|h| h.starts_with(&aqr_zstd::MAGIC))?;
+    // (Distant Horizons' database: its coarser levels made of the finer, where it has them)
+    if let Some(f) = aqr_minecraft::lods_formula::encode(d, &blobs, threads) {
+        return Some(f);
+    }
     let frames: Vec<_> = blobs.into_iter().map(|b| b.pieces).collect();
     aqr_zstd::formula::frames_in(d, &frames, 3, Kind::Table, threads)
 }

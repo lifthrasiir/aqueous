@@ -158,6 +158,48 @@ pub fn frames_in(
     kind: aqr_formula::Kind,
     threads: usize,
 ) -> Option<Formula> {
+    let mut contents = aqr_formula::store::Writer::new(None);
+    let mut writer = Some(&mut contents);
+    let mut f = frames_core(input, frames, level, threads, &mut writer)?.0;
+    let node = f.push_as("zstd/contents", kind, contents);
+    let aqr_formula::Node::Apply(a) = &mut f.root else { unreachable!("an application") };
+    a.inputs.push(node);
+    Some(f)
+}
+
+/// The frames that [`frames_in_by`] takes: each made again of its content, in the order of the
+/// contents (the frames' indices), and their contents' bytes.
+#[derive(Debug, Clone, Default)]
+pub struct Taken {
+    pub order: Vec<usize>,
+    pub lens: Vec<u64>,
+}
+
+/// [`frames_in`], its contents (one after another, as `taken` has them) the node that `contents`
+/// gives of the formula (its streams pushed to it): None where it gives none.
+pub fn frames_in_by(
+    input: &[u8],
+    frames: &[Vec<Range<usize>>],
+    level: i32,
+    threads: usize,
+    contents: &mut dyn FnMut(&Taken, &mut Formula) -> Option<Node>,
+) -> Option<Formula> {
+    let (mut f, taken) = frames_core(input, frames, level, threads, &mut None)?;
+    let node = contents(&taken, &mut f)?;
+    let aqr_formula::Node::Apply(a) = &mut f.root else { unreachable!("an application") };
+    a.inputs.push(node);
+    Some(f)
+}
+
+/// The formula of [`frames_in`] but its last input, the contents (written to `writer` where
+/// given, as they are checked), and the frames taken.
+fn frames_core(
+    input: &[u8],
+    frames: &[Vec<Range<usize>>],
+    level: i32,
+    threads: usize,
+    writer: &mut Option<&mut aqr_formula::store::Writer>,
+) -> Option<(Formula, Taken)> {
     use crate::frames::{Frames, KEPT, NEW, PIECE, Params, SHIFT, zigzag};
     use aqr_common::varint::put;
     crate::compress::params(level, 0)?;
@@ -192,7 +234,7 @@ pub fn frames_in(
         budget /= 2;
     }
     // each frame decompressed and made again, a batch at a time: the contents of those made
-    let mut contents = aqr_formula::store::Writer::new(None);
+    let mut taken_order = Taken::default();
     let mut lengths = Vec::new();
     let mut taken = vec![None::<u64>; frames.len()];
     let mut max_content = 0u64;
@@ -227,7 +269,11 @@ pub fn frames_in(
                 max_content = max_content.max(c.len() as u64);
                 taken[batch[k]] = Some(c.len() as u64);
                 put(&mut lengths, c.len() as u64);
-                contents.write(&c);
+                taken_order.order.push(batch[k]);
+                taken_order.lens.push(c.len() as u64);
+                if let Some(w) = writer.as_mut() {
+                    w.write(&c);
+                }
             }
         }
         at = end;
@@ -295,9 +341,8 @@ pub fn frames_in(
     let layout = f.push_as("zstd/layout", aqr_formula::Kind::Table, layout);
     let kept = f.push("zstd/kept", kept);
     let lengths = f.push_as("zstd/lengths", aqr_formula::Kind::Table, lengths);
-    let contents = f.push_as("zstd/contents", kind, contents);
-    f.root = Node::apply(FRAMES, params.bytes(), vec![layout, kept, lengths, contents], input.len() as u64);
-    Some(f)
+    f.root = Node::apply(FRAMES, params.bytes(), vec![layout, kept, lengths], input.len() as u64);
+    Some((f, taken_order))
 }
 
 /// The output of `a`, an application of [`FRAMES`], on `inputs`, on up to `threads` threads.

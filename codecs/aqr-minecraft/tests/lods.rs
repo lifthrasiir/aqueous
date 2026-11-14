@@ -1,0 +1,45 @@
+//! Distant Horizons' databases through `dh-lods` and `zstd-frames`: the parents made of their
+//! children (of those that come before them), the file made again natively, whole and streamed,
+//! on one thread and on several.
+
+#[path = "common/dh.rs"]
+mod dh_db;
+
+use aqr_formula::Node;
+
+fn slice<'a>(f: &'a aqr_formula::Formula, n: &Node) -> &'a [u8] {
+    match *n {
+        Node::Slice { stream, start, len } => &f.streams[stream].data[start as usize..][..len as usize],
+        _ => panic!("an input not a slice"),
+    }
+}
+
+#[test]
+fn parents_made_of_their_children() {
+    for n in [2, 4] {
+        let Some(db) = dh_db::database(n) else { return };
+        let blobs = aqr_sqlite::blobs::blobs(&db, 8, &|h| h.starts_with(&aqr_zstd::MAGIC)).unwrap();
+        let f = aqr_minecraft::lods_formula::encode(&db, &blobs, 2).expect("taken");
+        let Node::Apply(z) = &f.root else { panic!("zstd-frames") };
+        let Node::Apply(l) = &z.inputs[3] else { panic!("dh-lods") };
+        assert_eq!(l.module, aqr_minecraft::lods_formula::MODULE);
+        let li: Vec<&[u8]> = l.inputs.iter().map(|i| slice(&f, i)).collect();
+        // (the parents' contents not stored: less than the contents)
+        assert!((li[1].len() as u64) < l.len, "{n}: stored {} of {}", li[1].len(), l.len);
+        for threads in [1, 3] {
+            let contents = aqr_minecraft::lods::decode(&l.params, &li, l.len, threads).unwrap();
+            let mut zi: Vec<&[u8]> = z.inputs[..3].iter().map(|i| slice(&f, i)).collect();
+            zi.push(&contents);
+            let out = aqr_zstd::frames::decode(&z.params, &zi, z.len, 2).unwrap();
+            assert!(out == db, "{n} {threads}");
+        }
+        // corrupt steps fail, never panic
+        let mut steps = li[0].to_vec();
+        for i in (0..steps.len()).step_by(steps.len() / 50 + 1) {
+            steps[i] ^= 0x41;
+            let bad = [&steps[..], li[1], li[2]];
+            let _ = aqr_minecraft::lods::decode(&l.params, &bad, l.len, 2);
+            steps[i] ^= 0x41;
+        }
+    }
+}

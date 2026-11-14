@@ -6313,3 +6313,29 @@ fn zstd_frames_plans_hold() {
         plan_holds(&format!("zstd-frames {what}"), f, &d);
     }
 }
+
+/// Distant Horizons' databases made up (aqr-minecraft's tests').
+#[path = "../../../codecs/aqr-minecraft/tests/common/dh.rs"]
+mod dh_db;
+
+/// dh-lods lays its memory out as a stack, its limit its plan: of its params (the rows, the
+/// states, the most points of a section and of a column, the pool), the same natively and as
+/// WebAssembly; of a database of four children and one parent, and of 16 and 21.
+#[test]
+fn dh_lods_plans_hold() {
+    for n in [2, 4] {
+        let Some(db) = dh_db::database(n) else { return };
+        let blobs = aqr_sqlite::blobs::blobs(&db, 8, &|h| h.starts_with(&aqr_zstd::MAGIC)).unwrap();
+        let f = aqr_minecraft::lods_formula::encode(&db, &blobs, 2).expect("taken");
+        // (the application of dh-lods alone, its contents the output)
+        let Node::Apply(z) = &f.root else { panic!("zstd-frames") };
+        let mut g = f.clone();
+        g.root = z.inputs[3].clone();
+        let contents = g.eval(&Native::default()).unwrap();
+        plan_holds(&format!("dh-lods {n}"), g, &contents);
+        let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == db, "{n}");
+        let w = decode_wasm(&c);
+        assert!(w.as_ref().is_ok_and(|w| *w == db), "{n}: {:?}", w.err());
+    }
+}

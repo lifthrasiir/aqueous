@@ -209,36 +209,95 @@ pub fn mapping(b: &[u8]) -> Result<Vec<std::ops::Range<usize>>> {
 }
 
 /// The block states of a file, each its bytes and whether it is opaque (for culling) and air
-/// (for merging): ids for them, as the sections' mappings have them.
+/// (for merging): ids for them, as the sections' mappings have them. Its index is a table of
+/// open addressing, grown where it is made too small for what it takes
+/// ([`States::with_capacity`]).
 #[derive(Debug, Default, Clone)]
 pub struct States {
     pub bytes: Vec<u8>,
     pub at: Vec<(u32, u32)>,
     pub opaque: Vec<bool>,
     pub air: Vec<bool>,
-    index: std::collections::HashMap<Vec<u8>, u32>,
+    /// Ids plus one, by their hashes (0 none).
+    table: Vec<u32>,
 }
 
 /// The suffix of the air's states.
 const AIR: &[u8] = b"_DH-BSW_AIR";
 
+fn fnv(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x as u64).wrapping_mul(0x100_0000_01b3))
+}
+
 impl States {
-    pub fn id(&mut self, s: &[u8]) -> u32 {
-        if let Some(&i) = self.index.get(s) {
-            return i;
+    /// For `n` states of `bytes` bytes in all, made at once.
+    pub fn with_capacity(n: usize, bytes: usize) -> States {
+        let mut s = States {
+            bytes: Vec::with_capacity(bytes),
+            at: Vec::with_capacity(n),
+            opaque: Vec::with_capacity(n),
+            air: Vec::with_capacity(n),
+            table: Vec::new(),
+        };
+        s.table.resize(Self::slots(n), 0);
+        s
+    }
+
+    /// Slots of the table for `n` states: a power of two of at least twice as many.
+    pub fn slots(n: usize) -> usize {
+        (2 * n).next_power_of_two().max(16)
+    }
+
+    /// The slot of `s`: its id's, or the empty one where it would be.
+    fn slot(&self, s: &[u8]) -> usize {
+        let mask = self.table.len() - 1;
+        let mut i = fnv(s) as usize & mask;
+        loop {
+            match self.table[i] {
+                0 => return i,
+                id if self.get(id - 1) == s => return i,
+                _ => i = (i + 1) & mask,
+            }
         }
-        let i = self.at.len() as u32;
+    }
+
+    pub fn id(&mut self, s: &[u8]) -> u32 {
+        if self.table.is_empty() || 2 * (self.at.len() + 1) > self.table.len() {
+            let n = Self::slots(self.at.len() + 1);
+            let old = std::mem::replace(&mut self.table, vec![0; n]);
+            for id in old.into_iter().filter(|&id| id != 0) {
+                let i = self.slot(self.get(id - 1));
+                self.table[i] = id;
+            }
+        }
+        let i = self.slot(s);
+        if self.table[i] != 0 {
+            return self.table[i] - 1;
+        }
+        let id = self.at.len() as u32;
         self.at.push((self.bytes.len() as u32, s.len() as u32));
         self.bytes.extend_from_slice(s);
         self.opaque.push(false);
         self.air.push(s.ends_with(AIR));
-        self.index.insert(s.to_vec(), i);
-        i
+        self.table[i] = id + 1;
+        id
+    }
+
+    /// Of no states, its buffers kept.
+    pub fn clear(&mut self) {
+        self.bytes.clear();
+        self.at.clear();
+        self.opaque.clear();
+        self.air.clear();
+        self.table.fill(0);
     }
 
     /// The id of `s`, where it has one.
     pub fn find(&self, s: &[u8]) -> Option<u32> {
-        self.index.get(s).copied()
+        if self.table.is_empty() {
+            return None;
+        }
+        self.table[self.slot(s)].checked_sub(1)
     }
 
     pub fn get(&self, i: u32) -> &[u8] {
@@ -255,56 +314,267 @@ impl States {
     }
 }
 
-/// A section: its 4096 columns (their points' ids of [`States`]), its generation steps and its
-/// compression modes.
+/// Columns of points, each its start in `pts` and its length: a column is written whole (its
+/// points after the others'), and made shorter where it is (culled).
+#[derive(Debug, Clone, Default)]
+pub struct Grid {
+    start: Vec<u32>,
+    len: Vec<u16>,
+    pts: Vec<Point>,
+    /// The most points it may take, and of a column (0: no bound): past them, corrupt.
+    limit: usize,
+    column: usize,
+}
+
+impl Grid {
+    /// Of `columns` columns and `points` points at most, `column` of them in a column, made at
+    /// once.
+    pub fn with_capacity(columns: usize, points: usize, column: usize) -> Grid {
+        let mut g = Grid {
+            start: Vec::with_capacity(columns),
+            len: Vec::with_capacity(columns),
+            pts: Vec::with_capacity(points),
+            limit: points,
+            column,
+        };
+        g.clear(columns);
+        g
+    }
+
+    /// Whether `n` more points fit.
+    fn room(&self, n: usize) -> bool {
+        self.limit == 0 || self.pts.len() + n <= self.limit
+    }
+
+    /// Of `n` columns, none of points; its buffers kept.
+    pub fn clear(&mut self, n: usize) {
+        self.start.clear();
+        self.start.resize(n, 0);
+        self.len.clear();
+        self.len.resize(n, 0);
+        self.pts.clear();
+    }
+
+    pub fn columns(&self) -> usize {
+        self.len.len()
+    }
+
+    pub fn col(&self, i: usize) -> &[Point] {
+        let s = self.start[i] as usize;
+        &self.pts[s..s + self.len[i] as usize]
+    }
+
+    /// The points written, those of columns written again too (a section's corners: of two sides).
+    pub fn written(&self) -> usize {
+        self.pts.len()
+    }
+
+    /// The points of every column.
+    pub fn points(&self) -> usize {
+        self.len.iter().map(|&n| n as usize).sum()
+    }
+
+    /// Column `i` made of the points pushed by `f` (at most 65535).
+    fn set(&mut self, i: usize, f: impl FnOnce(&mut Vec<Point>)) -> Result<()> {
+        let s = self.pts.len();
+        f(&mut self.pts);
+        let n = self.pts.len() - s;
+        self.start[i] = s as u32;
+        self.len[i] = u16::try_from(n).map_err(|_| corrupt())?;
+        Ok(())
+    }
+
+    /// Point `c` of column `i` taken out, joined into the one above it.
+    fn join_up(&mut self, i: usize, c: usize) {
+        let (s, n) = (self.start[i] as usize, self.len[i] as usize);
+        let col = &mut self.pts[s..s + n];
+        let p = col[c];
+        col.copy_within(c + 1.., c);
+        let a = &mut col[c - 1];
+        a.height += p.height;
+        a.bottom = p.bottom;
+        self.len[i] -= 1;
+    }
+}
+
+/// A section: its columns (their points' ids of [`States`]), its generation steps and its
+/// compression modes, a byte for each column.
 #[derive(Debug, Clone, Default)]
 pub struct Section {
-    pub cols: Vec<Vec<Point>>,
+    pub grid: Grid,
     pub generation: Vec<u8>,
     pub compression: Vec<u8>,
 }
 
-/// The section of its blobs' contents (in the order of [`Blob::ALL`]), its ids those of `states`
-/// (those it has not added).
-pub fn section(blobs: &[&[u8]; 8], states: &mut States) -> Result<Section> {
+impl Section {
+    /// Of `columns` columns, `points` points at most (`column` in a column), made at once.
+    pub fn with_capacity(columns: usize, points: usize, column: usize) -> Section {
+        Section {
+            grid: Grid::with_capacity(columns, points, column),
+            generation: Vec::with_capacity(columns),
+            compression: Vec::with_capacity(columns),
+        }
+    }
+}
+
+/// A section of the columns `cols` (of 4096), its generation steps and compression modes none.
+pub fn section_from(cols: &[Vec<Point>]) -> Section {
+    let mut s = Section::default();
+    s.grid.clear(cols.len());
+    for (i, c) in cols.iter().enumerate() {
+        let _ = s.grid.set(i, |pts| pts.extend_from_slice(c));
+    }
+    s
+}
+
+/// Buffers of the walks of sections, kept from one to the next.
+#[derive(Debug, Clone, Default)]
+pub struct Work {
+    ys: Vec<i32>,
+    flags: Vec<u8>,
+    ids: Vec<u32>,
+    /// Of each state, its id in the section's mapping being made, where its stamp is the one now.
+    local: Vec<u32>,
+    stamp: Vec<u32>,
+    now: u32,
+    order: Vec<u32>,
+    pts: Vec<Point>,
+    at: Vec<usize>,
+    mapping: Vec<u8>,
+}
+
+impl Work {
+    /// For sections of `points` points at most (`column` in a column), and `states` states of
+    /// `bytes` bytes, made at once.
+    pub fn with_capacity(points: usize, column: usize, states: usize, bytes: usize) -> Work {
+        let mut w = Work {
+            ys: Vec::with_capacity(8 * column),
+            flags: Vec::with_capacity(points),
+            ids: Vec::with_capacity(states),
+            local: Vec::with_capacity(states),
+            stamp: Vec::with_capacity(states),
+            now: 0,
+            order: Vec::with_capacity(states),
+            pts: Vec::with_capacity(points),
+            at: Vec::with_capacity(COLUMNS + 1),
+            mapping: Vec::with_capacity(4 + 2 * states + bytes),
+        };
+        w.stamp.resize(states, 0);
+        w.local.resize(states, 0);
+        w
+    }
+
+    /// The bytes it takes, of those parameters: its buffers, in WebAssembly (of 32-bit pointers).
+    pub fn memory(points: usize, column: usize, states: usize, bytes: usize, block: impl Fn(u64) -> u64) -> u64 {
+        let (p, s) = (points as u64, states as u64);
+        block(32 * column as u64)
+            + block(p)
+            + 4 * block(4 * s)
+            + block(16 * p)
+            + block(4 * (COLUMNS as u64 + 1))
+            + block(4 + 2 * s + bytes as u64)
+    }
+}
+
+/// The columns `cols` of a blob parsed into `g` (as [`parse`] reads it), their ids by `ids`.
+fn parse_into(
+    b: &[u8],
+    cols: impl Iterator<Item = usize> + Clone,
+    g: &mut Grid,
+    ids: &[u32],
+    w: &mut Work,
+) -> Result<()> {
+    let mut p = 0;
+    let first = g.pts.len();
+    // the counts: each column's place in the points
+    let mut at = first;
+    for i in cols.clone() {
+        let k = usize::try_from(varint(b, &mut p)?).map_err(|_| corrupt())?;
+        if k > u16::MAX as usize || k > b.len() || g.column != 0 && k > g.column {
+            return Err(corrupt());
+        }
+        g.start[i] = at as u32;
+        g.len[i] = k as u16;
+        at += k;
+    }
+    let n = at - first;
+    if n > b.len() || !g.room(n) {
+        return Err(corrupt());
+    }
+    g.pts.resize(at, Point::default());
+    w.flags.clear();
+    w.flags.resize(n, 0);
+    let pts = &mut g.pts[first..];
+    for (q, f) in pts.iter_mut().zip(&mut w.flags) {
+        let e = varint(b, &mut p)?;
+        q.id = *ids.get(usize::try_from(e >> 2).map_err(|_| corrupt())?).ok_or_else(corrupt)?;
+        *f = (e & 3) as u8;
+    }
+    for q in pts.iter_mut() {
+        q.height = u32::try_from(varint(b, &mut p)?).map_err(|_| corrupt())?;
+    }
+    let mut prev = 0i64;
+    for (q, &f) in pts.iter_mut().zip(&w.flags) {
+        let err = if f & 1 != 0 { unzigzag(varint(b, &mut p)?) } else { 0 };
+        let v = prev - q.height as i64 + err;
+        q.bottom = i32::try_from(v).map_err(|_| corrupt())?;
+        prev = v;
+    }
+    for (q, &f) in pts.iter_mut().zip(&w.flags) {
+        if f & 2 != 0 {
+            q.light = *b.get(p).ok_or_else(corrupt)?;
+            p += 1;
+        }
+    }
+    match p == b.len() {
+        true => Ok(()),
+        false => Err(corrupt()),
+    }
+}
+
+/// The section of its blobs' contents (in the order of [`Blob::ALL`]) into `out`, its ids those
+/// of `states` (those it has not, added).
+pub fn section(blobs: &[&[u8]; 8], states: &mut States, w: &mut Work, out: &mut Section) -> Result<()> {
     for r in mapping(blobs[7])? {
         states.id(&blobs[7][r]);
     }
-    section_of(blobs, states)
+    section_of(blobs, states, w, out)
 }
 
 /// [`section`] of states that have all of its mapping's (else corrupt).
-pub fn section_of(blobs: &[&[u8]; 8], states: &States) -> Result<Section> {
-    let m = mapping(blobs[7])?;
-    let ids: Vec<u32> =
-        m.iter().map(|r| states.find(&blobs[7][r.clone()]).ok_or_else(corrupt)).collect::<Result<_>>()?;
-    let mut cols = vec![Vec::new(); COLUMNS];
-    for (k, blob) in Blob::ALL[..5].iter().enumerate() {
-        let idx: Vec<usize> = blob.columns().collect();
-        let c = parse(blobs[k], idx.len())?;
-        for (j, &i) in idx.iter().enumerate() {
-            cols[i] = c
-                .column(j)
-                .iter()
-                .map(|q| Ok(Point { id: *ids.get(q.id as usize).ok_or_else(corrupt)?, ..*q }))
-                .collect::<Result<_>>()?;
-        }
+pub fn section_of(blobs: &[&[u8]; 8], states: &States, w: &mut Work, out: &mut Section) -> Result<()> {
+    let mut ids = std::mem::take(&mut w.ids);
+    ids.clear();
+    for r in mapping(blobs[7])? {
+        ids.push(states.find(&blobs[7][r]).ok_or_else(corrupt)?);
     }
+    out.grid.clear(COLUMNS);
+    let mut r = Ok(());
+    for (k, blob) in Blob::ALL[..5].iter().enumerate() {
+        r = r.and_then(|_| parse_into(blobs[k], blob.columns(), &mut out.grid, &ids, w));
+    }
+    w.ids = ids;
+    r?;
     let (g, c) = (blobs[5], blobs[6]);
     if g.len() != COLUMNS || c.len() != COLUMNS {
         return Err(corrupt());
     }
-    Ok(Section { cols, generation: g.to_vec(), compression: c.to_vec() })
+    out.generation.clear();
+    out.generation.extend_from_slice(g);
+    out.compression.clear();
+    out.compression.extend_from_slice(c);
+    Ok(())
 }
 
-/// The merge of a parent's column of the 2 by 2 columns `cols` of its child: of each run between
-/// the points' tops and bottoms (of any of the four), the state most of the four have at its
-/// middle (air not counted; of a tie the first), the light the average of those of that state
-/// (else of all four); runs of the same state and light joined. From the top down.
-pub fn merge(cols: [&[Point]; 4], states: &States, out: &mut Vec<Point>) {
+/// The merge of a parent's column of the 2 by 2 columns `cols` of its child, pushed to `out`: of
+/// each run between the points' tops and bottoms (of any of the four), the state most of the four
+/// have at its middle (air not counted; of a tie the first; none where a column has no point
+/// there), the light the average of those of that state (else of all four); runs of the same
+/// state and light joined. From the top down.
+pub fn merge(cols: [&[Point]; 4], states: &States, ys: &mut Vec<i32>, out: &mut Vec<Point>) {
     const NONE: u32 = u32::MAX;
     let start = out.len();
-    let mut ys: Vec<i32> = Vec::with_capacity(64);
+    ys.clear();
     for c in cols {
         for p in c {
             ys.push(p.bottom);
@@ -320,14 +590,12 @@ pub fn merge(cols: [&[Point]; 4], states: &States, out: &mut Vec<Point>) {
     let mut acc = 0u32;
     let mut last = (NONE, 0u8, 0u8);
     let mut low = 0i32;
-    let mut run = Vec::new();
     for w in ys.windows(2) {
         let (lo, hi) = (w[0], w[1]);
         let h = (hi - lo) as u32;
         let sy = lo + (h / 2) as i32;
         let mut ids = [NONE; 4];
-        let mut bl = [0u32; 4];
-        let mut sk = [0u32; 4];
+        let mut light = [0u8; 4];
         for i in 0..4 {
             while cur[i] >= 0 {
                 let p = &cols[i][cur[i] as usize];
@@ -335,8 +603,7 @@ pub fn merge(cols: [&[Point]; 4], states: &States, out: &mut Vec<Point>) {
                     cur[i] -= 1;
                 } else if sy >= p.bottom {
                     ids[i] = p.id;
-                    bl[i] = (p.light >> 4) as u32;
-                    sk[i] = (p.light & 15) as u32;
+                    light[i] = p.light;
                     break;
                 } else {
                     break;
@@ -344,43 +611,36 @@ pub fn merge(cols: [&[Point]; 4], states: &States, out: &mut Vec<Point>) {
             }
         }
         // the most common of those not air
-        let air = |id: u32| id != NONE && states.air[id as usize];
         let mut c = [0u32; 4];
         for i in 0..4 {
-            if air(ids[i]) {
+            let x = ids[i];
+            if x != NONE && states.air[x as usize] {
                 continue;
             }
-            let x = ids[i];
-            let k = if x == ids[0] {
-                0
-            } else if x == ids[1] {
-                1
-            } else if x == ids[2] {
-                2
-            } else {
-                3
-            };
+            let k = (0..3).find(|&k| ids[k] == x).unwrap_or(3);
             c[k] += 1;
         }
         let m = *c.iter().max().unwrap();
         let win = ids[(0..4).find(|&k| c[k] == m).unwrap()];
-        let avg = |v: &[u32; 4]| {
-            let (mut s, mut n) = (0, 0);
+        let avg = |shift: u32| {
+            let (mut s, mut n, mut all) = (0u32, 0u32, 0u32);
             for i in 0..4 {
+                let v = (light[i] >> shift & 15) as u32;
+                all += v;
                 if ids[i] == win {
-                    s += v[i];
+                    s += v;
                     n += 1;
                 }
             }
-            s.checked_div(n).unwrap_or(v.iter().sum::<u32>() / 4)
+            s.checked_div(n).unwrap_or(all / 4) as u8
         };
-        let (b, s) = (avg(&bl) as u8, avg(&sk) as u8);
+        let (b, s) = (avg(4), avg(0));
         if acc == 0 {
             last = (win, b, s);
             low = lo;
             acc = h;
         } else if (win, b, s) != last {
-            run.push(Point { id: last.0, height: acc, bottom: low, light: last.1 << 4 | last.2 });
+            out.push(Point { id: last.0, height: acc, bottom: low, light: last.1 << 4 | last.2 });
             last = (win, b, s);
             low = lo;
             acc = h;
@@ -389,13 +649,12 @@ pub fn merge(cols: [&[Point]; 4], states: &States, out: &mut Vec<Point>) {
         }
     }
     if acc > 0 {
-        run.push(Point { id: last.0, height: acc, bottom: low, light: last.1 << 4 | last.2 });
+        out.push(Point { id: last.0, height: acc, bottom: low, light: last.1 << 4 | last.2 });
     }
+    let run = &mut out[start..];
     if run.len() >= 2 && run[0].bottom < run[run.len() - 1].bottom {
         run.reverse();
     }
-    out.truncate(start);
-    out.extend(run);
 }
 
 /// Whether the points of `adj` from index `ai` down (from the bottom up) that overlap `pt` are all
@@ -423,10 +682,10 @@ fn hidden_by(pt: &Point, adj: &[Point], mut ai: isize, opaque: &[bool]) -> std::
     Err(ai)
 }
 
-/// The column at `x`, `z` of `grid` culled: each point (from the bottom up, not the bottom nor the
+/// The column at `x`, `z` of `g` culled: each point (from the bottom up, not the bottom nor the
 /// top one) opaque between opaque ones above and below, whose four neighbours' points beside it
 /// are all opaque, joined into the point above. A column at the section's side is not.
-fn cull(grid: &mut [Vec<Point>], x: usize, z: usize, opaque: &[bool]) {
+fn cull(g: &mut Grid, x: usize, z: usize, opaque: &[bool]) {
     let op = |id: u32| id != u32::MAX && opaque[id as usize];
     let mut nb: [usize; 4] = [0; 4];
     for (k, (dx, dz)) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].into_iter().enumerate() {
@@ -435,17 +694,17 @@ fn cull(grid: &mut [Vec<Point>], x: usize, z: usize, opaque: &[bool]) {
             return;
         }
         let i = xx as usize * W + zz as usize;
-        if grid[i].is_empty() {
+        if g.len[i] == 0 {
             return;
         }
         nb[k] = i;
     }
     let me = x * W + z;
-    let mut idx = nb.map(|i| grid[i].len() as isize - 1);
-    let mut ci = grid[me].len() as isize - 1;
+    let mut idx = nb.map(|i| g.len[i] as isize - 1);
+    let mut ci = g.len[me] as isize - 1;
     while ci >= 0 {
         let c = ci as usize;
-        let col = &grid[me];
+        let col = g.col(me);
         let p = col[c];
         if !op(p.id) || c == 0 || !op(col[c - 1].id) || c + 1 >= col.len() || !op(col[c + 1].id) {
             ci -= 1;
@@ -453,7 +712,7 @@ fn cull(grid: &mut [Vec<Point>], x: usize, z: usize, opaque: &[bool]) {
         }
         let mut ok = true;
         for k in 0..4 {
-            match hidden_by(&p, &grid[nb[k]], idx[k], opaque) {
+            match hidden_by(&p, g.col(nb[k]), idx[k], opaque) {
                 Ok(r) => idx[k] = r,
                 Err(r) => {
                     idx[k] = r;
@@ -463,91 +722,179 @@ fn cull(grid: &mut [Vec<Point>], x: usize, z: usize, opaque: &[bool]) {
             }
         }
         if ok {
-            let col = &mut grid[me];
-            col.remove(c);
-            let a = &mut col[c - 1];
-            a.height += p.height;
-            a.bottom = p.bottom;
+            g.join_up(me, c);
         }
         ci -= 1;
     }
 }
 
-/// The quadrant of a parent that its child `k` makes: its 32 by 32 columns merged (`x * 32 + z`),
-/// and their generation steps (the least of the four) and compression modes (the most).
-pub fn quadrant(k: &Section, states: &States) -> Section {
-    let mut cols = vec![Vec::new(); 32 * 32];
-    let (mut generation, mut compression) = (vec![0; 32 * 32], vec![0; 32 * 32]);
+/// The quadrant of a parent that its child `k` makes, into `out`: its 32 by 32 columns merged
+/// (`x * 32 + z`), and their generation steps (the least of the four) and compression modes (the
+/// most).
+pub fn quadrant(k: &Section, states: &States, w: &mut Work, out: &mut Section) -> Result<()> {
+    out.grid.clear(32 * 32);
+    out.generation.clear();
+    out.compression.clear();
     for rx in 0..32 {
         for rz in 0..32 {
             let (cx, cz) = (rx * 2, rz * 2);
             let ii = [cx * W + cz, cx * W + cz + 1, (cx + 1) * W + cz, (cx + 1) * W + cz + 1];
-            let mut out = Vec::new();
-            merge(ii.map(|i| &k.cols[i][..]), states, &mut out);
-            cols[rx * 32 + rz] = out;
-            generation[rx * 32 + rz] = ii.iter().map(|&i| k.generation[i]).min().unwrap();
-            compression[rx * 32 + rz] = ii.iter().map(|&i| k.compression[i]).max().unwrap();
+            let ys = &mut w.ys;
+            // (a merge makes a point less than the tops and bottoms of the four, at most)
+            if !out.grid.room(2 * ii.iter().map(|&i| k.grid.len[i] as usize).sum::<usize>()) {
+                return Err(corrupt());
+            }
+            out.grid.set(rx * 32 + rz, |pts| merge(ii.map(|i| k.grid.col(i)), states, ys, pts))?;
+            out.generation.push(ii.iter().map(|&i| k.generation[i]).min().unwrap());
+            out.compression.push(ii.iter().map(|&i| k.compression[i]).max().unwrap());
         }
     }
-    Section { cols, generation, compression }
+    Ok(())
 }
 
-/// The parent of its four quadrants (`[a][b]` of the child at `2x + a`, `2z + b`), culled.
-pub fn parent(q: [[&Section; 2]; 2], states: &States) -> Section {
-    let mut s =
-        Section { cols: vec![Vec::new(); COLUMNS], generation: vec![0; COLUMNS], compression: vec![0; COLUMNS] };
+/// The parent of its four quadrants (`[a][b]` of the child at `2x + a`, `2z + b`) into `out`,
+/// culled.
+pub fn parent(q: [[&Section; 2]; 2], states: &States, out: &mut Section) -> Result<()> {
+    out.grid.clear(COLUMNS);
+    out.generation.clear();
+    out.compression.clear();
     for x in 0..W {
         for z in 0..W {
             let k = q[x / 32][z / 32];
             let j = (x % 32) * 32 + z % 32;
-            s.cols[x * W + z] = k.cols[j].clone();
-            s.generation[x * W + z] = k.generation[j];
-            s.compression[x * W + z] = k.compression[j];
+            let c = k.grid.col(j);
+            if !out.grid.room(c.len()) {
+                return Err(corrupt());
+            }
+            out.grid.set(x * W + z, |pts| pts.extend_from_slice(c))?;
+            out.generation.push(k.generation[j]);
+            out.compression.push(k.compression[j]);
         }
     }
     for x in 0..W {
         for z in 0..W {
-            if s.cols[x * W + z].len() > 1 {
-                cull(&mut s.cols, x, z, &states.opaque);
+            if out.grid.len[x * W + z] > 1 {
+                cull(&mut out.grid, x, z, &states.opaque);
             }
         }
     }
-    s
+    Ok(())
 }
 
-/// A section's blobs (in the order of [`Blob::ALL`]): its mapping the states of its points in the
-/// order of their first use (columns `x * 64 + z`, each from the top). None where a point is of
-/// no state.
-pub fn blobs(s: &Section, states: &States) -> Option<[Vec<u8>; 8]> {
-    let mut local = std::collections::HashMap::new();
-    let mut order = Vec::new();
-    for c in &s.cols {
-        for p in c {
+/// A section's blobs (in the order of [`Blob::ALL`]) into `out`: its mapping the states of its
+/// points in the order of their first use (columns `x * 64 + z`, each from the top). False where
+/// a point is of no state.
+pub fn blobs(s: &Section, states: &States, w: &mut Work, out: &mut [Vec<u8>; 8]) -> bool {
+    if !local_ids(&s.grid, states, w) {
+        return false;
+    }
+    for (k, blob) in Blob::ALL[..5].iter().enumerate() {
+        // (the columns' points of the mapping's ids)
+        w.pts.clear();
+        w.at.clear();
+        w.at.push(0);
+        for i in blob.columns() {
+            w.pts.extend(s.grid.col(i).iter().map(|p| Point { id: w.local[p.id as usize], ..*p }));
+            w.at.push(w.pts.len());
+        }
+        out[k].clear();
+        write(w.at.windows(2).map(|r| &w.pts[r[0]..r[1]]), &mut out[k]);
+    }
+    out[5].clear();
+    out[5].extend_from_slice(&s.generation);
+    out[6].clear();
+    out[6].extend_from_slice(&s.compression);
+    out[7].clear();
+    write_mapping(&w.order, states, &mut out[7]);
+    true
+}
+
+/// The ids of the points of `cols` of `g` in the order of their first use, into `w.order`, and
+/// each state's place among them into `w.local`: false where a point is of no state.
+fn local_ids(g: &Grid, states: &States, w: &mut Work) -> bool {
+    w.now = w.now.wrapping_add(1);
+    if w.now == 0 || w.stamp.len() < states.len() {
+        w.stamp.clear();
+        w.stamp.resize(states.len().max(w.stamp.capacity()), 0);
+        w.local.resize(w.stamp.len(), 0);
+        w.now = 1;
+    }
+    w.order.clear();
+    for i in 0..g.columns() {
+        for p in g.col(i) {
             if p.id == u32::MAX {
-                return None;
+                return false;
             }
-            local.entry(p.id).or_insert_with(|| {
-                order.push(p.id);
-                order.len() as u32 - 1
-            });
+            let id = p.id as usize;
+            if w.stamp[id] != w.now {
+                w.stamp[id] = w.now;
+                w.local[id] = w.order.len() as u32;
+                w.order.push(p.id);
+            }
         }
     }
-    let cols: Vec<Vec<Point>> =
-        s.cols.iter().map(|c| c.iter().map(|p| Point { id: local[&p.id], ..*p }).collect()).collect();
-    let mut out: [Vec<u8>; 8] = Default::default();
-    for (k, blob) in Blob::ALL[..5].iter().enumerate() {
-        write(blob.columns().map(|i| &cols[i][..]), &mut out[k]);
-    }
-    out[5] = s.generation.clone();
-    out[6] = s.compression.clone();
-    let m = &mut out[7];
+    true
+}
+
+/// The mapping of `w.order`'s states appended to `m`.
+fn write_mapping(order: &[u32], states: &States, m: &mut Vec<u8>) {
     m.extend((order.len() as i32).to_be_bytes());
-    for id in order {
+    for &id in order {
         let b = states.get(id);
         m.extend((b.len() as u16).to_be_bytes());
         m.extend_from_slice(b);
     }
-    Some(out)
+}
+
+/// A quadrant (of 1024 columns, [`quadrant`]) as bytes, appended to `out`: a varint of the
+/// bytes of its mapping (of its states in the order of their first use), the mapping, its columns
+/// (as [`write`] writes them, of the mapping's ids), then its generation steps and compression
+/// modes, 1024 bytes each. False where a point is of no state.
+pub fn quadrant_bytes(q: &Section, states: &States, w: &mut Work, out: &mut Vec<u8>) -> bool {
+    if !local_ids(&q.grid, states, w) {
+        return false;
+    }
+    let mut m = std::mem::take(&mut w.mapping);
+    m.clear();
+    write_mapping(&w.order, states, &mut m);
+    aqr_common::varint::put(out, m.len() as u64);
+    out.extend_from_slice(&m);
+    w.mapping = m;
+    w.pts.clear();
+    w.at.clear();
+    w.at.push(0);
+    for i in 0..q.grid.columns() {
+        w.pts.extend(q.grid.col(i).iter().map(|p| Point { id: w.local[p.id as usize], ..*p }));
+        w.at.push(w.pts.len());
+    }
+    write(w.at.windows(2).map(|r| &w.pts[r[0]..r[1]]), out);
+    out.extend_from_slice(&q.generation);
+    out.extend_from_slice(&q.compression);
+    true
+}
+
+/// A quadrant of [`quadrant_bytes`] into `out`, its states added to `states`.
+pub fn quadrant_of(b: &[u8], states: &mut States, w: &mut Work, out: &mut Section) -> Result<()> {
+    const N: usize = 32 * 32;
+    let mut p = 0;
+    let n = usize::try_from(varint(b, &mut p)?).map_err(|_| corrupt())?;
+    let m = b.get(p..).and_then(|r| r.get(..n)).ok_or_else(corrupt)?;
+    let mut ids = std::mem::take(&mut w.ids);
+    ids.clear();
+    for r in mapping(m)? {
+        ids.push(states.id(&m[r]));
+    }
+    p += n;
+    let rest = b.len().checked_sub(2 * N).filter(|&e| e >= p).ok_or_else(corrupt)?;
+    out.grid.clear(N);
+    let r = parse_into(&b[p..rest], 0..N, &mut out.grid, &ids, w);
+    w.ids = ids;
+    r?;
+    out.generation.clear();
+    out.generation.extend_from_slice(&b[rest..rest + N]);
+    out.compression.clear();
+    out.compression.extend_from_slice(&b[rest + N..]);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -614,11 +961,11 @@ mod tests {
         let stone = [p(0, 12, 0)];
         let dirt_on_stone = [p(1, 2, 10), p(0, 10, 0)];
         let air = [p(2, 12, 0)];
-        let mut out = Vec::new();
-        merge([&stone, &stone, &dirt_on_stone, &air], &st, &mut out);
+        let (mut out, mut ys) = (Vec::new(), Vec::new());
+        merge([&stone, &stone, &dirt_on_stone, &air], &st, &mut ys, &mut out);
         assert_eq!(out, [p(0, 12, 0)]);
         out.clear();
-        merge([&dirt_on_stone, &dirt_on_stone, &stone, &air], &st, &mut out);
+        merge([&dirt_on_stone, &dirt_on_stone, &stone, &air], &st, &mut ys, &mut out);
         assert_eq!(out, [p(1, 2, 10), p(0, 10, 0)]);
     }
 
@@ -629,17 +976,25 @@ mod tests {
         let mut st = states();
         st.opaque[0] = true;
         st.opaque[1] = true;
-        let col = vec![p(0, 2, 6), p(1, 2, 4), p(0, 4, 0)];
-        let mut grid = vec![vec![p(0, 8, 0)]; COLUMNS];
-        grid[10 * W + 10] = col.clone();
-        cull(&mut grid, 10, 10, &st.opaque);
-        assert_eq!(grid[10 * W + 10], [p(0, 4, 4), p(0, 4, 0)]);
-        grid[0] = col.clone();
-        cull(&mut grid, 0, 0, &st.opaque);
-        assert_eq!(grid[0], col);
-        grid[20 * W + 20] = col.clone();
-        grid[21 * W + 20] = vec![p(2, 8, 0)];
-        cull(&mut grid, 20, 20, &st.opaque);
-        assert_eq!(grid[20 * W + 20], col);
+        let col = [p(0, 2, 6), p(1, 2, 4), p(0, 4, 0)];
+        let grid = |cols: &[(usize, &[Point])]| {
+            let mut g = Grid::default();
+            g.clear(COLUMNS);
+            let stone = [p(0, 8, 0)];
+            for i in 0..COLUMNS {
+                let c = cols.iter().find(|c| c.0 == i).map_or(&stone[..], |c| c.1);
+                g.set(i, |pts| pts.extend_from_slice(c)).unwrap();
+            }
+            g
+        };
+        let mut g = grid(&[(10 * W + 10, &col)]);
+        cull(&mut g, 10, 10, &st.opaque);
+        assert_eq!(g.col(10 * W + 10), [p(0, 4, 4), p(0, 4, 0)]);
+        let mut g = grid(&[(0, &col)]);
+        cull(&mut g, 0, 0, &st.opaque);
+        assert_eq!(g.col(0), col);
+        let mut g = grid(&[(20 * W + 20, &col), (21 * W + 20, &[p(2, 8, 0)])]);
+        cull(&mut g, 20, 20, &st.opaque);
+        assert_eq!(g.col(20 * W + 20), col);
     }
 }

@@ -362,6 +362,22 @@ pub const NATIVE: &[Native] = &[
     ),
     threaded("mca-recons", |p, _, i, n, t| aqr_minecraft::module::decode(p, i, n, t).map_err(err)),
     streamed(
+        "dh-lods",
+        aqr_api::emu::Entry::part(
+            &[
+                Input(0, aqr_minecraft::lods::SMALL_WINDOW),
+                Input(1, aqr_minecraft::lods::WINDOW),
+                Input(2, aqr_minecraft::lods::SMALL_WINDOW),
+                Output(0, aqr_minecraft::lods::WINDOW),
+            ],
+            5,
+            |a| aqr_minecraft::lods::decode_part(a[0], a[1], a[2], a[3], a[4]),
+        ),
+        |p, _, i, n, t| aqr_minecraft::lods::decode(p, i, n, t).map_err(err),
+        // (whole of an output of 64 MiB at most, else streamed)
+        |_, len| len > 64 << 20,
+    ),
+    streamed(
         "zstd-frames",
         aqr_api::emu::Entry::part(
             &[

@@ -7,6 +7,9 @@ pub mod dh;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod layout;
+pub mod lods;
+#[cfg(feature = "encode")]
+pub mod lods_formula;
 pub mod model;
 pub mod module;
 pub mod nbt;

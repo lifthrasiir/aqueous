@@ -82,6 +82,32 @@ Measured and not kept: bits counting their uses (4% smaller, 0.2 s slower), two 
 halves of the rows (slower, 3.4% larger), ranks of the neighbours under zstd (7.0 MB against
 3.67), static ranks in 33 contexts (4.5 MB).
 
+## Distant Horizons
+
+Distant Horizons' `DistantHorizons.sqlite` (10.4 GB of the sample's 18 GB) is a SQLite database
+whose blobs are frames of zstd-jni at level 3: aqr-zstd's `zstd-frames` makes them again of
+their contents (aqr-compress's `sqlite-zstd`), and `dh-lods` (FORMAT.md, §8) makes those
+contents. Its sections of the coarser levels (`DetailLevel` 1 to 8, a parent of four children)
+are made of their children (`src/dh.rs`: the 2 by 2 merge of each child's columns, the culling of
+points hidden by opaque states, which are learned of the database and stored), of the children
+whose blobs come before the parent's in the file (their quadrants kept in the meanwhile), the
+other quadrants stored (`src/lods.rs`, `src/lods_formula.rs`).
+
+`examples/dhcheck.rs` makes every parent of four children again: 24,192 of The End's 25,149
+(96.2%) and 20,501 of the Nether's 20,770 (98.7%) exactly, the others stale (about 190 columns
+differ in each of The End's). Through `aqr` (default level, verified, a Ryzen 7 9700X, 16 threads),
+against zstd-frames alone:
+
+| database | zstd-frames | and dh-lods | compress | test (`-K`) |
+|---|---|---|---|---|
+| The End (594 MB) | 420.61 MB | **361.15 MB** | 30 -> 66 s | 5.3 -> 9.8 s |
+| the Nether (3.36 GB) | 2.99 GB | **2.84 GB** | 101 -> 184 s | 20.3 -> 35.3 s |
+| the Overworld (6.46 GB) | 5.98 GB | **5.92 GB** | 156 -> 277 s | 32.7 -> 40.1 s |
+
+The End's database makes 14,984 of its 24,192 exact parents, of 45,718 quadrants of children
+(14,218 stored); the Nether's 8,540 of 20,500 (17,118). The pool holds 32-34 MB at most. The
+decoder makes the children's quadrants on threads, the parents (their culling and blobs) on one.
+
 ## Memory
 
 `mca-recons` is a part module laid out as a stack (`aqr_api::stack`): the header, the chunks'
@@ -102,16 +128,8 @@ Left:
   block framing), gzip (type 1); chunks in files of their own (`c.X.Z.mcc`) are zlib files, which
   aqr-compress takes as such.
 - In WebAssembly the module makes the chunks one after another; tasks would spread them.
-- Distant Horizons' `DistantHorizons.sqlite` (10.4 GB of the sample's 18 GB): its blobs, frames
-  of zstd-jni at level 3, are made again of their contents by aqr-zstd's `zstd-frames`
-  (aqr-compress's `sqlite-zstd`; aqr-zstd's README has the numbers). Left, of the contents (some
-  9 times the frames in The End, 3 in the others): the table `FullData`'s columns of points
-  (`Data`, and the sides `*AdjData`: a varint count for each column, then each point's id with
-  two flags, its height, its bottom against the one above, its light) coded by a model of their
-  own rather than by the archive's zstd; and the coarser levels (`DetailLevel` 1 to 8, 31% of
-  the blobs' bytes, 44% in The End) made of the finer: a parent's column is the 2x2 merge of its
-  children's (each point the most common id among the four columns at its height, the light
-  averaged of that id), then culled of the points hidden by opaque neighbours, which is exact
-  but for which ids are opaque (to be stored); its mapping, generation steps and compression
-  modes follow from the children's too.
+- Distant Horizons: the parents made of children that come after them (a third of the quadrants
+  in The End, two fifths in the Nether, more in the Overworld: the order of the file is DH's
+  writes'), which a streaming decoder cannot take; a model of the columns' contents (counts,
+  ids, heights, light) rather than the archive's zstd; and speed (below).
 - Bedrock Edition worlds (LevelDB).

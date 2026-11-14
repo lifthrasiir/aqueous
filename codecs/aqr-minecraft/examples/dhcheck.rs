@@ -4,10 +4,21 @@
 
 use std::collections::HashMap;
 
-use aqr_minecraft::dh::{self, Blob, Section, States};
+use aqr_minecraft::dh::{self, Blob, Section, States, Work};
 
 /// The columns of `FullData` that are the blobs, in the order of [`Blob::ALL`].
 const COLUMNS: [u16; 8] = [5, 15, 16, 17, 18, 6, 7, 8];
+
+/// The buffers of one parent's making: its children, their quadrants, itself and its blobs.
+#[derive(Default)]
+struct Bufs {
+    w: Work,
+    kid: Section,
+    quads: [Section; 4],
+    parent: Section,
+    actual: Section,
+    blobs: [Vec<u8>; 8],
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,17 +44,15 @@ fn main() {
             states.id(&m[r]);
         }
     }
-    let section = |k: &[i64; 3], states: &States| {
+    let read = |k: &[i64; 3], states: &States, w: &mut Work, out: &mut Section| {
         let r = raw(k);
         let b: [&[u8]; 8] = std::array::from_fn(|j| &r[j][..]);
-        (dh::section_of(&b, states).unwrap(), r)
+        dh::section_of(&b, states, w, out).unwrap();
+        r
     };
-    let child = |p: &[i64; 3], a: usize, b: usize| [p[0] - 1, 2 * p[1] + a as i64, 2 * p[2] + b as i64];
-    let parents: Vec<[i64; 3]> = rows
-        .keys()
-        .copied()
-        .filter(|p| p[0] > 0 && (0..4).all(|q| rows.contains_key(&child(p, q / 2, q % 2))))
-        .collect();
+    let child = |p: &[i64; 3], q: usize| [p[0] - 1, 2 * p[1] + (q / 2) as i64, 2 * p[2] + (q % 2) as i64];
+    let parents: Vec<[i64; 3]> =
+        rows.keys().copied().filter(|p| p[0] > 0 && (0..4).all(|q| rows.contains_key(&child(p, q)))).collect();
     println!(
         "{} rows, {} parents of four children, {} states, in {:.1} s",
         rows.len(),
@@ -51,21 +60,31 @@ fn main() {
         states.len(),
         t.elapsed().as_secs_f64()
     );
-    let quads = |p: &[i64; 3], states: &States| -> [[Section; 2]; 2] {
-        std::array::from_fn(|a| std::array::from_fn(|b| dh::quadrant(&section(&child(p, a, b), states).0, states)))
+    // the four quadrants of a parent into `b.quads`
+    let quads = |p: &[i64; 3], states: &States, b: &mut Bufs| {
+        for q in 0..4 {
+            read(&child(p, q), states, &mut b.w, &mut b.kid);
+            dh::quadrant(&b.kid, states, &mut b.w, &mut b.quads[q]).unwrap();
+        }
+    };
+    let make = |b: &mut Bufs, states: &States| {
+        let [q0, q1, q2, q3] = &b.quads;
+        dh::parent([[q0, q1], [q2, q3]], states, &mut b.parent).unwrap();
     };
     // the states culled: of the merged columns' points, those whose tops are not of the parent's
     let t = std::time::Instant::now();
     let culled: Vec<Vec<u32>> = aqr_common::pool::par_map(parents.len(), threads, |k| {
         let p = &parents[k];
-        let (s, _) = section(p, &states);
-        let q = quads(p, &states);
+        let mut b = Bufs::default();
+        read(p, &states, &mut b.w, &mut b.actual);
+        quads(p, &states, &mut b);
         let mut out = Vec::new();
         for x in 0..dh::W {
             for z in 0..dh::W {
-                let tops: Vec<i32> = s.cols[x * dh::W + z].iter().map(|q| q.bottom + q.height as i32).collect();
-                for pt in &q[x / 32][z / 32].cols[(x % 32) * 32 + z % 32] {
-                    if pt.id != u32::MAX && !tops.contains(&(pt.bottom + pt.height as i32)) {
+                let col = b.actual.grid.col(x * dh::W + z);
+                for pt in b.quads[x / 32 * 2 + z / 32].grid.col((x % 32) * 32 + z % 32) {
+                    let top = pt.bottom + pt.height as i32;
+                    if pt.id != u32::MAX && !col.iter().any(|q| q.bottom + q.height as i32 == top) {
                         out.push(pt.id);
                     }
                 }
@@ -79,16 +98,61 @@ fn main() {
         states.opaque[*c as usize] = true;
     }
     println!("{} opaque, learned in {:.1} s", states.opaque.iter().filter(|&&o| o).count(), t.elapsed().as_secs_f64());
+    // the phases of one thread over the first parents, its buffers kept
+    {
+        let n = parents.len().min(300);
+        let (mut tp, mut tq, mut tpar, mut tb, mut td) = (0f64, 0f64, 0f64, 0f64, 0f64);
+        let mut b = Bufs::default();
+        for p in &parents[..n] {
+            for q in 0..4 {
+                let t = std::time::Instant::now();
+                let r = raw(&child(p, q));
+                td += t.elapsed().as_secs_f64();
+                let t = std::time::Instant::now();
+                let bl: [&[u8]; 8] = std::array::from_fn(|j| &r[j][..]);
+                dh::section_of(&bl, &states, &mut b.w, &mut b.kid).unwrap();
+                tp += t.elapsed().as_secs_f64();
+                let t = std::time::Instant::now();
+                dh::quadrant(&b.kid, &states, &mut b.w, &mut b.quads[q]).unwrap();
+                tq += t.elapsed().as_secs_f64();
+            }
+            let t = std::time::Instant::now();
+            make(&mut b, &states);
+            tpar += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            dh::blobs(&b.parent, &states, &mut b.w, &mut b.blobs);
+            tb += t.elapsed().as_secs_f64();
+        }
+        let ms = |x: f64| x * 1000.0 / n as f64;
+        println!(
+            "a parent, one thread: decompress 4 children {:.2} ms, parse them {:.2} ms, quadrants {:.2} ms, parent {:.2} ms, blobs {:.2} ms",
+            ms(td),
+            ms(tp),
+            ms(tq),
+            ms(tpar),
+            ms(tb)
+        );
+    }
     let t = std::time::Instant::now();
     let results: Vec<([bool; 8], usize)> = aqr_common::pool::par_map(parents.len(), threads, |k| {
         let p = &parents[k];
-        let (actual, r) = section(p, &states);
-        let q = quads(p, &states);
-        let s = dh::parent([[&q[0][0], &q[0][1]], [&q[1][0], &q[1][1]]], &states);
-        let differ = (0..dh::COLUMNS).filter(|&i| s.cols[i] != actual.cols[i]).count();
-        let same = match dh::blobs(&s, &states) {
-            Some(b) => std::array::from_fn(|j| b[j] == r[j]),
-            None => [false; 8],
+        let mut b = Bufs::default();
+        let r = read(p, &states, &mut b.w, &mut b.actual);
+        quads(p, &states, &mut b);
+        // (each quadrant through its bytes: the module's as it holds or stores them)
+        let mut st = states.clone();
+        for q in 0..4 {
+            let mut bytes = Vec::new();
+            if dh::quadrant_bytes(&b.quads[q], &st, &mut b.w, &mut bytes) {
+                dh::quadrant_of(&bytes, &mut st, &mut b.w, &mut b.kid).unwrap();
+                std::mem::swap(&mut b.quads[q], &mut b.kid);
+            }
+        }
+        make(&mut b, &states);
+        let differ = (0..dh::COLUMNS).filter(|&i| b.parent.grid.col(i) != b.actual.grid.col(i)).count();
+        let same = match dh::blobs(&b.parent, &states, &mut b.w, &mut b.blobs) {
+            true => std::array::from_fn(|j| b.blobs[j] == r[j]),
+            false => [false; 8],
         };
         (same, differ)
     });
@@ -106,5 +170,5 @@ fn main() {
     for (j, b) in Blob::ALL.iter().enumerate() {
         println!("  {b:?}: {} of {} the same", same[j], parents.len());
     }
-    println!("  all: {all}; columns differing {cols} (of {} parents)", differing);
+    println!("  all: {all}; columns differing {cols} (of {differing} parents)");
 }

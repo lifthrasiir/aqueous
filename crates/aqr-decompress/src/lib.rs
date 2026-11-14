@@ -302,6 +302,10 @@ pub const MCA: Module = aqr_minecraft::formula::MODULE;
 /// kept, the contents' lengths and the contents.
 pub const ZSTD_FRAMES: Module = aqr_zstd::formula::FRAMES;
 
+/// Distant Horizons' blobs' contents, the coarser levels' made of the finer. Params: the sizes of
+/// what it holds; inputs: the steps, the stored bytes and the opaque states.
+pub const DH_LODS: Module = aqr_minecraft::lods_formula::MODULE;
+
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
@@ -497,6 +501,7 @@ const NATIVE: &[Known] = &[
     entry(GIT_PACK_INDEX),
     entry(MCA),
     entry(ZSTD_FRAMES),
+    entry(DH_LODS),
     entry(PNG),
     entry(PNG_AGAINST),
     entry(PNG_SET),

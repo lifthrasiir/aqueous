@@ -8,13 +8,15 @@ publish = false
 [features]
 default = ["encode"]
 # The formula (`formula`) and the tool; without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula", "dep:flate2", "dep:zstd"]
+encode = ["dep:aqr-formula", "dep:flate2", "dep:zstd", "dep:aqr-sqlite", "aqr-zstd/encode"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-zstd = { path = "../aqr-zstd", default-features = false }
+aqr-sqlite = { path = "../aqr-sqlite", optional = true }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
 zstd = { version = "0.13", optional = true }
 
@@ -31,4 +33,8 @@ aqr-sqlite = { path = "../aqr-sqlite" }
 
 [[example]]
 name = "dhcheck"
+required-features = ["encode"]
+
+[[example]]
+name = "dhlods"
 required-features = ["encode"]

@@ -1443,6 +1443,20 @@ fn sqlite_zstd_whole() {
     assert!(!modules(&roundtrip(&plain.unwrap(), &all())).contains(&aqr_decompress::ZSTD_FRAMES.name));
 }
 
+/// Distant Horizons' databases made up (aqr-minecraft's tests').
+#[path = "../../../codecs/aqr-minecraft/tests/common/dh.rs"]
+mod dh_db;
+
+/// Distant Horizons' database: its blobs' frames made again (zstd-frames) of contents that dh-lods
+/// makes, its parents' of their children.
+#[test]
+fn distant_horizons_whole() {
+    let Some(db) = dh_db::database(4) else { return };
+    let f = roundtrip(&db, &all());
+    let m = modules(&f);
+    assert!(m.contains(&aqr_decompress::ZSTD_FRAMES.name) && m.contains(&aqr_decompress::DH_LODS.name), "{m:?}");
+}
+
 /// What recompressors know of their data refines what is made of it: the data of a gzip member
 /// by its name, the contents of a ZIP archive's entries by theirs, a PDF file's streams by
 /// what they are.
