@@ -102,7 +102,8 @@ fn presets() -> [&'static str; PRESET_COUNT] {
 /// The levels of a format: lowest, highest and default; none where it has no level (tar).
 fn levels(format: &str) -> Option<(i32, i32, i32)> {
     match format {
-        "aqr" | "7z" => Some((0, 9, 5)),
+        "aqr" => Some((0, 9, 5)),
+        "7z" => Some((0, 9, 6)),
         "zip" | "alz" | "egg" | "tar.gz" | "gz" | "tar.xz" | "tar.lzma" | "xz" | "lzma" => Some((0, 9, 6)),
         "tar.bz2" | "bz2" => Some((1, 9, 9)),
         "tar.zst" | "zst" => Some((1, 22, 3)),

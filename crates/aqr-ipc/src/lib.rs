@@ -120,7 +120,7 @@ pub fn command(
     format: &str,
 ) -> (Command, usize) {
     paths.sort();
-    let mut cmd = Command::new(aqr);
+    let mut cmd = aqr_command(aqr);
     cmd.arg("--ipc").arg(verb.flag());
     if encrypt {
         cmd.arg("-P");
@@ -153,11 +153,21 @@ pub fn command(
     (cmd, count)
 }
 
+/// A command running the `aqr` at that path: where it is a console program started by a program
+/// of no console, with none made for it (`CREATE_NO_WINDOW`).
+fn aqr_command(aqr: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(aqr);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+    cmd
+}
+
 /// The command running `aqr --session` (the program at that path), its standard streams piped,
 /// in `dir` where there is one: told what to do later ([`Job::request_inventory`],
 /// [`Job::begin`]), as a compression dialog does.
 pub fn session_command(aqr: &Path, dir: Option<&Path>) -> Command {
-    let mut cmd = Command::new(aqr);
+    let mut cmd = aqr_command(aqr);
     cmd.arg("--session");
     if let Some(dir) = dir.filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
@@ -187,7 +197,7 @@ impl Point {
 
 /// The points of `archive`, as the `aqr` at that path tells them (none: it has none).
 pub fn points(aqr: &Path, archive: &Path) -> Result<Vec<Point>, String> {
-    let out = Command::new(aqr)
+    let out = aqr_command(aqr)
         .args(["--history", "--json", "--"])
         .arg(archive)
         .stdin(Stdio::null())
@@ -218,7 +228,7 @@ fn parse_points(line: &str) -> Result<Vec<Point>, String> {
 /// Names the state `archive` is in `label` (`aqr --tag`, `{today}` and `{now}` filled in by it):
 /// what `aqr` told, or why it could not.
 pub fn tag(aqr: &Path, archive: &Path, label: &str) -> Result<String, String> {
-    let out = Command::new(aqr)
+    let out = aqr_command(aqr)
         .arg("--tag")
         .arg(label)
         .arg("--")
@@ -273,7 +283,7 @@ pub fn version_folder(archive: &Path, point: &Point) -> PathBuf {
 /// The command extracting `archive` as it was at `point` into `into` (`aqr --ipc -d --at`), its
 /// standard streams piped: one archive, as [`command`] has it.
 pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Command, usize) {
-    let mut cmd = Command::new(aqr);
+    let mut cmd = aqr_command(aqr);
     cmd.arg("--ipc")
         .arg("-d")
         .arg("--at")
