@@ -38,12 +38,30 @@ pub const fn render_of(mode: u8) -> u8 {
 
 #[inline]
 pub const fn src_of(mode: u8) -> u8 {
-    mode >> 4
+    mode >> 4 & 3
+}
+
+/// Mode bit 6: the point is printed as a comma (`4,216`, `1,5e-07`). Nothing else changes.
+pub const COMMA: u8 = 0x40;
+
+/// Whether a mode prints the point as a comma.
+#[inline]
+pub const fn comma_of(mode: u8) -> bool {
+    mode & COMMA != 0
+}
+
+/// Whether a mode is a fixed one (with or without the comma).
+#[inline]
+pub const fn is_fixed(mode: u8) -> bool {
+    render_of(mode) == R_FIX
 }
 
 /// Whether a mode and flags (the second byte of a template item) can be rendered.
 pub fn valid(mode: u8, f: u8) -> bool {
     let (r, s) = (render_of(mode), src_of(mode));
+    if mode & 0x80 != 0 {
+        return false;
+    }
     match r {
         R_FIX => s == SRC_DEC && fixed::valid_fmt(f),
         R_GEN | R_SCI => {
@@ -439,6 +457,19 @@ fn put_rendered(out: &mut Vec<u8>, r: u8, f: u8, neg: bool, m: u64, e: i32) {
 /// Appends the token for `v` at scale `s` in `mode` with flags `f` (a pair `valid`
 /// accepts).
 pub fn put(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
+    if !comma_of(mode) {
+        return put_dotted(out, v, s, mode, f);
+    }
+    let from = out.len();
+    put_dotted(out, v, s, mode & !COMMA, f);
+    for b in &mut out[from..] {
+        if *b == b'.' {
+            *b = b',';
+        }
+    }
+}
+
+fn put_dotted(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
     let (r, src) = (render_of(mode), src_of(mode));
     if r == R_FIX {
         return fixed::put(out, v, f);
@@ -490,6 +521,12 @@ pub fn put(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
 /// scale given to zero; `exp3` the exponent width for tokens without an exponent. `tmp` is
 /// scratch space.
 pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8)> {
+    if comma_of(mode) {
+        // (a comma mode codes the token with its comma as a point; a point is not its own)
+        let mut buf = [0u8; DOTTED];
+        let d = dotted(t, &mut buf)?;
+        return encode(d, mode & !COMMA, p, exp3, prev_scale, tmp);
+    }
     let (r, src) = (render_of(mode), src_of(mode));
     if r == R_GEN && src == SRC_DEC {
         return general::parse_gen(t, p, prev_scale, exp3, tmp);
@@ -557,6 +594,22 @@ pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32, tmp: &mut 
         }
     };
     finish(if zero { Dec::new(neg, 0, 0) } else { Dec { neg, ..x } })
+}
+
+/// The longest token a comma mode codes (more than any mode prints: the scales are at most 60).
+pub(crate) const DOTTED: usize = 96;
+
+/// Token `t` with its commas as points, in `buf`: None if it has a point already (it is not
+/// printed with a comma) or is longer than [`DOTTED`].
+pub(crate) fn dotted<'a>(t: &[u8], buf: &'a mut [u8; DOTTED]) -> Option<&'a [u8]> {
+    if t.len() > DOTTED || t.contains(&b'.') {
+        return None;
+    }
+    let b = &mut buf[..t.len()];
+    for (o, &c) in b.iter_mut().zip(t) {
+        *o = if c == b',' { b'.' } else { c };
+    }
+    Some(b)
 }
 
 /// `d` rounded to `n` significant digits (half up).

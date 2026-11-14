@@ -120,7 +120,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bcn-recons",
         version: 1,
-        sha512_256: hex("571378d8523623c5d8e043d6f83bc8ceb814e2c6e4ce36df2e175461087f05eb"),
+        sha512_256: hex("fc0c88b21c5b9be96204333446e41beb5dfc5c6a65a014eae2c35b6f69e82ca9"),
         block: include_bytes!("../wasm/bcn-recons.block"),
     },
     Known {
@@ -330,7 +330,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "jsonl-recons",
         version: 2,
-        sha512_256: hex("7fa4f5a4b80bd06dd30715b98d2170f5f4492c6da89fb630708ef0277a7f7a02"),
+        sha512_256: hex("500a56017296b7be0163aa4657229dc5dbf460bbb917ad60913d7b205ba3cf71"),
         block: include_bytes!("../wasm/jsonl-recons.block"),
     },
     Known {
@@ -348,7 +348,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "log-recons",
         version: 1,
-        sha512_256: hex("ae42f295797628d4b735fd17555ceafe4e34eebe7b459f0660d899f9e4688a38"),
+        sha512_256: hex("8798194ab2a5a1851c85e55f0ecd3b94b97329002d872a234065de27ba39b9c6"),
         block: include_bytes!("../wasm/log-recons.block"),
     },
     Known {
@@ -408,7 +408,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "obj-recons",
         version: 1,
-        sha512_256: hex("1c7c7c6dfbbc482177001592d74b6ae5ef3954c7cf19d6fa17068b9fef204e14"),
+        sha512_256: hex("073b2cbac111cbb2c3814508df91410b56efd08f85e95f515d0acbeae76f0dc1"),
         block: include_bytes!("../wasm/obj-recons.block"),
     },
     Known {
@@ -480,7 +480,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pvrtc-recons",
         version: 1,
-        sha512_256: hex("ddef6dfa7ec2a60cfabfd49d3462cb2a0158330b6477e1cb29e39a701e0989d6"),
+        sha512_256: hex("160f55905d28d1842ef780b1781dfac3e2dbe8191eef4950dceb89c7320daac2"),
         block: include_bytes!("../wasm/pvrtc-recons.block"),
     },
     Known {
@@ -576,7 +576,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "xsv-recons",
         version: 1,
-        sha512_256: hex("a7c6f9a9b923fd6ae01cca4d54b242326dffbe46a489046baefcbfd25fd46b94"),
+        sha512_256: hex("d6b792c3dbe563951e77c1d2130c5f4c7e37c56c24419b3c704fb2d0d54a241a"),
         block: include_bytes!("../wasm/xsv-recons.block"),
     },
     Known {

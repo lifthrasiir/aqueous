@@ -21,6 +21,13 @@ impl Style {
     /// to zero (not fixed); `tmp` scratch space.
     #[inline]
     pub fn encode(&self, t: &[u8], prev_scale: i32, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8, u8)> {
+        if dec::comma_of(self.mode) {
+            // (the decimal comma: the token as a number with a point, in the comma modes)
+            let mut buf = [0u8; dec::DOTTED];
+            let d = dec::dotted(t, &mut buf)?;
+            let st = Style { mode: self.mode & !dec::COMMA, ..*self };
+            return st.encode(d, prev_scale, tmp).map(|(v, s, m, f)| (v, s, m | dec::COMMA, f));
+        }
         if self.mode != R_FIX
             && let Some((v, s, f)) = dec::encode(t, self.mode, self.p, self.exp3, prev_scale, tmp)
         {
@@ -54,7 +61,23 @@ fn cost(t: &[u8], st: Style, dom: u8, prev: &mut i32, tmp: &mut Vec<u8>) -> usiz
 /// column (position in its line or record), in order; whole lines are best. Each mode is
 /// tried on the first 512 tokens: the one with the fewest digits and scale changes wins
 /// (fixed when nothing does better).
+///
+/// Where more of the tokens print their decimal separator as a comma than as a point, the style
+/// is of the comma modes (`dec::COMMA`), chosen from the tokens as if with points.
 pub fn choose(toks: &[(usize, &[u8])]) -> Style {
+    let sep = |t: &[u8], c: u8| t.contains(&c) && t.iter().any(u8::is_ascii_digit);
+    let commas = toks.iter().filter(|t| sep(t.1, b',')).count();
+    if commas > toks.iter().filter(|t| sep(t.1, b'.')).count() {
+        let swapped: Vec<Vec<u8>> =
+            toks.iter().map(|t| t.1.iter().map(|&c| if c == b',' { b'.' } else { c }).collect()).collect();
+        let toks: Vec<(usize, &[u8])> = toks.iter().zip(&swapped).map(|(t, d)| (t.0, &d[..])).collect();
+        let st = choose_dotted(&toks);
+        return Style { mode: st.mode | dec::COMMA, ..st };
+    }
+    choose_dotted(toks)
+}
+
+fn choose_dotted(toks: &[(usize, &[u8])]) -> Style {
     let mut hist = [0usize; 19];
     let mut maxsig = 1u8;
     let mut sci_p = 1u8;
@@ -149,6 +172,35 @@ mod tests {
         // %.6g (of floats here: f32 has these digits, and codes fewer scale changes)
         let st = pick(&["1.64901e-08 0.5 -123.456", "1 100000 2.5e+06", "0.25 3.14159 -0.0001"]);
         assert_eq!((dec::render_of(st.mode), st.p), (R_GEN, 6));
+    }
+
+    #[test]
+    fn chooses_the_decimal_comma() {
+        // fixed
+        let st = pick(&["1,000000 -2,500000 0,125000", "0,333333 4,000000 -0,000000"]);
+        assert_eq!(st.mode, 0x40);
+        let mut tmp = vec![];
+        assert_eq!(st.encode(b"1,50", 0, &mut tmp), Some((150, 2, 0x40, 2 | fixed::F_POINT)));
+        // a token with a point is not coded in it
+        assert_eq!(st.encode(b"1.50", 0, &mut tmp), None);
+        // the writers' modes
+        let st = pick(&["0,10000000000000001 12,759518999999999 -2,470218", "39,257838999999997 1 0"]);
+        assert_eq!((st.mode, st.p), (dec::mode(R_GEN, SRC_F64) | 0x40, 17));
+        let (v, s, m, f) = st.encode(b"-2,470218", 0, &mut tmp).unwrap();
+        let mut o = vec![];
+        crate::put(&mut o, v, s, m, f);
+        assert_eq!(o, b"-2,470218");
+        // exponents and the fallbacks
+        let st = pick(&["1,5e-07 2,5 3"; 3]);
+        for t in ["1,5e-07", "2,5", "3", "1,50e+30"] {
+            let (v, s, m, f) = st.encode(t.as_bytes(), 0, &mut tmp).unwrap_or_else(|| panic!("{t}"));
+            assert_eq!(m & 0x40, 0x40);
+            let mut o = vec![];
+            crate::put(&mut o, v, s, m, f);
+            assert_eq!(o, t.as_bytes());
+        }
+        // points win a tie
+        assert_eq!(pick(&["1.5 2,5"]).mode & 0x40, 0);
     }
 
     #[test]

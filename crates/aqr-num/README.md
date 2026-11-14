@@ -26,7 +26,8 @@ how `D` is split into `v` and `s`.
 
 ### Descriptor
 
-`mode` = render | source << 4. Valid pairs (526 in all):
+`mode` = render | source << 4 | comma << 6; bit 7 is zero. Valid pairs (1052 in all, twice
+those below: each with or without the decimal comma):
 
 | render | | sources | flags `f` |
 |---|---|---|---|
@@ -38,6 +39,12 @@ how `D` is split into `v` and `s`.
 | 5 | positional (Rust `Display`) | any | 0 or 64 |
 
 Sources: 0 decimal (the value is `D`), 1 `f32`, 2 `f64`.
+
+Decimal comma: with mode bit 6 (0x40) set, the token has a comma in the place of its decimal
+point: every `.` that the layouts below print (a fixed token's point, `%g`'s, `%e`'s and the
+positional and shortest forms', `repr`'s `.0`) is `,` instead (`4,216`, `-0,05`, `1,5e-07`,
+`1,0`). Nothing else changes: no digit grouping, the exponent and sign as they are, the value
+the same. A mode with bit 7 set is invalid.
 
 Fixed format flags: the point is present if bit 5 is set, else N = 0 and bit 6 is clear;
 bit 6 needs N > 0.
@@ -91,6 +98,13 @@ zeros.
 - positional: always.
 
 ### Encoder conventions (not normative)
+
+A comma mode (`dec::COMMA`) codes only tokens with no point: the token with its commas as
+points is coded as the mode without the bit says, and kept if it prints back (with the comma)
+to the same bytes. `style::choose` picks the comma modes where more tokens (with a digit) of
+the sample have a comma than a point (a tie goes to points), choosing from the tokens with
+points; `Style::encode` of such a style gives the comma modes, fixed included, and no mode to
+a token with a point.
 
 `dec::encode` codes a token in a given mode when it prints back to the same bytes. The
 scale is that of `D`'s last digit, except for decimal `%g` and `%e`, where it is P-1-`E`

@@ -106,7 +106,7 @@ fn column(d: &[u8], t: &Table, ids: &[usize], q: Option<u8>, s: &mut Streams) {
     let mut toks: Vec<(usize, &[u8])> = Vec::new();
     for &i in ids {
         let f = &t.fields[i];
-        if !f.escaped && numeric(&d[f.start..f.end]) {
+        if !f.escaped && numeric(&d[f.start..f.end]) && d[f.start..f.end].iter().any(u8::is_ascii_digit) {
             toks.push((0, &d[f.start..f.end]));
             if toks.len() == STYLE_SAMPLE {
                 break;
@@ -369,6 +369,26 @@ mod tests {
         assert!(f.streams[4].data.len() < 2000 * 4, "{}", f.streams[4].data.len());
         let f = encode(s.as_bytes(), 1).unwrap();
         assert_eq!(eval(&f, s.len()).unwrap(), s.as_bytes());
+    }
+
+    /// Numbers with a decimal comma (`;`-separated tables of European locales, and quoted in a
+    /// comma-separated one) are coded as numbers, a point in the same column as text.
+    #[test]
+    fn decimal_commas() {
+        let semi = Dialect { delim: b";".to_vec(), quote: Some(b'"'), term: vec![] };
+        let (mut a, mut b) = (String::from("id;x;y;z\n"), String::from("id,x,y\n"));
+        for i in 0..2000 {
+            let x = (i as f64 * 0.37).sin() * 100.0;
+            let y = format!("{:.3}", i as f64 * 0.001 + 4.0).replace('.', ",");
+            let x = format!("{x:.4}").replace('.', ",");
+            a += &format!("{i};{x};{y};{}\n", if i % 500 == 3 { "1.5" } else { "2,5" });
+            b += &format!("{i},\"{x}\",\"{y}\"\n");
+        }
+        for (t, dia) in [(&a, &semi), (&b, &csv())] {
+            let f = roundtrip(t.as_bytes(), dia);
+            // (the text holds the header and the point's four fields only)
+            assert!(f.streams[4].data.len() < 100, "{}", f.streams[4].data.len());
+        }
     }
 
     /// The file of a formula of segments (an application, or a Concat of them).

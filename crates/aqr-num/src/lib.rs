@@ -30,7 +30,7 @@ pub mod fixed;
 pub mod general;
 pub mod style;
 
-pub use dec::{encode, mode, put, render_of, src_of, valid};
+pub use dec::{COMMA, comma_of, encode, is_fixed, mode, put, render_of, src_of, valid};
 pub use fixed::{MAX_SCALE, MIN_SCALE};
 
 /// Fixed (`%.Nf`-like) numbers: their scale is in the flags.
@@ -42,8 +42,8 @@ pub const M_GEN: u8 = dec::mode(dec::R_GEN, dec::SRC_DEC);
 /// their digits after the point ("i" for none, "#" without an integer part, "-" for a
 /// negative zero), others as `[f32:|f64:]render[P][E][-]` ("E" for three-digit exponents).
 pub fn describe(mode: u8, f: u8) -> String {
-    if mode == M_FIX {
-        let mut s = String::new();
+    if is_fixed(mode) {
+        let mut s = String::from(if comma_of(mode) { "," } else { "" });
         if f & fixed::F_NEGZ != 0 {
             s += "-";
         }
@@ -60,7 +60,8 @@ pub fn describe(mode: u8, f: u8) -> String {
         String::new()
     };
     format!(
-        "{src}{r}{p}{}{}",
+        "{}{src}{r}{p}{}{}",
+        if comma_of(mode) { "," } else { "" },
         if f & general::G_EXP3 != 0 { "E" } else { "" },
         if f & general::G_NEGZ != 0 { "-" } else { "" }
     )
@@ -121,7 +122,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(n, 526);
+        assert_eq!(n, 1052);
         assert!(back > 4000, "{back} coded back");
     }
 
@@ -145,6 +146,43 @@ mod tests {
                 assert!(z.e == d.e && z.m.abs_diff(d.m) == 1 && z.m.is_multiple_of(2), "{x:e}");
             }
         }
+    }
+
+    /// A decimal comma (mode bit 6) prints the point as `,` and nothing else changes; a
+    /// token with a point is not coded in a comma mode.
+    #[test]
+    fn decimal_comma() {
+        let mut tmp = vec![];
+        let comma = |m: u8| m | 0x40;
+        for (t, m, p) in [
+            ("1,5e-07", mode(dec::R_SCI, dec::SRC_DEC), 2),
+            ("12,759518999999999", mode(dec::R_GEN, dec::SRC_F64), 17),
+            ("0,1", mode(dec::R_PY, dec::SRC_DEC), 0),
+            ("1,0", mode(dec::R_PY, dec::SRC_F32), 0),
+            ("4,216", mode(dec::R_POS, dec::SRC_DEC), 0),
+            ("1234", mode(dec::R_POS, dec::SRC_DEC), 0),
+        ] {
+            let (v, s, f) = encode(t.as_bytes(), comma(m), p, false, 0, &mut tmp).unwrap_or_else(|| panic!("{t}"));
+            assert!(valid(comma(m), f), "{t}");
+            let mut o = vec![];
+            put(&mut o, v, s, comma(m), f);
+            assert_eq!(std::str::from_utf8(&o).unwrap(), t);
+            let mut o = vec![];
+            put(&mut o, v, s, m, f);
+            assert_eq!(std::str::from_utf8(&o).unwrap(), t.replace(',', "."));
+            if t.contains(',') {
+                assert!(encode(t.replace(',', ".").as_bytes(), comma(m), p, false, 0, &mut tmp).is_none(), "{t}");
+                assert!(encode(t.as_bytes(), m, p, false, 0, &mut tmp).is_none(), "{t}");
+            }
+        }
+        // fixed
+        let (v, f) = fixed::parse(b"-0.05").unwrap();
+        let mut o = vec![];
+        put(&mut o, v, 2, M_FIX | 0x40, f);
+        assert_eq!(o, b"-0,05");
+        assert!(valid(M_FIX | 0x40, f));
+        assert!(!valid(0x80, 0) && !valid(0xC0, 0) && !valid(0x30, 0));
+        assert!(encode(b"1,2,3", comma(mode(dec::R_POS, dec::SRC_DEC)), 0, false, 0, &mut tmp).is_none());
     }
 
     #[test]

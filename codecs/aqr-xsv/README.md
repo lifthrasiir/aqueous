@@ -4,7 +4,7 @@ Delimited text tables rebuilt bit for bit from their fields, stored column by co
 TSV, the `;`, `|` and space variants (a space where a column holds numbers), and USV (U+241F and U+241E, or their ASCII forms). Text fields
 are kept as they are, for the archive to compress; numbers are coded as integers in the way
 they were printed ([`aqr-num`](../../crates/aqr-num)), as they are or as differences from the column's
-previous one. Records that are not of the table (a quote not closed, a zero byte) are kept as
+previous one. Decimal commas (`4,216`, in `;`-separated tables, or quoted in CSV) are numbers of aqr-num's comma modes. Records that are not of the table (a quote not closed, a zero byte) are kept as
 they are, so any file round-trips.
 
 ```rust

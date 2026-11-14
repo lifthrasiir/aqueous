@@ -22,7 +22,7 @@ use crate::recent::{Entry, NPRED, Recent, WIN, window_pred};
 pub use crate::style::Styles;
 pub use crate::style::next_styles;
 use crate::varint::{Rd, put_sv, put_uv};
-use aqr_num::{M_FIX, MAX_SCALE, MIN_SCALE, fixed};
+use aqr_num::{MAX_SCALE, MIN_SCALE, fixed};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -503,7 +503,7 @@ impl Encoder {
         let prev = &mut self.st.prev[k];
         // Zeros not in a fixed format take the scale of the previous number.
         for (j, v) in vals[..n].iter_mut().enumerate() {
-            if v.2 != M_FIX && v.0 == 0 {
+            if !aqr_num::is_fixed(v.2) && v.0 == 0 {
                 v.1 = prev[j].1;
             }
         }
@@ -539,7 +539,7 @@ impl Encoder {
         for &j in &o[..n] {
             let (v, sc, mode) = vals[j];
             let (pv, ps) = prev[j];
-            if mode != M_FIX {
+            if !aqr_num::is_fixed(mode) {
                 put_sv(&mut s[S_SCALE], (sc - ps) as i64);
             }
             let pred = if Some(j) == sel {
@@ -917,7 +917,7 @@ impl Sink for Check<'_> {
         // (a zero not fixed: told at the scale of its predecessor, not that of its token)
         if let Some(t) = t
             && t.at as usize == self.pos
-            && (v != 0 || mode == M_FIX)
+            && (v != 0 || aqr_num::is_fixed(mode))
             && (t.v, t.s, t.mode, t.f) == (v, s, mode, f)
         {
             self.pos += t.len as usize;
@@ -1098,7 +1098,7 @@ impl Decoder {
                 for &j in &o[..if d == 0 { n } else { 0 }] {
                     let (m, f) = (k[items[j]], k[items[j] + 1]);
                     let (pv, ps) = prev[j];
-                    let sc = if m != M_FIX {
+                    let sc = if !aqr_num::is_fixed(m) {
                         (ps as i64).wrapping_add(scale.sv()).clamp(MIN_SCALE as i64, MAX_SCALE as i64) as i32
                     } else {
                         (f & fixed::F_FRAC) as i32
