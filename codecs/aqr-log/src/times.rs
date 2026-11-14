@@ -1,8 +1,7 @@
 //! The encoder's side of times: timestamps found in a line, as spans of its bytes with an
 //! aqr-num pattern and the integer it prints (FORMAT.md, section 5).
 
-use std::collections::HashMap;
-
+use crate::formula::FxMap;
 use aqr_num::time::{self, MONTHS, NO_YEAR, WEEKDAYS};
 
 /// A timestamp in a line: its bytes `start..end`, its pattern (an index of [`Times::pattern`])
@@ -33,8 +32,9 @@ pub struct Times {
     mdy: bool,
     /// The patterns used, by id.
     pats: Vec<Vec<u8>>,
+    fracs: Vec<u32>,
     /// The patterns tried, by bytes, as an index of `comp`.
-    index: HashMap<Vec<u8>, usize>,
+    index: FxMap<Vec<u8>, usize>,
     comp: Vec<Option<Compiled>>,
     pub spans: Vec<Span>,
     pat: Vec<u8>,
@@ -65,6 +65,8 @@ enum It {
 /// (then aqr-num's [`time::parse`] and [`time::put`] do the work).
 struct Compiled {
     items: Option<Vec<It>>,
+    /// The digits of its fraction.
+    frac: u32,
     /// The id the pattern has been given, once it has matched.
     id: Option<u32>,
 }
@@ -119,7 +121,7 @@ impl Compiled {
             at += 1;
             items.as_mut().unwrap().push(it);
         }
-        Some(Compiled { items, id: None })
+        Some(Compiled { items, frac: time::fraction_digits(pat), id: None })
     }
 
     /// The integer of the time at the start of `t`, and its length, if [`time::parse`] takes it
@@ -337,12 +339,18 @@ impl Times {
             frac,
             mdy: first <= 12 && second > 12,
             pats: Vec::new(),
-            index: HashMap::new(),
+            fracs: Vec::new(),
+            index: FxMap::default(),
             comp: Vec::new(),
             spans: Vec::new(),
             pat: Vec::new(),
             out: Vec::new(),
         }
+    }
+
+    /// The digits of the fraction of pattern `id` (0: none).
+    pub fn fraction(&self, id: u32) -> u32 {
+        self.fracs[id as usize]
     }
 
     /// The bytes of pattern `id`.
@@ -540,6 +548,7 @@ impl Times {
         let c = self.comp[k].as_mut()?;
         let id = *c.id.get_or_insert_with(|| {
             self.pats.push(self.pat.clone());
+            self.fracs.push(c.frac);
             self.pats.len() as u32 - 1
         });
         Some(Span { start: i, end, pat: id, v })

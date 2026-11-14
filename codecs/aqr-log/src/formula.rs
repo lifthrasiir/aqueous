@@ -19,7 +19,7 @@ use crate::module::{
     K_NEW, K_SAME, M_DIGITS, M_NUM, M_TEXT, M_TIME, MAX_COLUMNS, MAX_DIGITS, MAX_TEMPLATE_BYTES, MAX_TEMPLATES,
     P_COLUMN, P_LINE, P_RAW, Params,
 };
-use crate::times::Times;
+use crate::times::{Span, Times};
 
 pub use crate::module::decode;
 
@@ -137,7 +137,7 @@ pub fn starts(d: &[u8]) -> bool {
 
 /// A hasher of hashes and bytes, quick: Fx's multiplication, the result mixed.
 #[derive(Default)]
-struct Fx(u64);
+pub(crate) struct Fx(u64);
 
 const K: u64 = 0x517c_c1b7_2722_0a95;
 
@@ -162,7 +162,7 @@ impl Hasher for Fx {
     }
 }
 
-type FxMap<Key, V> = HashMap<Key, V, BuildHasherDefault<Fx>>;
+pub(crate) type FxMap<Key, V> = HashMap<Key, V, BuildHasherDefault<Fx>>;
 
 /// The hash of a token's form (digit runs each as one mark), and whether each of them is of at
 /// most [`MAX_DIGITS`] digits.
@@ -248,7 +248,22 @@ struct Splitter {
     sep: [bool; 256],
     times: Times,
     pieces: Vec<Piece>,
+    /// The timestamps found in the lines of the first pass, to be given again to the others
+    /// (they cut the same lines in the same order): for each line its length and how many
+    /// there were, and all of them. Not kept beyond [`CACHE_LINES`] lines and [`CACHE_SPANS`]
+    /// timestamps; the lines after are found again.
+    seen: Vec<(u32, u32)>,
+    kept: Vec<Span>,
+    /// The lines cut in this pass so far, and where their timestamps are in `kept`.
+    cursor: usize,
+    next: usize,
+    /// Whether the lines cut now are put in `seen`.
+    recording: bool,
 }
+
+/// The most lines, and timestamps, that a segment's are kept for.
+const CACHE_LINES: usize = 4 << 20;
+const CACHE_SPANS: usize = 2 << 20;
 
 impl Splitter {
     fn new(seg: &[u8], wide: bool) -> Splitter {
@@ -256,7 +271,63 @@ impl Splitter {
         if n < seg.len() {
             n = seg[..n].iter().rposition(|&b| b == b'\n').map_or(n, |i| i + 1);
         }
-        Splitter { sep: separators(seg, wide), times: Times::new(&seg[..n]), pieces: Vec::new() }
+        Splitter {
+            sep: separators(seg, wide),
+            times: Times::new(&seg[..n]),
+            pieces: Vec::new(),
+            seen: Vec::new(),
+            kept: Vec::new(),
+            cursor: 0,
+            next: 0,
+            recording: true,
+        }
+    }
+
+    /// The timestamps of `line` in `self.times.spans`: found in the first pass, and kept for
+    /// the next ones.
+    fn find(&mut self, line: &[u8]) {
+        let at = self.cursor;
+        self.cursor += 1;
+        if self.recording {
+            self.times.find(line);
+            let n = self.times.spans.len();
+            if at == self.seen.len() && at < CACHE_LINES && self.kept.len() + n <= CACHE_SPANS {
+                if let Ok(len) = u32::try_from(line.len()) {
+                    self.seen.push((len, n as u32));
+                    self.kept.extend_from_slice(&self.times.spans);
+                }
+            }
+            return;
+        }
+        match self.seen.get(at) {
+            Some(&(len, n)) if len as usize == line.len() => {
+                let n = n as usize;
+                self.times.spans.clear();
+                self.times.spans.extend_from_slice(&self.kept[self.next..self.next + n]);
+                self.next += n;
+            }
+            _ => {
+                // (not kept, or not the same line: this and the lines after are found)
+                self.seen.truncate(at);
+                self.times.find(line);
+            }
+        }
+    }
+
+    /// Passes `line`, whose timestamps are not wanted.
+    fn skip(&mut self, line: &[u8]) {
+        match self.seen.get(self.cursor) {
+            Some(&(len, n)) if len as usize == line.len() => self.next += n as usize,
+            _ => self.seen.truncate(self.cursor),
+        }
+        self.cursor += 1;
+    }
+
+    /// Starts a pass over the same lines again, which are given the timestamps found.
+    fn rewind(&mut self) {
+        self.cursor = 0;
+        self.next = 0;
+        self.recording = false;
     }
 
     /// The pieces of `line` in `self.pieces`: of each token its parts around the timestamps in
@@ -264,7 +335,7 @@ impl Splitter {
     /// separator that ends it, if any.
     fn split(&mut self, line: &[u8]) {
         self.pieces.clear();
-        self.times.find(line);
+        self.find(line);
         let spans = &self.times.spans;
         let (mut at, mut sj) = (0, 0);
         loop {
@@ -326,6 +397,8 @@ struct Classifier {
     /// each (by id - 1); the mark of each column; the most numbers of a template.
     index: FxMap<Vec<u8>, u32>,
     tbytes: Vec<u8>,
+    /// Where each template starts in `tbytes` (by id - 1).
+    tstart: Vec<usize>,
     col0: Vec<u32>,
     marks: Vec<u8>,
     numbers: usize,
@@ -356,6 +429,7 @@ impl Classifier {
                 }
             }
         }
+        split.rewind();
         let rare = RARE_MIN.max(lines / RARE_PER).min(u32::MAX as usize) as u32;
         Classifier {
             counts,
@@ -363,6 +437,7 @@ impl Classifier {
             split,
             index: FxMap::default(),
             tbytes: Vec::new(),
+            tstart: Vec::new(),
             col0: Vec::new(),
             marks: Vec::new(),
             numbers: 0,
@@ -391,7 +466,7 @@ impl Classifier {
                     self.tpl.push(M_TIME);
                     self.tpl.extend_from_slice(self.split.times.pattern(pat));
                     self.tpl.push(M_TIME);
-                    let n = aqr_num::time::fraction_digits(self.split.times.pattern(pat));
+                    let n = self.split.times.fraction(pat);
                     self.slots.push(Slot { kind: M_TIME, start, len: end - start, v, n, col: self.ncols });
                     self.ncols += 1 + (n > 0) as usize;
                 }
@@ -411,6 +486,7 @@ impl Classifier {
         }
         let id = self.col0.len() as u32 + 1;
         self.index.insert(self.tpl.clone(), id);
+        self.tstart.push(self.tbytes.len());
         self.tbytes.extend_from_slice(&self.tpl);
         self.tbytes.push(b'\n');
         self.col0.push(self.marks.len() as u32);
@@ -422,6 +498,54 @@ impl Classifier {
         }
         self.numbers = self.numbers.max(nums);
         id
+    }
+
+    /// The slots of `line` of the template `id` (from 1), which it was given by [`Classifier::line`]:
+    /// read off the template's marks, where `line` would find them again by the counts of the
+    /// forms of the tokens and the numbers.
+    fn replay(&mut self, line: &[u8], id: u32) {
+        self.slots.clear();
+        self.ncols = 0;
+        self.split.split(line);
+        let k = id as usize - 1;
+        let end = self.tstart.get(k + 1).map_or(self.tbytes.len(), |&e| e) - 1;
+        let tpl = &self.tbytes[self.tstart[k]..end];
+        let mut tp = 0;
+        for piece in &self.split.pieces {
+            match *piece {
+                Piece::Plain { start, end } => match tpl.get(tp) {
+                    Some(&kind @ (M_NUM | M_TEXT)) => {
+                        tp += 1;
+                        self.slots.push(Slot { kind, start, len: end - start, v: 0, n: 0, col: self.ncols });
+                        self.ncols += 1;
+                    }
+                    _ => {
+                        // (a token of literal bytes and runs of digits)
+                        let mut i = start;
+                        while i < end {
+                            if line[i].is_ascii_digit() {
+                                let n = line[i..end].iter().take_while(|b| b.is_ascii_digit()).count();
+                                debug_assert_eq!(tpl[tp], M_DIGITS);
+                                self.slots.push(Slot { kind: M_DIGITS, start: i, len: n, v: 0, n: 0, col: self.ncols });
+                                self.ncols += 1;
+                                i += n;
+                            } else {
+                                i += 1;
+                            }
+                            tp += 1;
+                        }
+                    }
+                },
+                Piece::Time { start, end, pat, v } => {
+                    let n = self.split.times.fraction(pat);
+                    tp += self.split.times.pattern(pat).len() + 2;
+                    self.slots.push(Slot { kind: M_TIME, start, len: end - start, v, n, col: self.ncols });
+                    self.ncols += 1 + (n > 0) as usize;
+                }
+                Piece::Sep(_) => tp += 1,
+            }
+        }
+        debug_assert_eq!(tp, tpl.len());
     }
 
     /// Adds token `t` (at `at` in the line) to the template and slots.
@@ -604,8 +728,13 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
     let mut cl = Classifier::new(seg, wide);
     // the second pass: templates, and the samples of the numbers' styles
     let mut samples: Vec<Sample> = Vec::new();
+    // (the templates the lines have, for the third pass: the same ones, only not made again)
+    let mut ids: Vec<u32> = Vec::new();
     for line in lines_of(seg) {
         let id = cl.line(line);
+        if ids.len() < CACHE_LINES {
+            ids.push(id);
+        }
         if id == 0 {
             continue;
         }
@@ -622,6 +751,7 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
         }
     }
     cl.frozen = true;
+    cl.split.rewind();
     let mut cols: Vec<Col> = (0..cl.marks.len()).map(|_| Col::default()).collect();
     for (c, sm) in cols.iter_mut().zip(samples) {
         let mut at = 0;
@@ -646,8 +776,22 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
     let mut cur: Vec<(i64, i32)> = Vec::new();
     let mut sc = Scratch::default();
     let mut raw = 0;
-    for line in lines_of(seg) {
-        let id = cl.line(line);
+    for (n, line) in lines_of(seg).enumerate() {
+        let id = match ids.get(n) {
+            // (the line has no template, or it is the one it was given: its timestamps and its
+            // slots are read off the template)
+            Some(&0) => {
+                if !has_mark(line) {
+                    cl.split.skip(line);
+                }
+                0
+            }
+            Some(&id) => {
+                cl.replay(line, id);
+                id
+            }
+            None => cl.line(line),
+        };
         varint::put(&mut s.layout, id as u64);
         if id == 0 {
             raw += line.len() + 1;
@@ -989,6 +1133,54 @@ mod tests {
     }
 
     /// Timestamps are one integer with a pattern in the template, wherever they are in a line.
+    /// The slots read off a template are those the line was given them as.
+    #[test]
+    fn replay_gives_the_slots() {
+        let mut rng = aqr_common::rng::Rng::new(5);
+        let mut mixed = log(3000);
+        for i in 0..2000 {
+            // (empty tokens, runs of digits in words, numbers of many kinds, lines kept as they are)
+            mixed += &match i % 6 {
+                0 => format!(
+                    "a  b,{} x{}y{} ,, {}\n",
+                    rng.below(99),
+                    rng.below(9),
+                    rng.below(9),
+                    rng.below(7) as f64 / 8.0
+                ),
+                1 => format!("\n{}-{}\t{}\n", rng.below(9999), rng.below(99), 1u64 << rng.below(40)),
+                2 => format!("id{:04} {} 2021-03-0{} 10:00:0{}\n", rng.below(9999), rng.below(3), 1 + i % 8, i % 9),
+                3 => format!("{i} \u{1}mark {}\n", rng.below(5)),
+                4 => format!("{}e{} 0x{:x} {}\n", rng.below(9), rng.below(30), rng.below(1 << 20), -(i as i64)),
+                _ => format!("w{} {}:{}\n", rng.below(200), rng.below(24), rng.below(60)),
+            };
+        }
+        let mut cl = Classifier::new(mixed.as_bytes(), false);
+        let mut seen = 0;
+        let rows = |c: &Classifier| -> Vec<(u8, usize, usize, i64, u32, usize)> {
+            c.slots.iter().map(|s| (s.kind, s.start, s.len, s.v, s.n, s.col)).collect()
+        };
+        let mut lines = Vec::new();
+        for line in lines_of(mixed.as_bytes()) {
+            let id = cl.line(line);
+            lines.push((line, id, rows(&cl), cl.ncols));
+        }
+        cl.frozen = true;
+        cl.split.rewind();
+        for (line, id, want, ncols) in lines {
+            if id == 0 {
+                if !has_mark(line) {
+                    cl.split.skip(line);
+                }
+                continue;
+            }
+            cl.replay(line, id);
+            assert_eq!((rows(&cl), cl.ncols), (want, ncols), "{}", String::from_utf8_lossy(line));
+            seen += 1;
+        }
+        assert!(seen > 4000);
+    }
+
     #[test]
     fn times() {
         let mut rng = aqr_common::rng::Rng::new(21);
