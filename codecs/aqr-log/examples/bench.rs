@@ -1,4 +1,4 @@
-//! usage: [SEGMENT=BYTES] aqr-log-bench FILE...
+//! usage: [SEGMENT=BYTES] [ENCODE_ONLY=1] aqr-log-bench FILE...
 //!
 //! For each table: its streams as zstd -3 compresses them, against the file itself, the
 //! module's encoding (in segments of SEGMENT bytes if given, else of `formula::SEGMENT`) and decoding speeds (of the file's bytes), and that it decodes back.
@@ -18,6 +18,16 @@ fn main() {
             continue;
         };
         let e = t.elapsed().as_secs_f64();
+        if std::env::var_os("ENCODE_ONLY").is_some() {
+            // (the speed of the encoder alone, and a checksum of its streams, to compare builds)
+            let sum = f
+                .streams
+                .iter()
+                .flat_map(|s| s.data.iter())
+                .fold(0u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+            println!("{path}: encode {:.1} MB/s ({e:.2} s), streams {sum:016x}", d.len() as f64 / 1e6 / e);
+            continue;
+        }
         let apps = match &f.root {
             aqr_formula::Node::Concat(ns) => ns.iter().collect(),
             n => vec![n],
