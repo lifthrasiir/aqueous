@@ -5342,7 +5342,7 @@ fn log_plans_hold() {
         ("segments", table, 20_000),
     ] {
         let d = d.into_bytes();
-        let f = aqr_log::formula::encode_in(&d, segment, false).unwrap_or_else(|| panic!("{t}"));
+        let f = aqr_log::formula::encode_in(&d, segment, false, 1).unwrap_or_else(|| panic!("{t}"));
         let parts = match &f.root {
             Node::Concat(nodes) => nodes.clone(),
             n => vec![n.clone()],

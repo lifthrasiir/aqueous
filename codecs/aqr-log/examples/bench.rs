@@ -13,7 +13,7 @@ fn main() {
         let d = std::fs::read(&path).unwrap();
         let t = Instant::now();
         let segment = std::env::var("SEGMENT").ok().and_then(|s| s.parse().ok()).unwrap_or(aqr_log::formula::SEGMENT);
-        let Some(f) = aqr_log::formula::encode_in(&d, segment, true) else {
+        let Some(f) = aqr_log::formula::encode_in(&d, segment, true, 1) else {
             println!("{path}: not taken");
             continue;
         };

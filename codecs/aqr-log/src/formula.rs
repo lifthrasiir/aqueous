@@ -548,6 +548,20 @@ struct Streams {
 }
 
 impl Streams {
+    /// `other`'s streams put after these.
+    fn append(&mut self, other: Streams) {
+        let Streams { layout, raw, templates, columns, text, nums, widths, types, desc } = other;
+        self.layout.extend_from_slice(&layout);
+        self.raw.extend_from_slice(&raw);
+        self.templates.extend_from_slice(&templates);
+        self.columns.extend_from_slice(&columns);
+        self.text.extend_from_slice(&text);
+        self.nums.extend_from_slice(&nums);
+        self.widths.extend_from_slice(&widths);
+        self.types.extend_from_slice(&types);
+        self.desc.extend_from_slice(&desc);
+    }
+
     /// The lengths of the streams, in the order of [`STREAM_NAMES`].
     fn lens(&self) -> [usize; 9] {
         [
@@ -732,39 +746,47 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
 /// The formula of `input` as lines of text, or `None` where it is shorter than [`MIN_LEN`],
 /// does not start as such ([`starts`]), or a tenth of it or more is kept as it is. It is the
 /// same whatever `threads` is (one is used).
-pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
+pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     if !starts(input) {
         return None;
     }
-    encode_in(input, SEGMENT, true)
+    encode_in(input, SEGMENT, true, threads)
 }
 
 /// [`encode`] in segments of `segment` bytes of lines at least (the test of segments at lengths
 /// shorter than [`SEGMENT`]); `check` that no tenth of the file is kept as it is. `None` for
-/// an empty file.
-pub fn encode_in(input: &[u8], segment_len: usize, check: bool) -> Option<Formula> {
+/// an empty file. The segments are coded apart, on `threads`, and put in order: the same
+/// formula whatever `threads` is.
+pub fn encode_in(input: &[u8], segment_len: usize, check: bool, threads: usize) -> Option<Formula> {
     if input.is_empty() {
         return None;
     }
     let segment_len = segment_len.max(1);
-    let mut s = Streams::default();
-    let mut parts: Vec<(Params, [u64; 9], u64)> = Vec::new();
-    let (mut from, mut raw) = (0, 0);
-    while from < input.len() {
-        // the segment: lines taken while one starts within `segment_len` bytes of its start
-        let mut end = from;
+    // the segments: lines taken while one starts within `segment_len` bytes of its start
+    let mut cuts = vec![0];
+    let mut end = 0;
+    while end < input.len() {
+        let from = end;
         while end < input.len() && end - from < segment_len {
             end = memchr::memchr(b'\n', &input[end..]).map_or(input.len(), |i| end + i + 1);
         }
-        let before = s.lens();
-        let (params, r) = segment(&input[from..end], end == input.len(), &mut s);
+        cuts.push(end);
+    }
+    let done = aqr_common::pool::par_map(cuts.len() - 1, threads, |k| {
+        let mut s = Streams::default();
+        let (params, raw) = segment(&input[cuts[k]..cuts[k + 1]], cuts[k + 1] == input.len(), &mut s);
+        (s, params, raw)
+    });
+    let mut s = Streams::default();
+    let mut parts: Vec<(Params, [u64; 9], u64)> = Vec::new();
+    let mut raw = 0;
+    for (k, (t, params, r)) in done.into_iter().enumerate() {
         raw += r;
-        if check && raw * 10 >= input.len() {
-            return None;
-        }
-        let now = s.lens();
-        parts.push((params, std::array::from_fn(|j| (now[j] - before[j]) as u64), (end - from) as u64));
-        from = end;
+        parts.push((params, std::array::from_fn(|j| t.lens()[j] as u64), (cuts[k + 1] - cuts[k]) as u64));
+        s.append(t);
+    }
+    if check && raw * 10 >= input.len() {
+        return None;
     }
     let mut f = Formula::default();
     let kinds = [
@@ -810,7 +832,7 @@ mod tests {
     }
 
     fn roundtrip(d: &[u8]) -> Formula {
-        let f = encode_in(d, usize::MAX, false).unwrap();
+        let f = encode_in(d, usize::MAX, false, 1).unwrap();
         assert_eq!(eval(&f, d.len()).unwrap(), d, "{}", String::from_utf8_lossy(d));
         assert!(eval(&f, d.len() + 1).is_err());
         f
@@ -837,7 +859,7 @@ mod tests {
         ] {
             roundtrip(s);
         }
-        assert!(encode_in(b"", 10, false).is_none());
+        assert!(encode_in(b"", 10, false, 1).is_none());
     }
 
     /// A log of lines of a few templates, in which what varies is cut out.
@@ -1086,12 +1108,14 @@ mod tests {
     #[test]
     fn segments() {
         let d = log(4000).into_bytes();
-        let whole = encode_in(&d, usize::MAX, true).unwrap();
+        let whole = encode_in(&d, usize::MAX, true, 1).unwrap();
         assert!(matches!(whole.root, Node::Apply(_)));
         assert_eq!(eval_segments(&whole), d);
         for segment in [1, 100, 1000, 4096, 50_000, d.len() / 2] {
-            let f = encode_in(&d, segment, true).unwrap();
+            let f = encode_in(&d, segment, true, 1).unwrap();
             assert_eq!(eval_segments(&f), d, "segment {segment}");
+            // (the same formula on any threads)
+            assert_eq!(f, encode_in(&d, segment, true, 4).unwrap(), "threads at segment {segment}");
             assert_eq!(f.streams.len(), 9);
             let Node::Concat(ns) = &f.root else { panic!("not segments at {segment}") };
             let mut at = 0;
@@ -1106,7 +1130,7 @@ mod tests {
         // a file without the last LF: the last segment only says so
         let d = &d[..d.len() - 1];
         for segment in [1, 1000, usize::MAX] {
-            assert_eq!(eval_segments(&encode_in(d, segment, true).unwrap()), d);
+            assert_eq!(eval_segments(&encode_in(d, segment, true, 1).unwrap()), d);
         }
     }
 
@@ -1157,7 +1181,7 @@ mod tests {
         let _ = inputs(&streams);
         // a pattern of a column whose integers are of no time of day
         let day = "a 12:00:00\n".repeat(2000);
-        let f = encode_in(day.as_bytes(), usize::MAX, false).unwrap();
+        let f = encode_in(day.as_bytes(), usize::MAX, false, 1).unwrap();
         let Node::Apply(a2) = &f.root else { panic!() };
         let mut streams: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
         let at = streams[5].len() - 1;

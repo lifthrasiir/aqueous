@@ -906,6 +906,8 @@ formats! {
         // 73 MB 80.7 MB = 1.10 per byte, intel_lab 151 MB 171 MB = 1.14, nasa 205 MB 219 MB = 1.07,
         // apache 5 MB 10.4 MB = 2.0, the templates and columns being a share of a small input's),
         // 1.3 for the largest ratio of the inputs that count
+        // (the segments are coded at once on the threads: the heap peaks stay, the segments' streams
+        // being what the allowance counts; the resident peak of nasa 738 -> 830 MB)
         heap: 1.3,
         text: true,
     }
