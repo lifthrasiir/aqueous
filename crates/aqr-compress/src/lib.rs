@@ -957,8 +957,10 @@ fn finish(
     memory::note_kept(&f, opt.application_bound, d.len() as u64);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not
     // copied, their blocks compressed as they are written; then the sink's
-    // (of a file mapped, let go of as it is read: of all of it, again)
-    let sum = Some(aqr::checksum_through(d));
+    // (of a file mapped, let go of as it is read: of all of it, again, once for the checksum and
+    // the content hash that verifying compares with)
+    let read = through(d, opt.threads);
+    let sum = Some(read.sum);
     let encoding = aqr_common::trace::span("encode");
     let n = match (sink, direct) {
         (Some(sink), Some((place, room))) => written_direct(&mut f, sink, &place, room, sum, &cx.enc, out)?,
@@ -1013,7 +1015,7 @@ fn finish(
         decodes
     };
     // by the hashes recorded, without running a module; else decoded
-    let verified = |c: &[u8]| match hashed(c, d, &memo, opt, mapped) {
+    let verified = |c: &[u8]| match hashed(c, d, Some(&read), &memo, opt, mapped) {
         Some(same) => same,
         None => decodes(c),
     };
@@ -1113,11 +1115,65 @@ fn moved_back(place: &Placing, from: u64, end: u64, by: u64) -> io::Result<()> {
     Ok(())
 }
 
+/// What verifying compares a file with, as it was read through before the archive was written
+/// ([`through`]): its checksum ([`aqr::checksum`]) and its content hash.
+struct Through {
+    sum: u64,
+    ch: aqr_formula::chash::Ch,
+}
+
+/// [`Through`] of `d`, read once, its pages let go of as they are read ([`LET_GO`] at a time,
+/// where it is a file mapped): the content hash of each [`THROUGH`] bytes on up to `threads`
+/// threads (as many pages read in at once), on a worker of its own where one is free, while the
+/// checksum is taken of the stretch before.
+fn through(d: &[u8], threads: usize) -> Through {
+    use aqr_formula::chash::Ch;
+    let hashes = |part: &[u8]| -> Vec<Ch> {
+        let pieces: Vec<&[u8]> = part.chunks(LET_GO).collect();
+        aqr_common::pool::par_map(pieces.len(), threads.max(1), |k| Ch::of(pieces[k]))
+    };
+    let mut sum = xxhash_rust::xxh64::Xxh64::new(0);
+    let mut ch = Ch::EMPTY;
+    let parts: Vec<&[u8]> = d.chunks(THROUGH).collect();
+    let mut ahead = parts.first().map(|p| hashes(p));
+    aqr_common::pool::scope(1, |s| {
+        for (k, part) in parts.iter().enumerate() {
+            let next = parts.get(k + 1).copied();
+            let next = match s.workers() {
+                0 => {
+                    sum.update(part);
+                    next.map(hashes)
+                }
+                _ => {
+                    let h = next.map(|p| s.spawn(move || hashes(p)));
+                    sum.update(part);
+                    h.map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+                }
+            };
+            ch = ahead.take().expect("hashed ahead").into_iter().fold(ch, Ch::cat);
+            aqr_formula::store::let_go(part);
+            ahead = next;
+        }
+    });
+    Through { sum: sum.digest(), ch }
+}
+
+/// Bytes of a file read through at once ([`through`]).
+const THROUGH: usize = 16 * LET_GO;
+
 /// Whether archive `c` of file `d` gives it back by its content hashes, worked out without
 /// running a module by what `memo` recorded (`aqr::Archive::hashed`): its outputs' hashes those
-/// of the parts of `d` they are, which their checksums are of. None where any application is not
-/// recorded.
-fn hashed(c: &[u8], d: &[u8], memo: &std::cell::RefCell<verify::Memo>, opt: &Options, mapped: bool) -> Option<bool> {
+/// of the parts of `d` they are, which their checksums are of. Where the archive has an output
+/// of all of `d`, it is compared with `read` of it, if given, and `d` is not read again. None
+/// where any application is not recorded.
+fn hashed(
+    c: &[u8],
+    d: &[u8],
+    read: Option<&Through>,
+    memo: &std::cell::RefCell<verify::Memo>,
+    opt: &Options,
+    mapped: bool,
+) -> Option<bool> {
     use aqr_formula::chash::Ch;
     let _s = aqr_common::trace::span("verify");
     let native = Native { threads: opt.threads };
@@ -1132,6 +1188,11 @@ fn hashed(c: &[u8], d: &[u8], memo: &std::cell::RefCell<verify::Memo>, opt: &Opt
         Ok(None) => return None,
         Err(_) => return Some(false),
     };
+    if let (Some(read), [(h, sums)]) = (read, &roots[..])
+        && h.len() == d.len() as u64
+    {
+        return Some(*h == read.ch && sums.iter().all(|&s| s == read.sum));
+    }
     // (the hash of `d` made of those of its pieces, each read once for both, [`LET_GO`] at a
     // time, its pages then let go of: not all of a file mapped resident by the end)
     let (mut at, mut whole, mut of_d) = (0usize, Ch::EMPTY, Ch::EMPTY);
@@ -3373,7 +3434,7 @@ mod tests {
         assert!(rss(&mapped) < d.len() / 8);
         // and as it is checksummed (as the archive is encoded: of all of it)
         touch(&mapped);
-        assert_eq!(aqr::checksum_through(&mapped), aqr::checksum(&d));
+        assert_eq!(through(&mapped, 2).sum, aqr::checksum(&d));
         assert!(rss(&mapped) < d.len() / 8);
     }
 
@@ -4782,6 +4843,19 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
+    /// A file read through ([`through`]) has its checksum and content hash, of several stretches
+    /// read at once as of one.
+    #[test]
+    fn read_through() {
+        let d: Vec<u8> =
+            (0..THROUGH * 2 + 12345).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[3]).collect();
+        for threads in [1, 3] {
+            let t = through(&d, threads);
+            assert_eq!(t.sum, aqr::checksum(&d));
+            assert!(t.ch == aqr_formula::chash::Ch::of(&d));
+        }
+    }
+
     /// The formulas recompressors make are evaluated beforehand: the archive is verified by the
     /// hashes recorded (not as a file it is not; without the records, by evaluating what they do
     /// not tell); decoding it takes the applications recorded as the file's from the file, and
@@ -4801,12 +4875,15 @@ mod tests {
         assert!(!f.applies().is_empty());
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         let memo = std::cell::RefCell::new(memo);
-        assert_eq!(hashed(&c, &d, &memo, &opt, false), Some(true));
+        assert_eq!(hashed(&c, &d, None, &memo, &opt, false), Some(true));
         let mut other = d.clone();
         other[1000] ^= 1;
-        assert_eq!(hashed(&c, &other, &memo, &opt, false), Some(false));
+        assert_eq!(hashed(&c, &other, None, &memo, &opt, false), Some(false));
+        // (as it was read through before: compared with that, not read again)
+        assert_eq!(hashed(&c, &other, Some(&through(&d, 2)), &memo, &opt, false), Some(true));
+        assert_eq!(hashed(&c, &d, Some(&through(&other, 2)), &memo, &opt, false), Some(false));
         // (without the records: evaluated where they do not tell)
-        assert_eq!(hashed(&c, &d, &Default::default(), &opt, false), Some(true));
+        assert_eq!(hashed(&c, &d, None, &Default::default(), &opt, false), Some(true));
         let memo = memo.into_inner();
         let decode = |c: &[u8], memo: verify::Memo| {
             let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
@@ -4881,7 +4958,10 @@ mod tests {
         let c = Cx::new(&d, &opt).enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
         for threads in [1, 4] {
-            assert_eq!(hashed(&c, &d, &Default::default(), &Options { threads, ..opt.clone() }, false), Some(true));
+            assert_eq!(
+                hashed(&c, &d, None, &Default::default(), &Options { threads, ..opt.clone() }, false),
+                Some(true)
+            );
         }
     }
 
@@ -4914,7 +4994,7 @@ mod tests {
         assert!(!f.applies().is_empty());
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         // (the memo of the batch it was evaluated in gone)
-        assert_eq!(hashed(&c, &d, &Default::default(), &opt, false), Some(true));
+        assert_eq!(hashed(&c, &d, None, &Default::default(), &opt, false), Some(true));
     }
 
     /// A module run whose output is a whole file is run once: the same application again takes

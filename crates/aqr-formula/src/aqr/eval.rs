@@ -1288,8 +1288,9 @@ pub(super) fn hashed(
     if g.sums.keys().any(|v| !g.roots.contains(v)) {
         return Ok(None);
     }
-    // the slices hashed by block, each block decoded once and let go of as its slices are
-    // hashed, [`AHEAD_BLOCKS`] at once
+    // the slices hashed by block: those of blocks stored as they are in place, on up to
+    // `threads` threads; then the others', each block decoded once and let go of as its slices
+    // are hashed, [`AHEAD_BLOCKS`] at once
     let mut by_block: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (n, op) in g.ops.iter().enumerate() {
         if let Op::Slice { block, .. } = *op {
@@ -1297,9 +1298,8 @@ pub(super) fn hashed(
         }
     }
     let by_block: Vec<(usize, Vec<usize>)> = by_block.into_iter().collect();
-    let hashes = aqr_common::pool::par_map(by_block.len(), threads.clamp(1, AHEAD_BLOCKS + 1), |k| {
+    let of_block = |k: usize, d: &[u8]| -> Decoded<Vec<(usize, Ch)>> {
         let (block, ref nodes) = by_block[k];
-        let d = contents.block(block)?;
         let mut out = Vec::with_capacity(nodes.len());
         for &n in nodes {
             let Op::Slice { start, len, .. } = g.ops[n] else { unreachable!("a slice") };
@@ -1308,9 +1308,22 @@ pub(super) fn hashed(
             out.push((n, Ch::of(&d[r])));
         }
         Ok(out)
+    };
+    let stored = aqr_common::pool::par_map(by_block.len(), threads.max(1), |k| {
+        let d = contents.stored(by_block[k].0)?;
+        Some(d.and_then(|d| {
+            let out = of_block(k, d);
+            contents.read(d);
+            out
+        }))
+    });
+    let rest: Vec<usize> = (0..by_block.len()).filter(|&k| stored[k].is_none()).collect();
+    let decoded = aqr_common::pool::par_map(rest.len(), threads.clamp(1, AHEAD_BLOCKS + 1), |i| {
+        let k = rest[i];
+        of_block(k, &contents.block(by_block[k].0)?)
     });
     let mut sliced: HashMap<usize, Ch> = HashMap::new();
-    for h in hashes {
+    for h in stored.into_iter().flatten().chain(decoded) {
         sliced.extend(h?);
     }
     // what the hashes do not tell, evaluated as decoding does (the blocks decoded again)

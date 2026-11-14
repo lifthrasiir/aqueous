@@ -136,17 +136,6 @@ pub fn checksum(d: &[u8]) -> u64 {
     xxh64(d, 0)
 }
 
-/// [`checksum`] of `d`, its pages let go of as they are read through where it is of a file mapped
-/// ([`crate::store::let_go`]): not all of them resident at once.
-pub fn checksum_through(d: &[u8]) -> u64 {
-    let mut h = xxhash_rust::xxh64::Xxh64::new(0);
-    for part in d.chunks(4 << 20) {
-        h.update(part);
-        crate::store::let_go(part);
-    }
-    h.digest()
-}
-
 /// `f` as an archive, its blocks compressed at `level` ([`Encoder`]), with `checksum` of the
 /// output ([`checksum`]) if given. A leaf block checksums itself, which is the output: a
 /// `checksum` given must be its own. Fails on slices out of their stream, and on such a
@@ -4184,6 +4173,16 @@ fn decoded(d: &[u8], zstd: bool, checked: bool) -> Decoded<Vec<u8>> {
     decoded_with(d, zstd, checked, None)
 }
 
+/// The data of block data `d` stored as it is (not Zstandard data), its checksum checked: as
+/// [`decoded_with`] gives it, not copied.
+fn stored_checked(d: &[u8]) -> Decoded<&[u8]> {
+    let end = d.len().checked_sub(8).ok_or_else(|| Failure::Invalid("truncated".into()))?;
+    if checksum(&d[..end]).to_le_bytes() != d[end..] {
+        return invalid("checksum mismatch");
+    }
+    Ok(&d[..end])
+}
+
 /// [`decoded`], of Zstandard data compressed with dictionary `dict`.
 fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
     let end = d.len().checked_sub(if checked { 8 } else { 0 }).ok_or_else(|| Failure::Invalid("truncated".into()))?;
@@ -4796,7 +4795,7 @@ enum Slot<'c> {
     Gone,
 }
 
-impl Contents<'_, '_> {
+impl<'c> Contents<'c, '_> {
     /// The data of block `o`, while any slice of it is to be evaluated: decoded the first time.
     fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
         let mut s = self.data[o].lock().unwrap();
@@ -4813,6 +4812,17 @@ impl Contents<'_, '_> {
             Slot::Decoded(d) => Ok(d.clone()),
             _ => unreachable!("a block with slices left"),
         }
+    }
+
+    /// The data of block `o` as it is stored in the archive, where it is not Zstandard data and
+    /// is not decoded yet: checked, and let go of as read, not copied. None for any other.
+    fn stored(&self, o: usize) -> Option<Decoded<&'c [u8]>> {
+        let Slot::Raw(d, false, _) = *self.data[o].lock().unwrap() else { return None };
+        let d = stored_checked(d);
+        if let Ok(d) = d {
+            self.tally.add(d.len() as u64, 0);
+        }
+        Some(d)
     }
 
     /// Decodes block `o` ahead of its first slice, where it is not yet (and does not fail: one
@@ -6871,6 +6881,11 @@ mod tests {
         let hashed = open(&c, &NoModules).unwrap().hashed(&Untold, &|_| None, 1).unwrap();
         let hashes: Vec<_> = hashed.expect("hashes of slices alone").into_iter().map(|h| h.0).collect();
         assert_eq!(hashes, [crate::chash::Ch::of(b"xyz"); 3]);
+        // (the block stored as it is hashed in place, its checksum checked all the same)
+        let mut bad = c.clone();
+        let at = bad.windows(3).position(|w| w == b"xyz").unwrap();
+        bad[at] = b'w';
+        assert!(open(&bad, &NoModules).unwrap().hashed(&Untold, &|_| None, 1).is_err());
     }
 
     /// The evaluation tells how far it is: nothing at first, then each block decoded and each
