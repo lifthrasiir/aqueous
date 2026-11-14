@@ -34,6 +34,7 @@ aqr-msadpcm = { path = "../../codecs/aqr-msadpcm", default-features = false }
 aqr-infer-recs = { path = "../../codecs/aqr-infer-recs", default-features = false }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg", default-features = false }
 aqr-jsonl = { path = "../../codecs/aqr-jsonl", default-features = false }
+aqr-log = { path = "../../codecs/aqr-log", default-features = false }
 aqr-lha = { path = "../../codecs/aqr-lha", default-features = false }
 aqr-lz4 = { path = "../../codecs/aqr-lz4", default-features = false }
 aqr-lzma = { path = "../../codecs/aqr-lzma", default-features = false }

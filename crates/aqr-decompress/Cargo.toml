@@ -68,6 +68,7 @@ aqr-clip = { path = "../../codecs/aqr-clip" }
 aqr-obj = { path = "../../codecs/aqr-obj" }
 aqr-xsv = { path = "../../codecs/aqr-xsv" }
 aqr-jsonl = { path = "../../codecs/aqr-jsonl" }
+aqr-log = { path = "../../codecs/aqr-log" }
 aqr-raw = { path = "../../codecs/aqr-raw" }
 aqr-infer-recs = { path = "../../codecs/aqr-infer-recs" }
 aqr-ac3 = { path = "../../codecs/aqr-ac3" }

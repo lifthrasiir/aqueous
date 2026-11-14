@@ -5279,6 +5279,87 @@ fn jsonl_plans_hold() {
     }
 }
 
+/// log-recons lays its memory out as a stack, its limit its plan: of lines of templates of
+/// words, digit runs and whole numbers, lines kept as they are, a last line with no LF, and
+/// segments (each its own application, its own params).
+#[test]
+fn log_plans_hold() {
+    let mut rng = aqr_common::rng::Rng::new(11);
+    let mut syslog = String::new();
+    for i in 0..4000u64 {
+        let t = format!("Dec {:2} {:02}:{:02}:{:02}", 10 + i / 2000, i / 3600 % 24, i / 60 % 60, i % 60);
+        match i % 7 {
+            0 | 1 => {
+                syslog += &format!(
+                    "{t} host sshd[{}]: Accepted password for user{} from 10.0.{}.{} port {}\n",
+                    1000 + i / 7,
+                    rng.below(60),
+                    rng.below(4),
+                    rng.below(256),
+                    40000 + rng.below(9999)
+                )
+            }
+            2 => {
+                syslog += &format!(
+                    "{t} host kernel: temp {}.{:02} C load {:.2}\n",
+                    40 + rng.below(20),
+                    rng.below(100),
+                    rng.below(300) as f64 / 100.0
+                )
+            }
+            3 => {
+                let w: String = (0..8).map(|_| (b'a' + rng.below(26) as u8) as char).collect();
+                syslog += &format!("{t} host app: key-{w} value {}\n", -(rng.below(100) as i64));
+            }
+            4 if i % 300 == 4 => syslog += &format!("{t} a mark \x02 line\n"),
+            _ => {
+                syslog += &format!(
+                    "{t} host cron[{}]: ({}) CMD (run-parts /etc/cron.hourly)\n",
+                    i % 5000,
+                    ["root", "daemon"][(i % 2) as usize]
+                )
+            }
+        }
+    }
+    let mut table = String::new();
+    for i in 0..3000u64 {
+        table += &format!(
+            "{} {} {} {:.4} {:.4} {} {}\n",
+            20040228 + i / 1000,
+            i,
+            rng.below(54),
+            19.0 + rng.below(1000) as f64 / 1000.0,
+            30.0 + rng.below(100) as f64 / 3000.0,
+            1.5e-7 * i as f64,
+            2.5
+        );
+    }
+    let no_lf = syslog.trim_end().to_string();
+    for (t, d, segment) in [
+        ("syslog", syslog, usize::MAX),
+        ("no LF", no_lf, usize::MAX),
+        ("table", table.clone(), usize::MAX),
+        ("segments", table, 20_000),
+    ] {
+        let d = d.into_bytes();
+        let f = aqr_log::formula::encode_in(&d, segment, false).unwrap_or_else(|| panic!("{t}"));
+        let parts = match &f.root {
+            Node::Concat(nodes) => nodes.clone(),
+            n => vec![n.clone()],
+        };
+        let mut at = 0;
+        for (k, n) in parts.into_iter().enumerate() {
+            let Node::Apply(a) = &n else { panic!("{t}: not an application") };
+            let len = a.len as usize;
+            let mut g = f.clone();
+            g.root = n;
+            plan_holds(&format!("log {t} {k}"), g, &d[at..at + len]);
+            at += len;
+        }
+        assert_eq!(at, d.len(), "{t}");
+    }
+}
+
 /// obj-recons lays its memory out as a stack, its limit its plan: of a mesh in blocks (some
 /// stored whole), of unit normals and equal lines, and of faces of indexes past the vertices.
 #[test]

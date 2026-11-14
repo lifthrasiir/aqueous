@@ -95,4 +95,5 @@ aqr-wrt = { path = "../../codecs/aqr-wrt", default-features = false }
 aqr-wasm = { path = "../../codecs/aqr-wasm", default-features = false }
 aqr-xsv = { path = "../../codecs/aqr-xsv", default-features = false }
 aqr-jsonl = { path = "../../codecs/aqr-jsonl", default-features = false }
+aqr-log = { path = "../../codecs/aqr-log", default-features = false }
 aqr-zip = { path = "../../codecs/aqr-zip", default-features = false }

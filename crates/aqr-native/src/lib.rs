@@ -426,6 +426,7 @@ pub const NATIVE: &[Native] = &[
     bare("hdf5-recons-float", |p, _, i, n, _| aqr_hdf5::module::float(p, i, n).map_err(err)),
     bare("xsv-recons", |p, _, i, n, t| aqr_xsv::module::decode(p, i, n, t).map_err(err)),
     bare("jsonl-recons", |p, _, i, n, t| aqr_jsonl::module::decode(p, i, n, t).map_err(err)),
+    bare("log-recons", |p, _, i, n, t| aqr_log::module::decode(p, i, n, t).map_err(err)),
     takes("wrt-recons", |p, r, i, n, t| aqr_wrt::module::decode(p, r, i, n, t).map_err(err)),
     takes("wrt-recons-hangul", |p, r, i, n, t| aqr_wrt::module::decode_hangul(p, r, i, n, t).map_err(err)),
     threaded_takes("pcm-recons", |p, r, i, n, t| aqr_raw::module::pcm::decode(p, r, i, n, t).map_err(err)),

@@ -346,6 +346,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/lha-recons.block"),
     },
     Known {
+        name: "log-recons",
+        version: 1,
+        sha512_256: hex("ae42f295797628d4b735fd17555ceafe4e34eebe7b459f0660d899f9e4688a38"),
+        block: include_bytes!("../wasm/log-recons.block"),
+    },
+    Known {
         name: "lz4-recons",
         version: 2,
         sha512_256: hex("efd39ae9de96db919779e884b475cb7bb0c1bc163184be43cbcbb424dad83610"),

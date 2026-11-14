@@ -392,6 +392,8 @@ pub const HDF5_FLOAT: Module = aqr_hdf5::formula::FLOAT;
 pub const XSV: Module = aqr_xsv::formula::MODULE;
 /// JSON lines from their values stored by key path (aqr-jsonl).
 pub const JSONL: Module = aqr_jsonl::formula::MODULE;
+/// Lines of text from their templates and the fields in columns (aqr-log).
+pub const LOG: Module = aqr_log::formula::MODULE;
 /// Text of words and markup replaced by codes of a dictionary (aqr-wrt). Resources: the
 /// dictionary; inputs: the coded text.
 pub const WRT: Module = aqr_wrt::formula::MODULE;
@@ -525,6 +527,7 @@ const NATIVE: &[Known] = &[
     entry(HDF5_FLOAT),
     entry(XSV),
     entry(JSONL),
+    entry(LOG),
     entry(WRT),
     entry(WRT_HANGUL),
     entry(PCM),

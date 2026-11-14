@@ -6403,6 +6403,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lha-recons.wasm" title="crates/aqr-modules/wasm/lha-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lha/FORMAT.md" title="codecs/aqr-lha/FORMAT.md">R</a>
     <tr>
+      <td><code>ae42f295797628d4b735fd17555ceafe4e34eebe7b459f0660d899f9e4688a38</code>
+      <td>log-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/log-recons.wasm" title="crates/aqr-modules/wasm/log-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-log/FORMAT.md" title="codecs/aqr-log/FORMAT.md">R</a>
+    <tr>
       <td><code>efd39ae9de96db919779e884b475cb7bb0c1bc163184be43cbcbb424dad83610</code>
       <td>lz4-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lz4-recons.wasm" title="crates/aqr-modules/wasm/lz4-recons.wasm">D</a>
