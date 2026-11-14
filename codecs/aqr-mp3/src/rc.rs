@@ -55,8 +55,9 @@ pub trait BitCoder {
             return 0;
         }
         let neg = self.bit(&mut p.sign, (v < 0) as u32);
-        let m = self.uint(&mut p.mag, v.unsigned_abs().wrapping_sub(1)) + 1;
-        if neg != 0 { -(m as i32) } else { m as i32 }
+        // (a corrupt stream may give any magnitude: it wraps, and the caller's checks reject it)
+        let m = self.uint(&mut p.mag, v.unsigned_abs().wrapping_sub(1)).wrapping_add(1) as i32;
+        if neg != 0 { m.wrapping_neg() } else { m }
     }
 }
 

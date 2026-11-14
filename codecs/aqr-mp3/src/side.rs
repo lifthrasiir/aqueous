@@ -142,9 +142,10 @@ impl SideModel {
             g.mixed = false;
             3
         };
-        g.big_values =
-            (p.big_values as i32 + c.sint(&mut self.big_values[ch], g.big_values as i32 - p.big_values as i32)) as u16
-                & 0x1ff;
+        g.big_values = (p.big_values as i32)
+            .wrapping_add(c.sint(&mut self.big_values[ch], g.big_values as i32 - p.big_values as i32))
+            as u16
+            & 0x1ff;
         for t in 0..nt {
             g.table_select[t] =
                 c.tree(&mut self.table[t * 32 + p.table[t] as usize], 5, g.table_select[t] as u32) as u8;
@@ -173,7 +174,8 @@ impl SideModel {
             g.region1_count =
                 c.tree(&mut self.r1[band * 16 + g.region0_count as usize], 3, g.region1_count as u32) as u8;
         }
-        g.global_gain = (p.gain as i32 + c.sint(&mut self.gain[ch], g.global_gain as i32 - p.gain as i32)) as u8;
+        g.global_gain =
+            (p.gain as i32).wrapping_add(c.sint(&mut self.gain[ch], g.global_gain as i32 - p.gain as i32)) as u8;
         if h.lsf() {
             g.scalefac_compress = c.tree(&mut self.sfc2, 9, g.scalefac_compress as u32) as u16;
             g.preflag = g.scalefac_compress >= 500;
@@ -201,8 +203,9 @@ impl SideModel {
     /// Count1 quadruples and tail bits of a decoded granule.
     pub fn part3<C: BitCoder>(&mut self, c: &mut C, ch: usize, nquads: &mut usize, tail: &mut usize) {
         let p = &mut self.prev[ch];
-        *nquads =
-            (p.nquads as i32 + c.sint(&mut self.nquads[ch], *nquads as i32 - p.nquads as i32)).clamp(0, 144) as usize;
+        *nquads = (p.nquads as i32)
+            .wrapping_add(c.sint(&mut self.nquads[ch], *nquads as i32 - p.nquads as i32))
+            .clamp(0, 144) as usize;
         p.nquads = *nquads as u16;
         *tail = c.uint(&mut self.tail, *tail as u32) as usize;
     }
