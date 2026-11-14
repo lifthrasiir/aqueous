@@ -150,7 +150,8 @@ fn sample() -> Vec<(&'static str, Vec<u8>)> {
             "z.gz",
             gzip(
                 &(0..30000)
-                    .flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes())
+                    // (of lines of as many words but every other one, no table of spaces)
+                    .flat_map(|i| format!("line {} of the {}text\n", i * 7 % 1000, ["", "whole "][i % 2]).into_bytes())
                     .collect::<Vec<_>>(),
             ),
         ),

@@ -105,14 +105,16 @@ column's parts too; a record that would make the file longer than declared is an
 ## 5. Encoding *(encoder)*
 
 - **Dialect.** The first 64 KiB of the file are cut into records (up to 1,000; the last one,
-  cut by the sample's end, left out) with each candidate: `,`, TAB, `;` and `|` between fields,
+  cut by the sample's end, left out) with each candidate: `,`, TAB, `;`, `|` and a space between fields,
   each with `"` quoting and with none, records ending at a line's end; and, where the sample has
   them, USV (U+241F between fields, U+241E ending records, or U+241E and LF where 9 in 10 of
   them are followed by LF) and their ASCII forms (0x1F, 0x1E), without quoting. A candidate is
   kept where at least 9 in 10 of its records have the same number of fields, at least two, at
   most 1 in 50 of them are kept as they are, and there are at least 8 records (fewer only in a
-  file of fewer). Of those, the one whose records most often have that number, then of the
-  most fields, is taken.
+  file of fewer); a space is kept only where, of the records of that number of fields, a column
+  starts with a digit, a sign or a point at least 9 in 10 times (prose of lines of as many words
+  is no table). Of those, the one whose records most often have that number, then of the most
+  fields, is taken.
 - **Records.** A field starting with `quote` is quoted: it ends at a `quote` not followed by
   another, and must be followed by `delim`, the record's end, or the file's end. Any other field
   ends at the first `delim` or the record's end. Where there is no `term`, a record ends at LF

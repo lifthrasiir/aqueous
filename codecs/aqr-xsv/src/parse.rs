@@ -189,7 +189,7 @@ pub fn dialect(s: &[u8], whole: bool) -> Option<Dialect> {
     };
     let q = Some(b'"');
     let mut cands = Vec::new();
-    for delim in [&b","[..], b"\t", b";", b"|"] {
+    for delim in [&b","[..], b"\t", b";", b"|", b" "] {
         for quote in [q, None] {
             cands.push(Dialect { delim: delim.to_vec(), quote, term: Vec::new() });
         }
@@ -220,12 +220,35 @@ pub fn dialect(s: &[u8], whole: bool) -> Option<Dialect> {
         if width < 2 || count * 10 < n * 9 || raw * 50 > n || n < least {
             continue;
         }
+        // (words between spaces make a table only where a column holds numbers: prose of lines
+        // of the same number of words does not)
+        if dia.delim == b" " && !numeric_column(s, &t, width) {
+            continue;
+        }
         let key = ((count * 1000 / n) as u64, width);
         if best.as_ref().is_none_or(|(k, _)| key > *k) {
             best = Some((key, dia));
         }
     }
     best.map(|b| b.1)
+}
+
+/// Whether a column of the records of `width` fields of `t` (over `s`) starts with a digit, a
+/// sign or a point at least 9 in 10 times.
+fn numeric_column(s: &[u8], t: &Table, width: usize) -> bool {
+    let mut counts = vec![0usize; width];
+    let mut n = 0;
+    for r in &t.records {
+        if let Record::Fields { fields, .. } = r
+            && fields.len() == width
+        {
+            n += 1;
+            for (c, f) in t.fields[fields.clone()].iter().enumerate() {
+                counts[c] += matches!(s.get(f.start), Some(b'0'..=b'9' | b'-' | b'+' | b'.')) as usize;
+            }
+        }
+    }
+    counts.iter().any(|&c| c * 10 >= n * 9)
 }
 
 #[cfg(test)]
@@ -248,6 +271,9 @@ mod tests {
         assert_eq!(dia(&usv).map(|d| d.2), Some("␞".as_bytes().to_vec()));
         assert_eq!(dia("just some words, and more\nof them\nand, then, some, more\nand the end\n"), None);
         assert_eq!(dia(&"int main(void) {\n  return f(a, b);\n}\n".repeat(10)), None);
+        let ssv = "2004-02-28 00:59:16.02785 3 1 19.9884 37.0933\n2004-02-28 01:03:16.33393 11 1 19.3024 38.4629\n";
+        assert_eq!(dia(&ssv.repeat(10)), Some((b" ".to_vec(), Some(b'"'), vec![])));
+        assert_eq!(dia(&"words and more words\n".repeat(10)), None);
     }
 
     #[test]

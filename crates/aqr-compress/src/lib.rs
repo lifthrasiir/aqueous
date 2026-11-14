@@ -3133,7 +3133,8 @@ mod tests {
     #[test]
     fn heap_over_falls_back() {
         let text: Vec<u8> =
-            (0..30011).flat_map(|i| format!("line {} of the hogging text\n", i * 7 % 1000).into_bytes()).collect();
+            // (of lines of as many words but every other one, no table of spaces)
+            (0..30011).flat_map(|i| format!("line {} of the {}text\n", i * 7 % 1000, ["", "hogging "][i % 2]).into_bytes()).collect();
         let gz = |t: &[u8]| {
             let mut z = flate2::GzBuilder::new().filename("text.txt").write(Vec::new(), flate2::Compression::new(6));
             std::io::Write::write_all(&mut z, t).unwrap();
@@ -4361,7 +4362,8 @@ mod tests {
     #[test]
     fn gzip_members_as_one() {
         let text: Vec<u8> =
-            (0..60000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+            // (of lines of as many words but every other one, no table of spaces)
+            (0..60000).flat_map(|i| format!("line {} of the {}text\n", i * 7 % 1000, ["", "whole "][i % 2]).into_bytes()).collect();
         let member = |name: Option<&str>, d: &[u8]| {
             let b = flate2::GzBuilder::new();
             let b = if let Some(n) = name { b.filename(n) } else { b };
@@ -4527,8 +4529,11 @@ mod tests {
     /// (dense from level 8 on).
     #[test]
     fn text_kept_raw() {
-        // (of no words, which aqr-wrt would take)
-        let text: Vec<u8> = (0..40000).flat_map(|i| format!("{i}: {}\n", i * 7).into_bytes()).collect();
+        // (of no words, which aqr-wrt would take, nor of as many numbers on each line, which aqr-xsv
+        // would)
+        let text: Vec<u8> = (0..40000)
+            .flat_map(|i| format!("{i}: {}{}\n", i * 7, [String::new(), format!(" {}", i * 3)][i % 2]).into_bytes())
+            .collect();
         assert!(text.len() >= aqr_wrt::formula::MIN_LEN);
         assert_eq!(detect(&text), Some(Format::Text));
         let f = recompress(&text, &Options::default());

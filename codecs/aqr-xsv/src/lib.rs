@@ -1,4 +1,4 @@
-//! Delimited text tables (CSV, TSV, the `;` and `|` variants, USV), rebuilt bit for bit from
+//! Delimited text tables (CSV, TSV, the `;`, `|` and space variants, USV), rebuilt bit for bit from
 //! their fields stored column by column: text as it is, and numbers as integers in the way
 //! they were printed ([aqr-num](../aqr-num)). Records that are not of the table are kept as
 //! they are. `formula` is the entry point (a module of aqr-formula); `FORMAT.md` specifies it.

@@ -11,13 +11,16 @@ use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
 #[global_allocator]
 static A: Counting = Counting;
 
+/// Lines of text of words, not of as many on each line (which aqr-xsv would take, as a table of
+/// spaces).
 fn text(n: usize, seed: usize) -> Vec<u8> {
     let mut t = Vec::with_capacity(n + 100);
     for i in 0.. {
         if t.len() >= n {
             break;
         }
-        writeln!(t, "line {i}: the quick brown fox jumps over {} lazy dogs", (i + seed) * 7 % 13).unwrap();
+        let old = if i % 2 == 0 { "old " } else { "" };
+        writeln!(t, "line {i}: the quick brown fox jumps over {} {old}lazy dogs", (i + seed) * 7 % 13).unwrap();
     }
     t
 }

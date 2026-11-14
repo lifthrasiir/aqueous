@@ -1,7 +1,7 @@
 # aqr-xsv
 
 Delimited text tables rebuilt bit for bit from their fields, stored column by column: CSV,
-TSV, the `;` and `|` variants, and USV (U+241F and U+241E, or their ASCII forms). Text fields
+TSV, the `;`, `|` and space variants (a space where a column holds numbers), and USV (U+241F and U+241E, or their ASCII forms). Text fields
 are kept as they are, for the archive to compress; numbers are coded as integers in the way
 they were printed ([`aqr-num`](../../crates/aqr-num)), as they are or as differences from the column's
 previous one. Records that are not of the table (a quote not closed, a zero byte) are kept as
@@ -42,6 +42,14 @@ cmz's 27 test files together 39.32 -> 38.83 MB. The 10gb corpus is 2,630,733,924
 tables inside other files), Unicode tables, CMaps, AFM fonts and the like, and some C sources
 of tables of numbers; the rest go to aqr-wrt or are kept as they are; compression 137.9 -> 141.7 s, its peak
 footprint 5.79 -> 5.55 GB.
+
+Space between fields (2026-11-14, M4, level mid): the Intel Berkeley Lab's sensor readings
+(`data.txt`, 150.91 MB) are 34.15 -> 22.75 MB (22.6% -> 15.1%; xz -9 15.9%), compressed in 0.87
+-> 2.05 s. In the 10gb corpus 54 files are taken so (CMaps, `fp.log`, `moduli`, ...), and the
+corpus is 2,466,369,171 -> 2,464,730,629 B (compression 173.6 -> 159.9 s, within the noise; its
+peak footprint 4.60 -> 4.70 GB); 9 of those files grow, by 185 KB in all, most of it
+`iq/digits.txt` (random digits, +151 KB), which the comparison with the file kept raw lets
+through.
 
 ## Testing
 

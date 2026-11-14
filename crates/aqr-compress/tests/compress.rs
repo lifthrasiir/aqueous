@@ -63,26 +63,30 @@ fn all() -> Options {
     Options { smaller: false, ..Options::default() }
 }
 
-/// Lines of text of no words (which aqr-wrt would take, see [`prose`]).
+/// Lines of text of no words (which aqr-wrt would take, see [`prose`]), nor of as many fields
+/// on each line (which aqr-xsv would take, as a table of spaces).
 fn text(n: usize) -> Vec<u8> {
     let mut t = Vec::new();
     for i in 0.. {
         if t.len() >= n {
             break;
         }
-        writeln!(t, "{i}: {} + {} = {} (% 13)", i * 7 % 13, i % 5, (i * 7 + i % 5) % 13).unwrap();
+        let modulo = if i % 2 == 0 { " (% 13)" } else { "" };
+        writeln!(t, "{i}: {} + {} = {}{modulo}", i * 7 % 13, i % 5, (i * 7 + i % 5) % 13).unwrap();
     }
     t
 }
 
-/// Lines of text of words.
+/// Lines of text of words, not of as many on each line (which aqr-xsv would take, as a table of
+/// spaces).
 fn prose(n: usize) -> Vec<u8> {
     let mut t = Vec::new();
     for i in 0.. {
         if t.len() >= n {
             break;
         }
-        writeln!(t, "line {i}: the quick brown fox jumps over {} lazy dogs", i * 7 % 13).unwrap();
+        let old = if i % 2 == 0 { "old " } else { "" };
+        writeln!(t, "line {i}: the quick brown fox jumps over {} {old}lazy dogs", i * 7 % 13).unwrap();
     }
     t
 }
@@ -1149,7 +1153,8 @@ fn zip_nested() {
     // archives written by tools
     for name in ["py-stream.zip", "infozip.zip", "go.zip", "ditto.zip", "bsdtar.zip"] {
         let f = roundtrip(&fixture(&format!("codecs/aqr-zip/tests/data/{name}")), &all());
-        assert_eq!(modules(&f), [ZIP.name, FLATE.name], "{name}");
+        // (and their text, a table of spaces, by aqr-xsv)
+        assert_eq!(modules(&f)[..2], [ZIP.name, FLATE.name], "{name}");
     }
 }
 
@@ -1722,7 +1727,8 @@ fn text_words() {
         if d.len() >= 400_000 {
             break;
         }
-        writeln!(d, "{i}번째 줄: 날쌘 갈색 여우가 게으른 개 {}마리를 뛰어넘는다", i * 7 % 13).unwrap();
+        let lazy = if i % 2 == 0 { "아주 " } else { "" };
+        writeln!(d, "{i}번째 줄: 날쌘 갈색 여우가 {lazy}게으른 개 {}마리를 뛰어넘는다", i * 7 % 13).unwrap();
     }
     assert_eq!(modules(&roundtrip(&d, &all())), [WRT_HANGUL.name]);
 }
