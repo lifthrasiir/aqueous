@@ -57,6 +57,15 @@ fn main() {
             let t = Instant::now();
             let (lz, xz) = (l.as_ref().map(z), x.as_ref().map(z));
             let tz = t.elapsed().as_secs_f64();
+            if std::env::var("STREAMS").is_ok() {
+                for (name, st) in ["layout", "raw", "templates", "columns", "text", "nums", "widths", "types", "desc"]
+                    .iter()
+                    .zip(l.iter().flat_map(|f| f.streams.iter()))
+                {
+                    let c = |lv| zstd::bulk::compress(&st.data, lv).map_or(0, |c| c.len());
+                    println!("   {name:10} {:9} z3 {:8} z12 {:8} z19 {:8}", st.data.len(), c(3), c(12), c(19));
+                }
+            }
             let t = Instant::now();
             let (la, xa) = (l.as_ref().map(arch), x.as_ref().map(arch));
             let ta = t.elapsed().as_secs_f64();

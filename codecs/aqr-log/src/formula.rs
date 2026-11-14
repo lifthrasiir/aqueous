@@ -101,7 +101,7 @@ fn decimal_comma(seg: &[u8]) -> bool {
     }
     let (mut comma, mut grouping, mut point) = (0usize, 0usize, 0usize);
     for line in lines_of(&seg[..n]) {
-        for t in line.split(|&b| matches!(b, b' ' | b';' | b'\t')) {
+        for t in body(line).0.split(|&b| matches!(b, b' ' | b';' | b'\t')) {
             // (a number: a sign, digits, one point or comma, digits, an exponent)
             let t = t.strip_prefix(b"-").or_else(|| t.strip_prefix(b"+")).unwrap_or(t);
             // (groups of three digits with points before a decimal comma: `1.187,25`)
@@ -259,6 +259,15 @@ enum Piece {
     Sep(u8),
 }
 
+/// A line without the CR that ends it (before the LF), and whether it had one: the CR is a
+/// byte of the template, not of the last token.
+fn body(line: &[u8]) -> (&[u8], bool) {
+    match line.split_last() {
+        Some((b'\r', rest)) => (rest, true),
+        _ => (line, false),
+    }
+}
+
 /// How lines are cut: at the separators, but for the timestamps found (a time of day with its
 /// date, a syslog's `Dec 10 06:55:46`, may hold spaces), which are pieces on their own.
 struct Splitter {
@@ -345,6 +354,7 @@ impl Splitter {
 
     /// Passes `line`, whose timestamps are not wanted.
     fn skip(&mut self, line: &[u8]) {
+        let line = body(line).0;
         match self.seen.get(self.cursor) {
             Some(&(len, n)) if len as usize == line.len() => self.next += n as usize,
             _ => self.seen.truncate(self.cursor),
@@ -364,6 +374,7 @@ impl Splitter {
     /// separator that ends it, if any.
     fn split(&mut self, line: &[u8]) {
         self.pieces.clear();
+        let (line, cr) = body(line);
         self.find(line);
         let spans = &self.times.spans;
         let (mut at, mut sj) = (0, 0);
@@ -393,6 +404,9 @@ impl Splitter {
             }
             sj = k;
             if p >= line.len() {
+                if cr {
+                    self.pieces.push(Piece::Sep(b'\r'));
+                }
                 return;
             }
             self.pieces.push(Piece::Sep(line[p]));
@@ -631,8 +645,10 @@ struct Sample {
 #[derive(Default)]
 struct Col {
     text: Vec<u8>,
-    /// The integers as varints by each predictor.
+    /// The integers as varints by each predictor, and the greatest common divisor of those (0
+    /// while all are zero).
     by: [Vec<u8>; 3],
+    gcd: [u64; 3],
     widths: Vec<u8>,
     types: Vec<u8>,
     desc: Vec<u8>,
@@ -649,12 +665,41 @@ struct Col {
 /// `prev`; `cur` the line's numbers so far), at the scale of the number.
 fn emit(c: &mut Col, v: i64, scale: i32, prev: &[(i64, i32)], cur: &mut Vec<(i64, i32)>) {
     let (q, qs) = prev.get(cur.len()).copied().unwrap_or((0, 0));
-    varint::put_signed(&mut c.by[0], v);
-    varint::put_signed(&mut c.by[1], v.wrapping_sub(fixed::rescale(c.prev, c.prev_scale, scale)));
-    varint::put_signed(&mut c.by[2], v.wrapping_sub(fixed::rescale(q, qs, scale)));
+    let r =
+        [v, v.wrapping_sub(fixed::rescale(c.prev, c.prev_scale, scale)), v.wrapping_sub(fixed::rescale(q, qs, scale))];
+    for ((by, g), r) in c.by.iter_mut().zip(&mut c.gcd).zip(r) {
+        varint::put_signed(by, r);
+        *g = gcd(*g, r.unsigned_abs());
+    }
     c.prev = v;
     c.prev_scale = scale;
     cur.push((v, scale));
+}
+
+/// The greatest common divisor of `a` and `b` (the other where one is 0).
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The varints `by` (svarints of integers all multiples of `unit`, at least 1) divided by it.
+fn divided(by: &[u8], unit: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(by.len());
+    let mut at = 0;
+    while at < by.len() {
+        let r = varint::get_signed(by, &mut at).expect("the encoder's own varints");
+        // (the unit is at most i64::MAX: [`unit_of`])
+        varint::put_signed(&mut out, r / unit as i64);
+    }
+    out
+}
+
+/// The unit of a column's integers by a predictor, whose greatest common divisor is `g`: `g`
+/// where it is more than 1 and fits, else 1 ([`P_UNIT`]).
+fn unit_of(g: u64) -> u64 {
+    if (2..=i64::MAX as u64).contains(&g) { g } else { 1 }
 }
 
 /// The size of the integers of the `toks` as changes from each other, and of their descriptors,
@@ -879,15 +924,33 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
     s.templates.extend_from_slice(&cl.tbytes);
     for (c, &mark) in cols.iter_mut().zip(&cl.marks) {
         let [raw_v, col_v, line_v] = std::mem::take(&mut c.by);
-        let (pred, nums) = match mark {
-            M_TEXT => (P_RAW, Vec::new()),
+        let (pred, unit, nums) = match mark {
+            M_TEXT => (P_RAW, 1, Vec::new()),
             _ => {
-                // (the predictor whose varints zstd packs smaller, the shortest where they are few)
-                let cands = [(P_RAW, raw_v), (P_COLUMN, col_v), (P_LINE, line_v)];
+                // (the predictor whose varints zstd packs smaller, as they are or divided by their
+                // unit, which is told too: the shortest where they are few)
+                let by = [(P_RAW, raw_v, c.gcd[0]), (P_COLUMN, col_v, c.gcd[1]), (P_LINE, line_v, c.gcd[2])];
+                let mut cands = Vec::new();
+                for (pred, v, g) in by {
+                    if let u @ 2.. = unit_of(g) {
+                        let d = divided(&v, u);
+                        // (integers all the same cost nothing anyway: the unit would be its bytes
+                        // more)
+                        if d.iter().any(|&b| b != d[0]) {
+                            cands.push((pred, u, d));
+                        }
+                    }
+                    cands.push((pred, 1, v));
+                }
+                // (the unit costs its bytes where the integers are few; ties go to the lower
+                // predictor, and to the larger unit)
                 let few = c.count <= 8;
-                let cost = |b: &Vec<u8>| if few { b.len() } else { packed(b) };
-                let best = (0..3).min_by_key(|&i| (cost(&cands[i].1), i)).unwrap();
-                cands.into_iter().nth(best).unwrap()
+                let cost = |(_, u, b): &(u8, u64, Vec<u8>)| match few {
+                    true => b.len() + varint::len(*u),
+                    false => packed(b),
+                };
+                let best = (0..cands.len()).min_by_key(|&i| (cost(&cands[i]), cands[i].0, !cands[i].1)).unwrap();
+                cands.swap_remove(best)
             }
         };
         if mark == M_TEXT {
@@ -896,6 +959,7 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
             continue;
         }
         s.columns.push(pred);
+        varint::put(&mut s.columns, unit);
         varint::put(&mut s.columns, nums.len() as u64);
         s.nums.extend_from_slice(&nums);
         if mark == M_DIGITS {
@@ -1134,6 +1198,34 @@ mod tests {
         assert!(t.contains("\x03,"), "{t:?}");
     }
 
+    /// A CR before the LF is the template's own, not of the last token: the last column of a CRLF
+    /// file holds numbers, and lines of one ending and the other (and a lone CR) stay exact.
+    #[test]
+    fn crlf() {
+        let mut rng = aqr_common::rng::Rng::new(5);
+        let mut d = String::new();
+        for i in 0..2000 {
+            let (x, y) = (rng.below(5000), rng.below(900));
+            d += &format!("{i};{x},{y:02};{}\r\n", 100 + i * 3 + rng.below(3));
+        }
+        let f = roundtrip(d.as_bytes());
+        let t = String::from_utf8_lossy(&f.streams[2].data).into_owned();
+        assert_eq!(t, "\x03;\x03;\x03\r\n", "{t:?}");
+        assert!(f.streams[4].data.is_empty());
+        // (mixed endings: a template for each, and the lines of a lone CR or one inside)
+        let mut m = String::new();
+        for (i, l) in d.lines().enumerate() {
+            m += l;
+            m += ["\r\n", "\n", "\r\r\n", "\n"][i % 4];
+        }
+        m += "\r\n\r\n\r;5\r\n7;\r\r";
+        roundtrip(m.as_bytes());
+        let mut s = Streams::default();
+        segment_with(m.as_bytes(), true, &mut s, true);
+        let t = String::from_utf8_lossy(&s.templates).into_owned();
+        assert!(t.contains("\x03;\x03;\x03\r\n") && t.contains("\x03;\x03;\x03\n"), "{t:?}");
+    }
+
     /// Numbers with digit groups (`1.187,25` where the numbers have a decimal comma) are number
     /// slots with a grouping descriptor (mode bits 6 and 7); the small ones of the same column
     /// (no group) are numbers of the same descriptor.
@@ -1184,10 +1276,13 @@ mod tests {
                 i % 7
             );
         }
-        let f = roundtrip(d.as_bytes());
+        roundtrip(d.as_bytes());
+        // (the wide separators, which a segment takes where its streams come out smaller)
+        let mut s = Streams::default();
+        segment_with(d.as_bytes(), true, &mut s, true);
         // (padded fixed, mode 6, of the price: not the values at 8 decimals)
-        assert!(f.streams[8].data.contains(&6), "{:?}", &f.streams[8].data[..20]);
-        assert!(f.streams[5].data.len() < 4000 * 8, "{}", f.streams[5].data.len());
+        assert!(s.desc.contains(&6), "{:?}", &s.desc[..20.min(s.desc.len())]);
+        assert!(s.nums.len() < 4000 * 8, "{}", s.nums.len());
         // a line before at another scale, an integer after a decimal
         roundtrip("x 1.50 1.5\ny 1 2.25\nz 0.1 3\nx 100 0.5\n".repeat(50).as_bytes());
     }
@@ -1334,9 +1429,50 @@ mod tests {
         }
         let f = roundtrip(d.as_bytes());
         let columns = &f.streams[3].data;
-        assert!(columns.len() < 20, "{columns:?}");
+        assert!(columns.len() < 24, "{columns:?}");
         // (differences taken: smaller than 3000 numbers of 4 bytes)
         assert!(f.streams[5].data.len() < 3000 * 4 * 2, "{}", f.streams[5].data.len());
+    }
+
+    /// A column's integers are stored in units where they are all multiples of one (quarters of a
+    /// megawatt-hour: `16.195,25`, whose integers at scale 2 are multiples of 25).
+    #[test]
+    fn units() {
+        let mut rng = aqr_common::rng::Rng::new(13);
+        let (mut d, mut q) = (String::new(), 40_000i64);
+        for i in 0..4000 {
+            q = (q + rng.below(41) as i64 - 20).max(0);
+            let v = q * 25;
+            d += &format!("{i};{},{:02};{}\r\n", v / 100, v % 100, (i + rng.below(3)) * 15);
+        }
+        let f = roundtrip(d.as_bytes());
+        // (the units of the columns: 1 for the counter, 25 for the quarters, 15 for the minutes)
+        let mut at = 0;
+        let mut units = Vec::new();
+        for _ in 0..3 {
+            let c = &f.streams[3].data;
+            at += 1;
+            units.push(varint::get(c, &mut at).unwrap());
+            // (the lengths of its integers and of its descriptors)
+            varint::get(c, &mut at).unwrap();
+            varint::get(c, &mut at).unwrap();
+        }
+        assert_eq!(units, [1, 25, 15], "{:?}", f.streams[3].data);
+        assert!(f.streams[5].data.len() < 4000 * 3 + 16, "{}", f.streams[5].data.len());
+        // (a unit of 0 is an error, and one that overflows an integer too)
+        let Node::Apply(a) = &f.root else { panic!() };
+        for unit in [
+            &[0][..],
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1],
+        ] {
+            let mut streams: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
+            streams[3].splice(1..2, unit.iter().copied());
+            let inputs: Vec<&[u8]> = streams.iter().map(|s| &s[..]).collect();
+            assert!(decode(&a.params, &inputs, d.len() as u64, 1).is_err(), "{unit:?}");
+        }
+        // (values that are not all multiples keep a unit of 1)
+        roundtrip(d.replace("0\r", "1\r").as_bytes());
     }
 
     /// The file of a formula of segments (an application, or a Concat of them).

@@ -84,7 +84,7 @@ struct Template {
 
 /// Bytes of a [`Template`] and of a [`Column`] on WebAssembly (32-bit pointers), for the plan.
 const TEMPLATE_BYTES: u64 = 12;
-const COLUMN_BYTES: u64 = 64;
+const COLUMN_BYTES: u64 = 72;
 const _: () = assert!(size_of::<Template>() as u64 == TEMPLATE_BYTES);
 
 /// A column's parts of the streams, read from the front, and its state.
@@ -105,6 +105,8 @@ struct Column<'a> {
     flags: u8,
     has: bool,
     pred: u8,
+    /// What each integer of the column is multiplied by (at least 1).
+    unit: i64,
 }
 
 #[cfg(target_family = "wasm")]
@@ -245,6 +247,7 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
                     flags: 0,
                     has: false,
                     pred: P_RAW,
+                    unit: 1,
                 };
                 if m == M_TEXT {
                     c.text = take(&mut s.text, get(&mut s.columns)?)?;
@@ -253,6 +256,7 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
                     if c.pred > P_LINE {
                         return Err(corrupt());
                     }
+                    c.unit = i64::try_from(get(&mut s.columns)?).ok().filter(|&u| u >= 1).ok_or_else(corrupt)?;
                     c.nums = take(&mut s.nums, get(&mut s.columns)?)?;
                     // (each integer is a varint: the last byte ends one)
                     if c.nums.last().is_some_and(|&b| b >= 0x80) {
@@ -392,7 +396,7 @@ fn digits(out: &mut Out, v: i64, width: u8) -> Result<()> {
 /// those of this line so far, which it is added to); a whole number's descriptor (`desc`) is read
 /// first, as a prediction is at the scale of the number.
 fn value(c: &mut Column, desc: bool, prev: &[(i64, i32)], cur: &mut Vec<(i64, i32)>) -> Result<i64> {
-    let r = varint::unzz(get(&mut c.nums)?);
+    let r = varint::unzz(get(&mut c.nums)?).checked_mul(c.unit).ok_or_else(corrupt)?;
     let was = c.scale;
     if desc {
         descriptor(c)?;

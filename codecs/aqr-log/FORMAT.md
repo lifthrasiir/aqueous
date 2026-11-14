@@ -69,6 +69,7 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
   digits, number, time (each of its columns):
                    u8      pred      0: its integers as they are, 1: as changes from the
                                      column's previous one, 2: as changes from the line before
+                   varint  unit      what the stored integers are multiplied by: 1 to 2^63 - 1
                    varint  nums      the bytes of its part of `nums`
   number only:     varint  desc      the bytes of its part of `desc`
   ```
@@ -78,7 +79,8 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
   byte is left over.
 - **text**: of each word column, its words, each followed by a LF (the column's part is the
   words one after another; a word holds no LF).
-- **nums**: of each digits or number column, the svarint r of each of its values, in order.
+- **nums**: of each digits, number or time column, the svarint of each of its values, in order;
+  r is the integer it holds times the column's `unit` (an error if it does not fit 64 bits).
   The part must end where a varint does (its last byte under 0x80). Let n be the varints in
   the part; the column's parts of `widths` or `types` are n bytes.
 - **widths**: of each digits column, a byte for each value: 0, or the number of digits it is
@@ -98,7 +100,7 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
   then on.
 
 The value of the k-th number (a column of a digits, number or time slot) of a line is the integer v from its
-column's next r, by the column's `pred`: v = r (0); v = p + r (1) with p the column's previous
+column's next r (the stored integer times `unit`), by the column's `pred`: v = r (0); v = p + r (1) with p the column's previous
 value (0 for the first); v = q + r (2) with q the value of the k-th number of the last line
 that was not kept as it is (0 if it had fewer, or there was none). k counts from 0 over the
 columns of the marks digits, number and time of the line's template. The value is the column's
@@ -152,7 +154,7 @@ longer than declared is an error, and so is a file shorter.
   the limits (T 65,536, C 262,144, the templates 64 MiB), is kept as it is. A line is searched
   for *timestamps* (**Times**, below), each a slot of its own: the time mark, its pattern and the
   mark. What is left is cut into tokens at the *separators*, which stay in the template as
-  they are (so empty tokens exist; a CR before the LF is in the last token); a timestamp is
+  they are (so empty tokens exist; a CR before the LF is not: the line is cut without it, and the template ends with the byte, so the last token of a CRLF line is a clean one; a line of the other ending has a template of its own); a timestamp is
   not cut where it holds a separator, and a token round it is cut into the parts before and
   after (each a token of its own).
 - **Separators.** Either a space only, or *wide*: a space, `;` and TAB, and `,` unless the
@@ -194,7 +196,7 @@ longer than declared is an error, and so is a file shorter.
   of at most 14 hours and a multiple of 15 minutes, with a space before the sign or not, or `Z`, at
   the end of a token) is part of the timestamp, as literal bytes at the end of its pattern
   (`d/b/Y:H:M:S -0400`, `Y-m-d\TH:M:S\Z`: aqr-num's README, "Zones"): the time stays local, as
-  printed, and an offset that differs is a pattern of its own;   not hold (a comma and a digit after it, say) the zone is template text as before. The fraction a segment writes is told from the first 256 KiB: of the `H:M:S` followed
+  printed, and an offset that differs is a pattern of its own; where the conditions do not hold (a comma and a digit after it, say) the zone is template text as before. The fraction a segment writes is told from the first 256 KiB: of the `H:M:S` followed
   by a point or a comma and 1 to 9 digits, those digits' counts: one count, always that many
   digits (`f`); several, a trimmed fraction of the most (`t`); none, no fraction; the point is
   the likelier of `.` and `,`. A time of another fraction than the segment's is of its own
@@ -217,7 +219,13 @@ longer than declared is an error, and so is a file shorter.
   scale of the column's previous number) where that prints it back, else as it is a number
   alone. A change of descriptor is a 2 of `types`.
 - **Predictors.** Of a column, the one whose `nums` part zstd -1 compresses smallest (ties
-  to the lower; by length for a column of 8 values or fewer). A time with a fraction puts its
+  to the lower; by length for a column of 8 values or fewer), as it is (`unit` 1) or, where the
+  predictor's integers have a greatest common divisor `g` of at least 2 and fitting 63 bits,
+  divided by it (`unit` g; not where the quotients are all the same byte, which cost nothing
+  as they are, nor, for 8 values or fewer, where the unit's bytes outweigh theirs; ties to the
+  larger unit). A column whose integers are all multiples of one (a measure in quarters,
+  `16.195,25` of the SMARD tables, a multiple of 25 at its scale; times of a quarter of an
+  hour) stores the quotients, so the part holds what varies. A time with a fraction puts its
   integer without the fraction (in the unit of the pattern: seconds) into its first column and
   the fraction into its second, so that the changes of the first are small and the second, whose
   digits are random where a clock reads microseconds, is not a part of them.
