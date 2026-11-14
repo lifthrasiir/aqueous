@@ -25,20 +25,26 @@ fn kind_bit<C: Coder>(rc: &mut C, m: &mut Model, prev: u32, b: u32) -> u32 {
     rc.bit(m.slot(KIND, prev), b)
 }
 
-fn flat32<C: Coder>(rc: &mut C, v: u32) -> u32 {
-    let mut r = 0;
-    for i in (0..32).rev() {
-        r = r << 1 | rc.flat(v >> i & 1);
-    }
-    r
-}
-
-/// A record of a stream: its bytes `start..end`, and whether it is a syncframe (else a run of other bytes).
+/// A record of a stream: its bytes `start..end`, and whether it is a syncframe (else a run of other bytes, of
+/// [`RUN_MAX`] bytes at most: its length is coded in 32 bits).
 #[derive(Clone, Copy, Debug)]
 pub struct Record {
     pub start: usize,
     pub end: usize,
     pub frame: bool,
+}
+
+/// The most bytes of a record of a run of other bytes.
+const RUN_MAX: usize = u32::MAX as usize;
+
+/// Appends the run `start..end` of other bytes as records, cut where it is longer than [`RUN_MAX`].
+fn push_run(out: &mut Vec<Record>, start: usize, end: usize) {
+    let mut at = start;
+    while at < end {
+        let to = at + (end - at).min(RUN_MAX);
+        out.push(Record { start: at, end: to, frame: false });
+        at = to;
+    }
 }
 
 /// The records of `data`: the syncframes whose checksums are right and that parse, and the runs between them.
@@ -52,7 +58,7 @@ pub fn records(data: &[u8]) -> Vec<Record> {
             && ac3::check(&data[pos..pos + n])
         {
             if raw < pos {
-                out.push(Record { start: raw, end: pos, frame: false });
+                push_run(&mut out, raw, pos);
             }
             out.push(Record { start: pos, end: pos + n, frame: true });
             pos += n;
@@ -62,7 +68,7 @@ pub fn records(data: &[u8]) -> Vec<Record> {
         }
     }
     if raw < data.len() {
-        out.push(Record { start: raw, end: data.len(), frame: false });
+        push_run(&mut out, raw, data.len());
     }
     out
 }
@@ -97,11 +103,9 @@ pub fn encode_chunk<C: Coder>(rc: &mut C, data: &[u8], recs: &[Record]) {
         } else {
             kind_bit(rc, &mut m, prev, 0);
             prev = 0;
-            flat32(rc, (r.end - r.start) as u32);
+            rc.flat_bits((r.end - r.start) as u32, 32);
             for &b in &data[r.start..r.end] {
-                for k in (0..8).rev() {
-                    rc.flat((b >> k & 1) as u32);
-                }
+                rc.flat_bits(b as u32, 8);
             }
         }
     }
@@ -135,7 +139,7 @@ impl Decoder {
             if k == 1 {
                 return ac3::decode(rc, &mut self.m, &mut self.ctx, out);
             }
-            self.run = flat32(rc, 0);
+            self.run = rc.flat_bits(0, 32);
             if self.run == 0 {
                 return Err(Error::Parse);
             }
@@ -144,13 +148,29 @@ impl Decoder {
         out.clear();
         let n = (self.run as usize).min(RUN_PIECE);
         for _ in 0..n {
-            let mut v = 0u8;
-            for _ in 0..8 {
-                v = v << 1 | rc.flat(0) as u8;
-            }
-            out.push(v);
+            out.push(rc.flat_bits(0, 8) as u8);
         }
         self.run -= n as u32;
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn long_runs_are_cut() {
+        let mut out = Vec::new();
+        push_run(&mut out, 7, 7 + RUN_MAX + 5);
+        let cuts: Vec<_> = out.iter().map(|r| (r.start, r.end)).collect();
+        assert_eq!(cuts, [(7, 7 + RUN_MAX), (7 + RUN_MAX, 7 + RUN_MAX + 5)]);
+        let mut out = Vec::new();
+        push_run(&mut out, 0, RUN_MAX);
+        assert_eq!(out.len(), 1);
+        push_run(&mut out, 0, 3 * RUN_MAX + 1);
+        assert!(out.iter().all(|r| r.end - r.start <= RUN_MAX && !r.frame));
+        assert_eq!(out.iter().map(|r| r.end - r.start).sum::<usize>(), 4 * RUN_MAX + 1);
     }
 }

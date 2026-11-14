@@ -116,22 +116,3 @@ pub fn gather(
         *t = tails[k];
     }
 }
-
-/// Puts the planes' blocks back into the slices (whose components are sized already).
-pub fn scatter(planes: &[Plane; 3], slices: &mut [Slice], h: &Header, widths: &[usize]) {
-    for (k, p) in planes.iter().enumerate() {
-        let per_mb = if k == 0 || h.chroma == 3 { 4 } else { 2 };
-        let mut s = 0;
-        for r in 0..slices.len() / widths.len() {
-            let mut x0 = 0;
-            for &w in widths {
-                for (b, c) in slices[s].comps[k].0.as_chunks_mut::<64>().0.iter_mut().enumerate() {
-                    let (x, y) = place(b, per_mb);
-                    c.copy_from_slice(&p.blocks[(2 * r + y) * p.bw + x0 + x]);
-                }
-                x0 += if per_mb == 4 { 2 * w } else { w };
-                s += 1;
-            }
-        }
-    }
-}

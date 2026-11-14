@@ -7,3 +7,7 @@ publish = false
 
 [dependencies]
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
+
+# (natively, the tables of chunks)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+aqr-common = { path = "../aqr-common" }

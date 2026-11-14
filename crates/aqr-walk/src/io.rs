@@ -15,7 +15,6 @@ pub const ESC: u16 = 0xFFFF;
 
 /// A VLC: its codes, `(code left-aligned to 32 bits, length, symbol)`, and the tree of them to walk bit by bit.
 pub struct Vlc {
-    codes: &'static [(u32, u8, u16)],
     /// By node and bit: the next node (positive), or the symbol (`!symbol`, negative), or 0 for none.
     trie: Vec<[i32; 2]>,
 }
@@ -38,11 +37,7 @@ impl Vlc {
                 }
             }
         }
-        Vlc { codes, trie }
-    }
-
-    pub fn codes(&self) -> &'static [(u32, u8, u16)] {
-        self.codes
+        Vlc { trie }
     }
 }
 
@@ -115,9 +110,7 @@ impl<C: Coder> Io for Enc<'_, '_, C> {
     }
     fn raw(&mut self, n: u32) -> Result<u32, Error> {
         let v = self.r.get(n).ok_or(Error::Parse)?;
-        for k in (0..n).rev() {
-            self.rc.flat(v >> k & 1);
-        }
+        self.rc.flat_bits(v, n);
         Ok(v)
     }
     fn flag(&mut self, ctx: u32) -> Result<u32, Error> {
@@ -139,9 +132,7 @@ impl<C: Coder> Io for Enc<'_, '_, C> {
             self.rc.bit(self.m.at(base, gn), bit);
             gn = gn << 1 | bit;
         }
-        for i in (0..n - k).rev() {
-            self.rc.flat(v >> i & 1);
-        }
+        self.rc.flat_bits(v, n - k);
         Ok(v)
     }
     fn expect(&mut self, v: u32, n: u32) -> Result<(), Error> {
@@ -190,10 +181,7 @@ impl<C: Coder> Io for Dec<'_, C> {
         Err(Error::Parse)
     }
     fn raw(&mut self, n: u32) -> Result<u32, Error> {
-        let mut v = 0;
-        for _ in 0..n {
-            v = v << 1 | self.rc.flat(0);
-        }
+        let v = self.rc.flat_bits(0, n);
         self.w.put(v, n);
         Ok(v)
     }
@@ -216,9 +204,7 @@ impl<C: Coder> Io for Dec<'_, C> {
             gn = gn << 1 | bit;
             v = v << 1 | bit;
         }
-        for _ in 0..n - k {
-            v = v << 1 | self.rc.flat(0);
-        }
+        v = v << (n - k) | self.rc.flat_bits(0, n - k);
         self.w.put(v, n);
         Ok(v)
     }

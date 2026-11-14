@@ -7,6 +7,7 @@
 extern crate alloc;
 
 pub mod bits;
+pub mod chunks;
 pub mod io;
 pub mod model;
 pub mod rc;

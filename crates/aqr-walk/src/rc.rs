@@ -29,6 +29,15 @@ pub trait Coder {
     fn bit(&mut self, p: &mut Prob, b: u32) -> u32;
     /// A bit with probability 1/2.
     fn flat(&mut self, b: u32) -> u32;
+    /// The low `n` (at most 32) bits of `v`, most significant first, each flat; returns the bits.
+    #[inline]
+    fn flat_bits(&mut self, v: u32, n: u32) -> u32 {
+        let mut r = 0;
+        for k in (0..n).rev() {
+            r = r << 1 | self.flat(v >> k & 1);
+        }
+        r
+    }
 }
 
 const TOP: u32 = 1 << 24;

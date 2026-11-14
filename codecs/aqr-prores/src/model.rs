@@ -260,6 +260,15 @@ pub struct Model {
     res: Vec<u8>,
 }
 
+// The numbers of the adaptive bits of each table of a model.
+const ZERO_N: usize = 2 * KB * NREM * NB * 2 * PV;
+const SIZE_N: usize = 2 * KB * NB * 2 * PV * NS;
+const MANT_N: usize = 2 * CAT * 2 * 8 * 3 * 3;
+const SIGN_N: usize = 2 * KB * 9;
+const NZ_N: usize = 2 * NZB * 9 * 64;
+const DC_N: usize = 2 * 2 * 16 * (CAT + 1);
+const DC_SIGN_N: usize = 2 * 2 * 3;
+
 impl Default for Model {
     fn default() -> Self {
         Self::new()
@@ -267,13 +276,6 @@ impl Default for Model {
 }
 
 impl Model {
-    /// Bytes of a model's adaptive bits.
-    pub fn bytes() -> u64 {
-        let m = Model::new();
-        let n = m.zero.len() + m.size.len() + m.mant.len() + m.sign.len() + m.nz.len() + m.dc.len() + m.dc_sign.len();
-        (n * size_of::<Prob>()) as u64
-    }
-
     /// A model of room for planes of `n` blocks in its scratch.
     pub fn with_scratch(n: usize) -> Self {
         let mut m = Model::new();
@@ -285,21 +287,20 @@ impl Model {
     /// Bytes of [`aqr_api::stack`] that [`Model::with_scratch`] takes.
     pub fn plan(n: usize) -> u64 {
         use aqr_api::stack::block;
-        let m = Model::new();
-        let bits = [m.zero.len(), m.size.len(), m.mant.len(), m.sign.len(), m.nz.len(), m.dc.len(), m.dc_sign.len()];
+        let bits = [ZERO_N, SIZE_N, MANT_N, SIGN_N, NZ_N, DC_N, DC_SIGN_N];
         bits.iter().map(|&k| block((k * size_of::<Prob>()) as u64)).sum::<u64>() + 2 * block(n as u64)
     }
 
     pub fn new() -> Self {
         let b = Prob::default();
         Model {
-            zero: vec![b; 2 * KB * NREM * NB * 2 * PV],
-            size: vec![b; 2 * KB * NB * 2 * PV * NS],
-            mant: vec![b; 2 * CAT * 2 * 8 * 3 * 3],
-            sign: vec![b; 2 * KB * 9],
-            nz: vec![b; 2 * NZB * 9 * 64],
-            dc: vec![b; 2 * 2 * 16 * (CAT + 1)],
-            dc_sign: vec![b; 2 * 2 * 3],
+            zero: vec![b; ZERO_N],
+            size: vec![b; SIZE_N],
+            mant: vec![b; MANT_N],
+            sign: vec![b; SIGN_N],
+            nz: vec![b; NZ_N],
+            dc: vec![b; DC_N],
+            dc_sign: vec![b; DC_SIGN_N],
             nzs: Vec::new(),
             res: Vec::new(),
         }

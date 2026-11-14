@@ -9,6 +9,9 @@ use aqr_walk::rc::Coder;
 
 pub use aqr_walk::Error as FrameError;
 
+/// The bits of the model's table (2^22 probabilities).
+pub const MODEL_BITS: u32 = 22;
+
 type R<T> = Result<T, FrameError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,7 +323,7 @@ impl Syntax {
 
 impl Codec {
     pub fn new(width: usize, height: usize) -> Codec {
-        Codec { model: Model::new(22), syn: Syntax::new(width, height) }
+        Codec { model: Model::new(MODEL_BITS), syn: Syntax::new(width, height) }
     }
 
     /// Forgets what the model has learned (the start of a chunk), in place.
@@ -340,9 +343,7 @@ impl Codec {
         rc.bit(self.model.slot(E_OK, 0), ok as u32);
         if !ok {
             for &b in data {
-                for k in (0..8).rev() {
-                    rc.flat((b >> k & 1) as u32);
-                }
+                rc.flat_bits(b as u32, 8);
             }
             return None;
         }
@@ -357,11 +358,7 @@ impl Codec {
             let mut out = out;
             out.clear();
             for _ in 0..len {
-                let mut v = 0u8;
-                for _ in 0..8 {
-                    v = v << 1 | rc.flat(0) as u8;
-                }
-                out.push(v);
+                out.push(rc.flat_bits(0, 8) as u8);
             }
             return Ok(out);
         }

@@ -185,14 +185,9 @@ impl SideState {
     }
 }
 
-fn bytes<C: Coder>(c: &mut C, d: &mut Vec<u8>, n: usize) {
-    if C::DECODE {
-        d.clear();
-        d.extend((0..n).map(|_| c.raw(0, 8) as u8));
-    } else {
-        d.iter().for_each(|&b| {
-            c.raw(b as u32, 8);
-        });
+fn put_bytes(c: &mut Enc, d: &[u8]) {
+    for &b in d {
+        c.raw(b as u32, 8);
     }
 }
 
@@ -410,7 +405,7 @@ fn side_enc(c: &mut Enc, st: &mut SideState, f: &Frame) {
     c.bit(&mut st.bits.same_header, same);
     if !same {
         c.raw(f.header.raw.len() as u32, 16);
-        bytes(c, &mut f.header.raw.clone(), f.header.raw.len());
+        put_bytes(c, &f.header.raw);
         st.header = f.header.raw.clone();
     }
     for (pi, pic) in f.pictures.iter().enumerate() {
@@ -421,7 +416,7 @@ fn side_enc(c: &mut Enc, st: &mut SideState, f: &Frame) {
         c.bit(&mut st.bits.same_pic, same);
         if !same {
             c.raw(ph.len() as u32, 8);
-            bytes(c, &mut ph.clone(), ph.len());
+            put_bytes(c, &ph);
             st.pics[pi] = ph;
         }
         let (mut b0, mut q) = (0u8, 0u8);
@@ -439,7 +434,7 @@ fn side_enc(c: &mut Enc, st: &mut SideState, f: &Frame) {
             }
             if f.header.alpha != 0 {
                 c.raw(s.alpha.len() as u32, 16);
-                bytes(c, &mut s.alpha.clone(), s.alpha.len());
+                put_bytes(c, &s.alpha);
             }
             for (_, t) in &s.comps {
                 if c.bit(&mut st.bits.tail, *t != Tail::default()) {
@@ -451,7 +446,7 @@ fn side_enc(c: &mut Enc, st: &mut SideState, f: &Frame) {
     }
     c.raw(f.trailer.len() as u32, 32);
     if !f.trailer.is_empty() && !c.bit(&mut st.bits.trailer_zero, f.trailer.iter().all(|&b| b == 0)) {
-        bytes(c, &mut f.trailer.clone(), f.trailer.len());
+        put_bytes(c, &f.trailer);
     }
 }
 

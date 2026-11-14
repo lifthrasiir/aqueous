@@ -1639,6 +1639,7 @@ name = "aqr-walk"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-common",
 ]
 
 [[package]]

@@ -4,8 +4,11 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use aqr_api::stream::{In, Pull, Put, Slice, Written};
+use aqr_walk::chunks;
+use aqr_walk::model::Model;
 use aqr_walk::reader::Reader;
 
+use crate::frame::MODEL_BITS;
 use crate::{Codec, Decoder, Error, Result, corrupt};
 
 /// Pages of the windows of `div3-recons` as a part module: of each input and of the output.
@@ -15,14 +18,11 @@ pub const FRAME_MAX: usize = 4 << 20;
 /// Bytes of each buffer reading an input.
 const BUF: usize = 16 << 10;
 
-/// Bytes the model takes (`Model::new(22)`: 4-byte probabilities).
-const MODEL_BYTES: u64 = 4 << 22;
-
 /// The memory plan of `div3-recons` as a part module ([`aqr_api::stack`]): what [`decode_part`] takes beyond
 /// its initial memory (`initial` bytes) at most, whatever the inputs: the model, the frame, and four buffers.
 pub fn plan(initial: u64) -> u64 {
     let mut m = aqr_api::stack::Sim::new(initial);
-    m.take(MODEL_BYTES);
+    m.take(Model::bytes(MODEL_BITS));
     m.take(FRAME_MAX as u64 + 8);
     m.take(BUF as u64);
     m.take(BUF as u64);
@@ -31,28 +31,12 @@ pub fn plan(initial: u64) -> u64 {
     m.plan()
 }
 
-/// The table at the start of the coded frames: the number of chunks, then for each the frames it holds and the bytes it
-/// is coded in. Each chunk is coded on its own, with a model new to it.
-pub fn table(r: &mut Reader) -> Result<Vec<(u64, u64)>> {
-    let mut one = || r.varint().ok().flatten().ok_or_else(corrupt);
-    let n = one()?;
-    if n > 1 << 24 {
-        return Err(corrupt());
-    }
-    let mut out = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        let a = one()?;
-        let b = one()?;
-        out.push((a, b));
-    }
-    Ok(out)
-}
-
 /// The file of `size` bytes from the coded frames, the skeleton and the layout (see `FORMAT.md`), put to `out`.
 /// The chunks are decoded one after the other here; `formula::decode` does it at once natively.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     coded: &mut dyn Pull,
+    coded_len: u64,
     skeleton: &mut dyn Pull,
     layout: &mut dyn Pull,
     audio: &mut dyn Pull,
@@ -68,7 +52,7 @@ pub fn run(
     let mut skel = Reader::new(skeleton, BUF);
     let mut lay = Reader::new(layout, BUF);
     let mut aud = Reader::new(audio, BUF);
-    let chunks = table(&mut cod.borrow_mut())?;
+    let chunks = chunks::read(&mut cod.borrow_mut(), coded_len).map_err(|_| corrupt())?;
     let mut chunks = chunks.into_iter();
     let mut dec: Option<Decoder<&RefCell<Reader>>> = None;
     let mut left = 0u64;
@@ -76,7 +60,7 @@ pub fn run(
     while let Some(gap) = lay.varint().map_err(|_| corrupt())? {
         let tag = lay.varint().map_err(|_| corrupt())?.ok_or_else(corrupt)?;
         let n = tag >> 1;
-        if written + gap + n > size {
+        if written.checked_add(gap).and_then(|w| w.checked_add(n)).is_none_or(|w| w > size) {
             return Err(corrupt());
         }
         if !skel.copy(gap, out) {
@@ -113,7 +97,7 @@ pub fn run(
     Ok(())
 }
 
-fn dims(params: &[u8]) -> Result<(usize, usize)> {
+pub(crate) fn dims(params: &[u8]) -> Result<(usize, usize)> {
     let &[a, b, c, d] = params else { return Err(corrupt()) };
     Ok((u16::from_le_bytes([a, b]) as usize, u16::from_le_bytes([c, d]) as usize))
 }
@@ -122,8 +106,18 @@ fn dims(params: &[u8]) -> Result<(usize, usize)> {
 pub fn decode_serial(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[coded, skeleton, layout, audio] = inputs else { return Err(corrupt()) };
     let (w, h) = dims(params)?;
-    let mut out = Vec::with_capacity(len.min(1 << 32) as usize);
-    run(&mut Slice(coded), &mut Slice(skeleton), &mut Slice(layout), &mut Slice(audio), &mut out, w, h, len)?;
+    let mut out = Vec::new();
+    run(
+        &mut Slice(coded),
+        coded.len() as u64,
+        &mut Slice(skeleton),
+        &mut Slice(layout),
+        &mut Slice(audio),
+        &mut out,
+        w,
+        h,
+        len,
+    )?;
     if out.len() as u64 != len {
         return Err(Error("output of another length"));
     }
@@ -147,6 +141,7 @@ fn part(params_len: u64, in0_len: u64, in1_len: u64, in2_len: u64, in3_len: u64,
     let mut out = Written::new(size);
     run(
         &mut In::<0>::new(in0_len),
+        in0_len,
         &mut In::<1>::new(in1_len),
         &mut In::<2>::new(in2_len),
         &mut In::<3>::new(in3_len),

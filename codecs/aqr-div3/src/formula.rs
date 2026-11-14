@@ -194,11 +194,7 @@ fn encode_with(input: &[u8], worst: f64, threads: usize) -> Option<Formula> {
         enc.finish()
     });
     let mut coded = Vec::new();
-    varint::put(&mut coded, chunks.len() as u64);
-    for (c, part) in chunks.iter().zip(&parts) {
-        varint::put(&mut coded, c.len() as u64);
-        varint::put(&mut coded, part.len() as u64);
-    }
+    aqr_walk::chunks::put(&mut coded, chunks.iter().zip(&parts).map(|(c, part)| (c.len() as u64, part.len() as u64)));
     for part in &parts {
         coded.extend_from_slice(part);
     }

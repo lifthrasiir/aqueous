@@ -19,14 +19,6 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(crate::module::plan(u.initial()))
 }
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
 /// The coded form of the byte stream `data` (chunks coded at once on `threads`), if it comes to less than 97% of it.
 pub fn encode_with(data: &[u8], threads: usize) -> Option<Vec<u8>> {
     let out = encode_always(data, threads);
@@ -45,11 +37,7 @@ pub fn encode_always(data: &[u8], threads: usize) -> Vec<u8> {
         (bytes, enc.finish())
     });
     let mut out = Vec::new();
-    put_varint(&mut out, parts.len() as u64);
-    for (bytes, coded) in &parts {
-        put_varint(&mut out, *bytes as u64);
-        put_varint(&mut out, coded.len() as u64);
-    }
+    aqr_walk::chunks::put(&mut out, parts.iter().map(|(bytes, coded)| (*bytes as u64, coded.len() as u64)));
     for (_, coded) in &parts {
         out.extend_from_slice(coded);
     }

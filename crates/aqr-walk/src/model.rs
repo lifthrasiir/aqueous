@@ -14,6 +14,11 @@ impl Model {
         Model { t: vec![Prob::INIT; 1 << bits], shift: 64 - bits }
     }
 
+    /// The bytes a model of `bits` takes.
+    pub const fn bytes(bits: u32) -> u64 {
+        (core::mem::size_of::<Prob>() as u64) << bits
+    }
+
     /// Back to the probabilities of a new model, in place.
     pub fn reset(&mut self) {
         self.t.fill(Prob::INIT);

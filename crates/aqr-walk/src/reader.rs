@@ -1,4 +1,5 @@
 //! An input of a module read through a buffer, with a limit for the bytes of one chunk of a coded stream.
+use crate::Error;
 use crate::rc::Source;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -38,24 +39,23 @@ impl<'a> Reader<'a> {
         Some(self.buf[self.pos - 1])
     }
 
-    /// A LEB128 number, or None at the end (before its first byte); `Err` if it is cut or too long.
-    // (whoever reads it tells the failure as its own)
-    #[allow(clippy::result_unit_err)]
-    pub fn varint(&mut self) -> Result<Option<u64>, ()> {
-        let (mut v, mut shift) = (0u64, 0);
-        loop {
+    /// A LEB128 number of at most ten bytes (as `aqr_common::varint::get` reads it), or None at the end (before its
+    /// first byte); `Err` if it is cut or too long.
+    pub fn varint(&mut self) -> Result<Option<u64>, Error> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
             let Some(b) = self.next() else {
-                return if shift == 0 { Ok(None) } else { Err(()) };
+                return if shift == 0 { Ok(None) } else { Err(Error::Parse) };
             };
-            if shift > 56 {
-                return Err(());
+            if shift == 63 && b > 1 {
+                return Err(Error::Parse);
             }
             v |= ((b & 0x7f) as u64) << shift;
-            if b & 0x80 == 0 {
+            if b < 0x80 {
                 return Ok(Some(v));
             }
-            shift += 7;
         }
+        Err(Error::Parse)
     }
 
     /// `n` bytes put to `out`; false if the input or the limit ends first or the output refuses them.

@@ -33,7 +33,7 @@ fn get_code(r: &mut BitReader, cb: u8) -> Result<u32> {
     let w = r.window();
     let q = w.leading_zeros();
     if q > s {
-        let bits = ek - s + 2 * q;
+        let bits = 2 * q + ek - s;
         if bits > 32 {
             return Err(bad("codeword too long"));
         }
