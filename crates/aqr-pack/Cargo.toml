@@ -6,11 +6,15 @@ description = "A tree written as an archive of another format (ZIP, 7z, ALZ, EGG
 publish = false
 
 [dependencies]
+aqr-7z = { path = "../../codecs/aqr-7z" }
+aqr-alz = { path = "../../codecs/aqr-alz" }
 aqr-bz2 = { path = "../../codecs/aqr-bz2", default-features = false }
 aqr-common = { path = "../aqr-common" }
+aqr-egg = { path = "../../codecs/aqr-egg" }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
 aqr-foreign = { path = "../aqr-foreign" }
 aqr-formula = { path = "../aqr-formula" }
+aqr-zip = { path = "../../codecs/aqr-zip" }
 encoding_rs = "0.8"
 getrandom = "0.4"
 # XZ Utils' liblzma (0BSD), built from its source here (not the system's), as a black box

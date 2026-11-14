@@ -33,35 +33,33 @@ use aqr_foreign::attrs::{DOS_DIR, DOS_READ_ONLY, S_IFDIR, S_IFLNK, S_IFREG, UNIX
 use aqr_foreign::crypt::SEVENZ_AES_ID;
 use aqr_foreign::{crypt, time};
 
-const MAGIC: [u8; 6] = [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
-const SIGNATURE: usize = 32;
+use aqr_7z::header::{COPY, LZMA2, MAGIC, SIGNATURE};
 
-/// Property ids.
+/// Property ids, as bytes.
 mod id {
-    pub const END: u8 = 0;
-    pub const HEADER: u8 = 1;
-    pub const MAIN_STREAMS: u8 = 4;
-    pub const FILES: u8 = 5;
-    pub const PACK_INFO: u8 = 6;
-    pub const UNPACK_INFO: u8 = 7;
-    pub const SUBSTREAMS: u8 = 8;
-    pub const SIZE: u8 = 9;
-    pub const CRC: u8 = 10;
-    pub const FOLDER: u8 = 11;
-    pub const UNPACK_SIZE: u8 = 12;
-    pub const NUM_UNPACK_STREAM: u8 = 13;
-    pub const EMPTY_STREAM: u8 = 14;
-    pub const EMPTY_FILE: u8 = 15;
-    pub const NAME: u8 = 17;
-    pub const CTIME: u8 = 18;
-    pub const ATIME: u8 = 19;
-    pub const MTIME: u8 = 20;
-    pub const WIN_ATTRIBUTES: u8 = 21;
-    pub const ENCODED_HEADER: u8 = 23;
-}
+    use aqr_7z::header::id;
 
-const COPY: &[u8] = &[0];
-const LZMA2: &[u8] = &[0x21];
+    pub const END: u8 = id::END as u8;
+    pub const HEADER: u8 = id::HEADER as u8;
+    pub const MAIN_STREAMS: u8 = id::MAIN_STREAMS as u8;
+    pub const FILES: u8 = id::FILES as u8;
+    pub const PACK_INFO: u8 = id::PACK_INFO as u8;
+    pub const UNPACK_INFO: u8 = id::UNPACK_INFO as u8;
+    pub const SUBSTREAMS: u8 = id::SUBSTREAMS as u8;
+    pub const SIZE: u8 = id::SIZE as u8;
+    pub const CRC: u8 = id::CRC as u8;
+    pub const FOLDER: u8 = id::FOLDER as u8;
+    pub const UNPACK_SIZE: u8 = id::UNPACK_SIZE as u8;
+    pub const NUM_UNPACK_STREAM: u8 = id::NUM_UNPACK_STREAM as u8;
+    pub const EMPTY_STREAM: u8 = id::EMPTY_STREAM as u8;
+    pub const EMPTY_FILE: u8 = id::EMPTY_FILE as u8;
+    pub const NAME: u8 = id::NAME as u8;
+    pub const CTIME: u8 = id::CTIME as u8;
+    pub const ATIME: u8 = id::ATIME as u8;
+    pub const MTIME: u8 = id::MTIME as u8;
+    pub const WIN_ATTRIBUTES: u8 = id::WIN_ATTRIBUTES as u8;
+    pub const ENCODED_HEADER: u8 = id::ENCODED_HEADER as u8;
+}
 
 /// A coder of a folder: its id and properties.
 struct Coder {

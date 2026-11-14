@@ -79,6 +79,19 @@ impl ZipCrypto {
     }
 }
 
+/// The data of WinZip's AES extra field (`zip::WINZIP_AES`): AE-2, AES-256 and the method under it.
+pub fn winzip_field(method: u16) -> [u8; 7] {
+    let m = method.to_le_bytes();
+    [2, 0, b'A', b'E', 3, m[0], m[1]]
+}
+
+/// What the data of WinZip's AES field tells: the strength, whether it is AE-1 (the CRC-32 kept),
+/// and the method under it.
+pub fn parse_winzip_field(d: &[u8]) -> Option<(u8, bool, u16)> {
+    let d: &[u8; 7] = d.first_chunk()?;
+    Some((d[4], u16::from_le_bytes([d[0], d[1]]) == 1, u16::from_le_bytes([d[5], d[6]])))
+}
+
 /// Why encrypted data does not open: the passphrase (as the data tells it), or damage.
 #[derive(Debug, PartialEq)]
 pub enum Fail {
@@ -325,6 +338,13 @@ pub fn sevenz_aes_decrypt(passphrase: &[u8], props: &[u8], input: &[u8]) -> Resu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn winzip_field_roundtrips() {
+        assert_eq!(super::parse_winzip_field(&super::winzip_field(8)), Some((3, false, 8)));
+        assert_eq!(super::parse_winzip_field(&[1, 0, b'A', b'E', 1, 0, 0]), Some((1, true, 0)));
+        assert_eq!(super::parse_winzip_field(&[1, 0, b'A', b'E']), None);
+    }
+
     use super::*;
 
     #[test]

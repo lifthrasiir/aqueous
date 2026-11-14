@@ -28,19 +28,14 @@ use aqr_common::{crc32, pool};
 
 use crate::par;
 use crate::{Bytes, Contents, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items};
+use aqr_alz::alz;
+use aqr_egg::egg;
 use aqr_foreign::attrs::{DOS_DIR, DOS_KEPT, S_IFDIR, S_IFREG};
 use aqr_foreign::time;
 
 /// The same in EGG: its own bits (read-only, hidden, system), and a directory's.
 const EGG_KEPT: u32 = 0x07;
 const EGG_DIR: u8 = 0x80;
-/// ALZ's methods.
-const ALZ_STORED: u8 = 0;
-const ALZ_DEFLATE: u8 = 2;
-/// EGG's.
-const EGG_STORED: u8 = 0;
-const EGG_DEFLATE: u8 = 1;
-
 /// The most bytes of a file in an EGG block (its sizes are 32 bits).
 const BLOCK: usize = 1 << 30;
 
@@ -142,7 +137,7 @@ pub fn write_alz(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
     let done = AtomicU64::new(0);
     tell(Progress::Done { done: 0, total });
     let mut w = crate::Counted { w, n: 0 };
-    w.write_all(b"ALZ\x01\x0a\x00\x00\x00")?;
+    w.write_all(&[&alz::MAGIC[..], &[0x0a, 0, 0, 0]].concat())?;
     for range in batches(&its, o.batch, size) {
         let start = range.start;
         let batch = &its[range];
@@ -175,7 +170,7 @@ pub fn write_alz(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
                         _ => 8,
                     };
                     h.extend([(width as u8) << 4, 0]);
-                    h.extend([if b.deflated { ALZ_DEFLATE } else { ALZ_STORED }, 0]);
+                    h.extend([if b.deflated { alz::DEFLATE } else { alz::STORED }, 0]);
                     h.extend(b.crc.to_le_bytes());
                     h.extend(&clen.to_le_bytes()[..width as usize]);
                     h.extend(&b.size.to_le_bytes()[..width as usize]);
@@ -218,7 +213,7 @@ fn alz_names(its: &[Item], notes: &mut Vec<String>) -> Vec<Vec<u8>> {
 /// Writes tree `t`, the contents of its files read from `c`, as an EGG archive to `w`, telling
 /// `tell` how far it is.
 pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &Tell) -> io::Result<Written> {
-    const END: [u8; 4] = 0x08E2_8222u32.to_le_bytes();
+    const END: [u8; 4] = egg::END.to_le_bytes();
     let mut out = Written::default();
     let its = kept(t, "EGG", o, &mut out.notes)?;
     let level = o.level_of(Format::Egg);
@@ -228,7 +223,7 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
     tell(Progress::Done { done: 0, total });
     let mut w = crate::Counted { w, n: 0 };
     let id = u32::from_le_bytes(crate::random()?).max(1);
-    let mut h = b"EGGA\x00\x01".to_vec();
+    let mut h = [&egg::MAGIC[..], &[0, 1]].concat();
     h.extend(id.to_le_bytes());
     h.extend([0; 4]);
     h.extend(END);
@@ -243,12 +238,12 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             let dir = matches!(it.kind, Kind::Dir);
             let len: u64 = p.iter().map(|b| b.size).sum();
             out.read += len;
-            let mut h = 0x0A85_90E3u32.to_le_bytes().to_vec();
+            let mut h = egg::FILE.to_le_bytes().to_vec();
             h.extend(id.to_le_bytes());
             h.extend(len.to_le_bytes());
             id += 1;
             // the filename: UTF-8 (flags 0), its size 2 bytes, or 4 (flag bit 0) where longer
-            h.extend(0x0A85_91ACu32.to_le_bytes());
+            h.extend(egg::FILENAME.to_le_bytes());
             if it.path.len() > 0xffff {
                 h.push(1);
                 h.extend((it.path.len() as u32).to_le_bytes());
@@ -258,7 +253,7 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             }
             h.extend(&it.path);
             // Windows file information: the modification time and the attributes
-            h.extend(0x2C86_950Bu32.to_le_bytes());
+            h.extend(egg::WINDOWS_INFO.to_le_bytes());
             h.push(0);
             h.extend(9u16.to_le_bytes());
             // (a local time of an unknown time zone as local time here, as ALZ's MS-DOS times)
@@ -270,7 +265,7 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             if let Some(mode) = x.mode {
                 let id = |v: Option<u64>| v.and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
                 let secs = mtime.map_or(0, |t| t.secs.max(0) as u64);
-                h.extend(0x1EE9_22E5u32.to_le_bytes());
+                h.extend(egg::POSIX_INFO.to_le_bytes());
                 h.push(0);
                 h.extend(20u16.to_le_bytes());
                 h.extend((mode & 0o7777 | if dir { S_IFDIR } else { S_IFREG }).to_le_bytes());
@@ -282,8 +277,8 @@ pub fn write_egg(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tel
             w.write_all(&h)?;
             for b in &p {
                 let data = b.data.bytes();
-                let mut h = 0x02B5_0C13u32.to_le_bytes().to_vec();
-                h.extend([if b.deflated { EGG_DEFLATE } else { EGG_STORED }, 0]);
+                let mut h = egg::BLOCK.to_le_bytes().to_vec();
+                h.extend([if b.deflated { egg::DEFLATE } else { egg::STORED }, 0]);
                 h.extend((b.size as u32).to_le_bytes());
                 h.extend((data.len() as u32).to_le_bytes());
                 h.extend(b.crc.to_le_bytes());

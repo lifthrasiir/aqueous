@@ -21,6 +21,7 @@ use aqr_foreign::attrs::{DOS_DIR, S_IFDIR, S_IFLNK, S_IFMT};
 use aqr_foreign::charset::Choice;
 use aqr_foreign::crypt::{self, Fail, ZipCrypto};
 use aqr_foreign::time;
+use aqr_foreign::zip as zipf;
 
 /// Hosts of "version made by" whose names may separate by `\` and whose attributes are MS-DOS's.
 fn dos_host(host: u8) -> bool {
@@ -94,7 +95,7 @@ fn fields(x: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
 fn times(x: &mut Extra, central: &[u8], local: &[u8]) {
     for (id, f) in fields(central).chain(fields(local)) {
         match id {
-            0x000a if f.len() >= 32 => {
+            zipf::NTFS if f.len() >= 32 => {
                 // (attributes of tag 1, 24 bytes, after 4 reserved)
                 let mut p = 4;
                 while p + 4 <= f.len() {
@@ -111,7 +112,7 @@ fn times(x: &mut Extra, central: &[u8], local: &[u8]) {
         }
     }
     for (id, f) in fields(local).chain(fields(central)) {
-        if id == 0x5455 && !f.is_empty() {
+        if id == zipf::EXT_TIME && !f.is_empty() {
             let flags = f[0];
             let mut p = 1;
             let mut next = |bit: u8| {
@@ -134,7 +135,7 @@ fn times(x: &mut Extra, central: &[u8], local: &[u8]) {
 fn owner(x: &mut Extra, central: &[u8], local: &[u8]) {
     for (id, f) in fields(local).chain(fields(central)) {
         match id {
-            0x7875 if f.len() >= 3 && f[0] == 1 => {
+            zipf::UNIX_NEW if f.len() >= 3 && f[0] == 1 => {
                 let le = |b: &[u8]| (b.len() <= 8).then(|| b.iter().rev().fold(0u64, |v, &c| v << 8 | c as u64));
                 let n = f[1] as usize;
                 let Some(uid) = f.get(2..2 + n).and_then(le) else { continue };
@@ -143,7 +144,7 @@ fn owner(x: &mut Extra, central: &[u8], local: &[u8]) {
                 (x.uid, x.gid) = (Some(uid), Some(gid));
                 return;
             }
-            0x7855 if f.len() >= 4 => {
+            zipf::UNIX_OLD if f.len() >= 4 => {
                 (x.uid, x.gid) = (Some(u16_at(f, 0) as u64), Some(u16_at(f, 2) as u64));
                 return;
             }
@@ -155,11 +156,11 @@ fn owner(x: &mut Extra, central: &[u8], local: &[u8]) {
 /// The path of a central header: UTF-8 where flagged, else that of Info-ZIP's Unicode path
 /// field where it is of this path, else of no declared encoding (spec, "Entry names from ZIP").
 fn entry_name(raw: &[u8], flags: u16, central: &[u8]) -> Named {
-    if flags & 0x800 != 0 {
+    if flags & zipf::UTF8 != 0 {
         return Named::utf8(raw.to_vec());
     }
     for (id, f) in fields(central) {
-        if id == 0x7075
+        if id == zipf::UNICODE_PATH
             && f.len() >= 5
             && f[0] == 1
             && u32_at(f, 1) == crc32::hash(raw)
@@ -254,14 +255,18 @@ impl<'d> Listing<'d> {
             return Ok(());
         }
         let (enc, method) = match (flags & 1 != 0, method) {
-            (true, _) if flags & 0x40 != 0 => {
+            (true, _) if flags & zipf::STRONG_ENCRYPTION != 0 => {
                 self.notes
                     .push((lax(), format!("{shown}: of PKWARE's strong encryption, not known here, not extracted")));
                 return Ok(());
             }
             // WinZip's AES: its field gives the strength and the method
-            (_, 99) => match fields(cx).chain(fields(lx)).find(|f| f.0 == 0x9901 && f.1.len() >= 7) {
-                Some((_, a)) => (Enc::Aes(a[4], u16_at(a, 0) == 1), u16_at(a, 5)),
+            (_, zipf::METHOD_AES) => match fields(cx)
+                .chain(fields(lx))
+                .filter(|f| f.0 == zipf::WINZIP_AES)
+                .find_map(|f| crypt::parse_winzip_field(f.1))
+            {
+                Some((strength, ae1, method)) => (Enc::Aes(strength, ae1), method),
                 None => {
                     self.notes.push((lax(), format!("{shown}: of AES without its field, not extracted")));
                     return Ok(());

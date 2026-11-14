@@ -1414,12 +1414,16 @@ dependencies = [
 name = "aqr-pack"
 version = "0.1.0"
 dependencies = [
+ "aqr-7z",
+ "aqr-alz",
  "aqr-bz2",
  "aqr-common",
+ "aqr-egg",
  "aqr-flate",
  "aqr-foreign",
  "aqr-formula",
  "aqr-unpack",
+ "aqr-zip",
  "encoding_rs",
  "getrandom",
  "liblzma",

@@ -7,14 +7,10 @@
 
 use aqr_lzma::lzma::Props;
 
-const TOP: u32 = 1 << 24;
-const BITS: u32 = 11;
-const ONE: u16 = 1 << BITS;
-const HALF: u16 = ONE / 2;
-const MOVE: u32 = 5;
-const STATES: usize = 12;
-const POS_MAX: usize = 16;
-const MAX_LEN: usize = 273;
+use aqr_lzma::lzma::{POS_MAX, STATES};
+use aqr_lzma::rc::{BITS, HALF, MOVE, ONE, TOP};
+
+const MAX_LEN: usize = aqr_lzma::lzma::MAX_LEN as usize;
 /// Bytes past a match that its copy may write (see [`aqr_flate::inflate::copy_match`]).
 const OVERSHOOT: usize = 16;
 

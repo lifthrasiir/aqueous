@@ -9,6 +9,7 @@ use std::ops::Range;
 use aqr_bcj::formula::Filter as Bcj;
 use aqr_common::{crc32, pool, varint};
 use aqr_formula::aqr::{Reached, Step};
+use aqr_lzma::xz;
 
 use crate::Filter;
 use crate::codec::{self, CHUNK, Crc64};
@@ -148,10 +149,6 @@ struct XzBlock {
     check: (u8, Range<usize>),
 }
 
-const XZ_MAGIC: [u8; 6] = [0xfd, b'7', b'z', b'X', b'Z', 0];
-/// The bytes of the check of each type.
-const XZ_CHECK: [usize; 16] = [0, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64];
-
 fn le32(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(at..at + 4)?.try_into().unwrap()))
 }
@@ -163,11 +160,11 @@ fn xz_blocks(d: &[u8]) -> Result<(Vec<XzBlock>, u64), String> {
     let mut at = 0;
     loop {
         let h = d.get(at..at + 12).ok_or_else(|| bad("not a stream"))?;
-        if h[..6] != XZ_MAGIC || le32(h, 8) != Some(crc32::hash(&h[6..8])) || h[6] != 0 || h[7] > 15 {
+        if h[..6] != xz::MAGIC || le32(h, 8) != Some(crc32::hash(&h[6..8])) || h[6] != 0 || h[7] > 15 {
             return Err(bad("not a stream"));
         }
         let (flags, check) = ([h[6], h[7]], h[7]);
-        let check_len = XZ_CHECK[check as usize];
+        let check_len = xz::CHECK[check as usize];
         let mut p = at + 12;
         let mut n = 0u64;
         // the blocks, up to the index
@@ -186,7 +183,8 @@ fn xz_blocks(d: &[u8]) -> Result<(Vec<XzBlock>, u64), String> {
             for _ in 0..(hb[1] & 3) + 1 {
                 let id = get(&mut q)?;
                 let len = get(&mut q)? as usize;
-                let props = q.checked_add(len).and_then(|e| fields.get(q..e)).ok_or_else(|| bad("a damaged block header"))?;
+                let props =
+                    q.checked_add(len).and_then(|e| fields.get(q..e)).ok_or_else(|| bad("a damaged block header"))?;
                 q += len;
                 chain.push((id, props));
             }

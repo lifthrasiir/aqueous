@@ -28,30 +28,27 @@ use crate::{
     Bytes, Contents, Extra, Format, Item, Keeps, Kind, Options, Progress, Tell, Tree, Written, batches, items,
 };
 use aqr_foreign::attrs::{DOS_DIR, DOS_KEPT, S_IFDIR, S_IFLNK, S_IFREG};
+use aqr_foreign::zip as zipf;
 use aqr_foreign::{crypt, time};
+use aqr_zip::zip::{self, DEFLATED, ENCRYPTED, STORED};
 
-const LOCAL: u32 = 0x0403_4b50;
-const CENTRAL: u32 = 0x0201_4b50;
-const END: u32 = 0x0605_4b50;
-const END64: u32 = 0x0606_4b50;
-const LOCATOR64: u32 = 0x0706_4b50;
+const LOCAL: u32 = u32::from_le_bytes(zip::LOCAL);
+const CENTRAL: u32 = u32::from_le_bytes(zip::CENTRAL);
+const END: u32 = u32::from_le_bytes(zip::END);
+const END64: u32 = u32::from_le_bytes(zip::END64);
+const LOCATOR64: u32 = u32::from_le_bytes(zip::LOCATOR);
 
 /// Version 6.3 (made by), and what reading takes: 2.0, 4.5 with Zip64.
 const MADE_BY: u16 = 63;
 const NEEDS: u16 = 20;
 const NEEDS_ZIP64: u16 = 45;
 /// Hosts (of "version made by").
-const HOST_DOS: u16 = 0;
-const HOST_UNIX: u16 = 3;
-/// Bit 11 of the flags: the name is UTF-8.
-const UTF8: u16 = 0x800;
-const STORED: u16 = 0;
-const DEFLATED: u16 = 8;
+const HOST_DOS: u16 = zipf::HOST_DOS;
+const HOST_UNIX: u16 = zipf::HOST_UNIX;
+const UTF8: u16 = zipf::UTF8;
 /// WinZip's AES: the method, and the version needed (5.1).
-const AES: u16 = 99;
+const AES: u16 = zipf::METHOD_AES;
 const NEEDS_AES: u16 = 51;
-/// Bit 0 of the flags: encrypted.
-const ENCRYPTED: u16 = 1;
 
 /// The body of an entry: its CRC-32, method, size and the data written; for WinZip's AES,
 /// the method under it.
@@ -226,7 +223,7 @@ fn times(x: &Extra, central: bool) -> Vec<u8> {
         let kept = if central { &unix[..1] } else { &unix[..] };
         let mut d = vec![flags];
         kept.iter().flatten().for_each(|t| d.extend((t.secs as i32).to_le_bytes()));
-        field(&mut f, 0x5455, &d);
+        field(&mut f, zipf::EXT_TIME, &d);
     }
     if mtime.is_some() || atime.is_some() || crtime.is_some() {
         let mut d = vec![0; 4];
@@ -235,7 +232,7 @@ fn times(x: &Extra, central: bool) -> Vec<u8> {
         for t in [mtime, atime, crtime] {
             d.extend(t.map_or(0, time::to_filetime).to_le_bytes());
         }
-        field(&mut f, 0x000a, &d);
+        field(&mut f, zipf::NTFS, &d);
     }
     f
 }
@@ -258,17 +255,13 @@ fn owner(f: &mut Vec<u8>, x: &Extra) {
             }
         }
     }
-    field(f, 0x7875, &d);
+    field(f, zipf::UNIX_NEW, &d);
 }
 
 /// WinZip's AES field (0x9901): AE-2, AES-256, the method under it.
 fn aes_field(f: &mut Vec<u8>, method: Option<u16>) {
     if let Some(m) = method {
-        let mut d = 2u16.to_le_bytes().to_vec();
-        d.extend(b"AE");
-        d.push(3);
-        d.extend(m.to_le_bytes());
-        field(f, 0x9901, &d);
+        field(f, zipf::WINZIP_AES, &crypt::winzip_field(m));
     }
 }
 
@@ -294,7 +287,7 @@ fn local(it: &Item, x: &Extra, b: &Body) -> Vec<u8> {
     let zip64 = b.size >= 0xffff_ffff || clen >= 0xffff_ffff;
     let mut extra = Vec::new();
     if zip64 {
-        field(&mut extra, 0x0001, &[b.size.to_le_bytes(), clen.to_le_bytes()].concat());
+        field(&mut extra, zipf::ZIP64, &[b.size.to_le_bytes(), clen.to_le_bytes()].concat());
     }
     extra.extend(times(x, false));
     owner(&mut extra, x);
@@ -325,7 +318,7 @@ fn central(it: &Item, x: &Extra, w: &Written1) -> Vec<u8> {
     let (size32, clen32, offset32) = (len32(size), len32(clen), len32(w.offset));
     let mut extra = Vec::new();
     if !z.is_empty() {
-        field(&mut extra, 0x0001, &z);
+        field(&mut extra, zipf::ZIP64, &z);
     }
     let zip64 = !z.is_empty() || size >= 0xffff_ffff || clen >= 0xffff_ffff;
     extra.extend(times(x, true));

@@ -4,12 +4,14 @@
 //! - [`attrs`]: the kinds of a POSIX mode and MS-DOS's attribute bits.
 //! - [`charset`]: the character sets of names of no declared encoding, and their guessing.
 //! - [`crypt`]: ZIP's traditional encryption, WinZip's AES and 7-Zip's AES.
+//! - [`zip`]: ZIP's extra-field ids, hosts and flags.
 //! - [`time`]: Windows' FILETIME and MS-DOS's local date and time.
 
 pub mod attrs;
 pub mod charset;
 pub mod crypt;
 pub mod time;
+pub mod zip;
 
 /// A compressor of a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
