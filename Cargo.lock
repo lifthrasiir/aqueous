@@ -279,6 +279,7 @@ dependencies = [
  "aqr-jpeg",
  "aqr-jsonl",
  "aqr-lha",
+ "aqr-log",
  "aqr-lz4",
  "aqr-lzma",
  "aqr-lzo",

@@ -69,6 +69,7 @@ aqr-sqlite = { path = "../../codecs/aqr-sqlite" }
 aqr-tex = { path = "../../codecs/aqr-tex" }
 aqr-wrt = { path = "../../codecs/aqr-wrt" }
 aqr-jsonl = { path = "../../codecs/aqr-jsonl" }
+aqr-log = { path = "../../codecs/aqr-log" }
 aqr-xsv = { path = "../../codecs/aqr-xsv" }
 aqr-zip = { path = "../../codecs/aqr-zip" }
 aqr-zstd = { path = "../../codecs/aqr-zstd" }

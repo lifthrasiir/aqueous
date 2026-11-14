@@ -136,6 +136,23 @@ fn archived(files: &[(&str, Vec<u8>)], opt: &Options) -> (Vec<u8>, aqr_compress:
     (a.archive, a.report)
 }
 
+/// Lines of words of a vocabulary of 4000, the next a function of the last, as many on each line
+/// but every other one: no table of spaces (aqr-xsv), and no lines of templates (aqr-log), which
+/// would lose the phrases to its columns; aqr-wrt takes it.
+fn babble(lines: usize) -> Vec<u8> {
+    let mut x = 1u64;
+    let word = |k: u64| [k / 676, k / 26 % 26, k % 26].map(|c| (b'a' + c as u8) as char).iter().collect::<String>();
+    let mut t = String::new();
+    for i in 0..lines {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let a = (x >> 33) % 4000;
+        let (b, c) = ((a * 37 + 11) % 4000, (a * 37 * 37 + 11 * 38) % 4000);
+        let more = if i % 2 == 0 { format!("{} ", word((c * 37 + 11) % 4000)) } else { String::new() };
+        t += &format!("line {} of the {} {} {} {more}text\n", i * 7 % 1000, word(a), word(b), word(c));
+    }
+    t.into_bytes()
+}
+
 fn sample() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         ("a/t0.txt", text(20_000, 0)),
@@ -146,15 +163,7 @@ fn sample() -> Vec<(&'static str, Vec<u8>)> {
         ("p/0.png", variant(200, 150, None)),
         ("p/1.png", variant(200, 150, Some((20, 30, 40, 50)))),
         ("p/2.png", variant(200, 150, Some((90, 10, 30, 90)))),
-        (
-            "z.gz",
-            gzip(
-                &(0..30000)
-                    // (of lines of as many words but every other one, no table of spaces)
-                    .flat_map(|i| format!("line {} of the {}text\n", i * 7 % 1000, ["", "whole "][i % 2]).into_bytes())
-                    .collect::<Vec<_>>(),
-            ),
-        ),
+        ("z.gz", gzip(&babble(30000))),
         ("g.jpg", fixture("codecs/aqr-jpeg/tests/data/gradient.jpg")),
     ]
 }

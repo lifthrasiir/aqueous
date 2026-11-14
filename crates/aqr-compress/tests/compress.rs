@@ -5,8 +5,8 @@ use aqr_common::rng::noise;
 use aqr_compress::{Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, DWARF_APPLE, DWARF_INFO, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB,
-    LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE,
-    WRT, WRT_HANGUL, X86, ZIP, decompress,
+    LOG, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS,
+    SQLITE, WRT, WRT_HANGUL, X86, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -64,7 +64,8 @@ fn all() -> Options {
 }
 
 /// Lines of text of no words (which aqr-wrt would take, see [`prose`]), nor of as many fields
-/// on each line (which aqr-xsv would take, as a table of spaces).
+/// on each line (which aqr-xsv would take, as a table of spaces); aqr-log takes it, being of a
+/// few shapes.
 fn text(n: usize) -> Vec<u8> {
     let mut t = Vec::new();
     for i in 0.. {
@@ -78,7 +79,7 @@ fn text(n: usize) -> Vec<u8> {
 }
 
 /// Lines of text of words, not of as many on each line (which aqr-xsv would take, as a table of
-/// spaces).
+/// spaces), and of a few shapes (which aqr-log would take, as it does [`text`]).
 fn prose(n: usize) -> Vec<u8> {
     let mut t = Vec::new();
     for i in 0.. {
@@ -88,6 +89,52 @@ fn prose(n: usize) -> Vec<u8> {
         let old = if i % 2 == 0 { "old " } else { "" };
         writeln!(t, "line {i}: the quick brown fox jumps over {} {old}lazy dogs", i * 7 % 13).unwrap();
     }
+    t
+}
+
+/// `n` bytes of sentences of words, which aqr-wrt takes and aqr-log does not: lines of 4 to 15
+/// words drawn from a vocabulary of 3000 (most often its first ones, as natural language's are),
+/// a comma or a period after some. The words are of ASCII letters, or of Hangul syllables
+/// (`hangul`). Generated, so that no document of the repository changes what a test sees.
+fn natural(n: usize, hangul: bool) -> Vec<u8> {
+    let mut x = 0x9e3779b97f4a7c15u64;
+    let mut next = move |m: u64| {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (x >> 33) % m
+    };
+    let vocabulary: Vec<String> = (0..3000u64)
+        .map(|k| {
+            let (mut k, len) = (k * 2654435761 % 1000003, 2 + k % 4);
+            (0..len)
+                .map(|_| {
+                    let c = k % 400;
+                    k = k / 400 + c * 7 + 1;
+                    match hangul {
+                        true => char::from_u32(0xac00 + c as u32 * 28).unwrap().to_string(),
+                        false => [(b'a' + (c % 21) as u8) as char, ['a', 'e', 'i', 'o', 'u'][(c / 21 % 5) as usize]]
+                            .iter()
+                            .collect(),
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut t = String::new();
+    while t.len() < n {
+        let words = 4 + next(12);
+        for w in 0..words {
+            // (rank r drawn about as often as 1/r)
+            let r = (3000f64.powf(next(1 << 20) as f64 / (1 << 20) as f64)) as usize - 1;
+            t += &vocabulary[r.min(2999)];
+            t += match (w + 1 == words, next(8)) {
+                (true, _) => ".\n",
+                (false, 0) => ", ",
+                _ => " ",
+            };
+        }
+    }
+    let mut t = t.into_bytes();
+    t.truncate(t.iter().take(n).rposition(|&b| b == b'\n').map_or(n, |p| p + 1));
     t
 }
 
@@ -1136,7 +1183,8 @@ fn zip_nested() {
     let d = zip(&[("a.txt", &t, true), ("b.flac", &flac, true), ("c.jpg", &jpeg, false), ("d.gz", &gz, false)]);
     let f = roundtrip(&d, &all());
     // (the deflated bodies, the FLAC file among them, given the archive by aqr-flate's module)
-    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name, FLATE.name, FLAC.name]);
+    // (and their text, of a few shapes, by aqr-log)
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name, FLATE.name, LOG.name, FLAC.name]);
     // found in data, and in data inflated from a gzip member
     let f = roundtrip(&[&b"some data before "[..], &d, b" and after"].concat(), &all());
     assert_eq!(modules(&f)[0], ZIP.name);
@@ -1167,9 +1215,9 @@ fn zip_cut() {
     let d = zip(&[("a.txt", &t, true), ("b.jpg", &jpeg, false), ("c.txt", &t, true)]);
     let cut = &d[..d.windows(4).rposition(|w| w == b"PK\x03\x04").unwrap() + 200];
     let f = roundtrip(cut, &all());
-    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name]);
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name, LOG.name]);
     let f = roundtrip(&[&b"some data before "[..], cut].concat(), &all());
-    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name]);
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name, LOG.name]);
 }
 
 /// An RGBA PNG file of a picture of `w` x `h` (noise, rows filtered with Sub), with the pixels
@@ -1708,7 +1756,7 @@ fn dds() {
 /// text (a gzip member's); not text that is short, or has many other bytes, or of no words.
 #[test]
 fn text_words() {
-    let d = prose(400_000);
+    let d = natural(400_000, false);
     assert_eq!(modules(&roundtrip(&d, &all())), [WRT.name]);
     assert_eq!(modules(&roundtrip(&gzip_named(&d, "a.txt"), &all())), [FLATE.name, WRT.name]);
     assert_eq!(modules(&roundtrip(&gzip(&d), &all())), [FLATE.name, WRT.name]);
@@ -1720,16 +1768,10 @@ fn text_words() {
     let mut odd = d.clone();
     (0..odd.len() / 500).for_each(|i| odd[i * 500 + 1] = 0);
     assert!(modules(&roundtrip(&odd, &all())).is_empty());
-    assert!(modules(&roundtrip(&text(400_000), &all())).is_empty());
+    // (lines of a few shapes, by aqr-log)
+    assert_eq!(modules(&roundtrip(&text(400_000), &all())), [LOG.name]);
     // text of Hangul by its own module
-    let mut d = Vec::new();
-    for i in 0.. {
-        if d.len() >= 400_000 {
-            break;
-        }
-        let lazy = if i % 2 == 0 { "아주 " } else { "" };
-        writeln!(d, "{i}번째 줄: 날쌘 갈색 여우가 {lazy}게으른 개 {}마리를 뛰어넘는다", i * 7 % 13).unwrap();
-    }
+    let d = natural(400_000, true);
     assert_eq!(modules(&roundtrip(&d, &all())), [WRT_HANGUL.name]);
 }
 

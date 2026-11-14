@@ -897,6 +897,18 @@ formats! {
         heap: 0.0,
         text: true,
     }
+    /// Lines of text as templates and fields in columns (aqr-log): logs and tables of numbers,
+    /// a whole file known by its text, never detected: [`crate::table`] takes it where its
+    /// sample is clearly smaller than the text's.
+    Log = "log" {
+        recompressor: Pure(aqr_log::formula::encode),
+        // segments of 64 MiB, the streams whole (heap peaks of `aqr -c --stats` on logs: openssh
+        // 73 MB 80.7 MB = 1.10 per byte, intel_lab 151 MB 171 MB = 1.14, nasa 205 MB 219 MB = 1.07,
+        // apache 5 MB 10.4 MB = 2.0, the templates and columns being a share of a small input's),
+        // 1.3 for the largest ratio of the inputs that count
+        heap: 1.3,
+        text: true,
+    }
     /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.
     Text = "text" {
         // (with the dictionary given, if any)

@@ -1247,11 +1247,53 @@ fn is_text(format: Option<Format>) -> bool {
     format.is_some_and(|f| f.spec().text)
 }
 
-/// `d`, text, as JSON lines if aqr-jsonl takes it, else as a table if aqr-xsv does (and the
-/// formula is [`smaller`]).
+/// `d`, text, as JSON lines if aqr-jsonl takes it, else as a table if aqr-xsv does or as lines
+/// of templates and fields if aqr-log does ([`log_or_table`]), where the formula is
+/// [`smaller`].
 fn table(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     let jsonl = aqr_jsonl::formula::starts(d).then(|| recompress_as(Format::Jsonl, d, opt, depth, cx)).flatten();
-    jsonl.or_else(|| aqr_xsv::formula::starts(d).then(|| recompress_as(Format::Xsv, d, opt, depth, cx)).flatten())
+    jsonl.or_else(|| {
+        let xsv = aqr_xsv::formula::starts(d);
+        let format = match aqr_log::formula::starts(d) {
+            true => log_or_table(d, xsv)?,
+            false if xsv => Format::Xsv,
+            false => return None,
+        };
+        recompress_as(format, d, opt, depth, cx)
+    })
+}
+
+/// The bytes at the start of text that aqr-log, aqr-xsv and the text path are compared on.
+const TABLE_SAMPLE: usize = 1 << 20;
+
+/// aqr-log takes text over the text path (aqr-wrt) where its streams on the sample, compressed
+/// by zstd -3, are at most this many percent of the sample compressed so. Prose and source code,
+/// whose words vary and fill the columns of templates of every length, come out at 120% and
+/// more; lines that repeat their shape, which the text path takes as words only, come out at
+/// 100% and less. On the 10gb corpus (files' archived bytes, as `--stats` tells them): at 85%
+/// 156 files took aqr-log, -10.8 MB in all; at 100% 272, -11.9 MB, the 116 more -1.1 MB.
+const LOG_PERCENT: usize = 100;
+
+/// The format for text `d` that aqr-log takes (its `starts`), `xsv` whether aqr-xsv does too:
+/// of the first [`TABLE_SAMPLE`] bytes (cut at a line end) each candidate's streams as zstd -3
+/// compresses them, and the sample itself for the text path. aqr-xsv where it is no larger than
+/// aqr-log; aqr-log where it is at most [`LOG_PERCENT`] of the text path; else aqr-xsv if it
+/// takes the text, else none (the text path).
+fn log_or_table(d: &[u8], xsv: bool) -> Option<Format> {
+    let mut n = d.len().min(TABLE_SAMPLE);
+    if n < d.len() {
+        n = d[..n].iter().rposition(|&b| b == b'\n').map_or(n, |i| i + 1);
+    }
+    let s = &d[..n];
+    let z = |b: &[u8]| zstd::bulk::compress(b, 3).map_or(b.len(), |c| c.len());
+    let coded = |f: Formula| f.streams.iter().map(|s| z(&s.data)).sum::<usize>();
+    let log = aqr_log::formula::encode(s, 1).map(coded);
+    let x = xsv.then(|| aqr_xsv::formula::encode(s, 1).map(coded)).flatten();
+    match log {
+        Some(log) if x.is_some_and(|x| x <= log) => Some(Format::Xsv),
+        Some(log) if log * 100 <= z(s) * LOG_PERCENT => Some(Format::Log),
+        _ => xsv.then_some(Format::Xsv),
+    }
 }
 
 /// A formula of data, its stream 0 perhaps yet to be cut out of the data: the bytes of `gaps`,
@@ -3132,9 +3174,7 @@ mod tests {
     /// within it (of its contents) that does so gives up alone.
     #[test]
     fn heap_over_falls_back() {
-        let text: Vec<u8> =
-            // (of lines of as many words but every other one, no table of spaces)
-            (0..30011).flat_map(|i| format!("line {} of the {}text\n", i * 7 % 1000, ["", "hogging "][i % 2]).into_bytes()).collect();
+        let text: Vec<u8> = babble(30011);
         let gz = |t: &[u8]| {
             let mut z = flate2::GzBuilder::new().filename("text.txt").write(Vec::new(), flate2::Compression::new(6));
             std::io::Write::write_all(&mut z, t).unwrap();
@@ -4361,9 +4401,7 @@ mod tests {
     /// first's; a member that is not one ends them, what follows it kept as it is.
     #[test]
     fn gzip_members_as_one() {
-        let text: Vec<u8> =
-            // (of lines of as many words but every other one, no table of spaces)
-            (0..60000).flat_map(|i| format!("line {} of the {}text\n", i * 7 % 1000, ["", "whole "][i % 2]).into_bytes()).collect();
+        let text: Vec<u8> = babble(60000);
         let member = |name: Option<&str>, d: &[u8]| {
             let b = flate2::GzBuilder::new();
             let b = if let Some(n) = name { b.filename(n) } else { b };
@@ -4529,15 +4567,19 @@ mod tests {
     /// (dense from level 8 on).
     #[test]
     fn text_kept_raw() {
-        // (of no words, which aqr-wrt would take, nor of as many numbers on each line, which aqr-xsv
-        // would)
-        let text: Vec<u8> = (0..40000)
-            .flat_map(|i| format!("{i}: {}{}\n", i * 7, [String::new(), format!(" {}", i * 3)][i % 2]).into_bytes())
-            .collect();
+        // (of no words, which aqr-wrt would take, nor of a table of numbers, which aqr-xsv would, nor
+        // of lines that repeat their shape, which aqr-log would: hexadecimal digits of an LCG's)
+        let mut x = 1u64;
+        let mut text = Vec::new();
+        for i in 0..40000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let third = if i % 2 == 0 { String::new() } else { format!(" {:08x}", x >> 20 & 0xffff_ffff) };
+            text.extend(format!("{:012x} {:010x}{third}\n", x >> 16, x >> 24).into_bytes());
+        }
         assert!(text.len() >= aqr_wrt::formula::MIN_LEN);
         assert_eq!(detect(&text), Some(Format::Text));
         let f = recompress(&text, &Options::default());
-        assert!(f.applies().is_empty());
+        assert!(f.applies().is_empty(), "{:?}", f.applies().iter().map(|a| a.module.name).collect::<Vec<_>>());
         assert_eq!(f.streams[0].kind, Kind::Text);
 
         // a file alone of a kind by its name, as one in an archive of many: text too short for
@@ -4564,6 +4606,25 @@ mod tests {
         let opt = Options { smaller: false, ..opt };
         let (_, f) = compress_formula_as(&gz, kind_by_name(b"named.png"), &opt);
         assert!(!f.applies().is_empty());
+    }
+
+    /// Lines of words, each of a few of a vocabulary of 4000 that follow one another as words of
+    /// prose do (the next a function of the last: a phrase repeats as a whole, but no word is
+    /// seen often enough to be a template's own), as many on each line but every other one: no
+    /// table of spaces (aqr-xsv), and no lines of templates (aqr-log), which would lose the
+    /// phrases to its columns; aqr-wrt takes it.
+    fn babble(lines: usize) -> Vec<u8> {
+        let mut x = 1u64;
+        let word = |k: u64| [k / 676, k / 26 % 26, k % 26].map(|c| (b'a' + c as u8) as char).iter().collect::<String>();
+        let mut t = String::new();
+        for i in 0..lines {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let a = (x >> 33) % 4000;
+            let (b, c) = ((a * 37 + 11) % 4000, (a * 37 * 37 + 11 * 38) % 4000);
+            let more = if i % 2 == 0 { format!("{} ", word((c * 37 + 11) % 4000)) } else { String::new() };
+            t += &format!("line {} of the {} {} {} {more}text\n", i * 7 % 1000, word(a), word(b), word(c));
+        }
+        t.into_bytes()
     }
 
     /// Bytes of 16 values in no order (of an LCG): DEFLATE takes 4 bits off each.
