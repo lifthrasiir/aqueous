@@ -87,11 +87,10 @@ impl Hasher for Fx {
         (h.wrapping_mul(K) ^ (h >> 29)).wrapping_mul(K)
     }
     fn write(&mut self, b: &[u8]) {
-        let mut c = b.chunks_exact(8);
-        for w in &mut c {
-            self.write_u64(u64::from_le_bytes(w.try_into().unwrap()));
+        let (words, r) = b.as_chunks::<8>();
+        for w in words {
+            self.write_u64(u64::from_le_bytes(*w));
         }
-        let r = c.remainder();
         if !r.is_empty() {
             let mut w = [0u8; 8];
             w[..r.len()].copy_from_slice(r);
@@ -664,7 +663,7 @@ mod tests {
         // zeros that pad a digit run are kept by its width
         let d = "12:05:09 a\n12:15:59 b\n".repeat(100);
         let f = roundtrip(d.as_bytes());
-        assert!(f.streams[6].data.iter().any(|&w| w == 2));
+        assert!(f.streams[6].data.contains(&2));
     }
 
     #[test]

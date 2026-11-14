@@ -210,6 +210,7 @@ struct Host {
     sizes: Vec<u64>,
     last_log: Option<Vec<u8>>,
     /// The channels it made.
+    #[cfg(feature = "alloc")]
     chans: usize,
     /// How deep within tasks the code runs, and the empty memory they see.
     task: u32,
@@ -357,6 +358,7 @@ fn run(
         committed,
         sizes: sizes.to_vec(),
         last_log: None,
+        #[cfg(feature = "alloc")]
         chans: 0,
         task: 0,
         empty: Vec::new(),
@@ -403,6 +405,7 @@ fn trap(msg: String) -> ! {
 }
 
 /// Traps for a limit of the host exceeded: a resource failure.
+#[cfg(feature = "alloc")]
 fn exceeded(msg: String) -> ! {
     panic::panic_any(Trap { msg, resource: true })
 }
@@ -421,6 +424,7 @@ fn task_host(kind: Kind) -> Host {
         committed: Vec::new(),
         sizes: Vec::new(),
         last_log: None,
+        #[cfg(feature = "alloc")]
         chans: 0,
         task: 1,
         empty: Vec::new(),
