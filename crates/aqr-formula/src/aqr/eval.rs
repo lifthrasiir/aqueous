@@ -619,11 +619,14 @@ impl<'a> Source<'a> for Fanned {
                     // (its bytes to the outputs they are of: those of others held until pulled)
                     let mut mine = None;
                     while !c.is_empty() {
-                        while *start + sizes[*out] <= *read {
+                        while sizes.get(*out).is_some_and(|&n| *start + n <= *read) {
                             *start += sizes[*out];
                             *out += 1;
                         }
-                        let n = c.len().min((*start + sizes[*out] - *read) as usize);
+                        let Some(&size) = sizes.get(*out) else {
+                            return invalid("a split of a value longer than declared");
+                        };
+                        let n = c.len().min((*start + size - *read) as usize);
                         let (piece, rest) = c.split(n);
                         match *out == v.out {
                             true => mine = Some(piece),

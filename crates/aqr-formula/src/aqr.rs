@@ -3534,7 +3534,9 @@ impl<'c, 'n> Archive<'c, 'n> {
                     let n = stored_len(d, zstd, checked);
                     (n, n, 0)
                 }
-                (_, Some(p)) => p.weight(&slots),
+                (&LeafBlock::Formula { modules, segment, .. }, Some(p)) => {
+                    p.weight(&slots[blocks.segments[segment].first.modules..modules])
+                }
                 _ => (0, 0, 0),
             };
             weights.push(w);
@@ -3558,7 +3560,7 @@ impl<'c, 'n> Archive<'c, 'n> {
             tell: self.tell.as_deref(),
             decompressed: AtomicU64::new(0),
             evaluated: AtomicU64::new(0),
-            totals: (data_len, picked.iter().map(|&i| lens[i]).sum()),
+            totals: (data_len, picked.iter().fold(0u64, |a, &i| a.saturating_add(lens[i]))),
         };
         tally.add(0, 0);
         let contents = Contents {
@@ -4362,7 +4364,8 @@ impl<'a> Reader<'a> {
 }
 
 /// A formula block read: its instructions, and the non-leaf blocks, resources and modules they
-/// refer to (by their ordinals among all).
+/// refer to (`blocks` by their ordinals among all, `resources` and `modules` among those of its
+/// segment).
 struct Program<'a> {
     insns: Vec<Insn<'a>>,
     blocks: Vec<usize>,
@@ -4401,7 +4404,7 @@ impl Program<'_> {
     /// runs both, or an application's memory limit where larger: the working memory of its module,
     /// which a native one takes too), as the sizes the program tells: the weight of its leaf
     /// ([`Archive::set_budget`]); and the bytes on it at the end, its outputs. Of a module of
-    /// `slots[m]` task slots (by module block), the limit counts the tasks' copies of the working
+    /// `slots[m]` task slots (by module block of its segment), the limit counts the tasks' copies of the working
     /// memory as memories of their own, which a native one does not make and Wasm ones share
     /// (copying on write): an instance's share of it is weighed, as of the instance and as many
     /// tasks. Third, the bytes of the inputs and outputs of its applications of modules of no
@@ -4409,8 +4412,8 @@ impl Program<'_> {
     fn weight(&self, slots: &[u64]) -> (u64, u64, u64) {
         let (mut st, mut on, mut most, mut serial) = (Vec::<u64>::new(), 0u64, 0u64, 0u64);
         let pop = |st: &mut Vec<u64>, on: &mut u64, n: usize| -> u64 {
-            let taken: u64 = st.drain(st.len().saturating_sub(n)..).sum();
-            *on -= taken;
+            let taken = st.drain(st.len().saturating_sub(n)..).fold(0u64, u64::saturating_add);
+            *on = on.saturating_sub(taken);
             taken
         };
         for insn in &self.insns {
@@ -4434,7 +4437,7 @@ impl Program<'_> {
                 &Insn::Patch(len) => (pop(&mut st, &mut on, 2), vec![len]),
                 Insn::Nop | Insn::Swap(_) | Insn::Checksum(_) => continue,
             };
-            let out: u64 = outs.iter().sum();
+            let out = outs.iter().fold(0u64, |a, &b| a.saturating_add(b));
             if let Insn::Apply(a) = insn
                 && slots[self.modules[a.module]] == 0
             {
@@ -5646,6 +5649,12 @@ mod tests {
                     if params == [0xff] && pulled > 1 << 20 {
                         return invalid("failed midway");
                     }
+                    if params == [0xee] {
+                        // (more than declared, of the one output)
+                        buf.extend_from_slice(&[0; 10]);
+                        outputs[0].push(&buf)?;
+                        continue;
+                    }
                     let mut d = &buf[..];
                     while !d.is_empty() {
                         while left == 0 {
@@ -5799,6 +5808,27 @@ mod tests {
         f.root = f.share(cut(vec![inner], vec![0xff]), vec![n]).pop().unwrap();
         let c = encode(&f, None, Level::Zstd(1)).unwrap();
         assert_eq!(decode(&c, &PartCut), invalid("failed midway"));
+    }
+
+    /// A part module pushing more bytes than its output is declared to have, to a Split of it,
+    /// is an invalid archive.
+    #[test]
+    fn split_of_a_longer_output() {
+        let _alone = PART_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut f = Formula::default();
+        let a = f.push("a", vec![7; 1000]);
+        let cut = crate::Apply {
+            module: CUT,
+            resources: vec![],
+            params: vec![0xee],
+            inputs: vec![a],
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+            task_limits: Vec::new(),
+        };
+        f.root = Node::concat(f.split(cut, vec![400, 600]));
+        let c = encode(&f, None, Level::Zstd(1)).unwrap();
+        assert!(matches!(decode(&c, &PartCut), Err(Failure::Invalid(_))));
     }
 
     static RENDEZVOUS: AtomicUsize = AtomicUsize::new(0);

@@ -1589,7 +1589,8 @@ fn time(t: &Cbor) -> Option<Time> {
     let base = |t: &Cbor| -> Option<(i128, i128)> {
         let scale = match *t {
             Cbor::Int(_) => 1_000_000_000,
-            Cbor::Tag(tag, _) => TAG_SCALES.iter().find(|s| s.0 == tag)?.1,
+            // (the untagged scale's marker is no tag)
+            Cbor::Tag(tag, _) if tag != u64::MAX => TAG_SCALES.iter().find(|s| s.0 == tag)?.1,
             _ => return None,
         };
         let v = match t {
@@ -2110,7 +2111,7 @@ mod tests {
             time(&c)
         };
         let day = Time { unit: DAY, ..Time::new(86400 * 3, 0) };
-        let cases: [(&[u8], Option<Time>); 6] = [
+        let cases: [(&[u8], Option<Time>); 7] = [
             // 100(3): a date
             (&[0xd8, 100, 0x03], Some(day)),
             // [100(3)]: a local date
@@ -2125,6 +2126,8 @@ mod tests {
             // [100(3), 4]: a date has no offset; nor is 57 one
             (&[0x82, 0xd8, 100, 0x03, 0x04], None),
             (&[0x82, 0x07, 0x18, 57], None),
+            // 18446744073709551615(5): a tag of no time, not the seconds of an untagged one
+            (&[0xdb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x05], None),
         ];
         for (d, want) in cases {
             assert_eq!(read(d), want, "{d:02x?}");

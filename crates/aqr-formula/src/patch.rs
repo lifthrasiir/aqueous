@@ -54,8 +54,10 @@ pub fn apply(source: &[u8], patch: &[u8], len: u64) -> Result<Vec<u8>> {
     let mut d = DCtx::create();
     d.set_parameter(DParameter::WindowLogMax(31)).map_err(fail)?;
     d.ref_prefix(source).map_err(fail)?;
-    let mut out = vec![0u8; n];
-    let (mut input, mut output) = (InBuffer::around(&frame), OutBuffer::around(&mut out[..]));
+    // (`len` is the formula's: a size that cannot be had fails, as one that is not the patch's)
+    let mut out = Vec::new();
+    out.try_reserve_exact(n).map_err(|_| Error::new("patch: too large"))?;
+    let (mut input, mut output) = (InBuffer::around(&frame), OutBuffer::around(&mut out));
     let left = d.decompress_stream(&mut output, &mut input).map_err(fail)?;
     // all of it, to the end of the frame, and nothing beyond
     if left != 0 || input.pos() != frame.len() || output.pos() != n {
@@ -95,5 +97,7 @@ mod tests {
         assert!(apply(&noise, &p, n - 1).is_err());
         assert!(apply(&noise, &p, n + 1).is_err());
         assert!(apply(&noise, &[], n).is_err());
+        // a size no memory holds
+        assert!(apply(&noise, &p, 1 << 50).is_err());
     }
 }

@@ -250,14 +250,14 @@ pub fn rewrite_as(
                 let mut dead = vec![false; keep.len()];
                 let mut sliced: Vec<Vec<(u64, u64)>> = vec![Vec::new(); keep.len()];
                 for l in leaves.clone() {
-                    if let Some(p) = referred(&blocks, l).map_err(fail)? {
+                    if let Some(p) = referred(&blocks, l, seg.end.non_leaf).map_err(fail)? {
                         for &o in &p.ordinals {
                             *if live[l] { &mut keep[o - nl] } else { &mut dead[o - nl] } = true;
                         }
                         if live[l] {
-                            p.slices
-                                .iter()
-                                .for_each(|x| sliced[p.ordinals[x.block] - nl].push((x.start, x.start + x.len)));
+                            p.slices.iter().for_each(|x| {
+                                sliced[p.ordinals[x.block] - nl].push((x.start, x.start.saturating_add(x.len)))
+                            });
                             programs.insert(l, p);
                         }
                     }
@@ -454,8 +454,9 @@ impl Packed {
     }
 }
 
-/// What formula block `l` refers to of the non-leaf blocks; none of a leaf data block.
-fn referred(blocks: &super::Blocks, l: usize) -> super::Decoded<Option<Referred>> {
+/// What formula block `l` refers to of the non-leaf blocks (those before `end`, its segment's);
+/// none of a leaf data block.
+fn referred(blocks: &super::Blocks, l: usize, end: usize) -> super::Decoded<Option<Referred>> {
     let LeafBlock::Formula { data, non_leaf, .. } = blocks.leaves[l] else { return Ok(None) };
     let (d, dict) = blocks.formulas[data];
     let d = decoded_with(d, true, true, dict.map(|i| &blocks.dictionaries[i]))?;
@@ -463,7 +464,9 @@ fn referred(blocks: &super::Blocks, l: usize) -> super::Decoded<Option<Referred>
     let mut next = non_leaf;
     let mut ordinals = Vec::new();
     for delta in r.nums()? {
-        let o = next + delta as usize;
+        let o = usize::try_from(delta).ok().and_then(|d| next.checked_add(d)).filter(|&o| o < end);
+        let o =
+            o.ok_or_else(|| Failure::Invalid("a formula block refers to a non-leaf block not of its segment".into()))?;
         ordinals.push(o);
         next = o + 1;
     }
@@ -540,7 +543,8 @@ fn pack(blocks: &super::Blocks, o: usize, sliced: &mut Vec<(u64, u64)>, enc: &En
     let mut ranges = Vec::with_capacity(merged.len());
     for (s, e) in merged {
         ranges.push((s, e, kept.len() as u64));
-        kept.extend_from_slice(&d[s as usize..e as usize]);
+        let sliced = d.get(s as usize..e as usize);
+        kept.extend_from_slice(sliced.ok_or_else(|| Error::new("a formula block slices past its block"))?);
     }
     let mut block = Vec::new();
     enc.content_block(&mut block, false, &[&kept], super::How::Usual, None)?;
@@ -749,5 +753,43 @@ mod tests {
         let mut t = open(&c, &natives()).unwrap().tree().unwrap().clone();
         t.entries[1].node = EntryNode::File(9);
         assert!(rewrite(&c, &t, Level::Zstd(3), 1, &mut out).is_err());
+    }
+
+    /// `c` with formula block of leaf `l` changed by `edit` (its decoded data, of the same length;
+    /// the block stores it as it is, and its checksum made again).
+    fn damaged(c: &[u8], l: usize, edit: impl FnOnce(&mut [u8])) -> Vec<u8> {
+        let nat = natives();
+        let a = open(c, &nat).unwrap();
+        let blocks = a.parsed().unwrap();
+        let LeafBlock::Formula { data, .. } = blocks.leaves[l] else { panic!("a formula block") };
+        let (d, _) = blocks.formulas[data];
+        let at = d.as_ptr() as usize - c.as_ptr() as usize;
+        let mut got = decoded_with(d, true, true, None).unwrap();
+        // (a Zstandard block of raw bytes, after its three bytes of header and its block header)
+        let start = at + d.len() - 8 - got.len();
+        assert_eq!(&c[start..start + got.len()], &got[..]);
+        edit(&mut got);
+        let mut c = c.to_vec();
+        c[start..start + got.len()].copy_from_slice(&got);
+        let end = start + got.len();
+        c[end..end + 8].copy_from_slice(&checksum(&got).to_le_bytes());
+        c
+    }
+
+    /// A formula block of an ordinal past those of its segment, or slicing past its block (a
+    /// damaged archive) is an error where an archive is written again without a file, not a panic.
+    #[test]
+    fn damaged_formulas() {
+        let (c, _) = grouped();
+        let mut t = open(&c, &natives()).unwrap().tree().unwrap().clone();
+        let x = t.entries.iter().position(|e| e.name == b"x").unwrap();
+        t.entries.remove(x);
+        let mut out = Vec::new();
+        assert!(rewrite(&c, &t, Level::Zstd(3), 1, &mut out).is_ok());
+        // (the second leaf: 1 ordinal, 1 after the first stream's; slice of 500, 2000)
+        let ordinal = damaged(&c, 1, |d| d[1] = 7);
+        assert!(rewrite(&ordinal, &t, Level::Zstd(3), 1, &mut out).is_err());
+        let slice = damaged(&c, 1, |d| d[6..10].copy_from_slice(&[0xff, 0x7f, 0xff, 0x7f]));
+        assert!(rewrite(&slice, &t, Level::Zstd(3), 1, &mut out).is_err());
     }
 }

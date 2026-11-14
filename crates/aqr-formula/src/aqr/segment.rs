@@ -1896,4 +1896,51 @@ mod tests {
         }
         assert_eq!(both, [Some(0o700), Some(0o755)]);
     }
+
+    /// A leaf's weight counts the task slots of the module it applies, whichever segment it is
+    /// in: a leaf of a later segment of long work on a thread goes first, though an earlier
+    /// segment's module of the same ordinal has task slots.
+    #[test]
+    fn weights_in_later_segments() {
+        use super::super::{Step, Wasm, stand_in};
+        fn slotted(m: Module) -> Option<Wasm> {
+            let mut w = stand_in(m);
+            w.extend_from_slice(&[0, 16, 14]);
+            w.extend_from_slice(b"aqr_task_slots");
+            w.push(4);
+            Some(Wasm::Bytes(w.into()))
+        }
+        let mut f = Formula::default();
+        // (long enough for the work on a thread to be long: its input and output)
+        let lits = [f.push("small", b"abc".to_vec()), f.push("big", vec![7; 33 << 20])];
+        let encs = [Encoder::new(Level::Zstd(3)).with_modules(slotted), Encoder::new(Level::Zstd(3))];
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        for (k, enc) in encs.iter().enumerate() {
+            let len = [3, 33 << 20][k];
+            let leaves =
+                [Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![lits[k].clone()], len)], sums: vec![None] }];
+            let b = w.batch(enc, &f, &leaves).unwrap();
+            w.commit(&b);
+            out.extend_from_slice(&b.bytes);
+            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: len }];
+            let t = Tree { root: Extra::default(), entries: vec![entry(None, "f", EntryNode::File(0))] };
+            if k == 0 {
+                out.extend_from_slice(&w.close(enc, &t, &contents).unwrap());
+            } else {
+                out.extend_from_slice(&w.finish(enc, &t, &contents).unwrap().0);
+            }
+        }
+        let started = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = started.clone();
+        let runner = natives();
+        let mut a = open(&out, &runner).unwrap();
+        a.on_progress(Some(std::sync::Arc::new(move |s| {
+            if let Step::Started(i) = s {
+                seen.lock().unwrap().push(i);
+            }
+        })));
+        a.leaves(1, |_, _| Ok(())).unwrap();
+        assert_eq!(*started.lock().unwrap(), [1, 0]);
+    }
 }
