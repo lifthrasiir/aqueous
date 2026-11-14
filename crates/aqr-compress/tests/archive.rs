@@ -677,6 +677,40 @@ fn not_intact() {
     assert!(aqr_compress::compress_tree_to(&tree, &src, &opt, &mut out, &|_| {}).is_err());
 }
 
+/// A gzip file that is cut short after its start is read (the file shrank): the probe of its
+/// trailer finds nothing, and the archive is made of it as it is read.
+#[test]
+fn gzip_cut_after_its_start() {
+    struct Shrunk(Vec<(String, Vec<u8>)>);
+    impl aqr_compress::Source for Shrunk {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+        fn name(&self, c: usize) -> &[u8] {
+            self.0[c].0.as_bytes()
+        }
+        fn size(&self, c: usize) -> u64 {
+            self.0[c].1.len() as u64
+        }
+        fn read(&self, c: usize) -> std::io::Result<aqr_formula::Bytes> {
+            Ok(self.0[c].1.clone().into())
+        }
+        fn read_range(&self, c: usize, range: std::ops::Range<u64>) -> std::io::Result<Vec<u8>> {
+            let d = &self.0[c].1;
+            // (nothing of what is past its start)
+            Ok(match range.start {
+                0 => d[..(range.end as usize).min(d.len())].to_vec(),
+                _ => Vec::new(),
+            })
+        }
+    }
+    let files = [("a.gz", gzip(&words(3 << 20, 5)))];
+    let (tree, contents) = tree_of(&files);
+    let mut out = Vec::new();
+    let r = aqr_compress::compress_tree_to(&tree, &Shrunk(contents), &Options::default(), &mut out, &|_| {});
+    assert!(r.is_ok(), "{r:?}");
+}
+
 /// Words at random, `n` bytes of them from `seed`.
 fn words(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed;

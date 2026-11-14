@@ -29,6 +29,8 @@ struct State {
     slots: Vec<SlotState>,
     /// Whether a job runs (one at a time: they write to the sink in order).
     running: bool,
+    /// Whether a job panicked: the order is then broken, and whoever waits on it panics.
+    panicked: bool,
 }
 
 #[derive(Default)]
@@ -43,7 +45,11 @@ struct SlotState {
 impl Order {
     pub fn new(sink: Sink) -> Order {
         let root = SlotState { open: true, ..SlotState::default() };
-        Order { sink, state: Mutex::new(State { slots: vec![root], running: false }), changed: Condvar::new() }
+        Order {
+            sink,
+            state: Mutex::new(State { slots: vec![root], running: false, panicked: false }),
+            changed: Condvar::new(),
+        }
     }
 
     /// `n` slots under `parent`, in order (once for a slot).
@@ -70,6 +76,7 @@ impl Order {
         let _w = aqr_common::trace::wait("seal");
         let mut st = self.state.lock().unwrap();
         while !st.slots[s].children.iter().all(|&c| st.slots[c].done) {
+            assert!(!st.panicked, "{PANICKED}");
             st = self.changed.wait(st).unwrap();
         }
     }
@@ -79,6 +86,7 @@ impl Order {
         let _w = aqr_common::trace::wait("seal");
         let mut st = self.state.lock().unwrap();
         while !st.slots[s].done {
+            assert!(!st.panicked, "{PANICKED}");
             st = self.changed.wait(st).unwrap();
         }
     }
@@ -99,7 +107,7 @@ impl Order {
     /// of its slots not done, opening it, else its own job, then on to its parent.
     fn progress<'a>(&'a self, mut st: std::sync::MutexGuard<'a, State>, mut s: Slot) {
         loop {
-            if st.running || !st.slots[s].open || st.slots[s].done {
+            if st.running || st.panicked || !st.slots[s].open || st.slots[s].done {
                 return;
             }
             if let Some(&c) = st.slots[s].children.iter().find(|&&c| !st.slots[c].done) {
@@ -113,7 +121,9 @@ impl Order {
             let Some(job) = st.slots[s].job.take() else { return };
             st.running = true;
             drop(st);
+            let unwinding = Unwinding(self);
             job(&self.sink);
+            drop(unwinding);
             st = self.state.lock().unwrap();
             st.running = false;
             st.slots[s].done = true;
@@ -126,9 +136,65 @@ impl Order {
     }
 }
 
+const PANICKED: &str = "a job of the sealing order panicked";
+
+/// Held while a job runs: if it panics, the order is marked so and the threads waiting on it woken
+/// to panic too, rather than wait for ever.
+struct Unwinding<'a>(&'a Order);
+
+impl Drop for Unwinding<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let mut st = self.0.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (st.running, st.panicked) = (false, true);
+            drop(st);
+            self.0.changed.notify_all();
+        }
+    }
+}
+
 /// What a context seals into, where its contents are sealed: the order and its slot.
 #[derive(Clone)]
 pub(crate) struct Sealing {
     pub order: Arc<Order>,
     pub slot: Slot,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A job that panics does not leave the threads waiting for its slot waiting for ever: they
+    /// panic too.
+    #[test]
+    fn panicking_job_wakes_waiters() {
+        let enc = aqr_formula::aqr::Encoder::new(aqr_formula::aqr::Level::Zstd(1));
+        let order = Arc::new(Order::new(Sink::new(&enc, 1 << 10)));
+        let slots = order.slots(ROOT, 2);
+        let (told, heard) = std::sync::mpsc::channel();
+        let waiter = {
+            let (order, told) = (order.clone(), told.clone());
+            std::thread::spawn(move || {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| order.wait(ROOT)));
+                told.send(("waiter", r.is_err())).unwrap();
+            })
+        };
+        // (the waiter waits first)
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let runner = {
+            let order = order.clone();
+            std::thread::spawn(move || {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    order.submit(slots[0], Box::new(|_| panic!("a job that panics")));
+                }));
+                told.send(("runner", r.is_err())).unwrap();
+            })
+        };
+        for _ in 0..2 {
+            let (who, panicked) = heard.recv_timeout(std::time::Duration::from_secs(20)).expect("a wait for ever");
+            assert!(panicked, "{who}");
+        }
+        waiter.join().unwrap();
+        runner.join().unwrap();
+    }
 }

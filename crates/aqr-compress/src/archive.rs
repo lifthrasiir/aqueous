@@ -1363,8 +1363,14 @@ fn together<S: Source + ?Sized>(
             Some(detect::Format::Egg) => aqr_egg::egg::entry_sums(&mut windowed(src, c)),
             Some(detect::Format::Gzip) => {
                 let t = src.read_range(c, size - 8..size)?;
-                let word = |p: usize| u32::from_le_bytes(t[p..p + 4].try_into().expect("4 bytes"));
-                vec![(word(0), word(4) as u64)]
+                // (a file cut short since its size was taken has no trailer)
+                match t.first_chunk::<8>() {
+                    Some(t) => {
+                        let word = |p: usize| u32::from_le_bytes(t[p..p + 4].try_into().expect("4 bytes"));
+                        vec![(word(0), word(4) as u64)]
+                    }
+                    None => Vec::new(),
+                }
             }
             // a git loose object (inflated whole where its header tells a large object)
             Some(detect::Format::Zlib) if size <= TOGETHER_MAX => {
