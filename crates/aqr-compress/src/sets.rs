@@ -11,7 +11,7 @@
 //! are decoded in order, each once. A set of files of an archive is decoded whole for any of
 //! them, so that sets of those are cut to a bound of bytes ([`Cx::set_limit`]): along the
 //! order of the tree, each piece a set of its own, whose members with a parent in another one
-//! have none.
+//! have none. Any set is cut so to [`MAX_SET_INPUTS`] members.
 //!
 //! git packs with their indexes are sets too ([`crate::git::sets`]), of no bound: an index
 //! takes its pack to decode.
@@ -29,6 +29,10 @@ pub(crate) struct Set {
     pub f: Formula,
     pub members: Vec<usize>,
 }
+
+/// The most members of a set: each is an input of its application and, decoded as WebAssembly,
+/// a task of it, far under what a host lets an application spawn (`aqr_api::MAX_TASKS`).
+pub(crate) const MAX_SET_INPUTS: usize = 1024;
 
 /// Files less alike than this have no parent.
 const MIN_ALIKE: f64 = 0.25;
@@ -280,7 +284,8 @@ pub(crate) fn tree(alike: &[Vec<f64>], min: f64) -> (Vec<usize>, Vec<Option<usiz
 
 /// Tree `order` (members in order, parents first) and `parents` (the parent of each, in that
 /// order) cut into pieces along the order of `limit` bytes at most (by `len` of each member;
-/// one longer is a piece of its own): each its members and their parents in it.
+/// one longer is a piece of its own) and of [`MAX_SET_INPUTS`] members: each its members and
+/// their parents in it.
 #[allow(clippy::type_complexity)]
 fn cut(
     order: &[usize],
@@ -292,7 +297,7 @@ fn cut(
     let (mut start, mut bytes) = (0, 0usize);
     for (i, &m) in order.iter().enumerate() {
         let n = len(m);
-        if i > start && bytes.saturating_add(n) > limit {
+        if i > start && (bytes.saturating_add(n) > limit || i - start == MAX_SET_INPUTS) {
             start = i;
             bytes = 0;
             out.push((Vec::new(), Vec::new()));
@@ -311,6 +316,19 @@ fn cut(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A set has [`MAX_SET_INPUTS`] members at most, whatever its bytes.
+    #[test]
+    fn cut_by_members() {
+        let n = 2 * MAX_SET_INPUTS + 5;
+        let order: Vec<usize> = (0..n).collect();
+        let parents: Vec<Option<usize>> = (0..n).map(|i| i.checked_sub(1)).collect();
+        let pieces = cut(&order, &parents, |_| 1, usize::MAX);
+        let lens: Vec<usize> = pieces.iter().map(|p| p.0.len()).collect();
+        assert_eq!(lens, [MAX_SET_INPUTS, MAX_SET_INPUTS, 5]);
+        // (the first of a piece has no parent: its own was in the piece before)
+        assert!(pieces.iter().all(|p| p.1[0].is_none() && p.1[1..].iter().enumerate().all(|(i, &q)| q == Some(i))));
+    }
 
     /// Trees in depth-first order, parents first; members less alike than [`MIN_ALIKE`] start
     /// trees of their own.
