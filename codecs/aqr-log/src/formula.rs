@@ -17,8 +17,8 @@ use aqr_num::times::{Span, Times};
 use aqr_num::{dec, fixed};
 
 use crate::module::{
-    K_NEW, K_SAME, M_DIGITS, M_NUM, M_TEXT, M_TIME, MAX_COLUMNS, MAX_DIGITS, MAX_TEMPLATE_BYTES, MAX_TEMPLATES,
-    P_COLUMN, P_LINE, P_RAW, Params,
+    K_NEW, K_SAME, M_DIGITS, M_IP, M_NUM, M_TEXT, M_TIME, MAX_COLUMNS, MAX_DIGITS, MAX_TEMPLATE_BYTES, MAX_TEMPLATES,
+    P_COLUMN, P_LINE, P_RAW, P_RECENT, Params, RECENT,
 };
 
 pub use crate::module::decode;
@@ -62,7 +62,7 @@ const AT_ONCE: usize = 4;
 
 /// Whether `line` has a byte that marks a template (such a line is kept as it is).
 fn has_mark(line: &[u8]) -> bool {
-    memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, line).is_some() || memchr::memchr(M_TIME, line).is_some()
+    memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, line).is_some() || memchr::memchr2(M_TIME, M_IP, line).is_some()
 }
 
 /// The longest token that may be a whole number.
@@ -186,9 +186,17 @@ pub(crate) type FxMap<Key, V> = HashMap<Key, V, BuildHasherDefault<Fx>>;
 /// most [`MAX_DIGITS`] digits.
 fn form(t: &[u8]) -> (u64, bool) {
     let (mut h, mut run, mut ok) = (0u64, 0usize, true);
-    for &b in t {
+    let mut i = 0;
+    while i < t.len() {
+        let b = t[i];
         if b.is_ascii_digit() {
             if run == 0 {
+                // (an address is one mark, another than a digit run's)
+                if let Some((n, _)) = ip_at(t, i) {
+                    h = (h.rotate_left(5) ^ 2).wrapping_mul(K);
+                    i += n;
+                    continue;
+                }
                 h = (h.rotate_left(5) ^ 1).wrapping_mul(K);
             }
             run += 1;
@@ -197,8 +205,43 @@ fn form(t: &[u8]) -> (u64, bool) {
             run = 0;
             h = (h.rotate_left(5) ^ (b as u64 + 256)).wrapping_mul(K);
         }
+        i += 1;
     }
     (h, ok)
+}
+
+/// The IPv4 address that starts at `t[i]`, if there is one: its length and value. Four octets of
+/// one to three digits (no zero first unless it is the digit), each at most 255, between points;
+/// no digit or point before it, and no digit or point and a digit after it. It prints back as it
+/// is.
+fn ip_at(t: &[u8], i: usize) -> Option<(usize, u32)> {
+    if i > 0 && (t[i - 1].is_ascii_digit() || t[i - 1] == b'.') {
+        return None;
+    }
+    let (mut p, mut v) = (i, 0u32);
+    for k in 0..4 {
+        let s = p;
+        while p < t.len() && p - s < 3 && t[p].is_ascii_digit() {
+            p += 1;
+        }
+        let o = t[s..p].iter().fold(0u32, |o, &d| o * 10 + (d - b'0') as u32);
+        if p == s || (p - s > 1 && t[s] == b'0') || o > 255 {
+            return None;
+        }
+        v = v << 8 | o;
+        if k < 3 {
+            if t.get(p) != Some(&b'.') {
+                return None;
+            }
+            p += 1;
+        }
+    }
+    let after = (t.get(p), t.get(p + 1));
+    match after {
+        (Some(d), _) if d.is_ascii_digit() => None,
+        (Some(b'.'), Some(d)) if d.is_ascii_digit() => None,
+        _ => Some((p - i, v)),
+    }
 }
 
 /// Whether token `t` may be a number: of a sign, a digit or a point first, and short.
@@ -428,7 +471,7 @@ struct Slot {
 }
 
 /// The mark of a time's second column, that of its fraction (the module knows it by the pattern).
-const M_FRACTION: u8 = 5;
+const M_FRACTION: u8 = 6;
 
 /// Templates and the classification of lines into them, for the second and third passes.
 struct Classifier {
@@ -566,7 +609,15 @@ impl Classifier {
                         // (a token of literal bytes and runs of digits)
                         let mut i = start;
                         while i < end {
-                            if line[i].is_ascii_digit() {
+                            if let Some((n, v)) =
+                                ip_at(&line[start..end], i - start).filter(|_| line[i].is_ascii_digit())
+                            {
+                                debug_assert_eq!(tpl[tp], M_IP);
+                                let v = v as i64;
+                                self.slots.push(Slot { kind: M_IP, start: i, len: n, v, n: 0, col: self.ncols });
+                                self.ncols += 1;
+                                i += n;
+                            } else if line[i].is_ascii_digit() {
                                 let n = line[i..end].iter().take_while(|b| b.is_ascii_digit()).count();
                                 debug_assert_eq!(tpl[tp], M_DIGITS);
                                 self.slots.push(Slot { kind: M_DIGITS, start: i, len: n, v: 0, n: 0, col: self.ncols });
@@ -598,6 +649,16 @@ impl Classifier {
             c.slots.push(Slot { kind, start, len, v: 0, n: 0, col: c.ncols });
             c.ncols += 1;
         };
+        let ip = |c: &mut Classifier, start: usize, n: usize, v: u32| {
+            c.tpl.push(M_IP);
+            c.slots.push(Slot { kind: M_IP, start, len: n, v: v as i64, n: 0, col: c.ncols });
+            c.ncols += 1;
+        };
+        if let Some((n, v)) = ip_at(t, 0)
+            && n == t.len()
+        {
+            return ip(self, at, n, v);
+        }
         if numeric(t) && self.scratch.whole(t).is_some() {
             return slot(self, M_NUM, at, t.len());
         }
@@ -608,6 +669,11 @@ impl Classifier {
         let mut i = 0;
         while i < t.len() {
             if t[i].is_ascii_digit() {
+                if let Some((n, v)) = ip_at(t, i) {
+                    ip(self, at + i, n, v);
+                    i += n;
+                    continue;
+                }
                 let n = t[i..].iter().take_while(|b| b.is_ascii_digit()).count();
                 slot(self, M_DIGITS, at + i, n);
                 i += n;
@@ -645,9 +711,10 @@ struct Sample {
 #[derive(Default)]
 struct Col {
     text: Vec<u8>,
-    /// The integers as varints by each predictor, and the greatest common divisor of those (0
-    /// while all are zero).
-    by: [Vec<u8>; 3],
+    /// The integers as varints by each predictor (the fourth, of the columns of addresses, is
+    /// the list of recent ones: [`Recent`]), and the greatest common divisor of those of the
+    /// first three (0 while all are zero).
+    by: [Vec<u8>; 4],
     gcd: [u64; 3],
     widths: Vec<u8>,
     types: Vec<u8>,
@@ -674,6 +741,30 @@ fn emit(c: &mut Col, v: i64, scale: i32, prev: &[(i64, i32)], cur: &mut Vec<(i64
     c.prev = v;
     c.prev_scale = scale;
     cur.push((v, scale));
+}
+
+/// The most recent addresses of a segment, as the module keeps them.
+#[derive(Default)]
+struct Recent(Vec<u32>);
+
+impl Recent {
+    /// The integer of address `v` (an index into the list, else [`RECENT`] plus the address),
+    /// which is put first in the list.
+    fn code(&mut self, v: u32) -> u64 {
+        match self.0.iter().position(|&a| a == v) {
+            Some(i) => {
+                self.0[..=i].rotate_right(1);
+                i as u64
+            }
+            None => {
+                if self.0.len() == RECENT {
+                    self.0.pop();
+                }
+                self.0.insert(0, v);
+                RECENT as u64 + v as u64
+            }
+        }
+    }
 }
 
 /// The greatest common divisor of `a` and `b` (the other where one is 0).
@@ -849,6 +940,7 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
     let mut prev: Vec<(i64, i32)> = Vec::new();
     let mut cur: Vec<(i64, i32)> = Vec::new();
     let mut sc = Scratch::default();
+    let mut recent = Recent::default();
     let mut raw = 0;
     for (n, line) in lines_of(seg).enumerate() {
         let id = match ids.get(n) {
@@ -896,6 +988,10 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
                     continue;
                 }
                 M_TIME => (sl.v, 0),
+                M_IP => {
+                    varint::put(&mut c.by[3], recent.code(sl.v as u32));
+                    (sl.v, 0)
+                }
                 M_DIGITS => {
                     // (a width where leading zeros pad it)
                     c.widths.push(if t.len() > 1 && t[0] == b'0' { t.len() as u8 } else { 0 });
@@ -923,7 +1019,7 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
     // the columns' parts, put in order
     s.templates.extend_from_slice(&cl.tbytes);
     for (c, &mark) in cols.iter_mut().zip(&cl.marks) {
-        let [raw_v, col_v, line_v] = std::mem::take(&mut c.by);
+        let [raw_v, col_v, line_v, recent_v] = std::mem::take(&mut c.by);
         let (pred, unit, nums) = match mark {
             M_TEXT => (P_RAW, 1, Vec::new()),
             _ => {
@@ -931,6 +1027,9 @@ fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params,
                 // unit, which is told too: the shortest where they are few)
                 let by = [(P_RAW, raw_v, c.gcd[0]), (P_COLUMN, col_v, c.gcd[1]), (P_LINE, line_v, c.gcd[2])];
                 let mut cands = Vec::new();
+                if mark == M_IP {
+                    cands.push((P_RECENT, 1, recent_v));
+                }
                 for (pred, v, g) in by {
                     if let u @ 2.. = unit_of(g) {
                         let d = divided(&v, u);
@@ -1152,10 +1251,7 @@ mod tests {
         let templates = String::from_utf8_lossy(&f.streams[2].data).into_owned();
         // (the marks: 1 a digit run, 2 a word, 3 a number)
         assert!(templates.contains("\x04b e H:M:S\x04 host kernel: temp \x03 C load \x03\n"), "{templates:?}");
-        assert!(
-            templates.contains("Accepted password for user\x01 from \x01.\x01.\x01.\x01 port \x03\n"),
-            "{templates:?}"
-        );
+        assert!(templates.contains("Accepted password for user\x01 from \x05 port \x03\n"), "{templates:?}");
         // (the rare words are words of the column of text)
         assert!(String::from_utf8_lossy(&f.streams[4].data).contains("key-"));
         assert!(f.streams[1].data.is_empty());
@@ -1473,6 +1569,62 @@ mod tests {
         }
         // (values that are not all multiples keep a unit of 1)
         roundtrip(d.replace("0\r", "1\r").as_bytes());
+    }
+
+    /// IPv4 addresses (four octets that print back as they are) are slots of their own, in a token
+    /// of other bytes too; anything else stays digit runs. The addresses of all the columns are
+    /// the recent ones of each other.
+    #[test]
+    fn addresses() {
+        let mut rng = aqr_common::rng::Rng::new(21);
+        let mut d = String::new();
+        let mut hosts = Vec::new();
+        for _ in 0..40 {
+            hosts.push(format!("{}.{}.{}.{}", rng.below(256), rng.below(256), rng.below(256), rng.below(256)));
+        }
+        for i in 0..3000u64 {
+            let h = &hosts[(i / 7 % 40) as usize];
+            match i % 3 {
+                0 => d += &format!("sess{i} from {h} port {}\n", 1000 + i),
+                1 => d += &format!("sess{i} rhost={h} user=u{}\n", i % 9),
+                _ => d += &format!("sess{i} bye {h}: {}\n", rng.below(4)),
+            }
+        }
+        let f = roundtrip(d.as_bytes());
+        let t = String::from_utf8_lossy(&f.streams[2].data).into_owned();
+        assert!(t.contains("from \x05 port") && t.contains("rhost=\x05 user=") && t.contains("bye \x05:"), "{t:?}");
+        // (each address of a line is the same as one of the 40 recent ones: an index of one byte)
+        assert!(f.streams[5].data.len() < 3000 * 6, "{}", f.streams[5].data.len());
+        // (damaged: an index past the list, an address over 32 bits, an unit with an address: errors
+        // or other lines, never a panic)
+        let Node::Apply(ap) = &f.root else { panic!() };
+        let mut rng = aqr_common::rng::Rng::new(8);
+        for _ in 0..5000 {
+            let mut streams: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
+            let k = [3, 5][rng.below(2) as usize];
+            let i = rng.below(streams[k].len() as u64) as usize;
+            streams[k][i] = rng.below(256) as u8;
+            let inputs: Vec<&[u8]> = streams.iter().map(|s| &s[..]).collect();
+            let _ = decode(&ap.params, &inputs, d.len() as u64, 1);
+        }
+        let mut streams: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
+        // (the first column's integers all a huge address: past 2^32)
+        streams[5].splice(0..1, [0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]);
+        let inputs: Vec<&[u8]> = streams.iter().map(|s| &s[..]).collect();
+        assert!(decode(&ap.params, &inputs, d.len() as u64, 1).is_err());
+        // (what is no address: leading zeros, octets over 255, five groups, three, digits or points around)
+        let bad = "01.2.3.4 1.2.3.04 256.1.1.1 1.2.3.4.5 1.2.3 1.2.3.4567 x.1.2.3.4 1..2.3.4";
+        let line = format!("a {bad} z\n").repeat(100);
+        let f = roundtrip(line.as_bytes());
+        let t = String::from_utf8_lossy(&f.streams[2].data).into_owned();
+        assert!(t.starts_with("a ") && !t.contains('\x05'), "{t:?}");
+        // (a trailing point, and an address after a time, a separator or punctuation: addresses)
+        let ok =
+            "a 0.0.0.0 255.255.255.255 1.2.3.4. (10.20.30.40) ip=1.2.3.4,5.6.7.8 [1.2.3.4]:80 -1.2.3.4 1.2.3.4.x z\n"
+                .repeat(100);
+        let f = roundtrip(ok.as_bytes());
+        let t = String::from_utf8_lossy(&f.streams[2].data).into_owned();
+        assert_eq!(t.matches('\x05').count(), 9, "{t:?}");
     }
 
     /// The file of a formula of segments (an application, or a Concat of them).

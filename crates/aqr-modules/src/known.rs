@@ -348,7 +348,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "log-recons",
         version: 1,
-        sha512_256: hex("551cabca301d768e8fb770db195012edfff8f6d9f1048dc1996219e3f5519b03"),
+        sha512_256: hex("2a8d0ba3d74f196f2b6438b015187c03861605b7c5136d1b79a46a4423c858a8"),
         block: include_bytes!("../wasm/log-recons.block"),
     },
     Known {

@@ -25,7 +25,7 @@ Contents:
   Arithmetic on integers wraps in 64 bits.
 - `LF` is the byte 0x0A. A *line* is the bytes up to a LF (not holding it); the last line of a
   file has no LF where the file does not end with one.
-- The marks of templates: **digits** 0x01, **word** 0x02, **number** 0x03, **time** 0x04.
+- The marks of templates: **digits** 0x01, **word** 0x02, **number** 0x03, **time** 0x04, **ip** 0x05.
 
 ## 2. The module
 
@@ -54,11 +54,12 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
 - **templates**: the templates, in order, each followed by a LF (so a template holds no LF); at
   most 64 MiB in all. The templates are numbered from 1. A template is the bytes of a line
   with its *fields* replaced by marks: **digits** for a run of digits, **word** for the whole
-  of a token, **number** for the whole of a token that is a number. A template's *slots* are
-  its marks, in order. Template number i has the slots of its marks, and each slot is a
+  of a token, **number** for the whole of a token that is a number, **ip** for an IPv4 address,
+  and a time as the mark time, its pattern and the mark again. A template's *slots* are its
+  marks, in order. Template number i has the slots of its marks, and each slot is a
   *column*; the columns are numbered from 0, those of the first template first. The columns of
-  all the templates are C, T the templates and M the most slots of the marks digits or number
-  in one template.
+  all the templates are C, T the templates and M the most slots of the marks other than word
+  (digits, number, time, ip) in one template.
 - **layout**: of each line, in order, a varint: 0 for a line kept as it is, else its template's
   number (at most T).
 - **raw**: the lines kept as they are, each followed by a LF.
@@ -66,9 +67,10 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
 
   ```text
   word:            varint  the bytes of its part of `text`
-  digits, number, time (each of its columns):
+  digits, number, time, ip (each of its columns):
                    u8      pred      0: its integers as they are, 1: as changes from the
-                                     column's previous one, 2: as changes from the line before
+                                     column's previous one, 2: as changes from the line before,
+                                     3 (ip only): as indexes into the recent addresses (below)
                    varint  unit      what the stored integers are multiplied by: 1 to 2^63 - 1
                    varint  nums      the bytes of its part of `nums`
   number only:     varint  desc      the bytes of its part of `desc`
@@ -80,7 +82,8 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
 - **text**: of each word column, its words, each followed by a LF (the column's part is the
   words one after another; a word holds no LF).
 - **nums**: of each digits, number or time column, the svarint of each of its values, in order;
-  r is the integer it holds times the column's `unit` (an error if it does not fit 64 bits).
+  r is the integer it holds times the column's `unit` (an error if it does not fit 64 bits;
+  the unit of the predictor 3 is 1, and its integers are varints, not svarints).
   The part must end where a varint does (its last byte under 0x80). Let n be the varints in
   the part; the column's parts of `widths` or `types` are n bytes.
 - **widths**: of each digits column, a byte for each value: 0, or the number of digits it is
@@ -106,6 +109,15 @@ that was not kept as it is (0 if it had fewer, or there was none). k counts from
 columns of the marks digits, number and time of the line's template. The value is the column's
 previous value from then on, whatever its pred.
 
+The k-th number of an ip column is an address: a value from 0 to 2^32 - 1 (an error otherwise).
+By the predictor 3 its integer is a varint s, taken as an index into the *recent addresses* (the
+address at s, an error if there are not so many) where s < 64, else the address s - 64 (an error
+over 2^32 - 1). The recent addresses are a list of at most 64 (`RECENT`), shared by all the ip
+columns of the segment and starting empty, whatever their predictors: each address of a line, in
+the order of the slots, goes to the front of the list (from where it was in it, else the last
+one dropping out of a full list). The value is taken as the column's previous and the line's
+k-th as for any number, at scale 0.
+
 A number has a *scale*: that of its descriptor (for a number slot, whose descriptor is
 read before the value), 0 for a digit run. p and q are taken at the scale of the number
 they predict: p as `rescale(p, a, b)` with a the scale of the column's previous number
@@ -129,6 +141,8 @@ to its LF. A line of template i is the template's bytes with each mark replaced:
   digits: an error unless 0 ≤ f < 10^n, then v × 10^n + f, an error if it does not fit 64 bits)
   printed as the pattern says (aqr-num `time::put`; an error if it cannot print v). A time's
   columns have a scale of 0.
+- **ip**: the address v as four decimal octets (v's bytes, most significant first, without
+  leading zeros) between points.
 - **number**: the integer v at the scale s of the column's descriptor (mode, f) as
   `types` says (§3), printed as aqr-num specifies (its README, "Specification"; the modes
   include its decimal comma, padded fixed and digit groups).
@@ -203,11 +217,20 @@ longer than declared is an error, and so is a file shorter.
   fixed fraction.
 - **Tokens.** The *form* of a token is the token with each run of digits replaced by one
   mark. In the order:
-  1. a token that is a whole number (below) is a **number** slot;
-  2. a token with a run of more than 18 digits, or whose form occurs fewer than
+  1. a token that is an IPv4 address (below) is an **ip** slot;
+  2. a token that is a whole number (below) is a **number** slot;
+  3. a token with a run of more than 18 digits, or whose form occurs fewer than
      R = max(64, L / 500) times in the segment (L its lines not kept as they are; the counts
      include numbers' tokens), is a **word** slot;
-  3. else the token's bytes are in the template, each run of digits a **digits** slot.
+  4. else the token's bytes are in the template, each run of digits a **digits** slot, and each
+     IPv4 address in it an **ip** slot.
+
+  The *form* of a token has each IPv4 address in it as one mark of its own, apart from the
+  digit runs'. An *IPv4 address* in a token starts at a digit that follows no digit or point,
+  and is four octets between points, each of one to three digits (no zero first, but the digit
+  itself), at most 255, and ends before no digit, nor a point and a digit (so `1.2.3.4.5`,
+  `01.2.3.4` and `1.2.3` are none, `(1.2.3.4)`, `ip=1.2.3.4` and `1.2.3.4.` are, and a version
+  `1.2.3.4` is).
 - **Whole numbers.** A token of at most 40 bytes, starting with a digit, a sign or a point,
   that aqr-num's `fixed::parse` takes (with its comma as a point where the token has one, and
   no point: fixed in the comma mode), or, if it holds only digits, `.`, `,`, `e`, `E`, `+` and
@@ -225,7 +248,10 @@ longer than declared is an error, and so is a file shorter.
   as they are, nor, for 8 values or fewer, where the unit's bytes outweigh theirs; ties to the
   larger unit). A column whose integers are all multiples of one (a measure in quarters,
   `16.195,25` of the SMARD tables, a multiple of 25 at its scale; times of a quarter of an
-  hour) stores the quotients, so the part holds what varies. A time with a fraction puts its
+  hour) stores the quotients, so the part holds what varies. An ip column has the predictor 3 too, its indexes
+  into the recent addresses, where the addresses of a log recur across its templates (80% of those
+  of OpenSSH's log are the last one seen, 99% one of the last four); it is taken like the others,
+  but not divided by a unit. A time with a fraction puts its
   integer without the fraction (in the unit of the pattern: seconds) into its first column and
   the fraction into its second, so that the changes of the first are small and the second, whose
   digits are random where a clock reads microseconds, is not a part of them.

@@ -17,18 +17,26 @@ pub const MAX_TEMPLATE_BYTES: usize = 1 << 26;
 pub const MAX_DIGITS: usize = 18;
 
 /// The marks of a template: a digit run, a word kept as it is (until the end of its line's
-/// token), a whole number (of aqr-num), and a time: the mark, its pattern (aqr-num's
-/// `time`) and the mark again. A line holding any of the bytes is kept as it is.
+/// token), a whole number (of aqr-num), a time (the mark, its pattern (aqr-num's `time`) and the
+/// mark again), and an IPv4 address (a 32-bit integer, printed as a dotted quad). A line holding
+/// any of the bytes is kept as it is.
 pub const M_DIGITS: u8 = 1;
 pub const M_TEXT: u8 = 2;
 pub const M_NUM: u8 = 3;
 pub const M_TIME: u8 = 4;
+pub const M_IP: u8 = 5;
 
 /// A column's numbers as they are, as each the change from the column's previous one, or as
 /// each the change from the same slot of the line before.
 pub const P_RAW: u8 = 0;
 pub const P_COLUMN: u8 = 1;
 pub const P_LINE: u8 = 2;
+/// Of the columns of addresses only: each integer is an index into the addresses most recently
+/// seen (of all the address columns of the segment), or the address after [`RECENT`].
+pub const P_RECENT: u8 = 3;
+
+/// How many addresses the list of the most recent ones holds.
+pub const RECENT: usize = 64;
 
 /// A number's type (a byte of `types`): of the descriptor of the column's previous number, or
 /// of a descriptor given (`desc`).
@@ -125,6 +133,7 @@ pub fn plan(params: &[u8], inputs: &[u64], len: u64) -> Option<u64> {
             + block(COLUMN_BYTES * p.columns as u64)
             + 2 * block(16 * p.numbers as u64)
             + block(SCRATCH as u64)
+            + block(4 * RECENT as u64)
             + block(len),
     )
 }
@@ -211,7 +220,7 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
         while i < t.len() {
             let m = t[i];
             i += 1;
-            if !matches!(m, M_DIGITS | M_TEXT | M_NUM | M_TIME) {
+            if !matches!(m, M_DIGITS | M_TEXT | M_NUM | M_TIME | M_IP) {
                 continue;
             }
             // (a time with a fraction is two columns: the integer of its time without the fraction,
@@ -253,10 +262,13 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
                     c.text = take(&mut s.text, get(&mut s.columns)?)?;
                 } else {
                     c.pred = byte(&mut s.columns)?;
-                    if c.pred > P_LINE {
+                    if c.pred > P_LINE && !(m == M_IP && c.pred == P_RECENT) {
                         return Err(corrupt());
                     }
                     c.unit = i64::try_from(get(&mut s.columns)?).ok().filter(|&u| u >= 1).ok_or_else(corrupt)?;
+                    if c.pred == P_RECENT && c.unit != 1 {
+                        return Err(corrupt());
+                    }
                     c.nums = take(&mut s.nums, get(&mut s.columns)?)?;
                     // (each integer is a varint: the last byte ends one)
                     if c.nums.last().is_some_and(|&b| b >= 0x80) {
@@ -296,6 +308,7 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
     let mut prev: Vec<(i64, i32)> = Vec::with_capacity(p.numbers);
     let mut cur: Vec<(i64, i32)> = Vec::with_capacity(p.numbers);
     let mut scratch: Vec<u8> = Vec::with_capacity(SCRATCH);
+    let mut recent: Vec<u32> = Vec::with_capacity(RECENT);
     let mut out = Out { v: Vec::with_capacity(len), cap: len };
     let mut lines = 0usize;
     while !layout.is_empty() {
@@ -311,7 +324,8 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
             let mut col = t.col0 as usize;
             cur.clear();
             let mut from = 0;
-            while let Some(i) = tb[from..].iter().position(|&b| matches!(b, M_DIGITS | M_TEXT | M_NUM | M_TIME)) {
+            while let Some(i) = tb[from..].iter().position(|&b| matches!(b, M_DIGITS | M_TEXT | M_NUM | M_TIME | M_IP))
+            {
                 out.put(&tb[from..from + i])?;
                 let c = &mut cols[col];
                 col += 1;
@@ -320,6 +334,11 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
                         let n = c.text.iter().position(|&b| b == b'\n').ok_or_else(corrupt)?;
                         out.put(&c.text[..n])?;
                         c.text = &c.text[n + 1..];
+                    }
+                    M_IP => {
+                        let v = address(c, &mut recent, &prev, &mut cur)?;
+                        let mut buf = [0u8; 15];
+                        out.put(dotted(&mut buf, v))?;
                     }
                     m => {
                         let v = value(c, m == M_NUM, &prev, &mut cur)?;
@@ -370,6 +389,54 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
         return Err(corrupt());
     }
     Ok(out.v)
+}
+
+/// The next address of column `c` (a value of `0..2^32`), by its predictor, and the list of the
+/// recent addresses `recent` (most recent first) with it put first: of every address column,
+/// whatever its predictor. Under [`P_RECENT`] the integer is an index into the list (below
+/// [`RECENT`]), or [`RECENT`] plus the address.
+fn address(c: &mut Column, recent: &mut Vec<u32>, prev: &[(i64, i32)], cur: &mut Vec<(i64, i32)>) -> Result<u32> {
+    let v = if c.pred == P_RECENT {
+        let s = get(&mut c.nums)?;
+        let v = match s.checked_sub(RECENT as u64) {
+            None => *recent.get(s as usize).ok_or_else(corrupt)?,
+            Some(a) => u32::try_from(a).map_err(|_| corrupt())?,
+        };
+        c.prev = v as i64;
+        cur.push((v as i64, 0));
+        v
+    } else {
+        u32::try_from(value(c, false, prev, cur)?).map_err(|_| corrupt())?
+    };
+    match recent.iter().position(|&a| a == v) {
+        Some(i) => recent[..=i].rotate_right(1),
+        None => {
+            if recent.len() == RECENT {
+                recent.pop();
+            }
+            recent.insert(0, v);
+        }
+    }
+    Ok(v)
+}
+
+/// `v` as a dotted quad, in `buf`.
+fn dotted(buf: &mut [u8; 15], v: u32) -> &[u8] {
+    let mut n = 0;
+    for (k, o) in v.to_be_bytes().into_iter().enumerate() {
+        if k > 0 {
+            buf[n] = b'.';
+            n += 1;
+        }
+        let digits = 1 + (o > 9) as usize + (o > 99) as usize;
+        let mut x = o;
+        for d in (0..digits).rev() {
+            buf[n + d] = b'0' + x % 10;
+            x /= 10;
+        }
+        n += digits;
+    }
+    &buf[..n]
 }
 
 /// Appends digit run `v` (below ten to the 18th) padded with zeros to `width` digits (0: not).
