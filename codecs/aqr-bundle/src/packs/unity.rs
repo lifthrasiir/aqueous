@@ -50,7 +50,8 @@ fn table(d: &[u8]) -> Option<(Cow<'_, [u8]>, usize)> {
     let table = match flags & 0x3f {
         0 if packed == unpacked => Cow::Borrowed(raw),
         2 | 3 => {
-            let mut out = Vec::with_capacity(unpacked);
+            // (a block of LZ4 gives 255 bytes for one at most: the size told does not size the buffer)
+            let mut out = Vec::with_capacity(unpacked.min(packed.saturating_mul(255).saturating_add(64)));
             aqr_lz4::block::decode(raw, &mut out, 0, unpacked).ok()?;
             Cow::Owned((out.len() == unpacked).then_some(out)?)
         }

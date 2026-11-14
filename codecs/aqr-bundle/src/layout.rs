@@ -522,9 +522,12 @@ pub fn build_into(src: &mut dyn Source, out: &mut dyn Sink, len: u64, info: &mut
                 }
                 let (m, n) = (src.varint()?, src.varint()?);
                 let (hl, align) = (form.header(), form.align());
-                let mut h = [0u8; 110];
+                let (mut h, mut k) = ([0u8; 110], 0);
+                src.layout(hl, &mut |b| {
+                    h[k..k + b.len()].copy_from_slice(b);
+                    k += b.len();
+                })?;
                 let h = &mut h[..hl];
-                src.layout(hl, &mut { |b| h[..b.len()].copy_from_slice(b) })?;
                 cpio_code(form, flags & UPPER != 0, h, m as u64, n as u64);
                 out.put(h);
                 src.layout(m, &mut |b| out.put(b))?;

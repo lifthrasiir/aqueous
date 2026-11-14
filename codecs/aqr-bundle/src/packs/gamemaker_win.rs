@@ -120,7 +120,7 @@ fn textures(d: &[u8], chunk: &std::ops::Range<usize>, files: &mut Vec<File>) {
                 b"2zoq" => Format::Zqoi,
                 _ => continue,
             };
-            if target >= chunk.start {
+            if (chunk.start..chunk.end).contains(&target) {
                 // (the entries of 2022.9 on have the blob's size before the dimensions)
                 let size = (w == p + 24).then(|| u32le(d, p + 8)).flatten().map(|s| s as usize);
                 blobs.push(Blob { at: target, format, size });

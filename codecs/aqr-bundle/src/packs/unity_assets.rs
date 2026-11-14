@@ -566,8 +566,9 @@ pub fn streamed(d: &[u8], name: &[u8]) -> Vec<(std::ops::Range<u64>, Pixels)> {
         let Some(t) = texture(&d[ob.extent.clone()], o.engine, o.big) else { continue };
         if let Data::Stream { path, offset, size } = t.data
             && base(&path) == want
+            && let Some(end) = offset.checked_add(size)
         {
-            out.push((offset..offset + size, t.pixels));
+            out.push((offset..end, t.pixels));
         }
     }
     out

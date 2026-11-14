@@ -377,3 +377,26 @@ fn bundle_resources() {
     let plain = bundle(&[("CAB-0123", &cab), ("other.resS", &ress)]);
     assert!(aqr_bundle::packs::unity::encode_with(&plain, |_| aqr_formula::Kind::Unknown, 1).is_none());
 }
+
+/// A texture streamed from an offset so far that offset + size wraps: none taken.
+#[test]
+fn streamed_offset_overflow() {
+    use aqr_bundle::packs::unity_assets::streamed;
+    let blocks = bc1(64, 32, 7);
+    let n = blocks.len() as u32;
+    let path = "a.resS";
+    let wide = |low: u32, high: u32| {
+        let mut obj = texture2d(64, 32, 10, 7, n, &[], Some((low, n, path)));
+        // (2020.1 on: the offset is 64 bits)
+        let at = obj.len() - (path.len().next_multiple_of(4) + 4 + 8);
+        obj.splice(at + 4..at + 4, high.to_le_bytes());
+        // (and the mipmaps stripped, after the size)
+        obj.splice(36..36, 0u32.to_le_bytes());
+        let (mut d, _) = build(21, false, true, &[(1, 28, &obj)]);
+        let v = d.windows(10).position(|w| w == b"2019.4.1f1").unwrap();
+        d[v..v + 10].copy_from_slice(b"2020.1.1f1");
+        d
+    };
+    assert_eq!(streamed(&wide(100, 0), b"a.resS").len(), 1);
+    assert!(streamed(&wide(u32::MAX - 5, u32::MAX), b"a.resS").is_empty());
+}

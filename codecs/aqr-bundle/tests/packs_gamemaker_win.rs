@@ -108,3 +108,18 @@ fn audiogroup() {
     assert_eq!(names(&f), ["audo/000.wav", "audo/001.ogg"]);
     assert_eq!(&d[f[0].extents[0].clone()], b"RIFFabcd");
 }
+
+#[test]
+fn a_blob_past_its_chunk() {
+    // an entry whose pointer goes to a QOI header after the TXTR chunk (in AUDO's data)
+    let q = |m: &[u8; 4]| [m.as_slice(), &[64, 0, 64, 0], &[9u8; 20]].concat();
+    let mut d = game(true, &[q(b"fioq")], &[&q(b"fioq")]);
+    let pos: Vec<usize> = (0..d.len() - 4).filter(|&i| &d[i..i + 4] == b"fioq").collect();
+    assert_eq!(pos.len(), 2);
+    let old = (pos[0] as u32).to_le_bytes();
+    let at = (0..d.len() - 4).find(|&i| d[i..i + 4] == old).unwrap();
+    d[at..at + 4].copy_from_slice(&(pos[1] as u32).to_le_bytes());
+    let f = gamemaker_win::files(&d).unwrap();
+    assert!(f.iter().all(|f| f.extents.iter().all(|e| e.end <= d.len())));
+    assert!(f.iter().all(|f| !f.name.starts_with(b"txtr")));
+}

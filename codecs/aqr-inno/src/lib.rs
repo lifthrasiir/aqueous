@@ -107,8 +107,8 @@ pub fn split(d: &[u8], threads: usize) -> Vec<Piece> {
         let (Some(&p), Some(dict)) = (d.get(at + 4), u32le(d, at + 5)) else { break };
         let Some(props) = Props::from_byte(p) else { break };
         let from = at + CHUNK_HEAD;
-        let Ok(sp) = recons::split(&d[from..t.header], props, dict as u32, None, LIMIT.saturating_sub(total), threads)
-        else {
+        let Some(body) = d.get(from..t.header) else { break };
+        let Ok(sp) = recons::split(body, props, dict as u32, None, LIMIT.saturating_sub(total), threads) else {
             break;
         };
         total += sp.data.len();
@@ -152,6 +152,14 @@ mod tests {
     #[test]
     fn no_chunks_without_stream() {
         assert!(split(&made(1000, 900, 800, 0x80), 1).is_empty());
+    }
+
+    #[test]
+    fn a_chunk_head_past_the_header_ends_the_walk() {
+        // the chunk's signature in the last bytes before the setup header
+        let mut d = made(1000, 900, 0x86, 0x80);
+        d[0x80..0x84].copy_from_slice(CHUNK);
+        assert!(split(&d, 1).is_empty());
     }
 
     /// An installer of the given chunks (data, each an `.lzma` file's stream): the table, then

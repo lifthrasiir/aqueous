@@ -1,5 +1,5 @@
 use aqr_bundle::formula::{self, Format, Options};
-use aqr_bundle::layout::{self, Info, Rec, Role};
+use aqr_bundle::layout::{self, Info, Rec, Role, Writer};
 use aqr_common::rng::{Rng, noise};
 use aqr_formula::{Formula, Kind, Node};
 
@@ -323,5 +323,42 @@ fn corrupt_layouts() {
         assert!(formula::decode(&[], &[&data, &lay], d.len() as u64 + 1, 1).is_err());
         assert!(formula::decode(&[], &[&data[..data.len().saturating_sub(1)], &lay], d.len() as u64, 1).is_err());
         assert!(formula::decode(&[1], &[&data, &lay], d.len() as u64, 1).is_err());
+    }
+}
+
+/// A source giving every request in pieces of one byte, as a window or piece boundary may.
+struct Pieces<'a>(layout::Slices<'a>);
+
+impl layout::Source for Pieces<'_> {
+    fn layout(&mut self, n: usize, f: &mut dyn FnMut(&[u8])) -> aqr_bundle::Result<()> {
+        self.0.layout(n, &mut |b| b.chunks(1).for_each(&mut *f))
+    }
+
+    fn data(&mut self, n: usize, f: &mut dyn FnMut(&[u8])) -> aqr_bundle::Result<()> {
+        self.0.data(n, &mut |b| b.chunks(1).for_each(&mut *f))
+    }
+
+    fn more(&self) -> bool {
+        self.0.more()
+    }
+
+    fn done(&self) -> bool {
+        self.0.done()
+    }
+}
+
+/// A cpio header handed over in several pieces (it straddles a window of the part module).
+#[test]
+fn cpio_header_in_pieces() {
+    for name in ["bsdtar-newc.cpio", "bsdtar-odc.cpio", "bsdtar-bin.cpio", "py-crc.cpio"] {
+        let d = fixture(name);
+        let recs = formula::records(formula::detect(&d).unwrap(), &d).unwrap();
+        let mut w = Writer::new(&d);
+        recs.iter().enumerate().for_each(|(i, r)| w.rec(r, i));
+        let data: Vec<u8> = w.data.iter().flat_map(|(s, _, _)| d[s.clone()].iter().copied()).collect();
+        let mut out = Vec::new();
+        let mut src = Pieces(layout::Slices::new(&w.layout, &data));
+        layout::build_into(&mut src, &mut out, d.len() as u64, &mut |_| {}).unwrap();
+        assert!(out == d, "{name}");
     }
 }

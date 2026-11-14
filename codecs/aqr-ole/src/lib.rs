@@ -166,7 +166,7 @@ struct Entry {
 fn entries(s: &Sectors) -> Vec<Entry> {
     let per = s.h.sector / 128;
     let mut out = Vec::new();
-    for n in s.chain(s.h.dir_start, ENTRIES / per) {
+    for n in s.chain(s.h.dir_start, (ENTRIES / per).min(s.fat.len())) {
         let Some(b) = s.read(n) else { break };
         for e in b.as_chunks::<128>().0 {
             let units: Vec<u16> = (0..(le16(e, 64) as usize).clamp(2, 64) / 2 - 1).map(|i| le16(e, 2 * i)).collect();
@@ -242,7 +242,7 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         match e.kind {
             1 => stack.push((e.child, here, depth + 1)),
             2 if e.size >= h.cutoff as u64 && e.start != FREE => {
-                let need = usize::try_from(e.size.div_ceil(h.sector as u64)).unwrap_or(usize::MAX);
+                let need = usize::try_from(e.size.div_ceil(h.sector as u64)).unwrap_or(usize::MAX).min(s.fat.len());
                 let ex = extents(&s, &s.chain(e.start, need), e.size);
                 if !ex.is_empty() {
                     out.push(File { name: here, extents: ex, rank: 0, compressed: None });
@@ -379,6 +379,19 @@ mod tests {
         let mut bad = d;
         bad[0] ^= 1;
         assert!(files_of(&bad).is_empty());
+    }
+
+    #[test]
+    fn a_long_stream_on_a_looping_chain_is_bounded() {
+        let (mut d, _, _) = made();
+        let fat = 512;
+        for k in 0..128 {
+            d[fat + 4 * k..fat + 4 * k + 4].copy_from_slice(&2u32.to_le_bytes());
+        }
+        // A claims 4 GiB - 1 on a FAT of 128 sectors
+        d[1024 + 128 + 120..1024 + 128 + 124].copy_from_slice(&u32::MAX.to_le_bytes());
+        let files = files_of(&d);
+        assert!(files.iter().all(|f| f.extents.len() <= 128), "{}", files[0].extents.len());
     }
 
     fn files_of(d: &[u8]) -> Vec<File> {
