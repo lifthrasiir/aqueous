@@ -95,3 +95,7 @@ path = "examples/memprobe.rs"
 [[example]]
 name = "aqr-compress-classprobe"
 path = "examples/classprobe.rs"
+
+[[example]]
+name = "aqr-compress-selprobe"
+path = "examples/selprobe.rs"

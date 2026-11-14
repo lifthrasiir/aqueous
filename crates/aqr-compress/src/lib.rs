@@ -151,6 +151,7 @@ mod verify;
 mod zip;
 mod zst;
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Seek, Write};
@@ -1263,8 +1264,10 @@ fn table(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     })
 }
 
-/// The bytes at the start of text that aqr-log, aqr-xsv and the text path are compared on.
-const TABLE_SAMPLE: usize = 1 << 20;
+/// The bytes of a window of the sample that aqr-log, aqr-xsv and the text path are compared on,
+/// and the number of windows ([`table_sample`]).
+const TABLE_WINDOW: usize = 256 << 10;
+const TABLE_WINDOWS: usize = 8;
 
 /// aqr-log takes text over the text path (aqr-wrt) where its streams on the sample, compressed
 /// by zstd -3, are at most this many percent of the sample compressed so. Prose and source code,
@@ -1274,17 +1277,41 @@ const TABLE_SAMPLE: usize = 1 << 20;
 /// 156 files took aqr-log, -10.8 MB in all; at 100% 272, -11.9 MB, the 116 more -1.1 MB.
 const LOG_PERCENT: usize = 100;
 
-/// The format for text `d` that aqr-log takes (its `starts`), `xsv` whether aqr-xsv does too:
-/// of the first [`TABLE_SAMPLE`] bytes (cut at a line end) each candidate's streams as zstd -3
-/// compresses them, and the sample itself for the text path. aqr-xsv where it is no larger than
-/// aqr-log; aqr-log where it is at most [`LOG_PERCENT`] of the text path; else aqr-xsv if it
-/// takes the text, else none (the text path).
-fn log_or_table(d: &[u8], xsv: bool) -> Option<Format> {
-    let mut n = d.len().min(TABLE_SAMPLE);
-    if n < d.len() {
-        n = d[..n].iter().rposition(|&b| b == b'\n').map_or(n, |i| i + 1);
+/// The sample of text `d` that aqr-log and aqr-xsv are compared on: all of it up to
+/// [`TABLE_WINDOWS`] windows of [`TABLE_WINDOW`] bytes, else that many windows spread from the
+/// start of `d` to its end, each from a line's start to a line's end, one after the other.
+/// The start alone told nothing of what a file does later: of the first MiB of the SMARD price
+/// table, 261 bytes are streams (zeros), and aqr-xsv was 0.7% ahead on that of a load table that
+/// archives 7.7% larger with it than with aqr-log.
+fn table_sample(d: &[u8]) -> Cow<'_, [u8]> {
+    if d.len() <= TABLE_WINDOW * TABLE_WINDOWS {
+        return Cow::Borrowed(d);
     }
-    let s = &d[..n];
+    let mut s = Vec::with_capacity(TABLE_WINDOW * TABLE_WINDOWS);
+    for i in 0..TABLE_WINDOWS {
+        let at = (d.len() - TABLE_WINDOW) * i / (TABLE_WINDOWS - 1);
+        // (from the next line's start, unless at the start of `d`; to the last whole line)
+        let from = match at {
+            0 => 0,
+            _ => d[at - 1..].iter().position(|&b| b == b'\n').map_or(d.len(), |j| at + j),
+        };
+        let to = (at + TABLE_WINDOW).min(d.len());
+        if from < to
+            && let Some(j) = d[from..to].iter().rposition(|&b| b == b'\n')
+        {
+            s.extend_from_slice(&d[from..from + j + 1]);
+        }
+    }
+    Cow::Owned(s)
+}
+
+/// The format for text `d` that aqr-log takes (its `starts`), `xsv` whether aqr-xsv does too:
+/// of a sample of `d` ([`table_sample`]) each candidate's streams as zstd -3 compresses them, and
+/// the sample itself for the text path. aqr-xsv where it is no larger than aqr-log; aqr-log
+/// where it is at most [`LOG_PERCENT`] of the text path; else aqr-xsv if it takes the text, else
+/// none (the text path).
+fn log_or_table(d: &[u8], xsv: bool) -> Option<Format> {
+    let s = &*table_sample(d);
     let z = |b: &[u8]| zstd::bulk::compress(b, 3).map_or(b.len(), |c| c.len());
     let coded = |f: Formula| f.streams.iter().map(|s| z(&s.data)).sum::<usize>();
     let log = aqr_log::formula::encode(s, 1).map(coded);
@@ -3083,6 +3110,27 @@ pub fn classes(f: &Formula) -> Vec<(&str, usize)> {
 mod tests {
     use super::*;
     use aqr_decompress::FLATE;
+
+    /// The table sample is all of a small text, else windows from the start to the end of the
+    /// text, of whole lines.
+    #[test]
+    fn table_sample_spreads() {
+        let line = |i: usize| format!("{i:08};{};x\n", i * 7);
+        let small: String = (0..1000).map(line).collect();
+        assert!(matches!(table_sample(small.as_bytes()), Cow::Borrowed(s) if s == small.as_bytes()));
+        let big: String = (0..300_000).map(line).collect();
+        assert!(big.len() > TABLE_WINDOW * TABLE_WINDOWS * 2);
+        let s = table_sample(big.as_bytes());
+        assert!(s.len() <= TABLE_WINDOW * TABLE_WINDOWS && s.len() > TABLE_WINDOW * (TABLE_WINDOWS - 1));
+        assert!(s.starts_with(&big.as_bytes()[..30]));
+        assert!(s.ends_with(&big.as_bytes()[big.len() - 30..]));
+        let text = std::str::from_utf8(&s).unwrap();
+        assert!(text.lines().all(|l| l.ends_with(";x")));
+        // (the lines are in order, and some are from the middle)
+        let ids: Vec<usize> = text.lines().map(|l| l[..8].parse().unwrap()).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]));
+        assert!(ids.iter().any(|&i| (140_000..160_000).contains(&i)));
+    }
 
     thread_local! {
         /// The formats given to recompressors, in order.
