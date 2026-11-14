@@ -161,7 +161,11 @@ impl State<'_> {
         self.copy_to(soi, sink)?;
         let h = self.read_header(flags == 1)?;
         sink.put(&self.hb[..h.start])?;
-        Ok((h, usize::try_from(len).map_err(|_| Error("bad length".into()))?))
+        let len = usize::try_from(len).map_err(|_| Error("bad length".into()))?;
+        if !lmodule::data_fits(&h, len) {
+            return bad("length");
+        }
+        Ok((h, len))
     }
 
     /// The next stream's record in the info: its SOI, the bytes of its data, its flags.
@@ -401,7 +405,10 @@ fn groups(st: &mut State, sink: &mut Sink, count: u64, mut left: u64) -> Result<
                         Some(())
                     })
                     .ok_or(Error("bad cut".into()))?;
-                st.read_header(flags == 1)?;
+                let h = st.read_header(flags == 1)?;
+                if !lmodule::data_fits(&h, len) {
+                    return bad("length");
+                }
                 let hlen = st.hb.len();
                 if script.len() - job_at + script_bytes(gap, hlen, len) - gap > SCRIPT_JOB {
                     return bad("group");
@@ -551,7 +558,12 @@ fn banded(st: &mut State, sink: &mut Sink, bands: usize) -> Result<(), Error> {
     }
     let mut bits: Vec<u64> = Vec::with_capacity(bands);
     for _ in 0..bands {
-        bits.push(num(&mut st.info)?);
+        let b = num(&mut st.info)?;
+        // (the codes of a band are some of the stream's data)
+        if b / 8 > len as u64 {
+            return bad("bits of a band");
+        }
+        bits.push(b);
     }
     let mut held = Held::new(&h);
     let mut emitter = Emitter::new(&h);
@@ -652,7 +664,11 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
         for _ in 0..count {
             let (soi, len, flags) = lmodule::stream_record(info, &mut at, cut.len() as u64).ok()?;
             let mut h = lossless::parse(cut, soi).ok()?;
-            if h.end != h.start || h.start + 2 - soi > HEADER_MAX || h.samples() > lmodule::MAX_SAMPLES {
+            if h.end != h.start
+                || h.start + 2 - soi > HEADER_MAX
+                || h.samples() > lmodule::MAX_SAMPLES
+                || !lmodule::data_fits(&h, len)
+            {
                 return None;
             }
             h.last_code = flags == 1;
@@ -671,7 +687,11 @@ pub fn plan(initial: u64, cut: &[u8], info: &[u8], lens: &[u8]) -> Option<(u64, 
                 return None;
             }
             for _ in 0..bands {
-                bits.push(get_varint(info, &mut at).ok()?);
+                let b = get_varint(info, &mut at).ok()?;
+                if b / 8 > streams[0].1 as u64 {
+                    return None;
+                }
+                bits.push(b);
             }
         }
         jobs.push(Job { bands, streams, chunks, bits });

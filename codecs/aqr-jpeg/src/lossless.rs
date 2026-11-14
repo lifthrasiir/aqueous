@@ -154,10 +154,9 @@ pub fn parse(d: &[u8], at: usize) -> Result<Header, Error> {
                     let counts: [u8; 16] = rest.get(..16).ok_or(Error("truncated".into()))?.try_into().unwrap();
                     let n: usize = counts.iter().map(|&c| c as usize).sum();
                     let vals = rest.get(16..16 + n).ok_or(Error("truncated".into()))?;
-                    if !prefix_code(&counts) || vals.iter().any(|&v| v > 16) {
-                        return err("bad table");
-                    }
-                    tables[th] = Some(HuffSpec { counts, vals: crate::jpeg::Vals::of(vals).unwrap() });
+                    let vals =
+                        crate::jpeg::Vals::of(vals).filter(|v| prefix_code(&counts) && v.iter().all(|&v| v <= 16));
+                    tables[th] = Some(HuffSpec { counts, vals: vals.ok_or(Error("bad table".into()))? });
                     s = &rest[16 + n..];
                 }
             }
@@ -451,6 +450,11 @@ pub fn decode(h: &Header, data: &[u8]) -> Result<Samples, Error> {
     let rows_per = if h.restart == 0 { my } else { h.restart / mx };
     if ivs.len() != my.div_ceil(rows_per) {
         return err("the restart intervals do not fit the frame");
+    }
+    // every sample takes a code of at least one bit
+    let samples: usize = (0..h.comps.len()).map(|i| h.plane(i)).map(|(w, hh)| w * hh).sum();
+    if samples > data.len().saturating_mul(8) {
+        return err("data cut off");
     }
     let decoders: Vec<Option<Decoder>> = h.tables.iter().map(|t| t.as_ref().map(Decoder::new)).collect();
     let mut planes: Vec<Vec<u16>> = (0..h.comps.len()).map(|i| h.plane(i)).map(|(w, hh)| vec![0u16; w * hh]).collect();
@@ -909,6 +913,32 @@ pub(crate) mod tests {
         roundtrip(&synthetic(12, 33, 17, &[(2, 1), (1, 1), (1, 1)], 4, 0, 0, 2));
         roundtrip(&synthetic(12, 33, 17, &[(2, 2), (1, 1), (1, 1)], 6, 2, 0, 3));
         roundtrip(&synthetic(10, 16, 9, &[(1, 1), (1, 1), (1, 1), (1, 1)], 7, 0, 0, 4));
+    }
+
+    /// A prefix code of 510 symbols is an error, not a panic.
+    #[test]
+    fn table_of_too_many_symbols() {
+        let mut d = vec![0xFF, 0xD8];
+        let mut t = vec![0x00];
+        let mut counts = [0u8; 16];
+        counts[8] = 255;
+        counts[9] = 255;
+        t.extend_from_slice(&counts);
+        t.extend(std::iter::repeat_n(0u8, 510));
+        seg(&mut d, 0xC4, &t);
+        seg(&mut d, 0xC3, &[8, 0, 4, 0, 6, 1, 1, 0x11, 0]);
+        seg(&mut d, 0xDA, &[1, 1, 0, 1, 0, 0]);
+        d.extend_from_slice(&[0xFF, 0xD9]);
+        assert!(parse(&d, 0).is_err());
+    }
+
+    /// A big frame with no data is cut off, without a plane of its size made first.
+    #[test]
+    fn big_frame_without_data() {
+        let d = synthetic(8, 16, 16, &[(1, 1)], 1, 0, 0, 1);
+        let mut h = parse(&d, 0).unwrap();
+        (h.height, h.width) = (60000, 60000);
+        assert!(decode(&h, &[]).is_err());
     }
 
     /// A table listing the symbol 0 twice (5 and 7 bits), as in an Adobe DNG: its encoder writes

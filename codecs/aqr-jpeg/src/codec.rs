@@ -13,7 +13,7 @@
 //! `jpeg::encode_striped`). Other files, and scans that do not decode cleanly, are held whole.
 
 use crate::jpeg::{self, Clean, Coefs, Error, Jpeg, Scan, ScanInfo};
-use crate::model::{self, get_varint};
+use crate::model::{self, get_usize, get_varint};
 use crate::progressive;
 #[cfg(feature = "encode")]
 use aqr_common::varint;
@@ -402,7 +402,7 @@ pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, Op
     }
     let mut entries = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let gap = get_varint(head, p)? as usize;
+        let gap = get_usize(head, p)?;
         let kind = *head.get(*p).ok_or(Error("truncated".into()))?;
         *p += 1;
         let back = match kind {
@@ -474,8 +474,8 @@ pub(crate) fn decode_core<'a>(
         raws.push(false);
         let trailing_rst = u32::try_from(get_varint(info, &mut p)?).map_err(|_| Error("bad RST count".into()))?;
         if f & F_TRUNCATED != 0 {
-            let mcus = get_varint(info, &mut p)? as usize;
-            let bits = get_varint(info, &mut p)? as usize;
+            let mcus = get_usize(info, &mut p)?;
+            let bits = get_usize(info, &mut p)?;
             tails.push((k, mcus, bits, f & F_BOUNDARY != 0));
         }
         infos.push(ScanInfo {
@@ -652,7 +652,7 @@ pub(crate) fn core_plan<'a>(
                 let mut p = 1;
                 get_varint(info, &mut p).ok()?;
                 get_varint(info, &mut p).ok()?;
-                let mcus = get_varint(info, &mut p).ok()? as usize;
+                let mcus = get_usize(info, &mut p).ok()?;
                 Some((mcus, flags[0] & F_BOUNDARY != 0))
             }
             false => None,

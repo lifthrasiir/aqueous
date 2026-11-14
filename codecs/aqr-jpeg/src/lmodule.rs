@@ -37,6 +37,12 @@ pub fn script_bytes(gap: usize, header: usize, len: usize) -> usize {
     vl(gap as u64) + vl(header as u64) + vl(len as u64) + 1 + gap + header
 }
 
+/// Whether `len` bytes of entropy-coded data can be those of the frame of `h`: a sample takes at
+/// most 32 bits of code, doubled by byte stuffing, and a restart marker per sample adds 2 bytes.
+pub fn data_fits(h: &Header, len: usize) -> bool {
+    len / 16 <= h.samples()
+}
+
 /// The record of a stream in the info: where its SOI is in a cut of `cut_len` bytes, the bytes of
 /// its entropy-coded data, and its flags (0 or 1).
 pub fn stream_record(info: &[u8], at: &mut usize, cut_len: u64) -> Result<(usize, usize, u64), Error> {
@@ -101,7 +107,11 @@ impl Layout {
                 let (soi, len, flags) = stream_record(info, &mut at, cut.len() as u64)?;
                 let mut header = lossless::parse(cut, soi)?;
                 // the entropy-coded data is not in the cut: the EOI follows the scan's header
-                if header.end != header.start || header.samples() > MAX_SAMPLES || header.start + 2 - soi > HEADER_MAX {
+                if header.end != header.start
+                    || header.samples() > MAX_SAMPLES
+                    || header.start + 2 - soi > HEADER_MAX
+                    || !data_fits(&header, len)
+                {
                     return bad("stream");
                 }
                 // (the cut goes on after the EOI)
@@ -247,4 +257,37 @@ fn run_job(lay: &Layout, job: &Job, chunks: &[&[u8]]) -> Result<Vec<u8>, Error> 
 
 fn views(planes: &[Vec<u16>]) -> Vec<&[u16]> {
     planes.iter().map(|p| &p[..]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn varint(out: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            out.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    /// The info of one job of one stream at 0 of `len` bytes of data.
+    fn info(len: u64) -> Vec<u8> {
+        let mut i = Vec::new();
+        for v in [1, 1, 1, 0, len, 0] {
+            varint(&mut i, v);
+        }
+        i
+    }
+
+    /// A stream whose data is declared far longer than its samples can take is refused, before
+    /// the output is made for it.
+    #[test]
+    fn data_longer_than_the_samples_can_take() {
+        let d = crate::lossless::synthetic(8, 16, 16, &[(1, 1)], 1, 0, 0, 1);
+        let h = lossless::parse(&d, 0).unwrap();
+        let cut = [&d[..h.start], &[0xFF, 0xD9][..]].concat();
+        assert!(Layout::parse(&cut, &info(256)).is_ok());
+        assert!(Layout::parse(&cut, &info(1 << 40)).is_err());
+    }
 }

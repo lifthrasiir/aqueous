@@ -1173,6 +1173,10 @@ pub struct Encoded {
 pub(crate) fn get_varint(d: &[u8], p: &mut usize) -> Result<u64, Error> {
     varint::get(d, p).map_err(|e| Error(e.0.into()))
 }
+/// [`get_varint`], as a `usize` (an error where it does not fit, as on wasm32 for 2^32 and more).
+pub(crate) fn get_usize(d: &[u8], p: &mut usize) -> Result<usize, Error> {
+    usize::try_from(get_varint(d, p)?).map_err(|_| Error("bad number".into()))
+}
 pub(crate) fn get_bytes<'a>(d: &'a [u8], p: &mut usize, n: u64) -> Result<&'a [u8], Error> {
     let n = usize::try_from(n).map_err(|_| Error("bad length".into()))?;
     aqr_common::cursor::take(d, p, n).map_err(|e| Error(e.0.into()))
