@@ -125,7 +125,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
   git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, rar, snappy, zstd, gif, prores, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
-  asar, inno, ole, isc, vorbis, ogg, wwise, ima, msadpcm, mkv, lzx, xpress, lznt1, div3, ac3, tensors, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
+  asar, inno, ole, isc, vorbis, ogg, wwise, ima, msadpcm, mkv, lzx, xpress, lznt1, div3, ac3, tensors, log, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a
   crate with a `FORMAT.md` belongs here. Disk images are aqr-disk's (partition tables, containers,
   the formula; `docs/disk-image-design.md`), their file systems read by aqr-iso, aqr-fat, aqr-ntfs,
   aqr-ext, aqr-apfs and aqr-hfs (no FORMAT.md: aqr-disk's tells). Game engines' and middleware's packs are
@@ -347,6 +347,16 @@ optimization picked by hash.
   `F:\Data\sam_vit_h_4b8939.pth` (F32), used in place (never copied); safetensors from Hugging
   Face (and checkpoints dequantised from them) in `F:\Data\aqr-corpus\tensors`. Left (its
   README's Status).
+- aqr-log (lines of text: logs, tables of numbers between spaces; `log-recons`): each line a template
+  (its tokens cut at single spaces; a token that is a whole number of aqr-num a number slot, a
+  token of a form rare in the segment a word, any other kept with its digit runs as slots) and the
+  fields in columns by (template, slot), numbers as they are or as changes from the column's
+  previous value or the line before's same slot. It is a whole module, 64 MiB segments, its plan
+  exact from the params' counts (templates, columns, numbers of a template). aqr-compress's
+  `table` (lib.rs) chooses it for text by coding the first MiB: where aqr-log's streams (zstd -3)
+  are no larger than the text's (and aqr-xsv's, where that takes it too: the smaller of the
+  two); prose and code come out at 120% and are left to aqr-wrt. Left (its README): times as numbers
+  (`docs/log-design.md` section 4).
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by
