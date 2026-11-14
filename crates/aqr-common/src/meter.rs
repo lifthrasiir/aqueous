@@ -15,27 +15,15 @@
 //! this crate ([`crate::mem::Mapped`], [`crate::mem::Counting`]) tell it of their blocks.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
+use crate::blocks::{Blocks, clone_raw};
+
+pub use crate::plain::Measured;
+
 /// Blocks of at least this many bytes are told back to the meter that allocated them.
 pub const TRACKED: usize = 4 << 10;
-
-/// What a meter has seen.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Measured {
-    /// The most bytes held at once by the meter's own work (its tasks' not, but for what they
-    /// hand back).
-    pub peak: u64,
-    /// Of the tasks under it ([`task`]): the most a task held at once of its own, and the most
-    /// one held with the meter's peak as it started (the memory a task copies in WebAssembly,
-    /// the instance's as it is then: of a spawn of all of the memory).
-    pub task: u64,
-    pub task_with_copy: u64,
-    /// Tasks under it.
-    pub tasks: u64,
-}
 
 /// Bytes allocated under it, held and at most.
 pub struct Meter {
@@ -100,10 +88,7 @@ pub fn current() -> Option<Arc<Meter>> {
         return None;
     }
     // SAFETY: a meter set by `enter`, whose guard holds a strong count
-    unsafe {
-        Arc::increment_strong_count(p);
-        Some(Arc::from_raw(p))
-    }
+    Some(unsafe { clone_raw(p) })
 }
 
 /// The calling thread under `m` (nothing where `None`) until the guard is dropped.
@@ -166,14 +151,8 @@ pub fn task<R>(f: impl FnOnce() -> R) -> R {
 
 // The blocks, as the allocators tell of them.
 
-const SHARDS: usize = 16;
-
 /// The tracked blocks by address: their meter (a strong count) and size.
-static BLOCKS: [Mutex<BTreeMap<usize, (usize, usize)>>; SHARDS] = [const { Mutex::new(BTreeMap::new()) }; SHARDS];
-
-fn shard(p: usize) -> &'static Mutex<BTreeMap<usize, (usize, usize)>> {
-    &BLOCKS[((p >> 12) ^ (p >> 20)) % SHARDS]
-}
+static BLOCKS: Blocks<(usize, usize), 12> = Blocks::new();
 
 thread_local! {
     /// Set while the meter's own bookkeeping allocates (the map), which is not counted.
@@ -204,7 +183,7 @@ fn allocated_slow(p: usize, n: usize) {
         m.add(n as i64);
         if n >= TRACKED {
             let m = Arc::into_raw(m) as usize;
-            match shard(p).lock().unwrap().insert(p, (m, n)) {
+            match BLOCKS.insert(p, (m, n)) {
                 // SAFETY: a strong count the map held
                 Some(old) => drop(unsafe { Arc::from_raw(old.0 as *const Meter) }),
                 None => _ = BLOCKS_HELD.fetch_add(1, Relaxed),
@@ -229,7 +208,7 @@ static BLOCKS_HELD: AtomicUsize = AtomicUsize::new(0);
 fn freed_slow(p: usize, n: usize) {
     quiet(|| {
         if n >= TRACKED {
-            let owner = shard(p).lock().unwrap().remove(&p);
+            let owner = BLOCKS.remove(p);
             if let Some((m, n)) = owner {
                 BLOCKS_HELD.fetch_sub(1, Relaxed);
                 // SAFETY: the strong count the map held
@@ -246,17 +225,8 @@ fn freed_slow(p: usize, n: usize) {
 
 #[inline]
 pub(crate) fn reallocated(p: *mut u8, n: usize, q: *mut u8, m: usize) {
-    if q.is_null() {
-        return;
-    }
-    if p == q {
-        freed(p, n);
-        allocated(q, m);
-    } else {
-        // (both blocks held at the moment of the copy, as a growing vector's are in WebAssembly)
-        allocated(q, m);
-        freed(p, n);
-    }
+    // (both blocks held at the moment of the copy, as a growing vector's are in WebAssembly)
+    crate::blocks::reallocated((p, n), (q, m), allocated, freed);
 }
 
 #[cfg(test)]

@@ -1,13 +1,9 @@
 //! [`crate::allowance`] on WebAssembly, where nothing is counted: its functions doing nothing,
 //! so that what calls them is the same there.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exceeded {
-    pub used: u64,
-    pub limit: u64,
-}
+pub use crate::plain::Exceeded;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Context;
 
 impl Context {
@@ -33,11 +29,6 @@ pub fn attempt<R>(_: u64, f: impl FnOnce() -> R) -> Result<R, Exceeded> {
 
 #[inline(always)]
 pub fn check() {}
-
-#[inline(always)]
-pub fn fits(_: u64) -> bool {
-    true
-}
 
 #[inline(always)]
 pub(crate) fn allocated(_: *mut u8, _: usize) {}

@@ -3,13 +3,7 @@
 
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Measured {
-    pub peak: u64,
-    pub task: u64,
-    pub task_with_copy: u64,
-    pub tasks: u64,
-}
+pub use crate::plain::Measured;
 
 pub struct Meter;
 

@@ -458,7 +458,7 @@ pub fn join(ins: [&[u8]; STREAMS], len: u64) -> Option<Vec<u8>> {
 
 /// The module of streams `ins` ([`split`]) of at most `max` bytes, whatever its length (with
 /// room for `hint` bytes at first), as the split form of a module block has no length.
-pub fn join_to(ins: [&[u8]; STREAMS], max: usize, hint: usize) -> Option<Vec<u8>> {
+fn join_to(ins: [&[u8]; STREAMS], max: usize, hint: usize) -> Option<Vec<u8>> {
     // (and the room of the sizes of a section and a function made)
     let mut j = Join { ins, out: Vec::with_capacity(hint.min(1 << 30) + 2 * L32) };
     j.bytes(SKELETON, HEADER.len() as u64).filter(|_| j.out == HEADER)?;

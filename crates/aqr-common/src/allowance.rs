@@ -26,47 +26,36 @@
 
 use std::any::Any;
 use std::cell::Cell;
-use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
 
+use crate::blocks::{Blocks, clone_raw};
 use crate::mem::LARGE_MIN;
 
+pub use crate::plain::Exceeded;
+
 /// Bytes of small blocks a thread gathers of its own before it counts them to its allowance.
-pub const FLUSH: i64 = 256 << 10;
+const FLUSH: i64 = 256 << 10;
 
 /// The heap held by an attempt and its limit.
-pub struct Allowance {
+struct Allowance {
     used: AtomicI64,
-    peak: AtomicI64,
     limit: u64,
 }
 
 impl Allowance {
     fn new(limit: u64) -> Arc<Allowance> {
-        Arc::new(Allowance { used: AtomicI64::new(0), peak: AtomicI64::new(0), limit })
+        Arc::new(Allowance { used: AtomicI64::new(0), limit })
     }
 
     fn add(&self, n: i64) {
-        let c = self.used.fetch_add(n, Relaxed) + n;
-        if n > 0 {
-            self.peak.fetch_max(c, Relaxed);
-        }
+        self.used.fetch_add(n, Relaxed);
     }
 
     /// The bytes it holds (as counted so far: the threads' small blocks not yet told aside).
-    pub fn used(&self) -> u64 {
+    fn used(&self) -> u64 {
         self.used.load(Relaxed).max(0) as u64
-    }
-
-    /// The most it held.
-    pub fn peak(&self) -> u64 {
-        self.peak.load(Relaxed).max(0) as u64
-    }
-
-    pub fn limit(&self) -> u64 {
-        self.limit
     }
 
     /// Whether it is to give up: over its limit, or of more than its share of it while the
@@ -79,14 +68,6 @@ impl Allowance {
         let running = RUNNING.load(Relaxed).max(1) as u64;
         running > 1 && crate::mem::large_in_use() > self.limit && used > self.limit / running
     }
-}
-
-/// An attempt that gave up: the bytes its allowance held as it did, and its limit. Unwound
-/// with by [`check`], and returned by [`attempt`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exceeded {
-    pub used: u64,
-    pub limit: u64,
 }
 
 /// Allowances entered on some thread now: while none is, the allocators do nothing more.
@@ -147,10 +128,7 @@ pub fn context() -> Context {
                 return Context::NONE;
             }
             // SAFETY: set by `enter`, whose guard holds a strong count
-            let a = unsafe {
-                Arc::increment_strong_count(p);
-                Arc::from_raw(p)
-            };
+            let a = unsafe { clone_raw(p) };
             Context { a: Some(a), armed: l.armed.get() }
         })
         .unwrap_or(Context::NONE)
@@ -250,35 +228,11 @@ fn check_slow() {
     }
 }
 
-/// Whether `n` bytes more fit in the allowance of the attempt the calling thread works for
-/// (any where none): for an allocation of a size the data tells, to be turned down before it
-/// is made rather than given up after.
-pub fn fits(n: u64) -> bool {
-    let cx = context();
-    cx.a.is_none_or(|a| {
-        _ = LOCAL.try_with(Local::flush);
-        a.used().saturating_add(n) <= a.limit
-    })
-}
-
-/// Of the calling thread's attempt, if any: what it holds, the most it held and its limit.
-pub fn current() -> Option<(u64, u64, u64)> {
-    let a = context().a?;
-    _ = LOCAL.try_with(Local::flush);
-    Some((a.used(), a.peak(), a.limit))
-}
-
 // The blocks, as the allocators tell of them.
 
-const SHARDS: usize = 16;
-
 /// The large blocks counted by address: their allowance (a strong count) and size.
-static BLOCKS: [Mutex<BTreeMap<usize, (usize, usize)>>; SHARDS] = [const { Mutex::new(BTreeMap::new()) }; SHARDS];
-
-fn shard(p: usize) -> &'static Mutex<BTreeMap<usize, (usize, usize)>> {
-    // (blocks of at least 64 KiB: the bits above their alignment)
-    &BLOCKS[((p >> 16) ^ (p >> 20)) % SHARDS]
-}
+// (blocks of at least 64 KiB: the bits above their alignment)
+static BLOCKS: Blocks<(usize, usize), 16> = Blocks::new();
 
 /// Large blocks counted, not freed yet.
 static BLOCKS_HELD: AtomicUsize = AtomicUsize::new(0);
@@ -315,19 +269,14 @@ fn large_allocated(p: usize, n: usize) {
     // (the map's own blocks are small: counted as the thread's, never taking a shard again)
     let Ok(Some(a)) = LOCAL.try_with(|l| {
         let p = l.cur.get();
-        (!p.is_null()).then(|| {
-            // SAFETY: set by `enter`, whose guard holds a strong count
-            unsafe {
-                Arc::increment_strong_count(p);
-                Arc::from_raw(p)
-            }
-        })
+        // SAFETY: set by `enter`, whose guard holds a strong count
+        (!p.is_null()).then(|| unsafe { clone_raw(p) })
     }) else {
         return;
     };
     a.add(n as i64);
     let a = Arc::into_raw(a) as usize;
-    match shard(p).lock().unwrap_or_else(|e| e.into_inner()).insert(p, (a, n)) {
+    match BLOCKS.insert(p, (a, n)) {
         // SAFETY: a strong count the map held
         Some(old) => drop(unsafe { Arc::from_raw(old.0 as *const Allowance) }),
         None => _ = BLOCKS_HELD.fetch_add(1, Relaxed),
@@ -348,7 +297,7 @@ pub(crate) fn freed(p: *mut u8, n: usize) {
 
 #[cold]
 fn large_freed(p: usize) {
-    let owner = shard(p).lock().unwrap_or_else(|e| e.into_inner()).remove(&p);
+    let owner = BLOCKS.remove(p);
     if let Some((a, n)) = owner {
         BLOCKS_HELD.fetch_sub(1, Relaxed);
         // SAFETY: the strong count the map held
@@ -359,17 +308,7 @@ fn large_freed(p: usize) {
 
 #[inline]
 pub(crate) fn reallocated(p: *mut u8, n: usize, q: *mut u8, m: usize) {
-    if q.is_null() {
-        return;
-    }
-    if p == q {
-        freed(p, n);
-        allocated(q, m);
-    } else {
-        // (both blocks held at the moment of the copy)
-        allocated(q, m);
-        freed(p, n);
-    }
+    crate::blocks::reallocated((p, n), (q, m), allocated, freed);
 }
 
 #[cfg(test)]
@@ -385,6 +324,13 @@ mod tests {
         (unsafe { crate::mem::Mapped.alloc(l) }, l)
     }
 
+    /// What the calling thread's attempt holds, the small blocks told.
+    fn held() -> u64 {
+        let a = context().a.unwrap();
+        _ = LOCAL.try_with(Local::flush);
+        a.used()
+    }
+
     fn free((p, l): (*mut u8, Layout)) {
         // SAFETY: allocated by `alloc` of `l`
         unsafe { crate::mem::Mapped.dealloc(p, l) }
@@ -397,8 +343,8 @@ mod tests {
         let r = attempt(4 << 20, || {
             let b = alloc(512 << 10);
             check();
-            let (used, peak, limit) = current().unwrap();
-            assert!(used >= 512 << 10 && peak >= used && limit == 4 << 20, "{used} {peak}");
+            let used = held();
+            assert!(used >= 512 << 10, "{used}");
             free(b);
             7
         });
@@ -434,11 +380,11 @@ mod tests {
                 s.spawn(move || free((addr as *mut u8, b.1)));
             });
             let smalls: Vec<_> = (0..64).map(|_| alloc(16 << 10)).collect();
-            let held = current().unwrap().0;
-            assert!(held >= 1 << 20, "{held}");
+            let used = held();
+            assert!(used >= 1 << 20, "{used}");
             smalls.into_iter().for_each(free);
-            let (used, peak, _) = current().unwrap();
-            assert!(used < 64 << 10 && peak >= 1 << 20, "{used} {peak}");
+            let used = held();
+            assert!(used < 64 << 10, "{used}");
             alloc(3 << 20)
         });
         let b = r.unwrap();

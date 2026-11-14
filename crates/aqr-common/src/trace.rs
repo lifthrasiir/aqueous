@@ -18,11 +18,13 @@
 //! of the pool reserved for them stay idle, [`Sample::reserved`]), and processes of a sandbox.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicUsize, Ordering::*};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
+
+use crate::blocks::Blocks;
 
 static ON: AtomicBool = AtomicBool::new(false);
 
@@ -162,18 +164,19 @@ const NOTHING: Span = Span { prev: None, _here: PhantomData };
 /// The calling thread at work on `name`, under the spans it is in.
 #[inline]
 pub fn span(name: &'static str) -> Span {
-    if !on() { NOTHING } else { push(label(name, false), false, true) }
+    if !on() { NOTHING } else { push(label(name, false), false) }
 }
 
 /// The calling thread waiting, for what `name` tells (another's work, a worker, memory). Only
 /// of threads told of already: a thread that only waits is not sampled.
 #[inline]
 pub fn wait(name: &'static str) -> Span {
-    if !on() { NOTHING } else { push(label(name, true), true, false) }
+    if !on() { NOTHING } else { push(label(name, true), true) }
 }
 
-fn push(id: u32, wait: bool, register: bool) -> Span {
-    let pushed = with_thread(register, |t| {
+fn push(id: u32, wait: bool) -> Span {
+    // (a thread registers by what it does, not by what it waits for)
+    let pushed = with_thread(!wait, |t| {
         let d = t.depth.load(Relaxed);
         if d < DEPTH {
             t.frames[d].store(id, Relaxed);
@@ -319,11 +322,10 @@ pub fn remote(wall: Duration, cpu: Duration) {
     if !on() || wall.is_zero() {
         return;
     }
-    let (frames, item) = match context() {
+    let (mut frames, item) = match context() {
         Some(c) => (c.frames, c.item),
         None => (Vec::new(), NO_ITEM),
     };
-    let mut frames = frames;
     frames.push(label("sandbox worker", false));
     REMOTE.lock().unwrap().push(Remote {
         end: Instant::now(),
@@ -413,16 +415,10 @@ impl Drop for Outside {
     }
 }
 
-const SHARDS: usize = 16;
-
 /// The large blocks by address: their owner and size. (A map of no allocation of its own
 /// large enough to be counted, so never taken again within itself.)
-static BLOCKS: [Mutex<BTreeMap<usize, (u32, usize)>>; SHARDS] = [const { Mutex::new(BTreeMap::new()) }; SHARDS];
-
-fn shard(p: usize) -> &'static Mutex<BTreeMap<usize, (u32, usize)>> {
-    // (blocks of at least 64 KiB: the bits above their alignment)
-    &BLOCKS[((p >> 16) ^ (p >> 20)) % SHARDS]
-}
+// (blocks of at least 64 KiB: the bits above their alignment)
+static BLOCKS: Blocks<(u32, usize), 16> = Blocks::new();
 
 #[inline]
 pub(crate) fn allocated(p: *mut u8, n: usize) {
@@ -439,9 +435,7 @@ pub(crate) fn allocated(p: *mut u8, n: usize) {
 fn large(p: usize, n: usize, owner: Option<u32>) {
     let o = owner.unwrap_or_else(|| OWNER.try_with(Cell::get).unwrap_or(NONE));
     BYTES[o as usize].fetch_add(n as i64, Relaxed);
-    if let Ok(mut b) = shard(p).lock() {
-        b.insert(p, (o, n));
-    }
+    BLOCKS.insert(p, (o, n));
 }
 
 #[inline]
@@ -458,7 +452,7 @@ pub(crate) fn freed(p: *mut u8, n: usize) {
 /// The owner of large block `p`, no longer counted.
 #[cold]
 fn gone(p: usize) -> Option<u32> {
-    let (o, n) = shard(p).lock().ok()?.remove(&p)?;
+    let (o, n) = BLOCKS.remove(p)?;
     BYTES[o as usize].fetch_sub(n as i64, Relaxed);
     Some(o)
 }
@@ -476,11 +470,6 @@ pub(crate) fn reallocated(p: *mut u8, n: usize, q: *mut u8, m: usize) {
             large(q as usize, m, o);
         }
     }
-}
-
-/// The resident set of the process, in bytes (0 where unknown).
-pub fn rss() -> u64 {
-    resident().all
 }
 
 /// The resident set of the process, and what of it is of files mapped (0 where unknown).
@@ -748,10 +737,14 @@ fn sample(stop: &AtomicBool, to: &Sampled) {
             frames.clear();
             frames.extend((0..d).map(|i| t.frames[i].load(Relaxed)));
             let n = stacks.len() as u32;
-            let id = *stacks.entry(frames.clone()).or_insert_with(|| {
-                new_stacks.push(frames.clone());
-                n
-            });
+            let id = match stacks.get(&frames) {
+                Some(&id) => id,
+                None => {
+                    stacks.insert(frames.clone(), n);
+                    new_stacks.push(frames.clone());
+                    n
+                }
+            };
             s.threads.push((id, t.item.load(Relaxed)));
         }
         let labels = LABELS.read().unwrap().names.len();

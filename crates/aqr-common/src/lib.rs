@@ -26,6 +26,8 @@
 //! - [`streams`]: streams of data and records one after another, and their index.
 //! - [`lz`]: what the LZ parsers share (the length of a match).
 //! - [`bytes`]: byte slices compared (in SIMD in WebAssembly too).
+//! - [`fsio`]: files read and written at offsets (native).
+//! - [`text`]: bytes as text (native).
 //! - [`wasm`]: WebAssembly modules split into streams and joined back (aqr-wasm, module blocks).
 
 pub mod adler32;
@@ -35,12 +37,16 @@ pub mod allowance;
 #[path = "allowance_none.rs"]
 pub mod allowance;
 pub mod arith;
+#[cfg(not(target_family = "wasm"))]
+mod blocks;
 pub mod budget;
 pub mod bytes;
 #[cfg(not(target_family = "wasm"))]
 pub mod cpu;
 pub mod crc32;
 pub mod cursor;
+#[cfg(not(target_family = "wasm"))]
+pub mod fsio;
 pub mod lz;
 pub mod mem;
 #[cfg(not(target_family = "wasm"))]
@@ -53,12 +59,15 @@ pub mod out;
 pub mod packed;
 #[cfg(not(target_family = "wasm"))]
 pub mod pages;
+mod plain;
 pub mod pool;
 pub mod progress;
 pub mod rans32;
 pub mod rans64;
 pub mod rng;
 pub mod streams;
+#[cfg(not(target_family = "wasm"))]
+pub mod text;
 #[cfg(not(target_family = "wasm"))]
 pub mod trace;
 #[cfg(target_family = "wasm")]

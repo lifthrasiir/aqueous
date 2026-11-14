@@ -74,8 +74,13 @@ struct Alias {
     rank_start: [u16; 256],
 }
 
+/// Buckets of the alias table of an alphabet of `n` symbols.
+fn buckets(n: usize) -> usize {
+    n.next_power_of_two().max(4)
+}
+
 fn build_alias(f: &[u16]) -> Alias {
-    let a = f.len().next_power_of_two().max(4);
+    let a = buckets(f.len());
     let bs = PROB_SCALE as usize / a;
     let mut rem = [0u32; 256];
     for (r, &x) in rem.iter_mut().zip(f) {
@@ -195,7 +200,7 @@ impl Tables {
     /// bucket; room for the alias entries of every context (the canonical ones written); those
     /// of every context at a fixed stride, where all have as many buckets.
     pub fn dec_plan(n: &[u16], block: impl Fn(u64) -> u64) -> u64 {
-        let a = |k: u16| (k as u64).next_power_of_two().max(4);
+        let a = |k: u16| buckets(k as usize) as u64;
         let stride = n.iter().map(|&k| a(k)).max().unwrap_or(4);
         let flat = match n.iter().all(|&k| a(k) == stride) {
             true => block(8 * n.len() as u64 * stride),
@@ -250,9 +255,9 @@ impl Tables {
     fn build_dec(&self, threads: usize) -> DecTables {
         let mut meta = vec![0u32; self.n.len()];
         let canonical = || (0..self.n.len()).filter(|&c| self.canon[c] as usize == c);
-        let buckets = |c: usize| (self.n[c] as usize).next_power_of_two().max(4);
+        let buckets_of = |c: usize| buckets(self.n[c] as usize);
         // (room for as many entries as all contexts have buckets, whatever the canonical ones)
-        let mut alias = Vec::with_capacity((0..self.n.len()).map(buckets).sum());
+        let mut alias = Vec::with_capacity((0..self.n.len()).map(buckets_of).sum());
         let threads = threads.clamp(1, canonical().count().div_ceil(64).max(1));
         if threads > 1 {
             let canon: Vec<usize> = canonical().collect();
@@ -282,8 +287,8 @@ impl Tables {
             meta[c] = meta[self.canon[c] as usize];
         }
         // Every context at a fixed stride when all alphabets have the same size.
-        let a = self.n.iter().map(|&n| (n as usize).next_power_of_two().max(4)).max().unwrap_or(4);
-        let flat = if self.n.iter().all(|&n| (n as usize).next_power_of_two().max(4) == a) {
+        let a = self.n.iter().map(|&n| buckets(n as usize)).max().unwrap_or(4);
+        let flat = if self.n.iter().all(|&n| buckets(n as usize) == a) {
             let mut flat = Vec::with_capacity(self.n.len() * a);
             for &m in &meta {
                 let base = (m >> 4) as usize;
@@ -385,7 +390,7 @@ pub fn normalize(counts: &[u64], out: &mut [u16]) {
 /// Reciprocal of `freq` for division of rANS states (x < 2^63) by multiplication, as in
 /// ryg_rans' rans64: `x / freq == mulhi(x, rcp) >> shift`. For `freq == 1` the result is 0
 /// and the caller divides by 1 itself.
-pub fn reciprocal(freq: u64) -> (u64, u32) {
+fn reciprocal(freq: u64) -> (u64, u32) {
     if freq < 2 {
         return (0, 0);
     }
@@ -611,6 +616,12 @@ impl Encoder {
 }
 
 /// Encoder state by value, so that it stays in registers.
+///
+/// It points into the encoder and its tables without borrowing them: sound only as the
+/// contract of [`Encoder::local`] holds. The encoder and the tables outlive the state and the
+/// encoder is not used meanwhile (until [`Encoder::put_back`]), room for each `put` was
+/// reserved, each context is below the tables' number of contexts, and each symbol is within
+/// its context's alphabet (all only asserted or checked in debug builds).
 #[derive(Clone, Copy)]
 pub struct EncLocal<const TRACK: bool = false> {
     used: *mut u64,
@@ -733,7 +744,13 @@ impl<'a> Decoder<'a> {
 }
 
 /// Decoder state by value, so that it stays in registers. Valid while its decoder lives
-/// and is not used otherwise.
+/// and is not used otherwise (until [`Decoder::put_back`]).
+///
+/// The contexts given to [`DecLocal::get`] and [`DecLocal::get_flat`] must be below the
+/// tables' number of contexts, and `get_flat`'s `LOG` the tables' [`Tables::flat_log`]: the
+/// calls do not check it (in debug builds only), and `get_flat` unchecked (`CHECKED` false)
+/// reads the source without a bound, so that [`DecLocal::room`] must be positive for each
+/// symbol decoded.
 #[derive(Clone, Copy)]
 pub struct DecLocal {
     x: [u64; LANES],
@@ -791,7 +808,8 @@ impl DecLocal {
         }
     }
 
-    /// Decodes a symbol in context `ctx`, which must be below the number of contexts.
+    /// Decodes a symbol in context `ctx`, which must be below the number of contexts (see
+    /// [`DecLocal`]).
     #[inline(always)]
     pub fn get(&mut self, ctx: usize) -> u32 {
         // SAFETY: lane < LANES.

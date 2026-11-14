@@ -20,9 +20,10 @@ pub fn padded(d: &[u8]) -> Vec<u8> {
 }
 
 impl<'a> BitReader<'a> {
-    /// `data` includes the padding.
+    /// `data` includes the padding ([`padded`]); panics where it is shorter than that.
     pub fn new(data: &'a [u8], pos: usize) -> Self {
-        debug_assert!(data.len() >= PAD);
+        // (`window` reads eight bytes at a time: this is what keeps it within `data`)
+        assert!(data.len() >= PAD, "BitReader's data is not padded");
         BitReader { data, pos }
     }
 
@@ -246,6 +247,15 @@ impl BitWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Data shorter than the padding is refused where the reader is made (it would read out of
+    /// bounds), in release builds too.
+    #[test]
+    #[should_panic(expected = "padded")]
+    fn short_data_refused() {
+        let r = BitReader::new(&[0; PAD - 1], 0);
+        std::hint::black_box(r.window());
+    }
 
     /// Reads as [`BitReader`] over the data padded does, and zeros past the end.
     #[test]
@@ -491,6 +501,11 @@ impl FastWriter {
 }
 
 /// [`FastWriter`] state by value, so that it stays in registers.
+///
+/// It points into the writer's buffer without borrowing it: sound only as the contract of
+/// [`FastWriter::local`] holds. The writer is not used, moved or dropped while the state lives
+/// (until [`FastWriter::put_back`]), and room for every `put` was reserved first, as the buffer
+/// is not grown through it.
 #[derive(Clone, Copy)]
 pub struct FastBits {
     buf: *mut u8,
@@ -585,6 +600,11 @@ impl WordWriter {
 }
 
 /// [`WordWriter`] state by value.
+///
+/// It points into the writer's buffer without borrowing it: sound only as the contract of
+/// [`WordWriter::local`] holds. The writer is not used, moved or dropped while the state lives
+/// (until [`WordWriter::put_back`]), and room for every `put` was reserved first, as the
+/// buffer is not grown through it.
 #[derive(Clone, Copy)]
 pub struct WordBits {
     buf: *mut u8,
@@ -616,7 +636,7 @@ impl WordBits {
             assert!(self.pos + 8 <= self.end);
             self.n -= 32;
             let w = (self.acc >> self.n) as u32;
-            // SAFETY: pos + 4 <= end, the buffer's length.
+            // SAFETY: pos + 8 <= end, the buffer's length.
             unsafe { (self.buf.add(self.pos) as *mut u32).write_unaligned(w.to_be()) };
             self.pos += 4;
         }

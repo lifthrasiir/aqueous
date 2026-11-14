@@ -22,9 +22,15 @@ pub const DEFAULT: u64 = 2_000_000_000;
 /// waiting for another inside it, too); a unit larger than the limit is so taken alone, the
 /// limit passed by it.
 pub struct Budget {
-    state: Mutex<(u64, u64)>,
+    state: Mutex<State>,
     changed: Condvar,
     heap: Option<fn() -> u64>,
+}
+
+/// The limit of a budget and the bytes taken of it.
+struct State {
+    limit: u64,
+    held: u64,
 }
 
 /// How often a consumer waiting looks at the heap again, which tells nobody as it shrinks.
@@ -61,37 +67,40 @@ pub struct Taken<'a> {
 impl Budget {
     /// A budget of what its units take alone.
     pub const fn new(limit: u64) -> Budget {
-        Budget { state: Mutex::new((limit, 0)), changed: Condvar::new(), heap: None }
+        Budget { state: Mutex::new(State { limit, held: 0 }), changed: Condvar::new(), heap: None }
     }
 
     /// A budget of what its units take, or of the heap in use that `heap` tells where more.
     pub const fn measuring(limit: u64, heap: fn() -> u64) -> Budget {
-        Budget { state: Mutex::new((limit, 0)), changed: Condvar::new(), heap: Some(heap) }
+        Budget { state: Mutex::new(State { limit, held: 0 }), changed: Condvar::new(), heap: Some(heap) }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, (u64, u64)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The room as it is now.
     pub fn room(&self) -> Room {
-        let (limit, held) = *self.lock();
-        Room { limit, held, heap: self.heap.map_or(0, |h| h()) }
+        self.room_of(&self.lock())
+    }
+
+    fn room_of(&self, st: &State) -> Room {
+        Room { limit: st.limit, held: st.held, heap: self.heap.map_or(0, |h| h()) }
     }
 
     pub fn limit(&self) -> u64 {
-        self.lock().0
+        self.lock().limit
     }
 
     /// Sets the limit (the units in keep what they took).
     pub fn set_limit(&self, limit: u64) {
-        self.lock().0 = limit;
+        self.lock().limit = limit;
         self.changed.notify_all();
     }
 
     /// The bytes taken now.
     pub fn held(&self) -> u64 {
-        self.lock().1
+        self.lock().held
     }
 
     /// Waits until `f`, looking at the room (each time something is given back or the limit
@@ -101,9 +110,9 @@ impl Budget {
     pub fn wait<R>(&self, mut f: impl FnMut(Room) -> Option<(R, u64)>) -> (R, Taken<'_>) {
         let mut st = self.lock();
         loop {
-            let room = Room { limit: st.0, held: st.1, heap: self.heap.map_or(0, |h| h()) };
+            let room = self.room_of(&st);
             if let Some((r, n)) = f(room) {
-                st.1 = st.1.saturating_add(n);
+                st.held = st.held.saturating_add(n);
                 return (r, Taken { budget: self, n });
             }
             st = match self.heap {
@@ -122,7 +131,7 @@ impl Budget {
 impl Drop for Taken<'_> {
     fn drop(&mut self) {
         // (told of even of no bytes: a consumer may wait for its units to end)
-        self.budget.lock().1 -= self.n;
+        self.budget.lock().held -= self.n;
         self.budget.changed.notify_all();
     }
 }

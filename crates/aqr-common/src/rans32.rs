@@ -16,7 +16,7 @@ const RANS_L: u32 = 1 << 15;
 const STEPS: u32 = 4;
 const LEVELS: usize = 64;
 
-/// Integer weights of the levels: round(2^((l - 1) / STEPS) * 256), computed exactly once at
+/// Integer weights of the levels: 2^((l - 1) / STEPS) * 256, truncated, computed exactly once at
 /// compile time from a table of 2^(k/4) in fixed point, so that both sides agree bit for bit.
 static WEIGHT: [u64; LEVELS] = {
     // 2^(k/4) * 2^16 for k = 0..4.
@@ -60,8 +60,10 @@ fn normalise<const BITS: u32>(f: &mut [u32]) -> Result<(), Corrupt> {
     let n = f.len();
     let nz = f.iter().filter(|&&l| l > 0).count();
     if nz == 0 {
-        // An unused table: any valid one will do.
-        f[0] = scale;
+        // An unused table: any valid one will do (none, of no symbols).
+        if let Some(first) = f.first_mut() {
+            *first = scale;
+        }
         return Ok(());
     }
     if nz > scale as usize {
@@ -94,7 +96,8 @@ fn normalise<const BITS: u32>(f: &mut [u32]) -> Result<(), Corrupt> {
 }
 
 /// Writes the levels of `counts` (a used table) and returns the frequencies both sides
-/// will use.
+/// will use. Panics where more than `1 << BITS` symbols are used: they cannot all have a
+/// frequency.
 pub fn write_table<const BITS: u32, const MSB: bool>(w: &mut BitW<MSB>, counts: &[u32]) -> Vec<u32> {
     let n = counts.len();
     let max = counts.iter().copied().max().unwrap_or(0);
@@ -154,6 +157,10 @@ pub fn read_table_into<const BITS: u32, const MSB: bool>(
             continue;
         }
         let z = z - 1;
+        // (a step past the levels is bad, and keeps the arithmetic within `i32`)
+        if z > 2 * LEVELS as u32 {
+            return Err(Corrupt("bad table"));
+        }
         let d = if z & 1 == 1 { (z as i32 + 1) / 2 } else { -(z as i32 / 2) };
         let l = prev + d;
         if !(1..LEVELS as i32).contains(&l) {
@@ -170,16 +177,6 @@ pub fn read_table_into<const BITS: u32, const MSB: bool>(
 pub fn cost(counts: &[u32]) -> f64 {
     let tot: f64 = counts.iter().map(|&c| c as f64).sum();
     counts.iter().filter(|&&c| c > 0).map(|&c| c as f64 * (tot / c as f64).log2()).sum()
-}
-
-/// Bits to code `counts` with the frequencies `f`.
-pub fn cost_with<const BITS: u32>(counts: &[u32], f: &[u32]) -> f64 {
-    counts
-        .iter()
-        .zip(f)
-        .filter(|&(&c, _)| c > 0)
-        .map(|(&c, &q)| c as f64 * (BITS as f64 - (q.max(1) as f64).log2()))
-        .sum()
 }
 
 /// A symbol in the decoding tables.
@@ -503,7 +500,8 @@ impl<'a> Decoder<'a> {
 }
 
 /// A symbol of table `t` for the state `x`: the symbol, and the state it leads to, before
-/// renormalisation.
+/// renormalisation. `t` must be below the number of tables: the tables are read unchecked
+/// (checked in debug builds).
 #[inline(always)]
 fn step_get<S: Symbol, const BITS: u32>(x: u32, tb: &Tables<S, BITS>, t: usize) -> (u32, u32) {
     let slot = x & ((1 << BITS) - 1);
@@ -897,6 +895,28 @@ mod tests {
     #[test]
     fn bits_msb() {
         bits::<true>();
+    }
+
+    /// A table of no symbols is empty, not a panic, on both sides.
+    #[test]
+    fn empty_table() {
+        let mut w = BitW::<false>::default();
+        assert!(write_table::<12, false>(&mut w, &[]).is_empty());
+        let bytes = w.finish();
+        let mut r = BitR::<false>::new(&bytes);
+        assert_eq!(read_table::<12, false>(&mut r, 0), Ok(Vec::new()));
+    }
+
+    /// A level step too large for 32-bit arithmetic is a bad table, not a wrapped step.
+    #[test]
+    fn huge_level_step_refused() {
+        let mut w = BitW::<false>::default();
+        // (the step's code, one more than its zigzag, is `u32::MAX`: 2^32 - 2 less one)
+        w.gamma(u32::MAX);
+        w.gamma(1);
+        let bytes = w.finish();
+        let mut r = BitR::<false>::new(&bytes);
+        assert_eq!(read_table::<12, false>(&mut r, 2), Err(Corrupt("bad table")));
     }
 
     /// The fields of the gamma codes: 5 + 1 = 0b110, two zeros, the leading one, then 0b10.

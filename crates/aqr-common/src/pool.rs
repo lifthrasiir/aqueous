@@ -133,13 +133,10 @@ impl Drop for Lent {
             return;
         }
         let p = pool();
-        let mut free = p.free.lock().unwrap();
+        let free = p.free.lock().unwrap();
         let w = (*free == 0).then(|| crate::trace::wait("worker"));
-        while *free == 0 {
-            free = p.freed.wait(free).unwrap();
-        }
-        *free -= 1;
-        drop((free, w));
+        take_free(p, free);
+        drop(w);
         p.threads.lock().unwrap().1 -= 1;
     }
 }
@@ -194,10 +191,60 @@ struct Open {
     left: Erased,
     room: usize,
     state: Arc<OpenState>,
-    /// What the map is of ([`crate::trace`]), its meter and its allowance.
+    /// What the map is of.
+    inherited: Inherited,
+}
+
+/// What a job runs under that the thread making it is under: its spans ([`crate::trace`]), its
+/// meter and its allowance.
+#[derive(Clone)]
+struct Inherited {
     cx: Option<crate::trace::Context>,
     meter: Option<Arc<crate::meter::Meter>>,
     allowance: crate::allowance::Context,
+}
+
+/// The guards of [`Inherited::enter`], dropped in the order opposite to entering.
+struct InheritedGuard {
+    _allowance: crate::allowance::Entered,
+    _meter: crate::meter::Entered,
+    _cx: crate::trace::Adopted,
+}
+
+impl Inherited {
+    /// Of the calling thread.
+    fn capture() -> Self {
+        Inherited {
+            cx: crate::trace::context(),
+            meter: crate::meter::current(),
+            allowance: crate::allowance::context(),
+        }
+    }
+
+    /// The calling thread under them until the guard is dropped.
+    fn enter(self) -> InheritedGuard {
+        let _cx = crate::trace::adopt(self.cx);
+        let _meter = crate::meter::enter(self.meter);
+        let _allowance = crate::allowance::enter(self.allowance);
+        InheritedGuard { _allowance, _meter, _cx }
+    }
+}
+
+/// `f` as it runs, but giving up first where an attempt over its heap works for the thread (see
+/// [`crate::allowance`]).
+fn checked<T>(f: impl FnOnce() -> T) -> impl FnOnce() -> T {
+    move || {
+        crate::allowance::check();
+        f()
+    }
+}
+
+/// A free worker taken, waiting for one while `free` (the pool's count, locked) is 0.
+fn take_free(p: &Pool, mut free: std::sync::MutexGuard<'_, usize>) {
+    while *free == 0 {
+        free = p.freed.wait(free).unwrap();
+    }
+    *free -= 1;
 }
 
 #[derive(Default)]
@@ -228,23 +275,18 @@ static OPEN_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Puts a worker given back on the first open [`par_map`] with items left; whether there was
 /// one.
-// (the allowance's context is `Copy` in Wasm, where it is none)
-#[cfg_attr(target_family = "wasm", allow(clippy::clone_on_copy))]
 fn join_open() -> bool {
-    let (work, state, cx) = {
+    let (work, state, inherited) = {
         let mut open = OPEN.lock().unwrap();
         // SAFETY: the map is in OPEN, so its closures live
         let Some(o) = open.iter_mut().find(|o| o.room > 0 && unsafe { o.left.call() }) else { return false };
         o.room -= 1;
         *o.state.running.lock().unwrap() += 1;
-        (o.work, o.state.clone(), (o.cx.clone(), o.meter.clone(), o.allowance.clone()))
+        (o.work, o.state.clone(), o.inherited.clone())
     };
-    let (cx, meter, allowance) = cx;
     let p = pool();
     p.jobs.lock().unwrap().push_back(Box::new(move || {
-        let _cx = crate::trace::adopt(cx);
-        let _m = crate::meter::enter(meter);
-        let _a = crate::allowance::enter(allowance);
+        let _inherited = inherited.enter();
         // SAFETY: counted in `running`, which the map waits for
         let r = catch_unwind(AssertUnwindSafe(|| unsafe { work.call() }));
         if let Err(e) = r {
@@ -294,10 +336,7 @@ impl Reservation {
     /// is left.
     pub fn spawn<T: Send + 'static>(&mut self, f: impl FnOnce() -> T + Send + 'static) -> Handle<'static, T> {
         // (an attempt over its heap gives up before the work: see `crate::allowance`)
-        let f = move || {
-            crate::allowance::check();
-            f()
-        };
+        let f = checked(f);
         // SAFETY: it borrows nothing
         unsafe { self.spawn_unchecked(f, None) }
     }
@@ -335,15 +374,11 @@ unsafe fn push_job<'a>(job: Box<dyn FnOnce() + Send + 'a>, scope: Option<Arc<Sco
     // SAFETY: as the caller makes sure
     let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
     // (run under the spans, the meter and the allowance of the thread spawning it)
-    let cx = crate::trace::context();
-    let meter = crate::meter::current();
-    let allowance = crate::allowance::context();
+    let inherited = Inherited::capture();
     let p = pool();
     p.jobs.lock().unwrap().push_back(Box::new(move || {
         {
-            let _cx = crate::trace::adopt(cx);
-            let _m = crate::meter::enter(meter);
-            let _a = crate::allowance::enter(allowance);
+            let _inherited = inherited.enter();
             // (the job's part of the slot dropped with it, before the scope is told)
             job();
         }
@@ -401,11 +436,11 @@ impl<T> Handle<'_, T> {
     }
 }
 
-/// The workers of a [`Scope`], and a panic of what was spawned on them that nobody joined.
 /// Bytes of the block that [`scope`] takes of the heap (its state, shared with what it spawns:
 /// an `Arc`'s counts and the state), with or without workers.
 pub const SCOPE_BYTES: usize = 2 * size_of::<usize>() + size_of::<ScopeState>();
 
+/// The workers of a [`Scope`], and a panic of what was spawned on them that nobody joined.
 #[derive(Default)]
 struct ScopeState {
     workers: Mutex<Workers>,
@@ -495,10 +530,7 @@ impl<'scope> Scope<'scope, '_> {
         (w.idle, w.running) = (w.idle - 1, w.running + 1);
         drop(w);
         // (an attempt over its heap gives up before the work: see `crate::allowance`)
-        let f = move || {
-            crate::allowance::check();
-            f()
-        };
+        let f = checked(f);
         // SAFETY: the scope waits for it before it returns
         unsafe { Reservation { n: 1 }.spawn_unchecked(f, Some(self.state.clone())) }
     }
@@ -511,13 +543,9 @@ pub fn run<R: Send>(f: impl FnOnce() -> R + Send) -> R {
         return f();
     }
     let p = pool();
-    let mut free = p.free.lock().unwrap();
+    let free = p.free.lock().unwrap();
     let w = (*free == 0).then(|| crate::trace::wait("worker"));
-    while *free == 0 {
-        free = p.freed.wait(free).unwrap();
-    }
-    *free -= 1;
-    drop(free);
+    take_free(p, free);
     drop(w);
     let mut r = Reservation { n: 1 };
     // SAFETY: joined before `f`'s borrows end
@@ -573,9 +601,7 @@ fn par_for(n: usize, threads: usize, f: &(dyn Fn(usize) + Sync)) {
             left: erase(&left),
             room: want - hs.len(),
             state: state.clone(),
-            cx: crate::trace::context(),
-            meter: crate::meter::current(),
-            allowance: crate::allowance::context(),
+            inherited: Inherited::capture(),
         });
         (id, state)
     });
@@ -739,18 +765,10 @@ pub fn dispatch_any<G: Send, R: Send>(
                 }
                 *r += 1;
             }
-            let mut free = p.free.lock().unwrap();
-            while *free == 0 {
-                free = p.freed.wait(free).unwrap();
-            }
-            *free -= 1;
-            drop(free);
+            take_free(p, p.free.lock().unwrap());
             drop(w);
             let job = move || {
-                let r = catch_unwind(AssertUnwindSafe(|| {
-                    crate::allowance::check();
-                    f(i, g)
-                }));
+                let r = catch_unwind(AssertUnwindSafe(checked(|| f(i, g))));
                 if r.is_err() {
                     failed.store(true, Ordering::Relaxed);
                 }

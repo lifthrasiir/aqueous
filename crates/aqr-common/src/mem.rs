@@ -151,24 +151,14 @@ pub fn peak<R>(f: impl FnOnce() -> R) -> (R, usize) {
 pub fn max_rss() -> u64 {
     #[cfg(unix)]
     {
-        #[repr(C)]
-        struct Rusage {
-            utime: [i64; 2],
-            stime: [i64; 2],
-            maxrss: i64,
-            rest: [i64; 13],
-        }
-        unsafe extern "C" {
-            fn getrusage(who: i32, usage: *mut Rusage) -> i32;
-        }
-        let mut u = Rusage { utime: [0; 2], stime: [0; 2], maxrss: 0, rest: [0; 13] };
-        // SAFETY: RUSAGE_SELF (0) into a struct of the size and layout of 64-bit `rusage`.
-        if unsafe { getrusage(0, &mut u) } != 0 {
+        // SAFETY: an all-zero `rusage` is valid, and RUSAGE_SELF fills it.
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) } != 0 {
             return 0;
         }
         // bytes on macOS, KiB elsewhere
         let unit = if cfg!(target_vendor = "apple") { 1 } else { 1024 };
-        u.maxrss as u64 * unit
+        u.ru_maxrss as u64 * unit
     }
     #[cfg(not(unix))]
     0
@@ -207,24 +197,8 @@ pub struct Mapped;
 
 #[cfg(target_vendor = "apple")]
 mod mapped {
-    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-
-    static PAGE: AtomicUsize = AtomicUsize::new(0);
-
-    pub fn page() -> usize {
-        match PAGE.load(Relaxed) {
-            0 => {
-                // SAFETY: of no preconditions
-                let p = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
-                PAGE.store(p, Relaxed);
-                p
-            }
-            p => p,
-        }
-    }
-
     pub fn round(n: usize) -> usize {
-        n.next_multiple_of(page())
+        n.next_multiple_of(crate::pages::size())
     }
 
     /// `n` bytes mapped (zeroed), at `at` if given and free there; null where they could not be.
