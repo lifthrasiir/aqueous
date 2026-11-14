@@ -4,7 +4,7 @@ This document specifies the module `log-recons` of aqr-formula entry formulas. T
 rebuilds lines of text (logs, tables of numbers between spaces) from a *template* for each line
 and the *fields* the template leaves out, stored column by column: words as they are, and
 numbers as integers (with how they were printed, as [aqr-num](../../crates/aqr-num/README.md)
-specifies, or as runs of digits). The document is meant to be complete, with aqr-num for the
+specifies, or as runs of digits), and timestamps as integers by a pattern. The document is meant to be complete, with aqr-num for the
 whole numbers: an implementation of the module can be written from the two. Sections marked
 *(encoder)* describe the choices this implementation makes when it builds formulas; the module
 does not depend on them.
@@ -25,7 +25,7 @@ Contents:
   Arithmetic on integers wraps in 64 bits.
 - `LF` is the byte 0x0A. A *line* is the bytes up to a LF (not holding it); the last line of a
   file has no LF where the file does not end with one.
-- The marks of templates: **digits** 0x01, **word** 0x02, **number** 0x03.
+- The marks of templates: **digits** 0x01, **word** 0x02, **number** 0x03, **time** 0x04.
 
 ## 2. The module
 
@@ -66,7 +66,8 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
 
   ```text
   word:            varint  the bytes of its part of `text`
-  digits, number:  u8      pred      0: its integers as they are, 1: as changes from the
+  digits, number, time (each of its columns):
+                   u8      pred      0: its integers as they are, 1: as changes from the
                                      column's previous one, 2: as changes from the line before
                    varint  nums      the bytes of its part of `nums`
   number only:     varint  desc      the bytes of its part of `desc`
@@ -96,11 +97,11 @@ The file is a sequence of lines. A line is *kept as it is*, or has a *template*.
   (mode, f) must be valid (aqr-num's README, "Descriptor"). It is the column's descriptor from
   then on.
 
-The value of the k-th number (digits or number slot) of a line is the integer v from its
+The value of the k-th number (a column of a digits, number or time slot) of a line is the integer v from its
 column's next r, by the column's `pred`: v = r (0); v = p + r (1) with p the column's previous
 value (0 for the first); v = q + r (2) with q the value of the k-th number of the last line
 that was not kept as it is (0 if it had fewer, or there was none). k counts from 0 over the
-slots of the marks digits and number of the line's template. The value is the column's
+columns of the marks digits, number and time of the line's template. The value is the column's
 previous value from then on, whatever its pred.
 
 A number has a *scale*: that of its descriptor (for a number slot, whose descriptor is
@@ -122,6 +123,10 @@ to its LF. A line of template i is the template's bytes with each mark replaced:
 - **digits**: the value v (0 to 10^18 − 1, else an error) in decimal; with the byte w of
   `widths` nonzero, left-padded with zeros to w digits (an error unless the digits of v are
   fewer than w, and w at most 18);
+- **time**: the integer v (the first column's, the second's f for a pattern with a fraction of n
+  digits: an error unless 0 ≤ f < 10^n, then v × 10^n + f, an error if it does not fit 64 bits)
+  printed as the pattern says (aqr-num `time::put`; an error if it cannot print v). A time's
+  columns have a scale of 0.
 - **number**: the integer v at the scale s of the column's descriptor (mode, f) as
   `types` says (§3), printed as aqr-num specifies (its README, "Specification"; the modes
   include its decimal comma and padded fixed).
@@ -132,7 +137,7 @@ longer than declared is an error, and so is a file shorter.
 ## 5. Encoding *(encoder)*
 
 - **Taken.** A file of at least 16 KiB (`formula::MIN_LEN`) of at least 16 lines in its first
-  64 KiB, of which at most 1 in 10 hold a mark byte (0x01 to 0x03); and, once made, where lines
+  64 KiB, of which at most 1 in 10 hold a mark byte (0x01 to 0x04); and, once made, where lines
   kept as they are are less than a tenth of its bytes.
 - **Segments.** A file whose lines start past 64 MiB (`formula::SEGMENT`) from the first of a
   segment is cut there, at a line's start. Each segment is an application of the module, with
@@ -143,23 +148,50 @@ longer than declared is an error, and so is a file shorter.
   counts they depend on, the columns and their predictors start afresh, as the module does.
   The encoder goes over a segment's lines three times (counts, templates and samples, streams)
   so that its heap holds the segment's counts and the streams.
-- **Lines.** A line holding a mark byte, or one that would give a template past the limits
-  (T 65,536, C 262,144, the templates 64 MiB), is kept as it is. A line is cut into tokens at
-  each byte of the segment's *separators* (so empty tokens exist; a CR before the LF is in the
-  last token), which stay in the template as they are: a space, `;` and TAB always, and `,`
-  unless the segment's numbers have a decimal comma. That is told from the first 256 KiB of
-  the segment (cut at a line's end) by tokens, cut at spaces, `;` and TABs only: a token is a
-  *point number* if it is an optional sign, digits, a point and at least a digit, then an
-  optional exponent (`e` or `E` and at least one more byte); a *comma number* is the same with a
-  comma. A comma number of exactly three digits after the comma and not more than three
-  digits before it, the first of them not a zero, with no exponent (`1,234`), may be a
+- **Lines.** A line holding a mark byte (0x01 to 0x04), or one that would give a template past
+  the limits (T 65,536, C 262,144, the templates 64 MiB), is kept as it is. A line is searched
+  for *timestamps* (**Times**, below), each a slot of its own: the time mark, its pattern and the
+  mark. What is left is cut into tokens at the *separators*, which stay in the template as
+  they are (so empty tokens exist; a CR before the LF is in the last token); a timestamp is
+  not cut where it holds a separator, and a token round it is cut into the parts before and
+  after (each a token of its own).
+- **Separators.** Either a space only, or *wide*: a space, `;` and TAB, and `,` unless the
+  segment's numbers have a decimal comma. The segment takes the wide ones where the streams of
+  its first MiB (cut at a line's end), made both ways and compressed by zstd -3, are no larger
+  with them than without (text of words and code, whose commas and semicolons are the
+  punctuation of lines of every shape, comes out smaller with spaces only). The decimal comma is
+  told from the first 256 KiB of the segment by tokens, cut at spaces, `;` and TABs only: a
+  token is a *point number* if it is an optional sign, digits, a point and at least a digit,
+  then an optional exponent (`e` or `E` and at least one more byte); a *comma number* is the
+  same with a comma. A comma number of exactly three digits after the comma and not more than
+  three digits before it, the first of them not a zero, with no exponent (`1,234`), may be a
   thousands grouping: it is counted for that; the other comma numbers (`0,418`, `18,5`,
-  `1234,567`, `1,5e3`) are counted for the decimal comma. The numbers have a decimal comma
-  if the comma numbers (not those) outnumber the point numbers and are at least as many as
-  the groupings. (In a comma-separated table the tokens are lines or fields with several
-  commas, none of them a comma number; in a `;`-separated table of a European locale, `4,216` is
-  one.) A point is also a decimal point where the locale has a comma, in a token that has one
-  (never both).
+  `1234,567`, `1,5e3`) are counted for the decimal comma. The numbers have a decimal comma if
+  the comma numbers (not those) outnumber the point numbers and are at least as many as the
+  groupings. (In a comma-separated table the tokens are lines or fields with several commas,
+  none of them a comma number; in a `;`-separated table of a European locale, `4,216` is one.)
+  A token with a point is coded as a number also where the locale has a comma (never one
+  with both).
+- **Times.** A timestamp starts at a digit or a capital letter that follows no letter, digit,
+  `.`, `:`, `_` or `+`, and ends before no letter or digit (but a `Z` that ends a word), `_`
+  or `:`, nor before the digits of a fraction after a point or comma. It is one of these
+  (the pattern letters of aqr-num; first the longest that prints back the same bytes by
+  `time::put`, `time::parse` having read it):
+  - dates `Y-m-d`, `Y/m/d`, `Y.m.d` (4 digits and a separator: ISO 8601), `d/m/Y`, `d.m.Y`,
+    `d-m-Y` (2 digits and a separator, `m/d/Y` and so on where the segment's `dd/dd/yyyy`
+    dates have a second field over 12 and none a first), `d/b/Y`, `d-b-Y`, `d.b.Y` (a month
+    name), followed by nothing, or a space, `T` (the pattern's `\T`) or `:` and a time of day;
+  - a time of day `H:M:S` with the fraction the segment writes (below), `H:M:S` with the
+    digits of the fraction in the text (fixed), `H:M:S`, or `H:M`; alone, with an hour of
+    one digit (`h`) too;
+  - syslog's `b e H:M:S` (and `b D H:M:S`) and ctime's `a b d H:M:S Y` (and with `e`), and RFC
+    5322's `a, d b Y H:M:S` (a weekday and a date: the date must have it).
+  A zone (`-0400`, `+02:00`, `Z`) after a time stays in the template as it is and in digit
+  runs. The fraction a segment writes is told from the first 256 KiB: of the `H:M:S` followed
+  by a point or a comma and 1 to 9 digits, those digits' counts: one count, always that many
+  digits (`f`); several, a trimmed fraction of the most (`t`); none, no fraction; the point is
+  the likelier of `.` and `,`. A time of another fraction than the segment's is of its own
+  fixed fraction.
 - **Tokens.** The *form* of a token is the token with each run of digits replaced by one
   mark. In the order:
   1. a token that is a whole number (below) is a **number** slot;
@@ -172,10 +204,15 @@ longer than declared is an error, and so is a file shorter.
   no point: fixed in the comma mode), or, if it holds only digits, `.`, `,`, `e`, `E`, `+` and
   `-` and at least a digit, that a style from `style::choose_with` on that token alone codes such that
   `aqr_num::put` prints the same bytes. A column's style is chosen by `style::choose_with` (padded fixed allowed) from its
-  first 512 numbers' tokens, in the comma modes where its tokens have commas; each token is coded in it (`Style::encode`, a zero taking the
+  first 512 numbers' tokens (of the first 1024 where padded fixed is chosen, which is kept
+  only if they, coded as the column's numbers, with their descriptors, compress by zstd -1 to
+  fewer bytes than coded in the style without it), in the comma modes where its tokens have commas; each token is coded in it (`Style::encode`, a zero taking the
   scale of the column's previous number) where that prints it back, else as it is a number
   alone. A change of descriptor is a 2 of `types`.
 - **Predictors.** Of a column, the one whose `nums` part zstd -1 compresses smallest (ties
-  to the lower; by length for a column of 8 values or fewer).
+  to the lower; by length for a column of 8 values or fewer). A time with a fraction puts its
+  integer without the fraction (in the unit of the pattern: seconds) into its first column and
+  the fraction into its second, so that the changes of the first are small and the second, whose
+  digits are random where a clock reads microseconds, is not a part of them.
 - **Order.** Templates are numbered in the order of their first lines. The streams are left to
   the archive to compress; `raw`, `templates` and `text` are of `Kind::Text`.

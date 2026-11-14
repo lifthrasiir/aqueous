@@ -9,6 +9,7 @@
 //! - [`general`]: C's `%.Pg` of decimals.
 //! - [`dec`]: decimals and binary floats; the renders (`%g`, `%e`, Python `repr`,
 //!   JavaScript `toString`, positional), and the coding of a token in a given mode.
+//! - [`time`]: times printed by a pattern, as one integer.
 //! - [`style`]: the encoder's choice of mode for a group of numbers, and its fallbacks.
 //!
 //! ```
@@ -29,6 +30,7 @@ pub mod dec;
 pub mod fixed;
 pub mod general;
 pub mod style;
+pub mod time;
 
 pub use dec::{COMMA, comma_of, encode, is_fixed, mode, put, render_of, src_of, valid};
 pub use fixed::{MAX_SCALE, MIN_SCALE};

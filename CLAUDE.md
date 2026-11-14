@@ -347,16 +347,19 @@ optimization picked by hash.
   `F:\Data\sam_vit_h_4b8939.pth` (F32), used in place (never copied); safetensors from Hugging
   Face (and checkpoints dequantised from them) in `F:\Data\aqr-corpus\tensors`. Left (its
   README's Status).
-- aqr-log (lines of text: logs, tables of numbers between spaces; `log-recons`): each line a template
-  (its tokens cut at single spaces; a token that is a whole number of aqr-num a number slot, a
-  token of a form rare in the segment a word, any other kept with its digit runs as slots) and the
-  fields in columns by (template, slot), numbers as they are or as changes from the column's
-  previous value or the line before's same slot. It is a whole module, 64 MiB segments, its plan
+- aqr-log (lines of text: logs, tables of numbers; `log-recons`): each line a template (timestamps
+  found in it, by aqr-num's `time` patterns, are slots of the mark 0x04 with their pattern; the
+  rest cut into tokens at spaces, or by what the first MiB codes smaller at `;`, TAB and `,` too,
+  `,` not where the numbers have a decimal comma; a token that is a whole number of aqr-num a
+  number slot, a token of a form rare in the segment a word, any other kept with its digit runs as
+  slots) and the fields in columns by (template, slot), numbers as they are or as changes from the
+  column's previous value or the line before's same slot, taken at the scale of the number (a
+  time with a fraction is two columns). It is a whole module, 64 MiB segments, its plan
   exact from the params' counts (templates, columns, numbers of a template). aqr-compress's
   `table` (lib.rs) chooses it for text by coding the first MiB: where aqr-log's streams (zstd -3)
   are no larger than the text's (and aqr-xsv's, where that takes it too: the smaller of the
-  two); prose and code come out at 120% and are left to aqr-wrt. Left (its README): times as numbers
-  (`docs/log-design.md` section 4).
+  two); prose and code come out at 120% and are left to aqr-wrt. Left (its README and
+  `docs/log-design.md` section 4): times in aqr-xsv, epoch times, thousands grouping.
 - aqr-jpeg's lossless JPEG (SOF3: the pixels of CR2, DNG and the like) is the module
   `jpeg-lossless-recons`, apart from `jpeg-recons`: the streams are found by their SOI in a
   TIFF file (`lformula::starts`), their Huffman data taken out and the samples coded by

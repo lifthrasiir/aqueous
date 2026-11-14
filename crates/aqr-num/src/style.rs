@@ -71,7 +71,10 @@ pub fn choose(toks: &[(usize, &[u8])]) -> Style {
 /// [`choose`] where `padded` allows padded fixed too (render `R_FIXP`): for a container whose
 /// predictions of an integer from the previous number's take the change of scale in (aqr-log's
 /// rescaling), and that does not give a zero the scale of the number before it, which padded
-/// fixed has within its format's digits.
+/// fixed has within its format's digits. The digits that padded fixed saves are counted as
+/// those of the other modes, which says nothing of what a change of its scale costs where the
+/// zeros are few: a container may choose between the style given and one without padding by
+/// coding a sample both ways (aqr-log does).
 pub fn choose_with(toks: &[(usize, &[u8])], padded: bool) -> Style {
     let sep = |t: &[u8], c: u8| t.contains(&c) && t.iter().any(u8::is_ascii_digit);
     let commas = toks.iter().filter(|t| sep(t.1, b',')).count();

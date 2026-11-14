@@ -17,10 +17,12 @@ pub const MAX_TEMPLATE_BYTES: usize = 1 << 26;
 pub const MAX_DIGITS: usize = 18;
 
 /// The marks of a template: a digit run, a word kept as it is (until the end of its line's
-/// token), and a whole number (of aqr-num). A line holding any of the bytes is kept as it is.
+/// token), a whole number (of aqr-num), and a time: the mark, its pattern (aqr-num's
+/// `time`) and the mark again. A line holding any of the bytes is kept as it is.
 pub const M_DIGITS: u8 = 1;
 pub const M_TEXT: u8 = 2;
 pub const M_NUM: u8 = 3;
+pub const M_TIME: u8 = 4;
 
 /// A column's numbers as they are, as each the change from the column's previous one, or as
 /// each the change from the same slot of the line before.
@@ -82,7 +84,7 @@ struct Template {
 
 /// Bytes of a [`Template`] and of a [`Column`] on WebAssembly (32-bit pointers), for the plan.
 const TEMPLATE_BYTES: u64 = 12;
-const COLUMN_BYTES: u64 = 56;
+const COLUMN_BYTES: u64 = 64;
 const _: () = assert!(size_of::<Template>() as u64 == TEMPLATE_BYTES);
 
 /// A column's parts of the streams, read from the front, and its state.
@@ -93,6 +95,8 @@ struct Column<'a> {
     widths: &'a [u8],
     types: &'a [u8],
     desc: &'a [u8],
+    /// The pattern of a time column.
+    pat: &'a [u8],
     /// The integer of the column's previous number.
     prev: i64,
     /// The descriptor (scale, mode, flags) of the column's previous whole number, if `has`.
@@ -201,52 +205,72 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
         let t = &templates[at..at + n];
         tpls.push(Template { start: at as u32, len: n as u32, col0: cols.len() as u32 });
         let mut numbers = 0;
-        for &m in t {
-            if !matches!(m, M_DIGITS | M_TEXT | M_NUM) {
+        let mut i = 0;
+        while i < t.len() {
+            let m = t[i];
+            i += 1;
+            if !matches!(m, M_DIGITS | M_TEXT | M_NUM | M_TIME) {
                 continue;
             }
-            if cols.len() == p.columns {
-                return Err(corrupt());
+            // (a time with a fraction is two columns: the integer of its time without the fraction,
+            // and the fraction's)
+            let mut pat: &[u8] = &[];
+            let mut parts = 1;
+            if m == M_TIME {
+                let n = t[i..].iter().position(|&b| b == M_TIME).ok_or_else(corrupt)?;
+                pat = &t[i..i + n];
+                if !aqr_num::time::valid(pat) {
+                    return Err(corrupt());
+                }
+                parts += (aqr_num::time::fraction_digits(pat) > 0) as usize;
+                i += n + 1;
             }
-            // (a word's column: the length of its text; a number's: its predictor and the lengths
-            // of its integers, and of its descriptors if a whole number; one width and one type
-            // for each integer)
-            let mut c = Column {
-                text: &[],
-                nums: &[],
-                widths: &[],
-                types: &[],
-                desc: &[],
-                prev: 0,
-                scale: 0,
-                mode: 0,
-                flags: 0,
-                has: false,
-                pred: P_RAW,
-            };
-            if m == M_TEXT {
-                c.text = take(&mut s.text, get(&mut s.columns)?)?;
-            } else {
-                c.pred = byte(&mut s.columns)?;
-                if c.pred > P_LINE {
+            for part in 0..parts {
+                if cols.len() == p.columns {
                     return Err(corrupt());
                 }
-                c.nums = take(&mut s.nums, get(&mut s.columns)?)?;
-                // (each integer is a varint: the last byte ends one)
-                if c.nums.last().is_some_and(|&b| b >= 0x80) {
-                    return Err(corrupt());
-                }
-                let n = c.nums.iter().filter(|&&b| b < 0x80).count() as u64;
-                match m {
-                    M_DIGITS => c.widths = take(&mut s.widths, n)?,
-                    _ => {
-                        c.types = take(&mut s.types, n)?;
-                        c.desc = take(&mut s.desc, get(&mut s.columns)?)?;
+                // (a word's column: the length of its text; a number's: its predictor and the
+                // lengths of its integers, and of its descriptors if a whole number; one width and
+                // one type for each integer, none for a time, whose pattern follows its mark)
+                let mut c = Column {
+                    text: &[],
+                    nums: &[],
+                    widths: &[],
+                    types: &[],
+                    desc: &[],
+                    pat: if part == 0 { pat } else { &[] },
+                    prev: 0,
+                    scale: 0,
+                    mode: 0,
+                    flags: 0,
+                    has: false,
+                    pred: P_RAW,
+                };
+                if m == M_TEXT {
+                    c.text = take(&mut s.text, get(&mut s.columns)?)?;
+                } else {
+                    c.pred = byte(&mut s.columns)?;
+                    if c.pred > P_LINE {
+                        return Err(corrupt());
+                    }
+                    c.nums = take(&mut s.nums, get(&mut s.columns)?)?;
+                    // (each integer is a varint: the last byte ends one)
+                    if c.nums.last().is_some_and(|&b| b >= 0x80) {
+                        return Err(corrupt());
+                    }
+                    let n = c.nums.iter().filter(|&&b| b < 0x80).count() as u64;
+                    match m {
+                        M_DIGITS => c.widths = take(&mut s.widths, n)?,
+                        M_NUM => {
+                            c.types = take(&mut s.types, n)?;
+                            c.desc = take(&mut s.desc, get(&mut s.columns)?)?;
+                        }
+                        _ => {}
                     }
                 }
+                numbers += (m != M_TEXT) as usize;
+                cols.push(c);
             }
-            numbers += (m != M_TEXT) as usize;
-            cols.push(c);
         }
         most = most.max(numbers);
         at += n + 1;
@@ -283,7 +307,7 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
             let mut col = t.col0 as usize;
             cur.clear();
             let mut from = 0;
-            while let Some(i) = tb[from..].iter().position(|&b| matches!(b, M_DIGITS | M_TEXT | M_NUM)) {
+            while let Some(i) = tb[from..].iter().position(|&b| matches!(b, M_DIGITS | M_TEXT | M_NUM | M_TIME)) {
                 out.put(&tb[from..from + i])?;
                 let c = &mut cols[col];
                 col += 1;
@@ -294,29 +318,37 @@ fn build(p: &Params, mut layout: &[u8], mut raw: &[u8], templates: &[u8], mut s:
                         c.text = &c.text[n + 1..];
                     }
                     m => {
-                        let r = varint::unzz(get(&mut c.nums)?);
-                        // (the descriptor first: a prediction is at the scale of the number)
-                        let was = c.scale;
-                        if m == M_NUM {
-                            descriptor(c)?;
-                        }
-                        let to = c.scale;
-                        let v = match c.pred {
-                            P_RAW => r,
-                            P_COLUMN => rescale(c.prev, was, to).wrapping_add(r),
-                            _ => {
-                                let (q, qs) = prev.get(cur.len()).copied().unwrap_or((0, 0));
-                                rescale(q, qs, to).wrapping_add(r)
+                        let v = value(c, m == M_NUM, &prev, &mut cur)?;
+                        match m {
+                            M_DIGITS => digits(&mut out, v, byte(&mut c.widths)?)?,
+                            M_TIME => {
+                                // (the pattern and the mark that ends it are skipped)
+                                let pat = c.pat;
+                                from += pat.len() + 1;
+                                let n = aqr_num::time::fraction_digits(pat);
+                                let v = if n == 0 {
+                                    v
+                                } else {
+                                    // (the fraction's column follows: the digits of the integer's end)
+                                    let f = value(&mut cols[col], false, &prev, &mut cur)?;
+                                    col += 1;
+                                    let pow = 10i64.pow(n);
+                                    if !(0..pow).contains(&f) {
+                                        return Err(corrupt());
+                                    }
+                                    v.checked_mul(pow).and_then(|v| v.checked_add(f)).ok_or_else(corrupt)?
+                                };
+                                scratch.clear();
+                                if !aqr_num::time::put(&mut scratch, pat, v) {
+                                    return Err(corrupt());
+                                }
+                                out.put(&scratch)?;
                             }
-                        };
-                        c.prev = v;
-                        cur.push((v, to));
-                        if m == M_DIGITS {
-                            digits(&mut out, v, byte(&mut c.widths)?)?;
-                        } else {
-                            scratch.clear();
-                            aqr_num::put(&mut scratch, v, c.scale, c.mode, c.flags);
-                            out.put(&scratch)?;
+                            _ => {
+                                scratch.clear();
+                                aqr_num::put(&mut scratch, v, c.scale, c.mode, c.flags);
+                                out.put(&scratch)?;
+                            }
                         }
                     }
                 }
@@ -354,6 +386,29 @@ fn digits(out: &mut Out, v: i64, width: u8) -> Result<()> {
         return Err(corrupt());
     }
     out.put(&buf[if w == 0 { i } else { MAX_DIGITS - w }..])
+}
+
+/// The next integer of column `c`, by its predictor (`prev`: the numbers of the line before, `cur`
+/// those of this line so far, which it is added to); a whole number's descriptor (`desc`) is read
+/// first, as a prediction is at the scale of the number.
+fn value(c: &mut Column, desc: bool, prev: &[(i64, i32)], cur: &mut Vec<(i64, i32)>) -> Result<i64> {
+    let r = varint::unzz(get(&mut c.nums)?);
+    let was = c.scale;
+    if desc {
+        descriptor(c)?;
+    }
+    let to = c.scale;
+    let v = match c.pred {
+        P_RAW => r,
+        P_COLUMN => rescale(c.prev, was, to).wrapping_add(r),
+        _ => {
+            let (q, qs) = prev.get(cur.len()).copied().unwrap_or((0, 0));
+            rescale(q, qs, to).wrapping_add(r)
+        }
+    };
+    c.prev = v;
+    cur.push((v, to));
+    Ok(v)
 }
 
 /// Reads the descriptor of the next whole number of column `c` from `types` (and `desc`): it

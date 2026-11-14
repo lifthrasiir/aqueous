@@ -12,13 +12,14 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
-use aqr_num::fixed;
 use aqr_num::style::{Style, choose_with};
+use aqr_num::{dec, fixed};
 
 use crate::module::{
-    K_NEW, K_SAME, M_DIGITS, M_NUM, M_TEXT, MAX_COLUMNS, MAX_DIGITS, MAX_TEMPLATE_BYTES, MAX_TEMPLATES, P_COLUMN,
-    P_LINE, P_RAW, Params,
+    K_NEW, K_SAME, M_DIGITS, M_NUM, M_TEXT, M_TIME, MAX_COLUMNS, MAX_DIGITS, MAX_TEMPLATE_BYTES, MAX_TEMPLATES,
+    P_COLUMN, P_LINE, P_RAW, Params,
 };
+use crate::times::Times;
 
 pub use crate::module::decode;
 
@@ -43,7 +44,7 @@ const SAMPLE: usize = 64 << 10;
 const MIN_LINES: usize = 16;
 
 /// The tokens of a column that its numbers' style is chosen from.
-const STYLE_SAMPLE: usize = 512;
+const STYLE_SAMPLE: usize = 1024;
 
 /// The form of a token (its digit runs masked) is a template's own where the segment has it
 /// at least this many times, or as many times as 1 in [`RARE_PER`] lines, whichever is more;
@@ -55,22 +56,33 @@ const RARE_PER: usize = 500;
 /// and the module hold of a file at once.
 pub const SEGMENT: usize = 64 << 20;
 
+/// Whether `line` has a byte that marks a template (such a line is kept as it is).
+fn has_mark(line: &[u8]) -> bool {
+    memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, line).is_some() || memchr::memchr(M_TIME, line).is_some()
+}
+
 /// The longest token that may be a whole number.
 const MAX_NUMBER: usize = 40;
 
 /// The bytes of a segment's start that the locale of its numbers is told from.
 const LOCALE_SAMPLE: usize = 256 << 10;
 
-/// The bytes that cut a line into tokens: a space, `;` and TAB always, and `,` unless the
-/// segment's numbers have a decimal comma ([`decimal_comma`]).
-fn separators(seg: &[u8]) -> [bool; 256] {
+/// The bytes that cut a line into tokens: a space only, or (`wide`) a space, `;` and TAB, and `,`
+/// unless the segment's numbers have a decimal comma ([`decimal_comma`]).
+fn separators(seg: &[u8], wide: bool) -> [bool; 256] {
     let mut sep = [false; 256];
-    for b in [b' ', b';', b'\t'] {
-        sep[b as usize] = true;
+    sep[b' ' as usize] = true;
+    if wide {
+        sep[b';' as usize] = true;
+        sep[b'\t' as usize] = true;
+        sep[b',' as usize] = !decimal_comma(seg);
     }
-    sep[b',' as usize] = !decimal_comma(seg);
     sep
 }
+
+/// The bytes of a segment's start that the choice of separators is made on: coded both ways, the
+/// streams' sizes (zstd -3) compared.
+const TRIAL: usize = 1 << 20;
 
 /// Whether the numbers of a segment, from its first [`LOCALE_SAMPLE`] bytes, are written with a
 /// decimal comma: tokens (cut at spaces, `;` and TAB) that are a whole number with a comma, such
@@ -117,7 +129,7 @@ pub fn starts(d: &[u8]) -> bool {
     let mut at = 0;
     while let Some(i) = memchr::memchr(b'\n', &s[at..]) {
         lines += 1;
-        raw += memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, &s[at..at + i]).is_some() as usize;
+        raw += has_mark(&s[at..at + i]) as usize;
         at += i + 1;
     }
     lines >= MIN_LINES && raw * 10 < lines
@@ -222,20 +234,94 @@ impl Scratch {
     }
 }
 
+/// A piece of a line: a part of a token, a timestamp, or the separator after a token.
+#[derive(Clone, Copy)]
+enum Piece {
+    Plain { start: usize, end: usize },
+    Time { start: usize, end: usize, pat: u32, v: i64 },
+    Sep(u8),
+}
+
+/// How lines are cut: at the separators, but for the timestamps found (a time of day with its
+/// date, a syslog's `Dec 10 06:55:46`, may hold spaces), which are pieces on their own.
+struct Splitter {
+    sep: [bool; 256],
+    times: Times,
+    pieces: Vec<Piece>,
+}
+
+impl Splitter {
+    fn new(seg: &[u8], wide: bool) -> Splitter {
+        let mut n = seg.len().min(LOCALE_SAMPLE);
+        if n < seg.len() {
+            n = seg[..n].iter().rposition(|&b| b == b'\n').map_or(n, |i| i + 1);
+        }
+        Splitter { sep: separators(seg, wide), times: Times::new(&seg[..n]), pieces: Vec::new() }
+    }
+
+    /// The pieces of `line` in `self.pieces`: of each token its parts around the timestamps in
+    /// it (none where it has none, and the token is empty: a plain piece of no bytes), then the
+    /// separator that ends it, if any.
+    fn split(&mut self, line: &[u8]) {
+        self.pieces.clear();
+        self.times.find(line);
+        let spans = &self.times.spans;
+        let (mut at, mut sj) = (0, 0);
+        loop {
+            // the end of the token: the next separator that is not inside a timestamp
+            let (mut p, mut k) = (at, sj);
+            loop {
+                if k < spans.len() && spans[k].start == p {
+                    p = spans[k].end;
+                    k += 1;
+                } else if p >= line.len() || self.sep[line[p] as usize] {
+                    break;
+                } else {
+                    p += 1;
+                }
+            }
+            let mut q = at;
+            for sp in &spans[sj..k] {
+                if sp.start > q {
+                    self.pieces.push(Piece::Plain { start: q, end: sp.start });
+                }
+                self.pieces.push(Piece::Time { start: sp.start, end: sp.end, pat: sp.pat, v: sp.v });
+                q = sp.end;
+            }
+            if q < p || k == sj {
+                self.pieces.push(Piece::Plain { start: q, end: p });
+            }
+            sj = k;
+            if p >= line.len() {
+                return;
+            }
+            self.pieces.push(Piece::Sep(line[p]));
+            at = p + 1;
+        }
+    }
+}
+
 /// What a token's slot is: its kind (a mark of the template) and where it is in the line.
 struct Slot {
     kind: u8,
     start: usize,
     len: usize,
+    /// The integer of a time, and the digits of its pattern's fraction.
+    v: i64,
+    n: u32,
+    /// Where the slot's first column is among the template's (a time with a fraction has two).
+    col: usize,
 }
+
+/// The mark of a time's second column, that of its fraction (the module knows it by the pattern).
+const M_FRACTION: u8 = 5;
 
 /// Templates and the classification of lines into them, for the second and third passes.
 struct Classifier {
     /// The forms (hashes) of the tokens and how many times each is in the segment.
     counts: FxMap<u64, u32>,
     rare: u32,
-    /// The bytes that cut a line into tokens.
-    sep: [bool; 256],
+    split: Splitter,
     /// The templates' ids (from 1), by their bytes; the stream `templates`; the first column of
     /// each (by id - 1); the mark of each column; the most numbers of a template.
     index: FxMap<Vec<u8>, u32>,
@@ -247,29 +333,34 @@ struct Classifier {
     frozen: bool,
     tpl: Vec<u8>,
     slots: Vec<Slot>,
+    /// The columns of the line's template so far.
+    ncols: usize,
     scratch: Scratch,
 }
 
 impl Classifier {
     /// The counts of the forms of `seg`'s tokens.
-    fn new(seg: &[u8]) -> Classifier {
-        let sep = separators(seg);
+    fn new(seg: &[u8], wide: bool) -> Classifier {
+        let mut split = Splitter::new(seg, wide);
         let mut counts: FxMap<u64, u32> = FxMap::default();
         let mut lines = 0usize;
         for line in lines_of(seg) {
             lines += 1;
-            if memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, line).is_some() {
+            if has_mark(line) {
                 continue;
             }
-            for t in line.split(|&b| sep[b as usize]) {
-                *counts.entry(form(t).0).or_default() += 1;
+            split.split(line);
+            for p in &split.pieces {
+                if let &Piece::Plain { start, end } = p {
+                    *counts.entry(form(&line[start..end]).0).or_default() += 1;
+                }
             }
         }
         let rare = RARE_MIN.max(lines / RARE_PER).min(u32::MAX as usize) as u32;
         Classifier {
             counts,
             rare,
-            sep,
+            split,
             index: FxMap::default(),
             tbytes: Vec::new(),
             col0: Vec::new(),
@@ -278,6 +369,7 @@ impl Classifier {
             frozen: false,
             tpl: Vec::new(),
             slots: Vec::new(),
+            ncols: 0,
             scratch: Scratch::default(),
         }
     }
@@ -285,28 +377,34 @@ impl Classifier {
     /// The template of `line` (an id from 1; its slots in `self.slots`), or 0 if the line is
     /// kept as it is.
     fn line(&mut self, line: &[u8]) -> u32 {
-        if memchr::memchr3(M_DIGITS, M_TEXT, M_NUM, line).is_some() {
+        if has_mark(line) {
             return 0;
         }
         self.tpl.clear();
         self.slots.clear();
-        let mut at = 0;
-        loop {
-            let end = line[at..].iter().position(|&b| self.sep[b as usize]).map_or(line.len(), |i| at + i);
-            self.token(&line[at..end], at);
-            if end == line.len() {
-                break;
+        self.ncols = 0;
+        self.split.split(line);
+        for i in 0..self.split.pieces.len() {
+            match self.split.pieces[i] {
+                Piece::Plain { start, end } => self.token(&line[start..end], start),
+                Piece::Time { start, end, pat, v } => {
+                    self.tpl.push(M_TIME);
+                    self.tpl.extend_from_slice(self.split.times.pattern(pat));
+                    self.tpl.push(M_TIME);
+                    let n = aqr_num::time::fraction_digits(self.split.times.pattern(pat));
+                    self.slots.push(Slot { kind: M_TIME, start, len: end - start, v, n, col: self.ncols });
+                    self.ncols += 1 + (n > 0) as usize;
+                }
+                Piece::Sep(b) => self.tpl.push(b),
             }
-            self.tpl.push(line[end]);
-            at = end + 1;
         }
         if let Some(&id) = self.index.get(&self.tpl[..]) {
             return id;
         }
-        let nums = self.slots.iter().filter(|s| s.kind != M_TEXT).count();
+        let nums = self.ncols - self.slots.iter().filter(|s| s.kind == M_TEXT).count();
         if self.frozen
             || self.col0.len() >= MAX_TEMPLATES
-            || self.marks.len() + self.slots.len() > MAX_COLUMNS
+            || self.marks.len() + self.ncols > MAX_COLUMNS
             || self.tbytes.len() + self.tpl.len() + 1 > MAX_TEMPLATE_BYTES
         {
             return 0;
@@ -316,7 +414,12 @@ impl Classifier {
         self.tbytes.extend_from_slice(&self.tpl);
         self.tbytes.push(b'\n');
         self.col0.push(self.marks.len() as u32);
-        self.marks.extend(self.slots.iter().map(|s| s.kind));
+        for sl in &self.slots {
+            self.marks.push(sl.kind);
+            if sl.n > 0 {
+                self.marks.push(M_FRACTION);
+            }
+        }
         self.numbers = self.numbers.max(nums);
         id
     }
@@ -325,7 +428,8 @@ impl Classifier {
     fn token(&mut self, t: &[u8], at: usize) {
         let slot = |c: &mut Classifier, kind: u8, start: usize, len: usize| {
             c.tpl.push(kind);
-            c.slots.push(Slot { kind, start, len });
+            c.slots.push(Slot { kind, start, len, v: 0, n: 0, col: c.ncols });
+            c.ncols += 1;
         };
         if numeric(t) && self.scratch.whole(t).is_some() {
             return slot(self, M_NUM, at, t.len());
@@ -387,6 +491,43 @@ struct Col {
     count: usize,
 }
 
+/// Puts the integer `v` at `scale` into the column `c`'s three ways of coding it (as it is, as a
+/// change from the column's previous, as a change from the same number of the line before:
+/// `prev`; `cur` the line's numbers so far), at the scale of the number.
+fn emit(c: &mut Col, v: i64, scale: i32, prev: &[(i64, i32)], cur: &mut Vec<(i64, i32)>) {
+    let (q, qs) = prev.get(cur.len()).copied().unwrap_or((0, 0));
+    varint::put_signed(&mut c.by[0], v);
+    varint::put_signed(&mut c.by[1], v.wrapping_sub(fixed::rescale(c.prev, c.prev_scale, scale)));
+    varint::put_signed(&mut c.by[2], v.wrapping_sub(fixed::rescale(q, qs, scale)));
+    c.prev = v;
+    c.prev_scale = scale;
+    cur.push((v, scale));
+}
+
+/// The size of the integers of the `toks` as changes from each other, and of their descriptors,
+/// coded in `style` as a column does, compressed fast.
+fn trial(toks: &[(usize, &[u8])], style: Style) -> usize {
+    let mut sc = Scratch::default();
+    let (mut nums, mut types, mut desc) = (Vec::new(), Vec::new(), Vec::new());
+    let mut last: Option<(u8, u8, i32)> = None;
+    let mut prev: (i64, i32) = (0, 0);
+    for &(_, t) in toks {
+        let r = style.encode(t, last.map_or(0, |l| l.2), &mut sc.tmp).and_then(|r| sc.exact(t, r));
+        let Some((v, scale, mode, f)) = r.or_else(|| sc.whole(t)) else { continue };
+        if last == Some((mode, f, scale)) {
+            types.push(K_SAME);
+        } else {
+            last = Some((mode, f, scale));
+            types.push(K_NEW);
+            desc.extend_from_slice(&[mode, f]);
+            varint::put_signed(&mut desc, scale as i64);
+        }
+        varint::put_signed(&mut nums, v.wrapping_sub(fixed::rescale(prev.0, prev.1, scale)));
+        prev = (v, scale);
+    }
+    packed(&nums) + packed(&types) + packed(&desc)
+}
+
 /// The size of `b` compressed fast, which tells predictors apart.
 fn packed(b: &[u8]) -> usize {
     zstd::bulk::compress(b, 1).map_or(b.len(), |c| c.len())
@@ -427,7 +568,26 @@ impl Streams {
 /// Appends segment `seg` (the last of the file if `last`) to `s`: its params, and the bytes of
 /// its lines kept as they are.
 fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
-    let mut cl = Classifier::new(seg);
+    // the separators: those the streams of the first MiB come out smaller with
+    let mut n = seg.len().min(TRIAL);
+    if n < seg.len() {
+        n = seg[..n].iter().rposition(|&b| b == b'\n').map_or(n, |i| i + 1);
+    }
+    let size = |wide: bool| -> usize {
+        let mut t = Streams::default();
+        segment_with(&seg[..n], false, &mut t, wide);
+        [&t.layout, &t.raw, &t.templates, &t.columns, &t.text, &t.nums, &t.widths, &t.types, &t.desc]
+            .iter()
+            .map(|v| zstd::bulk::compress(v, 3).map_or(v.len(), |c| c.len()))
+            .sum()
+    };
+    let wide = separators(seg, true) != separators(seg, false) && size(true) <= size(false);
+    segment_with(seg, last, s, wide)
+}
+
+/// [`segment`] with the separators `wide` or not.
+fn segment_with(seg: &[u8], last: bool, s: &mut Streams, wide: bool) -> (Params, usize) {
+    let mut cl = Classifier::new(seg, wide);
     // the second pass: templates, and the samples of the numbers' styles
     let mut samples: Vec<Sample> = Vec::new();
     for line in lines_of(seg) {
@@ -439,8 +599,8 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
             samples.resize_with(cl.marks.len(), Sample::default);
         }
         let c0 = cl.col0[id as usize - 1] as usize;
-        for (k, sl) in cl.slots.iter().enumerate() {
-            let sm = &mut samples[c0 + k];
+        for sl in &cl.slots {
+            let sm = &mut samples[c0 + sl.col];
             if sl.kind == M_NUM && sm.lens.len() < STYLE_SAMPLE {
                 sm.bytes.extend_from_slice(&line[sl.start..][..sl.len]);
                 sm.lens.push(sl.len as u8);
@@ -458,9 +618,18 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
             })
             .collect();
         c.style = choose_with(&toks, true);
+        // (padded fixed saves the zeros of its digits and pays for each change of scale: the
+        // sample coded both ways tells which is smaller)
+        if dec::render_of(c.style.mode) == dec::R_FIXP {
+            let plain = choose_with(&toks, false);
+            if trial(&toks, plain) <= trial(&toks, c.style) {
+                c.style = plain;
+            }
+        }
     }
     // the third: the fields
-    let (mut prev, mut cur): (Vec<(i64, i32)>, Vec<(i64, i32)>) = (Vec::new(), Vec::new());
+    let mut prev: Vec<(i64, i32)> = Vec::new();
+    let mut cur: Vec<(i64, i32)> = Vec::new();
     let mut sc = Scratch::default();
     let mut raw = 0;
     for line in lines_of(seg) {
@@ -474,8 +643,8 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
         }
         let c0 = cl.col0[id as usize - 1] as usize;
         cur.clear();
-        for (k, sl) in cl.slots.iter().enumerate() {
-            let c = &mut cols[c0 + k];
+        for sl in &cl.slots {
+            let c = &mut cols[c0 + sl.col];
             let t = &line[sl.start..][..sl.len];
             c.count += 1;
             let (v, scale) = match sl.kind {
@@ -484,6 +653,17 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
                     c.text.push(b'\n');
                     continue;
                 }
+                M_TIME if sl.n > 0 => {
+                    // (the integer of the time without its fraction, and the fraction)
+                    let pow = 10i64.pow(sl.n);
+                    let (whole, frac) = (sl.v.div_euclid(pow), sl.v.rem_euclid(pow));
+                    emit(c, whole, 0, &prev, &mut cur);
+                    let c = &mut cols[c0 + sl.col + 1];
+                    c.count += 1;
+                    emit(c, frac, 0, &prev, &mut cur);
+                    continue;
+                }
+                M_TIME => (sl.v, 0),
                 M_DIGITS => {
                     // (a width where leading zeros pad it)
                     c.widths.push(if t.len() > 1 && t[0] == b'0' { t.len() as u8 } else { 0 });
@@ -504,14 +684,7 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
                     (v, scale)
                 }
             };
-            // (the predictions at the scale of the number)
-            let (q, qs) = prev.get(cur.len()).copied().unwrap_or((0, 0));
-            varint::put_signed(&mut c.by[0], v);
-            varint::put_signed(&mut c.by[1], v.wrapping_sub(fixed::rescale(c.prev, c.prev_scale, scale)));
-            varint::put_signed(&mut c.by[2], v.wrapping_sub(fixed::rescale(q, qs, scale)));
-            c.prev = v;
-            c.prev_scale = scale;
-            cur.push((v, scale));
+            emit(c, v, scale, &prev, &mut cur);
         }
         std::mem::swap(&mut prev, &mut cur);
     }
@@ -540,7 +713,7 @@ fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
         s.nums.extend_from_slice(&nums);
         if mark == M_DIGITS {
             s.widths.extend_from_slice(&c.widths);
-        } else {
+        } else if mark == M_NUM {
             varint::put(&mut s.columns, c.desc.len() as u64);
             s.types.extend_from_slice(&c.types);
             s.desc.extend_from_slice(&c.desc);
@@ -719,7 +892,7 @@ mod tests {
         let f = roundtrip(d.as_bytes());
         let templates = String::from_utf8_lossy(&f.streams[2].data).into_owned();
         // (the marks: 1 a digit run, 2 a word, 3 a number)
-        assert!(templates.contains("Dec \x03 \x01:\x01:\x01 host kernel: temp \x03 C load \x03\n"), "{templates:?}");
+        assert!(templates.contains("\x04b e H:M:S\x04 host kernel: temp \x03 C load \x03\n"), "{templates:?}");
         assert!(
             templates.contains("Accepted password for user\x01 from \x01.\x01.\x01.\x01 port \x03\n"),
             "{templates:?}"
@@ -728,9 +901,9 @@ mod tests {
         assert!(String::from_utf8_lossy(&f.streams[4].data).contains("key-"));
         assert!(f.streams[1].data.is_empty());
         // zeros that pad a digit run are kept by its width
-        let d = "12:05:09 a\n12:15:59 b\n".repeat(100);
+        let d = "id=0012 a\nid=0125 b\n".repeat(100);
         let f = roundtrip(d.as_bytes());
-        assert!(f.streams[6].data.contains(&2));
+        assert!(f.streams[6].data.contains(&4));
     }
 
     /// Tokens are cut at `;`, TAB and `,` too, `,` excepted where the numbers have a decimal comma.
@@ -744,14 +917,25 @@ mod tests {
             b += &format!("{i},{x}.{y:03},{z}.5,-{y}.25\tk{}\n", i % 3);
             c += &format!("{i},\"a b\",{x}.{y:03};{y}\n");
         }
-        let at = |t: &str| String::from_utf8_lossy(&roundtrip(t.as_bytes()).streams[2].data).into_owned();
+        // (the templates of the wide separators, which a segment takes where its streams come out
+        // smaller: not on every table)
+        let wide = |t: &str| {
+            let mut s = Streams::default();
+            segment_with(t.as_bytes(), true, &mut s, true);
+            String::from_utf8_lossy(&s.templates).into_owned()
+        };
+        for t in [&a, &b, &c] {
+            roundtrip(t.as_bytes());
+        }
         // semicolons, decimal commas: the numbers are whole tokens
-        let t = at(&a);
-        assert!(t.contains("\x01/\x01/\x01;\x01:\x01:\x01;\x03;\x03;\x03\n"), "{t:?}");
+        let t = wide(&a);
+        assert!(t.contains("\x04d/m/Y\x04;\x04H:M:S\x04;\x03;\x03;\x03\n"), "{t:?}");
+        let t = String::from_utf8_lossy(&roundtrip(a.as_bytes()).streams[2].data).into_owned();
+        assert!(t.contains("\x03;\x03;\x03\n"), "{t:?}");
         // decimal points: commas and TABs cut
-        let t = at(&b);
+        let t = wide(&b);
         assert!(t.contains("\x03,\x03,\x03,\x03\t"), "{t:?}");
-        let t = at(&c);
+        let t = wide(&c);
         assert!(t.contains("\x03,"), "{t:?}");
     }
 
@@ -780,6 +964,55 @@ mod tests {
         assert!(f.streams[5].data.len() < 4000 * 8, "{}", f.streams[5].data.len());
         // a line before at another scale, an integer after a decimal
         roundtrip("x 1.50 1.5\ny 1 2.25\nz 0.1 3\nx 100 0.5\n".repeat(50).as_bytes());
+    }
+
+    /// Timestamps are one integer with a pattern in the template, wherever they are in a line.
+    #[test]
+    fn times() {
+        let mut rng = aqr_common::rng::Rng::new(21);
+        let mut d = String::new();
+        let mut t = 1_088_000_000i64;
+        for i in 0..3000 {
+            t += rng.below(40) as i64;
+            let (days, secs) = (t.div_euclid(86400), t.rem_euclid(86400));
+            let (y, m, dd) = aqr_num::time::civil_from_days(days);
+            let (h, mi, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+            let mon = String::from_utf8_lossy(aqr_num::time::MONTHS[m as usize - 1]).into_owned();
+            let wd = String::from_utf8_lossy(aqr_num::time::WEEKDAYS[((days + 3).rem_euclid(7)) as usize]).into_owned();
+            let micro = rng.below(1_000_000);
+            // (a trimmed fraction: no trailing zeros, and none at all where it is zero)
+            let frac =
+                if i % 50 == 0 { String::new() } else { format!(".{micro:06}").trim_end_matches('0').to_string() };
+            d += &match i % 6 {
+                0 => format!("{y}-{m:02}-{dd:02} {h:02}:{mi:02}:{s:02}{frac} {} {}\n", i % 7, rng.below(100)),
+                1 => format!(
+                    "1.2.3.4 - - [{dd:02}/{mon}/{y}:{h:02}:{mi:02}:{s:02} -0400] \"GET /x{} HTTP/1.0\" 200 {}\n",
+                    i % 5,
+                    rng.below(9999)
+                ),
+                2 => format!("[{wd} {mon} {dd:02} {h:02}:{mi:02}:{s:02} {y}] [error] client {}\n", i % 3),
+                3 => format!("{mon} {dd:2} {h:02}:{mi:02}:{s:02} host sshd[{}]: x\n", rng.below(999)),
+                4 => format!("\"{y}{m:02}{dd:02}\",{y}-{m:02}-{dd:02}T{h:02}:{mi:02}:{s:02}Z,{h}:{mi:02}:{s:02}\n"),
+                _ => format!("{dd:02}.{m:02}.{y} {h:02}:{mi:02};{h:02}:{mi:02}:{s:02}.123 ip 10.0.1.{}\n", i % 9),
+            };
+        }
+        let f = roundtrip(d.as_bytes());
+        let tpl = String::from_utf8_lossy(&f.streams[2].data).into_owned();
+        for p in [
+            "\x04Y-m-d H:M:St.6\x04 \x03 \x03\n",
+            "\x04d/b/Y:H:M:St.6\x04",
+            "[\x04a b d H:M:St.6 Y\x04] [error]",
+            "\x04b e H:M:St.6\x04 host sshd[",
+            "\x04Y-m-d\\TH:M:St.6\x04Z,\x04h:M:St.6\x04",
+            "\x04d.m.Y H:M\x04;\x04H:M:St.6\x04 ip",
+        ] {
+            assert!(tpl.contains(p), "{p:?} in {tpl:?}");
+        }
+        // (the times are small changes: fewer bytes than the digits they held, whose random fractions and ids are the most of it)
+        assert!(f.streams[5].data.len() < d.len() / 4, "{}", f.streams[5].data.len());
+        // dates in lines of other shapes, and what is no time: kept in the template
+        roundtrip(b"a 2023-02-29 b 2023-13-01 c 25:00:00 d 12:30:45:67 e 10.0.12.30 f Thu Jun 10 06:07:04 2005 g\n12:30:45.5 12:30:45,5 1:2:3 99-99-99\n");
+        roundtrip("x 0000-01-01 9999-12-31T23:59:59 y 0001/01/01 0:00:00 Feb 29 00:00:00\n".repeat(30).as_bytes());
     }
 
     #[test]
@@ -904,6 +1137,33 @@ mod tests {
             let inputs: Vec<&[u8]> = streams.iter().map(|s| &s[..]).collect();
             let _ = decode(&a.params, &inputs, s.len() as u64, 1);
         }
+        // a time's pattern that is none, or has no end, and integers that are no time
+        let inputs = |streams: &[Vec<u8>]| -> crate::Result<Vec<u8>> {
+            let inputs: Vec<&[u8]> = streams.iter().map(|s| &s[..]).collect();
+            decode(&a.params, &inputs, s.len() as u64, 1)
+        };
+        let base: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
+        assert!(inputs(&base).is_ok());
+        let pat = base[2].windows(9).position(|w| w == b"\x04b e H:M:").expect("a time");
+        for (at, to) in [(pat + 5, b'x'), (pat + 1, b'Q'), (pat + 10, b'M')] {
+            let mut streams = base.clone();
+            streams[2][at] = to;
+            assert!(inputs(&streams).is_err(), "{at} {to}");
+        }
+        let mut streams = base.clone();
+        let mut bad = vec![];
+        varint::put_signed(&mut bad, i64::MAX);
+        streams[5].splice(0..0, bad);
+        let _ = inputs(&streams);
+        // a pattern of a column whose integers are of no time of day
+        let day = "a 12:00:00\n".repeat(2000);
+        let f = encode_in(day.as_bytes(), usize::MAX, false).unwrap();
+        let Node::Apply(a2) = &f.root else { panic!() };
+        let mut streams: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
+        let at = streams[5].len() - 1;
+        streams[5][at] = 0x7e;
+        let inputs2: Vec<&[u8]> = streams.iter().map(|s| &s[..]).collect();
+        assert!(decode(&a2.params, &inputs2, day.len() as u64, 1).is_err());
         // params that lie
         for p in [&[][..], &[2, 0, 0, 0], &[0, 255, 255, 255, 255, 15, 0, 0], &a.params[..a.params.len() - 1]] {
             let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();

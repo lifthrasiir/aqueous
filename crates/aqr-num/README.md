@@ -126,13 +126,90 @@ group's mode, then fixed, then `%g`, then `%e` and the shortest forms for tokens
 exponent. `style::choose` picks the mode of a group from a sample: the one with the
 fewest digits and scale changes over the first 512 tokens.
 
+## Times
+
+A time printed by a *pattern* is one integer `v` (an `i64`) of *ticks*; a container keeps the
+pattern's bytes and the integer, `time::valid(pattern)` checks a pattern read from untrusted
+input, and `time::put(out, pattern, v)` prints (false: `v` is not of a time the pattern can
+print, a decoding error, never a panic).
+
+### Patterns
+
+A pattern is bytes, read from the start as items:
+
+| item | prints |
+|---|---|
+| `Y` | the year, 4 digits (0000 to 9999) |
+| `m` | the month, 2 digits (01 to 12) |
+| `b` | the month's English name abbreviated: `Jan` `Feb` `Mar` `Apr` `May` `Jun` `Jul` `Aug` `Sep` `Oct` `Nov` `Dec` |
+| `d` | the day, 2 digits (01 to 31) |
+| `e` | the day, 2 characters: a digit with a space before it for 1 to 9 (`Dec  1`) |
+| `D` | the day, with no padding (1 to 31) |
+| `a` | the weekday's English name abbreviated: `Mon` `Tue` `Wed` `Thu` `Fri` `Sat` `Sun` |
+| `H` | the hour, 2 digits (00 to 23) |
+| `h` | the hour, with no padding (0 to 23) |
+| `M` | the minute, 2 digits (00 to 59) |
+| `S` | the second, 2 digits (00 to 59) |
+| `f` *p* *n* | a fixed fraction: the point byte *p* (`.` or `,`) and the *n* digits (*n* a digit `1` to `9`) of the fraction of a second, with zeros to *n* digits |
+| `t` *p* *n* | a trimmed fraction: as `f`, but the trailing zeros of the *n* digits are dropped, and nothing at all, not even *p*, is printed where all are zeros |
+| `\` *c* | the byte *c* (any but 0x01 to 0x04 and LF) |
+| *c* | the byte *c*, any but an ASCII letter, `\`, 0x01 to 0x04 and LF |
+
+Any other pattern is invalid: an ASCII letter that is no item (or `f`, `t` not followed by
+a point and a digit `1` to `9`), a byte 0x01 to 0x04 or LF, and a combination that is no time:
+
+- each of: `Y`; `m` or `b`; `d`, `e` or `D`; `a`; `H` or `h`; `M`; `S`; a fraction (`f` or
+  `t`), at most once;
+- a date is `m` or `b` with `d`, `e` or `D` (with `Y`, or not, and with `a`, or not); the year,
+  month, day, or weekday alone is no date;
+- the time of day is `H` or `h`, then `M` (not without the hour), then `S` (not without
+  `M`), then a fraction (not without `S`): each may end it;
+- at least a date or an hour;
+- at most 64 bytes (what is printed is then at most 190).
+
+The pattern prints, in the order of its items, the fields of an instant of the proleptic
+Gregorian calendar, whose weekday is derived from its date (a pattern with `a` prints the
+weekday the date has). Dates without a year are of the year 2000, a leap year.
+
+### The integer
+
+With *n* the digits of the fraction (0 without one), the ticks are those of the finest unit
+the pattern has: *days* since 1970-01-01 (a date without a time of day), else with *days* the
+days of the date (0 for a pattern with no date)
+
+```
+ticks = (((days × 24 + hour) × 60 + minute) × 60 + second) × 10^n + fraction
+```
+
+with the factors of the units the pattern has only: a pattern of hours and minutes counts
+minutes (`(days × 24 + hour) × 60 + minute`), of an hour hours, of a date alone days. The
+fraction is the digits as an integer of *n* digits (a trimmed one of fewer digits is padded
+with zeros on the right to *n*). A tick is a day, an hour, a minute, a second or 10^-*n* of a
+second.
+
+To print, the integer is divided by those factors, from the last, flooring (the remainders are
+the fraction, second, minute and hour; the hour counted modulo 24 and so on); what is left is
+the days (those of the integer, for a pattern with a date). The integer cannot be printed,
+and `put` says so, if: the days are not 0 for a pattern without a date (a time of day before
+midnight or after the end of the day); the date is before year 0 (-719528 days) or after
+year 9999 (2932896); the pattern has no `Y` and the date is not in the year 2000; or the
+pattern is invalid. Seconds are 00 to 59: there are no leap seconds.
+
+### Encoder conventions (not normative)
+
+`time::parse(pattern, text)` gives the integer of the time that `text` starts with and its
+length, if it is a valid date whose weekday (if the pattern has `a`) is right; the encoder
+codes it where `put` prints the same bytes (a trimmed fraction does not print a trailing
+zero, nor a fixed one fewer digits).
+
 ## Testing
 
 ```sh
 cargo test --release
 ```
 
-`%g` of decimals against the C library, exact digits against the standard library,
+Times: the calendar against every day of years 0 to 9999, the patterns of the writers in
+the corpus, the values printed back and the ones that are not. `%g` of decimals against the C library, exact digits against the standard library,
 shortest digits against the standard library (with the ties above), every valid
 descriptor rendering random values (as from corrupt input) and coding back, writer
 samples, the encoder's choices.
@@ -145,3 +222,4 @@ samples, the encoder's choices.
 | `src/general.rs` | `%g` of decimals |
 | `src/dec.rs` | Decimals, floats, renders, coding a token in a mode |
 | `src/style.rs` | Mode of a group of numbers, fallbacks (encoder) |
+| `src/time.rs` | Times by a pattern: calendar, `put` and `parse` |
