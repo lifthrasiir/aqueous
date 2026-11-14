@@ -1230,7 +1230,7 @@ enum Tok {
 
 /// The short options that take a value: in a bundle (`-cfo OUT`), the rest of the argument is
 /// theirs (`-oOUT`), or else the next argument.
-const SHORT_VALUES: &[u8] = b"oCTMlBbSEx";
+const SHORT_VALUES: &[u8] = b"oCTMlBbSExj";
 
 /// Reads the arguments as options and inputs, getopt's way: short options bundled (`-cf`), a
 /// value joined to its option (`-T8`, `--memory=2G`), `--` ending the options, `-` an input

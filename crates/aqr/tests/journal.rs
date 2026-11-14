@@ -44,6 +44,18 @@ fn listed(dir: &Path, args: &[&str]) -> Vec<String> {
     v
 }
 
+/// `-jLABEL`: the label joined to its option, as `-T8` and `-oOUT` are.
+#[test]
+fn label_joined_to_option() {
+    let d = scratch("joined");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), "alpha ".repeat(500)).unwrap();
+    ok(&d, Some(&day(0)), &["-q", "-jfirst", "-o", "a.aqr", "src"]);
+    let h = stdout(&ok(&d, None, &["--history", "a.aqr"]));
+    assert!(h.contains("first"), "{h}");
+}
+
 #[test]
 fn points_and_states() {
     let d = scratch("states");

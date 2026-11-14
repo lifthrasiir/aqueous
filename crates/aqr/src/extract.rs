@@ -1295,14 +1295,20 @@ fn resolve_link(
         }
         at.into_iter().flatten().collect()
     };
-    // (the tree's own links followed, as many as there are entries at most)
-    let mut budget = t.entries.len() + 1;
+    // (the tree's own links followed, as many as there are entries at most, and nested no more
+    // than `DEPTH`: Linux follows 40 at most, so that no real chain is this long)
+    const DEPTH: usize = 256;
+    struct Follow {
+        budget: usize,
+        depth: usize,
+    }
+    let mut follow = Follow { budget: t.entries.len() + 1, depth: 0 };
     fn resolve(
         t: &Tree,
         names: &Names,
         dir: Vec<Name>,
         target: &[u8],
-        budget: &mut usize,
+        follow: &mut Follow,
         find: &dyn Fn(&[Name]) -> Vec<usize>,
         path_of: &dyn Fn(Option<usize>) -> Vec<Name>,
     ) -> Result<Vec<Name>, Refused> {
@@ -1333,8 +1339,13 @@ fn resolve_link(
                             return Err(unsure());
                         }
                         let EntryNode::Link(next) = &t.entries[j].node else { unreachable!() };
-                        *budget = budget.checked_sub(1).ok_or(Refused::Loop)?;
-                        at = resolve(t, names, path_of(t.entries[j].parent), next, budget, find, path_of)?;
+                        follow.budget = follow.budget.checked_sub(1).ok_or(Refused::Loop)?;
+                        if follow.depth == DEPTH {
+                            return Err(Refused::Loop);
+                        }
+                        follow.depth += 1;
+                        at = resolve(t, names, path_of(t.entries[j].parent), next, follow, find, path_of)?;
+                        follow.depth -= 1;
                     } else if made && there.is_empty() {
                         return Err(unsure());
                     }
@@ -1344,7 +1355,7 @@ fn resolve_link(
         Ok(at)
     }
     let EntryNode::Link(target) = &t.entries[i].node else { return Ok(None) };
-    let p = resolve(t, names, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of)?;
+    let p = resolve(t, names, path_of(t.entries[i].parent), target, &mut follow, &find, &path_of)?;
     if let Some(w) = within {
         let within = p.len() >= w.len() && w.iter().zip(&p).all(|(n, m)| Name::of(&names.name(n).os).fold == m.fold);
         if !within {
@@ -1368,7 +1379,43 @@ fn symlink(target: &std::ffi::OsStr, at: &Path, dir: bool) -> std::io::Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{made_short, short_valid};
+    use super::{ByName, Name, Names, Refused, by_name_add, made_short, resolve_link, short_valid};
+    use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
+
+    /// Links `l0 -> l1 -> ... -> l{n-1} -> dir`, resolved from `l0` on a thread of a small stack.
+    fn chain(n: usize) -> Result<Option<usize>, Refused> {
+        std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(move || {
+                let mut t = Tree { root: Extra::default(), entries: Vec::new() };
+                for i in 0..n {
+                    let node = EntryNode::Link(format!("l{}", i + 1).into_bytes());
+                    t.entries.push(Entry {
+                        parent: None,
+                        name: format!("l{i}").into_bytes(),
+                        node,
+                        extra: Extra::default(),
+                    });
+                }
+                let (name, node) = (format!("l{n}").into_bytes(), EntryNode::Dir);
+                t.entries.push(Entry { parent: None, name, node, extra: Extra::default() });
+                let names = Names::new(&Default::default(), false);
+                let mut by_name = ByName::new();
+                for (j, e) in t.entries.iter().enumerate() {
+                    by_name_add(&mut by_name, e.parent, Name::of(&names.name(&e.name).os), j);
+                }
+                resolve_link(&t, &names, &by_name, 0, None)
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn long_chain_of_links() {
+        assert!(matches!(chain(40), Ok(Some(40))));
+        assert!(matches!(chain(100_000), Err(Refused::Loop)));
+    }
 
     #[test]
     fn short_names() {
