@@ -531,6 +531,18 @@ fn raw_held_once() {
     assert!(c.len() < (4 << 20) + (64 << 10), "{} bytes", c.len());
 }
 
+/// Two files that do not compress alone, the second the first with every 24th byte changed (no
+/// run of them long enough to be held once): kin, archived together, the second costing little
+/// of its bytes, not each stored as it is.
+#[test]
+fn raw_kin_together() {
+    let a = noise(400 << 10, 3);
+    let mut b = a.clone();
+    b.iter_mut().step_by(24).for_each(|x| *x ^= 0x5a);
+    let (c, _) = archived(&[("a.bin", a.clone()), ("b.bin", b)], &Options::default());
+    assert!(c.len() < a.len() * 3 / 2, "{} bytes of {} each", c.len(), a.len());
+}
+
 /// A PPMd var. J file of `data` as file `name` of time `time` (order 10, 256 MB, restore
 /// method 1), its data as it is.
 fn ppmd(name: &str, time: u32, data: &[u8]) -> Vec<u8> {

@@ -1733,6 +1733,39 @@ impl Encoder {
             .collect()
     }
 
+    /// Of streams `ds`, whether each compresses by 1/32 of its sample (as [`Encoder::compresses`]
+    /// tells, but at [`KIN_LEVEL`]) after the samples of its kin `kin[i]` (others of
+    /// `ds`, nearest first, as a raw prefix of at most [`KIN_PREFIX`] bytes): streams of a class
+    /// alike, versions of a program packed say, which do not compress alone but do archived
+    /// together (where the archive puts a class's streams one after another). On up to the
+    /// encoder's threads; false for a stream of no kin.
+    pub fn compresses_after_each(&self, ds: &[&[u8]], kin: &[Vec<usize>]) -> Result<Vec<bool>> {
+        if self.level == Level::STORED {
+            return Ok(vec![false; ds.len()]);
+        }
+        let trials = aqr_common::pool::par_map(ds.len(), self.threads, |i| -> Result<bool> {
+            // (the nearest last, next to the sample: a level keeps fewer positions far back)
+            let mut parts = Vec::new();
+            let mut room = KIN_PREFIX.get();
+            for &j in kin.get(i).map_or(&[][..], |k| &k[..]) {
+                if room == 0 {
+                    break;
+                }
+                let s = sampled(&[ds[j]]);
+                let n = s.len().min(room);
+                room -= n;
+                parts.push(s[s.len() - n..].to_vec());
+            }
+            if parts.is_empty() {
+                return Ok(false);
+            }
+            let prefix: Vec<u8> = parts.into_iter().rev().flatten().collect();
+            let own = sampled(&[ds[i]]);
+            Ok(after_prefix_len(&own, &prefix, KIN_LEVEL.get())?.is_some_and(|n| saves(n, own.len())))
+        });
+        trials.into_iter().collect()
+    }
+
     /// `sample` of the stream whose key is `k` compressed at `level`, as [`Encoder::least`]
     /// compressed it if it did.
     fn trial(&self, k: StreamKey, sample: &[u8], level: i32) -> Result<Option<Vec<u8>>> {
@@ -2366,6 +2399,53 @@ aqr_common::zopt! {
 /// it is also that of the single-threaded mode), nor on what context `c` compressed before.
 fn compressed(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize) -> Result<Option<Vec<u8>>> {
     compressed_to(c, data, level, threads, usize::MAX)
+}
+
+aqr_common::zopt_namespace!(
+    "kin",
+    "streams that compress after others of their class, kept compressible (aqr-formula, aqr-compress)"
+);
+
+aqr_common::zopt! {
+    /// The most bytes of the samples of a stream's kin put before its own sample, to tell
+    /// whether it compresses after them ([`Encoder::compresses_after_each`]): four streams'
+    /// samples.
+    static KIN_PREFIX: Opt<usize> = Opt::size("kin:prefix", 4 << 20, "bytes of the kin's samples put before a stream's sample at most")
+        .derived(|| 4 * SAMPLE.get(), "four samples (zstd:sample)");
+    /// The zstd level of the trial: the base level (level 1 caught half of what WinUHA's
+    /// installers gain, keeping few positions far back).
+    static KIN_LEVEL: Opt<i32> = Opt::value("kin:level", 3, "zstd level of the trial of a stream after its kin");
+}
+
+/// The bytes `d` compresses to at `level` after `prefix` (a raw prefix, all of it within the
+/// window: as where they are one after another in a stream), or None where they would be more
+/// than `d`.
+fn after_prefix_len(d: &[u8], prefix: &[u8], level: i32) -> Result<Option<usize>> {
+    let _s = aqr_common::trace::span("zstd");
+    let zstd = zstd_error;
+    let mut c = CCtx::create();
+    let window = (64 - ((prefix.len() + d.len()).max(2) as u64 - 1).leading_zeros()).clamp(10, WINDOW_LOG_MAX);
+    for p in [
+        CParameter::CompressionLevel(level),
+        CParameter::ContentSizeFlag(false),
+        CParameter::ChecksumFlag(false),
+        CParameter::WindowLog(window),
+    ] {
+        c.set_parameter(p).map_err(zstd)?;
+    }
+    c.ref_prefix(prefix).map(drop).map_err(zstd)?;
+    let mut out = Vec::with_capacity(zstd_safe::compress_bound(d.len()));
+    let mut input = InBuffer::around(d);
+    loop {
+        let pos = out.len();
+        let end = ZSTD_EndDirective::ZSTD_e_end;
+        let left = c.compress_stream2(&mut OutBuffer::around_pos(&mut out, pos), &mut input, end).map_err(zstd)?;
+        if left == 0 {
+            break;
+        }
+        out.reserve(left.max(4096));
+    }
+    Ok((out.len() < d.len()).then_some(out.len()))
 }
 
 /// The bytes a stream of `n` bytes compresses to, where a sample of `of` bytes of it compresses
@@ -6326,6 +6406,21 @@ mod tests {
             let r = decode(&archive(|out| out.extend_from_slice(&b)), &NoModules);
             assert!(matches!(r, Err(Failure::Invalid(_))), "{ty:#x}: {r:?}");
         }
+    }
+
+    /// A stream that does not compress alone compresses after its kin where they hold it but for
+    /// some bytes (its kin last next to it, after others), not after data unlike it, nor with
+    /// no kin.
+    #[test]
+    fn compresses_after_kin() {
+        let a = aqr_common::rng::Rng::new(5).bytes(300_000);
+        let mut b = a.clone();
+        b.iter_mut().step_by(24).for_each(|x| *x ^= 0x5a);
+        let (c, d) = (aqr_common::rng::Rng::new(6).bytes(300_000), aqr_common::rng::Rng::new(7).bytes(2_000_000));
+        let enc = Encoder::new(Level::MID);
+        assert_eq!(enc.compresses_each(&[&a, &b, &c]).unwrap(), [false, false, false]);
+        let after = enc.compresses_after_each(&[&a, &b, &c, &d], &[vec![], vec![0, 3, 2], vec![3, 0], vec![]]).unwrap();
+        assert_eq!(after, [false, true, false, false]);
     }
 
     /// A stream of [`Kind::Compressed`] is stored as it is where the probe level compresses

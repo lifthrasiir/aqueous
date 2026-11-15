@@ -54,6 +54,8 @@ aqr_common::zopt! {
     /// telling whether they compress.
     static MERGE_PROBE: Opt<usize> =
         Opt::size("merge-probe", 4 << 10, "streams shorter are merged into their class without a compression test");
+    /// Whether a stream that does not compress alone is tried after its kin ([`kin`]).
+    static KIN_TRIAL: Opt<bool> = Opt::flag("kin:trial", true, "try streams that do not compress alone after others of their class");
 }
 
 /// A file's content to archive: its data, and a name telling its kind ([`kind_by_name`]).
@@ -1979,7 +1981,8 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     }
 
     // the streams of a class together, within a block each; but those that do not compress,
-    // which would gain nothing and only make a file read alone read more
+    // which would gain nothing and only make a file read alone read more, unless they compress
+    // after others of their class and kind ([`kin`])
     let merge_probe = MERGE_PROBE.get();
     let probed: Vec<usize> = (0..f.streams.len())
         .filter(|&s| f.streams[s].kind != Kind::Compressed && f.streams[s].data.len() >= merge_probe)
@@ -1987,7 +1990,9 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     let ds: Vec<&[u8]> = probed.iter().map(|&s| &f.streams[s].data[..]).collect();
     let compresses = {
         let _s = aqr_common::trace::span("compressible");
-        enc.compresses_each(&ds).expect("zstd")
+        let alone = enc.compresses_each(&ds).expect("zstd");
+        let of = |i: usize| (&*f.streams[probed[i]].class, f.streams[probed[i]].kind);
+        kin(&enc, &ds, alone, of)
     };
     for (s, compresses) in probed.into_iter().zip(compresses) {
         if !compresses {
@@ -2006,6 +2011,48 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
     Analyzed { f, leaves, at, enc, memo }
+}
+
+/// Of streams `ds` and whether each compresses alone (`alone`, [`aqr::Encoder::compresses_each`]),
+/// whether each is compressed: those that do not alone, where they compress after the others of
+/// their class and kind (`of`), their kin, those nearest in `ds` first
+/// ([`aqr::Encoder::compresses_after_each`]): as where the archive puts them one after another.
+/// Of WinUHA 2.0's installers, the code streams of the packed programs of their versions
+/// (PECompact's sections through the x86 filter), 3 to 5% smaller together, which no anchors
+/// shared tell (0.5% of them at 64 bytes, 3% of 8-byte pieces).
+fn kin<'a>(enc: &aqr::Encoder, ds: &[&[u8]], alone: Vec<bool>, of: impl Fn(usize) -> (&'a str, Kind)) -> Vec<bool> {
+    if !KIN_TRIAL.get() {
+        return alone;
+    }
+    let mut groups: HashMap<(&str, Kind), Vec<usize>> = HashMap::new();
+    for i in 0..ds.len() {
+        groups.entry(of(i)).or_default().push(i);
+    }
+    // (of each stream that does not compress alone, the others of its group, nearest first)
+    let mut asked = Vec::new();
+    let mut kin = Vec::new();
+    for g in groups.values().filter(|g| g.len() > 1 && g.iter().any(|&i| !alone[i])) {
+        for &i in g.iter().filter(|&&i| !alone[i]) {
+            let mut k: Vec<usize> = g.iter().copied().filter(|&j| j != i).collect();
+            k.sort_by_key(|&j| j.abs_diff(i));
+            asked.push(i);
+            kin.push(k);
+        }
+    }
+    let mut compresses = alone;
+    if asked.is_empty() {
+        return compresses;
+    }
+    // (as the archive's indices, so that the trials are of `ds` themselves)
+    let after = enc.compresses_after_each(ds, &{
+        let mut all = vec![Vec::new(); ds.len()];
+        asked.iter().zip(kin).for_each(|(&i, k)| all[i] = k);
+        all
+    });
+    for (i, c) in after.expect("zstd").into_iter().enumerate() {
+        compresses[i] |= c;
+    }
+    compresses
 }
 
 /// Batch `i` of `files` of analysis `a`, to follow the blocks of `w`: encoded, and verified
