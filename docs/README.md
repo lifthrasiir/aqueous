@@ -7,6 +7,7 @@ Most of them are currently written in Korean, sorry.
 - `streaming-encoder-design.md`, `arena-design.md`, `sandbox-design.md`: the streaming encoder, modules' memory plans, the sandbox for modules.
 - `append-design.md`, `recovery-design.md`, `special-files-design.md`, `names-design.md`, `zip-extras-design.md`: appending, recovery, special files, names on extraction, ZIP extra fields.
 - `eval-design.md`, `bench-scenarios.md`: evaluation and benchmark scenarios.
+- `cross-file-design.md`: duplicates across files seen only once their streams are decoded (versions of an installer): a batch's map of shared anchors, kin groups merged, decisions made with them.
 - `macos-app-todo.md`: what is left for macOS application bundles.
 - `disk-image-design.md`: the plan for disk images (file systems, partition tables, virtual disks).
 - `other-projects.md`: survey of other projects.
