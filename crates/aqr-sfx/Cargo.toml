@@ -10,3 +10,9 @@ aqr-common = { path = "../aqr-common" }
 aqr-api = { path = "../aqr-api", default-features = false }
 aqr-blob = { path = "../aqr-blob", features = ["runner"] }
 aqr-formula = { path = "../aqr-formula" }
+aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
+zstd = { version = "0.13", default-features = false }
+
+[features]
+# Making bundles of blobs (`bundle::pack`), for aqr; the stub only unpacks them.
+encode = ["aqr-exe/encode"]

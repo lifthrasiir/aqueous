@@ -1,7 +1,7 @@
 //! The version (aqr-version): `env!("AQR_VERSION")` for `--version`, and on Windows `aqr.rc`,
 //! its `VERSIONINFO`, embedded in `aqr.exe`.
 //!
-//! And on Windows x86-64, what `--format sfx` merges into a self-extracting archive: the files of
+//! And on Windows x86-64, what `--format sfx` puts into a self-extracting archive: the files of
 //! `target/aqr-sfx/` (or of the directory `AQR_SFX_PACK` names), which `crates/aqr-sfx/pack.sh`
 //! gathers, packed into `$OUT_DIR/sfx.pack` (src/sfx.rs reads it): the interpreter blob in a zstd
 //! frame of its own (its length before it), unpacked alone where only it is needed, then the

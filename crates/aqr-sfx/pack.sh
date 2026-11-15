@@ -2,7 +2,8 @@
 # Gathers what `aqr --format sfx` embeds (Windows x86-64) into target/aqr-sfx/, which aqr's build
 # script packs into the binary:
 #
-# - aqr-sfx-shim.exe, the stub (release);
+# - aqr-sfx-shim.exe, the stub (release), packed by UPX (`upx -9`, as the release packs aqr.exe; the
+#   one UPX names, else `upx` on the path; where there is none, left as it is with a warning);
 # - aqr-interp.blob, the interpreter blob (aqr-interp built for the no-TLS target, digested by
 #   `aqr-ld blob`), for the modules with no native blob;
 # - modules/NAME.blob, each module of aqr-modules built as a native library for the no-TLS target
@@ -39,6 +40,12 @@ CARGO_TARGET_X86_64_AQR_WINDOWS_MSVC_LINKER=$(cygpath -w "$PWD/$ld") \
 rm -rf "$out"
 mkdir -p "$out/modules" "$out/libs"
 cp target/release/aqr-sfx-shim.exe "$out/"
+upx=${UPX:-upx}
+if command -v "$upx" >/dev/null 2>&1; then
+    "$upx" -9 -q "$out/aqr-sfx-shim.exe" >/dev/null
+else
+    echo "pack.sh: no UPX ($upx): the stub is left unpacked" >&2
+fi
 "$ld" blob --apply aqr_interp_vtable --info - --out "$out/aqr-interp.blob" \
     target/x86_64-aqr-windows-msvc/release/aqr_interp.dll
 libs=$(for d in crates/aqr-dll/shared/*/; do echo "target/aqr-dll/aqr_dll_$(basename "$d" | tr - _).dll"; done)

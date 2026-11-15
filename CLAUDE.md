@@ -16,8 +16,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`); `--ipc` drives it from a frontend (`src/ipc.rs`); `--session` serves a
     compression dialog's questions before it begins (`src/session.rs`). `--format sfx` (`src/sfx.rs`,
     Windows x86-64) makes a self-extracting program: the archive with shorthand module blocks for
-    the modules that have native blobs, after aqr-sfx-shim with those blobs (and the interpreter
-    blob, if any module is in full) merged in. What it merges is `target/aqr-sfx/` (or
+    the modules that have native blobs, after aqr-sfx-shim (packed by UPX) and the bundle of
+    those blobs (and of the interpreter blob, if any module is in full: aqr-sfx's `bundle`). What
+    it bundles is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.sh` gathers and `build.rs` packs into the binary
     (zstd, ~6 MB); each blob is used only for the hash it was packed for, so `cargo aqr` runs
     pack.sh again where the pack's modules are not those of known.rs (where there is a pack).
@@ -61,7 +62,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     blobs (or libraries) into a stub executable as one section with no loader — code copied and
     rebased, bound imports written as addresses (relocated), the others merged into the stub's
     table, a dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`); a library too
-    (`merge_bytes`, for `aqr --format sfx`). `src/msvc.rs`: the MSVC linker of aqr-dll's no-TLS
+    (`merge_bytes`). `src/msvc.rs`: the MSVC linker of aqr-dll's no-TLS
     target, cutting a shared library's exports to a list (`AQR_LD_EXPORTS`, made by `exports`) so
     that `/OPT:REF` drops the rest, its import library still of every export.
   - `aqr-wasmrt` — runs the Wasm modules of aqr natively by Wasmtime (`wasm::load`), in the
@@ -95,13 +96,18 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     and the hash in custom sections), which `load` takes to the native blob (a part module
     streamed through `aqr_dll_apply_part`, as `Info::apply_part` gives it); any other module
     goes to the interpreter. The shared libraries the native blobs link against are
-    entries `lib:NAME` (their images registered, nothing else). `extract` writes a
-    decoded archive's files out. Shared by the stub and aqr. `pack.sh` gathers what aqr embeds
-    (the stub, the blobs of the modules and of the shared libraries).
+    entries `lib:NAME` (their images registered, nothing else). `Sfx::load` takes the same
+    blobs from a bundle (`bundle`: each blob's code, up to the end of its exception table's
+    last function, through aqr-exe's x86 disfilter, the streams of all the blobs one after
+    another by stream and the rest apart, each a zstd frame at 19; feature `encode` makes them),
+    placed by `aqr_blob::load`. `extract` writes a decoded archive's files out. Shared by the
+    stub and aqr. `pack.sh` gathers what aqr embeds (the stub, packed by UPX `-9` where `UPX` or
+    `upx` is found, the blobs of the modules and of the shared libraries).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
-    ~1.3 MB): the small executable that `aqr --format sfx` (or `aqr-ld merge`) fills with blobs
-    and an archive is appended to. It finds the archive by its header magic (scanning from the
-    end, no trailer), decodes it running the modules through the merged blobs, and writes the
+    1.6 MB, 0.54 MB packed by UPX): the small executable that `aqr --format sfx` appends a bundle
+    of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle and
+    the archive from right after its image (else it scans itself from the end for the archive's
+    header magic), decodes the archive running the modules through the blobs, and writes the
     files out.
   - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_vtable`, aqr-blob's
     `Vtable`: load, apply, apply_part, and for aqr the loads of aqr-wasmrt, the bound and the

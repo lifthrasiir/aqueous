@@ -1834,7 +1834,7 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     let (gone, made, archived) = made?;
     if !a.quiet {
         eprintln!(
-            "{}: self-extracting, {} module{} native ({} shared librar{}){}: {} ({} of the archive){}",
+            "{}: self-extracting, {} module{} native ({} shared librar{}){}: {} ({} of the blobs, {} of the archive){}",
             out.display(),
             made.natives,
             plural(made.natives),
@@ -1842,6 +1842,7 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
             if made.libs == 1 { "y" } else { "ies" },
             if made.interp { " and the interpreter" } else { "" },
             size(made.exe.len() as f64),
+            size(made.bundle as f64),
             size(archived as f64),
             match a.verbose {
                 true => format!(", pack {}", sfx::PACK_ID.get(..12).unwrap_or("-")),

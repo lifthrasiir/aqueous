@@ -1,13 +1,15 @@
-//! Self-extracting archives (`--format sfx`, Windows x86-64): the stub (aqr-sfx-shim) with the
-//! blobs merged into it that the archive's modules need (`aqr_ld::pemerge`), and the archive
-//! appended, which the stub finds by its header magic.
+//! Self-extracting archives (`--format sfx`, Windows x86-64): the stub (aqr-sfx-shim, packed by
+//! UPX), the bundle of the blobs that the archive's modules need ([`aqr_sfx::bundle`]: their code
+//! through aqr-exe's x86 disfilter, then zstd), which the stub places in memory as it runs, and
+//! the archive.
 //!
 //! The stub and blobs are those `crates/aqr-sfx/pack.sh` gathered when this program was built
 //! (build.rs: `sfx.pack`). The archive names a module with a native blob there by a shorthand
-//! module block, its hash alone ([`wasm_of`]), and the stub carries the blob (named by the hash
-//! and the module's task slots, [`aqr_sfx::native_name`]) and the shared libraries that blob links
-//! against (crates/aqr-dll/layout.py: the runtime among them; the imports between them bound by
-//! the merge); any other module is written in full, and the interpreter blob is merged to run it.
+//! module block, its hash alone ([`wasm_of`]), and the bundle has the blob (named by the hash and
+//! the module's task slots, [`aqr_sfx::native_name`]) and the shared libraries that blob links
+//! against (crates/aqr-dll/layout.py: the runtime among them; the imports between them bound as
+//! the stub places them); any other module is written in full, and the interpreter blob is in the
+//! bundle to run it.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -114,16 +116,17 @@ pub fn wasm_of(m: Module) -> Option<Wasm> {
 /// What a self-extracting program carries of `archive`'s modules.
 pub struct Made {
     pub exe: Vec<u8>,
-    /// The native blobs merged, the shared libraries they link against, and whether the
-    /// interpreter blob is.
+    /// The native blobs in the bundle, the shared libraries they link against, whether the
+    /// interpreter blob is, and the bundle's bytes.
     pub natives: usize,
     pub libs: usize,
     pub interp: bool,
+    pub bundle: usize,
 }
 
 /// The self-extracting program of `archive` (an Aqueous archive made with [`wasm_of`]): the stub,
-/// the native blobs of the modules it names by their hashes and, if it has any module in full,
-/// the interpreter blob merged into it, and the archive after.
+/// the bundle of the native blobs of the modules it names by their hashes and, if it has any
+/// module in full, of the interpreter blob (none where it has no module), and the archive.
 pub fn make(archive: &[u8]) -> Result<Made, String> {
     let pack = pack()?;
     let ins = aqr::inspect::inspect(archive, false, &|_| None, None).map_err(|e| format!("{e:?}"))?;
@@ -164,7 +167,10 @@ pub fn make(archive: &[u8]) -> Result<Made, String> {
     if full {
         blobs.push((aqr_sfx::INTERP.to_owned(), interpreter()?));
     }
-    let mut exe = aqr_ld::pemerge::merge_bytes(pack.stub.clone(), &blobs, "aqr_dll_apply", "aqr_dll_info")?;
+    let bundle = if blobs.is_empty() { Vec::new() } else { aqr_sfx::bundle::pack(&blobs)? };
+    let mut exe = Vec::with_capacity(pack.stub.len() + bundle.len() + archive.len());
+    exe.extend_from_slice(&pack.stub);
+    exe.extend_from_slice(&bundle);
     exe.extend_from_slice(archive);
-    Ok(Made { exe, natives: hashes.len(), libs: libs.len(), interp: full })
+    Ok(Made { exe, natives: hashes.len(), libs: libs.len(), interp: full, bundle: bundle.len() })
 }

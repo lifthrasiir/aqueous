@@ -3,9 +3,11 @@
 //! through the dispatch table `aqr-ld merge` wrote into the anchor -- the native module blobs
 //! (aqr-dll), each named by its module's hash ([`native_name`]), and the interpreter blob
 //! (`aqr-interp`, [`INTERP`]) for any other module -- and is the [`Runner`] the decoder runs each
-//! module through; [`extract`] writes a decoded archive's files out. The merged blobs are Windows
-//! x86-64 only; elsewhere [`Sfx::find`] finds none.
+//! module through; [`Sfx::load`] takes the same blobs from a [`bundle`] (what `aqr --format sfx`
+//! appends to the stub), placing them in memory; [`extract`] writes a decoded archive's files
+//! out. The blobs are Windows x86-64 only; elsewhere [`Sfx::find`] finds none.
 
+pub mod bundle;
 mod native;
 
 use aqr_blob::interp::Interpreter;
@@ -98,34 +100,69 @@ impl Sfx {
             }
         });
         for e in aqr_blob::dispatch::entries(table) {
-            let (apply_rva, info_rva, name) = (e.apply_rva as usize, e.info_rva as usize, e.name);
-            let at = base + apply_rva;
-            if name == INTERP.as_bytes() {
-                // SAFETY: the merge wrote the RVA of aqr_interp_vtable, which returns the static vtable
-                let vtable_fn: extern "C" fn() -> *const Vtable = unsafe { std::mem::transmute(at) };
-                sfx.interp = Some(unsafe { Interpreter::new(vtable_fn()) });
-            } else if let Some((hash, slots)) = native::parse_native_name(name)
-                && info_rva != 0
-            {
-                // SAFETY: the merge wrote the RVAs of the blob's aqr_dll_apply and aqr_dll_info
-                let apply: aqr_api::dll::ApplyFn = unsafe { std::mem::transmute(at) };
-                let info: aqr_api::dll::InfoFn = unsafe { std::mem::transmute(base + info_rva) };
-                // (a blob of another version of the interface left out: its info is not this)
-                let info = unsafe { info() };
-                if info.version == aqr_api::dll::VERSION {
-                    let fns = Fns {
-                        apply,
-                        apply_part: info.apply_part,
-                        run: info.run,
-                        resources: info.resources != 0,
-                        decode: info.decode,
-                        streamed: info.streamed,
-                    };
-                    sfx.natives.push(Native { hash, slots, fns });
-                }
-            }
+            let info = if e.info_rva == 0 { 0 } else { base + e.info_rva as usize };
+            // SAFETY: the merge wrote the RVAs of the blob's entries
+            unsafe { sfx.add(e.name, base + e.apply_rva as usize, info) };
         }
         sfx
+    }
+
+    /// The blobs of bundle `bundle` ([`bundle`]: what `aqr --format sfx` appends to the stub)
+    /// placed in memory (`aqr_blob::load`: relocated, their imports bound, their exception tables
+    /// and images registered) and taken as [`Sfx::find`] takes the merged ones.
+    #[cfg(target_arch = "x86_64")]
+    pub fn load(&mut self, bundle: &[u8]) -> Result<(), String> {
+        #[cfg(target_env = "msvc")]
+        aqr_blob::keep_vcruntime();
+        let blobs = bundle::unpack(bundle)?;
+        let set: Vec<&[u8]> = blobs.iter().map(|(_, b)| &b[..]).collect();
+        let image = aqr_blob::load(&set)?;
+        for ((name, _), p) in blobs.iter().zip(&image.blobs) {
+            // SAFETY: the blob's entries, placed (a module blob's aqr_dll_apply and aqr_dll_info,
+            // the interpreter blob's aqr_interp_vtable)
+            unsafe { self.add(name.as_bytes(), p.at(p.apply_rva), p.at(p.info_rva)) };
+        }
+        Ok(())
+    }
+
+    /// None: blobs are placed on x86-64 alone.
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn load(&mut self, _: &[u8]) -> Result<(), String> {
+        Err("the blobs of a self-extracting program run on x86-64 alone".into())
+    }
+
+    /// Takes the blob of name `name` in the program (as [`Sfx::find`] tells) whose entries are
+    /// at `apply` and `info` (0 for none): the interpreter blob, a native module blob, or
+    /// neither (a shared library: nothing to take).
+    ///
+    /// # Safety
+    /// `apply` and `info` are the blob's entries, as its name tells.
+    unsafe fn add(&mut self, name: &[u8], apply: usize, info: usize) {
+        if name == INTERP.as_bytes() {
+            // SAFETY: the RVA of aqr_interp_vtable, which returns the static vtable
+            let vtable_fn: extern "C" fn() -> *const Vtable = unsafe { std::mem::transmute(apply) };
+            self.interp = Some(unsafe { Interpreter::new(vtable_fn()) });
+        } else if let Some((hash, slots)) = native::parse_native_name(name)
+            && apply != 0
+            && info != 0
+        {
+            // SAFETY: the blob's aqr_dll_apply and aqr_dll_info
+            let apply: aqr_api::dll::ApplyFn = unsafe { std::mem::transmute(apply) };
+            let info: aqr_api::dll::InfoFn = unsafe { std::mem::transmute(info) };
+            // (a blob of another version of the interface left out: its info is not this)
+            let info = unsafe { info() };
+            if info.version == aqr_api::dll::VERSION {
+                let fns = Fns {
+                    apply,
+                    apply_part: info.apply_part,
+                    run: info.run,
+                    resources: info.resources != 0,
+                    decode: info.decode,
+                    streamed: info.streamed,
+                };
+                self.natives.push(Native { hash, slots, fns });
+            }
+        }
     }
 }
 
@@ -134,6 +171,11 @@ impl Sfx {
     /// None: the merged blobs are Windows x86-64 only.
     pub fn find() -> Sfx {
         Sfx { interp: None, natives: Vec::new(), threads: std::thread::available_parallelism().map_or(1, |n| n.get()) }
+    }
+
+    /// None: the blobs are Windows x86-64 only.
+    pub fn load(&mut self, _: &[u8]) -> Result<(), String> {
+        Err("the blobs of a self-extracting program run on Windows x86-64 alone".into())
     }
 }
 

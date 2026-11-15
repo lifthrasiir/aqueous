@@ -1604,7 +1604,9 @@ dependencies = [
  "aqr-api",
  "aqr-blob",
  "aqr-common",
+ "aqr-exe",
  "aqr-formula",
+ "zstd",
 ]
 
 [[package]]

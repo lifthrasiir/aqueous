@@ -2,7 +2,7 @@
 name = "aqr-sfx-shim"
 version = "0.1.0"
 edition = "2024"
-description = "The self-extracting stub: the small executable that `aqr-ld merge` fills with module blobs and an archive is appended to; it decodes the archive and writes its files out (apply logic in aqr-sfx)"
+description = "The self-extracting stub: the small executable that a bundle of module blobs and an archive are appended to (or that `aqr-ld merge` fills with blobs); it decodes the archive and writes its files out (apply logic in aqr-sfx)"
 publish = false
 
 [[bin]]
