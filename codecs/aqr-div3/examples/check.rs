@@ -1,43 +1,21 @@
-//! Codes the video frames of an AVI (`00dc` chunks of a DIV3 stream), decodes them again and
+//! Codes the video frames of an AVI (the chunks of its DivX 3 stream), decodes them again and
 //! compares: `aqr-div3-check FILE.avi [FIRST [COUNT]]`. Reports the sizes by frame kind.
 use aqr_div3::{Codec, FrameKind};
 use std::time::Instant;
-
-fn frames(data: &[u8]) -> Vec<&[u8]> {
-    let mi = data.windows(4).position(|w| w == b"movi").expect("movi") + 4;
-    let mut pos = mi;
-    let mut out = Vec::new();
-    while pos + 8 <= data.len() {
-        let id = &data[pos..pos + 4];
-        let sz = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
-        if id == b"LIST" {
-            pos += 12;
-            continue;
-        }
-        let ok = id == b"JUNK"
-            || (id[0].is_ascii_digit() && id[1].is_ascii_digit() && matches!(&id[2..], b"dc" | b"wb" | b"db"));
-        if !ok || pos + 8 + sz > data.len() {
-            break;
-        }
-        if id == b"00dc" {
-            out.push(&data[pos + 8..pos + 8 + sz]);
-        }
-        pos += 8 + sz + (sz & 1);
-    }
-    out
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let data = std::fs::read(&args[1]).expect("read");
     let first: usize = args.get(2).map_or(0, |s| s.parse().unwrap());
     let count: usize = args.get(3).map_or(usize::MAX, |s| s.parse().unwrap());
-    let all = frames(&data);
+    let v = aqr_div3::formula::video(&data).expect("no DivX 3 video");
+    let (w, h) = (v.width as usize, v.height as usize);
+    let all: Vec<&[u8]> = v.frames.iter().map(|r| &data[r.clone()]).collect();
     let fr: Vec<&[u8]> = all.iter().skip(first).take(count).copied().collect();
-    println!("{} frames of {}", fr.len(), all.len());
+    println!("{w}x{h}, {} frames of {}", fr.len(), all.len());
 
     let t = Instant::now();
-    let mut codec = Codec::new(640, 352);
+    let mut codec = Codec::new(w, h);
     let mut enc = aqr_div3::Encoder::new();
     let mut sizes = Vec::new();
     let mut kinds = Vec::new();
@@ -53,7 +31,7 @@ fn main() {
     let te = t.elapsed();
 
     let t = Instant::now();
-    let mut codec = Codec::new(640, 352);
+    let mut codec = Codec::new(w, h);
     let mut dec = aqr_div3::Decoder::new(aqr_div3::SliceSource::new(&out));
     let mut bad = 0;
     for (i, f) in fr.iter().enumerate() {
