@@ -585,6 +585,12 @@ fn pe_inno_old() {
     let f = roundtrip(&d, &Options::default());
     assert!(!modules(&f).contains(&aqr_decompress::LZMA.name), "{f}");
     assert!(modules(&f).contains(&X86.name), "{f}");
+    // at level 9, where nothing probes the stream beforehand, it is split but put back as it
+    // is, nothing being made of its data: not the data left in the formula, larger than the
+    // stream (for which the installer would be kept whole as it is, where it is compared)
+    let f = roundtrip(&d, &Options { level: aqr::Level::Of(9), ..all() });
+    assert!(!modules(&f).contains(&aqr_decompress::LZMA.name), "{f}");
+    assert!(modules(&f).contains(&X86.name), "{f}");
 }
 
 /// An Inno Setup 4.0 installer of zlib chunks (zlib's default, level 9, as Inno Setup 4.0 wrote

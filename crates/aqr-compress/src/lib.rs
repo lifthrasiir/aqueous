@@ -452,6 +452,24 @@ pub(crate) struct Cx {
     /// resource files), by where their data is ([`siblings::plan`]). Shared with the contexts of
     /// the files.
     siblings: Option<Arc<siblings::Placed>>,
+    /// The decodings that the recompressor of this data asks to be undone where nothing is
+    /// made of their data ([`Undo`]): taken by [`recompress_with`] as the recompressor gives its
+    /// formula, those of formulas made within it put aside meanwhile.
+    undo: RefCell<Vec<Undo>>,
+}
+
+/// A decoding a recompressor asks to be undone ([`undo`]): the application at `coded` of the data,
+/// of its formula's root, whose data is the content stream `stream` (its record `record`
+/// bytes): put back as the bytes of `coded` (a stream of class `kept`) where nothing is made of
+/// the content, and its data and record would not archive in less than those bytes (aqr-formula's
+/// flat probe). An Inno Setup installer's LZMA stream split at level 7 or more, where nothing
+/// probes it beforehand, would otherwise leave its data as it is in the formula, larger than
+/// the stream, and the installer be kept whole as it is.
+pub(crate) struct Undo {
+    pub stream: usize,
+    pub coded: Range<usize>,
+    pub record: usize,
+    pub kept: &'static str,
 }
 
 /// Text coded once, for the files of an archive that other files of it hold as the contents of
@@ -574,6 +592,7 @@ impl Cx {
             once: Default::default(),
             files: None,
             siblings: None,
+            undo: Default::default(),
         }
     }
 
@@ -1599,6 +1618,8 @@ fn recompress_sealed(
     let prepared = ready.is_some();
     let words = cx.words.borrow().clone();
     let (words, held) = (words.as_deref(), cx.held.as_deref());
+    // (the undos of this recompressor's formula, those of formulas within it its own)
+    let outer = cx.undo.take();
     let f = match ready {
         Some(f) => f,
         None => match recompressor(format) {
@@ -1611,7 +1632,9 @@ fn recompress_sealed(
                 pure(format, d, &Pure { opt, depth, words, once: &cx.once, held, seal, pre }).flatten()
             }
         },
-    }?;
+    };
+    let undos = cx.undo.replace(outer);
+    let f = f?;
     // (parts sealed already, evaluated beforehand as they were)
     let sealed = f.streams.iter().any(|s| s.data.sunk_in().is_some());
     let mut f = f;
@@ -1672,7 +1695,10 @@ fn recompress_sealed(
     if of.files_apart {
         *cx.sealing.borrow_mut() = sealing.take();
     }
-    let children = nested(&mut f, d, opt, depth, cx);
+    let mut children = nested(&mut f, d, opt, depth, cx);
+    if !undos.is_empty() && undo(&mut f, d, children.as_mut(), &undos, opt, cx) && children.is_none() {
+        f.compact();
+    }
     if words.is_some() {
         cx.share_words(None);
     }
@@ -1705,6 +1731,66 @@ fn recompress_sealed(
     }
     // (text as aqr-wrt tells, see [`made`])
     (format == Format::Text || smaller_as(&f, None, d, of, opt, cx)).then_some(f)
+}
+
+/// Undoes the decodings of `undos` of formula `f` of data `d` ([`Undo`]) where nothing is made of
+/// their contents (of `children`, those [`nested`] made: their slices of the content dropped)
+/// and their data would not pay as it is; not where contents are planned into sets, whose
+/// members are told by their places among the children. Whether any was undone.
+fn undo(
+    f: &mut Formula,
+    d: &[u8],
+    children: Option<&mut (Contents, sets::Plan)>,
+    undos: &[Undo],
+    opt: &Options,
+    cx: &Cx,
+) -> bool {
+    if children.as_ref().is_some_and(|c| !c.1.is_empty()) {
+        return false;
+    }
+    let mut children = children.map(|c| &mut c.0);
+    let of = |n: &Node, s: usize| matches!(n, &Node::Slice { stream, .. } if stream == s);
+    let mut undone = false;
+    for u in undos {
+        let made = children.as_ref().is_some_and(|c| c.iter().any(|(n, m)| of(n, u.stream) && m.is_some()));
+        let Some(data) = f.streams.get(u.stream).filter(|s| s.content && !s.data.is_lazy()) else { continue };
+        let Some(coded) = d.get(u.coded.clone()) else { continue };
+        if made || !undoes(coded.len(), u.record, &data.data, d, opt, cx) {
+            continue;
+        }
+        let kept = f.push(u.kept, coded.to_vec());
+        if !replace_apply(&mut f.root, u.stream, &kept) {
+            f.streams.pop();
+            continue;
+        }
+        if let Some(c) = children.as_mut() {
+            c.retain(|(n, _)| !of(n, u.stream));
+        }
+        undone = true;
+    }
+    undone
+}
+
+/// Whether a decoding of `coded` bytes into `data` and a record of `record` bytes, nothing made
+/// of the data, is undone ([`undo`]): unless they may archive in less than the coded bytes, as
+/// aqr-formula's flat probe tells (what other data of `within`'s batch holds counting as nothing).
+fn undoes(coded: usize, record: usize, data: &[u8], within: &[u8], opt: &Options, cx: &Cx) -> bool {
+    let held = || cx.held_by_others(data, within) as u8 as f64;
+    !Probe::flat(opt.level).pays(&cx.enc, coded, || Some(record), data, held, Kind::Unknown)
+}
+
+/// Puts `with` in place of the application below `n` that takes a slice of `stream` among its
+/// inputs. Whether there was one.
+fn replace_apply(n: &mut Node, stream: usize, with: &Node) -> bool {
+    match n {
+        Node::Apply(a) if a.inputs.iter().any(|i| matches!(i, &Node::Slice { stream: s, .. } if s == stream)) => {
+            *n = with.clone();
+            true
+        }
+        Node::Apply(a) => a.inputs.iter_mut().any(|i| replace_apply(i, stream, with)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().any(|n| replace_apply(n, stream, with)),
+        _ => false,
+    }
 }
 
 /// Where bytes `b` are, as an address (0 for bytes not made yet, or sunk).

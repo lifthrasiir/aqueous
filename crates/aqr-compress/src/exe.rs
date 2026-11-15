@@ -91,6 +91,9 @@ aqr_common::zopt! {
     /// Whether an Inno Setup 4.0 installer's zlib streams are recompressed in turn
     /// ([`aqr_inno::zlib_streams`]).
     static INNO_ZLIB: Opt<bool> = Opt::flag("exe:inno-zlib", true, "recompress Inno Setup 4.0's zlib chunks and setup program");
+    /// Whether an Inno Setup installer's LZMA stream split is put back as it was where nothing is
+    /// made of its data ([`crate::Undo`]).
+    static INNO_UNDO: Opt<bool> = Opt::flag("exe:inno-undo", true, "put an Inno Setup LZMA stream back where nothing is made of its data");
     /// Tables shorter than this are left with the rest.
     static MIN_TABLE: Opt<usize> = Opt::size("exe:min-table", 64, "tables shorter than this are left with the rest");
     /// Symbol tables shorter than this, with their string tables, are left with the rest: the
@@ -192,7 +195,36 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
     }
     sections.extend(zlib.iter().map(|r| (0, r.start, r.len(), Arch::InnoZlib)));
     sections.extend(inno.iter().enumerate().map(|(k, p)| (0, p.range.start, p.range.len(), Arch::Inno(k))));
-    filtered(d, "pe", sections, &[], &[], None, &[], inno)
+    let f = filtered(d, "pe", sections, &[], &[], None, &[], inno)?;
+    if INNO_UNDO.get() {
+        cx.undo.borrow_mut().extend(inno_undos(&f));
+    }
+    Some(f)
+}
+
+/// The LZMA streams of an Inno Setup installer's data split in formula `f` (of [`pe`]), to be
+/// undone where nothing is made of their data ([`crate::Undo`]): each application of `lzma-recons`
+/// among the parts of its root, by where its output is in the installer.
+fn inno_undos(f: &Formula) -> Vec<crate::Undo> {
+    let Node::Concat(parts) = &f.root else { return Vec::new() };
+    let mut at = 0usize;
+    let mut undos = Vec::new();
+    for n in parts {
+        let len = n.len() as usize;
+        if let Node::Apply(a) = n
+            && a.module == aqr_lzma::formula::MODULE
+            && let [Node::Slice { stream, .. }, record, ..] = &a.inputs[..]
+        {
+            undos.push(crate::Undo {
+                stream: *stream,
+                coded: at..at + len,
+                record: record.len() as usize,
+                kept: "pe/kept",
+            });
+        }
+        at += len;
+    }
+    undos
 }
 
 /// An image's code: `(virtual address, offset, size)` of each section, within its file.
