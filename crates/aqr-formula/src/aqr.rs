@@ -1758,7 +1758,8 @@ impl Encoder {
         let level = self.level;
         let total = todo.iter().map(|t| self::total(&t.0) as u64).sum();
         let (done, progress) = (std::sync::atomic::AtomicU64::new(0), self.progress.as_deref());
-        let one = |(d, how): &(Vec<&[u8]>, How), threads: usize| -> Result<(StreamKey, Compressed, i32)> {
+        // (each kept as it is made: the store taking it then, not once all of a batch's are)
+        let one = |(d, how): &(Vec<&[u8]>, How), threads: usize| -> Result<(StreamKey, Option<crate::Bytes>, i32)> {
             let (d, how) = (&d[..], *how);
             let made = THREAD_CCTX.with(|c| {
                 let c = &mut c.borrow_mut();
@@ -1767,7 +1768,7 @@ impl Encoder {
                     None => compressed(c, d, l, 1),
                 })?;
                 let (c, l) = plan.carry_out(c, d, threads)?;
-                Ok((key_how(d, how), c, l))
+                Ok((key_how(d, how), self::kept(c), l))
             });
             let n = self::total(d) as u64;
             if let Some(p) = progress {
@@ -1793,7 +1794,7 @@ impl Encoder {
         let (mut kept, mut levels) = (self.streams.borrow_mut(), self.levels.borrow_mut());
         for m in made {
             let (k, c, l) = m?;
-            kept.insert(k, self::kept(c));
+            kept.insert(k, c);
             levels.insert(k, l);
         }
         Ok(())
