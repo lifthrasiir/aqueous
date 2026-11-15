@@ -5,10 +5,16 @@
 # is rebuilt from them: the bytes kept are the modules (a toolchain giving other bytes makes
 # other modules, of other hashes).
 set -eu
+# (globs, and so known.rs and the spec's rows, in the order of the bytes: a locale's collation
+# may pass over the hyphens, as Windows' en_US.UTF-8 does)
+export LC_ALL=C
 cd "$(dirname "$0")/../.."
 cargo build --release -p aqr-ld
 # (paths in the modules, of panics, made the same anywhere, and without the workspace's
-# directories; the crates' paths still reach the symbols, so moving a crate can reorder functions)
+# directories; aqr-ld as rustc's wrapper makes the crates' metadata, which Cargo makes of their
+# paths with the host's separators, of no path, so that the symbols and the order they give the
+# data and functions are the same on any host and wherever a crate is)
+RUSTC_WORKSPACE_WRAPPER="$PWD/target/release/aqr-ld" \
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=crates/= --remap-path-prefix=codecs/=" \
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER="$PWD/target/release/aqr-ld" \
     cargo build --profile release-wasm --target wasm32-unknown-unknown -p aqr-modules -F wasm --bins

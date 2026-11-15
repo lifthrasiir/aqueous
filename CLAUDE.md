@@ -204,6 +204,8 @@ optimization picked by hash.
 - aqr-modules: one `[[bin]]` per module (never one module doing several things). `build.sh`
   builds them through aqr-ld and writes `wasm/*.wasm`, `*.block` (the module blocks' data),
   `src/known.rs` (name, version, SHA-512/256) and the registry's table in `spec/index.bs`.
+  Every host builds the same bytes: aqr-ld, as rustc's wrapper there, makes the crates' `-C
+  metadata` (of their paths, with the host's separators, by Cargo) of no path (`src/metadata.rs`).
 - **After changing any code a module links, rerun `crates/aqr-modules/build.sh`** and commit
   the results; a test in aqr-decompress catches stale ones. If you don't rebuild, say so in
   the commit message.

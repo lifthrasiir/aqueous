@@ -11,9 +11,12 @@
 //!   library the symbols that the others import from it.
 //! - `aqr-ld merge --stub S --out O NAME=MODULE.dll ...` merges native module libraries into a
 //!   stub executable as sections, with no loader ([`pemerge`]), toward self-extracting archives.
+//! - As Cargo's `RUSTC_WORKSPACE_WRAPPER` (crates/aqr-modules/build.sh), it runs rustc with the
+//!   crates' `-C metadata` made the same on any host ([`metadata`]).
 //!
 //! With `AQR_LD_NAMES` set, the name section is kept, to see what is left in a module.
 
+mod metadata;
 mod msvc;
 mod rewrite;
 mod trim;
@@ -26,7 +29,9 @@ use aqr_ld::pemerge;
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let result = if args.first().is_some_and(|a| a == "-flavor") {
+    let result = if metadata::is_wrapper(&args) {
+        metadata::wrap(&args)
+    } else if args.first().is_some_and(|a| a == "-flavor") {
         link(&args)
     } else if args.first().is_some_and(|a| a == "merge") {
         pemerge::main(&args[1..])
