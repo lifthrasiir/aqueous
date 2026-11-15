@@ -44,9 +44,13 @@ impl Tokens for crate::inflate::Flat {
     }
 }
 
-/// Tokens emulated per candidate in the first round of ranking; each further round covers
-/// four times as many among the candidates still tied for the fewest misses.
-const TRIAL_TOKENS: usize = 1024;
+aqr_common::zopt! {
+    /// Tokens emulated per candidate in the first round of ranking; each further round covers
+    /// [`TRIAL_GROWTH`] times as many among the candidates still tied for the fewest misses.
+    static TRIAL_TOKENS: Opt<usize> = Opt::value("flate:trial-tokens", 1024, "tokens emulated per zlib candidate in the first round");
+    /// The factor by which each round of ranking covers more tokens.
+    static TRIAL_GROWTH: Opt<usize> = Opt::value("flate:trial-growth", 4, "factor by which each zlib ranking round grows");
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Detection {
@@ -392,7 +396,7 @@ pub fn plausible(stream: &dyn Tokens, data: &[u8], p: Params, hints: &Hints) -> 
     candidates_hinted(stream, hints)
         .iter()
         .any(|&c| c == p || (alts.contains(&p.mem) && Params { mem: c.mem, ..p } == c))
-        && trial(stream, data, p, TRIAL_TOKENS, 0).is_some()
+        && trial(stream, data, p, TRIAL_TOKENS.get(), 0).is_some()
 }
 
 /// Other memLevels that `stream` allows when it has no full block to tell it by (memLevel
@@ -509,7 +513,8 @@ fn detect_among_followed<'a>(
 ) -> Option<(Detection, Option<Followed<'a>>)> {
     let mut units = units(stream, data, candidates, cuts);
     let take = |units: Vec<Unit<'a>>, i: usize| units.into_iter().find_map(|u| u.into_followed(i));
-    let mut limit = TRIAL_TOKENS;
+    let mut limit = TRIAL_TOKENS.get();
+    let growth = TRIAL_GROWTH.get();
     loop {
         let mut best = usize::MAX;
         for k in 0..units.len() {
@@ -538,7 +543,7 @@ fn detect_among_followed<'a>(
             let &(i, d) = alive.first()?;
             return Some((d, take(units, i)));
         }
-        limit = limit.saturating_mul(4);
+        limit = limit.saturating_mul(growth);
     }
 }
 

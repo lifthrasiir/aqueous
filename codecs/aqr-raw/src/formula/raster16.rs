@@ -17,12 +17,6 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::raster16::plan(u.params, u.inputs, u.output())?)
 }
 
-/// The bytes of a band, about: a raster of more is cut into bands of rows of about this many
-/// bytes (`bands`), each an application of the module of its own, whose coder starts anew (no
-/// row above the first). An application needs about four times its band at most (the inputs
-/// imported and copied, the output imported and made): 192 MiB at this length.
-pub const BAND: usize = 48 << 20;
-
 impl Layout for Format {
     const MODULE: Module = MODULE;
     const CODED: &'static str = "raster16/coded";
@@ -53,7 +47,7 @@ impl Layout for Format {
 /// The application giving `samples` (exactly the raster of `fmt`), its inputs pushed to `f`.
 /// None where the layout is not taken.
 pub fn apply(f: &mut Formula, samples: &[u8], fmt: Format) -> Option<Node> {
-    apply_in(f, samples, fmt, 1, BAND)
+    apply_in(f, samples, fmt, 1, super::raster::BAND.get())
 }
 
 /// [`apply`] in bands of about `band` bytes, `threads` coded at a time. A raster of one band is

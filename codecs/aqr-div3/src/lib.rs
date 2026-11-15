@@ -9,6 +9,8 @@ extern crate alloc;
 #[cfg(feature = "encode")]
 extern crate std;
 
+aqr_common::zopt_namespace!("div3", "DivX 3 video in AVI (aqr-div3)");
+
 mod frame;
 pub mod tables;
 

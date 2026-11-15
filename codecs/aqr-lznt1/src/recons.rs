@@ -832,8 +832,15 @@ fn read_into(units: &[(&[u8], usize)], data: &mut [u8]) -> Result<(usize, usize)
     Ok((if multi { first } else { single.unwrap_or(first) }, g.max(1)))
 }
 
-/// Bytes of data that the choice of [`walk`]'s candidates is made on.
-const SAMPLE: usize = 256 << 10;
+aqr_common::zopt! {
+    /// Bytes of data that the choice of [`walk`]'s candidates is made on.
+    static SAMPLE: Opt<usize> = Opt::size("lznt1:sample", 256 << 10, "bytes of data the choice of candidates is made on");
+    /// The choice of [`walk`]'s candidates forced (on: all of them), rather than made on a sample.
+    static ALL: Opt<Option<bool>> =
+        Opt::value("lznt1:all", None, "candidates forced, all (on) or the usual (off), rather than chosen on a sample")
+            .bare(Some(true))
+            .off(Some(false));
+}
 
 /// The record of `data` coded with the candidates the stream's encoder seems to use: tried on its
 /// first units (up to [`SAMPLE`] bytes), the cheaper going on to the rest.
@@ -846,8 +853,12 @@ fn best_walk(data: &[u8], units: &[(&[u8], usize)], us: usize, cl: usize) -> Res
             Err(e) => Err(e),
         }
     };
-    let small = data.len() <= SAMPLE;
-    let sample = if small { usize::MAX } else { SAMPLE };
+    if let Some(all) = ALL.get() {
+        return run(all, usize::MAX);
+    }
+    let sample_bytes = SAMPLE.get();
+    let small = data.len() <= sample_bytes;
+    let sample = if small { usize::MAX } else { sample_bytes };
     let (a, b) = (run(false, sample)?, run(true, sample)?);
     let all = b.cost.iter().sum::<f64>() < a.cost.iter().sum::<f64>();
     if small {

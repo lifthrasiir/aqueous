@@ -24,8 +24,28 @@ use crate::varint;
 use aqr_flate::inflate::{self, Layout};
 use aqr_formula::{Formula, Kind, Node};
 
-/// Streams shorter than this stay in the skeleton.
-const MIN_ITEM: usize = 64;
+aqr_common::zopt_namespace!("pdf", "PDF files (aqr-pdf)");
+
+aqr_common::zopt! {
+    /// Streams shorter than this stay in the skeleton.
+    static MIN_ITEM: Opt<usize> = Opt::size("pdf:min-item", 64, "streams shorter stay in the skeleton");
+    /// Default of [`Options::speed`]: the target speed in MB/s of PDF (none: no limit).
+    static SPEED: Opt<Option<f64>> = Opt::value("pdf:speed", Some(100.0), "target speed in MB/s of PDF, none: no limit").off(None);
+    /// Default of [`Options::verify`].
+    static VERIFY: Opt<bool> = Opt::flag("pdf:verify", false, "evaluate the formula and compare");
+    /// Default of [`Options::level`].
+    static LEVEL: Opt<i32> = Opt::value("pdf:level", 9, "zstd level to judge whether the formula is smaller");
+    /// Default of [`Options::tok`].
+    static ALLOW_TOK: Opt<bool> = Opt::flag("pdf:tok", true, "allow the token mode for FlateDecode streams");
+    /// Default of [`Options::full`].
+    static ALLOW_FULL: Opt<bool> = Opt::flag("pdf:full", true, "allow the full mode for FlateDecode streams");
+    /// Default of [`Options::png`].
+    static ALLOW_PNG: Opt<bool> = Opt::flag("pdf:png", true, "code images with PNG predictors through aqr-png");
+    /// A scale of all the fitted time costs of the plan (against the speed target).
+    static COST_SCALE: Opt<f64> = Opt::value("pdf:cost-scale", 1.0, "scale of the fitted time costs of the plan");
+    /// Memory in flight in [`pipeline`] (estimated); one item at least.
+    static IN_FLIGHT: Opt<usize> = Opt::size("pdf:in-flight", 256 << 20, "estimated memory of the pipeline's jobs in flight");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -56,14 +76,14 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            speed: 100.0,
-            verify: false,
-            level: 9,
-            tok: true,
-            full: true,
-            png: true,
-            profile: aqr_flate::DEFAULT_PROFILE,
-            zlib: true,
+            speed: SPEED.get().unwrap_or(f64::INFINITY),
+            verify: VERIFY.get(),
+            level: LEVEL.get(),
+            tok: ALLOW_TOK.get(),
+            full: ALLOW_FULL.get(),
+            png: ALLOW_PNG.get(),
+            profile: aqr_flate::PROFILE.get(),
+            zlib: aqr_flate::ZLIB.get(),
             threads: 1,
         }
     }
@@ -170,7 +190,7 @@ mod cost {
     /// The larger of the two times of an item.
     pub fn time(t: &Time, n: f64, plain: f64) -> f64 {
         let f = |c: &[f64; 3]| c[0] + c[1] * n + c[2] * plain;
-        f(&t.0).max(f(&t.1))
+        f(&t.0).max(f(&t.1)) * super::COST_SCALE.get()
     }
 
     /// Inflated bytes per DEFLATE byte, when the dictionary does not tell.
@@ -257,6 +277,7 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize, Optio
     let mut items: Vec<Item> = vec![];
     let mut seen: std::collections::HashMap<u64, Vec<usize>> = Default::default();
     let mut covered = 0usize;
+    let min_item = MIN_ITEM.get();
     // Encrypted streams look random: nothing to code but repeats, unless the file's cipher is
     // known (the empty user password) and they are decrypted.
     let encrypted = encrypted(file);
@@ -264,7 +285,7 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize, Optio
     let standard = if encrypted { standard::detect(file, &mut objs) } else { None };
     for s in &streams {
         let data = &file[s.data.clone()];
-        if data.len() < MIN_ITEM {
+        if data.len() < min_item {
             continue;
         }
         let f = kind::filter(&s.dict);
@@ -322,7 +343,7 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize, Optio
     let skel_len = file.len() - covered;
     let budget =
         if opts.speed.is_finite() { file.len() as f64 * 1e3 / (opts.speed * cost::MARGIN) } else { f64::INFINITY };
-    let fixed = file.len() as f64 * cost::SCAN + skel_len as f64 * cost::ZSTD_C;
+    let fixed = (file.len() as f64 * cost::SCAN + skel_len as f64 * cost::ZSTD_C) * COST_SCALE.get();
     st.predicted = fixed + choose(&mut items, budget - fixed, opts);
     st.times[0] += t0.elapsed().as_secs_f64();
     (items, skel_len, standard)
@@ -440,9 +461,6 @@ fn pool(threads: usize) -> Option<rayon::ThreadPool> {
     aqr_common::pool::rayon_pool(threads).filter(|p| p.current_num_threads() > 1)
 }
 
-/// Memory in flight in [`pipeline`] (estimated); one item at least.
-const IN_FLIGHT: usize = 256 << 20;
-
 /// Hands `consume` the indices `0..n` in order, on the calling thread, each with `job`'s
 /// result for it if `est` gives it an estimate of memory: those jobs run on `pool`, ahead in
 /// order, up to a bound in number and memory. A job's panic is resumed here; once this
@@ -470,6 +488,7 @@ fn pipeline<T: Send, E>(
         // Spawned and not consumed: (index, estimate), in order.
         let mut flight = std::collections::VecDeque::new();
         let mut bytes = 0usize;
+        let in_flight = IN_FLIGHT.get();
         let mut done = std::collections::HashMap::new();
         let mut next = 0;
         for i in 0..n {
@@ -478,7 +497,7 @@ fn pipeline<T: Send, E>(
                     next += 1;
                     continue;
                 };
-                if !flight.is_empty() && bytes.saturating_add(e) > IN_FLIGHT {
+                if !flight.is_empty() && bytes.saturating_add(e) > in_flight {
                     break;
                 }
                 bytes = bytes.saturating_add(e);

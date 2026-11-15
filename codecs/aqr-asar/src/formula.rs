@@ -25,9 +25,13 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::plan(u.inputs, u.content(2)?, len)?)
 }
 
-/// Bodies of at least this many bytes are slices of their own, apart from the others of their
-/// kind next to them, so that the same files elsewhere are found by their slices.
-pub const OWN_MIN: usize = 1 << 10;
+aqr_common::zopt_namespace!("asar", "Electron asar archives (aqr-asar)");
+
+aqr_common::zopt! {
+    /// Bodies of at least this many bytes are slices of their own, apart from the others of their
+    /// kind next to them, so that the same files elsewhere are found by their slices.
+    pub static OWN_MIN: Opt<usize> = Opt::size("asar:own-min", 1 << 10, "bodies at least this long are slices of their own");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -42,7 +46,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { kind: |_| Kind::Unknown, own: OWN_MIN }
+        Options { kind: |_| Kind::Unknown, own: OWN_MIN.get() }
     }
 }
 

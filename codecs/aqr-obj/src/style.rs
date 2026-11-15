@@ -20,16 +20,24 @@ pub fn next_styles(prev: &Styles, src: &[u8]) -> Styles {
     st
 }
 
+aqr_common::zopt! {
+    /// Places in a block, spread over it, where lines are sampled for the styles (of `PART` bytes each).
+    static PARTS: Opt<usize> = Opt::value("obj:style-parts", 16, "places of a block sampled for the number styles");
+    /// Percent of the normals that are of length 1 (within 1e-3) for them to be taken as unit vectors.
+    static UNIT_NORMAL_PCT: Opt<usize> =
+        Opt::value("obj:unit-normal-pct", 80, "percent of normals of length 1 for taking them as unit vectors");
+}
+
 /// Chooses the styles from lines spread over a block: `%.Pg` when most numbers of a kind
 /// are that and their fixed formats vary; unit normals when most normals have length 1. A
 /// kind not seen keeps its style (`st`, `unit`: those of the previous block).
 fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
-    const PARTS: usize = 16;
+    let parts = PARTS.get();
     const PART: usize = 2 << 10;
     // Tokens with their position in the line.
     let mut toks: [Vec<(usize, &[u8])>; 4] = Default::default();
-    for i in 0..PARTS {
-        let a = src.len() / PARTS * i;
+    for i in 0..parts {
+        let a = src.len() / parts * i;
         let sample = &src[a..(a + PART).min(src.len())];
         // Whole lines only: from the first line start.
         let b = if a == 0 { 0 } else { memchr::memchr(b'\n', sample).map_or(sample.len(), |p| p + 1) };
@@ -60,6 +68,6 @@ fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
         }
     }
     if nvn > 0 {
-        *unit = nunit * 10 >= nvn * 8;
+        *unit = nunit * 100 >= nvn * UNIT_NORMAL_PCT.get();
     }
 }

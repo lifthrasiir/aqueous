@@ -290,16 +290,23 @@ fn column(d: &[u8], t: &Table, ids: &[usize], q: Option<u8>, s: &mut Streams) {
 /// so a long table's would take several times its length at once.
 pub const SEGMENT: usize = 64 << 20;
 
+aqr_common::zopt_namespace!("xsv", "tables of delimited text (aqr-xsv)");
+
+aqr_common::zopt! {
+    /// [`SEGMENT`] as set (`xsv:segment`), what the encoder takes.
+    pub static SEGMENT_LEN: Opt<usize> = Opt::size("xsv:segment", SEGMENT, "bytes of records of a segment, coded on its own");
+}
+
 /// The formula of table `input`, or `None` where it is shorter than [`MIN_LEN`], does not
 /// start as a table ([`parse::dialect`]), or a tenth of it or more is not of the table. It is
 /// the same whatever `threads` is (one is used).
 pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
-    encode_in(input, SEGMENT, true)
+    encode_in(input, SEGMENT_LEN.get(), true)
 }
 
 /// The formula of `input` as a table of dialect `dia`, whatever it holds.
 pub fn encode_as(input: &[u8], dia: &Dialect) -> Formula {
-    formula(input, dia, SEGMENT, false).0
+    formula(input, dia, SEGMENT_LEN.get(), false).0
 }
 
 /// [`encode`] in segments of `segment` bytes (the test of segments at lengths shorter than

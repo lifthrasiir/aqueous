@@ -6,6 +6,8 @@
 //! let formula = aqr_psd::formula::encode(&psd, 1); // None where there is nothing to take out
 //! ```
 
+aqr_common::zopt_namespace!("psd", "Photoshop files (aqr-psd)");
+
 pub mod codec;
 pub mod composite;
 #[cfg(feature = "encode")]

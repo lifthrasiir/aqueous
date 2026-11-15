@@ -46,18 +46,20 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// members of a file of their own, which a recompressor makes apart.
 pub const MEMBERS: &str = "lzo/members";
 
-/// Bytes of streams [`encode_blocks`] splits at once.
-const WINDOW: usize = 32 << 20;
+aqr_common::zopt! {
+    /// Bytes of streams [`encode_blocks`] splits at once.
+    static WINDOW: Opt<usize> = Opt::size("lzo:window", 32 << 20, "bytes of streams split at once");
+    /// Streams of [`encode_blocks`]'s first that are split with both modes of the match finder, the
+    /// smaller record kept ([`recons::split`]).
+    static PROBE: Opt<usize> = Opt::value("lzo:probe", 16, "first streams split with both modes, to pick the others'");
+    /// Bytes of data and streams an application of [`encode_blocks`]'s with `contents` takes at
+    /// most (but a stream of more): its data is one content.
+    static GROUP: Opt<usize> = Opt::size("lzo:group", 32 << 20, "bytes of data and streams of an application of members");
+}
 
-/// Streams of [`encode_blocks`]'s first that are split with both modes of the match finder, the
-/// smaller record kept ([`recons::split`]), and how many must split for the mode they agree on
-/// to be the others'.
-const PROBE: usize = 16;
+/// How many of the first streams must split for the mode they agree on to be the others'
+/// ([`PROBE`]).
 const PROBE_AGREE: usize = 4;
-
-/// Bytes of data and streams an application of [`encode_blocks`]'s with `contents` takes at
-/// most (but a stream of more): its data is one content.
-const GROUP: usize = 32 << 20;
 
 /// A piece of an input [`encode_blocks`] takes: an LZO1X stream (of `data` bytes of data where
 /// it is known), or data stored as it is.
@@ -90,12 +92,13 @@ pub fn encode_blocks(input: &[u8], blocks: &[Block], threads: usize, contents: b
             .filter(|sp| sp.used == b.len && b.data.is_none_or(|n| sp.data.len() == n))
     };
     // the first [`PROBE`] blocks a window of their own, then windows of [`WINDOW`] bytes
-    let first = 0..blocks.len().min(PROBE);
+    let (window, probe) = (WINDOW.get(), PROBE.get());
+    let first = 0..blocks.len().min(probe);
     let mut i = first.end;
     let mut windows = vec![first];
     while i < blocks.len() {
         let (mut j, mut bytes) = (i, 0);
-        while j < blocks.len() && (j == i || bytes + blocks[j].len <= WINDOW) {
+        while j < blocks.len() && (j == i || bytes + blocks[j].len <= window) {
             bytes += blocks[j].len;
             j += 1;
         }
@@ -221,13 +224,14 @@ pub fn encode_blocks(input: &[u8], blocks: &[Block], threads: usize, contents: b
         // applications of streams one after another, [`GROUP`] bytes of their data and streams
         // at most (one of all of a game's data file of 50 MB took 274 MiB, over the bound),
         // the data of each one content (one of each stream cost each a content's work)
+        let group = GROUP.get();
         let rec = f.push_as("lzo/record", Kind::Compressed, records);
         let Node::Slice { stream: rec_stream, .. } = rec else { unreachable!() };
         let (mut i, mut r_at) = (0, 0u64);
         while i < lens.len() {
             let mut j = i;
             let mut bytes = 0;
-            while j < lens.len() && (j == i || bytes + lens[j].0 + lens[j].2 <= GROUP) {
+            while j < lens.len() && (j == i || bytes + lens[j].0 + lens[j].2 <= group) {
                 bytes += lens[j].0 + lens[j].2;
                 j += 1;
             }

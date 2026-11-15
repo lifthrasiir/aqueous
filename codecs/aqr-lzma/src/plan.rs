@@ -133,6 +133,14 @@ pub fn application(n: usize, dict: u32, finder: usize, own: Own) -> u64 {
     m.plan()
 }
 
+aqr_common::zopt! {
+    /// The reach of the match finder to record, forced (`finder_of`'s byte: 0 the dictionary's), not
+    /// chosen to fit the application's bound ([`finder_for`]).
+    pub static FIN: Opt<Option<u8>> = Opt::value("lzma:fin", None, "match finder reach to record, forced (0 the dictionary's), else fitted to the bound");
+    /// The smallest reach (2^N bytes) that [`finder_for`] lowers it to, to fit the application's bound.
+    pub static FIN_MIN: Opt<u32> = Opt::value("lzma:fin-min", 12, "smallest match finder reach (2^N) lowered to for the plan to fit");
+}
+
 /// The reach of the match finder to record for a stream of `n` bytes of data of a dictionary of
 /// `dict` bytes ([`recons::finder_of`]'s byte): 0, the dictionary's, where the application with
 /// it fits the bound ([`set_bound`]) or no reach would, else the largest power of two below it
@@ -140,6 +148,9 @@ pub fn application(n: usize, dict: u32, finder: usize, own: Own) -> u64 {
 /// beyond it is coded as a far distance), but the rings of 12 bytes for each position are
 /// smaller.
 pub fn finder_for(n: usize, dict: u32, own: Own) -> u8 {
+    if let Some(f) = FIN.get() {
+        return f;
+    }
     let bound = BOUND.load(Relaxed);
     let fits = |finder: usize| application(n, dict, finder, own) <= bound;
     let reach = recons::reach(dict);
@@ -148,7 +159,8 @@ pub fn finder_for(n: usize, dict: u32, own: Own) -> u8 {
     }
     // (the powers of two below the reach)
     let mut k = usize::BITS - 1 - (reach - 1).leading_zeros();
-    while k >= 12 {
+    let min = FIN_MIN.get();
+    while k >= min {
         if fits(1 << k) {
             return k as u8;
         }

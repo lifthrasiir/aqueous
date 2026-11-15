@@ -18,14 +18,21 @@ use crate::{Error, Result, corrupt};
 /// Pixels of a file at most.
 pub const MAX_PIXELS: u64 = 1 << 28;
 
-/// The encoder gives a file up where, once the images coded hold a quarter of its LZW data
-/// (of 1 Mbit at least), the record has taken more than 5/4 of their bits: the pixels of lossy
-/// encoders (Photoshop's "Lossy") are made to fit LZW's dictionary, and the model codes them
-/// larger. Of the GIF files of 27 asar archives, those the record makes smaller are at most
-/// 1.16 there, those it makes larger 1.22 to 2.2.
-const GIVE_UP_MIN: u64 = 1 << 20;
-const GIVE_UP_AFTER: u64 = 4;
-const GIVE_UP_RATIO: (u64, u64) = (5, 4);
+// The encoder gives a file up where, once the images coded hold a quarter of its LZW data
+// (of 1 Mbit at least), the record has taken more than 5/4 of their bits: the pixels of lossy
+// encoders (Photoshop's "Lossy") are made to fit LZW's dictionary, and the model codes them
+// larger. Of the GIF files of 27 asar archives, those the record makes smaller are at most
+// 1.16 there, those it makes larger 1.22 to 2.2.
+aqr_common::zopt! {
+    /// The least LZW bits (of all the images) for the encoder to give a file up.
+    static GIVE_UP_MIN: Opt<u64> = Opt::value("gif:giveup-min", 1 << 20, "least LZW bits of a file for the encoder to judge giving it up");
+    /// The encoder judges once this part (1/N) of the LZW data is coded.
+    static GIVE_UP_AFTER: Opt<u64> = Opt::value("gif:giveup-after", 4, "the encoder judges giving up after 1/N of the LZW data");
+    /// The numerator of the ratio of record to LZW bits above which the encoder gives up.
+    static GIVE_UP_NUM: Opt<u64> = Opt::value("gif:giveup-num", 5, "numerator of the record to LZW bits ratio above which it gives up");
+    /// The denominator of that ratio.
+    static GIVE_UP_DEN: Opt<u64> = Opt::value("gif:giveup-den", 4, "denominator of the record to LZW bits ratio above which it gives up");
+}
 
 /// What an image's codes do not tell.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
@@ -483,7 +490,8 @@ fn code(c: &mut Enc, sk: &[u8], at: &[usize], data: &[Data]) -> Result<u64> {
     let mut model = Model::new(area.min(MAX_PIXELS), screen);
     let mut trie = Trie::new();
     let mut total = 0u64;
-    let lzw = Some(data.iter().map(|d| chain_bits(&d.rest)).sum::<u64>()).filter(|&b| b >= GIVE_UP_MIN);
+    let lzw = Some(data.iter().map(|d| chain_bits(&d.rest)).sum::<u64>()).filter(|&b| b >= GIVE_UP_MIN.get());
+    let (after, num, den) = (GIVE_UP_AFTER.get(), GIVE_UP_NUM.get(), GIVE_UP_DEN.get());
     let mut done = 0;
     let mut most = 0;
     for (s, d) in shapes.iter().zip(data) {
@@ -510,7 +518,7 @@ fn code(c: &mut Enc, sk: &[u8], at: &[usize], data: &[Data]) -> Result<u64> {
         code_rest(c, &mut x, bits, &mut rest, true)?;
         if let Some(all) = lzw {
             done += chain_bits(&rest);
-            if done >= all / GIVE_UP_AFTER && c.spent() >> 16 > done * GIVE_UP_RATIO.0 / GIVE_UP_RATIO.1 {
+            if done >= all / after && c.spent() >> 16 > done * num / den {
                 return Err(Error("the pixels no smaller than their LZW data"));
             }
         }

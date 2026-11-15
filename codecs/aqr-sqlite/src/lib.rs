@@ -3,6 +3,8 @@
 
 #![allow(clippy::needless_range_loop)]
 
+aqr_common::zopt_namespace!("sqlite", "SQLite databases (aqr-sqlite)");
+
 pub mod blobs;
 #[cfg(feature = "encode")]
 pub mod formula;

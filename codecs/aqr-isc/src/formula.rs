@@ -17,8 +17,18 @@ pub const CHUNK: usize = 32768;
 /// The most bytes of data a chunk may decode to.
 const MAX_CHUNK: usize = 1 << 16;
 
-/// Files of at least this many bytes are contents of their own; the smaller ones share one.
-pub const OWN_MIN: usize = 1 << 12;
+aqr_common::zopt_namespace!("isc", "InstallShield cabinets (aqr-isc)");
+
+aqr_common::zopt! {
+    /// Files of at least this many bytes are contents of their own; the smaller ones share one.
+    pub static OWN_MIN: Opt<usize> = Opt::size("isc:own-min", 1 << 12, "files at least this long are contents of their own");
+    /// The base of [`limit`] (by default that of all formats, `limit-base`).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("isc:limit-base", 64 << 20, "bytes the chunks may decode to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    /// The ratio of [`limit`] (by default that of all formats, `limit-ratio`).
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("isc:limit-ratio", 32, "bytes per byte of the cabinet the chunks may decode to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -40,7 +50,7 @@ impl Default for Options {
 
 /// [`Options::limit`] for a cabinet of `n` bytes on its own: 64 MiB, and 32 times the cabinet.
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
 
 /// What [`encode_with`] made.
@@ -95,6 +105,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     // where in it
     let mut file: (Vec<u8>, Vec<(usize, usize, usize)>) = Default::default();
     let mut rebuilt = Vec::new();
+    let own_min = OWN_MIN.get();
     let flush = |f: &mut Formula,
                  items: &mut Vec<Item>,
                  small: &mut Vec<u8>,
@@ -104,11 +115,11 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         if parts.is_empty() {
             return;
         }
-        let (stream, base) = match data.len() >= OWN_MIN {
+        let (stream, base) = match data.len() >= own_min {
             true => (f.streams.len(), 0),
             false => (small_at, small.len()),
         };
-        match data.len() >= OWN_MIN {
+        match data.len() >= own_min {
             true => {
                 f.push_content("isc", Kind::Unknown, data);
             }

@@ -25,15 +25,36 @@ pub const RAW: &str = "tensors/raw";
 pub const SIDE: &str = "tensors/side";
 pub const DATA: &str = "tensors/data";
 
-/// Bytes of a segment, about: of the output of an application. The decoder makes the
-/// applications of a file at once, 8 of them ahead and 256 MiB at most, so 16 MiB keeps 8 at
-/// work; the encoder holds the symbols of as many as it has threads.
+aqr_common::zopt_namespace!("tensors", "files of tensors: GGUF, PyTorch, safetensors (aqr-tensors)");
+
+/// Bytes of a segment, about: of the output of an application (the default of [`SEGMENT_BYTES`]).
+/// The decoder makes the applications of a file at once, 8 of them ahead and 256 MiB at most, so
+/// 16 MiB keeps 8 at work; the encoder holds the symbols of as many as it has threads.
 pub const SEGMENT: usize = 16 << 20;
-/// Bytes not coded of at least this many, between the tensors coded, are left out of the
-/// applications, as they are.
-pub const LONG_RAW: usize = 1 << 20;
-/// A tensor (or a part of one in a segment) of fewer bytes is not coded.
-pub const MIN_CODED: usize = 4096;
+
+aqr_common::zopt! {
+    /// Bytes of a segment, about: of the output of an application ([`SEGMENT`]).
+    pub static SEGMENT_BYTES: Opt<usize> =
+        Opt::size("tensors:segment", SEGMENT, "bytes of a segment of tensor data, about");
+    /// Bytes not coded of at least this many, between the tensors coded, are left out of the
+    /// applications, as they are.
+    static LONG_RAW: Opt<usize> =
+        Opt::size("tensors:long-raw", 1 << 20, "bytes between coded tensors left out of the applications");
+    /// A tensor (or a part of one in a segment) of fewer bytes is not coded.
+    static MIN_CODED: Opt<usize> = Opt::size("tensors:min-coded", 4096, "tensors of fewer bytes are not coded");
+    /// Whether coding comes to less than this share of the bytes as they are (of their 8 bits
+    /// each), for a run to be coded.
+    static PAYS: Opt<f64> = Opt::value("tensors:pays", 0.985, "a run is coded where under this share of its raw bits");
+    /// The least gain of the mantissa's top bits, as a share of a float's bits, for them to be symbols.
+    pub(crate) static MAN_GAIN: Opt<f64> =
+        Opt::value("tensors:man-gain", 0.015, "least gain, as a share of a float's bits, to code mantissas");
+    /// The sample of floats a model is chosen on (also of grids): windows of this many floats.
+    pub(crate) static SAMPLE_WINDOW: Opt<usize> =
+        Opt::value("tensors:man-window", 1024, "floats of each window of a sample for models and grids");
+    /// The windows of the sample, spread over the tensor (at least 2).
+    pub(crate) static SAMPLE_WINDOWS: Opt<usize> =
+        Opt::value("tensors:man-windows", 8, "windows of a sample for models and grids, at least 2");
+}
 
 /// A span of the file in a segment: bytes as they are, or of a tensor coded (its index in the
 /// file's).
@@ -70,12 +91,13 @@ fn pieces(len: usize, g: &Tensors, segment: usize) -> Vec<Piece> {
         }
         *seg_len = 0;
     };
+    let long_raw = LONG_RAW.get();
     let mut at = g.data;
     let raw = |a: usize, b: usize, seg: &mut Vec<Span>, seg_len: &mut usize, out: &mut Vec<Piece>| {
         if a == b {
             return;
         }
-        if b - a >= LONG_RAW {
+        if b - a >= long_raw {
             close(seg, seg_len, out);
             out.push(Piece::Long(a, b));
         } else {
@@ -147,7 +169,7 @@ fn mantissa_pays(f: Float, d: &[u8]) -> bool {
         b[..fb].copy_from_slice(&d[i * fb..(i + 1) * fb]);
         u64::from_le_bytes(b)
     };
-    let (win, wins) = (1024usize.min(n), 8usize);
+    let (win, wins) = (SAMPLE_WINDOW.get().min(n), SAMPLE_WINDOWS.get());
     let starts: Vec<usize> = (0..wins).map(|k| (n - win) / (wins - 1) * k).collect();
     let mmask = (1u64 << f.man_bits()) - 1;
     let tz =
@@ -192,7 +214,7 @@ fn mantissa_pays(f: Float, d: &[u8]) -> bool {
             t as f64 - grid::classes(&c, 1 << t, 0.0).2 / all
         })
         .fold(0f64, f64::max);
-    gain >= 0.015 * float_bits
+    gain >= MAN_GAIN.get() * float_bits
 }
 
 /// What a segment comes to: the parameters, and its coded symbols, raw and side bytes.
@@ -224,11 +246,12 @@ fn segment(d: &[u8], spans: &[Span], g: &Tensors, models: &[std::sync::OnceLock<
     };
     // (the grid of the last run of a grid)
     let mut last_grid = None;
+    let (min_coded, pays) = (MIN_CODED.get(), PAYS.get());
     for &s in spans {
         let r = s.range();
         let bytes = &d[r.clone()];
         let run = match s {
-            Span::Coded(_, _, _) if bytes.len() < MIN_CODED => None,
+            Span::Coded(_, _, _) if bytes.len() < min_coded => None,
             Span::Coded(at, Data::Float(f, n), ti) => {
                 let t = &g.tensors[ti];
                 let model = *models[ti].get_or_init(|| model(d, t));
@@ -236,7 +259,7 @@ fn segment(d: &[u8], spans: &[Span], g: &Tensors, models: &[std::sync::OnceLock<
                     Model::Grid(cfg) => {
                         let tensor = &d[t.start..t.start + t.data.len() as usize];
                         let from = ((at - t.start) / f.bytes()) as u64;
-                        let limit = 0.985 * 8.0 * bytes.len() as f64;
+                        let limit = pays * 8.0 * bytes.len() as f64;
                         let same = last_grid == Some(cfg.grid);
                         grid::encode(cfg, f, tensor, from, n, same, limit, &mut enc, &mut tables, &mut c.side).map(
                             |r| {
@@ -277,7 +300,7 @@ fn segment(d: &[u8], spans: &[Span], g: &Tensors, models: &[std::sync::OnceLock<
 
 /// Whether coding at `bits` pays against `bytes` as they are.
 fn pays(bits: f64, bytes: usize) -> bool {
-    bits < 0.985 * 8.0 * bytes as f64
+    bits < PAYS.get() * 8.0 * bytes as f64
 }
 
 /// A run of `n` floats `d` coded (FORMAT.md §4.2), the top bits of their mantissas symbols where
@@ -621,7 +644,7 @@ pub fn formula_bound(input: &[u8]) -> Option<usize> {
     let block = aqr_formula::aqr::BLOCK;
     let over = |len: usize| len / block + 2;
     let mut n = 1024 + over(g.data) * SLICE + ITEM + over(input.len()) * 4;
-    for p in pieces(input.len(), &g, SEGMENT) {
+    for p in pieces(input.len(), &g, SEGMENT_BYTES.get()) {
         n += ITEM
             + match p {
                 Piece::Long(a, b) => over(b - a) * SLICE + 1 + NUM,
@@ -638,11 +661,11 @@ type Made<T> = (Option<(Formula, T)>, std::ops::Range<usize>);
 /// The formula of file of tensors `input` (GGUF, `torch.save`'s, safetensors), or None where it is not one this crate takes. The segments
 /// are coded `threads` at a time; the formula is the same whatever `threads` is.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    encode_in(input, threads, SEGMENT)
+    encode_in(input, threads, SEGMENT_BYTES.get())
 }
 
 /// [`encode`] in segments of about `segment` bytes (the tests' of segments, at lengths shorter
-/// than [`SEGMENT`]).
+/// than [`SEGMENT_BYTES`]).
 pub fn encode_in(input: &[u8], threads: usize, segment_bytes: usize) -> Option<Formula> {
     let made = |part: &mut Formula, _: &[u8]| aqr_formula::store::spill_streams(part);
     encode_sealing(input, threads, segment_bytes, &made, &mut |_, _, ()| {})

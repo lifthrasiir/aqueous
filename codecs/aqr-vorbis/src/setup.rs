@@ -587,6 +587,14 @@ fn list<T>(n: usize, mut item: impl FnMut() -> Result<T>) -> Result<Vec<T>> {
     Ok(v)
 }
 
+aqr_common::zopt! {
+    /// The most setups kept (then all are dropped).
+    #[cfg(not(target_family = "wasm"))]
+    static SETUP_CACHE: Opt<usize> = Opt::value("vorbis:setup-cache", 64, "setups kept in the cache, then all dropped");
+}
+
+aqr_common::zopt_namespace!("vorbis", "Vorbis streams (aqr-vorbis)");
+
 impl Setup {
     /// Parses setup header `d` (the whole packet, type 5) of a stream of `ident`.
     pub fn parse(d: &[u8], ident: Ident) -> Result<Setup> {
@@ -648,8 +656,6 @@ impl Setup {
         use std::collections::HashMap;
         use std::sync::{Arc, Mutex, OnceLock};
         type Cache = Mutex<HashMap<(Vec<u8>, Ident), Arc<Setup>>>;
-        /// The most setups kept (then all are dropped).
-        const CACHED: usize = 64;
         static CACHE: OnceLock<Cache> = OnceLock::new();
         let cache = CACHE.get_or_init(Cache::default);
         let key = (d.to_vec(), ident);
@@ -658,7 +664,7 @@ impl Setup {
         }
         let s = Arc::new(Setup::parse(d, ident)?);
         let mut c = cache.lock().unwrap();
-        if c.len() >= CACHED {
+        if c.len() >= SETUP_CACHE.get() {
             c.clear();
         }
         c.insert(key, s.clone());

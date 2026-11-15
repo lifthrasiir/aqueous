@@ -10,11 +10,22 @@ use aqr_common::varint;
 
 use crate::{Result, corrupt};
 
-/// The longest word or markup coded, in bytes.
-pub const MAX_TOKEN: usize = 48;
+/// The most bytes of a token that [`MAX_TOKEN`] may be set to (the size of the buffers).
+const TOKEN_CAP: usize = 256;
 
-/// Words and markup seen fewer times than this are left as they are.
-pub const MIN_COUNT: u32 = 4;
+aqr_common::zopt! {
+    /// The longest word or markup coded, in bytes (at most [`TOKEN_CAP`]).
+    static MAX_TOKEN: Opt<usize> = Opt::value("wrt:max-token", 48, "longest word or markup coded, in bytes (at most 256)");
+    /// Words and markup seen fewer times than this are left as they are.
+    static MIN_COUNT: Opt<u32> = Opt::value("wrt:min-count", 4, "words and markup seen fewer times than this are left as they are");
+}
+
+/// [`MAX_TOKEN`], checked against the size of the buffers.
+fn max_token() -> usize {
+    let n = MAX_TOKEN.get();
+    assert!(n <= TOKEN_CAP, "wrt:max-token is at most {TOKEN_CAP}");
+    n
+}
 
 /// The flags, by their place in [`Layout::flags`]: the next byte as it is, the word
 /// capitalized, the word in upper case, no space before the word.
@@ -217,9 +228,9 @@ enum Case {
 }
 
 /// Token `t` as an entry would be (in `buf`), and its case; `None` where no entry may be it: a
-/// word of one letter or of mixed case, or a token longer than [`MAX_TOKEN`].
-fn entry<'a>(t: &[u8], word: bool, buf: &'a mut [u8; MAX_TOKEN]) -> Option<(&'a [u8], Case)> {
-    if t.len() > MAX_TOKEN || word && t.len() < 2 {
+/// word of one letter or of mixed case, or a token longer than `max` ([`MAX_TOKEN`]).
+fn entry<'a>(t: &[u8], word: bool, max: usize, buf: &'a mut [u8; TOKEN_CAP]) -> Option<(&'a [u8], Case)> {
+    if t.len() > max || word && t.len() < 2 {
         return None;
     }
     let e = &mut buf[..t.len()];
@@ -250,10 +261,12 @@ pub struct Dictionary {
     index: Map<u32>,
 }
 
-/// Data longer than this is counted and coded in pieces of about as many bytes, each ending
-/// with a byte that no token holds ([`apart`]; or the data), on threads of their own, so that
-/// the pieces code to the same bytes as the whole.
-pub(crate) const PIECE: usize = 16 << 20;
+aqr_common::zopt! {
+    /// Data longer than this is counted and coded in pieces of about as many bytes, each ending
+    /// with a byte that no token holds ([`apart`]; or the data), on threads of their own, so that
+    /// the pieces code to the same bytes as the whole.
+    pub(crate) static PIECE: Opt<usize> = Opt::size("wrt:piece", 16 << 20, "bytes of a piece coded on a thread of its own");
+}
 
 /// Whether `c` is neither in any token nor a space: the tokens of what follows it are found as
 /// they would be from there, and a word just after it is not preceded by a space.
@@ -263,13 +276,15 @@ fn apart(c: u8) -> bool {
 
 /// `d` in pieces ([`PIECE`]).
 fn pieces(d: &[u8]) -> Vec<&[u8]> {
-    split(d, PIECE, apart, 1)
+    split(d, PIECE.get(), apart, 1)
 }
 
-/// Text is coded and decoded in segments of about this many bytes, each an application of the
-/// module with the one dictionary of all of them (FORMAT.md, "Segments"): what the module holds
-/// of a text at once.
-pub const SEGMENT: usize = 32 << 20;
+aqr_common::zopt! {
+    /// Text is coded and decoded in segments of about this many bytes, each an application of the
+    /// module with the one dictionary of all of them (FORMAT.md, "Segments"): what the module holds
+    /// of a text at once.
+    pub static SEGMENT: Opt<usize> = Opt::size("wrt:segment", 32 << 20, "bytes of text of a segment, coded on its own");
+}
 
 /// `d` in segments of about `size` bytes ([`SEGMENT`]), cut as pieces are.
 pub fn segments(d: &[u8], size: usize) -> Vec<&[u8]> {
@@ -306,9 +321,10 @@ pub(crate) fn split(d: &[u8], size: usize, apart: impl Fn(u8) -> bool, after: us
 /// The counts of the entries of `d`, and of its bytes.
 fn count(d: &[u8]) -> (Map<u32>, [u64; 256]) {
     let mut counts: Map<u32> = Map::default();
-    let mut buf = [0; MAX_TOKEN];
+    let mut buf = [0; TOKEN_CAP];
+    let max = max_token();
     tokens(d, |s, e, word| {
-        if let Some((t, _)) = entry(&d[s..e], word, &mut buf) {
+        if let Some((t, _)) = entry(&d[s..e], word, max, &mut buf) {
             match counts.get_mut(t) {
                 Some(c) => *c += 1,
                 None => {
@@ -336,7 +352,7 @@ impl Dictionary {
             }
             (0..256).for_each(|i| bytes[i] += b[i]);
         }
-        let mut entries: Vec<(Box<[u8]>, u32)> = counts.into_iter().filter(|e| e.1 >= MIN_COUNT).collect();
+        let mut entries: Vec<(Box<[u8]>, u32)> = counts.into_iter().filter(|e| e.1 >= MIN_COUNT.get()).collect();
         if entries.is_empty() {
             return None;
         }
@@ -400,9 +416,9 @@ impl Dictionary {
                 out.push(b);
             }
         };
-        let (mut at, mut buf) = (0, [0; MAX_TOKEN]);
+        let (mut at, mut buf, max) = (0, [0; TOKEN_CAP], max_token());
         tokens(d, |s, e, word| {
-            let Some((t, case)) = entry(&d[s..e], word, &mut buf) else { return };
+            let Some((t, case)) = entry(&d[s..e], word, max, &mut buf) else { return };
             let Some(&i) = self.index.get(t) else { return };
             let gap = &d[at..s];
             match gap.strip_suffix(b" ") {
@@ -858,10 +874,10 @@ mod tests {
     #[test]
     fn pieces_as_whole() {
         let line = "Some words, and <b>some</b> MORE words &amp; others\n";
-        let mut d = line.repeat((PIECE * 5 / 2) / line.len()).into_bytes();
+        let mut d = line.repeat((PIECE.get() * 5 / 2) / line.len()).into_bytes();
         // (a line of minified JSON, cut where no token is)
         let json = r#"{"t":"Some words","u":"</b>&amp;&#38;","v":"x"},"#;
-        d.extend_from_slice(&json.repeat((PIECE * 3 / 2) / json.len()).into_bytes());
+        d.extend_from_slice(&json.repeat((PIECE.get() * 3 / 2) / json.len()).into_bytes());
         assert!(pieces(&d).len() == 4 && pieces(&d).concat() == d);
         let one = Dictionary::of(&[&d], 1).unwrap();
         let four = Dictionary::of(&[&d], 4).unwrap();
@@ -883,9 +899,9 @@ mod tests {
     /// Text with no byte to cut at is cut anyway, each part coded on its own.
     #[test]
     fn uncuttable() {
-        let d = b"the end ".repeat(PIECE * 3 / 8);
-        let parts = split(&d, PIECE, apart, 1);
-        assert!(parts.len() == 3 && parts.concat() == d && parts[0].len() == PIECE);
+        let d = b"the end ".repeat(PIECE.get() * 3 / 8);
+        let parts = split(&d, PIECE.get(), apart, 1);
+        assert!(parts.len() == 3 && parts.concat() == d && parts[0].len() == PIECE.get());
         let dict = Dictionary::of(&[&d], 2).unwrap();
         let (text, lens) = dict.encode(&d, 2);
         assert_eq!(lens.len(), 3);

@@ -6,6 +6,8 @@
 //! LZMA2 streams (`lzma2`) are split by their segments, each standing alone. The containers
 //! taken are the `.lzma` file (LZMA-alone, `alone`) and the `.xz` file (`xz`).
 
+aqr_common::zopt_namespace!("lzma", "LZMA and LZMA2 streams (aqr-lzma)");
+
 pub mod alone;
 pub use aqr_common::arith;
 #[cfg(feature = "encode")]

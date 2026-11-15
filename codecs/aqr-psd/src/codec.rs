@@ -26,11 +26,19 @@ use aqr_common::varint;
 #[cfg(feature = "encode")]
 use aqr_formula::Formula;
 
+aqr_common::zopt! {
+    /// Whether to print the phase times and sizes (the times are summed over threads).
+    pub static STATS: Opt<bool> = Opt::flag("psd:stats", false, "print phase times and sizes (times summed over threads)");
+    /// Whether to tell where decoding found corrupt input.
+    #[allow(dead_code)]
+    static DEBUG: Opt<bool> = Opt::flag("psd:debug", false, "tell where decoding found corrupt input");
+}
+
 #[cfg_attr(feature = "encode", track_caller)]
 fn corrupt() -> Error {
     // (the module has no environment)
     #[cfg(feature = "encode")]
-    if std::env::var_os("PSDR_DEBUG").is_some() {
+    if DEBUG.get() {
         eprintln!("corrupt at {}", std::panic::Location::caller());
     }
     Error("corrupt input".into())
@@ -76,9 +84,11 @@ enum Codec {
     Jpeg,
 }
 
-/// How deep embedded PSDs are recompressed.
-#[cfg(feature = "encode")]
-const MAX_DEPTH: usize = 3;
+aqr_common::zopt! {
+    /// How deep embedded PSDs are recompressed.
+    #[allow(dead_code)]
+    static MAX_DEPTH: Opt<usize> = Opt::value("psd:max-depth", 3, "how deep embedded PSDs are recompressed");
+}
 
 /// Thread budget of one call.
 #[cfg(feature = "encode")]
@@ -115,7 +125,7 @@ fn par_map<T: Send, R: Send>(threads: usize, items: Vec<T>, f: impl Fn(T) -> R +
 fn nested_compress(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Formula> {
     let t0 = std::time::Instant::now();
     let r = nested_compress_(codec, data, depth, par);
-    if std::env::var_os("PSDR_STATS").is_some() {
+    if STATS.get() {
         eprintln!(
             "nested {codec:?} {} -> {:?} in {:.3}s",
             data.len(),
@@ -236,14 +246,26 @@ fn all_splits(src: &[u8], rows: usize, cb: usize) -> Vec<usize> {
     splits
 }
 
+aqr_common::zopt! {
+    /// The rows sampled to tell which encoder made a span's PackBits rows (`rows / N` apart).
+    #[allow(dead_code)]
+    static RLE_SAMPLE: Opt<usize> = Opt::value("psd:rle-sample", 32, "rows sampled to choose the PackBits encoder");
+    /// The rows between the sampled rows of the render hint.
+    #[allow(dead_code)]
+    static HINT_EVERY: Opt<usize> = Opt::value("psd:hint-every", 16, "rows between the sampled rows of the render hint");
+    /// The share of sampled pixels that rendering must predict exactly for the hint to be used.
+    #[allow(dead_code)]
+    static HINT_SHARE: Opt<f64> = Opt::value("psd:hint-share", 0.5, "share of pixels the render must predict exactly to be used");
+}
+
 /// How many of a sample of rows (every `rows / 32`th) each candidate encoder reproduces, and
 /// the rows sampled (that decode to `w` bytes).
 #[cfg(feature = "encode")]
 fn sample_hits(cands: &[Encoder], src: &[u8], shape: RleShape) -> (Vec<usize>, usize) {
-    const SAMPLE: usize = 32;
+    let sample = RLE_SAMPLE.get();
     let RleShape { planes, w, h, cb } = shape;
     let rows = planes * h;
-    let step = rows.div_ceil(SAMPLE).max(1);
+    let step = rows.div_ceil(sample).max(1);
     let mut starts = vec![0usize; rows + 1];
     starts[0] = rows * cb;
     for r in 0..rows {
@@ -347,8 +369,7 @@ fn hint_psd(prefix: &[u8], w: usize, h: usize) -> Result<Psd> {
 /// enough to be worth its time: on a sample of rows, the share of pixels predicted exactly.
 #[cfg(feature = "encode")]
 fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
-    const EVERY: usize = 16;
-    const SHARE: f64 = 0.5;
+    let (every, share) = (HINT_EVERY.get(), HINT_SHARE.get());
     let (w, h) = (sp.w, sp.h);
     let comp = if matches!(sp.coding, Coding::Raw) { Compression::Raw } else { Compression::Rle };
     let src = &d[sp.start..sp.end];
@@ -365,7 +386,7 @@ fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
     let mut same = vec![true; w];
     let (mut hits, mut total) = (0usize, 0usize);
     for y in 0..h {
-        let sample = y % EVERY == EVERY / 2;
+        let sample = y % every == every / 2;
         if sample {
             let mut refs: Vec<&mut [u8]> = rendered.iter_mut().map(|v| v.as_mut_slice()).collect();
             if r.next_row(&mut refs).is_err() {
@@ -394,7 +415,7 @@ fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
             total += w;
         }
     }
-    total > 0 && hits as f64 >= SHARE * total as f64
+    total > 0 && hits as f64 >= share * total as f64
 }
 
 /// Spans, groups and coded embedded files of a parsed file.
@@ -465,7 +486,7 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>
     // Embedded files, which come after the layers' pixel data; and the composite. Embedded
     // files are coded, and the composite planned and its hint sampled, on the threads.
     let mut linked = Vec::new();
-    if depth < MAX_DEPTH {
+    if depth < MAX_DEPTH.get() {
         let end = spans.last().map_or(0, |s| s.span.end);
         for f in psd::linked(psd, d) {
             if end > f.data.start {
@@ -847,8 +868,10 @@ pub(crate) fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
     Ok(Head { groups: Lifo::new(groups), owned, spans: Lifo::new(spans) })
 }
 
-/// Rows pipelined through helper threads: batches of this many samples at most...
-const PIPE_BATCH: usize = 1 << 20;
+aqr_common::zopt! {
+    /// Rows pipelined through helper threads: batches of this many samples at most...
+    static PIPE_BATCH: Opt<usize> = Opt::size("psd:pipe-batch", 1 << 20, "samples of a batch of rows pipelined through helper threads");
+}
 /// ... this many batches full between two threads (and one more being filled, one used)...
 const PIPE_DEPTH: usize = 3;
 /// ... for groups of at least this many samples (smaller ones are not worth the threads).
@@ -857,7 +880,7 @@ const PIPE_MIN: usize = 1 << 18;
 /// Rows of a batch for `h` rows of `w` samples in `n` planes: the batches between two
 /// threads hold fewer rows than there are.
 fn pipe_rows(w: usize, h: usize, n: usize) -> usize {
-    (PIPE_BATCH / (w * n).max(1)).clamp(1, 256).min(h.div_ceil(PIPE_DEPTH + 3)).max(1)
+    (PIPE_BATCH.get() / (w * n).max(1)).clamp(1, 256).min(h.div_ceil(PIPE_DEPTH + 3)).max(1)
 }
 
 /// Rows handed from one thread to another: per row, a buffer per plane (empty for planes not
@@ -993,7 +1016,7 @@ fn encode_group(
     let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut rows = vec![vec![0u8; w]; n];
     let mut misses = vec![Vec::new(); n];
-    let timing = std::env::var_os("PSDR_STATS").is_some();
+    let timing = STATS.get();
     let mut t = [0f64; 4];
     let mut clock = std::time::Instant::now();
     let mut lap = |i: usize, t: &mut [f64; 4]| {
@@ -1066,7 +1089,7 @@ fn encode_rows_piped<'a>(
     let read: Vec<bool> = readers.iter().map(Option::is_some).collect();
     let hn = if hint.is_some() { n } else { 0 };
     let (full_tx, full_rx, free_tx, free_rx) = batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &read, hn));
-    let timing = std::env::var_os("PSDR_STATS").is_some();
+    let timing = STATS.get();
     aqr_common::pool::scope_in(reader, |sc| {
         let reader = sc.spawn(move || -> Option<Vec<Vec<usize>>> {
             let mut misses = vec![Vec::new(); n];
@@ -1347,7 +1370,7 @@ pub(crate) fn formula_parts(file: &[u8], depth: usize, par: &Par) -> Option<Form
     let c = code_file(file, depth, par)?;
     let mut head = Vec::new();
     put_head(&mut head, &c.spans, &c.groups);
-    if std::env::var_os("PSDR_STATS").is_some() {
+    if STATS.get() {
         let samples: usize =
             c.groups.iter().map(|g| g.planes.len() * c.spans[g.planes[0].0].w * c.spans[g.planes[0].0].h).sum();
         let [t_plan, t_skel, t_model] = c.times;
@@ -1384,10 +1407,10 @@ impl Times {
 
 /// Planning time: RLE checks, tile inference, candidate ranking, hint sampling.
 pub static PLAN_TIMES: Times = Times::new();
-/// Encoding time (with `PSDR_STATS`): reading rows, checking them against the encoder,
+/// Encoding time (with `psd:stats`): reading rows, checking them against the encoder,
 /// rendering, model.
 pub static ENC_TIMES: Times = Times::new();
-/// Decoding time (with `PSDR_STATS`): known rows, rendering, model, writing rows.
+/// Decoding time (with `psd:stats`): known rows, rendering, model, writing rows.
 pub static DEC_TIMES: Times = Times::new();
 
 /// Writes the rows of a plane of an RLE or raw span as they are decoded.
@@ -1510,7 +1533,7 @@ fn decode_rows_piped(
         batch_channels(if has_in { PIPE_DEPTH + 2 } else { 0 }, || Batch::new(per, w, &known, hn));
     let (out_full_tx, out_full_rx, out_free_tx, out_free_rx) =
         batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &vec![true; ns], 0));
-    let timing = cfg!(feature = "encode") && std::env::var_os("PSDR_STATS").is_some();
+    let timing = cfg!(feature = "encode") && STATS.get();
     aqr_common::pool::scope_in(workers, |sc| {
         let reader = has_in.then(|| {
             sc.spawn(move || -> Result<()> {
@@ -1729,7 +1752,7 @@ fn decode_group(
     let mut hint_rows = model::zero_rows(if g.hinted { n } else { 0 }, w);
     let mut rows = model::zero_rows(n, w);
     let mut buf = Vec::with_capacity(row_room(w));
-    let timing = cfg!(feature = "encode") && std::env::var_os("PSDR_STATS").is_some();
+    let timing = cfg!(feature = "encode") && STATS.get();
     let mut t = [0f64; 4];
     // (the clock read only if timing: WebAssembly has none)
     let mut clock = timing.then(std::time::Instant::now);

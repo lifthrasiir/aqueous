@@ -174,9 +174,10 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
                 let mut kept = Some((f.push(format!("{}/kept", opt.prefix), u.table.clone()), u.table.len() as u64));
                 let (mut at, mut apps) = (0, Vec::new());
                 let mut streams = u.streams.into_iter().peekable();
+                let stream_data = STREAM_DATA.get();
                 while streams.peek().is_some() {
                     let (mut group, mut data_len, mut bytes) = (Vec::new(), 0, 0);
-                    while let Some(p) = streams.next_if(|p| group.is_empty() || data_len + p.data <= STREAM_DATA) {
+                    while let Some(p) = streams.next_if(|p| group.is_empty() || data_len + p.data <= stream_data) {
                         let (kept, n) = kept.take().unwrap_or_else(|| (Node::concat(Vec::new()), 0));
                         let data = Node::slice(stream_of[i], at, p.data as u64);
                         at += p.data as u64;

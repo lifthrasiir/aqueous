@@ -53,11 +53,18 @@ impl From<aqr_flate::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// `Error::Corrupt`, reporting where it was raised when `PNGR_DEBUG` is set.
+aqr_common::zopt_namespace!("png", "PNG images (aqr-png)");
+
+aqr_common::zopt! {
+    /// Whether to tell where a decoding error was raised, and each image's record size.
+    pub(crate) static DEBUG: Opt<bool> = Opt::flag("png:debug", false, "tell where decoding errors are raised and the records' sizes");
+}
+
+/// `Error::Corrupt`, reporting where it was raised with [`DEBUG`].
 #[track_caller]
 #[cold]
 pub(crate) fn corrupt() -> Error {
-    if std::env::var_os("PNGR_DEBUG").is_some() {
+    if DEBUG.get() {
         eprintln!("corrupt at {}", std::panic::Location::caller());
     }
     Error::Corrupt

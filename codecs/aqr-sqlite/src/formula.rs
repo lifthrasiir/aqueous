@@ -16,6 +16,11 @@ fn memory(u: &Usage<'_>) -> Option<aqr_formula::Plan> {
     crate::module::plan(u.params, &s, u.initial(), u.output()).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
+aqr_common::zopt! {
+    /// Whether the file is rebuilt from the streams and compared ([`Options::verify`]'s default).
+    static VERIFY: Opt<bool> = Opt::flag("sqlite:verify", true, "rebuild the file from the streams and compare");
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     /// Rebuild the file from the streams and compare (no formula on a mismatch).
@@ -27,7 +32,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { verify: true, threads: 1 }
+        Options { verify: VERIFY.get(), threads: 1 }
     }
 }
 

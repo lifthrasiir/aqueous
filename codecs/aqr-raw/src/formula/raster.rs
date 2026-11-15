@@ -17,11 +17,14 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::raster::plan(u.params, u.inputs, u.output())?)
 }
 
-/// The bytes of a band, about: a raster of more is cut into bands of rows of about this many
-/// bytes (`bands`), each an application of the module of its own, whose coder starts anew (no
-/// row above the first). An application needs about four times its band at most (the inputs
-/// imported and copied, the output imported and made): 192 MiB at this length.
-pub const BAND: usize = 48 << 20;
+aqr_common::zopt! {
+    /// The bytes of a band, about: a raster of more is cut into bands of rows of about this many
+    /// bytes (`bands`), each an application of the module of its own, whose coder starts anew (no
+    /// row above the first). An application needs about four times its band at most (the inputs
+    /// imported and copied, the output imported and made): 192 MiB at this length. The 16-bit
+    /// rasters' too.
+    pub static BAND: Opt<usize> = Opt::size("raw:band-bytes", 48 << 20, "bytes of a band of rows of a raster");
+}
 
 impl Layout for Format {
     const MODULE: Module = MODULE;
@@ -53,7 +56,7 @@ impl Layout for Format {
 /// The application giving `samples` (exactly the raster of `fmt`), its inputs pushed to `f`.
 /// None where the layout is not taken.
 pub fn apply(f: &mut Formula, samples: &[u8], fmt: Format) -> Option<Node> {
-    apply_in(f, samples, fmt, 1, BAND)
+    apply_in(f, samples, fmt, 1, BAND.get())
 }
 
 /// [`apply`] in bands of about `band` bytes, `threads` coded at a time. A raster of one band is

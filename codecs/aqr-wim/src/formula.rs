@@ -17,11 +17,15 @@ use crate::wim::{self, Resource};
 /// The class of the stream of the bytes between the streams of chunks, stream 1.
 pub const REST: &str = "wim/rest";
 
-/// Chunks of a stream of aqr-lzx at most (32 MiB of data): a resource of more is several.
-pub const STREAM_CHUNKS: usize = 1024;
-/// Bytes of data of an application of aqr-lzx's module at most (but for one stream alone), so
-/// that its memory is bounded however large the file.
-pub const APPLY_DATA: usize = 32 << 20;
+aqr_common::zopt_namespace!("wim", "WIM images (aqr-wim)");
+
+aqr_common::zopt! {
+    /// Chunks of a stream of aqr-lzx at most (32 MiB of data): a resource of more is several.
+    pub static STREAM_CHUNKS: Opt<usize> = Opt::value("wim:stream-chunks", 1024, "chunks of a stream of aqr-lzx at most");
+    /// Bytes of data of an application of aqr-lzx's module at most (but for one stream alone), so
+    /// that its memory is bounded however large the file.
+    pub static APPLY_DATA: Opt<usize> = Opt::size("wim:apply-data", 32 << 20, "bytes of data of an application of aqr-lzx's module at most");
+}
 
 /// A stream of chunks of a resource (its chunks, their bytes and their data's lengths), or a
 /// resource of no compression (no chunks): where it is in the file, and the resource's index.
@@ -61,7 +65,7 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
     for (i, r) in w.resources.iter().enumerate() {
         match r {
             Resource::Chunks { chunks, .. } => {
-                for c in chunks.chunks(STREAM_CHUNKS) {
+                for c in chunks.chunks(STREAM_CHUNKS.get()) {
                     let span = c[0].0.start..c[c.len() - 1].0.end;
                     let chunks = c.iter().map(|(r, n)| (&input[r.clone()], *n)).collect();
                     parts.push(Part { chunks, span, resource: i });
@@ -296,9 +300,10 @@ fn groups(order: &[usize], stored: impl Fn(usize) -> bool, lens: &[usize], spans
     // (the group open: of an application and its bytes of data, or of resources of no
     // compression and where the last ends)
     let mut open: Option<Result<usize, usize>> = None;
+    let apply_data = APPLY_DATA.get();
     for &i in order {
         let join = match open {
-            Some(Ok(bytes)) => !stored(i) && (bytes == 0 || bytes + lens[i] <= APPLY_DATA),
+            Some(Ok(bytes)) => !stored(i) && (bytes == 0 || bytes + lens[i] <= apply_data),
             Some(Err(end)) => stored(i) && end == spans[i].start,
             None => false,
         };

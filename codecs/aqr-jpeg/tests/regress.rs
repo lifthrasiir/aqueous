@@ -1,5 +1,5 @@
 //! Regression inputs. Each one must roundtrip through the formula, and must not trip the
-//! progressive test oracle (JRC_VERIFY_PROGRESSIVE: a scan judged reproducible must re-encode
+//! progressive test oracle (`-Z jpeg:verify-progressive`: a scan judged reproducible must re-encode
 //! identically), which `formula::encode` would otherwise report as not coded.
 
 use aqr_formula::Apply;
@@ -11,8 +11,11 @@ fn module(a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 }
 
 fn check(name: &str, data: &[u8]) {
-    // SAFETY: set before any encoding; the tests in this file only ever set it to "1"
-    unsafe { std::env::set_var("JRC_VERIFY_PROGRESSIVE", "1") };
+    // set before any encoding, once (`apply` refuses a second setting)
+    static ORACLE: std::sync::Once = std::sync::Once::new();
+    ORACLE.call_once(|| {
+        aqr_common::zopt::apply(&["jpeg:verify-progressive"]).unwrap();
+    });
     let f = formula::encode(data, 0).unwrap_or_else(|| panic!("{name}: not coded (oracle failed?)"));
     assert_eq!(f.eval(&module).unwrap(), data, "{name}: roundtrip");
 }

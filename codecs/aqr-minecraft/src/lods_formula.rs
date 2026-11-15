@@ -22,13 +22,17 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 /// The columns of `FullData` that are a section's blobs, in the order of [`dh::Blob::ALL`].
 pub const COLUMNS: [u16; 8] = [5, 15, 16, 17, 18, 6, 7, 8];
 
-/// What the pool may hold at once (blobs of children to come, quadrants kept, parents' blobs to
-/// put), and the pool at most: within the bound of an application (256 MiB compressing).
-const HELD: u64 = 96 << 20;
-const POOL: u64 = 160 << 20;
-
-/// Contents made and checked at once, about: their bytes.
-const BATCH: usize = 64 << 20;
+aqr_common::zopt! {
+    /// What the pool may hold at once (blobs of children to come, quadrants kept, parents' blobs to
+    /// put), within the bound of an application (256 MiB compressing).
+    static HELD: Opt<usize> = Opt::size("mc:lods-held", 96 << 20, "bytes the LOD pool may hold at once");
+    /// The pool at most, within the bound of an application (256 MiB compressing).
+    static POOL: Opt<usize> = Opt::size("mc:lods-pool", 160 << 20, "bytes the LOD pool may hold at most");
+    /// Contents made and checked at once, about: their bytes.
+    static BATCH: Opt<usize> = Opt::size("mc:lods-batch", 64 << 20, "bytes of LOD contents made and checked at once");
+    /// Rows of `FullData` collected in parallel by one task.
+    static GROUP: Opt<usize> = Opt::value("mc:lods-group", 256, "rows of states collected by one task");
+}
 
 /// A row of `FullData` of all its blobs' frames taken: its key and its frames.
 struct Row {
@@ -168,10 +172,10 @@ fn lods(
     let mut states = States::default();
     {
         // (each group's states, each once: not the mappings, which are some 2-5% of the contents)
-        const GROUP: usize = 256;
-        let groups = aqr_common::pool::par_map(rows.len().div_ceil(GROUP), threads, |g| {
+        let group = GROUP.get();
+        let groups = aqr_common::pool::par_map(rows.len().div_ceil(group), threads, |g| {
             let mut own = States::default();
-            let ok = rows[g * GROUP..(g * GROUP + GROUP).min(rows.len())].iter().all(|r| {
+            let ok = rows[g * group..(g * group + group).min(rows.len())].iter().all(|r| {
                 let m = contents(input, frames, &[r.frames[7]], 1).pop().unwrap_or_default();
                 dh::mapping(&m)
                     .map(|rs| {
@@ -305,11 +309,12 @@ fn lods(
     }
     // what the pool holds, within HELD: the children kept longest let go first (their quadrants
     // stored instead), and parents whose blobs wait longest made no more
-    let mut budget = HELD;
+    let mut budget = HELD.get() as u64;
+    let pool = POOL.get() as u64;
     let sim = loop {
         settle(&rows, &facts, &mut roles, &parent_of, budget);
         let s = simulate(&rows, &facts, &roles, taken, &place);
-        if s.most <= POOL || budget < 1 << 20 {
+        if s.most <= pool || budget < 1 << 20 {
             break s;
         }
         budget /= 2;
@@ -331,11 +336,12 @@ fn lods(
     let mut started = vec![false; rows.len()];
     let mut got = vec![0u8; rows.len()];
     let put = aqr_common::varint::put;
+    let batch = BATCH.get() as u64;
     let mut at = 0;
     while at < n {
         let mut end = at;
         let mut bytes = 0u64;
-        while end < n && bytes < BATCH as u64 {
+        while end < n && bytes < batch {
             bytes += taken.lens[end];
             end += 1;
         }

@@ -4,6 +4,8 @@
 //! instead. `lz5` decodes and encodes RAR5 streams, `lz3` RAR 2.9's (with `ppmd` for their PPMd
 //! blocks), `huff` their prefix codes. `FORMAT.md` specifies the records and the modules.
 
+aqr_common::zopt_namespace!("rar", "RAR archives (aqr-rar)");
+
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod huff;

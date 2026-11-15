@@ -3,6 +3,8 @@
 //! (`recons`), so that the data is stored instead. `lzh` decodes and encodes those streams.
 //! `FORMAT.md` specifies the record and the module.
 
+aqr_common::zopt_namespace!("lha", "LHA archives (aqr-lha)");
+
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod huff;

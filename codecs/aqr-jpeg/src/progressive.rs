@@ -519,13 +519,26 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &[CompPtr], sync: Option<
     }
     check_segment_end!(seg);
     flag!(pad_ones && pad_zeros, "mixed padding");
-    if let (Some(w), true) = (why, std::env::var_os("JRC_DEBUG_CANON").is_some()) {
+    if let (Some(w), true) = (why, DEBUG_CANON.get()) {
         eprintln!("canon: scan ss={} se={} ah={} al={}: {w}", s.ss, s.se, s.ah, s.al);
     }
     Ok(Canon { standard: why.is_none(), pad_zero: pad_zeros && !pad_ones, why })
 }
 
 // ---------------------------------------------------------------- encoding (jcphuff.c)
+
+aqr_common::zopt! {
+    /// With it set, every progressive scan is also re-encoded and the inline verdict checked
+    /// against the outcome (a scan judged reproducible that is not panics). A test oracle.
+    static VERIFY_PROGRESSIVE: Opt<bool> = Opt::flag(
+        "jpeg:verify-progressive",
+        false,
+        "re-encode every progressive scan and check the verdict, panic on a difference",
+    );
+    /// With it set, tells why a progressive scan was judged non-canonical.
+    static DEBUG_CANON: Opt<bool> =
+        Opt::flag("jpeg:debug-canon", false, "tell why a progressive scan is not canonical");
+}
 
 const MAX_CORR_BITS: usize = 1000;
 
@@ -920,7 +933,7 @@ fn valid_script_len(j: &Jpeg) -> usize {
 /// first scan that fails to decode and all later ones (which may depend on it) are marked `raw`,
 /// as are scans not encoded the way `encode_scan` would.
 ///
-/// With JRC_VERIFY_PROGRESSIVE set, every scan is also re-encoded and the inline verdict is
+/// With `-Z jpeg:verify-progressive`, every scan is also re-encoded and the inline verdict is
 /// checked against the outcome (a scan judged reproducible that is not panics: test oracle).
 pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Vec<ScanInfo>, Error> {
     let n = valid_script_len(j);
@@ -965,7 +978,7 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
             }
         }
     }
-    if std::env::var_os("JRC_VERIFY_PROGRESSIVE").is_some() {
+    if VERIFY_PROGRESSIVE.get() {
         let mut buf = Vec::new();
         for (i, (s, info)) in j.scans.iter().zip(&infos).enumerate() {
             if info.raw && info.standard {

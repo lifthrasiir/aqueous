@@ -26,12 +26,16 @@ pub const N_BYTE_STREAMS: usize = 3;
 
 /// Samples per block.
 pub const BLOCK: usize = 4096;
-/// Highest LPC order and coefficient precision.
-const MAX_ORDER: usize = 16;
-const PRECISION: u32 = 14;
-/// Weight of the parameter cost per order in the order choice (the LMS stage gains some of
-/// what a higher order would).
-const ORDER_COST: f64 = 4.0;
+aqr_common::zopt! {
+    /// Highest LPC order tried (at most 32).
+    static MAX_ORDER: Opt<usize> = Opt::value("raw:lpc-max-order", 16, "highest LPC order tried, at most 32");
+    /// LPC coefficient precision, in bits (1..=15).
+    static PRECISION: Opt<u32> = Opt::value("raw:lpc-precision", 14, "bits of an LPC coefficient (1 to 15)");
+    /// Weight of the parameter cost per order in the order choice (the LMS stage gains some of
+    /// what a higher order would).
+    static ORDER_COST: Opt<f64> =
+        Opt::value("raw:lpc-order-cost", 4.0, "weight of the parameter cost of an LPC order in the order choice");
+}
 
 /// Layout of the samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,7 +162,10 @@ fn autocorr(w: &[f64], max_lag: usize) -> [f64; 33] {
 /// prediction error per sample, plus the coefficients and warm-up samples.
 fn lpc(x: &[i64], win: &[f64], bits: u32) -> Option<([i32; 32], i8, usize)> {
     let n = x.len();
-    let max_order = MAX_ORDER.min(n / 4);
+    let (max_order, precision, order_cost) = (MAX_ORDER.get(), PRECISION.get(), ORDER_COST.get());
+    assert!(max_order <= 32, "-Z raw:lpc-max-order={max_order}: above 32, which the coefficient arrays hold");
+    assert!((1..=15).contains(&precision), "-Z raw:lpc-precision={precision}: not 1 to 15");
+    let max_order = max_order.min(n / 4);
     if max_order == 0 {
         return None;
     }
@@ -172,7 +179,7 @@ fn lpc(x: &[i64], win: &[f64], bits: u32) -> Option<([i32; 32], i8, usize)> {
     let mut a = [0f64; 33];
     let mut best = (f64::MAX, 0, a);
     let mut err = r[0];
-    let per_order = (PRECISION + bits) as f64 * ORDER_COST;
+    let per_order = (precision + bits) as f64 * order_cost;
     for i in 0..max_order {
         let mut k = -r[i + 1];
         for j in 0..i {
@@ -203,8 +210,8 @@ fn lpc(x: &[i64], win: &[f64], bits: u32) -> Option<([i32; 32], i8, usize)> {
         return None;
     }
     let log2 = cmax.log2().floor() as i32 + 1;
-    let shift = (PRECISION as i32 - 1 - log2).clamp(0, 15);
-    let lim = (1i64 << (PRECISION - 1)) - 1;
+    let shift = (precision as i32 - 1 - log2).clamp(0, 15);
+    let lim = (1i64 << (precision - 1)) - 1;
     let mut q = [0i32; 32];
     let mut e = 0f64;
     for j in 0..order {
@@ -245,7 +252,7 @@ fn subframe(f: &mut Frame, ch: usize, x: &mut [i64], full_bits: u32, win: &[f64]
     let ok = if let Some((q, shift, order)) = lpc(x, win, full_bits - wasted) {
         sf.typ = SUB_LPC + order as u8 - 1;
         sf.order = order as u8;
-        sf.precision = PRECISION as u8;
+        sf.precision = PRECISION.get() as u8;
         sf.shift = shift;
         sf.coefs = q;
         sf.warm[..order].copy_from_slice(&x[..order]);

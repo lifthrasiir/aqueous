@@ -18,15 +18,26 @@ pub const MODULE: Module = Module::new("prores-recons", 3).with_task_plan(memory
 /// each (`codec::STRIPE_BYTES`), 16 of them. (The decoder holds a few frames, not a chunk.)
 pub const CHUNK: usize = 64 << 20;
 
+aqr_common::zopt! {
+    /// [`CHUNK`], the default of `prores:chunk`.
+    static CHUNK_BYTES: Opt<usize> = Opt::size("prores:chunk", CHUNK, "frame bytes of a chunk, about");
+    /// Stripes in each chunk, where given (else by size).
+    static STRIPES: Opt<Option<usize>> =
+        Opt::value("prores:stripes", None, "stripes of each chunk, 1 to 16 (default: by size)").off(None);
+}
+
 /// The class of the stream holding the frames' coefficients, which tells a ProRes formula.
 const CODED: &str = "prores/coded";
 /// The class of the stream holding the frames' headers and the like.
 const SIDE: &str = "prores/side";
 
-/// Bytes between frames past which a chunk ends (they stay out of the applications).
-const GAP: usize = 4 << 20;
-/// How far into a file its first frame is looked for.
-const FIRST: usize = 64 << 20;
+aqr_common::zopt! {
+    /// Bytes between frames past which a chunk ends (they stay out of the applications).
+    static GAP: Opt<usize> = Opt::size("prores:gap", 4 << 20, "bytes between frames past which a chunk ends");
+    /// How far into a file its first frame is looked for.
+    static FIRST: Opt<usize> =
+        Opt::size("prores:first-frame-window", 64 << 20, "bytes into a file its first frame is looked for");
+}
 
 /// The memory of the module: its plan ([`crate::module::plan`]), the messages its channels may hold
 /// with it.
@@ -44,7 +55,7 @@ pub fn starts(d: &[u8]) -> bool {
     if !qt && !mxf {
         return false;
     }
-    let head = &d[..d.len().min(FIRST)];
+    let head = &d[..d.len().min(FIRST.get())];
     let mut at = 4;
     while let Some(i) = memchr::memmem::find(&head[at..], b"icpf").map(|i| i + at) {
         if Frame::parse(&d[i - 4..]).is_ok() {
@@ -68,10 +79,11 @@ fn size(d: &[u8], at: usize) -> usize {
 /// The frames (by their indices in `frames`, offsets in `d` in order) of each chunk.
 fn chunks(d: &[u8], frames: &[usize], chunk: usize) -> Vec<Range<usize>> {
     let end = |i: usize| frames[i] + size(d, frames[i]);
+    let gap = GAP.get();
     let mut out = Vec::new();
     let (mut first, mut bytes) = (0, 0);
     for (i, &at) in frames.iter().enumerate() {
-        if i > first && (bytes >= chunk || at - end(i - 1) > GAP) {
+        if i > first && (bytes >= chunk || at - end(i - 1) > gap) {
             out.push(first..i);
             (first, bytes) = (i, 0);
         }
@@ -86,7 +98,7 @@ fn chunks(d: &[u8], frames: &[usize], chunk: usize) -> Vec<Range<usize>> {
 /// The formula of `input`, a file holding ProRes frames, on `threads` threads (the formula does
 /// not depend on it); None where there are none, or coding them saves nothing.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    encode_with(input, threads, CHUNK, None)
+    encode_with(input, threads, CHUNK_BYTES.get(), STRIPES.get())
 }
 
 /// [`encode`] with chunks of about `chunk` bytes of frames, and `stripes` stripes in each where

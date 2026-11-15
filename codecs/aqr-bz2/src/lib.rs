@@ -7,6 +7,8 @@
 //! that rotations sort as libbzip2 sorts them. Only the order of equal rotations (of a
 //! periodic block) can differ, which a formula notes.
 
+aqr_common::zopt_namespace!("bz2", "bzip2 streams (aqr-bz2)");
+
 pub mod compress;
 pub mod crc;
 #[cfg(feature = "encode")]

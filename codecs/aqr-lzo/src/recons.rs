@@ -435,13 +435,19 @@ pub fn costs(data: &[u8], record: &[u8]) -> Result<[f64; CATS]> {
     Ok(e.cost)
 }
 
-/// Data of a stream coded under both modes to pick one.
-const TRIAL: usize = 1 << 16;
+aqr_common::zopt! {
+    /// Data of a stream coded under both modes to pick one.
+    static TRIAL: Opt<usize> = Opt::size("lzo:trial", 1 << 16, "bytes of a stream coded under both modes to pick one");
+    /// The mode of the match finder forced (0, or 1 for [`SKIP`]) rather than picked.
+    static MODE: Opt<Option<u8>> = Opt::value("lzo:mode", None, "match finder mode forced (0 or 1), else the smaller record's");
+    /// Whether a stream is checked to be given back by encoding its parse, before it is split.
+    static CHECK: Opt<bool> = Opt::flag("lzo:check", true, "check that a stream is given back by its parse before splitting it");
+}
 
 /// The mode whose record of the first [`TRIAL`] bytes or so of `data` is the smaller.
 fn mode(data: &[u8], parse: &Parse) -> u8 {
-    let (mut at, mut k) = (0, 0);
-    while k < parse.matches.len() && at < TRIAL {
+    let (mut at, mut k, trial) = (0, 0, TRIAL.get());
+    while k < parse.matches.len() && at < trial {
         at += (parse.matches[k].lits + parse.matches[k].len) as usize;
         k += 1;
     }
@@ -460,7 +466,8 @@ pub fn split(s: &[u8], limit: usize) -> Result<Split> {
 /// streams of a compressor, which take the same mode.
 pub fn split_as(s: &[u8], limit: usize, given: Option<u8>) -> Result<Split> {
     let dec = lzo1x::decode(s, limit)?;
-    if lzo1x::encode(&dec.data, &dec.parse) != s[..dec.used] {
+    let given = given.or(MODE.get().map(|m| if m == 0 { 0 } else { SKIP }));
+    if CHECK.get() && lzo1x::encode(&dec.data, &dec.parse) != s[..dec.used] {
         return Err(Error("stream not given back"));
     }
     if let Some(m) = given {
@@ -470,7 +477,7 @@ pub fn split_as(s: &[u8], limit: usize, given: Option<u8>) -> Result<Split> {
     // a stream of no more data than the trial's: its records under both modes, the smaller
     // (the trial would code them as much again: a game's data file of thousands of small
     // streams spent a third of its time on it)
-    let record = if dec.data.len() <= TRIAL {
+    let record = if dec.data.len() <= TRIAL.get() {
         match (record(&dec.data, &dec.parse, 0), record(&dec.data, &dec.parse, SKIP)) {
             (Ok(a), Ok(b)) => {
                 if a.len() <= b.len() {

@@ -27,7 +27,6 @@ const CHUNK: &[u8; 4] = b"zlb\x1a";
 const CHUNK_HEAD: usize = 9;
 
 /// The most data a stream is split to.
-const LIMIT: usize = aqr_lzma::formula::LIMIT;
 
 /// The loader's offset table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +147,8 @@ pub struct Piece {
 pub fn split(d: &[u8], threads: usize) -> Vec<Piece> {
     let Some(t) = table(d) else { return Vec::new() };
     let (mut pieces, mut at) = (Vec::new(), t.data);
+    // (the most the streams decode to, all together: aqr-lzma's `-Z lzma:limit`)
+    let limit = aqr_lzma::formula::MAX.get();
     // (the data ends where the setup header or, before 4.1, the setup program starts)
     let end = t.header.min(t.exe);
     let mut total = 0usize;
@@ -156,7 +157,7 @@ pub fn split(d: &[u8], threads: usize) -> Vec<Piece> {
         let Some(props) = Props::from_byte(p) else { break };
         let from = at + CHUNK_HEAD;
         let Some(body) = d.get(from..end) else { break };
-        let Ok(sp) = recons::split(body, props, dict as u32, None, LIMIT.saturating_sub(total), threads) else {
+        let Ok(sp) = recons::split(body, props, dict as u32, None, limit.saturating_sub(total), threads) else {
             break;
         };
         total += sp.data.len();

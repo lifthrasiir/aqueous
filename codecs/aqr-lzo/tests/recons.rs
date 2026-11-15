@@ -42,7 +42,10 @@ fn streams_of_liblzo2() {
         assert!(recons::join(&sp.data, &sp.record).unwrap() == s, "{name}");
         // (the bits counted by kind: the record's, but the coder's last bytes and its mode)
         let bits: f64 = recons::costs(&sp.data, &sp.record).unwrap().iter().sum();
-        assert!((bits / 8.0 - sp.record.len() as f64).abs() <= 8.0 + sp.record.len() as f64 / 100.0, "{name}: {bits} bits");
+        assert!(
+            (bits / 8.0 - sp.record.len() as f64).abs() <= 8.0 + sp.record.len() as f64 / 100.0,
+            "{name}: {bits} bits"
+        );
         // the other mode of the match finder codes it too, and a mode given is taken (or the
         // other where the parse is not coded with it)
         for mode in [0, recons::SKIP] {

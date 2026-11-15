@@ -7,6 +7,8 @@
 //! ProRes frames delimit themselves (a big-endian size, then `icpf`), so they are found in any
 //! container (QuickTime, MXF, Matroska) without reading it: `find` scans for them.
 
+aqr_common::zopt_namespace!("prores", "Apple ProRes video (aqr-prores)");
+
 pub mod codec;
 pub mod coef;
 #[cfg(feature = "encode")]

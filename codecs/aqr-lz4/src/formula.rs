@@ -26,6 +26,12 @@ pub const MOZLZ4: [u8; 8] = *b"mozLz40\0";
 /// first, then those of `lz4 --fast` and other common choices.
 pub const ACCELERATIONS: [u32; 15] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 16, 17, 32, MAX_ACCELERATION];
 
+aqr_common::zopt! {
+    /// The accelerations tried, in order ([`ACCELERATIONS`] by default).
+    pub static ACCEL: Opt<&'static [u32]> =
+        Opt::value("lz4:accel", &ACCELERATIONS, "accelerations tried to reproduce a stream, in order");
+}
+
 /// Whether `d` starts like a container this module rebuilds the stream of.
 pub fn starts(d: &[u8]) -> bool {
     d.starts_with(&MOZLZ4) || d.starts_with(&frame::MAGIC)
@@ -61,7 +67,7 @@ fn mozlz4(d: &[u8]) -> Option<Formula> {
     let mut data = Vec::with_capacity(n);
     block::decode(blk, &mut data, 0, n).ok()?;
     let mut params = vec![BLOCK];
-    ACCELERATIONS.iter().find(|&&a| {
+    ACCEL.get().iter().find(|&&a| {
         params.truncate(1);
         varint::put(&mut params, a as u64);
         crate::part::reproduces(&params, &data, blk)
@@ -83,9 +89,8 @@ fn lz4_frame(d: &[u8]) -> Option<Formula> {
         return None;
     }
     let orig = &d[..fr.len];
-    let a = *ACCELERATIONS
-        .iter()
-        .find(|&&a| matches!(frame::encode(&fr.data, fr.flg, fr.bd, a, Some(orig)), Ok(Some(_))))?;
+    let a =
+        *ACCEL.get().iter().find(|&&a| matches!(frame::encode(&fr.data, fr.flg, fr.bd, a, Some(orig)), Ok(Some(_))))?;
     let mut params = vec![FRAME];
     varint::put(&mut params, a as u64);
     params.extend_from_slice(&[fr.flg, fr.bd]);

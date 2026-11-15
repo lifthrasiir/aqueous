@@ -307,8 +307,10 @@ pub fn tokens(d: &[u8], l: &Line, toks: &mut Toks) -> bool {
     ok
 }
 
-/// The lines of a sample that tell its style.
-const SAMPLE_LINES: usize = 1000;
+aqr_common::zopt! {
+    /// The lines of a sample that tell its style.
+    static SAMPLE_LINES: Opt<usize> = Opt::value("jsonl:sample-lines", 1000, "lines of the sample that tell a file's style");
+}
 
 /// The style of JSON lines starting with `s` (a sample of the file, `whole` if it is all of it),
 /// if any: where 9 lines in 10 at least are objects or arrays, of 8 lines at least (2 in a short
@@ -317,8 +319,9 @@ pub fn style(s: &[u8], whole: bool) -> Option<Style> {
     let mut n = 0;
     let mut good = 0;
     let mut toks = Toks::default();
+    let sample_lines = SAMPLE_LINES.get();
     let mut at = 0;
-    while at < s.len() && n < SAMPLE_LINES {
+    while at < s.len() && n < sample_lines {
         let l = line(s, at);
         // (the last line cut by the sample's end)
         if l.term == E_NONE && !whole {

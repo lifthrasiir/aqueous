@@ -21,8 +21,11 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
     crate::module::plan(u.params, &inputs, u.initial(), len).map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
-/// what a formula costs beyond its streams, for deciding whether coding an embedded JPEG pays off
-const OVERHEAD: usize = 8;
+aqr_common::zopt! {
+    /// what a formula costs beyond its streams, for deciding whether coding an embedded JPEG pays off
+    static OVERHEAD: Opt<usize> =
+        Opt::value("jpeg:embedded-overhead", 8, "bytes a formula costs beyond its streams, for an embedded JPEG");
+}
 
 /// The formula for `input`; None where it is not coded. `threads` bounds the parallelism: the
 /// calling thread and workers of aqr-common's pool (0: rayon's pool as it is, the global one
@@ -45,7 +48,7 @@ fn try_encode(input: &[u8], depth: u32) -> Result<Formula, Error> {
     // embedded JPEGs in the blob, coded recursively (only where it pays off)
     let entries = codec::embedded_entries(&core.blob, depth, |bytes| {
         let c = encode_at(bytes, depth + 1)?;
-        (size(&c) + OVERHEAD < bytes.len()).then_some(c)
+        (size(&c) + OVERHEAD.get() < bytes.len()).then_some(c)
     });
     let mut head = Vec::with_capacity(4 + entries.len() * 8);
     codec::put_entries(&mut head, &entries);

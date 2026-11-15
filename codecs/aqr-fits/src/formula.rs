@@ -37,8 +37,14 @@ fn rice_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::rice_plan(u.params, u.inputs, rows, rebuilt)?)
 }
 
-/// Data smaller than this is kept as it is.
-const MIN_DATA: usize = 2048;
+aqr_common::zopt! {
+    /// Data smaller than this is kept as it is.
+    static MIN_DATA: Opt<usize> = Opt::size("fits:min-data", 2048, "data (an HDU's) shorter is kept as it is");
+    /// The zstd level whose output the image model is compared to (it stands for what the archive
+    /// does with the data as it is).
+    static BASELINE_LEVEL: Opt<i32> =
+        Opt::value("fits:baseline-level", 3, "zstd level the image model is compared with");
+}
 
 /// Whether `d` starts like a FITS file.
 pub fn starts(d: &[u8]) -> bool {
@@ -103,7 +109,7 @@ fn index(n: Node) -> usize {
 fn data(f: &mut Formula, s: &Streams, input: &[u8], h: &Hdu) -> Vec<Node> {
     let d = &input[h.data.clone()];
     let hd = Header::new(&input[h.header.clone()]);
-    if d.len() >= MIN_DATA {
+    if d.len() >= MIN_DATA.get() {
         let coded = if let Some(l) = Layout::from_header(&hd, d.len() as u64) {
             rice(f, d, &l)
         } else if let Some(p) = pixels(&hd) {
@@ -145,8 +151,10 @@ fn pixels_node(f: &mut Formula, d: &[u8], mut p: Pixels) -> Option<Vec<Node>> {
     let c;
     (p.mode, c) = image::encode_best(&p.numbers(&pixels), p.shape(), None);
     let coded = c.model.len() + c.raw.len();
-    // (zstd at a low level stands for what the archive does with the data as it is)
-    if !module::within(d.len() as u64, coded) || coded >= zstd::bulk::compress(d, 3).map_or(d.len(), |z| z.len()) {
+    // (zstd at a low level, `fits:baseline-level`, stands for what the archive does with the data as it is)
+    if !module::within(d.len() as u64, coded)
+        || coded >= zstd::bulk::compress(d, BASELINE_LEVEL.get()).map_or(d.len(), |z| z.len())
+    {
         return None;
     }
     let inputs =
@@ -191,7 +199,7 @@ fn bintable(f: &mut Formula, s: &Streams, d: &[u8], h: &Header) -> Option<Vec<No
     let &[row, n] = &axes[..] else { return None };
     let (row, n) = (usize::try_from(row).ok()?, usize::try_from(n).ok()?);
     let len = row.checked_mul(n)?;
-    if n < 2 || len < MIN_DATA || len > d.len() {
+    if n < 2 || len < MIN_DATA.get() || len > d.len() {
         return None;
     }
     let fields = table::fields(h)?;

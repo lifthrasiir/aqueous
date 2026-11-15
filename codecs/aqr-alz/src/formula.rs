@@ -12,12 +12,21 @@ use aqr_formula::{Formula, Kind, Node};
 
 use crate::alz::{self, BZIP2, DEFLATE, Entry, STORED};
 
-/// Contents of at least this many bytes are slices of their own, apart from the others of their
-/// kind next to them: so that the same contents elsewhere are found by their slices.
-pub const OWN_MIN: usize = 1 << 10;
+aqr_common::zopt_namespace!("alz", "ALZ archives (aqr-alz)");
 
-/// Bytes from which a DEFLATE body gets threads of its own: two of aqr-flate's segments.
-const LARGE: usize = 2 << 20;
+aqr_common::zopt! {
+    /// Contents of at least this many bytes are slices of their own, apart from the others of their
+    /// kind next to them: so that the same contents elsewhere are found by their slices.
+    pub static OWN_MIN: Opt<usize> = Opt::size("alz:own-min", 1 << 10, "contents at least this long are slices of their own");
+    /// Bytes from which a DEFLATE block gets threads of its own: two of aqr-flate's segments.
+    static LARGE: Opt<usize> = Opt::size("alz:large", 2 << 20, "DEFLATE blocks at least this long get all the threads");
+    /// The base of [`limit`] (by default that of all formats, `limit-base`).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("alz:limit-base", 64 << 20, "bytes the blocks may inflate to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    /// The ratio of [`limit`] (by default that of all formats, `limit-ratio`).
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("alz:limit-ratio", 32, "bytes per byte of the archive the blocks may inflate to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -48,7 +57,7 @@ impl Default for Options {
 
 /// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive.
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
 
 /// What [`encode_with`] made.
@@ -116,11 +125,12 @@ pub fn encode_with(
         }
     }
     let fopt = aqr_flate::Options { zlib: opt.zlib, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
+    let large = LARGE.get();
     // (the large ones first, each on all threads, the small ones side by side on one each)
     order.sort_by_key(|&i| std::cmp::Reverse(a.entries[i].body.len()));
     let done = aqr_common::pool::par_map(order.len(), opt.threads, |k| {
         let e = &a.entries[order[k]];
-        let threads = if e.body.len() >= LARGE { opt.threads } else { 1 };
+        let threads = if e.body.len() >= large { opt.threads } else { 1 };
         let max_data = usize::try_from(e.size).ok()?;
         let o = aqr_flate::Options { threads, max_data, ..fopt.clone() };
         let (data, record) = aqr_flate::deconstruct_with(body(e), &o).ok()?;
@@ -181,7 +191,7 @@ pub fn encode_with(
     let by_kind = |f: &mut Formula, (data, ends): (Vec<u8>, Vec<(Kind, usize)>)| {
         let raw = f.streams.len();
         f.push("raw", Vec::new());
-        f.push_by_kind(raw, data, &ends, "alz", OWN_MIN)
+        f.push_by_kind(raw, data, &ends, "alz", OWN_MIN.get())
     };
     // each method's nodes, one for each body in order
     let stored_sizes = sizes(|m| matches!(m, Made::Stored));

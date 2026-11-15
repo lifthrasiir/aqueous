@@ -11,6 +11,8 @@
 
 extern crate alloc;
 
+aqr_common::zopt_namespace!("zst", "Zstandard frames (aqr-zstd)");
+
 pub mod compress;
 #[cfg(feature = "encode")]
 pub mod formula;

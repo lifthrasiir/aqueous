@@ -31,8 +31,12 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::plan([data, flate, layout, kept], u.content(2)?)?)
 }
 
-/// Bodies shorter than this are not looked for among earlier ones.
-const SAME_MIN: usize = 16;
+aqr_common::zopt_namespace!("zip", "ZIP archives (aqr-zip)");
+
+aqr_common::zopt! {
+    /// Bodies shorter than this are not looked for among earlier ones.
+    static SAME_MIN: Opt<usize> = Opt::value("zip:same-min", 16, "bodies shorter are not looked for among earlier ones");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -62,8 +66,8 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             threads: 1,
-            profile: aqr_flate::DEFAULT_PROFILE,
-            zlib: true,
+            profile: aqr_flate::PROFILE.get(),
+            zlib: aqr_flate::ZLIB.get(),
             limit: u64::MAX,
             kind: |_| Kind::Unknown,
             probe: None,
@@ -72,24 +76,31 @@ impl Default for Options {
     }
 }
 
-/// Bodies shorter than this are rebuilt without a probe: the contents of entries of a kind are
-/// archived together, and those of small entries compress far better so than alone (as a
-/// probe would estimate them); and they cost little to rebuild.
-pub const PROBE_MIN: usize = 256 << 10;
+aqr_common::zopt! {
+    /// Bodies shorter than this are rebuilt without a probe: the contents of entries of a kind are
+    /// archived together, and those of small entries compress far better so than alone (as a
+    /// probe would estimate them); and they cost little to rebuild.
+    pub static PROBE_MIN: Opt<usize> = Opt::size("zip:probe-min", 256 << 10, "bodies shorter are rebuilt without a probe");
+    /// The contents of entries of at least this many bytes are slices of their own, apart from the
+    /// others of their kind next to them: each recompressed as a file of its own (a tar archive is
+    /// known only at its start), and found where the same file is archived along with them.
+    pub static OWN_MIN: Opt<usize> = Opt::size("zip:own-min", 256 << 10, "contents at least this long are slices of their own");
+    /// Bodies kept as they are of at least this many bytes are slices of their own, so that the
+    /// same bodies elsewhere (another build's archive) are found by their slices; they are not
+    /// recompressed, so that costs only the slices.
+    pub static KEPT_OWN: Opt<usize> = Opt::size("zip:kept-own", 1 << 10, "kept bodies at least this long are slices of their own");
+    /// The base of [`limit`] (by default that of all formats, `limit-base`).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("zip:limit-base", 0, "bytes the bodies may inflate to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    /// The ratio of [`limit`] (by default that of all formats, `limit-ratio`).
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("zip:limit-ratio", 0, "bytes per byte of the archive the bodies may inflate to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
-/// The contents of entries of at least this many bytes are slices of their own, apart from the
-/// others of their kind next to them: each recompressed as a file of its own (a tar archive is
-/// known only at its start), and found where the same file is archived along with them.
-pub const OWN_MIN: usize = 256 << 10;
-
-/// Bodies kept as they are of at least this many bytes are slices of their own, so that the
-/// same bodies elsewhere (another build's archive) are found by their slices; they are not
-/// recompressed, so that costs only the slices.
-pub const KEPT_OWN: usize = 1 << 10;
-
-/// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive.
+/// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive
+/// (by default).
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
 
 /// What [`encode_with`] made.
@@ -148,13 +159,14 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     }
     // Bodies seen before: no need to look into them again (42.zip has every one 16 times).
     let mut first: HashMap<&[u8], usize> = HashMap::new();
+    let same_min = SAME_MIN.get();
     let mut made: Vec<Option<Made>> = locals
         .iter()
         .enumerate()
         .map(|(i, l)| {
             let b = &input[l.body.clone()];
             match first.entry(b) {
-                Entry::Occupied(e) if b.len() >= SAME_MIN => Some(Made::Same(*e.get())),
+                Entry::Occupied(e) if b.len() >= same_min => Some(Made::Same(*e.get())),
                 Entry::Occupied(_) => None,
                 Entry::Vacant(v) => {
                     v.insert(i);
@@ -183,7 +195,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             max_data: usize::try_from(max).unwrap_or(usize::MAX),
             ..fopt.clone()
         };
-        let probed = |i: usize| opt.probe.is_some() && locals[i].body.len() >= PROBE_MIN;
+        let probe_min = PROBE_MIN.get();
+        let probed = |i: usize| opt.probe.is_some() && locals[i].body.len() >= probe_min;
         let size = |&(i, _): &(usize, u64)| locals[i].body.len();
         // (each with its options, made once: they hold the profile's catalog)
         let parsed = par_jobs(jobs, size, opt.threads, |&(i, max), threads| {
@@ -351,7 +364,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     // The contents of the stored bodies and the data of the deflated ones apart, by kind,
     // each body's data dropped once written; the records one after another.
     let records_len = bodies.iter().flatten().map(|b| b.1.len()).sum();
-    let (mut stored, mut data) = (ByKind::new(OWN_MIN), ByKind::new(OWN_MIN));
+    let (mut stored, mut data) = (ByKind::new(OWN_MIN.get()), ByKind::new(OWN_MIN.get()));
     // (the stored bodies one after another, for the check below)
     let stored_len =
         made.iter().zip(&locals).filter(|(m, _)| matches!(m, Made::Stored)).map(|(_, l)| l.body.len()).sum();
@@ -439,8 +452,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
 fn own_slices(all: Node, ends: &[usize]) -> Node {
     let Node::Slice { stream, .. } = all else { return all };
     let (mut parts, mut start, mut open) = (Vec::<(usize, usize)>::new(), 0, false);
+    let kept_own = KEPT_OWN.get();
     for &end in ends {
-        let small = end - start < KEPT_OWN;
+        let small = end - start < kept_own;
         match parts.last_mut() {
             Some(p) if open && small => p.1 = end,
             _ if end == start => {}

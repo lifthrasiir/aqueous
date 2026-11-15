@@ -2,6 +2,8 @@
 //! A stream is a chain of blocks of magic `bvx?`: LZFSE (`bvx2`), LZVN (`bvxn`), stored (`bvx-`),
 //! ending with `bvx$` (`bvx`). LZVN is also found alone, without blocks (`lzvn`).
 
+aqr_common::zopt_namespace!("bvx", "LZFSE and LZVN streams (aqr-bvx)");
+
 pub mod bvx;
 #[cfg(feature = "encode")]
 pub mod formula;

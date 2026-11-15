@@ -11,7 +11,7 @@ aqr-psd-research check|predict|rle FILE...          # research tools: decoding, 
 cargo test                              # formula round trips of synthetic PSDs (no corpus needed)
 ```
 
-`PSDR_STATS=1` prints phase times and sizes; `PSDR_DEBUG=1` where decoding found corrupt
+`-Z psd:stats` (of `aqr`, or `aqr-psd bench -Z psd:stats`) prints phase times and sizes; `-Z psd:debug` tells where decoding found corrupt
 input. `examples/` holds profiling aids (`modelbench`, `renderbench`, `pbbench`, `recbench`) and
 debugging ones (`chan`, `diff`, `rlediff`), run with `cargo run --release --example aqr-psd-NAME -- FILE`.
 
@@ -53,7 +53,7 @@ on one thread, in order; around it:
 - aqr-jpeg uses rayon: for more than one thread aqr-psd asks it for that many, for one it
   keeps the global pool. aqr-png gets the threads too. A nested PSD gets one thread when
   several embedded files run at once.
-- `PSDR_STATS` times are summed over threads.
+- `psd:stats` times are summed over threads.
 
 Memory of the native pipeline (WebAssembly runs one thread): batches in flight add at most about 10 MB per helper pair (5 batches of about 1 MB,
 twice), and fewer rows than the group has.

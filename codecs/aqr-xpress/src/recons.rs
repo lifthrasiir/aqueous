@@ -756,8 +756,15 @@ pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<Vec<u8>>
     Ok(best_walk(data, size, &parses)?.c.finish())
 }
 
-/// Bytes of data that the choice of [`walk`]'s candidates is made on.
-const SAMPLE: usize = 256 << 10;
+aqr_common::zopt! {
+    /// Bytes of data that the choice of [`walk`]'s candidates is made on.
+    static SAMPLE: Opt<usize> = Opt::size("xpress:sample", 256 << 10, "bytes of data the choice of candidates is made on");
+    /// The choice of [`walk`]'s candidates forced (on: all of them), rather than made on a sample.
+    static ALL: Opt<Option<bool>> =
+        Opt::value("xpress:all", None, "candidates forced, all (on) or the usual (off), rather than chosen on a sample")
+            .bare(Some(true))
+            .off(Some(false));
+}
 
 /// The record of `data` coded with the candidates the stream's encoder seems to use: tried on its
 /// first chunks (up to [`SAMPLE`] bytes), the cheaper going on to the rest.
@@ -766,7 +773,10 @@ fn best_walk(data: &[u8], size: usize, parses: &[Option<Parse>]) -> Result<Enc> 
         let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
         walk(&mut enc, data, size, parses, all).map(|_| enc)
     };
-    let k = (SAMPLE / size).max(1).min(parses.len());
+    if let Some(all) = ALL.get() {
+        return run(parses, data, all);
+    }
+    let k = (SAMPLE.get() / size).max(1).min(parses.len());
     let sample = &data[..(k * size).min(data.len())];
     let (a, b) = (run(&parses[..k], sample, false)?, run(&parses[..k], sample, true)?);
     let all = b.cost.iter().sum::<f64>() < a.cost.iter().sum::<f64>();

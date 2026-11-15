@@ -71,8 +71,8 @@ pub fn encode_samples(input: &[u8], layout: Layout, threads: usize) -> Option<Fo
 pub fn apply(f: &mut Formula, samples: &[u8], layout: Layout, threads: usize) -> Option<Node> {
     match layout {
         Layout::Pcm(fmt) => pcm::apply(f, samples, fmt, threads),
-        Layout::Raster(fmt) => raster::apply_in(f, samples, fmt, threads, raster::BAND),
-        Layout::Raster16(fmt) => raster16::apply_in(f, samples, fmt, threads, raster16::BAND),
+        Layout::Raster(fmt) => raster::apply_in(f, samples, fmt, threads, raster::BAND.get()),
+        Layout::Raster16(fmt) => raster16::apply_in(f, samples, fmt, threads, raster::BAND.get()),
         Layout::Ima(fmt) => {
             let l = aqr_ima::codec::Layout::new(fmt.channels, fmt.per_channel)?;
             // Any bytes of whole blocks are coded (aqr-ima's record keeps them all).

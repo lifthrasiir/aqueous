@@ -35,12 +35,24 @@ const F_PAD_ZERO: u8 = 1;
 pub(crate) const F_RAW: u8 = 2;
 pub(crate) const F_TRUNCATED: u8 = 4;
 const F_BOUNDARY: u8 = 8;
-/// nesting limit for embedded JPEGs (main image = depth 0)
 #[cfg(feature = "encode")]
-const MAX_DEPTH: u32 = 3;
-/// embedded JPEGs smaller than this are left alone (model tables alone would outweigh them)
-#[cfg(feature = "encode")]
-const MIN_EMBEDDED: usize = 1024;
+aqr_common::zopt! {
+    /// nesting limit for embedded JPEGs (main image = depth 0)
+    static MAX_DEPTH: Opt<u32> = Opt::value("jpeg:max-depth", 3, "nesting limit of embedded JPEGs (the main image is 0)");
+    /// embedded JPEGs smaller than this are left alone (model tables alone would outweigh them)
+    static MIN_EMBEDDED: Opt<usize> =
+        Opt::size("jpeg:min-embedded", 1024, "embedded JPEGs shorter are left as they are");
+}
+// (decoding reads it too: in WebAssembly it is off)
+aqr_common::zopt! {
+    /// With it set, striped decoding and modelling is checked against holding the coefficients
+    /// whole (scan info, model, re-emitted scan); a difference panics. A test oracle.
+    static VERIFY_STRIPED: Opt<bool> = Opt::flag(
+        "jpeg:verify-striped",
+        false,
+        "check striped decoding, modelling and re-emission against whole, panic on a difference",
+    );
+}
 
 #[cfg(feature = "encode")]
 fn put_varint(out: &mut Vec<u8>, v: u64) {
@@ -61,10 +73,10 @@ pub(crate) fn with_bufs<R>(f: impl FnOnce(&mut Vec<Coefs>, &mut Clean) -> R) -> 
     let (mut coefs, mut clean) = BUFS.with(|b| std::mem::take(&mut *b.borrow_mut()));
     let r = f(&mut coefs, &mut clean);
     let bytes = coefs.iter().map(|c| c.blocks.capacity() * 128 + c.masks.capacity() * 8).sum::<usize>();
-    if bytes > jpeg::KEEP_BYTES {
+    if bytes > jpeg::KEEP_BYTES.get() {
         coefs = Vec::new();
     }
-    if clean.data.capacity() > jpeg::KEEP_BYTES {
+    if clean.data.capacity() > jpeg::KEEP_BYTES.get() {
         clean = Clean::default();
     }
     BUFS.with(|b| *b.borrow_mut() = (coefs, clean));
@@ -115,7 +127,7 @@ fn find_embedded(blob: &[u8]) -> Vec<(usize, usize)> {
     while let Some(o) = memchr::memmem::find(&blob[i..], b"\xFF\xD8\xFF") {
         let p = i + o;
         match jpeg_extent(blob, p) {
-            Some(e) if e - p >= MIN_EMBEDDED => {
+            Some(e) if e - p >= MIN_EMBEDDED.get() => {
                 v.push((p, e));
                 i = e;
             }
@@ -208,7 +220,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
     let none = || Err(Error("no scan could be modelled".into()));
     let (infos, model, sizes) = match model_striped(&j, input, clean) {
         Some((_, None)) => {
-            if std::env::var_os("JRC_VERIFY_STRIPED").is_some()
+            if VERIFY_STRIPED.get()
                 && let Ok(infos) = jpeg::decode_all(&j, input, coefs, clean)
             {
                 // test oracle: decoding the scan whole must not take it either
@@ -217,7 +229,7 @@ pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &m
             return none();
         }
         Some((info, Some((model, bits)))) => {
-            if std::env::var_os("JRC_VERIFY_STRIPED").is_some() {
+            if VERIFY_STRIPED.get() {
                 // test oracle: the outcome must equal that of decoding the scan whole
                 let infos = jpeg::decode_all(&j, input, coefs, clean)?;
                 assert!(infos == [info.clone()], "striped decoding: scan info differs");
@@ -306,7 +318,7 @@ pub(crate) struct Entry<C> {
 #[cfg(feature = "encode")]
 pub(crate) fn embedded_entries<C>(blob: &[u8], depth: u32, mut code: impl FnMut(&[u8]) -> Option<C>) -> Vec<Entry<C>> {
     let mut entries: Vec<Entry<C>> = Vec::new();
-    if depth < MAX_DEPTH {
+    if depth < MAX_DEPTH.get() {
         for (a, b) in find_embedded(blob) {
             let bytes = &blob[a..b];
             if let Some(k) = entries.iter().position(|e| blob[e.start..e.end] == *bytes) {
@@ -525,7 +537,7 @@ pub(crate) fn decode_core<'a>(
         let ranges = model::stripe_mcus(&j, s.mcux, ns);
         let fill = |k, b: &mut Vec<Coefs>| model::decode_stripe(&j, &t, k, ns, stripes[k], b);
         jpeg::encode_striped(&j, s, &infos[0], &ranges, &sizes.stripes, fill, (blob, len), &mut out)?;
-        if std::env::var_os("JRC_VERIFY_STRIPED").is_some() {
+        if VERIFY_STRIPED.get() {
             // test oracle: the scan must equal the one re-emitted from whole components
             model::decode_whole(&j, &t, &stripes, coefs)?;
             let mut scan = Vec::new();

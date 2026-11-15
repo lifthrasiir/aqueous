@@ -14,9 +14,15 @@ use aqr_vorbis::setups::{self, Setups};
 use crate::stripped::{self, Stripped};
 use crate::{ids, wem};
 
-/// The packets a setup found by its skeleton (not by the table of ids) is tried on (but the
-/// last, which often ends early).
-const TRIED: usize = 64;
+aqr_common::zopt_namespace!("wwise", "Wwise Vorbis media (aqr-wwise)");
+
+aqr_common::zopt! {
+    /// The packets a setup found by its skeleton (not by the table of ids) is tried on (but the
+    /// last, which often ends early).
+    static TRIED: Opt<usize> = Opt::value("wwise:tried", 64, "packets a setup found by its skeleton is tried on");
+    /// The most setups kept (then all are dropped).
+    static CACHED: Opt<usize> = Opt::value("wwise:setup-cache", 64, "setups kept in the cache, then all dropped");
+}
 
 /// Whether every packet of `packets` (of `d`) parses exactly under `setup`: to its end, at most
 /// 7 zero bits left.
@@ -47,7 +53,7 @@ pub fn setup(s: &Stripped, ident: Ident, d: &[u8], w: &wem::Wem) -> Option<Vec<u
 fn found(s: &Stripped, ident: Ident, d: &[u8], w: &wem::Wem) -> Option<(Vec<u8>, Setup)> {
     let db = setups::database().ok()?;
     let known: Vec<Option<u32>> = s.ids.iter().map(|&id| ids::part(id)).collect();
-    let sample = &w.packets[..w.packets.len().saturating_sub(1).min(TRIED)];
+    let sample = &w.packets[..w.packets.len().saturating_sub(1).min(TRIED.get())];
     if let Some(parts) = known.iter().copied().collect::<Option<Vec<u32>>>() {
         return assemble(db, s, ident, &parts);
     }
@@ -63,9 +69,6 @@ fn found(s: &Stripped, ident: Ident, d: &[u8], w: &wem::Wem) -> Option<(Vec<u8>,
 /// parsing one costs as much as encoding a small medium's packets.
 type Cache = Mutex<HashMap<(Vec<u8>, Ident), Arc<(Vec<u8>, Setup)>>>;
 
-/// The most setups kept (then all are dropped).
-const CACHED: usize = 64;
-
 /// [`found`] through the cache, for a setup found by the table of ids (one found by its packets
 /// is those packets', not the stripped header's alone).
 fn cached(stripped: &[u8], s: &Stripped, ident: Ident, d: &[u8], w: &wem::Wem) -> Option<Arc<(Vec<u8>, Setup)>> {
@@ -79,7 +82,7 @@ fn cached(stripped: &[u8], s: &Stripped, ident: Ident, d: &[u8], w: &wem::Wem) -
     let made = Arc::new(found(s, ident, d, w)?);
     if by_table {
         let mut c = cache.lock().unwrap();
-        if c.len() >= CACHED {
+        if c.len() >= CACHED.get() {
             c.clear();
         }
         c.insert(key, made.clone());

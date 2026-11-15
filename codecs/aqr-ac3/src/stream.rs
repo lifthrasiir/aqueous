@@ -16,8 +16,11 @@ pub const MODEL_BITS: u32 = 21;
 pub const FRAME_MAX: usize = 3840;
 /// Bytes of a run of other bytes decoded at once.
 pub const RUN_PIECE: usize = 4096;
-/// The bytes of a chunk, about: it ends with the record that passes them.
-pub const CHUNK: usize = 16 << 20;
+#[cfg(feature = "encode")]
+aqr_common::zopt! {
+    /// The bytes of a chunk, about: it ends with the record that passes them.
+    pub static CHUNK: Opt<usize> = Opt::size("ac3:chunk", 16 << 20, "record bytes of a chunk, about");
+}
 
 const KIND: u32 = 0xFFFF_0001;
 
@@ -74,11 +77,13 @@ pub fn records(data: &[u8]) -> Vec<Record> {
 }
 
 /// The chunks: ranges of records of about [`CHUNK`] bytes.
+#[cfg(feature = "encode")]
 pub fn chunks(recs: &[Record]) -> Vec<core::ops::Range<usize>> {
+    let chunk = CHUNK.get();
     let (mut out, mut from, mut bytes) = (Vec::new(), 0usize, 0usize);
     for (i, r) in recs.iter().enumerate() {
         bytes += r.end - r.start;
-        if bytes >= CHUNK {
+        if bytes >= chunk {
             out.push(from..i + 1);
             from = i + 1;
             bytes = 0;

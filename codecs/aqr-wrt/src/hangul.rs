@@ -12,11 +12,12 @@ use aqr_common::varint;
 use crate::words::{PIECE, in_pieces, put_at, split};
 use crate::{Result, corrupt};
 
-/// The longest token coded by an entry, in bytes (16 syllables, or 15 and the space before).
-pub const MAX_TOKEN: usize = 48;
-
-/// Tokens seen fewer times than this have no entry.
-pub const MIN_COUNT: u32 = 4;
+aqr_common::zopt! {
+    /// The longest token coded by an entry, in bytes (16 syllables, or 15 and the space before).
+    static MAX_TOKEN: Opt<usize> = Opt::value("hangul:max-token", 48, "longest token of Hangul coded by an entry, in bytes");
+    /// Tokens seen fewer times than this have no entry.
+    static MIN_COUNT: Opt<u32> = Opt::value("hangul:min-count", 4, "tokens of Hangul seen fewer times than this have no entry");
+}
 
 /// The first Hangul syllable (U+AC00), and how many there are (to U+D7A3).
 const FIRST: u32 = 0xac00;
@@ -106,7 +107,7 @@ fn tokens(d: &[u8], mut f: impl FnMut(usize, usize)) {
 /// than a space: no token holds one, nor is it in the middle of a character of UTF-8, so that
 /// the pieces code to the same bytes as the whole. (Text of JSON may have no LF at all.)
 fn pieces(d: &[u8]) -> Vec<&[u8]> {
-    split(d, PIECE, apart, 0)
+    split(d, PIECE.get(), apart, 0)
 }
 
 /// `d` in segments of about `size` bytes ([`SEGMENT`]), cut as pieces are.
@@ -169,9 +170,10 @@ fn shard(h: u64) -> usize {
 /// bytes.
 fn count(d: &[u8]) -> (Vec<Counts<'_>>, [u64; 256]) {
     let mut shards: Vec<Counts> = (0..SHARDS).map(|_| Counts::default()).collect();
+    let max = MAX_TOKEN.get();
     tokens(d, |s, e| {
         let t = &d[s..e];
-        if t.len() <= MAX_TOKEN {
+        if t.len() <= max {
             let h = hash(t);
             shards[shard(h)].entry(h).or_insert((0, t)).0 += 1;
         }
@@ -213,6 +215,7 @@ impl Dictionary {
             }
         }
         // (the shards merged on threads, each keeping the tokens counted often enough)
+        let min_count = MIN_COUNT.get();
         let merged = aqr_common::pool::par_map(SHARDS, threads, |k| {
             let maps = std::mem::take(&mut *shards[k].lock().unwrap());
             let mut maps = maps.into_iter();
@@ -222,7 +225,7 @@ impl Dictionary {
                     all.entry(h).or_insert((0, t)).0 += n;
                 }
             }
-            let found = all.into_values().filter(|e| e.0 >= MIN_COUNT);
+            let found = all.into_values().filter(|e| e.0 >= min_count);
             found.map(|(n, t)| (Box::<[u8]>::from(t), n)).collect::<Vec<_>>()
         });
         drop(shards);
@@ -675,8 +678,8 @@ mod tests {
     fn pieces_as_whole() {
         // (no LF, as in JSON; a piece of no ASCII but spaces)
         let line = "한국어 문장이 여기에 있다. 그리고 English words 사이에 있다.\\n";
-        let mut d = line.repeat((PIECE * 5 / 2) / line.len()).into_bytes();
-        d.extend_from_slice(&"끝이다 ".repeat(PIECE / 20).into_bytes());
+        let mut d = line.repeat((PIECE.get() * 5 / 2) / line.len()).into_bytes();
+        d.extend_from_slice(&"끝이다 ".repeat(PIECE.get() / 20).into_bytes());
         assert!(pieces(&d).len() == 3 && pieces(&d).concat() == d);
         assert!(pieces(&d)[1].first().is_some_and(|&b| b < 0x80 && b != b' '));
         let one = Dictionary::of(&[&d], 1).unwrap();

@@ -4,6 +4,8 @@
 //! chunks; `formula` is the entry point (see aqr-formula), with the feature `encode`; `module`
 //! is the code of the module, which `FORMAT.md` specifies.
 
+aqr_common::zopt_namespace!("lzx", "LZX chunks (aqr-lzx)");
+
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod lzx;

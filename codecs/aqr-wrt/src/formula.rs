@@ -33,14 +33,30 @@ pub const STREAM_NAMES: [&str; 1] = ["text"];
 /// from this long on (aqr-formula's `Held`), and text that does is coded alike there.
 pub const MIN_LEN: usize = 256 << 10;
 
-/// Text is sampled in this many windows of [`WINDOW`] bytes, evenly spread, to tell whether
-/// coding it pays ([`pays`]).
-const WINDOWS: usize = 8;
-const WINDOW: usize = 128 << 10;
+aqr_common::zopt_namespace!("wrt", "text coded by words and markup (aqr-wrt)");
+aqr_common::zopt_namespace!("words", "shared text dictionaries (aqr-wrt, aqr-compress)");
+aqr_common::zopt_namespace!("hangul", "text of Hangul (aqr-wrt)");
 
-/// Text is of Hangul ([`korean`]) where syllables are at least this share of the bytes of its
-/// samples.
-const KOREAN: f64 = 0.25;
+aqr_common::zopt! {
+    /// [`MIN_LEN`] as set (`wrt:min-len`), what the encoder takes.
+    pub static MIN_TEXT: Opt<usize> = Opt::size("wrt:min-len", MIN_LEN, "text shorter than this is not taken");
+    /// Text is sampled in this many windows of [`WINDOW`] bytes, evenly spread, to tell whether
+    /// coding it pays ([`pays`]).
+    static WINDOWS: Opt<usize> = Opt::value("wrt:windows", 8, "windows sampled to tell whether coding pays and whether text is Hangul");
+    static WINDOW: Opt<usize> = Opt::size("wrt:window", 128 << 10, "bytes of each sampled window");
+    /// Text is of Hangul ([`korean`]) where syllables are at least this share of the bytes of its
+    /// samples.
+    static KOREAN: Opt<f64> = Opt::value("wrt:korean", 0.25, "share of syllables of the sampled bytes that makes text Hangul");
+    /// Coding is chosen by [`pays`] (`auto`), or always (`code`), or never (`no-code`).
+    static CODE: Opt<&'static str> = Opt::value("wrt:code", "auto", "code always (wrt:code), never (wrt:no-code), or where it pays")
+        .bare("code")
+        .off("no-code")
+        .choices(&["auto", "code", "no-code"]);
+    /// Coding pays where the samples coded are at most `PAYS_NUM`/`PAYS_DEN` of the samples as
+    /// they are (zstd -3).
+    static PAYS_NUM: Opt<usize> = Opt::value("wrt:pays-num", 31, "coded samples must be at most pays-num/pays-den of raw");
+    static PAYS_DEN: Opt<usize> = Opt::value("wrt:pays-den", 32, "coded samples must be at most pays-num/pays-den of raw");
+}
 
 /// The dictionaries of texts, and their resources: of words and markup, of the texts not of
 /// Hangul ([`korean`]); of Hangul, of those of it.
@@ -98,7 +114,7 @@ pub fn mostly_text(d: &[u8]) -> bool {
 /// [`encode`] takes it (a few others are common in text: DOS's end of file, Ctrl-Z, at its
 /// end, escapes of a terminal). A file of more bytes of others is looked into for files in it.
 pub fn starts(d: &[u8]) -> bool {
-    d.len() >= MIN_LEN && mostly_text(d)
+    d.len() >= MIN_TEXT.get() && mostly_text(d)
 }
 
 /// Whether coding text `d` with `dict` pays, told by `d` and `dict` alone (so that the same
@@ -106,20 +122,26 @@ pub fn starts(d: &[u8]) -> bool {
 /// samples of it ([`WINDOWS`]) coded at least 1/32 smaller than as they are, by more than
 /// `own` bytes over all of `d` (the dictionary compressed, where it is `d`'s own).
 fn pays(d: &[u8], code: impl Fn(&[u8]) -> Vec<u8>, own: usize) -> bool {
+    match CODE.get() {
+        "code" => return true,
+        "no-code" => return false,
+        _ => {}
+    }
     let z = |s: &[u8]| zstd::bulk::compress(s, 3).map_or(s.len(), |c| c.len());
     let (mut raw, mut coded, mut n) = (0, 0, 0);
     for s in samples(d) {
         (raw, coded, n) = (raw + z(s), coded + z(&code(s)), n + s.len());
     }
-    coded * 32 <= raw * 31 && ((raw - coded) as f64 * d.len() as f64 / n as f64) > own as f64
+    coded * PAYS_DEN.get() <= raw * PAYS_NUM.get() && ((raw - coded) as f64 * d.len() as f64 / n as f64) > own as f64
 }
 
 /// The samples of `d` that [`pays`] and [`korean`] go by: [`WINDOWS`] of [`WINDOW`] bytes,
 /// evenly spread, or all of `d` where it is shorter.
 fn samples(d: &[u8]) -> Vec<&[u8]> {
-    match d.len() <= WINDOWS * WINDOW {
+    let (windows, window) = (WINDOWS.get(), WINDOW.get());
+    match d.len() <= windows * window {
         true => vec![d],
-        false => (0..WINDOWS).map(|i| &d[i * (d.len() - WINDOW) / (WINDOWS - 1)..][..WINDOW]).collect(),
+        false => (0..windows).map(|i| &d[i * (d.len() - window) / (windows - 1)..][..window]).collect(),
     }
 }
 
@@ -130,7 +152,7 @@ pub fn korean(d: &[u8]) -> bool {
     for s in samples(d) {
         (n, of) = (n + hangul::syllable_bytes(s), of + s.len());
     }
-    of > 0 && n as f64 >= KOREAN * of as f64
+    of > 0 && n as f64 >= KOREAN.get() * of as f64
 }
 
 /// The formula of text `input` with dictionaries of its own, or `None` where it is shorter than
@@ -138,7 +160,7 @@ pub fn korean(d: &[u8]) -> bool {
 /// not pay (`pays`). Text of Hangul ([`korean`]) is coded by [`HANGUL`], else by [`MODULE`].
 /// It is the same whatever `threads` is.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    if input.len() < MIN_LEN || !mostly_text(input) {
+    if input.len() < MIN_TEXT.get() || !mostly_text(input) {
         return None;
     }
     let shared = Shared::of(&[input], threads)?;
@@ -150,14 +172,14 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// [`MIN_LEN`], is not [`mostly_text`], `shared` has no dictionary of its kind ([`korean`]) or
 /// coding it does not pay (`pays`). It is the same whatever `threads` is.
 pub fn encode_with(input: &[u8], shared: &Shared, threads: usize) -> Option<Formula> {
-    if input.len() < MIN_LEN || !mostly_text(input) {
+    if input.len() < MIN_TEXT.get() || !mostly_text(input) {
         return None;
     }
     coded(input, shared, 0, threads)
 }
 
 fn coded(input: &[u8], shared: &Shared, own: usize, threads: usize) -> Option<Formula> {
-    coded_in(input, shared, own, threads, words::SEGMENT)
+    coded_in(input, shared, own, threads, words::SEGMENT.get())
 }
 
 /// [`coded`] in segments of about `segment` bytes.

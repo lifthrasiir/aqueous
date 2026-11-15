@@ -11,6 +11,8 @@
 
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
 
+aqr_common::zopt_namespace!("raw", "uncompressed sampled data, PCM and rasters (aqr-raw)");
+
 pub mod audio;
 pub mod container;
 #[cfg(feature = "encode")]

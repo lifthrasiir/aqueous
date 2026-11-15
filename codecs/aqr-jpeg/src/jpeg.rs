@@ -30,9 +30,28 @@ const _: () = assert!(4 * FAST_BITS <= 56 && 3 * FAST_BITS <= 40);
 /// Largest DC magnitude accepted; keeps DC prediction residuals of downstream models in 16 bits.
 pub const DC_LIMIT: i32 = (1 << 14) - 1;
 
-/// Buffers kept for reuse by a thread (to spare allocation and page faults on the next file)
-/// are dropped instead above this size, so that a large image's memory is not held on to.
-pub(crate) const KEEP_BYTES: usize = 16 << 20;
+aqr_common::zopt! {
+    /// Buffers kept for reuse by a thread (to spare allocation and page faults on the next file)
+    /// are dropped instead above this size, so that a large image's memory is not held on to.
+    pub(crate) static KEEP_BYTES: Opt<usize> =
+        Opt::size("jpeg:keep-bytes", 16 << 20, "reused buffers above this size are dropped, not kept");
+    /// With it set, parallel Huffman decoding is also checked against serial decoding (coefficients
+    /// and verdicts); a difference panics. A test oracle.
+    static VERIFY_PARALLEL: Opt<bool> =
+        Opt::flag("jpeg:verify-parallel", false, "check parallel Huffman decoding against serial, panic on a difference");
+    /// With it set, speculative decoding tells its phase times and why it fell back.
+    static DEBUG_SPEC: Opt<bool> =
+        Opt::flag("jpeg:debug-spec", false, "tell speculative decoding's phase times and fallbacks");
+    /// With it set, tells how a scan was decoded stripe by stripe and the outcome.
+    static DEBUG_STRIPED: Opt<bool> =
+        Opt::flag("jpeg:debug-striped", false, "tell how each scan was decoded stripe by stripe, and the outcome");
+    /// Minimum chunk size (in blocks) for parallel Huffman encoding / decoding.
+    static CHUNK_BLOCKS: Opt<usize> =
+        Opt::value("jpeg:chunk-blocks", 1 << 13, "fewest blocks of a chunk of parallel Huffman coding");
+    /// Chunks of parallel Huffman coding for each thread, at most.
+    static CHUNKS_PER_THREAD: Opt<usize> =
+        Opt::value("jpeg:chunks-per-thread", 4, "most chunks of parallel Huffman coding for each thread");
+}
 
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -1155,7 +1174,7 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<S
     }
     let blocks_per_mcu: usize = ctx.layout.iter().map(|&(_, h, v)| h * v).sum();
     let chunks = if crate::par::current_num_threads() > 1 {
-        (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(crate::par::current_num_threads() * 4)
+        (nmcu * blocks_per_mcu / CHUNK_BLOCKS.get()).min(crate::par::current_num_threads() * CHUNKS_PER_THREAD.get())
     } else {
         1
     };
@@ -1179,7 +1198,7 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<S
         r = decode_speculative(&ctx, chunks);
     }
     if let Some(p) = &r
-        && std::env::var_os("JRC_VERIFY_PARALLEL").is_some()
+        && VERIFY_PARALLEL.get()
     {
         // test oracle: the parallel outcome must equal the serial one
         let par: Vec<(Vec<[i16; 64]>, Vec<u64>)> = out.iter().map(|o| (o.blocks.clone(), o.masks.clone())).collect();
@@ -1361,7 +1380,7 @@ fn speculate(c: &Ctx, from: usize, to: usize, o: &mut SpecOut) {
 }
 
 fn spec_dbg(why: &str) {
-    if std::env::var_os("JRC_DEBUG_SPEC").is_some() {
+    if DEBUG_SPEC.get() {
         eprintln!("speculative decoding fell back: {why}");
     }
 }
@@ -1504,10 +1523,10 @@ fn decode_speculative(c: &Ctx, chunks: usize) -> Option<ScanResult> {
         });
         ok.then_some(Ok((chk, None)))
     })();
-    if outs.iter().all(|o| o.blocks.len() * 136 <= KEEP_BYTES) {
+    if outs.iter().all(|o| o.blocks.len() * 136 <= KEEP_BYTES.get()) {
         SPEC.with(|s| *s.borrow_mut() = outs);
     }
-    if std::env::var_os("JRC_DEBUG_SPEC").is_some() {
+    if DEBUG_SPEC.get() {
         let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1e3;
         eprintln!(
             "speculative: {chunks} chunks, decode {:.2} ms, sync {:.2} ms, copy {:.2} ms",
@@ -1711,7 +1730,7 @@ pub(crate) fn decode_striped(
     };
     let threads = crate::par::current_num_threads();
     let bpm: usize = c.layout.iter().map(|&(_, h, v)| h * v).sum();
-    let chunks = (nmcu * bpm / CHUNK_BLOCKS).min(threads * 4);
+    let chunks = (nmcu * bpm / CHUNK_BLOCKS.get()).min(threads * CHUNKS_PER_THREAD.get());
     // Ok(outcome), Err(()) to start over serially
     let parallel = |chk: Option<Checks>| chk.map(|c| Some((c, None))).ok_or(());
     let (mode, r) = if serial_only || threads == 1 || ranges.len() == 1 {
@@ -1727,7 +1746,7 @@ pub(crate) fn decode_striped(
     } else {
         ("serial", Ok(serial()))
     };
-    if std::env::var_os("JRC_DEBUG_STRIPED").is_some() {
+    if DEBUG_STRIPED.get() {
         let how = match &r {
             Ok(Some((chk, _))) if failed(chk) => "not reproducible",
             Ok(Some((_, None))) => "ok",
@@ -2087,7 +2106,7 @@ pub fn encode_scan(j: &Jpeg, s: &Scan, info: &ScanInfo, coefs: &[Coefs], out: &m
     let blocks_per_mcu: usize = layout.iter().map(|&(_, h, v)| h * v).sum();
     // (in chunks where there are threads to code them on)
     let threads = crate::par::current_num_threads();
-    let chunks = (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(threads * 4);
+    let chunks = (nmcu * blocks_per_mcu / CHUNK_BLOCKS.get()).min(threads * CHUNKS_PER_THREAD.get());
     if threads > 1 && chunks >= 2 && info.truncated.is_none() {
         return encode_chunked(s, info, coefs, out, &layout, &dct, &act, chunks);
     }
@@ -2127,9 +2146,6 @@ pub(crate) fn encode_scan_onto(
     r
 }
 
-/// Minimum chunk size (in blocks) for parallel Huffman encoding / decoding.
-const CHUNK_BLOCKS: usize = 1 << 13;
-
 thread_local! {
     static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -2138,7 +2154,7 @@ pub(crate) fn take_scratch() -> Vec<u8> {
     SCRATCH.with(|b| std::mem::take(&mut *b.borrow_mut()))
 }
 pub(crate) fn put_scratch(v: Vec<u8>) {
-    if v.capacity() <= KEEP_BYTES {
+    if v.capacity() <= KEEP_BYTES.get() {
         SCRATCH.with(|b| *b.borrow_mut() = v);
     }
 }

@@ -24,8 +24,10 @@ pub const SHF_COMPRESSED: u64 = 0x800;
 const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 
-/// Code sections further apart than this are taken as ranges of their own.
-const MAX_GAP: usize = 4096;
+aqr_common::zopt! {
+    /// Code sections further apart than this are taken as ranges of their own.
+    static MAX_GAP: Opt<usize> = Opt::size("exe:elf-max-gap", 4096, "ELF code sections further apart than this are ranges of their own");
+}
 
 /// An ELF image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +260,7 @@ pub fn image(d: &[u8]) -> Option<Image> {
     ranges.sort_by_key(|r| r.1);
     let mut starts: Vec<usize> = sections.iter().map(|s| s.off).collect();
     starts.sort_unstable();
+    let max_gap = MAX_GAP.get();
     for (va, off, size) in ranges {
         // overlapping the last: left out; after it but for a gap of nothing else: joined
         if let Some((lva, loff, lsize)) = code.last_mut() {
@@ -267,7 +270,7 @@ pub fn image(d: &[u8]) -> Option<Image> {
             }
             // (no section starting in the gap)
             let between = starts.partition_point(|&o| o < end) < starts.partition_point(|&o| o < off);
-            if off - end <= MAX_GAP && va.wrapping_sub(*lva) == (off - *loff) as u64 && !between {
+            if off - end <= max_gap && va.wrapping_sub(*lva) == (off - *loff) as u64 && !between {
                 *lsize = off + size - *loff;
                 continue;
             }

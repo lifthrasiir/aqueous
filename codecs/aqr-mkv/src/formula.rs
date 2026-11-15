@@ -13,19 +13,24 @@ pub const DATA: &str = "mkv/data";
 /// The class of the stream of the video tracks' keyframes, stream 1.
 pub const KEYS: &str = "mkv/keys";
 
-/// The least bytes of a frame taken from where it was before, or into [`KEYS`]: a smaller one
-/// costs more as a slice than as its bytes.
-const FRAME_MIN: usize = 256;
+aqr_common::zopt_namespace!("mkv", "Matroska and WebM files (aqr-mkv)");
 
-/// The least bytes of frames seen before for any file to be taken ([`taken_min`]).
-const TAKEN_MIN: usize = 64 << 10;
+aqr_common::zopt! {
+    /// The least bytes of a frame taken from where it was before, or into [`KEYS`]: a smaller one
+    /// costs more as a slice than as its bytes.
+    static FRAME_MIN: Opt<usize> = Opt::size("mkv:frame-min", 256, "least bytes of a frame taken from where it was before");
+    /// The least bytes of frames seen before for any file to be taken ([`taken_min`]).
+    static TAKEN_MIN: Opt<usize> = Opt::size("mkv:taken-min", 64 << 10, "least bytes of repeated frames for a file to be taken");
+    /// The divisor of a file's length in [`taken_min`].
+    static TAKEN_RATIO: Opt<usize> = Opt::value("mkv:taken-ratio", 100, "a file needs repeated frames of its length over this");
+}
 
 /// The least bytes of frames seen before for a file of `len` bytes to be taken: a hundredth of
 /// it, and [`TAKEN_MIN`]. Fewer gain too little for a pass of zstd over all of the file, which
 /// would otherwise be stored as it is (aqr-compress takes Matroska files as compressed).
-const fn taken_min(len: usize) -> usize {
-    let n = len / 100;
-    if n > TAKEN_MIN { n } else { TAKEN_MIN }
+fn taken_min(len: usize) -> usize {
+    let n = len / TAKEN_RATIO.get();
+    n.max(TAKEN_MIN.get())
 }
 
 /// The formula of Matroska or WebM file `input`, or None where it is none ([`crate::starts`])
@@ -42,7 +47,8 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     // and where in the file
     let mut seen: HashMap<u64, Vec<(usize, usize, usize)>> = HashMap::new();
     let (mut p, mut repeated) = (0, 0);
-    for r in walk.frames.iter().filter(|f| f.span.len() >= FRAME_MIN) {
+    let frame_min = FRAME_MIN.get();
+    for r in walk.frames.iter().filter(|f| f.span.len() >= frame_min) {
         let (span, frame) = (r.span.clone(), &input[r.span.clone()]);
         let key = r.flags & 0x80 != 0 && walk.video.contains(&r.track);
         let kept = seen.entry(xxhash_rust::xxh3::xxh3_64(frame)).or_default();

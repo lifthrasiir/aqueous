@@ -251,7 +251,7 @@ cargo test --release
 - Unit tests: the rANS coder, the code tables, Paeth against the specification for all
   inputs, unfiltering in pieces against the reference.
 
-`PNGR_WINDOW=N` moves the windows on every `N` bytes, whatever the image's size, so that
+`aqr -Z png:window=N` moves the windows on every `N` bytes, whatever the image's size, so that
 the tests (and `aqr-png bench` on the corpus) run through them on small images too.
 
 ## Layout

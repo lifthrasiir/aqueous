@@ -35,30 +35,35 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 pub const STREAM_NAMES: [&str; 9] =
     ["layout", "raw", "templates", "columns", "text", "nums", "widths", "types", "desc"];
 
-/// A file shorter than this is not taken.
-pub const MIN_LEN: usize = 16 << 10;
+aqr_common::zopt_namespace!("log", "lines of text (aqr-log)");
 
-/// The bytes at the start of a file that tell whether it is lines of text this crate takes.
-const SAMPLE: usize = 64 << 10;
+aqr_common::zopt! {
+    /// A file shorter than this is not taken.
+    pub static MIN_LEN: Opt<usize> = Opt::size("log:min-len", 16 << 10, "files shorter than this are not taken as lines of text");
+    /// The bytes at the start of a file that tell whether it is lines of text this crate takes.
+    static SAMPLE: Opt<usize> = Opt::size("log:sample", 64 << 10, "bytes at the start that tell whether a file is lines of text");
+}
 /// The lines of a file's start there must be at least.
 const MIN_LINES: usize = 16;
 
 /// The tokens of a column that its numbers' style is chosen from.
 const STYLE_SAMPLE: usize = 1024;
 
-/// The form of a token (its digit runs masked) is a template's own where the segment has it
-/// at least this many times, or as many times as 1 in [`RARE_PER`] lines, whichever is more;
-/// else the token is a word kept in its column.
-const RARE_MIN: usize = 64;
-const RARE_PER: usize = 500;
-
-/// The bytes of lines of a segment at least (but the last), coded on its own: what the encoder
-/// and the module hold of a file at once.
-pub const SEGMENT: usize = 64 << 20;
-
-/// The most segments coded at once: each holds its working memory (the counts of its tokens'
-/// forms, the timestamps and templates of its lines, its streams) on top of the input.
-const AT_ONCE: usize = 4;
+aqr_common::zopt! {
+    /// The form of a token (its digit runs masked) is a template's own where the segment has it
+    /// at least this many times, or as many times as 1 in [`RARE_PER`] lines, whichever is more;
+    /// else the token is a word kept in its column.
+    static RARE_MIN: Opt<usize> = Opt::value("log:rare-min", 64, "times a token's form must occur to make a template");
+    static RARE_PER: Opt<usize> = Opt::value("log:rare-per", 500, "a form also needs 1 in this many lines (the larger of the two)");
+    /// The bytes of lines of a segment at least (but the last), coded on its own: what the encoder
+    /// and the module hold of a file at once.
+    pub static SEGMENT: Opt<usize> = Opt::size("log:segment", 64 << 20, "bytes of lines of a segment, coded on its own");
+    /// The most segments coded at once: each holds its working memory (the counts of its tokens'
+    /// forms, the timestamps and templates of its lines, its streams) on top of the input.
+    static AT_ONCE: Opt<usize> = Opt::value("log:at-once", 4, "segments coded at once");
+    /// The share (percent) of a file that may be kept as it is, at most (not that or more).
+    static MAX_RAW_PCT: Opt<usize> = Opt::value("log:max-raw-pct", 10, "a file with this percent or more of lines kept raw is refused");
+}
 
 /// Whether `line` has a byte that marks a template (such a line is kept as it is).
 fn has_mark(line: &[u8]) -> bool {
@@ -84,9 +89,11 @@ fn separators(seg: &[u8], wide: bool) -> [bool; 256] {
     sep
 }
 
-/// The bytes of a segment's start that the choice of separators is made on: coded both ways, the
-/// streams' sizes (zstd -3) compared.
-const TRIAL: usize = 1 << 20;
+aqr_common::zopt! {
+    /// The bytes of a segment's start that the choice of separators is made on: coded both ways, the
+    /// streams' sizes (zstd -3) compared.
+    static TRIAL: Opt<usize> = Opt::size("log:trial", 1 << 20, "bytes of a segment's start the separators are chosen on");
+}
 
 /// Whether the numbers of a segment, from its first [`LOCALE_SAMPLE`] bytes, are written with a
 /// decimal comma: tokens (cut at spaces, `;` and TAB) that are a whole number with a comma, such
@@ -139,10 +146,10 @@ fn decimal_comma(seg: &[u8]) -> bool {
 /// Whether `d` is a file this crate takes: of at least [`MIN_LEN`] bytes, of at least
 /// [`MIN_LINES`] lines at its start of which 9 in 10 or more are not kept as they are.
 pub fn starts(d: &[u8]) -> bool {
-    if d.len() < MIN_LEN {
+    if d.len() < MIN_LEN.get() {
         return false;
     }
-    let s = &d[..d.len().min(SAMPLE)];
+    let s = &d[..d.len().min(SAMPLE.get())];
     let (mut lines, mut raw) = (0, 0);
     let mut at = 0;
     while let Some(i) = memchr::memchr(b'\n', &s[at..]) {
@@ -150,7 +157,7 @@ pub fn starts(d: &[u8]) -> bool {
         raw += has_mark(&s[at..at + i]) as usize;
         at += i + 1;
     }
-    lines >= MIN_LINES && raw * 10 < lines
+    lines >= MIN_LINES && raw * 100 < lines * MAX_RAW_PCT.get()
 }
 
 /// A hasher of hashes and bytes, quick: Fx's multiplication, the result mixed.
@@ -516,7 +523,7 @@ impl Classifier {
             }
         }
         split.rewind();
-        let rare = RARE_MIN.max(lines / RARE_PER).min(u32::MAX as usize) as u32;
+        let rare = RARE_MIN.get().max(lines / RARE_PER.get().max(1)).min(u32::MAX as usize) as u32;
         Classifier {
             counts,
             rare,
@@ -872,7 +879,7 @@ impl Streams {
 /// its lines kept as they are.
 fn segment(seg: &[u8], last: bool, s: &mut Streams) -> (Params, usize) {
     // the separators: those the streams of the first MiB come out smaller with
-    let mut n = seg.len().min(TRIAL);
+    let mut n = seg.len().min(TRIAL.get());
     if n < seg.len() {
         n = seg[..n].iter().rposition(|&b| b == b'\n').map_or(n, |i| i + 1);
     }
@@ -1086,7 +1093,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     if !starts(input) {
         return None;
     }
-    encode_in(input, SEGMENT, true, threads)
+    encode_in(input, SEGMENT.get(), true, threads)
 }
 
 /// [`encode`] in segments of `segment` bytes of lines at least (the test of segments at lengths
@@ -1108,7 +1115,7 @@ pub fn encode_in(input: &[u8], segment_len: usize, check: bool, threads: usize) 
         }
         cuts.push(end);
     }
-    let done = aqr_common::pool::par_map(cuts.len() - 1, threads.min(AT_ONCE), |k| {
+    let done = aqr_common::pool::par_map(cuts.len() - 1, threads.min(AT_ONCE.get()), |k| {
         let mut s = Streams::default();
         let (params, raw) = segment(&input[cuts[k]..cuts[k + 1]], cuts[k + 1] == input.len(), &mut s);
         (s, params, raw)
@@ -1121,7 +1128,7 @@ pub fn encode_in(input: &[u8], segment_len: usize, check: bool, threads: usize) 
         parts.push((params, std::array::from_fn(|j| t.lens()[j] as u64), (cuts[k + 1] - cuts[k]) as u64));
         s.append(t);
     }
-    if check && raw * 10 >= input.len() {
+    if check && raw * 100 >= input.len() * MAX_RAW_PCT.get() {
         return None;
     }
     let mut f = Formula::default();

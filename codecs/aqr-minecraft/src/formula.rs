@@ -23,14 +23,23 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     crate::module::plan(u.initial(), u.params, u.content(0)?, u.content(1)?, u.output())
 }
 
-/// The most bytes that the chunks of a file of `n` bytes may inflate to, all together: 64 MiB,
-/// and 64 times the file (the End's regions inflate to 18 times theirs).
-pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 64 * n as u64
+aqr_common::zopt_namespace!("mc", "Minecraft region files (aqr-minecraft)");
+
+aqr_common::zopt! {
+    /// The base of [`limit`] (by default that of all formats, `limit-base`).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("mc:limit-base", 0, "bytes the chunks may inflate to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    /// The ratio of [`limit`]: 64 (the End's regions inflate to 18 times theirs).
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("mc:limit-ratio", 64, "bytes per byte of the file the chunks may inflate to");
+    /// Chunks whose streams the zlib parameters are found of, the first.
+    static SAMPLES: Opt<usize> = Opt::value("mc:samples", 4, "chunks whose streams the zlib parameters are found of");
 }
 
-/// Chunks whose streams the zlib parameters are found of, the first.
-const SAMPLES: usize = 4;
+/// The most bytes that the chunks of a file of `n` bytes may inflate to, all together: 64 MiB,
+/// and 64 times the file by default (the End's regions inflate to 18 times theirs).
+pub fn limit(n: usize) -> u64 {
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
+}
 
 /// What became of a chunk: its data and how it is made, of its stream (the bytes after the
 /// compression type) where it is rebuilt.
@@ -188,7 +197,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let samples: Vec<(&[u8], Vec<u8>)> = chunks
         .iter()
         .filter_map(|c| zlib_stream(input, c))
-        .take(SAMPLES)
+        .take(SAMPLES.get())
         .filter_map(|z| Some((z, inflate(z, budget)?)))
         .collect();
     let params = find_params(&samples);

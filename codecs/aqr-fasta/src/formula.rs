@@ -29,19 +29,23 @@ pub fn starts(d: &[u8]) -> bool {
     !line.is_empty() && line.iter().all(|c| b"ACGTNacgtn".contains(c))
 }
 
-/// The bytes of a segment, about: a file longer than this is cut into segments of equal parts of
-/// about it (`cuts`), each an application of its own, the model restarting at each. The
-/// module's memory is the same whatever the length (it is a part module), so this is not a bound
-/// of memory but of what the encoder holds of a file at once (its parts and bases, as many
-/// segments as it has threads) and of how long one application runs: 256 MiB keeps every human
-/// chromosome whole (chr1 is 242 MiB) while a longer file still decodes in parallel.
-pub const SEGMENT: usize = 256 << 20;
+aqr_common::zopt_namespace!("fasta", "FASTA files (aqr-fasta)");
+
+aqr_common::zopt! {
+    /// The bytes of a segment, about: a file longer than this is cut into segments of equal parts of
+    /// about it (`cuts`), each an application of its own, the model restarting at each. The
+    /// module's memory is the same whatever the length (it is a part module), so this is not a bound
+    /// of memory but of what the encoder holds of a file at once (its parts and bases, as many
+    /// segments as it has threads) and of how long one application runs: 256 MiB keeps every human
+    /// chromosome whole (chr1 is 242 MiB) while a longer file still decodes in parallel.
+    pub static SEGMENT: Opt<usize> = Opt::size("fasta:segment", 256 << 20, "bytes of a segment, coded on its own (a longer file is cut)");
+}
 
 /// The formula of FASTA file `input`, or `None` where it is not one this crate takes
 /// ([`fasta`]). It is the same whatever `threads` is (the segments, if more than one, are coded
 /// that many at a time).
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    encode_in(input, threads, SEGMENT)
+    encode_in(input, threads, SEGMENT.get())
 }
 
 /// Where the segments of `d` begin, of about `segment` bytes: the file in equal parts, cut at

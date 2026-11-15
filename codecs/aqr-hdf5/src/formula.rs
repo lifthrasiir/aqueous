@@ -25,11 +25,23 @@ fn float_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::float_plan(u.params, u.inputs, u.output())?)
 }
 
-/// Samples of a dataset fewer than this are not coded by the float model.
-const MIN_FLOATS: usize = 1024;
+aqr_common::zopt_namespace!("hdf5", "HDF5 files (aqr-hdf5)");
 
-/// The order of the float model's predictor.
-const FLOAT_ORDER: u8 = 32;
+aqr_common::zopt! {
+    /// Samples of a dataset fewer than this are not coded by the float model.
+    static MIN_FLOATS: Opt<usize> = Opt::value("hdf5:min-floats", 1024, "datasets of fewer samples are not coded by the float model");
+    /// The order of the float model's predictor (at most [`float::MAX_ORDER`]).
+    static FLOAT_ORDER: Opt<u8> = Opt::value("hdf5:float-order", 32, "order of the float model's predictor (at most 32)");
+    /// Whether datasets of floats are coded by the float model at all.
+    static FLOAT_MODEL: Opt<bool> = Opt::flag("hdf5:floats", true, "code datasets of floats by the float model");
+    /// Streams whose zlib settings are found first, the largest, for the others.
+    static SAMPLES: Opt<usize> = Opt::value("hdf5:samples", 8, "streams whose zlib settings are found first, for the others");
+    /// [`LIMIT_BASE`](aqr_common::zopt::LIMIT_BASE) for HDF5 files.
+    static LIMIT_BASE: Opt<usize> = Opt::size("hdf5:limit-base", 64 << 20, "bytes a file may inflate to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    static LIMIT_RATIO: Opt<usize> = Opt::value("hdf5:limit-ratio", 32, "bytes per byte of the file it may inflate to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -61,13 +73,11 @@ impl Default for Options {
     }
 }
 
-/// [`Options::limit`] for a file of `n` bytes on its own: 64 MiB, and 32 times the file.
+/// [`Options::limit`] for a file of `n` bytes on its own: 64 MiB, and 32 times the file
+/// (`hdf5:limit-base`, `hdf5:limit-ratio`).
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
-
-/// Streams whose zlib settings are found first, the largest, for the others.
-const SAMPLES: usize = 8;
 
 /// Bytes from which a stream gets threads of its own: two of aqr-flate's segments.
 const LARGE: usize = 2 << 20;
@@ -245,7 +255,7 @@ pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bo
     // first on the others (taken where they predict every token).
     let mut order: Vec<usize> = (0..jobs.len()).collect();
     order.sort_by_key(|&j| (std::cmp::Reverse(size(&j)), j));
-    order.truncate(SAMPLES);
+    order.truncate(SAMPLES.get());
     let mut made: HashMap<usize, Made> = HashMap::new();
     // The samples at the adaptive profile first, where the profile is lower: if its zlib emulation
     // predicts every token of at least half of them, all are made at it, its parameters hinted (no
@@ -305,7 +315,7 @@ pub fn encode_checked(input: &[u8], opt: &Options, fits: &dyn Fn(&Formula) -> bo
     let (mut meta, mut data, mut records) = (Vec::new(), Vec::new(), Vec::new());
     // the data of the chunks of floats coded, by job (the Fletcher-32 of their data first in
     // the meta stream)
-    let coded = match opt.floats {
+    let coded = match opt.floats && FLOAT_MODEL.get() {
         true => floats(&mut f, &file, &jobs, &made, &mut meta),
         false => HashMap::new(),
     };
@@ -376,6 +386,8 @@ fn floats(
     let mut sets: Vec<(usize, Vec<usize>)> = by.into_iter().collect();
     sets.sort_unstable();
     let mut streams: Option<[usize; 3]> = None;
+    let (min_floats, float_order) = (MIN_FLOATS.get(), FLOAT_ORDER.get());
+    assert!(float_order as usize <= float::MAX_ORDER, "hdf5:float-order is at most {}", float::MAX_ORDER);
     for (k, mut js) in sets {
         let ds = &file.datasets[k];
         let Some(t) = ds.dtype.filter(|t| t.class == FLOATS && matches!(t.size, 4 | 8)) else { continue };
@@ -398,14 +410,14 @@ fn floats(
             be: t.be,
             shuffle,
             shift: 0,
-            order: FLOAT_ORDER,
+            order: float_order,
         };
         let mut bits = Vec::with_capacity(p.samples().unwrap_or(0));
         for &j in &js {
             let d = &made[&j].as_ref().unwrap().data;
             p.samples_of(&d[..bytes], &mut bits);
         }
-        if bits.len() < MIN_FLOATS {
+        if bits.len() < min_floats {
             continue;
         }
         // the low bits zero in every sample, all but 8 at most

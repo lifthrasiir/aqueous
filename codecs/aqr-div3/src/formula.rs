@@ -12,9 +12,11 @@ use crate::module::FRAME_MAX;
 pub use crate::native::decode;
 use crate::{Codec, Encoder};
 
-/// The bytes of frames a chunk of the coded frames holds, about: each chunk has a model of its own, so that they are coded
-/// and decoded at once.
-pub const CHUNK: usize = 16 << 20;
+aqr_common::zopt! {
+    /// The bytes of frames a chunk of the coded frames holds, about: each chunk has a model of its own, so that they are
+    /// coded and decoded at once.
+    pub static CHUNK: Opt<usize> = Opt::size("div3:chunk", 16 << 20, "frame bytes of a chunk, about");
+}
 
 /// The classes of the streams.
 pub const CODED: &str = "div3/frames";
@@ -164,15 +166,16 @@ fn encode_with(input: &[u8], worst: f64, threads: usize) -> Option<Formula> {
     items.sort_by_key(|(r, _)| r.start);
     let (mut skeleton, mut layout, mut audio) = (Vec::with_capacity(input.len() / 8), Vec::new(), Vec::new());
     let (mut p, mut frames_len) = (0, 0usize);
-    // the frames, cut in chunks of about CHUNK bytes: (frames' ranges)
+    // the frames, cut in chunks of about `CHUNK` bytes: (frames' ranges)
     let mut chunks: Vec<Vec<Range<usize>>> = vec![Vec::new()];
     let mut chunk_bytes = 0usize;
+    let chunk = CHUNK.get();
     for (r, kind) in &items {
         varint::put(&mut layout, (r.start - p) as u64);
         varint::put(&mut layout, (r.len() as u64) << 1 | kind);
         skeleton.extend_from_slice(&input[p..r.start]);
         if *kind == 0 {
-            if chunk_bytes >= CHUNK {
+            if chunk_bytes >= chunk {
                 chunks.push(Vec::new());
                 chunk_bytes = 0;
             }

@@ -25,9 +25,21 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::plan())
 }
 
-/// Files' contents of at least this many bytes are slices of their own, apart from the others of
-/// their kind next to them: so that the same contents elsewhere are found by their slices.
-pub const OWN_MIN: usize = 1 << 10;
+aqr_common::zopt_namespace!("mszip", "CAB and CHM files (aqr-mszip)");
+
+aqr_common::zopt! {
+    /// Files' contents of at least this many bytes are slices of their own, apart from the others of
+    /// their kind next to them: so that the same contents elsewhere are found by their slices.
+    pub static OWN_MIN: Opt<usize> = Opt::size("mszip:own-min", 1 << 10, "files' contents at least this long are slices of their own");
+    /// Bytes of data from which an LZX folder is rebuilt by an application of its own.
+    static ALONE: Opt<usize> = Opt::size("mszip:lzx-alone", 64 << 20, "LZX folders of at least this much data get an application of their own");
+    /// The base of [`limit`] (by default that of all formats, `limit-base`).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("mszip:limit-base", 0, "bytes the folders may inflate to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    /// The ratio of [`limit`] (by default that of all formats, `limit-ratio`).
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("mszip:limit-ratio", 0, "bytes per byte of the file the folders may inflate to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -51,8 +63,8 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             threads: 1,
-            profile: aqr_flate::DEFAULT_PROFILE,
-            zlib: true,
+            profile: aqr_flate::PROFILE.get(),
+            zlib: aqr_flate::ZLIB.get(),
             limit: u64::MAX,
             kind: |_| Kind::Unknown,
             lzx: true,
@@ -60,9 +72,10 @@ impl Default for Options {
     }
 }
 
-/// [`Options::limit`] for a file of `n` bytes on its own: 64 MiB, and 32 times the file.
+/// [`Options::limit`] for a file of `n` bytes on its own: 64 MiB, and 32 times the file (by
+/// default).
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
 
 /// What [`encode_with`] made.
@@ -106,9 +119,6 @@ impl Made {
         !matches!(self, Made::Stored { .. })
     }
 }
-
-/// Bytes of data from which an LZX folder is rebuilt by an application of its own.
-const ALONE: u64 = 64 << 20;
 
 /// The LZX folders of a window: the window's bits, their streams, and for each where its node
 /// goes among the raw blocks' and its bytes.
@@ -238,12 +248,12 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             Made::Stored { data } => {
                 let raw = f.streams.len();
                 f.push("raw", Vec::new());
-                raws.push(Some(f.push_by_kind(raw, data, &ends, "cab", OWN_MIN)));
+                raws.push(Some(f.push_by_kind(raw, data, &ends, "cab", OWN_MIN.get())));
             }
             Made::Lzx { data, record, window_bits } => {
                 let raw = f.streams.len();
                 f.push("raw", Vec::new());
-                let data = f.push_by_kind(raw, data, &ends, "cab", OWN_MIN);
+                let data = f.push_by_kind(raw, data, &ends, "cab", OWN_MIN.get());
                 let g = match lzx.iter().position(|g| g.bits == window_bits) {
                     Some(g) => g,
                     None => {
@@ -262,7 +272,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         let v = aqr_lzx::lzx::Variant::cab(bits)?;
         // (a stream of long data in an application of its own, which is streamed and applied at
         // once with the others; the rest together)
-        let (long, short): (Vec<_>, Vec<_>) = streams.into_iter().zip(at).partition(|(s, _)| s.data.len() >= ALONE);
+        let alone = ALONE.get() as u64;
+        let (long, short): (Vec<_>, Vec<_>) =
+            streams.into_iter().zip(at).partition(|(s, _)| s.data.len() as u64 >= alone);
         for group in long.into_iter().map(|s| vec![s]).chain((!short.is_empty()).then_some(short)) {
             let (streams, at): (Vec<_>, Vec<_>) = group.into_iter().unzip();
             let sizes: Vec<u64> = at.iter().map(|a| a.1).collect();
@@ -286,7 +298,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             };
             let raw = f.streams.len();
             f.push("raw", Vec::new());
-            let data = f.push_by_kind(raw, flate_data, &flate_ends, "cab", OWN_MIN);
+            let data = f.push_by_kind(raw, flate_data, &flate_ends, "cab", OWN_MIN.get());
             let a = aqr_flate::formula::apply(opt.profile, data, records, index, joined_len, Derived::None).ok()?;
             Node::Apply(Box::new(a))
         }
@@ -433,7 +445,7 @@ pub fn encode_chm_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     f.push("chm", Vec::new());
     let raw = f.streams.len();
     f.push("raw", Vec::new());
-    let data = f.push_by_kind(raw, data, &ends, "chm", OWN_MIN);
+    let data = f.push_by_kind(raw, data, &ends, "chm", OWN_MIN.get());
     let a = aqr_lzx::formula::apply_joined(&mut f, v, data, streams, Node::Concat(Vec::new()), content.len() as u64);
     let r = z.content.clone();
     let mut container = input[..r.start].to_vec();

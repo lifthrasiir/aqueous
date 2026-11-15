@@ -16,12 +16,21 @@ use aqr_lzma::{lzma, recons};
 
 use crate::egg::{self, AZO, BZIP2, Block, DEFLATE, Egg, LZMA, LZMA_HEADER, STORED};
 
-/// Contents of at least this many bytes are slices of their own, apart from the others of their
-/// kind next to them: so that the same contents elsewhere are found by their slices.
-pub const OWN_MIN: usize = 1 << 10;
+aqr_common::zopt_namespace!("egg", "EGG archives (aqr-egg)");
 
-/// Bytes from which a DEFLATE block gets threads of its own: two of aqr-flate's segments.
-const LARGE: usize = 2 << 20;
+aqr_common::zopt! {
+    /// Contents of at least this many bytes are slices of their own, apart from the others of their
+    /// kind next to them: so that the same contents elsewhere are found by their slices.
+    pub static OWN_MIN: Opt<usize> = Opt::size("egg:own-min", 1 << 10, "contents at least this long are slices of their own");
+    /// Bytes from which a DEFLATE block gets threads of its own: two of aqr-flate's segments.
+    static LARGE: Opt<usize> = Opt::size("egg:large", 2 << 20, "DEFLATE blocks at least this long get all the threads");
+    /// The base of [`limit`] (by default that of all formats, `limit-base`).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("egg:limit-base", 64 << 20, "bytes the blocks may inflate to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    /// The ratio of [`limit`] (by default that of all formats, `limit-ratio`).
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("egg:limit-ratio", 32, "bytes per byte of the archive the blocks may inflate to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -52,7 +61,7 @@ impl Default for Options {
 
 /// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive.
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
 
 /// Contents of blocks one after another, with their kinds and the ends of each.
@@ -205,11 +214,12 @@ pub fn encode_with(
         }
     }
     let fopt = aqr_flate::Options { zlib: opt.zlib, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
+    let large = LARGE.get();
     // (the large ones first, each on all threads, the small ones side by side on one each)
     order.sort_by_key(|&i| std::cmp::Reverse(blocks[i].0.body.len()));
     let done = aqr_common::pool::par_map(order.len(), opt.threads, |k| {
         let b = blocks[order[k]].0;
-        let threads = if b.body.len() >= LARGE { opt.threads } else { 1 };
+        let threads = if b.body.len() >= large { opt.threads } else { 1 };
         let o = aqr_flate::Options { threads, max_data: b.size as usize, ..fopt.clone() };
         let (data, record) = aqr_flate::deconstruct_with(body(b), &o).ok()?;
         // (a block kept costs nothing more than itself, its header kept anyway)
@@ -304,7 +314,7 @@ pub fn encode_with(
     let by_kind = |f: &mut Formula, (data, ends): Contents| {
         let raw = f.streams.len();
         f.push("raw", Vec::new());
-        f.push_by_kind(raw, data, &ends, "egg", OWN_MIN)
+        f.push_by_kind(raw, data, &ends, "egg", OWN_MIN.get())
     };
     let [stored, flate, bz2, lz, az] = contents;
     // each method's nodes, one for each block in order

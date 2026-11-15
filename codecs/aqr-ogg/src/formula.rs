@@ -64,17 +64,21 @@ fn vorbis_ident(id: &[u8]) -> Option<Ident> {
     Ident::from_exps(id[11] as usize, id[28] & 15, id[28] >> 4, false)
 }
 
-/// Audio packets of a Vorbis stream are given to aqr-vorbis in pieces, each coded apart, on
-/// threads and of tables of its own: a piece starts at the first packet at or past each multiple
-/// of so many bytes of the packets framed (as aqr-lzma's parts do), so that the pieces are the
-/// same whatever the threads, and their grid divides the archive's blocks (16 MiB shared, 128
-/// MiB of a stream). aqr-vorbis's encoder takes about 35 bytes a byte; of the 12 Vorbis files of
-/// FORMAT.md §6, the records grow by 0.15% of the files in pieces of 1 MiB, 0.05% of 2 MiB and
-/// 0.02% of 4 MiB over the streams whole.
-const PIECE: usize = 2 << 20;
+aqr_common::zopt! {
+    /// Audio packets of a Vorbis stream are given to aqr-vorbis in pieces, each coded apart, on
+    /// threads and of tables of its own: a piece starts at the first packet at or past each multiple
+    /// of so many bytes of the packets framed (as aqr-lzma's parts do), so that the pieces are the
+    /// same whatever the threads, and their grid divides the archive's blocks (16 MiB shared, 128
+    /// MiB of a stream). aqr-vorbis's encoder takes about 35 bytes a byte; of the 12 Vorbis files of
+    /// FORMAT.md §6, the records grow by 0.15% of the files in pieces of 1 MiB, 0.05% of 2 MiB and
+    /// 0.02% of 4 MiB over the streams whole.
+    static PIECE: Opt<usize> = Opt::size("ogg:piece", 2 << 20, "bytes of Vorbis packets in a piece, each coded apart");
+}
+
+aqr_common::zopt_namespace!("ogg", "Ogg Vorbis streams (aqr-ogg)");
 
 /// A Vorbis stream's audio packets framed, and the pieces of them for aqr-vorbis: the packets
-/// up to one of a chunk or more (framed as aqr-vorbis's are not), in pieces of [`PIECE`].
+/// up to one of a chunk or more (framed as aqr-vorbis's are not), in pieces of [`PIECE`] bytes.
 struct Audio {
     framed: Vec<u8>,
     pieces: Vec<std::ops::Range<usize>>,
@@ -87,6 +91,7 @@ impl Audio {
             return None;
         }
         let mut framed = Vec::with_capacity(p.bytes.len() - p.ends[2] + 2 * p.len());
+        let piece = PIECE.get();
         let (mut pieces, mut start, mut end) = (Vec::new(), 0, None);
         for i in 3..p.len() {
             let q = p.get(i);
@@ -94,7 +99,7 @@ impl Audio {
                 end = Some(framed.len());
             }
             layout::frame(&mut framed, q);
-            if end.is_none() && framed.len() / PIECE > start / PIECE {
+            if end.is_none() && framed.len() / piece > start / piece {
                 pieces.push(start..framed.len());
                 start = framed.len();
             }

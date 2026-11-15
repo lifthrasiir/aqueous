@@ -1,6 +1,8 @@
 //! Lossless Wavefront OBJ recompression: an OBJ file is split into streams that are stored
 //! smaller, and restored bit for bit. `formula` is the entry point (see aqr-formula).
 
+aqr_common::zopt_namespace!("obj", "Wavefront OBJ files (aqr-obj)");
+
 pub mod ans;
 pub mod block;
 pub mod codec;

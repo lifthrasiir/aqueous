@@ -334,8 +334,10 @@ pub trait Io {
     fn raw(&mut self, k: u32, v: u32) -> u32;
 }
 
-/// Symbol lists of at least this length are counted by several threads.
-const PAR_HIST_MIN: usize = 1 << 20;
+aqr_common::zopt! {
+    /// Symbol lists of at least this many are counted by several threads.
+    static PAR_HIST_MIN: Opt<usize> = Opt::size("png:par-hist-min", 1 << 20, "symbol lists at least this long are counted by several threads");
+}
 
 pub struct Recorder {
     pub syms: Vec<(u8, u8)>,
@@ -367,7 +369,7 @@ impl Recorder {
                 h[t as usize * 256 + v as usize] += 1;
             }
         };
-        if threads > 1 && self.syms.len() >= PAR_HIST_MIN {
+        if threads > 1 && self.syms.len() >= PAR_HIST_MIN.get() {
             let chunks: Vec<&[(u8, u8)]> = self.syms.chunks(self.syms.len().div_ceil(threads)).collect();
             let parts: Vec<Vec<u32>> = aqr_common::pool::par_map(chunks.len(), threads, |i| {
                 let mut h = vec![0u32; tables * 256];
@@ -780,14 +782,19 @@ impl Win {
     }
 }
 
+aqr_common::zopt! {
+    /// Data bytes per move of the windows: [`WINDOW`], and with `-Z png:window=N` a step for any
+    /// size of image (for tests).
+    static WINDOW_STEP: Opt<usize> = Opt::size("png:window", WINDOW, "bytes per move of the windows, for images of any size (default: large ones only)");
+}
+
 /// Data sizes above which the buffers are windows, and the windows' steps: `WINDOW`, or
-/// as `PNGR_WINDOW` sets it (a step, for any size; for tests).
+/// as `-Z png:window` sets it (a step, for any size; for tests).
 fn window_sizes() -> (usize, usize) {
-    static SIZES: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
-    *SIZES.get_or_init(|| match std::env::var("PNGR_WINDOW").ok().and_then(|s| s.parse().ok()) {
-        Some(step) => (0, step),
-        None => (4 * WINDOW, WINDOW),
-    })
+    match WINDOW_STEP.is_set() {
+        true => (0, WINDOW_STEP.get()),
+        false => (4 * WINDOW, WINDOW),
+    }
 }
 
 impl<'g> St<'g> {
@@ -1143,7 +1150,7 @@ fn encode_image<'g, const BPP: usize>(
     reference: Option<&'g Reference>,
 ) -> crate::Result<Encoded> {
     let est = g.len.min(MAX_EXPANSION * payload.len());
-    let threads = if est >= PAR_ROWS_MIN { threads.max(1) } else { 1 };
+    let threads = if est >= PAR_ROWS_MIN.get() { threads.max(1) } else { 1 };
     let mut sink = Rows::<BPP>::new(g, est, threads, reference);
     let mut streams = vec![];
     let mut o = 0;
@@ -1240,7 +1247,8 @@ struct Rows<'g, const BPP: usize> {
 impl<'g, const BPP: usize> Rows<'g, BPP> {
     /// For about `est` bytes of data, against `reference` if given.
     fn new(g: &'g Geometry, est: usize, threads: usize, reference: Option<&'g Reference>) -> Rows<'g, BPP> {
-        let mut win = Window::new(STRIPE * threads);
+        let stripe = STRIPE.get();
+        let mut win = Window::new(stripe * threads);
         // the literals compared with the reference's
         win.keep = reference.is_some();
         let size = (g.pad + KEEP + win.size + g.rs_max() + 2 * (65536 + ROOM)).min(g.pad + est + ROOM);
@@ -1249,7 +1257,7 @@ impl<'g, const BPP: usize> Rows<'g, BPP> {
             rec.tables = TABLES_REF;
         }
         // About a symbol per byte (they grow as needed).
-        rec.syms.reserve(est.min(STRIPE * 64));
+        rec.syms.reserve(est.min(stripe * 64));
         let mut r = Rows {
             g,
             buf: vec![0; size],
@@ -1401,11 +1409,12 @@ impl Geometry {
     }
 }
 
-/// Images of at least this many data bytes get their symbols computed by several threads.
-const PAR_ROWS_MIN: usize = 1 << 20;
-
-/// Data bytes per window and thread (see [`Window`]).
-const STRIPE: usize = 1 << 18;
+aqr_common::zopt! {
+    /// Images of at least this many data bytes get their symbols computed by several threads.
+    static PAR_ROWS_MIN: Opt<usize> = Opt::size("png:par-rows-min", 1 << 20, "images at least this large get their symbols made by several threads");
+    /// Data bytes per window and thread (see [`Window`]).
+    static STRIPE: Opt<usize> = Opt::size("png:stripe", 1 << 18, "data bytes per window and thread");
+}
 
 /// Per position of a window of the data (whole rows of a pass, or a piece past the image),
 /// its symbol, its table relative to `T_LIT` (before the after-match offset) and the

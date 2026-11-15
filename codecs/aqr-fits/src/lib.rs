@@ -3,6 +3,8 @@
 //! their pixels and the codes of their Rice blocks ([`rice`], [`tiled`]). `formula` is the entry
 //! point (modules of aqr-formula); `FORMAT.md` specifies them.
 
+aqr_common::zopt_namespace!("fits", "FITS astronomy files (aqr-fits)");
+
 pub mod bits;
 pub mod fits;
 #[cfg(feature = "encode")]

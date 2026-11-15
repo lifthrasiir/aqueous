@@ -17,8 +17,10 @@ pub const MODULE: Module = Module::new("bz2-recons", 2).with_plan(memory).with_c
 /// ALZip's bzip2 streams (`FORMAT.md`, §8).
 pub const MODULE_ALZ: Module = Module::new("bz2-alz-recons", 2).with_plan(memory_alz);
 
-/// Bytes of data taken, at most (a stream of zeros grows forty-thousandfold).
-pub const MAX_DATA: usize = 1 << 30;
+aqr_common::zopt! {
+    /// Bytes of data taken, at most (a stream of zeros grows forty-thousandfold).
+    pub static MAX_DATA: Opt<usize> = Opt::size("bz2:max-data", 1 << 30, "most bytes of data a bzip2 stream is decoded to");
+}
 
 /// The memory of the module, a part module: its plan ([`crate::module::plan`]), of
 /// the data (whose blocks' symbols it reads).
@@ -60,9 +62,11 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_if(input, threads, &mut |_, _, _| true)
 }
 
-/// Bytes of data decoded first, of a stream that has more: [`encode_if`] asks of them before
-/// decoding the rest.
-pub const PREFIX: usize = 4 << 20;
+aqr_common::zopt! {
+    /// Bytes of data decoded first, of a stream that has more: [`encode_if`] asks of them before
+    /// decoding the rest.
+    pub static PREFIX: Opt<usize> = Opt::size("bz2:prefix", 4 << 20, "bytes of a stream decoded first, to tell whether it pays");
+}
 
 /// [`encode`], each stream taken only where `pays(coded, data, whole)` tells that it may pay,
 /// given the data and the bytes of the stream it was coded in: first of the first [`PREFIX`]
@@ -72,7 +76,7 @@ pub const PREFIX: usize = 4 << 20;
 pub fn encode_if(input: &[u8], threads: usize, pays: &mut dyn FnMut(usize, &[u8], bool) -> bool) -> Option<Formula> {
     let (mut at, mut streams, mut data) = (0, Vec::new(), Vec::new());
     while starts(&input[at..]) {
-        let Some((sp, len)) = take(&input[at..], Framing::Bzip2, threads, MAX_DATA - data.len(), pays, &mut data)
+        let Some((sp, len)) = take(&input[at..], Framing::Bzip2, threads, MAX_DATA.get() - data.len(), pays, &mut data)
         else {
             break;
         };
@@ -116,7 +120,7 @@ pub fn take_whole(
     pays: &mut dyn FnMut(usize, &[u8], bool) -> bool,
 ) -> Option<(StreamParams, Vec<u8>)> {
     let mut data = Vec::new();
-    let (sp, len) = take(d, framing, threads, max_data.min(MAX_DATA), pays, &mut data)?;
+    let (sp, len) = take(d, framing, threads, max_data.min(MAX_DATA.get()), pays, &mut data)?;
     (len == d.len()).then_some((sp, data))
 }
 
@@ -156,7 +160,7 @@ fn take(
     pays: &mut dyn FnMut(usize, &[u8], bool) -> bool,
     data: &mut Vec<u8>,
 ) -> Option<(StreamParams, usize)> {
-    let p = stream::Partial::start_framed(d, framing, PREFIX, max_data).ok()?;
+    let p = stream::Partial::start_framed(d, framing, PREFIX.get(), max_data).ok()?;
     if p.ended.is_none() && !pays(p.coded(), &p.data, false) {
         return None;
     }

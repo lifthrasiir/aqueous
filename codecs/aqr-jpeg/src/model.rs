@@ -403,7 +403,25 @@ fn groups() -> impl Iterator<Item = (usize, usize)> {
 }
 
 /// Largest precision reduction of a group's table: its frequencies sum to PROB_SCALE >> shift.
+/// (What a stream may hold; the encoder's own bound is `jpeg:max-shift`.)
 const MAX_SHIFT: u32 = 8;
+
+aqr_common::zopt! {
+    /// Largest precision reduction the encoder tries for a group's table (at most [`MAX_SHIFT`],
+    /// what a stream may hold: a larger value fails).
+    static ENC_MAX_SHIFT: Opt<u32> =
+        Opt::value("jpeg:max-shift", MAX_SHIFT, "largest precision reduction tried for a table, at most 8");
+    /// With it set, tells the size breakdown of the serialised model tables.
+    static DEBUG_TABLES: Opt<bool> =
+        Opt::flag("jpeg:debug-tables", false, "tell the size breakdown of the serialised model tables");
+}
+
+/// `jpeg:max-shift`: lowered from the format's bound only.
+fn max_shift() -> u32 {
+    let m = ENC_MAX_SHIFT.get();
+    assert!(m <= MAX_SHIFT, "-Z jpeg:max-shift={m}: above {MAX_SHIFT}, which the format does not hold");
+    m
+}
 
 /// Normalise counts `h` (total > 0) to sum `total`, every occurring symbol >= 1.
 /// Returns false if `total` is too small for the number of occurring symbols.
@@ -450,7 +468,7 @@ fn gamma_len(v: u32) -> u32 {
 fn best_shift(h: &[u32], tmp: &mut [u16; 64]) -> (f64, u32) {
     let len = h.len();
     let mut best = (f64::INFINITY, 0u32);
-    for sh in 0..=MAX_SHIFT {
+    for sh in 0..=max_shift() {
         let total = PROB_SCALE >> sh;
         if !norm_group(h, total, &mut tmp[..len]) {
             break;
@@ -788,7 +806,7 @@ fn write_tables(freq: &[u16], plan: &TablePlan, hist: &[u32]) -> Vec<u8> {
             w.put(1, own.is_none() as u32);
         }
     }
-    let dbg = std::env::var_os("JRC_DEBUG_TABLES").is_some();
+    let dbg = DEBUG_TABLES.get();
     let mut mark = w.out.len();
     let mut report = |w: &BitWriter, what: &str, n: usize| {
         if dbg {
@@ -1111,10 +1129,19 @@ fn walk_dec(
 /// The image is coded as independent horizontal stripes (whole MCU rows; every component's
 /// rows of those MCUs), each with its own rANS and raw streams, so that they can be modelled
 /// and decoded in parallel. Contexts do not cross stripe boundaries. The tables are shared.
-/// Target stripe size in blocks: large enough that the lost above-context of each stripe's
-/// first row costs little, small enough to balance across cores.
-const STRIPE_BLOCKS: usize = 1 << 15;
+/// Most stripes a stream may hold.
 pub const MAX_STRIPES: usize = 256;
+
+aqr_common::zopt! {
+    /// Target stripe size in blocks: large enough that the lost above-context of each stripe's
+    /// first row costs little, small enough to balance across cores.
+    static ENC_STRIPE_BLOCKS: Opt<usize> =
+        Opt::value("jpeg:stripe-blocks", 1 << 15, "target blocks of a stripe, which are modelled in parallel");
+    /// Most stripes the encoder cuts an image in (at most [`MAX_STRIPES`], what a stream may
+    /// hold: a larger value fails).
+    static ENC_MAX_STRIPES: Opt<usize> =
+        Opt::value("jpeg:max-stripes", MAX_STRIPES, "most stripes an image is cut in, at most 256");
+}
 
 /// Number of MCU rows (of the image's block grid; single-component images: block rows).
 fn mcu_rows(j: &Jpeg) -> usize {
@@ -1130,7 +1157,9 @@ fn stripe_rows(j: &Jpeg, ci: usize, s: usize, n: usize) -> std::ops::Range<usize
 
 pub(crate) fn stripe_count(j: &Jpeg) -> usize {
     let nblk: usize = j.comps.iter().map(|c| c.bw * c.bh).sum();
-    (nblk / STRIPE_BLOCKS).clamp(1, mcu_rows(j).clamp(1, MAX_STRIPES))
+    let max = ENC_MAX_STRIPES.get();
+    assert!(max <= MAX_STRIPES, "-Z jpeg:max-stripes={max}: above {MAX_STRIPES}, which the format does not hold");
+    (nblk / ENC_STRIPE_BLOCKS.get()).clamp(1, mcu_rows(j).clamp(1, max))
 }
 
 /// A stored stripe count must leave every stripe at least one MCU row.

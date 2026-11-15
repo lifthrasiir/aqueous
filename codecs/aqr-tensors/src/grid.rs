@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::formula::{SAMPLE_WINDOW, SAMPLE_WINDOWS};
 use crate::layout::{ESCAPED, Float, GridRun, GridValues, grid_value};
 use crate::rans::{Encoder, LANES, Table};
 
@@ -403,8 +404,20 @@ fn distinct(blocks: u64, b: u64, value: impl Fn(u64, u64) -> u64) -> f64 {
     if blocks > 0 { sum as f64 / blocks as f64 } else { 0.0 }
 }
 
-/// Elements of a tensor at least, for a grid to be looked for.
-pub const MIN_ELEMENTS: u64 = 1 << 15;
+aqr_common::zopt! {
+    /// Elements of a tensor at least, for a grid to be looked for.
+    static MIN_ELEMENTS: Opt<u64> = Opt::value("tensors:grid-min", 1 << 15, "tensors of fewer elements get no grid");
+    /// Where the distinct values of a sample's blocks are fewer than this share of those expected
+    /// of a random one, a grid is seen.
+    static DISTINCT: Opt<f64> =
+        Opt::value("tensors:grid-distinct", 0.85, "share of expected distinct values under which a grid is seen");
+    /// A grid is taken where it comes to less than this share of the floats' coding.
+    static ACCEPT: Opt<f64> = Opt::value("tensors:grid-accept", 0.95, "grid taken where under this share of float coding");
+    /// Elements of a tile-fitting trial on the small sample, then the larger one.
+    static TRIAL_SMALL: Opt<u64> = Opt::value("tensors:grid-trial-small", 1024, "elements of each band of the first grid trials");
+    static TRIAL_LARGE: Opt<u64> =
+        Opt::value("tensors:grid-trial-large", 8192, "elements of each band of the retrial of the best three grids");
+}
 
 /// Whether tensor `d` of `f` (rows of `row`, 0 where not known) is the values of a grid in tiles,
 /// and of which, by a sample of it, comparing the bits it comes to with those the floats' coding
@@ -416,7 +429,7 @@ pub fn detect(f: Float, d: &[u8], row: u64) -> Option<Cfg> {
     }
     let fb = f.bytes();
     let n = (d.len() / fb) as u64;
-    if n < MIN_ELEMENTS {
+    if n < MIN_ELEMENTS.get() {
         return None;
     }
     let row = if row == 0 || row > n { n } else { row };
@@ -429,7 +442,7 @@ pub fn detect(f: Float, d: &[u8], row: u64) -> Option<Cfg> {
     let sign = 1u64 << (8 * fb - 1);
     let mag = |i: u64| get(i) & (sign - 1);
     // (the sample: windows along the rows, and blocks down the columns)
-    let (win, wins) = (1024u64, 8u64);
+    let (win, wins) = (SAMPLE_WINDOW.get() as u64, SAMPLE_WINDOWS.get() as u64);
     let starts: Vec<u64> = (0..wins).map(|k| (n - win) / (wins - 1) * k).collect();
     let mmask = (1u64 << f.man_bits()) - 1;
     let mut mags: Vec<u64> = starts.iter().flat_map(|&s| s..s + win).map(mag).collect();
@@ -441,18 +454,19 @@ pub fn detect(f: Float, d: &[u8], row: u64) -> Option<Cfg> {
     mans.sort_unstable();
     mags.sort_unstable();
     let (counts, mans) = (runs(&mags), runs(&mans));
+    let distinct_share = DISTINCT.get();
     let mut seen = false;
     for b in [16u64, 128] {
         let per = win / b;
         let got = distinct(wins * per, b, |k, j| mag(starts[(k / per) as usize] + k % per * b + j));
-        if got < 0.85 * expected_distinct(&counts, b) {
+        if got < distinct_share * expected_distinct(&counts, b) {
             seen = true;
         }
     }
     if rows >= 64 && row >= 16 {
         let cols = 64.min(row);
         let got = distinct(wins * cols, 16, |k, j| mag(((rows - 16) / (wins - 1) * (k / cols) + j) * row + k % cols));
-        if got < 0.85 * expected_distinct(&counts, 16) {
+        if got < distinct_share * expected_distinct(&counts, 16) {
             seen = true;
         }
     }
@@ -542,10 +556,11 @@ pub fn detect(f: Float, d: &[u8], row: u64) -> Option<Cfg> {
         Some(bits / all as f64)
     };
     // (every grid and shape on a small sample, the best three of them again on a larger one)
+    let (trial_small, trial_large) = (TRIAL_SMALL.get(), TRIAL_LARGE.get());
     let mut first: Vec<(f64, Cfg)> = Vec::new();
     for gi in 0..grids().len() {
         for &(br, bc) in &shapes {
-            if let Some(per) = trial(gi, br, bc, 1024, if br * bc > 1024 { 1 } else { 2 }) {
+            if let Some(per) = trial(gi, br, bc, trial_small, if br * bc > 1024 { 1 } else { 2 }) {
                 first.push((per, Cfg { grid: gi, row, br, bc }));
             }
         }
@@ -553,14 +568,14 @@ pub fn detect(f: Float, d: &[u8], row: u64) -> Option<Cfg> {
     first.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut best: Option<(f64, Cfg)> = None;
     for &(_, cfg) in first.iter().take(3) {
-        if let Some(per) = trial(cfg.grid, cfg.br, cfg.bc, 8192, 4)
+        if let Some(per) = trial(cfg.grid, cfg.br, cfg.bc, trial_large, 4)
             && best.is_none_or(|b| per < b.0)
         {
             best = Some((per, cfg));
         }
     }
     let (per, cfg) = best?;
-    (per < 0.95 * float_bits).then_some(cfg)
+    (per < ACCEPT.get() * float_bits).then_some(cfg)
 }
 
 /// The classes of symbols of 16 by their counts of `alphabet` symbols each (`counts[s]`): at most

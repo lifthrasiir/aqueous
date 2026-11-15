@@ -51,11 +51,19 @@ pub const CHUNK: usize = WARM + (8 << 10);
 /// Bytes at the start of each run after the first that only fill a coder's tables.
 pub const WARM: usize = 8 << 10;
 
+aqr_common::zopt! {
+    /// The least step between runs that sample a stream.
+    static SAMPLE_STEP: Opt<usize> = Opt::size("flate:sample-step", 64 << 10, "least bytes between the samples of a stream");
+    /// Tokens of a block decoded by [`plausible_start`]: enough that data which only looks like a
+    /// fixed block's start fails, as its matches reach before the stream.
+    static PLAUSIBLE_TOKENS: Opt<usize> = Opt::value("flate:plausible-tokens", 32, "tokens decoded to take a block start as plausible");
+}
+
 /// Where the run after one starting at `pos` starts: 64 KiB on, or an eighth of `pos` on, so
 /// that the runs sample a stream of any length (its length not known as it is parsed) with
 /// about 8 per doubling of it.
 pub fn next_chunk(pos: usize) -> usize {
-    pos + (pos / 8).max(64 << 10)
+    pos + (pos / 8).max(SAMPLE_STEP.get())
 }
 
 /// Per block, its symbol frequencies: 288 literal/length (end of block counted once), 32
@@ -966,10 +974,6 @@ impl Canon {
     }
 }
 
-/// Tokens of a block decoded by [`plausible_start`]: enough that data which only looks like a
-/// fixed block's start fails, as its matches reach before the stream.
-const PLAUSIBLE_TOKENS: usize = 32;
-
 /// Whether `raw` starts like a DEFLATE stream, by its first block, without decoding its data:
 /// for finding streams in other data, where a header that only looks right is common (a
 /// two-byte zlib header passes once in about 250 places, and more often in code). A stored
@@ -1014,8 +1018,9 @@ pub fn plausible_start(raw: &[u8], fixed: bool) -> bool {
         let Some((lit, dist)) = codes else {
             return false;
         };
+        let plausible_tokens = PLAUSIBLE_TOKENS.get();
         loop {
-            if tokens == PLAUSIBLE_TOKENS {
+            if tokens == plausible_tokens {
                 return true;
             }
             tokens += 1;

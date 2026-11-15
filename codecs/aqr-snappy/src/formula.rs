@@ -11,6 +11,30 @@ use crate::snappy::{self, Hash};
 
 pub use crate::module::{decode, decode_table};
 
+impl aqr_common::zopt::Value for Hash {
+    const META: &'static str = "mul|crc";
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "mul" => Ok(Hash::Mul),
+            "crc" => Ok(Hash::Crc),
+            _ => Err(format!("not mul or crc: {s}")),
+        }
+    }
+    fn show(&self) -> String {
+        match self {
+            Hash::Mul => "mul",
+            Hash::Crc => "crc",
+        }
+        .into()
+    }
+}
+
+aqr_common::zopt! {
+    /// The hashes tried to reproduce a stream, in order ([`Hash::ALL`] by default).
+    pub static HASHES: Opt<&'static [Hash]> =
+        Opt::value("snappy:hash", &Hash::ALL, "hashes of the compressor's table tried (mul, crc), in order");
+}
+
 /// A Snappy stream ([`stream`], [`decode`]).
 pub const MODULE: Module = Module::new("snappy-recons", 3).with_plan(memory).with_contents(&[0]);
 
@@ -38,7 +62,7 @@ pub fn stream(hash: Hash, data: Node, len: u64) -> Node {
 
 /// The hash that compresses `data` into `stream`, if any does.
 pub fn find_hash(data: &[u8], stream: &[u8]) -> Option<Hash> {
-    Hash::ALL.into_iter().find(|&h| snappy::compress(data, h).is_ok_and(|s| s == stream))
+    HASHES.get().iter().copied().find(|&h| snappy::compress(data, h).is_ok_and(|s| s == stream))
 }
 
 /// The formula rebuilding the LevelDB table `input`, or None where it is not one, or none of its
@@ -54,8 +78,12 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
         if hash.is_none()
             && let Some(d) = &d
         {
-            let hits: Vec<Hash> =
-                Hash::ALL.into_iter().filter(|&h| snappy::compress(d, h).is_ok_and(|s| s == stored(b))).collect();
+            let hits: Vec<Hash> = HASHES
+                .get()
+                .iter()
+                .copied()
+                .filter(|&h| snappy::compress(d, h).is_ok_and(|s| s == stored(b)))
+                .collect();
             if hits.len() == 1 {
                 hash = Some(hits[0]);
             }

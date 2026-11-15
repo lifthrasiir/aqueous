@@ -6,6 +6,8 @@
 //!
 //! The container taken is the lzop file (`lzop`).
 
+aqr_common::zopt_namespace!("lzo", "LZO1X streams, lzop files (aqr-lzo)");
+
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod lzo1x;

@@ -551,9 +551,11 @@ pub fn reconstruct(
     (!d.overrun()).then_some(())
 }
 
-/// Bytes of data from which a record is cut into parts, at the first packet at or past each
-/// multiple, for their packets to be coded and decoded side by side ([`split`]).
-pub const PART: usize = 64 << 20;
+aqr_common::zopt! {
+    /// Bytes of data from which a record is cut into parts, at the first packet at or past each
+    /// multiple, for their packets to be coded and decoded side by side ([`split`]).
+    pub static PART: Opt<usize> = Opt::size("lzma:part", 64 << 20, "bytes of data a record's parts are cut at, coded side by side");
+}
 
 /// The parts of the packets of `n` bytes of data, `part` bytes apart (at the first packet at or
 /// past each multiple), with the index of the first packet of each.
@@ -778,7 +780,7 @@ pub fn split(
     limit: usize,
     threads: usize,
 ) -> std::result::Result<Split, lzma::Error> {
-    split_with(input, props, dict, size, limit, PART, threads)
+    split_with(input, props, dict, size, limit, PART.get(), threads)
 }
 
 /// [`split`] with parts of `part` bytes: the record is the same whatever the threads.

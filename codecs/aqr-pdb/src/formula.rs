@@ -14,14 +14,19 @@ pub const MODULE: Module = Module::new("pdb-msf", 1).with_plan(memory);
 pub const SYMBOLS: Module = Module::new("pdb-symbols", 2).with_plan(symbols_memory);
 pub const TYPES: Module = Module::new("pdb-types", 1).with_plan(types_memory);
 
-/// Files of modules' symbols shorter than this in all are left as they are: the modules' blocks
-/// (about 14 KB) would cost more than the symbols coded save, and the container alone saves
-/// nothing (Windows' public PDBs, mostly public symbols and section contributions, archive 4 to
-/// 13% larger through it).
-const MIN_SYMBOLS: usize = 512 << 10;
+aqr_common::zopt_namespace!("pdb", "Program Database files (aqr-pdb)");
 
-/// TPI and IPI streams of less than this in all are left as they are, for the same reason.
-const MIN_TYPES: usize = 64 << 10;
+aqr_common::zopt! {
+    /// Files of modules' symbols shorter than this in all are left as they are: the modules' blocks
+    /// (about 14 KB) would cost more than the symbols coded save, and the container alone saves
+    /// nothing (Windows' public PDBs, mostly public symbols and section contributions, archive 4 to
+    /// 13% larger through it).
+    static MIN_SYMBOLS: Opt<usize> = Opt::size("pdb:min-symbols", 512 << 10, "modules' symbols shorter than this in all are left as they are");
+    /// TPI and IPI streams of less than this in all are left as they are, for the same reason.
+    static MIN_TYPES: Opt<usize> = Opt::size("pdb:min-types", 64 << 10, "TPI and IPI streams shorter than this in all are left as they are");
+    /// Whether the modules' symbols are taken apart ([`SYMBOLS`]) at all.
+    static TAKE_SYMBOLS: Opt<bool> = Opt::flag("pdb:symbols", true, "take the modules' symbols apart");
+}
 
 /// The memory of [`MODULE`]: its initial memory, and its plan ([`crate::module::msf_plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -89,7 +94,7 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
 /// None are made where the types are fewer than [`MIN_TYPES`] bytes in all.
 fn types_apply(f: &mut Formula, streams: &[u8], spans: &[Option<Range<usize>>]) -> Vec<(Range<usize>, Node)> {
     let Some(e) = types::encode(streams, spans) else { return Vec::new() };
-    if e.places.iter().map(|p| p.bytes.len()).sum::<usize>() < MIN_TYPES {
+    if e.places.iter().map(|p| p.bytes.len()).sum::<usize>() < MIN_TYPES.get() {
         return Vec::new();
     }
     let inputs = types::STREAM_NAMES
@@ -127,6 +132,9 @@ fn symbols_apply(
     streams: &[u8],
     spans: &[Option<Range<usize>>],
 ) -> Option<(Vec<Range<usize>>, Vec<Node>)> {
+    if !TAKE_SYMBOLS.get() {
+        return None;
+    }
     let stream = |k: usize| spans.get(k).cloned().flatten();
     let mods = dbi::modules(&streams[stream(3)?])?;
     // the modules' streams, each whole, and what the DBI stream tells of it
@@ -136,7 +144,7 @@ fn symbols_apply(
         .collect();
     subs.sort_by_key(|s| s.0.start);
     subs.dedup_by(|b, a| b.0.start < a.0.end);
-    if subs.iter().map(|s| s.1.symbols).sum::<usize>() < MIN_SYMBOLS {
+    if subs.iter().map(|s| s.1.symbols).sum::<usize>() < MIN_SYMBOLS.get() {
         return None;
     }
     let parts: Vec<(&[u8], dbi::Module)> = subs.iter().map(|(r, m)| (&streams[r.clone()], *m)).collect();

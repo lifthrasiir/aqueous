@@ -1,5 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 
+aqr_common::zopt_namespace!("jpeg", "JPEG (aqr-jpeg)");
+
 pub mod codec;
 #[cfg(feature = "encode")]
 pub mod formula;

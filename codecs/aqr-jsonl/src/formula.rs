@@ -47,20 +47,28 @@ const SAMPLE_MAX: usize = 4 << 20;
 /// The tokens of a path that its numbers' style is chosen from.
 const STYLE_SAMPLE: usize = 512;
 
-/// A path's objects are maps once it has seen this many objects and its keys are data: at
-/// least [`MAP_KEYS`] of them, each seen fewer than [`MAP_USES`] times on average (or more than
-/// [`MAP_MAX_KEYS`] in all).
-const MAP_OBJECTS: u64 = 32;
+aqr_common::zopt_namespace!("jsonl", "JSON lines (aqr-jsonl)");
+
+aqr_common::zopt! {
+    /// A path's objects are maps once it has seen this many objects and its keys are data: at
+    /// least [`MAP_KEYS`] of them, each seen fewer than [`MAP_USES`] times on average (or more than
+    /// [`MAP_MAX_KEYS`] in all).
+    static MAP_OBJECTS: Opt<u64> = Opt::value("jsonl:map-objects", 32, "objects of a path seen before its keys can make it a map");
+    /// A path's arrays are tuples where 9 in 10 of them, of this many at least, are of one
+    /// length within 2..[`MAX_WIDTH`].
+    static TUPLE_ARRAYS: Opt<u64> = Opt::value("jsonl:tuple-arrays", 8, "arrays of a path seen before they can be tuples");
+    /// The bytes of the first strings of a file that tell which paths' strings are shared.
+    static SHARED_SAMPLE: Opt<usize> = Opt::size("jsonl:shared-sample", 4 << 20, "bytes of the first strings that tell which paths share strings");
+    /// The bytes of lines of a segment at least (but the last), coded on its own (FORMAT.md,
+    /// "Encoding"): what the encoder and the module hold of a file at once.
+    pub static SEGMENT: Opt<usize> = Opt::size("jsonl:segment", 64 << 20, "bytes of lines of a segment, coded on its own");
+}
 const MAP_KEYS: u64 = 16;
 const MAP_USES: u64 = 4;
 const MAP_MAX_KEYS: u64 = 4096;
 
 /// The key lists the first pass keeps of a path (only to find their members' paths again).
 const SEEN_LISTS: usize = 4096;
-
-/// A path's arrays are tuples where 9 in 10 of them, of [`TUPLE_ARRAYS`] at least, are of one
-/// length within 2..[`MAX_WIDTH`].
-const TUPLE_ARRAYS: u64 = 8;
 
 /// The style of `d`, told from its start.
 fn style_of(d: &[u8]) -> Option<Style> {
@@ -254,6 +262,9 @@ struct First<'a> {
     /// The first strings of the file, in order, and their paths ([`shared_paths`]).
     strings: Vec<(u32, usize, usize)>,
     string_bytes: usize,
+    /// [`SHARED_SAMPLE`] and [`MAP_OBJECTS`] as set.
+    shared_sample: usize,
+    map_objects: u64,
 }
 
 impl<'a> First<'a> {
@@ -273,7 +284,7 @@ impl<'a> First<'a> {
             }
             Tok::Str(a, b) => {
                 // (an entry counted as 16 bytes more, so that their number is bounded too)
-                if self.string_bytes < SHARED_SAMPLE {
+                if self.string_bytes < self.shared_sample {
                     self.strings.push((p, a, b));
                     self.string_bytes += b - a + 16;
                 }
@@ -309,7 +320,7 @@ impl<'a> First<'a> {
                         }
                     };
                     let s = &mut self.seen[p as usize];
-                    if s.objects >= MAP_OBJECTS && (s.keys >= MAP_KEYS && s.uses < MAP_USES * s.keys)
+                    if s.objects >= self.map_objects && (s.keys >= MAP_KEYS && s.uses < MAP_USES * s.keys)
                         || s.keys > MAP_MAX_KEYS
                     {
                         s.map = true;
@@ -383,8 +394,9 @@ impl Seen<'_> {
     fn kind(&self, shared: bool) -> Kind1 {
         let (len, &count) =
             self.lens.iter().enumerate().max_by_key(|&(l, c)| (c, std::cmp::Reverse(l))).unwrap_or((0, &0));
-        let tuple =
-            self.arrays >= TUPLE_ARRAYS && count * 10 >= self.arrays * 9 && (2..MAX_WIDTH as usize).contains(&len);
+        let tuple = self.arrays >= TUPLE_ARRAYS.get()
+            && count * 10 >= self.arrays * 9
+            && (2..MAX_WIDTH as usize).contains(&len);
         let toks: Vec<(usize, &[u8])> = self.sample.iter().map(|&t| (0, t)).collect();
         Kind1 { map: self.map, shared, width: if tuple { len } else { 1 }, style: choose(&toks) }
     }
@@ -618,8 +630,6 @@ impl<'a, 'b> Second<'a, 'b> {
     }
 }
 
-/// The bytes of the first strings of a file that tell which paths' strings are shared.
-const SHARED_SAMPLE: usize = 4 << 20;
 /// Fewer bytes of strings than this are not shared.
 const SHARED_MIN: usize = 64 << 10;
 /// The paths of the most bytes of strings that are told apart; the others are told together.
@@ -697,14 +707,10 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     encode_as(input, style).filter(|(_, raw)| raw * 10 < input.len()).map(|f| f.0)
 }
 
-/// The bytes of lines of a segment at least (but the last), coded on its own (FORMAT.md,
-/// "Encoding"): what the encoder and the module hold of a file at once.
-pub const SEGMENT: usize = 64 << 20;
-
 /// The formula of `input` as JSON lines of style `style` and the bytes of its lines kept as they
 /// are, or `None` where a segment has more than [`MAX_PATHS`] paths.
 pub fn encode_as(input: &[u8], style: Style) -> Option<(Formula, usize)> {
-    encode_in(input, style, SEGMENT)
+    encode_in(input, style, SEGMENT.get())
 }
 
 /// [`encode_as`] in segments of `segment` bytes of lines at least.
@@ -712,7 +718,15 @@ fn encode_in(input: &[u8], style: Style, segment: usize) -> Option<(Formula, usi
     let d = input;
     // the first pass, over all of the file
     let mut toks = Toks::default();
-    let mut first = First { d, seen: Vec::new(), named: HashMap::new(), strings: Vec::new(), string_bytes: 0 };
+    let mut first = First {
+        d,
+        seen: Vec::new(),
+        named: HashMap::new(),
+        strings: Vec::new(),
+        string_bytes: 0,
+        shared_sample: SHARED_SAMPLE.get(),
+        map_objects: MAP_OBJECTS.get(),
+    };
     let mut at = 0;
     while at < d.len() {
         let l = parse::line(d, at);

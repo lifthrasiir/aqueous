@@ -305,7 +305,7 @@ fn parts(
         image_rec(&chunks[range.clone()], classes[range.start], ih, threads, r, alone.map(|a| a[i]), also_alone)
     };
     // Below this size there is nothing worth a thread to overlap.
-    let records = if threads > 1 && file.len() >= PAR_MIN {
+    let records = if threads > 1 && file.len() >= PAR_MIN.get() {
         // The images (each into a record of its own) in parallel.
         let workers = threads.min(imgs.len()).max(1);
         // Threads left over from the images go to each image's own parallel steps.
@@ -364,7 +364,7 @@ fn image_rec(
         rec.push(0);
         rec.extend_from_slice(&payload);
     }
-    if std::env::var_os("PNGR_DEBUG").is_some() {
+    if crate::DEBUG.get() {
         eprintln!(
             "image {class} payload {} -> record {} ({})",
             payload.len(),
@@ -390,8 +390,10 @@ pub(crate) fn formula_parts(
     parts.records.iter().any(|r| r[0] != 0).then_some(parts)
 }
 
-/// Files smaller than this are handled on one thread whatever the thread count.
-const PAR_MIN: usize = 1 << 16;
+aqr_common::zopt! {
+    /// Files smaller than this are handled on one thread whatever the thread count.
+    static PAR_MIN: Opt<usize> = Opt::size("png:par-min", 1 << 16, "files smaller are handled on one thread");
+}
 
 /// Appends the record of a coded image to `rec`, against `reference` if given.
 #[cfg(feature = "encode")]
@@ -409,7 +411,7 @@ fn image_record(
     if enc.len > u32::MAX as usize {
         return Err(Error::Unsupported("image data of 4 GiB or more"));
     }
-    if std::env::var_os("PNGR_DEBUG").is_some() {
+    if crate::DEBUG.get() {
         eprintln!("  {} zlib streams, {} bytes of data", enc.streams.len(), enc.len);
     }
     write_record(kind, enc, threads, rec);
@@ -885,7 +887,7 @@ fn rebuild(
     // (positions as the reference's are 32-bit)
     let mut own = (keep && n <= u32::MAX as usize).then(|| model::Reference::with_capacity(ntok));
     // (the writer on a worker of the pool, if one is free)
-    let writer = (threads > 1 && n >= PAR_MIN).then(|| aqr_common::pool::reserve(1)).filter(|w| !w.is_empty());
+    let writer = (threads > 1 && n >= PAR_MIN.get()).then(|| aqr_common::pool::reserve(1)).filter(|w| !w.is_empty());
     if let Some(writer) = writer {
         /// A block's tokens and frequencies, and the bytes of a stored block.
         type Msg = (Vec<Token>, model::Freqs, Vec<u8>);

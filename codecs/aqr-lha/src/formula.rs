@@ -36,9 +36,18 @@ pub fn apply_recons(data: Node, records: Node, index: Node, len: u64) -> Apply {
     }
 }
 
-/// Contents of at least this many bytes are slices of their own, apart from the others of their
-/// kind next to them: so that the same contents elsewhere are found by their slices.
-pub const OWN_MIN: usize = 1 << 10;
+aqr_common::zopt! {
+    /// Contents of at least this many bytes are slices of their own, apart from the others of their
+    /// kind next to them: so that the same contents elsewhere are found by their slices.
+    pub static OWN_MIN: Opt<usize> =
+        Opt::size("lha:own-min", 1 << 10, "contents of at least this many bytes are slices of their own");
+    /// The bytes that the streams may decode to, all together, of an archive of `n` bytes on its own:
+    /// `limit-base` and `limit-ratio` times `n` ([`limit`]).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("lha:limit-base", 64 << 20, "bytes the streams may decode to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("lha:limit-ratio", 32, "bytes per byte of the archive the streams may decode to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -57,9 +66,10 @@ impl Default for Options {
     }
 }
 
-/// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive.
+/// [`Options::limit`] for an archive of `n` bytes on its own: `limit-base` (64 MiB) and
+/// `limit-ratio` (32) times the archive.
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
 
 /// What [`encode_with`] made.
@@ -175,7 +185,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let by_kind = |f: &mut Formula, (data, ends): (Vec<u8>, Vec<(Kind, usize)>)| {
         let raw = f.streams.len();
         f.push("raw", Vec::new());
-        f.push_by_kind(raw, data, &ends, "lha", OWN_MIN)
+        f.push_by_kind(raw, data, &ends, "lha", OWN_MIN.get())
     };
     let kept_sizes = sizes(false);
     let kept_nodes = match kept_sizes.is_empty() {

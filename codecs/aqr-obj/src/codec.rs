@@ -62,14 +62,20 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { block: 4 << 20, verify: true, force_whole: 0, threads: 1, portion: PORTION }
+        Options { block: BLOCK.get(), verify: VERIFY.get(), force_whole: 0, threads: 1, portion: PORTION.get() }
     }
 }
 
-/// The input bytes of a portion at most, about ([`Options::portion`]): the module holds its
-/// file and its streams whole, so that a portion's application takes some 2.4 times its bytes;
-/// a file of more is cut into portions, an application each (`formula::encode_with`).
-pub const PORTION: usize = 64 << 20;
+aqr_common::zopt! {
+    /// The input bytes of a portion at most, about ([`Options::portion`]): the module holds its
+    /// file and its streams whole, so that a portion's application takes some 2.4 times its bytes;
+    /// a file of more is cut into portions, an application each (`formula::encode_with`).
+    pub static PORTION: Opt<usize> = Opt::size("obj:portion", 64 << 20, "input bytes of a portion, an application each");
+    /// The input bytes of a block, about ([`Options::block`]): each is coded apart.
+    static BLOCK: Opt<usize> = Opt::size("obj:block", 4 << 20, "input bytes of a block, about");
+    /// Whether each block is decoded and compared as it is coded ([`Options::verify`]).
+    static VERIFY: Opt<bool> = Opt::flag("obj:verify", true, "decode and compare each block as it is coded");
+}
 
 /// The end of the block starting at `p`: at most `bsize` bytes, at a line end if there is
 /// one.

@@ -5,6 +5,8 @@
 //! aqr-formula), with the feature `encode`; `module` is the code of the module, which
 //! `FORMAT.md` specifies.
 
+aqr_common::zopt_namespace!("xpress", "XPRESS Huffman streams (aqr-xpress)");
+
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;

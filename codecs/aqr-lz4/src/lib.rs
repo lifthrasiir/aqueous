@@ -6,6 +6,8 @@
 //! Two containers are taken: Firefox's `mozlz4` (one block) and LZ4 frames with independent
 //! blocks.
 
+aqr_common::zopt_namespace!("lz4", "LZ4 blocks and frames (aqr-lz4)");
+
 pub mod block;
 #[cfg(feature = "encode")]
 pub mod formula;

@@ -204,16 +204,18 @@ impl FromIterator<u8> for Packed {
     }
 }
 
-/// Bases coded at a time by [`encode`]: the model is run over all of them first, kept at the
-/// start of each such chunk, then over each chunk again, from the last, as the coder goes
-/// backward (the next chunk's on a worker of the pool while this one's is coded, where one is
-/// free). A chunk's symbols take 4 bytes a base, a model kept [`MODEL_BYTES`]: of chr1 of hg19
-/// (225 M bases), 2 × 34 MB and 55 MB, where the symbols of all the bases took 0.9 GB.
-const CHUNK: usize = 8 << 20;
+aqr_common::zopt! {
+    /// Bases coded at a time by [`encode`]: the model is run over all of them first, kept at the
+    /// start of each such chunk, then over each chunk again, from the last, as the coder goes
+    /// backward (the next chunk's on a worker of the pool while this one's is coded, where one is
+    /// free). A chunk's symbols take 4 bytes a base, a model kept [`MODEL_BYTES`]: of chr1 of hg19
+    /// (225 M bases), 2 × 34 MB and 55 MB, where the symbols of all the bases took 0.9 GB.
+    static CHUNK: Opt<usize> = Opt::value("fasta:chunk", 8 << 20, "bases the coder takes at a time");
+}
 
 /// The coded form of bases `s`.
 pub fn encode(s: &Packed) -> Vec<u8> {
-    encode_in(s, CHUNK)
+    encode_in(s, CHUNK.get())
 }
 
 /// The start and frequency of each base of `s` in `r` ([`encode`]), the model `t` going on from

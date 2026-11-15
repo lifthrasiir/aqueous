@@ -170,8 +170,12 @@ fn record(d: &[u8], mut p: usize, dia: &Dialect, fields: &mut Vec<Field>) -> Opt
     }
 }
 
-/// The records of a sample that tell its dialect.
-const SAMPLE_RECORDS: usize = 1000;
+aqr_common::zopt! {
+    /// The records of a sample that tell its dialect.
+    static SAMPLE_RECORDS: Opt<usize> = Opt::value("xsv:sample-records", 1000, "records of the sample that tell a table's dialect");
+    /// The share (percent) of a sample's records that must have the most common number of fields, at least.
+    static DIALECT_PCT: Opt<usize> = Opt::value("xsv:dialect-pct", 90, "percent of records with the most common field count a dialect needs");
+}
 
 /// The dialect of a table starting with `s` (a sample of the file, `whole` if it is all of
 /// it), if any: of the candidates, those whose records are cut into the same number of fields
@@ -201,8 +205,10 @@ pub fn dialect(s: &[u8], whole: bool) -> Option<Dialect> {
         cands.push(Dialect { delim: vec![0x1f], quote: None, term: term(&[0x1e]) });
     }
     let mut best: Option<((u64, usize), Dialect)> = None;
+    let dialect_pct = DIALECT_PCT.get();
+    let sample_records = SAMPLE_RECORDS.get();
     for dia in cands {
-        let mut t = parse(s, &dia, SAMPLE_RECORDS);
+        let mut t = parse(s, &dia, sample_records);
         // (the last record cut by the sample's end)
         if !whole && t.records.len() > 1 && matches!(t.records.last(), Some(Record::Fields { end: E_NONE, .. })) {
             t.records.pop();
@@ -217,7 +223,7 @@ pub fn dialect(s: &[u8], whole: bool) -> Option<Dialect> {
         }
         let Some((&width, &count)) = hist.iter().max_by_key(|&(w, c)| (c, w)) else { continue };
         let least = if whole { n.clamp(2, 8) } else { 8 };
-        if width < 2 || count * 10 < n * 9 || raw * 50 > n || n < least {
+        if width < 2 || count * 100 < n * dialect_pct || raw * 50 > n || n < least {
             continue;
         }
         // (words between spaces make a table only where a column holds numbers: prose of lines

@@ -40,7 +40,7 @@ fn main() {
             continue;
         }
         let t = Instant::now();
-        let s = match stream::decode(&d, true, formula::MAX_DATA) {
+        let s = match stream::decode(&d, true, formula::MAX_DATA.get()) {
             Ok(s) => s,
             Err(e) => {
                 *outcome.entry(format!("decode: {e}")).or_default() += 1;

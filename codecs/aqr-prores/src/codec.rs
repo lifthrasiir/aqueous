@@ -26,13 +26,32 @@ use crate::{Error, Result};
 /// Bytes of frames a stripe codes, about: a chunk has `⌈its frames' bytes / STRIPE_BYTES⌉`
 /// stripes, at most [`MAX_STRIPES`]. (Each stripe's model learns anew: an animated film lost
 /// 0.6% at 8 stripes for 56 MB, 2.3% at 32; camera footage gained a little.)
+///
+/// (`prores:stripe-bytes`.)
 pub const STRIPE_BYTES: usize = 4 << 20;
+/// Most stripes a stream may hold (`prores:max-stripes` lowers the encoder's).
 pub const MAX_STRIPES: usize = 16;
 /// Bytes of a frame a stripe codes at least: with less, the messages of a frame (to every
 /// stripe's task and back) cost more than the stripe's work. (Natively the channels wake only
 /// their own waiters: 4 stripes of 4 KB frames decode 3.6 times as fast as one, 16 as fast as 4;
 /// with the global wake-up of earlier emulations 16 stripes were 2 times slower than one.)
 pub const STRIPE_FRAME_BYTES: usize = 1 << 10;
+
+aqr_common::zopt! {
+    /// [`STRIPE_BYTES`], the default of `prores:stripe-bytes`.
+    static ENC_STRIPE_BYTES: Opt<usize> =
+        Opt::size("prores:stripe-bytes", STRIPE_BYTES, "bytes of frames a stripe codes, about");
+    /// The encoder's most stripes: at most [`MAX_STRIPES`], what a stream may hold (a larger
+    /// value fails).
+    static ENC_MAX_STRIPES: Opt<usize> =
+        Opt::value("prores:max-stripes", MAX_STRIPES, "most stripes of a chunk, at most 16");
+    /// [`STRIPE_FRAME_BYTES`], the default of `prores:stripe-frame-bytes`.
+    static ENC_STRIPE_FRAME_BYTES: Opt<usize> = Opt::size(
+        "prores:stripe-frame-bytes",
+        STRIPE_FRAME_BYTES,
+        "bytes of a frame a stripe codes at least",
+    );
+}
 
 /// The slice rows of stripe `s` of `k` of a picture of `rows` of them: `rows * s / k` up to
 /// `rows * (s + 1) / k`.
@@ -299,8 +318,10 @@ pub struct Coded {
 /// as a chunk: the frames coded, the bytes between them given back as they are.
 pub fn encode(span: &[u8], frames: &[Range<usize>]) -> Coded {
     let frame_bytes: usize = frames.iter().map(|r| r.len()).sum();
-    let by_frame = (frame_bytes / frames.len().max(1)).div_ceil(STRIPE_FRAME_BYTES);
-    encode_with(span, frames, frame_bytes.div_ceil(STRIPE_BYTES).min(by_frame).clamp(1, MAX_STRIPES))
+    let by_frame = (frame_bytes / frames.len().max(1)).div_ceil(ENC_STRIPE_FRAME_BYTES.get());
+    let max = ENC_MAX_STRIPES.get();
+    assert!(max <= MAX_STRIPES, "-Z prores:max-stripes={max}: above {MAX_STRIPES}, which the format does not hold");
+    encode_with(span, frames, frame_bytes.div_ceil(ENC_STRIPE_BYTES.get()).min(by_frame).clamp(1, max))
 }
 
 /// [`encode`] in `k` stripes (1 to [`MAX_STRIPES`]).

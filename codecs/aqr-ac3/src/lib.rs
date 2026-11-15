@@ -8,6 +8,9 @@ extern crate alloc;
 #[cfg(feature = "encode")]
 extern crate std;
 
+#[cfg(feature = "encode")]
+aqr_common::zopt_namespace!("ac3", "AC-3 audio (aqr-ac3)");
+
 mod ac3;
 mod ac3_tables;
 #[cfg(feature = "encode")]

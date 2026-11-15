@@ -115,7 +115,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// The number of threads reconstruction uses by default: the available parallelism.
 pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
+    THREADS.get()
 }
 
 use crate::bits::{BitReader, BitWriter};
@@ -149,6 +149,51 @@ pub const ADAPTIVE: u16 = 10;
 pub(crate) const PRIORS: [&str; 1] = [include_str!("../model/priors-10.txt")];
 /// The profile of [`Options::default`] (λ = 5).
 pub const DEFAULT_PROFILE: u16 = 6;
+
+aqr_common::zopt_namespace!("flate", "DEFLATE streams (aqr-flate)");
+
+aqr_common::zopt! {
+    /// The profile of [`Options::default`] (the constant [`DEFAULT_PROFILE`]; 0-9 static, 10 adaptive).
+    pub static PROFILE: Opt<u16> = Opt::value("flate:profile", DEFAULT_PROFILE, "default profile (0..9 static, 10 adaptive)");
+    /// Whether [`Options::default`] has zlib emulated.
+    pub static ZLIB: Opt<bool> = Opt::flag("flate:zlib", true, "emulate zlib's compressor to predict tokens");
+    /// Whether [`Options::default`] tries chain rules.
+    static CHAIN: Opt<bool> = Opt::flag("flate:chain", true, "try chain rules where the misses are few");
+    /// Whether [`Options::default`] verifies by writing the whole stream back.
+    static VERIFY: Opt<bool> = Opt::flag("flate:verify", false, "verify by writing the whole stream again (no streaming)");
+    /// Bytes of data about a segment covers.
+    static SEGMENT: Opt<usize> = Opt::size("flate:segment", 1 << 20, "bytes of data about each segment covers");
+    /// Bytes of data the rules are compared on where the fingerprint does not settle it.
+    static PREFIX: Opt<usize> = Opt::size("flate:prefix", 4 << 10, "bytes compared when the fingerprint does not pick the rule");
+    /// Streams of more data than this are refused.
+    static MAX_DATA: Opt<Option<usize>> = Opt::size_or_off("flate:max-data", None, "streams of more data are refused");
+    /// Threads for reconstruction.
+    static THREADS: Opt<usize> =
+        Opt::value("flate:threads", 1, "threads for rebuilding streams").derived(available_threads, "available parallelism");
+    /// Bytes of data of the first run of tokens that [`Parsed::estimate`] codes (the others are
+    /// of [`inflate::CHUNK`] bytes, as [`inflate::next_chunk`] places them).
+    static ESTIMATE_FIRST: Opt<usize> = Opt::size("flate:estimate-first", 16 << 10, "bytes of the first sample of an estimate");
+    /// zlib emulation missing at most one token in this many settles a stream's coding (with the
+    /// rule or a chain rule, whichever codes the misses smaller).
+    static ZLIB_SETTLES: Opt<usize> = Opt::value("flate:zlib-settles", 100, "zlib emulation settles a stream missing 1/N tokens or fewer");
+    /// Below this many bytes of data, the catalog's rule alone is compared with exact hinted
+    /// zlib parameters (it is cheap there, and often smaller).
+    static HINT_RULE_BELOW: Opt<usize> = Opt::size("flate:hint-rule-below", 1 << 10, "below this, the rule alone is compared with hinted zlib");
+    /// No chain searches deeper than this quantile of the depths at which the stream's matches
+    /// are (the rest are coded by rank anyway): joining stays fast, and the intermediate depths
+    /// this gives often predict better too.
+    static DEPTH_QUANTILE: Opt<f64> = Opt::value("flate:depth-quantile", 0.995, "quantile of match depths capping chain searches");
+    /// Chain configurations are compared on this much data when the stream has twice as much.
+    static CHAIN_PREFIX: Opt<usize> = Opt::size("flate:chain-prefix", 256 << 10, "bytes chain configurations are compared on");
+    /// Bits a miss is assumed to cost at least, to give up on a rule early.
+    static MIN_MISS_BITS: Opt<f64> = Opt::value("flate:min-miss-bits", 4.0, "least bits a miss costs, to give up on a rule early");
+    /// A rule is consistent with the matches when at most this many percent contradict it.
+    static CONSISTENT_PCT: Opt<usize> = Opt::value("flate:consistent-pct", 1, "percent of matches that may contradict a consistent rule");
+}
+
+fn available_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
 
 /// The known profiles.
 pub fn profiles() -> std::ops::Range<u16> {
@@ -270,20 +315,21 @@ impl Options {
 
 impl Default for Options {
     fn default() -> Self {
-        let (rules, map) = profile_catalog(DEFAULT_PROFILE).unwrap().clone();
+        let profile = PROFILE.get();
+        let (rules, map) = profile_catalog(profile).unwrap().clone();
         Options {
-            profile: DEFAULT_PROFILE,
+            profile,
             priors: None,
-            zlib: true,
-            chain: true,
+            zlib: ZLIB.get(),
+            chain: CHAIN.get(),
             collect: false,
             rules,
             map,
             threads: crate::default_threads(),
-            segment: 1 << 20,
-            prefix: 4 << 10,
-            verify: false,
-            max_data: usize::MAX,
+            segment: SEGMENT.get(),
+            prefix: PREFIX.get(),
+            verify: VERIFY.get(),
+            max_data: MAX_DATA.get().unwrap_or(usize::MAX),
             size: 0,
             store: false,
         }
@@ -678,10 +724,6 @@ pub fn deconstruct_hinted(
     Parsed::new(raw, opts)?.deconstruct(opts, hints)
 }
 
-/// Bytes of data of the first run of tokens that [`Parsed::estimate`] codes (the others are
-/// of [`inflate::CHUNK`] bytes, as [`inflate::next_chunk`] places them).
-const ESTIMATE_FIRST: usize = 16 << 10;
-
 /// A stream parsed, its data made, before anything is coded: so that whether to deconstruct
 /// it can be decided by its data and [`Parsed::estimate`] without parsing it again.
 pub struct Parsed<'a> {
@@ -718,7 +760,7 @@ impl<'a> Parsed<'a> {
         let t0 = std::time::Instant::now();
         let streamed = opts.profile < ADAPTIVE && !opts.verify;
         let mut f = if streamed {
-            let prefix = opts.prefix.max(ESTIMATE_FIRST);
+            let prefix = opts.prefix.max(ESTIMATE_FIRST.get());
             inflate::parse_segments_head(
                 raw,
                 opts.segment,
@@ -1004,9 +1046,10 @@ fn chunks_of(f: &Flat) -> Vec<inflate::Chunk> {
         pos: 0,
         count: 0,
     }];
+    let estimate_first = ESTIMATE_FIRST.get();
     let (mut turn, mut next, mut keeping) = (
-        ESTIMATE_FIRST,
-        inflate::next_chunk(0).max(ESTIMATE_FIRST),
+        estimate_first,
+        inflate::next_chunk(0).max(estimate_first),
         true,
     );
     let (mut p, mut skips) = (0, f.skips.iter().peekable());
@@ -1279,7 +1322,7 @@ fn choose_adaptive<'a>(
         if segs.iter().all(|s| s.misses == 0) {
             // In a short stream the rule may predict as well, without zlib's parameters (ties
             // go to the rule, as below).
-            if f.data.len() < HINT_RULE_BELOW {
+            if f.data.len() < HINT_RULE_BELOW.get() {
                 let alone = code_adaptive(
                     f,
                     rule,
@@ -1324,7 +1367,7 @@ fn choose_adaptive<'a>(
         .and_then(|&s| zlib_params(s, &f.data, hints, &cuts))
     {
         None => passes.store(1, std::sync::atomic::Ordering::Relaxed),
-        Some((d, followed)) if d.misses > d.tokens / ZLIB_SETTLES => {
+        Some((d, followed)) if d.misses > d.tokens / ZLIB_SETTLES.get() => {
             late = Some((d.params, followed))
         }
         Some((d, followed)) => {
@@ -1351,7 +1394,7 @@ fn choose_adaptive<'a>(
             };
             let mut e = code(rule, followed.into(), 0)?;
             let misses: usize = e.segs.iter().map(|s| s.misses).sum();
-            if misses <= f.tokens.len() / ZLIB_SETTLES {
+            if misses <= f.tokens.len() / ZLIB_SETTLES.get() {
                 // The misses are coded against the rule's matches, where a chain rule may do
                 // better (coded again with the emulation's predictions).
                 if misses > 0
@@ -1490,24 +1533,10 @@ fn both<A: Send, B: Send>(
     })
 }
 
-/// zlib emulation missing at most one token in this many settles a stream's coding (with the
-/// rule or a chain rule, whichever codes the misses smaller).
-const ZLIB_SETTLES: usize = 100;
-
-/// Below this many bytes of data, the catalog's rule alone is compared with exact hinted
-/// zlib parameters (it is cheap there, and often smaller).
-const HINT_RULE_BELOW: usize = 1 << 10;
-
 /// Chain configurations tried, as (depth, nice) indices into [`tokens::DEPTHS`] and
 /// [`tokens::NICES`]: depth 128 and nice 128, 1 and 8, 16 and 16, 4096 and 128.
 const CHAIN_CONFIGS: [(u8, u8); 4] = [(7, 5), (0, 0), (4, 1), (12, 5)];
 const _: () = assert!(CHAIN_CONFIGS.len() <= table::MULTI);
-/// No chain searches deeper than this quantile of the depths at which the stream's matches
-/// are (the rest are coded by rank anyway): joining stays fast, and the intermediate depths
-/// this gives often predict better too.
-const DEPTH_QUANTILE: f64 = 0.995;
-/// Chain configurations are compared on this much data when the stream has twice as much.
-const CHAIN_PREFIX: usize = 256 << 10;
 
 /// The best chain rule for a stream, by adaptive cost: of [`CHAIN_CONFIGS`] with the depth
 /// capped by [`DEPTH_QUANTILE`], compared on a prefix of long streams. `None` without
@@ -1541,7 +1570,7 @@ fn chain_rule<'a>(
         })
     };
     let mut m = crate::matchfind::Matcher::single(&f.data);
-    let dq = m.depth_quantile(&f.data, matches, DEPTH_QUANTILE);
+    let dq = m.depth_quantile(&f.data, matches, DEPTH_QUANTILE.get());
     let cap = tokens::DEPTHS
         .iter()
         .position(|&d| d as usize > dq)
@@ -1570,7 +1599,8 @@ fn chain_rule<'a>(
         }
         best.1
     };
-    if f.data.len() < 2 * CHAIN_PREFIX
+    let chain_prefix = CHAIN_PREFIX.get();
+    if f.data.len() < 2 * chain_prefix
         && let [r] = ranges
         && !collect
         && (r.first, r.count, r.pos, r.end) == (0, f.tokens.len(), 0, f.data.len())
@@ -1596,8 +1626,8 @@ fn chain_rule<'a>(
         };
         return Ok(Some((rules[i], Some(vec![seg]))));
     }
-    let prefix = if f.data.len() >= 2 * CHAIN_PREFIX {
-        CHAIN_PREFIX
+    let prefix = if f.data.len() >= 2 * chain_prefix {
+        chain_prefix
     } else {
         usize::MAX
     };
@@ -1995,9 +2025,6 @@ fn choose_rule(f: &Flat, opts: &Options, fp: (u64, u64)) -> Result<Rule> {
     Ok(best.1)
 }
 
-/// Bits a miss is assumed to cost at least, to give up on a rule early.
-const MIN_MISS_BITS: f64 = 4.0;
-
 /// The first part of a stream, ready for costing rules on it.
 pub struct Prepared {
     data: Vec<u8>,
@@ -2059,13 +2086,13 @@ impl Prepared {
                 } as usize;
             }
         }
-        bad * 100 <= n
+        bad * 100 <= n * CONSISTENT_PCT.get()
     }
 
     /// [`Prepared::cost`], or `None` once it surely exceeds `budget`.
     pub fn cost_within(&mut self, rule: Rule, budget: f64) -> Result<Option<f64>> {
         let limit = if budget.is_finite() {
-            (budget / MIN_MISS_BITS) as usize
+            (budget / MIN_MISS_BITS.get()) as usize
         } else {
             usize::MAX
         };

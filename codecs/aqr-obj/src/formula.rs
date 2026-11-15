@@ -20,6 +20,11 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::plan(u.inputs, u.content(0)?, len)?)
 }
 
+aqr_common::zopt! {
+    /// Streams of this many bytes or fewer are not coded by rANS.
+    static ANS_MIN: Opt<usize> = Opt::value("obj:ans-min", 64, "streams of this many bytes or fewer are not coded by rANS");
+}
+
 /// Statement keywords of OBJ files (the specification's, those of its free-form geometry
 /// included), the comment aside.
 const STATEMENTS: [&[u8]; 37] = [
@@ -256,6 +261,7 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Portion> {
     }
 
     // Per stream of a coded block, its rANS coding where that is smaller than storing it.
+    let ans_min = ANS_MIN.get();
     let ans_of = |b: &Blk| -> Vec<Option<Vec<u8>>> {
         let Blk::Coded(_, streams) = b else { return Vec::new() };
         let mut ac = Vec::new();
@@ -264,7 +270,7 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Portion> {
             .enumerate()
             .map(|(i, s)| {
                 ac.clear();
-                (AC_STREAMS[i] && s.len() > 64 && ans::encode(s, &mut ac).is_some() && ac.len() < s.len())
+                (AC_STREAMS[i] && s.len() > ans_min && ans::encode(s, &mut ac).is_some() && ac.len() < s.len())
                     .then(|| std::mem::take(&mut ac))
             })
             .collect()

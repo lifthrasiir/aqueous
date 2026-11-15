@@ -69,39 +69,48 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             threads: 1,
-            profile: aqr_flate::DEFAULT_PROFILE,
-            zlib: true,
-            trial: true,
+            profile: aqr_flate::PROFILE.get(),
+            zlib: aqr_flate::ZLIB.get(),
+            trial: TRIAL.get(),
             limit: u64::MAX,
             probe: None,
             held: None,
-            window: WINDOW,
+            window: WINDOW.get(),
         }
     }
 }
 
-/// Streams shorter than this are rebuilt without a probe: the data of the objects of a kind is
-/// archived together, and that of small objects compresses far better so than alone (as a
-/// probe would estimate it); and they cost little to rebuild.
-pub const PROBE_MIN: usize = 256 << 10;
+aqr_common::zopt_namespace!("git", "git packs (aqr-git)");
 
-/// The data of entries of at least this many bytes is a slice of its own, apart from the
-/// others of its kind next to it: recompressed as a file of its own, and found where the same
-/// file is archived along with it.
-pub const OWN_MIN: usize = 256 << 10;
+aqr_common::zopt! {
+    /// Streams shorter than this are rebuilt without a probe: the data of the objects of a kind is
+    /// archived together, and that of small objects compresses far better so than alone (as a
+    /// probe would estimate it); and they cost little to rebuild.
+    pub static PROBE_MIN: Opt<usize> = Opt::size("git:probe-min", 256 << 10, "streams shorter are rebuilt without a probe");
+    /// The data of entries of at least this many bytes is a slice of its own, apart from the
+    /// others of its kind next to it: recompressed as a file of its own, and found where the same
+    /// file is archived along with it.
+    pub static OWN_MIN: Opt<usize> = Opt::size("git:own-min", 256 << 10, "entries' data at least this long are slices of their own");
+    /// Streams whose zlib settings are found first, the largest, for the others.
+    static SAMPLES: Opt<usize> = Opt::value("git:samples", 8, "largest streams whose zlib settings are found first for the others");
+    /// Whether [`Options::trial`] is by default.
+    static TRIAL: Opt<bool> = Opt::flag("git:trial", true, "try the adaptive profile where the samples may show zlib is predicted");
+    /// [`Options::window`] by default.
+    pub static WINDOW: Opt<usize> = Opt::size("git:window", 64 << 20, "bytes of streams made at once");
+    /// Bytes from which a stream gets threads of its own: two of aqr-flate's segments.
+    static LARGE: Opt<usize> = Opt::size("git:large", 2 << 20, "streams at least this long get all the threads");
+    /// The base of [`limit`] (by default that of all formats, `limit-base`).
+    pub static LIMIT_BASE: Opt<usize> = Opt::size("git:limit-base", 0, "bytes the entries may inflate to, besides limit-ratio per byte")
+        .derived(|| aqr_common::zopt::LIMIT_BASE.get(), "limit-base");
+    /// The ratio of [`limit`] (by default that of all formats, `limit-ratio`).
+    pub static LIMIT_RATIO: Opt<usize> = Opt::value("git:limit-ratio", 0, "bytes per byte of the pack the entries may inflate to")
+        .derived(|| aqr_common::zopt::LIMIT_RATIO.get(), "limit-ratio");
+}
 
-/// Streams whose zlib settings are found first, the largest, for the others.
-const SAMPLES: usize = 8;
-
-/// [`Options::window`] by default.
-pub const WINDOW: usize = 64 << 20;
-
-/// Bytes from which a stream gets threads of its own: two of aqr-flate's segments.
-const LARGE: usize = 2 << 20;
-
-/// [`Options::limit`] for a pack of `n` bytes on its own: 64 MiB, and 32 times the pack.
+/// [`Options::limit`] for a pack of `n` bytes on its own: 64 MiB, and 32 times the pack (by
+/// default).
 pub fn limit(n: usize) -> u64 {
-    (64 << 20) + 32 * n as u64
+    aqr_common::zopt::limit_of(n, &LIMIT_BASE, &LIMIT_RATIO) as u64
 }
 
 /// What [`encode_with`] made.
@@ -195,12 +204,13 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     };
     // The large streams, where there is a probe, one at a time, as it tells: and only where it
     // may pay (the probe's encoder is of one thread).
-    let probed = |j: usize| opt.probe.is_some() && size(&jobs[j]) >= PROBE_MIN;
+    let probe_min = PROBE_MIN.get();
+    let probed = |j: usize| opt.probe.is_some() && size(&jobs[j]) >= probe_min;
     // git writes every object with the same zlib settings: those of a few of the largest
     // streams are tried first on the others (taken where they predict every token).
     let mut order: Vec<usize> = (0..jobs.len()).filter(|&j| !probed(j)).collect();
     order.sort_by_key(|&j| (std::cmp::Reverse(size(&jobs[j])), j));
-    order.truncate(SAMPLES);
+    order.truncate(SAMPLES.get());
     let run = |js: &[usize], params: Option<zlib::Params>| {
         par_jobs(js, |&j| size(&jobs[j]), opt.threads, |&j, threads| make(j, parse(j, threads)?, threads, params))
     };
@@ -224,8 +234,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     // (made apart from the others: a few)
     if let Some(probe) = &opt.probe {
         let enc = Encoder::with_threads(probe.level, opt.threads);
+        let large = LARGE.get();
         for j in (0..jobs.len()).filter(|&j| probed(j)) {
-            let threads = if size(&jobs[j]) >= LARGE { opt.threads } else { 1 };
+            let threads = if size(&jobs[j]) >= large { opt.threads } else { 1 };
             let Some(p) = parse(j, threads) else { continue };
             let e = &entries[jobs[j].0];
             let held = || opt.held.as_ref().is_some_and(|(h, except)| h.holds(p.data(), *except)) as u8 as f64;
@@ -313,7 +324,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         i if i.is_empty() => Node::Concat(Vec::new()),
         i => f.push("flate/index", i),
     };
-    let data = f.push_by_kind(0, data, &kinds, "git-pack", OWN_MIN);
+    let data = f.push_by_kind(0, data, &kinds, "git-pack", OWN_MIN.get());
     let a = aqr_flate::formula::apply(profile, data, records, index, flate_len as u64, Derived::Zlib).ok()?;
     // (the streams and what is derived of them apart, so that both are taken in order)
     let [streams, table]: [Node; 2] = f.split(a, vec![streams as u64, derived.len() as u64]).try_into().ok()?;
@@ -385,7 +396,8 @@ fn par_jobs<T: Sync, R: Send>(
 ) -> Vec<R> {
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(size(&items[i])));
-    let threads_of = |i: usize| if size(&items[i]) >= LARGE { threads } else { 1 };
+    let large = LARGE.get();
+    let threads_of = |i: usize| if size(&items[i]) >= large { threads } else { 1 };
     let done = aqr_common::pool::par_map(order.len(), threads, |k| f(&items[order[k]], threads_of(order[k])));
     let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
     for (i, r) in order.into_iter().zip(done) {

@@ -355,14 +355,29 @@ pub fn decode_as(
     }
 }
 
-/// Pixels of the sample [`encode_best`] tries the modes on.
-const SAMPLE: usize = 1 << 20;
+aqr_common::zopt! {
+    /// Pixels of the sample [`encode_best`] tries the modes on.
+    static SAMPLE: Opt<usize> = Opt::size("fits:mode-sample", 1 << 20, "pixels the predict and pyramid modes are tried on");
+    /// The mode of an image, forced; else the one that codes the smaller ([`encode_best`]).
+    static MODE: Opt<&'static str> =
+        Opt::value("fits:mode", "auto", "image mode: auto, predict or pyramid").choices(&["auto", "predict", "pyramid"]);
+}
 
-/// The mode that codes `image` the smaller, tried on its first rows (about `SAMPLE`
+/// The mode that codes `image` the smaller, tried on its first rows (about `fits:mode-sample`
 /// pixels), and the image coded so.
 pub fn encode_best(image: &[u32], s: Shape, known: Option<&[bool]>) -> (Mode, Coded) {
+    let forced = match MODE.get() {
+        "predict" => Some(Mode::Predict),
+        "pyramid" => Some(Mode::Pyramid),
+        _ => None,
+    };
+    if let Some(mode) = forced {
+        let c = encode_as(image, s, known, mode)
+            .unwrap_or_else(|| panic!("-Z fits:mode={}: the image does not take that mode", MODE.get()));
+        return (mode, c);
+    }
     let size = |c: &Coded| c.model.len() + c.raw.len();
-    let rows = (SAMPLE / s.width).max(4) * s.width;
+    let rows = (SAMPLE.get() / s.width).max(4) * s.width;
     if rows < image.len() {
         let sample = &image[..rows];
         let k = known.map(|k| &k[..rows]);

@@ -9,6 +9,7 @@ encode = []
 decode = []
 
 [dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }

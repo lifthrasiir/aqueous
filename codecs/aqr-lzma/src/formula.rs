@@ -26,8 +26,14 @@ fn plan2(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     crate::plan::decode2(u.initial(), u.all_contents::<3>()?)
 }
 
-/// The most data a stream is decoded to (and an `.xz` file's streams, in all).
+/// The most data a stream is decoded to (and an `.xz` file's streams, in all), by default
+/// ([`MAX`]; `aqr-7z` and `aqr-inno` take it as it is).
 pub const LIMIT: usize = 1 << 31;
+
+aqr_common::zopt! {
+    /// The most data a stream is decoded to (and an `.xz` file's streams, in all).
+    pub static MAX: Opt<usize> = Opt::size("lzma:limit", LIMIT, "most data an LZMA stream is decoded to (an .xz file's streams in all)");
+}
 
 /// Whether `d` starts like a `.lzma` file: a header of valid properties, a dictionary size as
 /// encoders write it (2^n or 3 × 2^n bytes, 4 KiB at least), a data size that is unknown or below
@@ -46,7 +52,7 @@ pub fn starts(d: &[u8]) -> bool {
 /// decode: what [`encode`]'s formula holds as data, for telling what it may share with others.
 pub fn data(d: &[u8]) -> Option<Vec<u8>> {
     let h = alone::parse(d)?;
-    crate::lzma::decode(&d[alone::HEADER..], h.props, h.size, LIMIT).ok().map(|dec| dec.data)
+    crate::lzma::decode(&d[alone::HEADER..], h.props, h.size, MAX.get()).ok().map(|dec| dec.data)
 }
 
 /// The formula rebuilding `input`, a `.lzma` file, or None where it is not one or its stream
@@ -57,7 +63,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     }
     let h = alone::parse(input)?;
     let s = &input[alone::HEADER..];
-    let sp = recons::split(s, h.props, h.dict, h.size, LIMIT, threads).ok()?;
+    let sp = recons::split(s, h.props, h.dict, h.size, MAX.get(), threads).ok()?;
     let rest = s.len() - sp.used;
     let mut f = Formula::default();
     f.push("lzma", [&input[..alone::HEADER], &s[sp.used..]].concat());
@@ -94,7 +100,7 @@ pub fn data_xz(d: &[u8]) -> Option<Vec<u8>> {
     let mut data = Vec::new();
     for b in xz::parse(d)?.blocks {
         let Some(fs) = filters(&b) else { continue };
-        let Ok(dec) = lzma2::decode(&d[b.stream], LIMIT - data.len()) else { continue };
+        let Ok(dec) = lzma2::decode(&d[b.stream], MAX.get() - data.len()) else { continue };
         let mut x: Vec<u8> = dec.segments.into_iter().flat_map(|s| s.data).collect();
         fs.iter().rev().for_each(|f| f.decode(&mut x));
         data.extend_from_slice(&x);
@@ -103,7 +109,7 @@ pub fn data_xz(d: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The formula rebuilding `input`, an `.xz` file: its blocks ending with LZMA2 (as far as they
-/// split, of [`LIMIT`] bytes of data in all) by one application of [`LZMA2`], an output each,
+/// split, of [`MAX`] bytes of data in all) by one application of [`LZMA2`], an output each,
 /// the rest of the file as it is. The data of a block of filters (aqr-bcj's) is that before
 /// them, their modules applied to it, where encoding it gives back the filtered data (else the
 /// filtered data). None where it is not one or no block splits.
@@ -114,7 +120,7 @@ pub fn encode_xz(input: &[u8], threads: usize) -> Option<Formula> {
     let splits = aqr_common::pool::par_map(blocks.len(), threads, |i| {
         let b = &blocks[i];
         let fs = filters(b)?;
-        let sp = lzma2::split(&input[b.stream.clone()], b.dict, LIMIT, inner).ok()?;
+        let sp = lzma2::split(&input[b.stream.clone()], b.dict, MAX.get(), inner).ok()?;
         let unfiltered = match fs.is_empty() {
             true => None,
             false => {
@@ -124,6 +130,7 @@ pub fn encode_xz(input: &[u8], threads: usize) -> Option<Formula> {
         };
         Some((sp, unfiltered))
     });
+    let max = MAX.get();
     let (mut container, mut data, mut records, mut lens) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     // the pieces of the file: bytes of the container, or the output of a block; and the data of
     // each block taken: its span in the data, and its filters
@@ -132,7 +139,7 @@ pub fn encode_xz(input: &[u8], threads: usize) -> Option<Formula> {
     let (mut sizes, mut at) = (Vec::new(), 0);
     for (b, sp) in blocks.iter().zip(splits) {
         let Some((sp, unfiltered)) =
-            sp.filter(|sp| data.len() + sp.0.iter().map(|x| x.data.len()).sum::<usize>() <= LIMIT)
+            sp.filter(|sp| data.len() + sp.0.iter().map(|x| x.data.len()).sum::<usize>() <= max)
         else {
             continue;
         };

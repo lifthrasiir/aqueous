@@ -26,9 +26,11 @@ pub struct Cli {
     pub metadata: usize,
 }
 
-/// Runtime functions closer than this are taken in one extent, the padding between them
-/// with them.
-const FUNCTION_GAP: u32 = 64;
+aqr_common::zopt! {
+    /// Runtime functions closer than this are taken in one extent, the padding between them
+    /// with them.
+    static FUNCTION_GAP: Opt<u32> = Opt::value("exe:pe-function-gap", 64, "PE runtime functions closer than this are taken in one extent");
+}
 
 /// Locates the executable sections of the PE image in `f`.
 pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Result<Code> {
@@ -337,12 +339,13 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
         funcs.sort_unstable();
 
         let mut extents: Vec<(u32, u32)> = Vec::new();
+        let gap = FUNCTION_GAP.get();
         for (begin, end) in funcs {
             if end <= begin {
                 return None;
             }
             match extents.last_mut() {
-                Some(last) if begin <= last.1.saturating_add(FUNCTION_GAP) => last.1 = last.1.max(end),
+                Some(last) if begin <= last.1.saturating_add(gap) => last.1 = last.1.max(end),
                 _ => extents.push((begin, end)),
             }
         }

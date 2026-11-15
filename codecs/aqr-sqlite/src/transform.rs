@@ -373,6 +373,12 @@ struct Scratch {
     pred: Vec<u8>,
 }
 
+aqr_common::zopt! {
+    /// Tells each group's statistics on standard error as it is coded (scripts/groups.py joins
+    /// them with `dbstat` names).
+    static DUMP: Opt<bool> = Opt::flag("sqlite:dump", false, "tell each group's statistics on standard error");
+}
+
 /// Codes group `i` (`gr`; `r` if its records are predicted from a table: its number, the
 /// group and the index key): its
 /// directory entry goes to `d`, its streams to `gs` as pieces.
@@ -440,7 +446,7 @@ fn code_group(
             ge.record(e, g.fmt4, cols);
         }
     }
-    if std::env::var_os("SQLR_DUMP").is_some() {
+    if DUMP.get() {
         eprintln!(
             "G {i} first={} table={} recs={} ref={:?} {}",
             gr.first,

@@ -63,11 +63,15 @@ pub fn extent(format: Format, d: &[u8]) -> Option<usize> {
     })
 }
 
-/// Bodies of at least this many bytes are slices of their own, apart from the others of their
-/// kind next to them: so that the same contents elsewhere (the files of a tar archive, archived
-/// along with it) are found by their slices. Those shorter (most members of ar archives, of
-/// object files) cost less as one slice.
-pub const OWN_MIN: usize = 1 << 10;
+aqr_common::zopt_namespace!("bundle", "tar, ar and cpio archives, game engines' packs (aqr-bundle)");
+
+aqr_common::zopt! {
+    /// Bodies of at least this many bytes are slices of their own, apart from the others of their
+    /// kind next to them: so that the same contents elsewhere (the files of a tar archive, archived
+    /// along with it) are found by their slices. Those shorter (most members of ar archives, of
+    /// object files) cost less as one slice.
+    pub static OWN_MIN: Opt<usize> = Opt::size("bundle:own-min", 1 << 10, "bodies at least this long are slices of their own");
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -81,7 +85,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { kind: |_| Kind::Unknown, own: OWN_MIN }
+        Options { kind: |_| Kind::Unknown, own: OWN_MIN.get() }
     }
 }
 

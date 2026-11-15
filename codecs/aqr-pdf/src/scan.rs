@@ -23,8 +23,10 @@ pub struct Stream<'a> {
     pub id: Option<(u32, u16)>,
 }
 
-/// How far back the object header may be from `stream`.
-const MAX_DICT: usize = 1 << 16;
+aqr_common::zopt! {
+    /// How far back the object header may be from `stream`.
+    static MAX_DICT: Opt<usize> = Opt::size("pdf:max-dict", 1 << 16, "bytes back from a stream to look for its object header");
+}
 
 /// Every stream of `buf`, in order, not overlapping.
 pub fn streams(buf: &[u8]) -> Vec<Stream<'_>> {
@@ -84,7 +86,7 @@ pub fn streams(buf: &[u8]) -> Vec<Stream<'_>> {
 /// The dictionary of an object `N G obj << ... >>` that ends (but for white space) at
 /// `kw`, starting at or after `floor`, and the object's number and generation.
 fn dict_before(buf: &[u8], floor: usize, kw: usize) -> Option<(Obj<'_>, Option<(u32, u16)>)> {
-    let lo = floor.max(kw.saturating_sub(MAX_DICT));
+    let lo = floor.max(kw.saturating_sub(MAX_DICT.get()));
     let mut e = kw;
     while e > lo && is_white(buf[e - 1]) {
         e -= 1;

@@ -37,7 +37,7 @@ fn unpack(c: &[u8], threads: usize) -> Option<Vec<u8>> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: aqr-sqlite bench [-n ITERS] [-t THREADS] [-c|-d] [-m] [-v] [-x] FILE...\n       aqr-sqlite fuzz [-n N] [-s SEED] FILE..."
+        "usage: aqr-sqlite bench [-n ITERS] [-t THREADS] [-c|-d] [-m] [-v] [-x] [-Z OPTION] FILE...\n       aqr-sqlite fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }
@@ -63,23 +63,37 @@ fn bench(args: &[String]) {
     let mut iters = 1;
     let mut files = vec![];
     let mut verbose = false;
-    let mut opt = Options::default();
+    let (mut no_verify, mut threads) = (false, None);
     let mut mem = false;
     // Repeat only one side (for profiling): 'c' or 'd'.
     let mut only = ' ';
+    let mut zopts = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "-Z" => zopts.push(it.next().unwrap_or_else(|| usage()).clone()),
             "-n" => iters = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
-            "-x" => opt.verify = false,
+            "-x" => no_verify = true,
             "-m" => mem = true,
-            "-t" => opt.threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-t" => threads = Some(it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
             "-c" => only = 'c',
             "-d" => only = 'd',
             "-v" => verbose = true,
             _ => files.push(a.clone()),
         }
     }
+    match aqr_common::zopt::apply(&zopts) {
+        Ok(aqr_common::zopt::Applied::Set) => {}
+        Ok(aqr_common::zopt::Applied::Help(h)) => return println!("{h}"),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2)
+        }
+    }
+    // (after the options are set: the default reads `sqlite:verify`)
+    let mut opt = Options::default();
+    opt.verify &= !no_verify;
+    opt.threads = threads.unwrap_or(opt.threads);
     let (mut tin, mut tout, mut tc, mut td) = (0f64, 0f64, 0f64, 0f64);
     let mut raw = [0usize; NSTREAMS];
     let mut fails = 0;

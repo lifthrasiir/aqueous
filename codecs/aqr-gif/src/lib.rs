@@ -4,6 +4,9 @@
 
 #[cfg(feature = "encode")]
 pub mod formula;
+
+aqr_common::zopt_namespace!("gif", "GIF images (aqr-gif)");
+
 pub mod gif;
 pub mod lzw;
 pub mod model;

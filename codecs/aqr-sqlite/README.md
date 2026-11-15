@@ -6,7 +6,7 @@ the target is 100 MB/s single-threaded on an Apple M4, both ways.
 
 ```sh
 cargo build --release
-aqr-sqlite bench [-n ITERS] [-t N] [-m] [-v] [-x] [-c|-d] FILE...  # round trip check, archive size, CPU-time throughput (wall time with -t > 1)
+aqr-sqlite bench [-n ITERS] [-t N] [-m] [-v] [-x] [-Z OPTION] [-c|-d] FILE...  # round trip check, archive size, CPU-time throughput (wall time with -t > 1)
 aqr-sqlite fuzz [-n N] [-s SEED] FILE...                           # mutated databases and corrupted streams
 ```
 

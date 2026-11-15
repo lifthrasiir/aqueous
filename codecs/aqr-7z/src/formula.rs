@@ -16,9 +16,13 @@ use aqr_lzma::{lzma, lzma2, recons};
 
 use crate::header::{self, Coder, Folder, Streams, Top};
 
-/// Files' contents of at least this many bytes are slices of their own, apart from the others of
-/// their kind next to them: so that the same contents elsewhere are found by their slices.
-pub const OWN_MIN: usize = 1 << 10;
+aqr_common::zopt_namespace!("7z", "7z archives (aqr-7z)");
+
+aqr_common::zopt! {
+    /// Files' contents of at least this many bytes are slices of their own, apart from the others of
+    /// their kind next to them: so that the same contents elsewhere are found by their slices.
+    pub static OWN_MIN: Opt<usize> = Opt::size("7z:own-min", 1 << 10, "contents at least this long are slices of their own");
+}
 
 /// The id of BCJ2's coder.
 const BCJ2: &[u8] = &[3, 3, 1, 0x1b];
@@ -35,7 +39,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, kind: |_| Kind::Unknown, own: OWN_MIN }
+        Options { threads: 1, kind: |_| Kind::Unknown, own: OWN_MIN.get() }
     }
 }
 

@@ -608,6 +608,12 @@ pub fn schema_indexes(schema: &[&[u8]], enc: u32) -> Vec<(u32, u32)> {
     indexes.iter().filter_map(|&(tbl, ir)| tables.get(tbl).map(|&t| (ir, t))).collect()
 }
 
+aqr_common::zopt! {
+    /// About this many entries spread across an index are matched to its table's columns.
+    static INDEX_SAMPLE: Opt<usize> =
+        Opt::value("sqlite:index-sample", 64, "entries of an index sampled to match its columns");
+}
+
 /// Finds the key of an index from its entries: the table column of every indexed column
 /// (the first whose value matches in every sampled entry's row; `row_of` finds a row by
 /// rowid), and the order of each (from adjacent entries, which are mostly in index order).
@@ -624,7 +630,7 @@ pub fn discover_key(
     let mut hits: Vec<Vec<u32>> = Vec::new();
     let mut rowid_hits: Vec<u32> = Vec::new();
     let mut seen = 0u32;
-    let step = (entries.len() / 64).max(1);
+    let step = (entries.len() / INDEX_SAMPLE.get().max(1)).max(1);
     for e in entries.iter().step_by(step) {
         if !parse(e, &mut ec) || ec.is_empty() {
             continue;

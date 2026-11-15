@@ -255,8 +255,14 @@ pub fn plan(initial: u64, params: &[u8]) -> Option<u64> {
 }
 
 /// Frames made at once, ahead of where they are put, on threads: natively; in WebAssembly one
-/// at a time (as the plan has it).
+/// at a time (as the plan has it). Natively [`AHEAD_MADE`] sets it (in WebAssembly the path is
+/// not taken, and the module's code stays as it is).
 pub const AHEAD: usize = 2048;
+
+aqr_common::zopt! {
+    /// Frames made at once ahead, natively (default [`AHEAD`]).
+    pub static AHEAD_MADE: Opt<usize> = Opt::value("zst:ahead", AHEAD, "frames made ahead at once on threads, natively");
+}
 
 /// The frames made ahead of the layout, of the lengths and the contents, in order.
 struct Ahead<'a, 'b, 'c> {
@@ -297,7 +303,11 @@ impl Ahead<'_, '_, '_> {
         }
         if self.made.is_empty() {
             let mut batch = Vec::new();
-            while batch.len() < AHEAD && !self.lengths.done() {
+            #[cfg(not(target_family = "wasm"))]
+            let ahead = AHEAD_MADE.get();
+            #[cfg(target_family = "wasm")]
+            let ahead = AHEAD;
+            while batch.len() < ahead && !self.lengths.done() {
                 let n = self.lengths.num()?;
                 if n > self.p.content {
                     return Err(Error);

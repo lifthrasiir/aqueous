@@ -401,8 +401,10 @@ pub fn write(stream: &Stream, data: &[u8]) -> Result<Vec<u8>> {
     write_threads(stream, data, 1)
 }
 
-/// Long streams are written in parallel chunks of at least this many bytes of data.
-const MIN_CHUNK: usize = 1 << 20;
+aqr_common::zopt! {
+    /// Long streams are written in parallel chunks of at least this many bytes of data.
+    static MIN_CHUNK: Opt<usize> = Opt::size("flate:write-chunk", 1 << 20, "least bytes of data of a chunk written in parallel");
+}
 
 /// Like [`write()`], on up to `threads` threads: the blocks are split in chunks that are
 /// written separately and joined bit by bit. Chunks with stored blocks, whose padding
@@ -422,7 +424,7 @@ pub fn write_threads(stream: &Stream, data: &[u8], threads: usize) -> Result<Vec
     }
     starts.push(pos);
     // Chunks of about equal data, at block boundaries.
-    let nchunks = threads.min(pos / MIN_CHUNK).max(1);
+    let nchunks = threads.min(pos / MIN_CHUNK.get()).max(1);
     let mut cuts = vec![0];
     for i in 1..nchunks {
         let b = starts.partition_point(|&p| p < pos * i / nchunks);

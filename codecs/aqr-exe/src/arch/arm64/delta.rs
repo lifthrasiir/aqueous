@@ -125,11 +125,16 @@ mod encode {
     const WORD: usize = 4;
     /// Words hashed for a match.
     const SEED: usize = 4;
-    /// Exact matches shorter than this (in words) are not taken as anchors.
-    const MIN_MATCH: usize = 6;
-    /// Copies of one offset at most this many words apart are one, the words between them
-    /// differences.
-    const MERGE_GAP: usize = 16;
+
+    aqr_common::zopt_namespace!("arm64", "ARM64 code of executable files (aqr-exe)");
+
+    aqr_common::zopt! {
+        /// Exact matches shorter than this (in words) are not taken as anchors.
+        static MIN_MATCH: Opt<usize> = Opt::value("arm64:delta-min-match", 6, "exact matches shorter than this many words are not anchors");
+        /// Copies of one offset at most this many words apart are one, the words between them
+        /// differences.
+        static MERGE_GAP: Opt<usize> = Opt::value("arm64:delta-merge-gap", 16, "copies of one offset this many words apart or less are merged");
+    }
     /// Positions in each bucket of the index.
     const WAYS: usize = 4;
 
@@ -198,6 +203,7 @@ mod encode {
     fn anchors(a: &[u8], b: &[u8], idx: &Index) -> Vec<Copy> {
         let (na, nb) = (a.len() / WORD, b.len() / WORD);
         let mut out: Vec<Copy> = Vec::new();
+        let min_match = MIN_MATCH.get();
         let (mut i, mut last) = (0, None::<i64>);
         let mut cands = Vec::with_capacity(WAYS + 1);
         while i + SEED <= nb {
@@ -229,7 +235,7 @@ mod encode {
                     best = (f + k, off, k);
                 }
             }
-            if best.0 >= MIN_MATCH {
+            if best.0 >= min_match {
                 let start = i - best.2;
                 out.push(Copy { b: start, len: best.0, off: best.1 });
                 last = Some(best.1);
@@ -252,6 +258,7 @@ mod encode {
             j >= 0 && (j as usize) < na && w(a, j as usize) == w(b, p)
         };
         let mut out: Vec<Copy> = Vec::with_capacity(anchors.len());
+        let merge_gap = MERGE_GAP.get();
         for (k, c) in anchors.iter().enumerate() {
             let (mut s, mut e) = (c.b, c.b + c.len);
             let lo = out.last().map_or(0, |p| p.b + p.len);
@@ -273,7 +280,7 @@ mod encode {
             }
             e += len;
             match out.last_mut() {
-                Some(p) if p.off == c.off && s - (p.b + p.len) <= MERGE_GAP => p.len = e - p.b,
+                Some(p) if p.off == c.off && s - (p.b + p.len) <= merge_gap => p.len = e - p.b,
                 _ => out.push(Copy { b: s, len: e - s, off: c.off }),
             }
         }

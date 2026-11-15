@@ -96,14 +96,15 @@ fn frames_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     crate::frames::plan(u.initial(), u.params)
 }
 
-/// Frames checked at once, about: their bytes (their contents some 10 times that at most).
-const BATCH: usize = 16 << 20;
-
-/// Bytes of the frames open at once at most (of the module's pool, which the first fit of its
-/// blocks makes larger), and of the pool: so that the module's plan stays well within the bound
-/// of an application (256 MiB compressing).
-const OPEN_BYTES: u64 = 96 << 20;
-const POOL_BYTES: u64 = 160 << 20;
+aqr_common::zopt! {
+    /// Frames checked at once, about: their bytes (their contents some 10 times that at most).
+    static BATCH: Opt<usize> = Opt::size("zst:batch", 16 << 20, "bytes of frames checked at once, about");
+    /// Bytes of the frames open at once at most (of the module's pool, which the first fit of its
+    /// blocks makes larger), and of the pool: so that the module's plan stays well within the bound
+    /// of an application (256 MiB compressing).
+    static OPEN_BYTES: Opt<usize> = Opt::size("zst:open-bytes", 96 << 20, "bytes of frames open at once at most");
+    static POOL_BYTES: Opt<usize> = Opt::size("zst:pool-bytes", 160 << 20, "bytes of the module's pool at most");
+}
 
 /// The frames of `order` (by their first pieces) to be left out so that those open at once (from
 /// their first piece to their last) are of `budget` bytes at most: where more would be, the one
@@ -222,12 +223,12 @@ fn frames_core(
         order.retain(|i| !bad.contains(i));
     }
     // (of a pool of POOL_BYTES at most: the frames open at once fewer until it is)
-    let mut budget = OPEN_BYTES;
+    let mut budget = OPEN_BYTES.get() as u64;
     loop {
         let left = over_budget(frames, &order, budget);
         let mut sim = crate::frames::Frames::new(&Params { level: level as u8, content: 0, pool: u64::MAX, open: 0 });
         let kept: Vec<usize> = order.iter().copied().filter(|i| !left.contains(i)).collect();
-        if pool_of(frames, &kept, &mut sim) <= POOL_BYTES || budget < 1 << 20 {
+        if pool_of(frames, &kept, &mut sim) <= POOL_BYTES.get() as u64 || budget < 1 << 20 {
             order = kept;
             break;
         }
@@ -239,10 +240,11 @@ fn frames_core(
     let mut taken = vec![None::<u64>; frames.len()];
     let mut max_content = 0u64;
     let mut at = 0;
+    let batch_bytes = BATCH.get();
     while at < order.len() {
         let mut end = at;
         let mut bytes = 0;
-        while end < order.len() && bytes < BATCH {
+        while end < order.len() && bytes < batch_bytes {
             bytes += frames[order[end]].iter().map(|r| r.len()).sum::<usize>();
             end += 1;
         }

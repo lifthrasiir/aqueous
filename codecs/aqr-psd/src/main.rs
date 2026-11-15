@@ -5,7 +5,7 @@ use aqr_psd::formula::{self, MODULE};
 use std::time::Instant;
 
 fn usage() -> ! {
-    eprintln!("usage: aqr-psd bench [-n ITERS] [-t THREADS] [-v] [-c|-d] FILE...\n(-t defaults to 1)");
+    eprintln!("usage: aqr-psd bench [-n ITERS] [-t THREADS] [-v] [-c|-d] [-Z OPTION]... FILE...\n(-t defaults to 1)");
     std::process::exit(2);
 }
 
@@ -29,9 +29,11 @@ fn bench(args: &[String]) {
     // Repeat only one side (for profiling): 'c' or 'd'.
     let mut only = ' ';
     let mut threads = 1;
+    let mut zopts = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "-Z" => zopts.push(it.next().unwrap_or_else(|| usage()).clone()),
             "-n" => iters = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-t" => threads = threads_arg(&mut it),
             "-v" => verbose = true,
@@ -39,6 +41,10 @@ fn bench(args: &[String]) {
             "-d" => only = 'd',
             _ => files.push(a.clone()),
         }
+    }
+    if let Err(e) = aqr_common::zopt::apply(&zopts) {
+        eprintln!("{e}");
+        std::process::exit(2);
     }
     let (mut tin, mut tout, mut tc, mut td) = (0f64, 0f64, 0f64, 0f64);
     let mut skipped = 0;
@@ -92,7 +98,7 @@ fn bench(args: &[String]) {
             );
         }
     }
-    if std::env::var_os("PSDR_STATS").is_some() {
+    if aqr_psd::codec::STATS.get() {
         let t = aqr_psd::codec::DEC_TIMES.get();
         let k = iters as f64;
         eprintln!(

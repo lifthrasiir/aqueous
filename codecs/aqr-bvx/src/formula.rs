@@ -10,8 +10,11 @@ pub use crate::module::decode;
 
 pub const MODULE: Module = Module::new("bvx-recons", 2).with_plan(memory).with_contents(&[0]);
 
-/// Bytes of data of a stream taken, at most (a stream of zeros grows a thousandfold).
-pub const MAX_DATA: u64 = 1 << 30;
+aqr_common::zopt! {
+    /// Bytes of data of a stream taken, at most (a stream of zeros grows a thousandfold).
+    pub static MAX_DATA: Opt<usize> =
+        Opt::size("bvx:max-data", 1 << 30, "most bytes of data an LZFSE or LZVN stream is decoded to");
+}
 
 /// The memory of the module: its initial memory, and its plan ([`crate::module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -33,7 +36,7 @@ pub fn extent(d: &[u8]) -> Option<usize> {
 /// The formula rebuilding `input`, a stream of bvx blocks and what follows it, or None where
 /// it is not one, holds no data or does not split. What follows the stream is sliced as it is.
 pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
-    let (_, n) = bvx::extent(input).filter(|e| (1..=MAX_DATA).contains(&e.1))?;
+    let (_, n) = bvx::extent(input).filter(|e| (1..=MAX_DATA.get() as u64).contains(&e.1))?;
     let sp = recons::split(input, n as usize).ok()?;
     let mut f = Formula::default();
     f.push("bvx", input[sp.used..].to_vec());

@@ -7,13 +7,17 @@ use std::ops::Range;
 
 use crate::Compressed;
 
-/// Bytes of data of a stream of chunks at most, of LZX (as aqr-wim's) and of XPRESS: a file of more
-/// is several, so that the memory of a split, and of an application (the modules hold their data
-/// whole), is bounded however large the file. (XPRESS's split takes about 6 bytes a byte of data:
-/// streams of 32 MiB on 10 threads took the heap past 2 GB; its chunks are compressed apart, so
-/// shorter streams cost little.)
-pub const STREAM_DATA: usize = 32 << 20;
-pub const XPRESS_STREAM_DATA: usize = 8 << 20;
+aqr_common::zopt_namespace!("disk", "disk images and their file systems (aqr-disk)");
+
+aqr_common::zopt! {
+    /// Bytes of data of a stream of chunks at most, of LZX (as aqr-wim's) and of XPRESS: a file of more
+    /// is several, so that the memory of a split, and of an application (the modules hold their data
+    /// whole), is bounded however large the file. (XPRESS's split takes about 6 bytes a byte of data:
+    /// streams of 32 MiB on 10 threads took the heap past 2 GB; its chunks are compressed apart, so
+    /// shorter streams cost little.)
+    pub static STREAM_DATA: Opt<usize> = Opt::size("disk:stream-data", 32 << 20, "bytes of data of a stream of LZX chunks at most");
+    pub static XPRESS_STREAM_DATA: Opt<usize> = Opt::size("disk:xpress-stream-data", 8 << 20, "bytes of data of a stream of XPRESS chunks at most");
+}
 
 /// A file taken apart: its data, its streams of chunks, and its chunk table (the bytes before
 /// the chunks, as they are; none of LZNT1's); the recompressor of its chunks.
@@ -111,7 +115,7 @@ pub fn unpack(s: &[u8], how: &Compressed) -> Option<Unpacked> {
     };
     let mut data = vec![0; aqr_lzx::recons::data_len(&chunks)];
     let (mut streams, mut at) = (Vec::new(), 0);
-    let most = if by == By::Lzx { STREAM_DATA } else { XPRESS_STREAM_DATA };
+    let most = if by == By::Lzx { STREAM_DATA.get() } else { XPRESS_STREAM_DATA.get() };
     for c in chunks.chunks((most / chunk).max(1)) {
         let n = aqr_lzx::recons::data_len(c);
         let out = &mut data[at..at + n];

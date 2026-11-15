@@ -53,17 +53,20 @@ Auxiliary binaries:
 - `aqr-jpeg-huffbench`: Huffman decoding throughput, and a coefficient comparison against a
   `tools/coefdump.c` (libjpeg) dump.
 
-### Debug / test environment variables
+### Debug / test options
 
-| Variable | Effect |
+Switches of `aqr -Z` (`-Z jpeg:verify-striped`, `-Z jpeg:no-verify-striped`; `-Z jpeg:help` lists them
+and the tunable bounds). Tests set them with `aqr_common::zopt::apply` (once per process).
+
+| Option | Effect |
 |---|---|
-| `JRC_VERIFY_PROGRESSIVE` | Re-encodes every progressive scan and checks the inline verdict; panics if a scan judged reproducible re-encodes differently |
-| `JRC_VERIFY_PARALLEL` | Checks parallel Huffman decoding (coefficients and verdicts) against serial decoding; panics on any difference |
-| `JRC_VERIFY_STRIPED` | Checks stripe-wise decoding and modelling (scan info, model) and re-emission (scan bytes) against holding the coefficients whole; panics on any difference |
-| `JRC_DEBUG_CANON` | Prints why a progressive scan was judged non-canonical |
-| `JRC_DEBUG_SPEC` | Prints speculative-decoding phase times and fallback reasons |
-| `JRC_DEBUG_STRIPED` | Prints how a scan was decoded stripe by stripe (serially, by restart intervals, from located starts) and the outcome |
-| `JRC_DEBUG_TABLES` | Prints the size breakdown of the serialised model tables |
+| `jpeg:verify-progressive` | Re-encodes every progressive scan and checks the inline verdict; panics if a scan judged reproducible re-encodes differently |
+| `jpeg:verify-parallel` | Checks parallel Huffman decoding (coefficients and verdicts) against serial decoding; panics on any difference |
+| `jpeg:verify-striped` | Checks stripe-wise decoding and modelling (scan info, model) and re-emission (scan bytes) against holding the coefficients whole; panics on any difference |
+| `jpeg:debug-canon` | Prints why a progressive scan was judged non-canonical |
+| `jpeg:debug-spec` | Prints speculative-decoding phase times and fallback reasons |
+| `jpeg:debug-striped` | Prints how a scan was decoded stripe by stripe (serially, by restart intervals, from located starts) and the outcome |
+| `jpeg:debug-tables` | Prints the size breakdown of the serialised model tables |
 
 `formula::encode` catches panics and leaves the input uncoded, so an oracle failure shows up
 as a file that is not coded.
@@ -250,7 +253,7 @@ The format is specified in [FORMAT.md](FORMAT.md).
   and must not panic.
 - `aqr-jpeg mutenc`: variants that re-encode the same coefficients with valid non-canonical choices
   (ZRL placement, padding, fill, trailing RSTs, EOBRUN splits, ...) must roundtrip exactly.
-- With both oracles (`JRC_VERIFY_PROGRESSIVE`, `JRC_VERIFY_PARALLEL`) enabled: 6000 fuzz
+- With both oracles (`jpeg:verify-progressive`, `jpeg:verify-parallel`) enabled: 6000 fuzz
   inputs, 600 mutenc rounds and a 208 MB corpus, all passing.
 - `cargo rt -p aqr-jpeg`: `tests/regress.rs`, currently one progressive scan-script violation
   found by fuzzing.

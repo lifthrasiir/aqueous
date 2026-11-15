@@ -6,6 +6,8 @@
 //! LevelDB tables (`leveldb`), whose blocks Snappy compresses, are rebuilt whole: the contents
 //! of their blocks are stored, and the trailers and the footer derived.
 
+aqr_common::zopt_namespace!("snappy", "Snappy streams and LevelDB tables (aqr-snappy)");
+
 pub mod crc32c;
 #[cfg(feature = "encode")]
 pub mod formula;

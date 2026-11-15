@@ -6,8 +6,6 @@ description = "Audiokinetic Wwise's Vorbis media (.wem): their stripped setup he
 publish = false
 
 [dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula" }
 aqr-vorbis = { path = "../aqr-vorbis" }
-
-[dev-dependencies]
-aqr-common = { path = "../../crates/aqr-common" }
