@@ -86,14 +86,26 @@ impl<T: Value> Opt<T> {
         self
     }
 
-    /// The value set, else the default.
+    /// The value given on this thread ([`Opt::set_here`]), else the value set, else the default.
     #[inline]
     pub fn get(&self) -> T {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(v) = here::get(self as *const Self as usize, "") {
+            return v;
+        }
         #[cfg(not(target_family = "wasm"))]
         if let Some(v) = self.set.get() {
             return *v;
         }
         self.default()
+    }
+
+    /// Gives `v` as the option's value on this thread until the guard returned is dropped (then
+    /// the one before again), whatever `-Z` set: for tests, which share a process and its
+    /// options. Other threads (the pool's workers) see the option as it is.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn set_here(&'static self, v: T) -> Here {
+        Here::new(self as *const Self as usize, "", Box::new(v))
     }
 
     /// The default.
@@ -298,8 +310,12 @@ impl<T: Value> Family<T> {
         self
     }
 
-    /// The value set of `member`, if any.
+    /// The value of `member` given on this thread ([`Family::set_here`]), else set, if any.
     pub fn get(&self, member: &str) -> Option<T> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(v) = here::get(self as *const Self as usize, member) {
+            return Some(v);
+        }
         #[cfg(not(target_family = "wasm"))]
         return self.set.read().unwrap().iter().find(|m| m.0 == member).map(|m| m.1);
         #[cfg(target_family = "wasm")]
@@ -307,6 +323,78 @@ impl<T: Value> Family<T> {
             let _ = member;
             None
         }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl<T: Value> Family<T> {
+    /// [`Opt::set_here`] of `member`.
+    pub fn set_here(&'static self, member: &str, v: T) -> Here {
+        Here::new(self as *const Self as usize, member, Box::new(v))
+    }
+}
+
+/// Values given on a thread ([`Opt::set_here`]), by the option (where it is) and the member of a
+/// family (empty for an option).
+#[cfg(not(target_family = "wasm"))]
+mod here {
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Whether any value was ever given on a thread: else [`get`] looks no further, so that
+    /// reading an option costs as before outside tests.
+    pub(super) static ANY: AtomicBool = AtomicBool::new(false);
+
+    type Key = (usize, String);
+
+    thread_local! {
+        pub(super) static VALUES: RefCell<HashMap<Key, Box<dyn Any>>> = RefCell::new(HashMap::new());
+    }
+
+    #[inline]
+    pub(super) fn get<T: Copy + 'static>(at: usize, member: &str) -> Option<T> {
+        if !ANY.load(Ordering::Relaxed) {
+            return None;
+        }
+        VALUES.with(|v| v.borrow().get(&(at, member.to_owned())).and_then(|b| b.downcast_ref::<T>()).copied())
+    }
+
+    pub(super) fn put(key: Key, v: Option<Box<dyn Any>>) -> Option<Box<dyn Any>> {
+        ANY.store(true, Ordering::Relaxed);
+        VALUES.with(|m| {
+            let mut m = m.borrow_mut();
+            match v {
+                Some(v) => m.insert(key, v),
+                None => m.remove(&key),
+            }
+        })
+    }
+}
+
+/// A value given to an option on this thread ([`Opt::set_here`], [`Family::set_here`]): the one
+/// before again once dropped. Of the thread it was made on (not `Send`).
+#[cfg(not(target_family = "wasm"))]
+#[must_use = "the value is given only until the guard is dropped"]
+pub struct Here {
+    key: (usize, String),
+    before: Option<Box<dyn std::any::Any>>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Here {
+    fn new(at: usize, member: &str, v: Box<dyn std::any::Any>) -> Here {
+        let key = (at, member.to_owned());
+        let before = here::put(key.clone(), Some(v));
+        Here { key, before }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Drop for Here {
+    fn drop(&mut self) {
+        here::put(std::mem::take(&mut self.key), self.before.take());
     }
 }
 
@@ -798,6 +886,30 @@ mod tests {
         static ON: Family<bool> = Family::flags("zopt-test-on:FORMAT", || vec!["tar", "zst"], "on", "formats taken");
     }
     crate::zopt_namespace!("zopt-test", "options of the tests of zopt");
+
+    /// A value given on a thread is its value there until dropped, over what was set, the one
+    /// before again after it; other threads see the option as it is.
+    #[test]
+    fn set_here() {
+        crate::zopt! {
+            static HERE: Opt<usize> = Opt::value("zopt-test:here", 3, "given on a thread");
+            static HERE_ON: Family<bool> = Family::flags("zopt-test-here:FORMAT", || vec!["tar"], "on", "formats taken");
+        }
+        assert_eq!(HERE.get(), 3);
+        {
+            let _a = HERE.set_here(5);
+            assert_eq!(HERE.get(), 5);
+            {
+                let _b = HERE.set_here(7);
+                assert_eq!(HERE.get(), 7);
+                assert_eq!(std::thread::spawn(|| HERE.get()).join().unwrap(), 3);
+            }
+            assert_eq!(HERE.get(), 5);
+            let _t = HERE_ON.set_here("tar", false);
+            assert_eq!((HERE_ON.get("tar"), HERE_ON.get("zst")), (Some(false), None));
+        }
+        assert_eq!((HERE.get(), HERE_ON.get("tar")), (3, None));
+    }
 
     #[test]
     fn options() {

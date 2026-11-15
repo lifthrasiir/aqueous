@@ -189,6 +189,12 @@ mod tests {
         let other = f.push("x", y);
         let longer = f.push("y", noise(5).repeat(2));
         f.root = Node::Concat(vec![either(k1, m1, 200_000), either(k2, Node::concat([m2, longer]), 200_000), other]);
+        // (all kept where told so: as before alternatives were chosen)
+        {
+            let _kept = CHOOSE.set_here("kept");
+            let mut g = f.clone();
+            assert_eq!(choose(&mut g, &Encoder::new(Level::MID)).made, 0);
+        }
         let chosen = choose(&mut f, &Encoder::new(Level::MID));
         assert_eq!((chosen.alternatives, chosen.made), (2, 1));
         assert!(f.eithers().is_empty());
