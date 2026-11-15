@@ -5,16 +5,20 @@
 
 use std::collections::HashMap;
 
-/// Of a rolling hash of the 64 bytes up to each position, the top bits that are zero where the
-/// position is an anchor: one in 4 KiB of bytes unlike each other.
-const ANCHOR_BITS: u32 = 12;
+aqr_common::zopt_namespace!("pieces", "pieces of long streams paired by their anchors (aqr-formula)");
 
-/// Anchors in more pieces than this, of runs and padding, are not counted.
-const COMMON: usize = 16;
+aqr_common::zopt! {
+    /// Of a rolling hash of the 64 bytes up to each position, the top bits that are zero where the
+    /// position is an anchor: one in 4 KiB of bytes unlike each other.
+    static ANCHOR_BITS: Opt<u32> = Opt::value("pieces:anchor-bits", 12, "anchors are 1 in 2^N positions");
 
-/// Of the anchors of the larger of two pieces, the least share, as one in this many, that the
-/// other has too for them to be paired.
-const SHARE: u64 = 10;
+    /// Anchors in more pieces than this, of runs and padding, are not counted.
+    static COMMON: Opt<usize> = Opt::value("pieces:common", 16, "anchors in more pieces than this are ignored");
+
+    /// Of the anchors of the larger of two pieces, the least share, as one in this many, that the
+    /// other has too for them to be paired.
+    static SHARE: Opt<u64> = Opt::value("pieces:share", 10, "two pieces pair if they share 1/N of the larger one's anchors");
+}
 
 /// The table of the gear hash: a value for each byte (SplitMix64).
 const GEAR: [u64; 256] = {
@@ -32,11 +36,12 @@ const GEAR: [u64; 256] = {
 
 /// The hashes of the anchors of `data`, sorted, each once.
 fn anchors(data: &[u8]) -> Vec<u64> {
+    let bits = ANCHOR_BITS.get();
     let mut h = 0u64;
-    let mut out = Vec::with_capacity(data.len() >> ANCHOR_BITS);
+    let mut out = Vec::with_capacity(data.len() >> bits);
     for &b in data {
         h = (h << 1).wrapping_add(GEAR[b as usize]);
-        if h >> (64 - ANCHOR_BITS) == 0 {
+        if h >> (64 - bits) == 0 {
             out.push(h);
         }
     }
@@ -50,13 +55,14 @@ fn anchors(data: &[u8]) -> Vec<u64> {
 /// pieces with the largest share of anchors in common first. The same for the same pieces.
 pub(crate) fn group(pieces: &[(usize, &[u8])], most: usize) -> Vec<usize> {
     let n = pieces.len();
+    let (common_most, share) = (COMMON.get(), SHARE.get());
     let anchors = aqr_common::pool::par_map(n, aqr_common::pool::size(), |i| anchors(pieces[i].1));
     let mut of: HashMap<u64, Vec<u32>> = HashMap::new();
     for (i, a) in anchors.iter().enumerate() {
         a.iter().for_each(|&h| of.entry(h).or_default().push(i as u32));
     }
     let mut common: HashMap<(u32, u32), u64> = HashMap::new();
-    for ps in of.values().filter(|ps| ps.len() <= COMMON) {
+    for ps in of.values().filter(|ps| ps.len() <= common_most) {
         for (k, &x) in ps.iter().enumerate() {
             for &y in &ps[k + 1..] {
                 if pieces[x as usize].0 != pieces[y as usize].0 {
@@ -70,7 +76,7 @@ pub(crate) fn group(pieces: &[(usize, &[u8])], most: usize) -> Vec<usize> {
         .into_iter()
         .filter_map(|((x, y), c)| {
             let larger = anchors[x as usize].len().max(anchors[y as usize].len()) as u64;
-            (c * SHARE >= larger).then(|| ((c << 16) / larger, x, y))
+            (c * share >= larger).then(|| ((c << 16) / larger, x, y))
         })
         .collect();
     pairs.sort_unstable_by(|a, b| b.0.cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));

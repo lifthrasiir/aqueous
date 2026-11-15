@@ -516,7 +516,8 @@ mod native {
 
         fn set_text(&self) -> Option<String> {
             let set = self.set.read().unwrap();
-            (!set.is_empty()).then(|| set.iter().map(|(m, v)| format!("{m}={}", v.show())).collect::<Vec<_>>().join(","))
+            (!set.is_empty())
+                .then(|| set.iter().map(|(m, v)| format!("{m}={}", v.show())).collect::<Vec<_>>().join(","))
         }
 
         fn member(&self, name: &str) -> Option<&'static str> {
@@ -718,8 +719,10 @@ mod native {
             .collect();
         let mut s = String::new();
         match ns {
-            "" => s += "Developer options, not stable across versions: -Z NAME=VALUE (-ZNAME=VALUE),\n\
-                        -Z NAME and -Z no-NAME of a switch (NS:no-NAME in a namespace).\n",
+            "" => {
+                s += "Developer options, not stable across versions: -Z NAME=VALUE (-ZNAME=VALUE),\n\
+                        -Z NAME and -Z no-NAME of a switch (NS:no-NAME in a namespace).\n"
+            }
             _ => {
                 let what = spaces.iter().find(|n| n.0 == ns).map_or("", |n| n.1);
                 s += &format!("Developer options of {ns}:{}{what}\n", if what.is_empty() { "" } else { " " });

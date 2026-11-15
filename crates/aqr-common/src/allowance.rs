@@ -6,7 +6,7 @@
 //! does [`crate::meter`]'s). Blocks of at least [`crate::mem::LARGE_MIN`] bytes are told back to
 //! the allowance that allocated them as they are freed, on whatever thread and however late;
 //! smaller ones are counted to the allowance of the thread allocating or freeing them, a
-//! thread's own share gathered until it is [`FLUSH`] bytes either way (or the thread moves to
+//! thread's own share gathered until it is `allowance:flush` bytes either way (or the thread moves to
 //! another allowance), so that they do not all take one counter.
 //!
 //! The allocator only counts: it must not unwind. An attempt over its allowance gives up at the
@@ -35,8 +35,16 @@ use crate::mem::LARGE_MIN;
 
 pub use crate::plain::Exceeded;
 
-/// Bytes of small blocks a thread gathers of its own before it counts them to its allowance.
-const FLUSH: i64 = 256 << 10;
+crate::zopt_namespace!("allowance", "the heap a recompression may take (aqr-common)");
+
+crate::zopt! {
+    /// Bytes of small blocks a thread gathers of its own before it counts them to its allowance.
+    static FLUSH: Opt<usize> = Opt::size("allowance:flush", 256 << 10, "bytes of small blocks a thread gathers before counting them");
+
+    /// Whether an attempt gives up where the large blocks of the process pass its limit and it
+    /// holds more than its share of it (the limit over the attempts running).
+    static FAIR_SHARE: Opt<bool> = Opt::flag("allowance:fair-share", true, "attempts holding more than limit/running give up while the heap is over the limit");
+}
 
 /// The heap held by an attempt and its limit.
 struct Allowance {
@@ -66,7 +74,7 @@ impl Allowance {
             return true;
         }
         let running = RUNNING.load(Relaxed).max(1) as u64;
-        running > 1 && crate::mem::large_in_use() > self.limit && used > self.limit / running
+        FAIR_SHARE.get() && running > 1 && crate::mem::large_in_use() > self.limit && used > self.limit / running
     }
 }
 
@@ -246,7 +254,7 @@ fn small(n: i64) {
         }
         let v = l.pending.get() + n;
         l.pending.set(v);
-        if v.unsigned_abs() >= FLUSH as u64 {
+        if v.unsigned_abs() >= FLUSH.get() as u64 {
             l.flush();
         }
     });

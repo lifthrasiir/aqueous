@@ -84,6 +84,25 @@ pub fn log_large(min: Option<usize>) {
     LOG_MIN.store(min.unwrap_or(0), Relaxed);
 }
 
+crate::zopt_namespace!("mem", "the allocators and heap accounting (aqr-common)");
+
+crate::zopt! {
+    /// Allocations of at least this many bytes are logged with a backtrace ([`log_large`]);
+    /// `-Z mem:log` alone logs those of 1 MiB. Set by [`log_from_option`], which the binary calls
+    /// after the options are applied.
+    #[cfg(not(target_family = "wasm"))]
+    pub static LOG: Opt<Option<usize>> =
+        Opt::size_or_off("mem:log", None, "log allocations of at least this size with a backtrace (slow)").bare(Some(1 << 20));
+}
+
+/// Starts [`log_large`] at the size of the option `mem:log`, if it is set.
+#[cfg(not(target_family = "wasm"))]
+pub fn log_from_option() {
+    if LOG.is_set() {
+        log_large(LOG.get());
+    }
+}
+
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(l) };

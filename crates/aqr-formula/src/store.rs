@@ -9,21 +9,31 @@ use std::sync::{Arc, RwLock};
 
 use crate::Bytes;
 
-/// Bytes a buffer is of at least to be taken from the store; smaller ones stay on the heap.
+/// The default of `store:min`.
 pub const MIN: usize = 4 << 10;
 
-/// Bytes a [`Writer`] of a length not told gathers on the heap before it takes a region of the
-/// store: one finished within them is moved to the store as a region of its length, of the files
-/// shared by all. (Most such streams are short: an archive's entries of a kind,
-/// [`crate::ByKind`].)
+/// The default of `store:untold`.
 pub const UNTOLD: usize = 8 << 20;
 
-/// How much larger a region a [`Writer`] of a length not told takes when the one it has is full:
-/// this many times the bytes it has, copied there, so that the bytes copied are a third of the
-/// stream's at most and its region this many times its length at most. (A region of all a stream
-/// might grow to made a file of 64 GiB each; on Windows a mapping takes commit by its length,
-/// and some hundreds of them ran it out.)
-pub const GROW: usize = 4;
+aqr_common::zopt_namespace!("store", "regions of the spill store for large buffers (aqr-formula)");
+
+aqr_common::zopt! {
+    /// Bytes a buffer is of at least to be taken from the store; smaller ones stay on the heap.
+    static MIN_BYTES: Opt<usize> = Opt::size("store:min", MIN, "buffers of at least this are taken from the store");
+
+    /// Bytes a [`Writer`] of a length not told gathers on the heap before it takes a region of the
+    /// store: one finished within them is moved to the store as a region of its length, of the files
+    /// shared by all. (Most such streams are short: an archive's entries of a kind,
+    /// [`crate::ByKind`].)
+    static UNTOLD_BYTES: Opt<usize> = Opt::size("store:untold", UNTOLD, "bytes a stream of unknown length gathers on the heap before a region");
+
+    /// How much larger a region a [`Writer`] of a length not told takes when the one it has is full:
+    /// this many times the bytes it has, copied there, so that the bytes copied are a third of the
+    /// stream's at most and its region this many times its length at most. (A region of all a stream
+    /// might grow to made a file of 64 GiB each; on Windows a mapping takes commit by its length,
+    /// and some hundreds of them ran it out.)
+    static GROW: Opt<usize> = Opt::value("store:grow", 4, "times its bytes a region grows to when full");
+}
 
 /// Regions of bytes outside the heap.
 pub trait Store: Send + Sync {
@@ -104,8 +114,8 @@ impl DerefMut for Buffer {
 }
 
 /// Bytes of a stream made in order: written to the store as they come where one is set (and
-/// they are not told to be few; of a length not told, past [`UNTOLD`] bytes, in regions growing
-/// by [`GROW`]), else gathered on the heap. A stream of a formula is pushed of it as it is
+/// they are not told to be few; of a length not told, past `store:untold` bytes, in regions growing
+/// by `store:grow`), else gathered on the heap. A stream of a formula is pushed of it as it is
 /// (`Formula::push(class, writer)`), so that a recompressor making a long stream holds none of
 /// it.
 pub struct Writer {
@@ -120,10 +130,10 @@ enum WriterRepr {
     Stored(Box<dyn StoreWriter>, usize),
 }
 
-/// A region of the store of `GROW` times `need` bytes (and of [`UNTOLD`] at least), `d` written
+/// A region of the store of `store:grow` times `need` bytes (and of `store:untold` at least), `d` written
 /// to it first.
 fn grown(d: &[u8], need: usize) -> Option<WriterRepr> {
-    let cap = need.max(UNTOLD).checked_mul(GROW)?;
+    let cap = need.max(UNTOLD_BYTES.get()).checked_mul(GROW.get())?;
     let mut w = store()?.writer(cap)?;
     w.write(d).then_some(WriterRepr::Stored(w, cap))
 }
@@ -132,7 +142,7 @@ impl Writer {
     /// A writer of `len` bytes at most where told.
     pub fn new(len: Option<usize>) -> Writer {
         let stored = match len {
-            Some(n) if n >= MIN => store().and_then(|s| s.writer(n)).map(|w| WriterRepr::Stored(w, n)),
+            Some(n) if n >= MIN_BYTES.get() => store().and_then(|s| s.writer(n)).map(|w| WriterRepr::Stored(w, n)),
             _ => None,
         };
         let repr = stored.unwrap_or_else(|| WriterRepr::Heap(Vec::with_capacity(len.unwrap_or(0))));
@@ -147,15 +157,16 @@ impl Writer {
                 // (of a length not told and long now: a region of the store, the bytes so far
                 // first; else on the heap)
                 let need = v.len() + d.len();
+                let untold = UNTOLD_BYTES.get();
                 if self.untold
-                    && need > UNTOLD
+                    && need > untold
                     && let Some(r) = grown(v, need)
                 {
                     self.repr = r;
                     return self.write(d);
                 }
                 // (the store refusing it: not asked again)
-                self.untold &= need <= UNTOLD;
+                self.untold &= need <= untold;
                 v.extend_from_slice(d)
             }
             WriterRepr::Stored(w, cap) => {
@@ -226,7 +237,7 @@ impl std::io::Write for Writer {
 /// `b` moved to the store where it is of the heap and large and a store is set (copied, its
 /// heap let go), so that what a formula keeps is not held in memory.
 pub fn spill(b: &mut Bytes) {
-    if b.is_shared() || b.sunk_in().is_some() || b.is_lazy() || b.len() < MIN {
+    if b.is_shared() || b.sunk_in().is_some() || b.is_lazy() || b.len() < MIN_BYTES.get() {
         return;
     }
     let Some(mut w) = store().and_then(|s| s.writer(b.len())) else { return };
@@ -293,7 +304,7 @@ impl Drop for Known {
 /// `d` as bytes shared rather than a copy, where it is within bytes [`known`], or within a
 /// region of the store still held (a stream spilled, say) and the store would rather share it.
 pub fn find(d: &[u8]) -> Option<Bytes> {
-    if d.len() < MIN {
+    if d.len() < MIN_BYTES.get() {
         return None;
     }
     let at = d.as_ptr() as usize;

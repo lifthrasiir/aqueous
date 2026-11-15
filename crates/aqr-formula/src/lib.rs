@@ -349,16 +349,22 @@ impl Stream {
 /// A piece of a stream: the stream, and where it starts and ends in it.
 pub type Piece = (usize, u64, u64);
 
-/// The least pieces that [`Formula::merge_classes_within`] cuts streams into.
-pub const PIECE_MIN: u64 = 1 << 20;
+aqr_common::zopt_namespace!("merge", "streams of a class merged within the limit (aqr-formula)");
+
+aqr_common::zopt! {
+    /// The least pieces that [`Formula::merge_classes_within`] cuts streams into.
+    pub static PIECE_MIN: Opt<usize> = Opt::size("merge:piece-min", 1 << 20, "least bytes of a piece that long streams are cut into to be merged");
+}
 
 /// Where a piece of a stream goes ([`Formula::merge_classes_within`]): where it starts, the
 /// merged stream, and where in it.
 type At = (u64, usize, u64);
 
-/// The most pieces that [`Formula::merge_classes_within`] puts together, each of a different
-/// stream (versions of a program, say).
-const GROUP_MOST: usize = 4;
+aqr_common::zopt! {
+    /// The most pieces that [`Formula::merge_classes_within`] puts together, each of a different
+    /// stream (versions of a program, say).
+    static GROUP_MOST: Opt<usize> = Opt::value("merge:group-most", 4, "most pieces of different streams merged together");
+}
 
 /// The bytes of a [`Stream`]: its own, or shared with whoever else holds them (a file mapped
 /// into memory, which the system may drop and read again as it likes, rather than a copy of
@@ -1456,7 +1462,7 @@ impl Formula {
     /// [`Formula::merge_classes`], into streams of `limit` bytes at most: a stream that would
     /// take one past it starts another of its class and kind (one longer is left as it is).
     /// Where a class and kind has several streams longer than half of it, `k` of them (at most
-    /// `GROUP_MOST`), they are cut into pieces of a `k`th of it (of [`PIECE_MIN`] at least),
+    /// `merge:group-most`), they are cut into pieces of a `k`th of it (of `merge:piece-min` at least),
     /// and each piece put with those of the others most like it, if any, up to `k` pieces of
     /// different streams (versions of a program's code, say): the pieces of a stream not so
     /// put are one stream, and a stream none of whose pieces is put so is left whole.
@@ -1556,9 +1562,9 @@ impl Formula {
             }
         }
         for (_, _, ss) in long.iter().filter(|l| l.2.len() > 1) {
-            let most = ss.len().min(GROUP_MOST);
+            let most = ss.len().min(GROUP_MOST.get());
             let size = limit / most as u64;
-            if size < PIECE_MIN {
+            if size < PIECE_MIN.get() as u64 {
                 continue;
             }
             let from = pieces.len();
@@ -2385,43 +2391,43 @@ mod tests {
     /// put together, the rest of each stream one; the output the same.
     #[test]
     fn merge_pieces() {
-        const P: usize = PIECE_MIN as usize;
+        let p = PIECE_MIN.get();
         let noise = |n: usize, seed: u64| -> Vec<u8> {
             let mut x = seed;
             (0..n)
                 .map(|_| (x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407), (x >> 56) as u8).1)
                 .collect()
         };
-        let a = noise(3 * P, 1);
+        let a = noise(3 * p, 1);
         // a's first two pieces swapped, then others
-        let b = [&a[P..2 * P], &a[..P], &noise(P / 2, 2)].concat();
+        let b = [&a[p..2 * p], &a[..p], &noise(p / 2, 2)].concat();
         let mut f = Formula::default();
         let na = f.push("c", a.clone());
         let nb = f.push("c", b.clone());
         let s = f.push("c", b"small".to_vec());
         let o = f.push("d", b"other".to_vec());
         f.root = Node::concat([
-            Node::apply(REV, vec![], vec![Node::slice(0, P as u64 - 10, P as u64 + 20)], P as u64 + 20),
+            Node::apply(REV, vec![], vec![Node::slice(0, p as u64 - 10, p as u64 + 20)], p as u64 + 20),
             nb,
             s,
             o,
-            Node::slice(1, 10, 2 * P as u64),
+            Node::slice(1, 10, 2 * p as u64),
             na,
         ]);
         let want = f.eval(&Rev).unwrap();
         let mut g = f.clone();
-        g.merge_classes_within(2 * PIECE_MIN);
+        g.merge_classes_within(2 * PIECE_MIN.get() as u64);
         assert_eq!(g.eval(&Rev), Ok(want));
         let streams: Vec<_> = g.streams.iter().map(|s| (&*s.class, &s.data[..])).collect();
         let (a, b) = (&a[..], &b[..]);
-        let (ab, ba) = ([&a[..P], &b[P..2 * P]].concat(), [&a[P..2 * P], &b[..P]].concat());
+        let (ab, ba) = ([&a[..p], &b[p..2 * p]].concat(), [&a[p..2 * p], &b[..p]].concat());
         assert_eq!(
             streams,
-            [("c", &ab[..]), ("c", &ba[..]), ("c", &a[2 * P..]), ("c", &b[2 * P..]), ("c", b"small"), ("d", b"other")]
+            [("c", &ab[..]), ("c", &ba[..]), ("c", &a[2 * p..]), ("c", &b[2 * p..]), ("c", b"small"), ("d", b"other")]
         );
         // not within a limit of less than twice the least piece
         let mut g = f.clone();
-        g.merge_classes_within(2 * PIECE_MIN - 1);
+        g.merge_classes_within(2 * PIECE_MIN.get() as u64 - 1);
         assert_eq!(g.streams.len(), 4);
     }
 

@@ -573,7 +573,7 @@ impl<'a> Source<'a> for Fanned {
         if let Fan::Idle = *f {
             *f = match *op {
                 Op::Apply(a, _, _) if (ev.part)(a) => {
-                    Fan::Part(start(at, v.node, usize::MAX, HELD_BYTES).into_iter().map(Some).collect())
+                    Fan::Part(start(at, v.node, usize::MAX, HELD_BYTES.get()).into_iter().map(Some).collect())
                 }
                 Op::Apply(a, ref inputs, _) => match applied(at, a, inputs) {
                     Ok(outs) => Fan::Made(outs.into_iter().map(Some).collect()),
@@ -676,13 +676,17 @@ impl<'a> Source<'a> for Summed<'a> {
     }
 }
 
-/// Parts of an output evaluated at most at once ahead of where they are written ([`run`]), and
-/// their bytes at most held ahead (but the next part's).
-const AHEAD_PARTS: usize = 8;
-const AHEAD_PART_BYTES: u64 = 256 << 20;
+aqr_common::zopt_namespace!("eval", "evaluating formulas: decoding ahead, queues and caches (aqr-formula)");
 
-/// Blocks decoded at most at once ahead of their first slice ([`run`]).
-const AHEAD_BLOCKS: usize = 3;
+aqr_common::zopt! {
+    /// Parts of an output evaluated at most at once ahead of where they are written ([`run`]), and
+    /// their bytes at most held ahead (but the next part's).
+    static AHEAD_PARTS: Opt<usize> = Opt::value("eval:ahead-parts", 8, "parts of an output decoded at most at once ahead of the writing");
+    static AHEAD_PART_BYTES: Opt<usize> = Opt::size("eval:ahead-part-bytes", 256 << 20, "bytes of parts held ahead at most");
+
+    /// Blocks decoded at most at once ahead of their first slice ([`run`]).
+    static AHEAD_BLOCKS: Opt<usize> = Opt::value("eval:ahead-blocks", 3, "blocks decoded at most at once ahead of their first slice");
+}
 
 /// The outputs of formula block `p`, with the non-leaf blocks in `contents`. Where `sink` is
 /// given, they are written to it in turn as they are pulled, rather than held whole, and none
@@ -770,7 +774,7 @@ fn emit<'e, 'a>(
     if threads < 2 || heavy.len() < 2 {
         return emit(None);
     }
-    aqr_common::pool::scope(threads.min(AHEAD_PARTS), |s| {
+    aqr_common::pool::scope(threads.min(AHEAD_PARTS.get()), |s| {
         let parts = (s.workers() > 0).then(|| PartsAhead {
             scope: s,
             ev,
@@ -881,15 +885,16 @@ enum Ahead {
 impl PartsAhead<'_, '_, '_, '_> {
     /// Part `k` (taken in order): made ahead and waited for, else to be made now; the parts
     /// after it started while the pool's workers are free and what they hold is within
-    /// [`AHEAD_PART_BYTES`].
+    /// `eval:ahead-part-bytes`.
     fn take(&self, k: usize) -> Decoded<Ahead> {
         let here = k >= self.spawned.get();
         let mut next = self.spawned.get().max(k + 1);
         // (the bytes of those made ahead and not yet taken)
         let mut held: u64 = self.heavy[k + 1..next].iter().map(|h| h.1).sum();
+        let part_bytes = AHEAD_PART_BYTES.get() as u64;
         while next < self.heavy.len()
             && self.running() < self.scope.workers()
-            && (next == k + 1 || held + self.heavy[next].1 <= AHEAD_PART_BYTES)
+            && (next == k + 1 || held + self.heavy[next].1 <= part_bytes)
         {
             let (v, len) = self.heavy[next];
             held += len;
@@ -937,7 +942,7 @@ impl PartsAhead<'_, '_, '_, '_> {
 
 /// `f` given what to tell of each block as it is first sliced, by which the blocks after it (in
 /// the order `g` first slices them) are decoded ahead on workers of the pool where they are
-/// free, [`AHEAD_BLOCKS`] at most at once.
+/// free, `eval:ahead-blocks` at most at once.
 fn blocks_ahead<R>(g: &Graph, contents: Option<&Contents>, f: impl FnOnce(Option<&(dyn Fn(usize) + Sync)>) -> R) -> R {
     let Some(contents) = contents else { return f(None) };
     let mut firsts: Vec<usize> = Vec::new();
@@ -954,7 +959,8 @@ fn blocks_ahead<R>(g: &Graph, contents: Option<&Contents>, f: impl FnOnce(Option
         return f(None);
     }
     let (next, running) = (AtomicUsize::new(1), Arc::new(AtomicUsize::new(0)));
-    aqr_common::pool::scope(AHEAD_BLOCKS, |s| {
+    let ahead = AHEAD_BLOCKS.get();
+    aqr_common::pool::scope(ahead, |s| {
         if s.workers() == 0 {
             return f(None);
         }
@@ -962,7 +968,7 @@ fn blocks_ahead<R>(g: &Graph, contents: Option<&Contents>, f: impl FnOnce(Option
             let Some(&at) = first_at.get(&o) else { return };
             // (those after the block first sliced now, as workers are free)
             let mut n = next.load(Ordering::Relaxed).max(at + 1);
-            while n < firsts.len() && n <= at + AHEAD_BLOCKS && running.load(Ordering::Relaxed) < s.workers() {
+            while n < firsts.len() && n <= at + ahead && running.load(Ordering::Relaxed) < s.workers() {
                 let (b, running) = (firsts[n], running.clone());
                 running.fetch_add(1, Ordering::Relaxed);
                 s.spawn(move || {
@@ -977,19 +983,24 @@ fn blocks_ahead<R>(g: &Graph, contents: Option<&Contents>, f: impl FnOnce(Option
     })
 }
 
-/// Bytes the queue of a part module's application's output holds at most before the module
-/// waits for them to be pulled, where it is its only output (else all: see [`Fan`]).
-const QUEUE_BYTES: usize = 16 << 20;
-
-/// Bytes held at most in memory of what an output of several of a node is pulled out of its
-/// turn (a queue's, or a split's), the rest in a file ([`Spool`]).
+/// The default of `eval:held`.
 #[cfg(not(test))]
-const HELD_BYTES: usize = 64 << 20;
+const HELD_DEFAULT: usize = 64 << 20;
 #[cfg(test)]
-const HELD_BYTES: usize = 1 << 20;
+const HELD_DEFAULT: usize = 1 << 20;
+
+aqr_common::zopt! {
+    /// Bytes the queue of a part module's application's output holds at most before the module
+    /// waits for them to be pulled, where it is its only output (else all: see [`Fan`]).
+    static QUEUE_BYTES: Opt<usize> = Opt::size("eval:queue", 16 << 20, "bytes a part module's output queue holds before the module waits");
+
+    /// Bytes held at most in memory of what an output of several of a node is pulled out of its
+    /// turn (a queue's, or a split's), the rest in a file ([`Spool`]).
+    static HELD_BYTES: Opt<usize> = Opt::size("eval:held", HELD_DEFAULT, "bytes of outputs pulled out of turn held in memory, the rest spooled");
+}
 
 /// The pieces of an output of a Split pulled out of its turn: shared, until they are more than
-/// [`HELD_BYTES`]; the rest copied to a spool.
+/// `eval:held`; the rest copied to a spool.
 #[derive(Default)]
 struct Held<'a> {
     pieces: VecDeque<Chunk<'a>>,
@@ -1000,7 +1011,7 @@ struct Held<'a> {
 impl<'a> Held<'a> {
     fn push(&mut self, c: Chunk<'a>) -> Decoded<()> {
         match &mut self.spool {
-            None if self.bytes + c.len() <= HELD_BYTES => {
+            None if self.bytes + c.len() <= HELD_BYTES.get() => {
                 self.bytes += c.len();
                 self.pieces.push_back(c);
                 Ok(())
@@ -1132,7 +1143,9 @@ impl Drop for Queued {
 impl<'a> Source<'a> for Queued {
     fn next(&mut self, at: At<'_, '_, 'a>) -> Decoded<Option<Chunk<'a>>> {
         let node = self.node;
-        let q = self.q.get_or_insert_with(|| start(at, node, QUEUE_BYTES, HELD_BYTES).pop().expect("an output"));
+        let q = self
+            .q
+            .get_or_insert_with(|| start(at, node, QUEUE_BYTES.get(), HELD_BYTES.get()).pop().expect("an output"));
         q.pop()
     }
 }
@@ -1293,7 +1306,7 @@ pub(super) fn hashed(
     }
     // the slices hashed by block: those of blocks stored as they are in place, on up to
     // `threads` threads; then the others', each block decoded once and let go of as its slices
-    // are hashed, [`AHEAD_BLOCKS`] at once
+    // are hashed, `eval:ahead-blocks` at once
     let mut by_block: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (n, op) in g.ops.iter().enumerate() {
         if let Op::Slice { block, .. } = *op {
@@ -1321,7 +1334,7 @@ pub(super) fn hashed(
         }))
     });
     let rest: Vec<usize> = (0..by_block.len()).filter(|&k| stored[k].is_none()).collect();
-    let decoded = aqr_common::pool::par_map(rest.len(), threads.clamp(1, AHEAD_BLOCKS + 1), |i| {
+    let decoded = aqr_common::pool::par_map(rest.len(), threads.clamp(1, AHEAD_BLOCKS.get() + 1), |i| {
         let k = rest[i];
         of_block(k, &contents.block(by_block[k].0)?)
     });
@@ -1596,13 +1609,14 @@ impl Hashing<'_, '_, '_> {
             usize::MAX
         };
         heavy.sort_by_cached_key(|&v| first(v));
-        // (in batches of [`AHEAD_HASHED_BYTES`] of output at most, as each holds its output and
+        // (in batches of `eval:hash-ahead` of output at most, as each holds its output and
         // its inputs while it is made)
         let at = self.at;
+        let hashed_bytes = AHEAD_HASHED_BYTES.get() as u64;
         let mut rest = &heavy[..];
         while !rest.is_empty() {
             let (mut n, mut bytes) = (0, 0);
-            while n < rest.len() && (n == 0 || bytes + g.len(rest[n]) <= AHEAD_HASHED_BYTES) {
+            while n < rest.len() && (n == 0 || bytes + g.len(rest[n]) <= hashed_bytes) {
                 bytes += g.len(rest[n]);
                 n += 1;
             }
@@ -1719,13 +1733,15 @@ fn hash_of(at: At, v: Val) -> Decoded<Ch> {
     Ok(h)
 }
 
-/// Bytes of the blocks [`Fresh`] keeps decoded (but [`AHEAD_BLOCKS`] and one, whatever their
-/// size): an image's applications on threads take their inputs of several blocks each, of many
-/// small ones (thousands, of the classes of its files), which a few were decoded again for each.
-const FRESH_BYTES: usize = 512 << 20;
+aqr_common::zopt! {
+    /// Bytes of the blocks [`Fresh`] keeps decoded (but `eval:ahead-blocks` and one, whatever their
+    /// size): an image's applications on threads take their inputs of several blocks each, of many
+    /// small ones (thousands, of the classes of its files), which a few were decoded again for each.
+    static FRESH_BYTES: Opt<usize> = Opt::size("eval:fresh", 512 << 20, "bytes of decoded blocks kept; no-fresh keeps only those ahead").off(0);
 
-/// Bytes of output at most of the values [`Hashing::ahead`] makes at once.
-const AHEAD_HASHED_BYTES: u64 = 128 << 20;
+    /// Bytes of output at most of the values [`Hashing::ahead`] makes at once.
+    static AHEAD_HASHED_BYTES: Opt<usize> = Opt::size("eval:hash-ahead", 128 << 20, "bytes of output hashed ahead at once");
+}
 
 /// The non-leaf blocks of an archive decoded as they are asked for, again where they were let go
 /// of: `raw` (data as stored, whether of Zstandard, and of a dictionary), the last few kept.
@@ -1766,10 +1782,11 @@ impl Blocks for Fresh<'_> {
             // (asked for again: decoded again, to fail there too)
             Err(_) => _ = cache.remove(k),
         }
-        // (the oldest decoded let go of, those being decoded kept: past [`FRESH_BYTES`] and
-        // [`AHEAD_BLOCKS`] and one)
+        // (the oldest decoded let go of, those being decoded kept: past `eval:fresh` and
+        // `eval:ahead-blocks` and one)
+        let (ahead_blocks, fresh) = (AHEAD_BLOCKS.get(), FRESH_BYTES.get());
         let bytes = |c: &Kept| c.iter().filter_map(|e| e.1.as_ref()).map(|d| d.len()).sum::<usize>();
-        while cache.iter().filter(|e| e.1.is_some()).count() > AHEAD_BLOCKS + 1 && bytes(&cache) > FRESH_BYTES {
+        while cache.iter().filter(|e| e.1.is_some()).count() > ahead_blocks + 1 && bytes(&cache) > fresh {
             let k = cache.iter().position(|e| e.1.is_some()).expect("one decoded");
             cache.remove(k);
         }

@@ -29,8 +29,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-/// Bytes of stack of a worker: as much as a main thread has, for the work [`run`] moves there.
-const STACK: usize = 16 << 20;
+crate::zopt_namespace!("pool", "the pool of threads (aqr-common)");
+
+crate::zopt! {
+    /// Bytes of stack of a worker: as much as a main thread has, for the work [`run`] moves there.
+    static STACK: Opt<usize> = Opt::size("pool:stack", 16 << 20, "bytes of stack of a worker thread");
+}
 
 /// Whether there are threads to make workers of.
 const THREADS: bool = !cfg!(target_family = "wasm");
@@ -99,7 +103,7 @@ fn pool() -> &'static Pool {
 fn spawn_worker(i: usize) {
     std::thread::Builder::new()
         .name(format!("aqr-pool-{i}"))
-        .stack_size(STACK)
+        .stack_size(STACK.get())
         .spawn(work)
         .expect("a worker of the pool");
 }
@@ -816,7 +820,7 @@ pub fn rayon_pool(threads: usize) -> Option<rayon::ThreadPool> {
         .num_threads(r.len() + 1)
         .spawn_handler(|t| {
             if std::mem::take(&mut caller) {
-                std::thread::Builder::new().name("aqr-rayon".into()).stack_size(STACK).spawn(move || t.run())?;
+                std::thread::Builder::new().name("aqr-rayon".into()).stack_size(STACK.get()).spawn(move || t.run())?;
             } else {
                 r.spawn(move || t.run());
             }

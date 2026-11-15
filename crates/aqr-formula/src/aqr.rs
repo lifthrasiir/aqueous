@@ -152,7 +152,7 @@ pub enum Level {
     /// [`Level::HIGH`] being 2, 5 and 8. At 0 ([`Level::STORED`]) nothing is compressed: every
     /// block is uncompressed, but for those that are always Zstandard (formula, module and
     /// resource blocks), which hold raw Zstandard blocks. Otherwise each stream is uncompressed
-    /// if incompressible (`PROBE`), by a sample and then, where the sample is not all of it, by
+    /// if incompressible (`PROBE_LEVEL`), by a sample and then, where the sample is not all of it, by
     /// all of it (which finds what repeats from afar), compressed at the probe level where only
     /// all of it compresses; else at the base zstd level of the level's `Pick`, or:
     ///
@@ -215,44 +215,64 @@ impl std::str::FromStr for Level {
     }
 }
 
-/// The zstd level at which a stream is incompressible if it saves less than 1/32 (as a
-/// recompressor's entropy-coded output does), whatever level would compress it otherwise.
-/// A stream that its sample does not compress so, or of [`Kind::Compressed`], is compressed at
-/// this level all of it (some 1 GB/s on a core, of 13 instructions a byte with long-distance
-/// matching, on noise), and kept so where that saves 1/32: a sample of chunks of 64 KiB does
-/// not see what repeats from afar (a video's keyframes, the same each time).
-const PROBE: i32 = 1;
-/// The base zstd level of [`Level::Of`] from 2 on, with the bytes per second it compresses (as
-/// measured on text and PSD skeletons, as are the others).
-const BASE: (i32, f64) = (3, 350e6);
-/// The zstd levels above [`BASE`] that [`Level::Of`] picks from, with their speed: of level 5
-/// the first three, below as many fewer as it is lower; of level 9 all.
-const HIGHER: [(i32, f64); 4] = [(4, 330e6), (6, 140e6), (9, 100e6), (DENSE, 8.2e6)];
-/// The bytes that [`Level::MID`] would save for a second of compression above [`BASE`]:
-/// level 9 where it saves 0.71% of the data over level 3 (2??% of what they compress to,
-/// where 10gb's solid blocks save 8% at the median); zstd at 100 MB/s on a core is still far
-/// from all of compression's time.
-const MID_RATE: f64 = 1e6;
-/// The zstd level of dense streams from level 8 ([`Level::HIGH`]) on: level 16 (btultra, 8.2
-/// MB/s on a core; 9 at 89) was smaller than 9 on every block of 1 MiB or more of 10gb's PE
-/// code (0.949 of it at the median, 0.996 at most) and text (0.935, 0.957 at most), about ??9
-/// MB for some 200 s of a core; not so on other data (raw 1.006 at most). Not in estimates
-/// ([`Encoder::least`]): a probe goes by the level picked.
-const DENSE: i32 = 16;
-/// Streams shorter than this are compressed at the base by [`Level::Of`], as picking would
-/// take longer than any level.
-const SMALL: usize = 64 << 10;
-/// [`Level::Of`] picks the level by this many bytes of the stream, in [`SAMPLE_CHUNKS`]
-/// chunks spread evenly over it (or by the whole stream if no longer).
-pub(crate) const SAMPLE: usize = 1 << 20;
-pub(crate) const SAMPLE_CHUNKS: usize = 16;
+aqr_common::zopt_namespace!("zstd", "Zstandard levels and jobs of the archive's streams (aqr-formula)");
+
+aqr_common::zopt! {
+    /// The zstd level at which a stream is incompressible if it saves less than 1/32 (as a
+    /// recompressor's entropy-coded output does), whatever level would compress it otherwise.
+    /// A stream that its sample does not compress so, or of [`Kind::Compressed`], is compressed at
+    /// this level all of it (some 1 GB/s on a core, of 13 instructions a byte with long-distance
+    /// matching, on noise), and kept so where that saves 1/32: a sample of chunks of 64 KiB does
+    /// not see what repeats from afar (a video's keyframes, the same each time).
+    static PROBE_LEVEL: Opt<i32> = Opt::value("zstd:probe-level", 1, "zstd level that tells whether a stream compresses at all");
+    /// A stream is kept compressed only where that saves 1/N of it at least ([`saves`]).
+    static STORE_MARGIN: Opt<usize> = Opt::value("zstd:store-margin", 32, "a stream compressed is kept if it saves 1/N or more");
+    /// A lower level of a [`Pick`] wins where it is smaller than the base by 1/N at least (beyond
+    /// what a sample may be off by).
+    static LOWER_MARGIN: Opt<usize> = Opt::value("zstd:lower-margin", 32, "a lower level wins if smaller than the base by 1/N or more");
+    /// The base zstd level of [`Level::Of`] from 2 on.
+    static BASE_LEVEL: Opt<i32> = Opt::value("zstd:base-level", 3, "base zstd level of archive levels from 2 on");
+    /// The bytes per second the base level compresses (as measured on text and PSD skeletons, as
+    /// are the others).
+    static BASE_SPEED: Opt<f64> = Opt::value("zstd:base-speed", 350e6, "assumed speed of the base level, bytes per second");
+    /// The zstd levels above the base that [`Level::Of`] picks from: of level 5 the first three,
+    /// below as many fewer as it is lower; of level 9 all.
+    static HIGHER: Opt<&'static [i32]> = Opt::value("zstd:higher", &[4, 6, 9, 16], "higher levels picked from, as many as the archive level allows");
+    /// The speed of each of [`HIGHER`], bytes per second.
+    static HIGHER_SPEEDS: Opt<&'static [f64]> =
+        Opt::value("zstd:higher-speeds", &[330e6, 140e6, 100e6, 8.2e6], "assumed speeds of the higher levels, bytes per second");
+    /// The bytes that [`Level::MID`] would save for a second of compression above the base:
+    /// level 9 where it saves 0.71% of the data over level 3 (2??% of what they compress to,
+    /// where 10gb's solid blocks save 8% at the median); zstd at 100 MB/s on a core is still far
+    /// from all of compression's time.
+    static MID_RATE: Opt<f64> = Opt::value("zstd:mid-rate", 1e6, "bytes saved per second that justify a higher level (archive levels below 6)");
+    /// The zstd level of dense streams from level 8 ([`Level::HIGH`]) on: level 16 (btultra, 8.2
+    /// MB/s on a core; 9 at 89) was smaller than 9 on every block of 1 MiB or more of 10gb's PE
+    /// code (0.949 of it at the median, 0.996 at most) and text (0.935, 0.957 at most), about ??9
+    /// MB for some 200 s of a core; not so on other data (raw 1.006 at most). Not in estimates
+    /// ([`Encoder::least`]): a probe goes by the level picked.
+    static DENSE_LEVEL: Opt<i32> = Opt::value("zstd:dense-level", 16, "zstd level of dense streams (PE code, text)");
+    /// The archive level from which dense streams have a level of their own.
+    static DENSE_FROM: Opt<u8> = Opt::value("zstd:dense-from", 8, "archive level from which dense streams get the dense level");
+    /// The streams that are dense: `text` (of the kind), a class's name, or the start of one
+    /// (ending with `/`).
+    static DENSE_CLASSES: Opt<&'static [&'static str]> =
+        Opt::value("zstd:dense-classes", &["text", "pe", "x86/", "arm64/"], "classes of dense streams: text, a name, or a prefix ending in /");
+    /// Streams shorter than this are compressed at the base by [`Level::Of`], as picking would
+    /// take longer than any level.
+    static SMALL: Opt<usize> = Opt::size("zstd:small", 64 << 10, "streams shorter are compressed at the base level without picking");
+    /// [`Level::Of`] picks the level by this many bytes of the stream, in [`SAMPLE_CHUNKS`]
+    /// chunks spread evenly over it (or by the whole stream if no longer).
+    pub(crate) static SAMPLE: Opt<usize> = Opt::size("zstd:sample", 1 << 20, "bytes of a stream that the level is picked by");
+    pub(crate) static SAMPLE_CHUNKS: Opt<usize> = Opt::value("zstd:sample-chunks", 16, "chunks the sample is cut in, spread over the stream");
+}
 
 /// How [`Level::Of`] picks the zstd level of a stream (see there).
 struct Pick {
     base: (i32, f64),
     /// Fastest first.
     lower: &'static [i32],
-    higher: &'static [(i32, f64)],
+    higher: Vec<(i32, f64)>,
     /// The bytes worth saving for a second of compression above the base.
     rate: f64,
     dense: Option<i32>,
@@ -262,24 +282,32 @@ impl Pick {
     /// Level 1: zstd level 1 alone. 2??: the base, level 1 where smaller, and as many of
     /// [`HIGHER`] as the level is above 2. From 6 on, the higher level by the sample alone, as a
     /// sample of chunks of 64 KiB does not see the matches from afar that a higher level's
-    /// larger window finds (10gb: some ??1 MB at 5's rate); from 8 on, [`DENSE`] for dense
+    /// larger window finds (10gb: some ??1 MB at 5's rate); from 8 on, the dense level for dense
     /// streams, and at 9 for any where the sample is smaller so.
     /// (Level 0 compresses nothing, and picks nothing: taken as 1.)
     fn of(level: u8) -> Pick {
         let n = level.clamp(1, Level::MAX);
+        let (levels, speeds) = (HIGHER.get(), HIGHER_SPEEDS.get());
+        assert_eq!(levels.len(), speeds.len(), "zstd:higher and zstd:higher-speeds are of different lengths");
+        let base = (BASE_LEVEL.get(), BASE_SPEED.get());
         Pick {
             // (level 1's speed compared with no other)
-            base: if n == 1 { (1, BASE.1) } else { BASE },
+            base: if n == 1 { (1, base.1) } else { base },
             lower: if n == 1 { &[] } else { &[1] },
-            higher: &HIGHER[..match n {
-                1 | 2 => 0,
-                3 => 1,
-                4 => 2,
-                5..=8 => 3,
-                _ => 4,
-            }],
-            rate: if n >= 6 { 0.0 } else { MID_RATE },
-            dense: (n >= 8).then_some(DENSE),
+            higher: levels
+                .iter()
+                .copied()
+                .zip(speeds.iter().copied())
+                .take(match n {
+                    1 | 2 => 0,
+                    3 => 1,
+                    4 => 2,
+                    5..=8 => 3,
+                    _ => 4,
+                })
+                .collect(),
+            rate: if n >= 6 { 0.0 } else { MID_RATE.get() },
+            dense: (n >= DENSE_FROM.get()).then(|| DENSE_LEVEL.get()),
         }
     }
 
@@ -292,7 +320,7 @@ impl Pick {
 /// How a stream is compressed, by what it is ([`Encoder::how`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum How {
-    /// Of [`Kind::Compressed`]: stored as it is, unless all of it compresses at [`PROBE`].
+    /// Of [`Kind::Compressed`]: stored as it is, unless all of it compresses at [`PROBE_LEVEL`].
     Light,
     Usual,
     /// PE code or text, at the dense level of the [`Pick`] (which has one).
@@ -301,7 +329,7 @@ enum How {
 
 /// What an [`Encoder`] makes of a stream: compressed already ([`compressed`]), to be
 /// compressed at a zstd level, to about so many bytes (by a sample), or to be compressed at
-/// [`PROBE`] all of it and stored unless that saves enough ([`saves`]).
+/// [`PROBE_LEVEL`] all of it and stored unless that saves enough ([`saves`]).
 enum Plan {
     Done(Option<Vec<u8>>, i32),
     Level(i32, usize),
@@ -316,8 +344,8 @@ impl Plan {
             Plan::Level(l, size) => Ok((compressed_to(c, data, l, threads, size)?, l)),
             Plan::Probe => {
                 let n = total(data);
-                match compressed_to(c, data, PROBE, threads, n)?.filter(|c| saves(c.len(), n)) {
-                    Some(c) => Ok((Some(c), PROBE)),
+                match compressed_to(c, data, PROBE_LEVEL.get(), threads, n)?.filter(|c| saves(c.len(), n)) {
+                    Some(c) => Ok((Some(c), PROBE_LEVEL.get())),
                     None => Ok((None, STORED)),
                 }
             }
@@ -325,9 +353,9 @@ impl Plan {
     }
 }
 
-/// Whether compressing `n` bytes to `len` is worth it rather than storing them ([`PROBE`]).
+/// Whether compressing `n` bytes to `len` is worth it rather than storing them ([`PROBE_LEVEL`]).
 fn saves(len: usize, n: usize) -> bool {
-    len < n - n / 32
+    len < n - n / STORE_MARGIN.get()
 }
 
 /// Encodes formulas as archives at a [`Level`], keeping the compressed streams and resources
@@ -1080,8 +1108,14 @@ pub fn footer_bytes(blocks: usize) -> Vec<u8> {
 
 /// [`Encoder::how`] of a stream of `class` and `kind` at `level`.
 fn how_of(level: Level, class: &str, kind: Kind) -> How {
-    let dense = matches!(level, Level::Of(n) if Pick::of(n).dense.is_some())
-        && (kind == Kind::Text || class == "pe" || class.starts_with("x86/") || class.starts_with("arm64/"));
+    let dense = matches!(level, Level::Of(n) if n.clamp(1, Level::MAX) >= DENSE_FROM.get())
+        && DENSE_CLASSES.get().iter().any(|&c| match c {
+            "text" => kind == Kind::Text,
+            _ => match c.strip_suffix('/') {
+                Some(_) => class.starts_with(c),
+                None => class == c,
+            },
+        });
     match kind {
         Kind::Compressed => How::Light,
         _ if dense => How::Dense,
@@ -1671,9 +1705,9 @@ impl Encoder {
             return Ok(false);
         }
         let (k, sample) = (key(&[d]), sampled(&[d]));
-        let c = self.trial(k, &sample, PROBE)?;
+        let c = self.trial(k, &sample, PROBE_LEVEL.get())?;
         let saves = c.as_ref().is_some_and(|c| saves(c.len(), sample.len()));
-        self.trials.borrow_mut().insert((k, PROBE), c);
+        self.trials.borrow_mut().insert((k, PROBE_LEVEL.get()), c);
         Ok(saves)
     }
 
@@ -1684,7 +1718,8 @@ impl Encoder {
         }
         let trials = aqr_common::pool::par_map(ds.len(), self.threads, |i| {
             let (k, sample) = (key(&[ds[i]]), sampled(&[ds[i]]));
-            THREAD_CCTX.with(|c| Ok((k, sample.len(), compressed(&mut c.borrow_mut(), &[&sample], PROBE, 1)?)))
+            THREAD_CCTX
+                .with(|c| Ok((k, sample.len(), compressed(&mut c.borrow_mut(), &[&sample], PROBE_LEVEL.get(), 1)?)))
         });
         let mut kept = self.trials.borrow_mut();
         trials
@@ -1692,7 +1727,7 @@ impl Encoder {
             .map(|t| {
                 let (k, n, c): (StreamKey, usize, Compressed) = t?;
                 let saves = c.as_ref().is_some_and(|c| saves(c.len(), n));
-                kept.insert((k, PROBE), c);
+                kept.insert((k, PROBE_LEVEL.get()), c);
                 Ok(saves)
             })
             .collect()
@@ -1777,8 +1812,7 @@ impl Encoder {
             made
         };
         let jobs = if wide { 1 } else { 2 };
-        let (mut large, small): (Vec<_>, Vec<_>) =
-            todo.iter().partition(|t| self::total(&t.0) > jobs * ZSTD_JOB as usize);
+        let (mut large, small): (Vec<_>, Vec<_>) = todo.iter().partition(|t| self::total(&t.0) > jobs * ZSTD_JOB.get());
         let mut made: Vec<_> = match wide {
             true => {
                 large.sort_by_key(|t| std::cmp::Reverse(self::total(&t.0)));
@@ -1786,7 +1820,7 @@ impl Encoder {
                 aqr_common::pool::par_map(large.len(), threads, |i| one(large[i], threads))
             }
             false => {
-                let each = self.threads.min(LARGE_THREADS);
+                let each = self.threads.min(LARGE_THREADS.get());
                 aqr_common::pool::par_map(large.len(), self.threads / each, |i| one(large[i], each))
             }
         };
@@ -1860,7 +1894,7 @@ impl Encoder {
                     // (counted, not held, where it is not kept)
                     let counted = match matches!(self.level, Level::Of(_)) && level > self.base_level() {
                         true => Some(self.base_level()),
-                        false => (d.len() > RAW_KEPT_MAX).then_some(level),
+                        false => (d.len() > RAW_KEPT_MAX.get()).then_some(level),
                     };
                     if let Some(counted) = counted {
                         let c = compressed_len(&mut self.cctx(), &[d], counted, self.threads)?;
@@ -1871,8 +1905,8 @@ impl Encoder {
                     compressed_to(&mut self.cctx(), &[d], level, self.threads, estimate)?
                 }
                 // (counted, not held, where it is not kept, as above)
-                Plan::Probe if d.len() > RAW_KEPT_MAX => {
-                    let c = compressed_len(&mut self.cctx(), &[d], PROBE, self.threads)?;
+                Plan::Probe if d.len() > RAW_KEPT_MAX.get() => {
+                    let c = compressed_len(&mut self.cctx(), &[d], PROBE_LEVEL.get(), self.threads)?;
                     let raw = archived_raw_len(d, c.filter(|&c| saves(c, d.len())));
                     self.raw_lens.borrow_mut().insert(key(&[d]), raw);
                     return Ok(n < raw);
@@ -1927,9 +1961,9 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
     let mut trial = |sample: &[u8], level| compress(Some(sample), level);
     let n = total(data);
     // (where all of it is at hand already, compressed at the probe level now)
-    let probe_all = |trial: &mut dyn FnMut(&[u8], i32) -> Result<Compressed>| match n <= SAMPLE {
-        true => trial(&data.concat(), PROBE).map(|c| match c.filter(|c| saves(c.len(), n)) {
-            Some(c) => Plan::Done(Some(c), PROBE),
+    let probe_all = |trial: &mut dyn FnMut(&[u8], i32) -> Result<Compressed>| match n <= SAMPLE.get() {
+        true => trial(&data.concat(), PROBE_LEVEL.get()).map(|c| match c.filter(|c| saves(c.len(), n)) {
+            Some(c) => Plan::Done(Some(c), PROBE_LEVEL.get()),
             None => Plan::Done(None, STORED),
         }),
         false => Ok(Plan::Probe),
@@ -1940,7 +1974,7 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
         _ => {}
     }
     match level {
-        Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(trial(&data.concat(), l)?, l)),
+        Level::Zstd(l) if n <= SAMPLE.get() => Ok(Plan::Done(trial(&data.concat(), l)?, l)),
         Level::Zstd(l) => {
             let sample = sampled(data);
             let c = trial(&sample, l)?.map_or(sample.len(), |c| c.len());
@@ -1950,7 +1984,7 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
             let p = Pick::of(level);
             let sample = sampled(data);
             // (planned before, of the same data: its trials not made again)
-            let k = (n >= SMALL).then(|| (key_how(data, how), level));
+            let k = (n >= SMALL.get()).then(|| (key_how(data, how), level));
             let before = k.and_then(|k| PLANNED.lock().unwrap().as_ref().and_then(|m| m.get(&k).copied()));
             if let Some(b) = before {
                 return Ok(match b {
@@ -2003,19 +2037,19 @@ const PLANNED_MAX: usize = 1 << 20;
 /// the sample, by `compress`.
 fn plan_of(p: &Pick, how: How, n: usize, sample: &[u8], compress: &mut Compress) -> Result<Plan> {
     let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
-    let probe = compress(Some(sample), PROBE)?;
+    let probe = compress(Some(sample), PROBE_LEVEL.get())?;
     if !saves(len(&probe), sample.len()) {
         return match sample.len() < n {
             true => Ok(Plan::Probe),
             false => Ok(Plan::Done(None, STORED)),
         };
     }
-    if n < SMALL {
+    if n < SMALL.get() {
         return Ok(Plan::Done(compress(None, p.base.0)?, p.base.0));
     }
     let mut tried = Vec::new();
     for level in [p.base.0].into_iter().chain(p.higher.iter().map(|h| h.0)).chain(p.lower.iter().copied()) {
-        tried.push((level, if level == PROBE { probe.clone() } else { compress(Some(sample), level)? }));
+        tried.push((level, if level == PROBE_LEVEL.get() { probe.clone() } else { compress(Some(sample), level)? }));
     }
     let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
     let (higher, lower) = lens[1..].split_at(p.higher.len());
@@ -2040,6 +2074,7 @@ fn plan_of(p: &Pick, how: How, n: usize, sample: &[u8], compress: &mut Compress)
 /// compress, else below where smaller by 1/32 at least.
 fn pick(p: &Pick, n: usize, base: usize, higher: &[usize], lower: &[usize]) -> i32 {
     let cost = |len: usize, speed: f64| len as f64 + p.rate * n as f64 / speed;
+    let margin = LOWER_MARGIN.get();
     let (mut best, mut least) = (p.base.0, cost(base, p.base.1));
     for (&(level, speed), &len) in p.higher.iter().zip(higher) {
         if cost(len, speed) < least {
@@ -2047,7 +2082,7 @@ fn pick(p: &Pick, n: usize, base: usize, higher: &[usize], lower: &[usize]) -> i
         }
     }
     if best == p.base.0
-        && let Some((&level, _)) = p.lower.iter().zip(lower).find(|&(_, &len)| len <= base - base / 32)
+        && let Some((&level, _)) = p.lower.iter().zip(lower).find(|&(_, &len)| len <= base - base / margin)
     {
         best = level;
     }
@@ -2154,17 +2189,18 @@ fn cut<'a>(pieces: &[&'a [u8]], mut start: usize, mut len: usize) -> Vec<&'a [u8
 /// [`SAMPLE`] bytes of `data` in [`SAMPLE_CHUNKS`] chunks spread evenly over it, or all of it.
 fn sampled<'a>(data: &[&'a [u8]]) -> Cow<'a, [u8]> {
     let n = total(data);
+    let (sample, chunks) = (SAMPLE.get(), SAMPLE_CHUNKS.get());
     if let [d] = data
-        && n <= SAMPLE
+        && n <= sample
     {
         return (*d).into();
     }
-    if n <= SAMPLE {
+    if n <= sample {
         return data.concat().into();
     }
-    let chunk = SAMPLE / SAMPLE_CHUNKS;
-    let step = (n - chunk) / (SAMPLE_CHUNKS - 1);
-    (0..SAMPLE_CHUNKS).flat_map(|i| cut(data, i * step, chunk)).flatten().copied().collect::<Vec<_>>().into()
+    let chunk = sample / chunks;
+    let step = (n - chunk) / (chunks - 1);
+    (0..chunks).flat_map(|i| cut(data, i * step, chunk)).flatten().copied().collect::<Vec<_>>().into()
 }
 
 /// The [`StreamKey`] of `data`.
@@ -2205,10 +2241,13 @@ fn archived_raw(d: &[u8], c: Option<&[u8]>) -> usize {
     n.0
 }
 
-/// Data longer than this that [`Encoder::smaller`] compresses to compare with a formula is only
-/// counted, not kept to be archived if it is (compressed again then): what compressing it holds
-/// is then a window of its output, whatever its length. (Below, it is kept, of the store.)
-const RAW_KEPT_MAX: usize = 4 * BLOCK;
+aqr_common::zopt! {
+    /// Data longer than this that [`Encoder::smaller`] compresses to compare with a formula is only
+    /// counted, not kept to be archived if it is (compressed again then): what compressing it holds
+    /// is then a window of its output, whatever its length. (Below, it is kept, of the store.)
+    static RAW_KEPT_MAX: Opt<usize> = Opt::size("raw-kept", 0, "bytes of data compared with a formula that are kept compressed, not only counted")
+        .derived(|| 4 * BLOCK, "4 blocks");
+}
 
 /// [`archived_raw`] of `d` compressed to `c` bytes ([`compressed_len`]) if given, the compressed
 /// bytes not at hand.
@@ -2283,33 +2322,42 @@ fn stored_external(data: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Zstandard's jobs of multithreaded compression, and how much of the window each job takes
-/// over from the data before it (9: all of it). Data is cut in jobs however many the threads,
-/// so that it compresses the same on any; this loses 0.1-0.2% against compressing it in one
-/// piece, at levels 3 and 4.
-const ZSTD_JOB: u32 = 16 << 20;
+aqr_common::zopt! {
+    /// Zstandard's jobs of multithreaded compression, and how much of the window each job takes
+    /// over from the data before it (9: all of it). Data is cut in jobs however many the threads,
+    /// so that it compresses the same on any; this loses 0.1-0.2% against compressing it in one
+    /// piece, at levels 3 and 4.
+    static ZSTD_JOB: Opt<usize> = Opt::size("zstd:job", 16 << 20, "bytes of a job of multithreaded compression (changes the output)");
+}
 
-/// Threads compressing a stream of more than two of Zstandard's jobs in
-/// [`Encoder::precompress`], which the rest would wait for on one (10gb's enwik batch: a stream
-/// of 0.5 GB, 5.3 s at level 9). Each of Zstandard's workers holds a context of the level and
-/// window of its own (all of them, 10, took 0.2-0.3 GB more of 10gb's peak).
-const LARGE_THREADS: usize = 4;
+aqr_common::zopt! {
+    /// Threads compressing a stream of more than two of Zstandard's jobs in
+    /// [`Encoder::precompress`], which the rest would wait for on one (10gb's enwik batch: a stream
+    /// of 0.5 GB, 5.3 s at level 9). Each of Zstandard's workers holds a context of the level and
+    /// window of its own (all of them, 10, took 0.2-0.3 GB more of 10gb's peak).
+    static LARGE_THREADS: Opt<usize> = Opt::value("zstd:large-threads", 4, "threads on a stream of more than two jobs, ahead of the rest");
+}
 
-/// Bytes of data above which it is compressed with long-distance matching, over a window of
-/// all of it up to [`WINDOW_LOG_MAX`]. Below, the window is the level's own (at level 3, 2 MiB
-/// of most data), which misses what repeats from farther: at 8 MiB, of the files of an archive
-/// of Deskflow.app, the rests of its two programs (a stream of 8.3 MB that a stream class
-/// put together) archived to 3.07 MB, and to 2.28 MB with a window of all of it and
-/// long-distance matching. From 1 MiB on rather than 8 MiB, the applications of
-/// `docs/macos-app-todo.md` archive to 1088.91 -> 1080.60 MB (-0.76%; a window alone, without
-/// long-distance matching, 1085.29 MB) and 10gb to 2464.75 -> 2462.14 MB (-0.11%), the
-/// instructions retired 0.4% more.
-pub(crate) const LONG: usize = 1 << 20;
+aqr_common::zopt! {
+    /// Bytes of data above which it is compressed with long-distance matching, over a window of
+    /// all of it up to [`WINDOW_LOG_MAX`]. Below, the window is the level's own (at level 3, 2 MiB
+    /// of most data), which misses what repeats from farther: at 8 MiB, of the files of an archive
+    /// of Deskflow.app, the rests of its two programs (a stream of 8.3 MB that a stream class
+    /// put together) archived to 3.07 MB, and to 2.28 MB with a window of all of it and
+    /// long-distance matching. From 1 MiB on rather than 8 MiB, the applications of
+    /// `docs/macos-app-todo.md` archive to 1088.91 -> 1080.60 MB (-0.76%; a window alone, without
+    /// long-distance matching, 1085.29 MB) and 10gb to 2464.75 -> 2462.14 MB (-0.11%), the
+    /// instructions retired 0.4% more.
+    pub(crate) static LONG: Opt<Option<usize>> = Opt::size_or_off("zstd:ldm", Some(1 << 20), "bytes above which long-distance matching is on; no-ldm: never");
+}
 
 /// The largest window, as a power of two, that every decoder takes (spec, "Zstandard
 /// compression method").
 pub(crate) const WINDOW_LOG_MAX: u32 = 27;
-const ZSTD_OVERLAP: u32 = 9;
+aqr_common::zopt! {
+    /// How much of the window each job takes over from the data before it (9: all of it).
+    static ZSTD_OVERLAP: Opt<u32> = Opt::value("zstd:overlap", 9, "log of the overlap of jobs with the data before them (9: all of it)");
+}
 
 /// The compressed external structure of `data` (Zstandard, XXH64), unless the Zstandard
 /// blocks would be longer than `data`. It is compressed on up to `threads` threads (those of
@@ -2362,7 +2410,7 @@ fn begin<'a>(
     c.reset(ResetDirective::SessionAndParameters).map_err(zstd)?;
     // Zstandard's workers counted in aqr-common's pool: as many workers of it reserved, but
     // for the calling thread, which waits while they compress (one job a worker at most).
-    let jobs = total(data).div_ceil(ZSTD_JOB as usize).max(1);
+    let jobs = total(data).div_ceil(ZSTD_JOB.get()).max(1);
     let lent = aqr_common::pool::reserve(threads.min(jobs).saturating_sub(1));
     let threads = lent.len() + 1;
     for p in [
@@ -2371,8 +2419,8 @@ fn begin<'a>(
         CParameter::ChecksumFlag(false),
         CParameter::DictIdFlag(false),
         CParameter::NbWorkers(threads.max(1) as u32),
-        CParameter::JobSize(ZSTD_JOB),
-        CParameter::OverlapSizeLog(ZSTD_OVERLAP),
+        CParameter::JobSize(ZSTD_JOB.get() as u32),
+        CParameter::OverlapSizeLog(ZSTD_OVERLAP.get()),
     ] {
         c.set_parameter(p).map_err(zstd)?;
     }
@@ -2380,7 +2428,7 @@ fn begin<'a>(
     // apart, data ending at the end of a job ends with an empty block).
     let len = total(data);
     // Long data matched from afar, over a window of all of it as far as decoders must take.
-    if len > LONG {
+    if LONG.get().is_some_and(|long| len > long) {
         let window = (64 - (len as u64 - 1).leading_zeros()).min(WINDOW_LOG_MAX);
         c.set_parameter(CParameter::WindowLog(window)).map_err(zstd)?;
         c.set_parameter(CParameter::EnableLongDistanceMatching(true)).map_err(zstd)?;
@@ -3543,7 +3591,8 @@ impl<'c, 'n> Archive<'c, 'n> {
         // the leaves of long work on a thread first, the longest first, for it to be done beside
         // the others; the others in their order
         // (by their places among those picked)
-        let long = |k: &usize| serial[picked[*k]] >= LONG_SERIAL;
+        let long_serial = LONG_SERIAL.get();
+        let long = |k: &usize| serial[picked[*k]] >= long_serial;
         let mut order: Vec<usize> = (0..picked.len()).filter(long).collect();
         order.sort_by_key(|&k| std::cmp::Reverse(serial[picked[k]]));
         order.extend((0..picked.len()).filter(|k| !long(k)));
@@ -4471,14 +4520,16 @@ fn stored_len(d: &[u8], zstd: bool, checked: bool) -> u64 {
     raw.saturating_sub(at as u64 + 1).saturating_add(delta).saturating_sub(shrink)
 }
 
-/// The bytes of work on a thread from which a leaf is evaluated first ([`Program::weight`]).
-const LONG_SERIAL: u64 = 64 << 20;
+aqr_common::zopt! {
+    /// The bytes of work on a thread from which a leaf is evaluated first ([`Program::weight`]).
+    static LONG_SERIAL: Opt<u64> = Opt::value("eval:long-serial", 64 << 20, "leaves with this much work on a thread are evaluated first");
+}
 
 /// The leaves let in by [`Archive::set_budget`] ([`aqr_common::pool::dispatch_any`]): in an
 /// order (of the leaves' indices), each once there is room in the budget for it (or none of
 /// this evaluation is in); but while the first not let in waits, the leaves after it that fit
 /// go before it, up to the limit's bytes of weights (after which it is let in as soon as it
-/// fits, or alone), and past [`PASSING`] leaves that do not at most.
+/// fits, or alone), and past `eval:passing` leaves that do not at most.
 struct Gate<'w> {
     budget: Option<&'w Budget>,
     weights: &'w [u64],
@@ -4490,9 +4541,11 @@ struct Gate<'w> {
     on: AtomicUsize,
 }
 
-/// How many leaves that do not fit in the leaves going before the first waiting pass at most
-/// ([`Gate`]).
-const PASSING: usize = 64;
+aqr_common::zopt! {
+    /// How many leaves that do not fit in the leaves going before the first waiting pass at most
+    /// ([`Gate`]).
+    static PASSING: Opt<usize> = Opt::value("eval:passing", 64, "most leaves that do not fit that the leaves passing a waiting one look past");
+}
 
 struct GateState {
     /// The leaves let in, and the first not (by their places in the order, as below).
@@ -4514,7 +4567,8 @@ impl GateState {
             return Some(self.skipped.remove(k));
         }
         self.scan = self.scan.max(first + 1);
-        while self.skipped.len() < PASSING && self.scan < taken.len() {
+        let passing = PASSING.get();
+        while self.skipped.len() < passing && self.scan < taken.len() {
             let i = self.scan;
             self.scan += 1;
             if fits(i) {
@@ -6298,7 +6352,7 @@ mod tests {
             // at the probe level, not the encoder's
             let mut f = Formula::default();
             f.root = f.push_as("a", Kind::Compressed, same.clone());
-            let at_probe = compressed(&mut CCtx::create(), &[&same], PROBE, 1).unwrap().unwrap();
+            let at_probe = compressed(&mut CCtx::create(), &[&same], PROBE_LEVEL.get(), 1).unwrap().unwrap();
             assert!(encode(&f, None, level).unwrap().windows(at_probe.len()).any(|w| w == at_probe));
         }
         let mut f = Formula::default();
@@ -6352,7 +6406,7 @@ mod tests {
     }
 
     /// Levels by name and number; the zstd levels picked from grow with the level, and only
-    /// from 8 on are dense streams (text, PE code) at [`DENSE`] (one no longer than a sample
+    /// from 8 on are dense streams (text, PE code) at the dense level (one no longer than a sample
     /// where that is smaller).
     #[test]
     fn levels() {
@@ -6380,7 +6434,7 @@ mod tests {
         // (lines shuffled, so that it is not one text repeated)
         let mut rng = aqr_common::rng::Rng::new(1);
         let lines: Vec<&[u8]> = text.split_inclusive(|&b| b == b'\n').collect();
-        while long.len() <= super::SAMPLE * 2 {
+        while long.len() <= super::SAMPLE.get() * 2 {
             long.extend_from_slice(lines[rng.below(lines.len() as u64) as usize]);
         }
         let s = |d: &[u8], kind, class: &'static str| Stream {
@@ -6399,16 +6453,16 @@ mod tests {
             let at = |d: &[u8], how| match enc.plan(key(&[d]), &[d], how).unwrap() {
                 Plan::Level(l, _) => l,
                 Plan::Done(..) => 0,
-                Plan::Probe => PROBE,
+                Plan::Probe => PROBE_LEVEL.get(),
             };
-            assert_eq!(at(&long, How::Dense) == DENSE, dense, "{level:?}");
+            assert_eq!(at(&long, How::Dense) == DENSE_LEVEL.get(), dense, "{level:?}");
             // (at 9, picked from as any other)
-            assert_eq!(at(&long, How::Usual) == DENSE, level == Level::Of(9), "{level:?}");
+            assert_eq!(at(&long, How::Usual) == DENSE_LEVEL.get(), level == Level::Of(9), "{level:?}");
             // no longer than a sample: compressed whole, at the dense level where smaller so
             let Plan::Done(Some(c), _) = enc.plan(key(&[&text]), &[&text], How::Dense).unwrap() else {
                 panic!("{level:?}: not compressed whole")
             };
-            let at_dense = compressed(&mut enc.cctx(), &[&text], DENSE, 1).unwrap().unwrap();
+            let at_dense = compressed(&mut enc.cctx(), &[&text], DENSE_LEVEL.get(), 1).unwrap().unwrap();
             assert!(at_dense.len() < c.len() || dense, "{level:?}: {} vs {}", at_dense.len(), c.len());
             assert_eq!(c == at_dense, dense, "{level:?}");
         }
@@ -6470,7 +6524,7 @@ mod tests {
     #[test]
     fn cctx_reused() {
         let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/index.bs")).unwrap();
-        let big = text.repeat(ZSTD_JOB as usize / text.len() + 2);
+        let big = text.repeat(ZSTD_JOB.get() / text.len() + 2);
         let runs: [(&[u8], i32, usize); 7] = [
             (&big, 9, 4),
             (&text[..1000], 1, 1),
@@ -6525,8 +6579,8 @@ mod tests {
     fn swept() {
         let mut rng = aqr_common::rng::Rng::new(1);
         let d: Vec<u8> =
-            (0..2 * ZSTD_JOB as usize + 12345).map(|i| if i % 3 == 0 { rng.below(256) as u8 } else { b'a' }).collect();
-        let job = ZSTD_JOB as usize;
+            (0..2 * ZSTD_JOB.get() + 12345).map(|i| if i % 3 == 0 { rng.below(256) as u8 } else { b'a' }).collect();
+        let job = ZSTD_JOB.get();
         for pieces in [vec![&d[..]], vec![&d[..job], &d[job..]], vec![&d[..5], &d[5..job + 1], &d[job + 1..]]] {
             let one = compressed(&mut CCtx::create(), &pieces, 3, 4).unwrap();
             let file = vec![0u8; 1000];
@@ -6549,23 +6603,23 @@ mod tests {
         let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/index.bs")).unwrap();
         let mut d = Vec::new();
         let mut rng = aqr_common::rng::Rng::new(1);
-        while d.len() < 2 * ZSTD_JOB as usize {
+        while d.len() < 2 * ZSTD_JOB.get() {
             let at = rng.below(text.len() as u64 - 4096) as usize;
             d.extend_from_slice(&text[at..at + 4096]);
         }
-        d.truncate(2 * ZSTD_JOB as usize);
-        let job = ZSTD_JOB as usize;
+        d.truncate(2 * ZSTD_JOB.get());
+        let job = ZSTD_JOB.get();
         let one = compressed(&mut CCtx::create(), &[&d], 1, 4).unwrap();
         // as Zstandard compresses it in one go (long data from afar)
-        assert!(d.len() > LONG);
+        assert!(d.len() > LONG.get().unwrap());
         let mut z = zstd::bulk::Compressor::new(1).unwrap();
         for p in [
             CParameter::ContentSizeFlag(false),
             CParameter::ChecksumFlag(false),
             CParameter::DictIdFlag(false),
             CParameter::NbWorkers(4),
-            CParameter::JobSize(ZSTD_JOB),
-            CParameter::OverlapSizeLog(ZSTD_OVERLAP),
+            CParameter::JobSize(ZSTD_JOB.get() as u32),
+            CParameter::OverlapSizeLog(ZSTD_OVERLAP.get()),
             CParameter::WindowLog(25),
             CParameter::EnableLongDistanceMatching(true),
         ] {
@@ -6674,8 +6728,8 @@ mod tests {
         f.root = Node::slice(0, 0, part.len() as u64);
         let enc = Encoder::new(Level::MID);
         let k = key(&[&d]);
-        assert!(matches!(enc.plan(k, &[&d], How::Usual).unwrap(), Plan::Level(l, _) if l > BASE.0));
-        let raw = Encoder::new(Level::Zstd(BASE.0)).raw_len(&d).unwrap();
+        assert!(matches!(enc.plan(k, &[&d], How::Usual).unwrap(), Plan::Level(l, _) if l > BASE_LEVEL.get()));
+        let raw = Encoder::new(Level::Zstd(BASE_LEVEL.get())).raw_len(&d).unwrap();
         assert_eq!(enc.smaller(&f, &d).unwrap(), enc.len(&f).unwrap() < raw);
         assert!(!enc.streams.borrow().contains_key(&k));
         assert_eq!(enc.raw_lens.borrow().get(&k), Some(&raw));
@@ -7079,10 +7133,10 @@ mod tests {
             })));
             a.leaves(4, |_, _| Ok(()))
         };
-        // the second and the third wait for the first to end, and more leaves than PASSING go
+        // the second and the third wait for the first to end, and more leaves than `eval:passing` go
         // before them
         let mut leaves = vec![leaf(9, 1500, 0), leaf(1, 1800, 0), leaf(1, 1800, 0)];
-        leaves.extend(std::iter::repeat_n(plain.clone(), 2 * PASSING));
+        leaves.extend(std::iter::repeat_n(plain.clone(), 2 * PASSING.get()));
         assert_eq!(run(&stand_in(REV), &leaves), Ok(()));
         // a module of a class of 8 task slots: its instance of 1500 bytes (the tasks' have limits of
         // their own)

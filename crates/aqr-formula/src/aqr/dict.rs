@@ -19,30 +19,34 @@ use zstd::zstd_safe::{CCtx, CDict, DDict};
 use super::{Decoded, Encoder, How, StreamKey, external_with, invalid, key_how};
 use crate::{Error, Result};
 
-/// Blocks alike fewer than this are not worth a dictionary.
-pub const MIN_BLOCKS: usize = 8;
+aqr_common::zopt_namespace!("dict", "Zstandard dictionaries trained for blocks alike (aqr-formula)");
 
-/// Blocks longer than this take no dictionary: they gain next to nothing (1.20× -> 1.12× of
-/// solid with 1 MiB blocks of rustdoc's HTML, 1.010× -> 1.009× with 16 MiB ones).
-pub const BLOCK_MAX: usize = 4 << 20;
+aqr_common::zopt! {
+    /// Blocks alike fewer than this are not worth a dictionary.
+    pub static MIN_BLOCKS: Opt<usize> = Opt::value("dict:min-blocks", 8, "fewest blocks alike that a dictionary is trained for");
 
-/// A dictionary is about this share of the blocks it is trained for, within its bounds.
-const SHARE: usize = 128;
-const SIZE_MIN: usize = 16 << 10;
-const SIZE_MAX: usize = 1 << 20;
+    /// Blocks longer than this take no dictionary: they gain next to nothing (1.20x -> 1.12x of
+    /// solid with 1 MiB blocks of rustdoc's HTML, 1.010x -> 1.009x with 16 MiB ones).
+    pub static BLOCK_MAX: Opt<usize> = Opt::size("dict:block-max", 4 << 20, "blocks longer take no dictionary");
 
-/// The most bytes of samples a dictionary is trained on (fastCover takes about 0.2 s for a
-/// dictionary of the samples of a few tens of MB), taken evenly from the blocks.
-const TRAIN_MAX: usize = 32 << 20;
+    /// A dictionary is about this share of the blocks it is trained for, within its bounds.
+    static SHARE: Opt<usize> = Opt::value("dict:share", 128, "a dictionary is 1/N of the blocks it is trained for");
+    static SIZE_MIN: Opt<usize> = Opt::size("dict:size-min", 16 << 10, "smallest dictionary");
+    static SIZE_MAX: Opt<usize> = Opt::size("dict:size-max", 1 << 20, "largest dictionary");
 
-/// Samples are pieces of the blocks of at most this many bytes: the blocks are of the streams
-/// of several files one after another, whose bounds the archive encoder does not know.
-const PIECE: usize = 8 << 10;
+    /// The most bytes of samples a dictionary is trained on (fastCover takes about 0.2 s for a
+    /// dictionary of the samples of a few tens of MB), taken evenly from the blocks.
+    static TRAIN_MAX: Opt<usize> = Opt::size("dict:train-max", 32 << 20, "most bytes of samples a dictionary is trained on");
 
-/// fastCover's segment and d-mer sizes, fixed: tuned on the corpora of `scripts/zstd_dict_*`,
-/// k was 530–1874 and d 6 or 8.
-const K: u32 = 1024;
-const D: u32 = 8;
+    /// Samples are pieces of the blocks of at most this many bytes: the blocks are of the streams
+    /// of several files one after another, whose bounds the archive encoder does not know.
+    static PIECE: Opt<usize> = Opt::size("dict:piece", 8 << 10, "bytes of a piece of a block taken as a sample");
+
+    /// fastCover's segment and d-mer sizes, fixed: tuned on the corpora of `scripts/zstd_dict_*`,
+    /// k was 530-1874 and d 6 or 8.
+    static K: Opt<u32> = Opt::value("dict:k", 1024, "fastCover's segment size");
+    static D: Opt<u32> = Opt::value("dict:d", 8, "fastCover's d-mer size");
+}
 
 /// The magic number and the ID of a Zstandard dictionary (RFC 8878 §5) put in front of the
 /// data of a dictionary block for libzstd, which takes them away again (any nonzero ID).
@@ -75,17 +79,18 @@ impl Planned {
 
 impl Encoder {
     /// The dictionaries for `blocks` (each compressed already, [`Encoder::precompress`]):
-    /// those of each class of [`MIN_BLOCKS`] or more of at most [`BLOCK_MAX`] bytes, where it
+    /// those of each class of `dict:min-blocks` or more of at most `dict:block-max` bytes, where it
     /// saves more than its block takes.
     pub(super) fn dictionaries(&self, blocks: &[Candidate]) -> Result<Planned> {
         let mut out = Planned::default();
         if !self.trains {
             return Ok(out);
         }
+        let (block_max, min_blocks) = (BLOCK_MAX.get(), MIN_BLOCKS.get());
         let mut classes: Vec<(Class, Vec<&[u8]>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for c in blocks {
-            if c.how == How::Light || c.data.is_empty() || c.data.len() > BLOCK_MAX {
+            if c.how == How::Light || c.data.is_empty() || c.data.len() > block_max {
                 continue;
             }
             if !seen.insert(key_how(&[c.data], c.how)) {
@@ -98,7 +103,7 @@ impl Encoder {
             }
         }
         for ((_, _, how), data) in classes {
-            if data.len() < MIN_BLOCKS {
+            if data.len() < min_blocks {
                 continue;
             }
             let Some(trained) = self.trained(&data, how)? else { continue };
@@ -128,7 +133,7 @@ impl Encoder {
     /// (none where it was not compressed alone). None where training fails.
     fn trained(&self, data: &[&[u8]], how: How) -> Result<Option<Trained>> {
         let total: usize = data.iter().map(|d| d.len()).sum();
-        let size = (total / SHARE).clamp(SIZE_MIN, SIZE_MAX);
+        let size = (total / SHARE.get()).clamp(SIZE_MIN.get(), SIZE_MAX.get());
         let level = self.base_level();
         let Some(dict) = train(data, size, level) else { return Ok(None) };
         let header = unsafe { zstd_sys::ZDICT_getDictHeaderSize(dict.as_ptr() as *const c_void, dict.len()) };
@@ -210,13 +215,14 @@ pub enum With<'a> {
 fn train(data: &[&[u8]], size: usize, level: i32) -> Option<Vec<u8>> {
     let total: usize = data.iter().map(|d| d.len()).sum();
     // every `skip`-th piece of the blocks', from the first
-    let pieces = total.div_ceil(PIECE);
-    let skip = total.div_ceil(TRAIN_MAX).max(1);
-    let mut samples = Vec::with_capacity(total.min(TRAIN_MAX + PIECE));
+    let (piece, train_max) = (PIECE.get(), TRAIN_MAX.get());
+    let pieces = total.div_ceil(piece);
+    let skip = total.div_ceil(train_max).max(1);
+    let mut samples = Vec::with_capacity(total.min(train_max + piece));
     let mut sizes = Vec::with_capacity(pieces / skip + data.len());
     let mut n = 0;
     for d in data {
-        for p in d.chunks(PIECE) {
+        for p in d.chunks(piece) {
             if n % skip == 0 {
                 samples.extend_from_slice(p);
                 sizes.push(p.len());
@@ -225,8 +231,8 @@ fn train(data: &[&[u8]], size: usize, level: i32) -> Option<Vec<u8>> {
         }
     }
     let params = zstd_sys::ZDICT_fastCover_params_t {
-        k: K,
-        d: D,
+        k: K.get(),
+        d: D.get(),
         f: 0,
         steps: 0,
         nbThreads: 1,

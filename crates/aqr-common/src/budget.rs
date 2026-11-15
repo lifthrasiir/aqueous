@@ -33,8 +33,17 @@ struct State {
     held: u64,
 }
 
-/// How often a consumer waiting looks at the heap again, which tells nobody as it shrinks.
-const LOOK: Duration = Duration::from_millis(10);
+crate::zopt_namespace!("budget", "the heap the work may take at once (aqr-common)");
+
+crate::zopt! {
+    /// How often a consumer waiting looks at the heap again (in milliseconds), which tells nobody
+    /// as it shrinks.
+    static LOOK_MS: Opt<u64> = Opt::value("budget:look-ms", 10, "milliseconds between a waiting consumer's looks at the heap");
+
+    /// Without `-M`, [`attempt_limit`] is the budget or this share of the system's memory (1/N),
+    /// whichever is more.
+    static SYSTEM_SHARE: Opt<u64> = Opt::value("budget:system-share", 2, "without -M, a recompression may take 1/N of the system's memory");
+}
 
 /// The limit of a budget, the bytes taken of it and the heap in use, as a consumer looks
 /// ([`Budget::wait`]).
@@ -104,11 +113,12 @@ impl Budget {
     }
 
     /// Waits until `f`, looking at the room (each time something is given back or the limit
-    /// changes, and every `LOOK` where the heap is measured), takes a unit: what it gives, and
+    /// changes, and every `budget:look-ms` where the heap is measured), takes a unit: what it gives, and
     /// the bytes taken for it. `f` runs with the budget locked; a lock it takes is taken after
     /// the budget's, never before.
     pub fn wait<R>(&self, mut f: impl FnMut(Room) -> Option<(R, u64)>) -> (R, Taken<'_>) {
         let mut st = self.lock();
+        let look = Duration::from_millis(LOOK_MS.get());
         loop {
             let room = self.room_of(&st);
             if let Some((r, n)) = f(room) {
@@ -117,7 +127,7 @@ impl Budget {
             }
             st = match self.heap {
                 None => self.changed.wait(st).unwrap_or_else(|e| e.into_inner()),
-                Some(_) => self.changed.wait_timeout(st, LOOK).unwrap_or_else(|e| e.into_inner()).0,
+                Some(_) => self.changed.wait_timeout(st, look).unwrap_or_else(|e| e.into_inner()).0,
             };
         }
     }
@@ -153,7 +163,7 @@ static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 /// together, not a limit of one recompression.
 pub fn attempt_limit() -> u64 {
     match ATTEMPT.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => global().limit().max(total().unwrap_or(0) / 2),
+        0 => global().limit().max(total().unwrap_or(0) / SYSTEM_SHARE.get()),
         n => n,
     }
 }

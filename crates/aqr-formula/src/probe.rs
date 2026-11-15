@@ -41,9 +41,39 @@ pub struct Probe {
     pub scan: fn(&[u8]) -> usize,
 }
 
-/// The least a recompressor must save, as a fraction of the stream: estimates are off by about
-/// as much (a sample, a prefix), and what saves less is not worth its time.
-const MARGIN: usize = 32;
+aqr_common::zopt_namespace!("probe", "probes of whether a recompressor pays (aqr-formula)");
+
+aqr_common::zopt! {
+    /// The least a recompressor must save, as a fraction of the stream: estimates are off by about
+    /// as much (a sample, a prefix), and what saves less is not worth its time.
+    static MARGIN: Opt<usize> = Opt::value("probe:margin", 32, "a recompressor must save 1/N of the stream or more");
+
+    /// Data shorter than this is not looked for among what is archived with it ([`Held::MIN`] is
+    /// its default): its anchors are too few to tell.
+    static HELD_MIN: Opt<usize> = Opt::size("probe:held-min", Held::MIN, "data shorter is not looked for in what is archived with it");
+
+    /// Data shorter than this does not count as holding any: it has about no anchor. Shorter
+    /// data than [`HELD_MIN`] does, as data looked for may be many such (the files of a tar
+    /// archive, each held by a file of its own).
+    static HELD_INDEX_MIN: Opt<usize> = Opt::size("probe:index-min", 4 << 10, "data shorter holds no anchors of others");
+
+    /// Of the gear hash, the low bits that are zero where a position is an anchor ([`shared`],
+    /// [`repeated`]): 1 in 256 of all.
+    static ANCHOR_BITS: Opt<u32> = Opt::value("probe:anchor-bits", 8, "anchors of shared and repeated are 1 in 2^N positions");
+
+    /// The window [`repeated`] looks in for data that is not long (zstd's own at level 9).
+    static REPEATED_WINDOW: Opt<usize> = Opt::size("probe:repeated-window", 4 << 20, "window that repeats are looked for in, for data that is not long");
+
+    /// The shortest and longest chunk of [`chunks`], and its bits: boundaries fall at 1 in
+    /// 2048.
+    static CHUNK_MIN: Opt<usize> = Opt::size("probe:chunk-min", 512, "shortest content-defined chunk");
+    static CHUNK_MAX: Opt<usize> = Opt::size("probe:chunk-max", 8 << 10, "longest content-defined chunk");
+    static CHUNK_BITS: Opt<u32> = Opt::value("probe:chunk-bits", 11, "chunk boundaries are 1 in 2^N positions");
+
+    /// A hash that more than this many data left have in a bin is not counted by
+    /// [`alike_chains`]: it tells little, and would take time as the square of the data.
+    static LIKENESS_COMMON: Opt<usize> = Opt::value("probe:likeness-common", 1024, "a likeness hash in more data than this is not counted");
+}
 
 impl Probe {
     /// A probe at `level` that looks for no files.
@@ -74,7 +104,7 @@ impl Probe {
         }
         // (what cannot be told is the recompressor's to tell)
         let Some(record) = record() else { return true };
-        let Some(enough) = (coded - coded / MARGIN).checked_sub(record + 1) else { return false };
+        let Some(enough) = (coded - coded / MARGIN.get()).checked_sub(record + 1) else { return false };
         let scanned = look == Look::Scan;
         let first = (scanned && (self.starts)(data)).then(|| (self.scan)(data));
         if first == Some(data.len()) {
@@ -106,13 +136,14 @@ impl Probe {
 /// wherever they lie): the fraction of a data's distinct anchors that another has. A pass over
 /// the data, at about a byte per cycle.
 pub fn shared(datas: &[&[u8]]) -> Vec<f64> {
+    let mask = (1u64 << ANCHOR_BITS.get()) - 1;
     let anchors: Vec<Vec<u64>> = datas
         .iter()
         .map(|d| {
             let (mut h, mut a) = (0u64, Vec::with_capacity(d.len() / 200));
             for &b in d.iter() {
                 h = (h << 1).wrapping_add(GEAR[b as usize]);
-                if h & 0xff == 0 {
+                if h & mask == 0 {
                     a.push(h);
                 }
             }
@@ -134,7 +165,9 @@ pub fn shared(datas: &[&[u8]]) -> Vec<f64> {
 
 /// Bytes of the pieces [`repeated`] cuts data into: those of the chunks a sample of data is
 /// made of ([`Encoder::least`]).
-const PIECE: usize = crate::aqr::SAMPLE / crate::aqr::SAMPLE_CHUNKS;
+fn piece_len() -> usize {
+    crate::aqr::SAMPLE.get() / crate::aqr::SAMPLE_CHUNKS.get()
+}
 
 /// About the fraction of `d` that repeats what comes earlier in it, from farther than a sample
 /// of it shows but within the window it is archived in: by anchors as in [`shared`], those of
@@ -142,22 +175,24 @@ const PIECE: usize = crate::aqr::SAMPLE / crate::aqr::SAMPLE_CHUNKS;
 /// the piece (a repeat within a piece, the sample shows). Nothing for data that a sample is all
 /// of. A pass over the data, at about a byte per cycle.
 pub fn repeated(d: &[u8]) -> f64 {
-    if d.len() <= crate::aqr::SAMPLE {
+    if d.len() <= crate::aqr::SAMPLE.get() {
         return 0.0;
     }
+    let (piece_len, mask) = (piece_len(), (1u64 << ANCHOR_BITS.get()) - 1);
     // (zstd's own at level 9 for data that is not long, else one of all of it)
-    let window = if d.len() > crate::aqr::LONG { 1 << crate::aqr::WINDOW_LOG_MAX } else { 4 << 20 };
+    let long = crate::aqr::LONG.get().is_some_and(|long| d.len() > long);
+    let window = if long { 1 << crate::aqr::WINDOW_LOG_MAX } else { REPEATED_WINDOW.get() };
     // each anchor with the last piece that has it
     let mut seen: HashMap<u64, usize> = HashMap::new();
     let (mut h, mut total, mut afar) = (0u64, 0usize, 0usize);
-    for (k, piece) in d.chunks(PIECE).enumerate() {
+    for (k, piece) in d.chunks(piece_len).enumerate() {
         let mut own = Vec::new();
         for &b in piece {
             h = (h << 1).wrapping_add(GEAR[b as usize]);
-            if h & 0xff == 0 {
+            if h & mask == 0 {
                 total += 1;
                 if !own.contains(&h) {
-                    afar += seen.get(&h).is_some_and(|&j| (k - j) * PIECE <= window) as usize;
+                    afar += seen.get(&h).is_some_and(|&j| (k - j) * piece_len <= window) as usize;
                     own.push(h);
                 }
             }
@@ -184,19 +219,16 @@ pub struct Held {
 const MANY: usize = usize::MAX;
 
 impl Held {
-    /// Data shorter than this is not looked for: its anchors are too few to tell.
+    /// The default of `probe:held-min`: data shorter than this is not looked for, its anchors
+    /// being too few to tell.
     pub const MIN: usize = 256 << 10;
 
-    /// Data shorter than this does not count as holding any: it has about no anchor. Shorter
-    /// data than [`Held::MIN`] does, as data looked for may be many such (the files of a tar
-    /// archive, each held by a file of its own).
-    pub const INDEX_MIN: usize = 4 << 10;
-
-    /// What `datas` hold, of those at least [`Held::INDEX_MIN`] bytes long, hashed on up to
+    /// What `datas` hold, of those at least `probe:index-min` bytes long, hashed on up to
     /// `threads` threads.
     pub fn of(datas: &[&[u8]], threads: usize) -> Held {
         let _s = aqr_common::trace::span("held");
-        let long: Vec<usize> = (0..datas.len()).filter(|&i| datas[i].len() >= Held::INDEX_MIN).collect();
+        let index_min = HELD_INDEX_MIN.get();
+        let long: Vec<usize> = (0..datas.len()).filter(|&i| datas[i].len() >= index_min).collect();
         let found = aqr_common::pool::par_map(long.len(), threads, |j| held_anchors(datas[long[j]]));
         let mut anchors: HashMap<u64, usize> = HashMap::new();
         for (&i, a) in long.iter().zip(found) {
@@ -221,7 +253,7 @@ impl Held {
     /// Whether `data` is about all held by data other than `except` (that it is part of, say):
     /// all but 1 in 100 of its distinct anchors.
     pub fn holds(&self, data: &[u8], except: Option<usize>) -> bool {
-        if data.len() < Held::MIN || self.anchors.is_empty() {
+        if data.len() < HELD_MIN.get() || self.anchors.is_empty() {
             return false;
         }
         let mut a = held_anchors(data);
@@ -237,8 +269,7 @@ impl Held {
 /// bytes (zeros, padding), sorted: data alike but for some bytes, or shifted by some
 /// (another header), has most of them in common. Of a file's start, to tell files alike.
 pub fn chunks(d: &[u8]) -> Vec<u64> {
-    const MIN: usize = 512;
-    const MAX: usize = 8 << 10;
+    let (min, max, shift) = (CHUNK_MIN.get(), CHUNK_MAX.get(), 64 - CHUNK_BITS.get());
     let mut keys = Vec::with_capacity(d.len() / 1024);
     let mut push = |c: &[u8]| {
         let mut seen = [false; 256];
@@ -251,7 +282,7 @@ pub fn chunks(d: &[u8]) -> Vec<u64> {
     for (i, &b) in d.iter().enumerate() {
         h = (h << 1).wrapping_add(GEAR[b as usize]);
         let len = i + 1 - start;
-        if (len >= MIN && h >> 53 == 0) || len >= MAX {
+        if (len >= min && h >> shift == 0) || len >= max {
             push(&d[start..=i]);
             start = i + 1;
         }
@@ -302,10 +333,11 @@ pub fn likeness(d: &[u8]) -> Likeness {
 
 /// Chains of data `likes` alike (by index), each from the first left, each data followed by the
 /// one most like it of those left (the first of those as much alike): a data like none is a
-/// chain of its own. A hash that more than `BY_LIKENESS_COMMON` data left have in a bin is not
+/// chain of its own. A hash that more than `probe:likeness-common` data left have in a bin is not
 /// counted: it tells little, and would take time as the square of the data.
 pub fn alike_chains(likes: &[Likeness]) -> Vec<Vec<usize>> {
     let n = likes.len();
+    let common = LIKENESS_COMMON.get();
     let mut having: HashMap<(usize, u64), Vec<usize>> = HashMap::new();
     for (i, l) in likes.iter().enumerate() {
         for (k, &h) in l.0.iter().enumerate().filter(|&(_, &h)| h != u64::MAX) {
@@ -327,7 +359,7 @@ pub fn alike_chains(likes: &[Likeness]) -> Vec<Vec<usize>> {
             for (k, &h) in likes[at].0.iter().enumerate().filter(|&(_, &h)| h != u64::MAX) {
                 let Some(those) = having.get_mut(&(k, h)) else { continue };
                 those.retain(|&j| left[j]);
-                if those.len() > BY_LIKENESS_COMMON {
+                if those.len() > common {
                     continue;
                 }
                 for &j in those.iter() {
@@ -348,9 +380,6 @@ pub fn alike_chains(likes: &[Likeness]) -> Vec<Vec<usize>> {
     }
     chains
 }
-
-/// See [`alike_chains`].
-const BY_LIKENESS_COMMON: usize = 1024;
 
 fn held_anchors(d: &[u8]) -> Vec<u64> {
     let (mut h, mut a) = (0u64, Vec::with_capacity(d.len() >> 12));
