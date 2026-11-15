@@ -1108,7 +1108,7 @@ mod tests {
                 vec![Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![a.clone()], len)], sums: vec![sum] }];
             let batch = w.batch(&enc, &f, &leaves).unwrap();
             w.commit(&batch);
-            out.extend_from_slice(&batch.bytes);
+            out.extend_from_slice(batch.blocks());
             contents.push(ContentAt { leaf: batch.leaf_at[0], output: 0, size: len });
             let name = format!("f{k}").into_bytes();
             t.entries.push(Entry { parent: None, name, node: EntryNode::File(k), extra: Extra::default() });
@@ -1310,7 +1310,7 @@ mod tests {
                 vec![Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![a.clone()], len)], sums: vec![None] }];
             let batch = w.batch(&enc, &f, &leaves).unwrap();
             w.commit(&batch);
-            out.extend_from_slice(&batch.bytes);
+            out.extend_from_slice(batch.blocks());
             contents.push(ContentAt { leaf: batch.leaf_at[0], output: 0, size: len });
             let name = format!("f{k}").into_bytes();
             t.entries.push(Entry {

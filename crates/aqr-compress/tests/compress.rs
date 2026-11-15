@@ -1485,9 +1485,11 @@ fn sqlite_zstd_whole() {
     let f = roundtrip(&db, &all());
     assert_eq!(modules(&f), [aqr_decompress::ZSTD_FRAMES.name]);
     // (one of plain blobs is aqr-sqlite's)
-    let plain = sqlite_db_of("create table t(a integer primary key, b blob);
+    let plain = sqlite_db_of(
+        "create table t(a integer primary key, b blob);
         with recursive n(i) as (select 1 union all select i + 1 from n where i < 300)
-        insert into t select i, randomblob(1000) from n;");
+        insert into t select i, randomblob(1000) from n;",
+    );
     assert!(!modules(&roundtrip(&plain.unwrap(), &all())).contains(&aqr_decompress::ZSTD_FRAMES.name));
 }
 

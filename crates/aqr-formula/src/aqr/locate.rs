@@ -194,7 +194,7 @@ mod tests {
         let mut out = SegmentWriter::header().to_vec();
         let b = w.batch(&enc, &f, &[Leaf { outputs: vec![s], sums: vec![None] }]).unwrap();
         w.commit(&b);
-        out.extend_from_slice(&b.bytes);
+        out.extend_from_slice(b.blocks());
         let mut t = Tree::default();
         t.entries.push(Entry { parent: None, name: b"a".to_vec(), node: EntryNode::File(0), extra: Extra::default() });
         let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: data.len() as u64 }];

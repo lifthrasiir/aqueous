@@ -195,6 +195,15 @@ impl Writer {
             WriterRepr::Stored(w, _) => w.finish(),
         }
     }
+
+    /// [`Writer::into_bytes`], but bytes of the heap left there (not copied to the store): of
+    /// bytes read soon and let go.
+    pub fn into_bytes_in_place(self) -> Bytes {
+        match self.repr {
+            WriterRepr::Heap(v) => v.into(),
+            WriterRepr::Stored(w, _) => w.finish(),
+        }
+    }
 }
 
 impl From<Writer> for Bytes {

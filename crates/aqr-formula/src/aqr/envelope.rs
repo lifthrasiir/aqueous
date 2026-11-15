@@ -884,7 +884,7 @@ mod tests {
             };
             let batch = w.batch(&enc, &f, &leaves).unwrap();
             w.commit(&batch);
-            a.extend_from_slice(&batch.bytes);
+            a.extend_from_slice(batch.blocks());
             for (i, &leaf) in batch.leaf_at.iter().enumerate() {
                 let c = contents.len();
                 contents.push(ContentAt { leaf, output: 0, size: data[k + i].len() as u64 });

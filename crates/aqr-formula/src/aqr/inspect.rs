@@ -629,7 +629,7 @@ mod tests {
                 .collect();
             let b = w.batch(&enc, &f, &leaves).unwrap();
             w.commit(&b);
-            out.extend_from_slice(&b.bytes);
+            out.extend_from_slice(b.blocks());
             let mut t = Tree::default();
             let mut contents = Vec::new();
             for (i, (name, bytes, mtime)) in files.iter().enumerate() {
@@ -703,7 +703,7 @@ mod tests {
                 files.iter().map(|b| Leaf { outputs: vec![f.push("t", b.to_vec())], sums: vec![None] }).collect();
             let b = w.batch(&enc, &f, &leaves).unwrap();
             w.commit(&b);
-            out.extend_from_slice(&b.bytes);
+            out.extend_from_slice(b.blocks());
             let mut t = Tree::default();
             for (parent, name, n) in entries {
                 let (node, mode) = match n {

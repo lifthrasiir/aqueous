@@ -22,7 +22,7 @@
 //! solid, in non-leaf blocks of at most [`Options::block`] bytes, but those that do not compress
 //! ([`aqr::Encoder::compresses`]).
 //!
-//! With [`Options::verify`], each batch is decoded alone ([`aqr::SegmentWriter::standalone`],
+//! With [`Options::verify`], each batch is decoded alone ([`aqr::Batch::standalone`],
 //! the applications' outputs taken from those evaluated beforehand, as [`crate::compress`]
 //! does) and its files compared with the input: those not given back (all of the batch's where
 //! it does not decode) are made again kept raw.
@@ -751,7 +751,7 @@ struct Writer {
     /// Whether the last batches are held back, at least [`aqr::mirror::FAR`] bytes of them, for
     /// the metadata block's mirror block to be written before them ([`Options::mirrors`]).
     hold: bool,
-    held: std::collections::VecDeque<Vec<u8>>,
+    held: std::collections::VecDeque<HeldBack>,
     held_len: usize,
     /// The contents of the segment being written (those of the same content as one before it
     /// too), where it starts, and the segments closed.
@@ -1015,11 +1015,12 @@ impl Writer {
             match self.hold {
                 false => {
                     out.write_all(self.w.pad())?;
-                    out.write_all(&made.batch.bytes)?
+                    out.write_all(made.batch.blocks())?
                 }
                 true => {
-                    self.held_len += made.batch.bytes.len();
-                    self.held.push_back(std::mem::take(&mut made.batch.bytes));
+                    let (d, r) = made.batch.take_blocks();
+                    self.held_len += r.len();
+                    self.held.push_back(HeldBack(d, r));
                     while let Some(b) = self.held.front()
                         && (self.held_len - b.len()) as u64 >= aqr::mirror::FAR
                     {
@@ -1960,7 +1961,7 @@ fn finish<S: Source + ?Sized>(
     let Analyzed { f, leaves, at, mut enc, memo } = a;
     enc.on_precompress(Some(notes.encoding(i)));
     let encoding = aqr_common::trace::span("encode");
-    let mut batch = w.batch(&enc, &f, &leaves).expect("slices within their streams");
+    let batch = w.batch(&enc, &f, &leaves).expect("slices within their streams");
     drop(encoding);
     drop(enc);
     let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
@@ -1974,11 +1975,22 @@ fn finish<S: Source + ?Sized>(
             m.whole.entry(f.len).or_default().push((k, f.hash));
         }
         let _s = aqr_common::trace::span("verify");
-        check(i, w, &mut batch, files, &at, &m, opt.threads, notes)
+        check(i, &batch, files, &at, &m, opt.threads, notes)
     } else {
         Vec::new()
     };
     Made { batch, at, files: reports, solid, sets, bad }
+}
+
+/// A batch's blocks held back ([`Writer::hold`]): its bytes, and where the blocks are in them.
+struct HeldBack(Bytes, Range<usize>);
+
+impl std::ops::Deref for HeldBack {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0[self.1.clone()]
+    }
 }
 
 /// The files of batch `b` (by index; each at its leaf and output in `at`) that its blocks, decoded
@@ -1986,19 +1998,14 @@ fn finish<S: Source + ?Sized>(
 #[allow(clippy::too_many_arguments)]
 fn check(
     i: usize,
-    w: &SegmentWriter,
-    b: &mut Batch,
+    b: &Batch,
     files: &[File],
     at: &[(usize, usize)],
     m: &verify::Cached,
     threads: usize,
     notes: &Notes,
 ) -> Vec<usize> {
-    // (the batch's bytes in the archive decoded, rather than a copy of them)
-    let c = w.take_standalone(b);
-    let bad = check_in(i, &c, b, files, at, m, threads, notes);
-    w.give_back(b, c);
-    bad
+    check_in(i, b.standalone(), b, files, at, m, threads, notes)
 }
 
 #[allow(clippy::too_many_arguments)]

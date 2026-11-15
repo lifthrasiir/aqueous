@@ -7,9 +7,11 @@
 //! Leaves that slice a stream together are laid out together, as a group: their formula
 //! blocks, then the streams any of them slices (spec, "Block order"). A stream sliced by
 //! several leaves holds them solid; the encoder is given the streams as they are, and decides
-//! nothing of what goes together. A batch is checked alone ([`SegmentWriter::standalone`])
-//! before it is written: its blocks with the module and resource blocks before them make an
-//! archive of a single file, its leaves' outputs one after another.
+//! nothing of what goes together. A batch is checked alone ([`Batch::standalone`]) before it is
+//! written: its blocks with the module and resource blocks before them make an archive of a
+//! single file, its leaves' outputs one after another. Its bytes are written as that archive
+//! from the first, in the store where one is set ([`crate::store::Writer`]), so that a batch of
+//! gigabytes is not held on the heap.
 //!
 //! The blocks of a batch alike (of a class and kind of stream) may take a dictionary trained
 //! for them ([`super::dict`]), whose block comes before all of the batch's; a batch checked
@@ -23,10 +25,10 @@ use aqr_common::varint;
 use super::dict::Candidate;
 use super::tree::{self, FileParam, Status, Tree};
 use super::{
-    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, STORED, SWAP, always_compressed, block, block_of,
+    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, Out, STORED, SWAP, always_compressed, block, block_of,
     block_ranges, checksum_of, dictionary_block, dictionary_stand_in, footer, footer_with, formula_block, key_how,
 };
-use crate::{Error, Formula, Module, Node, Resource, Result};
+use crate::{Bytes, Error, Formula, Module, Node, Resource, Result};
 
 /// The content of one or more files: outputs over the streams (and the applications of several
 /// outputs) of a formula.
@@ -114,18 +116,61 @@ pub struct SegmentWriter {
 
 /// The blocks of a batch of leaves, to write after those before ([`SegmentWriter::commit`]).
 pub struct Batch {
-    pub bytes: Vec<u8>,
+    /// The archive of a single file of the batch ([`Batch::standalone`]), its blocks from
+    /// `front` to `end`.
+    archive: Bytes,
+    front: usize,
+    end: usize,
     /// Where each leaf block is in the archive.
     pub leaf_at: Vec<usize>,
     pub layout: Layout,
-    /// The modules and resources it adds, and where their blocks are in `bytes`.
+    /// The modules and resources it adds, and where their blocks are in its blocks.
     modules: Vec<Module>,
     resources: Vec<Resource>,
     added: Vec<std::ops::Range<usize>>,
-    /// Where its dictionary blocks are in `bytes`, and the dictionary (by index in the
+    /// Where its dictionary blocks are in its blocks, and the dictionary (by index in the
     /// segment) of each leaf taking one.
     dictionaries: Vec<usize>,
     leaf_dictionary: Vec<(usize, usize)>,
+}
+
+impl Batch {
+    /// Its blocks, to write after those before.
+    pub fn blocks(&self) -> &[u8] {
+        &self.archive[self.front..self.end]
+    }
+
+    /// An archive of a single file of the batch (the blocks so far not in it but the module and
+    /// resource blocks, and stand-ins of the dictionaries): its leaves' outputs one after another.
+    pub fn standalone(&self) -> &[u8] {
+        &self.archive
+    }
+
+    /// Its bytes taken out (none left), and where its blocks are in them.
+    pub fn take_blocks(&mut self) -> (Bytes, std::ops::Range<usize>) {
+        let r = self.front..self.end;
+        (self.front, self.end) = (0, 0);
+        (std::mem::take(&mut self.archive), r)
+    }
+}
+
+/// The bytes of a batch being made, after the head of its archive alone ([`Batch::standalone`]),
+/// as [`Out`] counts them: from the first of its blocks.
+struct Blocks {
+    w: crate::store::Writer,
+    front: usize,
+    len: usize,
+}
+
+impl Out for Blocks {
+    fn put(&mut self, b: &[u8]) {
+        self.w.write(b);
+        self.len += b.len();
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
 }
 
 /// A block copied into a segment ([`SegmentWriter::copied`]).
@@ -492,8 +537,14 @@ impl SegmentWriter {
         enc.precompress(&(0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect::<Vec<_>>())?;
 
         let level = enc.base_level();
+        let mut out =
+            Blocks { w: crate::store::Writer::new(None), front: HEADER_MAGIC.len() + self.prefix.len(), len: 0 };
+        out.w.write(&HEADER_MAGIC);
+        out.w.write(&self.prefix);
         let mut b = Batch {
-            bytes: Vec::new(),
+            archive: Bytes::default(),
+            front: out.front,
+            end: 0,
             leaf_at: vec![0; leaves.len()],
             layout: Vec::new(),
             modules: Vec::new(),
@@ -506,7 +557,7 @@ impl SegmentWriter {
         // (the non-leaf blocks counted from the batch's first: only their deltas are stored)
         let mut ordinals = vec![None; f.streams.len()];
         let mut non_leaf = 0u64;
-        let out = &mut b.bytes;
+        let out = &mut out;
 
         // the dictionaries of the blocks alike, before all of the batch's blocks
         let mut whole = vec![false; f.streams.len()];
@@ -610,52 +661,17 @@ impl SegmentWriter {
             }
             non_leaf += blocks;
         }
+        b.end = b.front + out.len;
+        footer(out, b.end - HEADER_MAGIC.len());
+        // (one on the heap kept there, not copied to the store)
+        b.archive = std::mem::replace(&mut out.w, crate::store::Writer::new(Some(0))).into_bytes_in_place();
         Ok(b)
-    }
-
-    /// An archive of a single file of batch `b` (the blocks so far not in it but the module and
-    /// resource blocks): its leaves' outputs one after another.
-    pub fn standalone(&self, b: &Batch) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_MAGIC.len() + self.prefix.len() + b.bytes.len() + 32);
-        out.extend_from_slice(&HEADER_MAGIC);
-        out.extend_from_slice(&self.prefix);
-        out.extend_from_slice(&b.bytes);
-        let blocks = out.len() - HEADER_MAGIC.len();
-        footer(&mut out, blocks);
-        out
-    }
-
-    /// [`SegmentWriter::standalone`], of the bytes of `b` taken rather than copied: they are
-    /// back in `b` once the archive is given to [`SegmentWriter::give_back`].
-    pub fn take_standalone(&self, b: &mut Batch) -> Vec<u8> {
-        let front = HEADER_MAGIC.len() + self.prefix.len();
-        let mut out = std::mem::take(&mut b.bytes);
-        let n = out.len();
-        out.reserve(front + 32);
-        out.resize(n + front, 0);
-        out.copy_within(..n, front);
-        out[..HEADER_MAGIC.len()].copy_from_slice(&HEADER_MAGIC);
-        out[HEADER_MAGIC.len()..front].copy_from_slice(&self.prefix);
-        let blocks = out.len() - HEADER_MAGIC.len();
-        footer(&mut out, blocks);
-        out
-    }
-
-    /// The bytes of `b` back from `archive`, its [`SegmentWriter::take_standalone`].
-    pub fn give_back(&self, b: &mut Batch, mut archive: Vec<u8>) {
-        let front = HEADER_MAGIC.len() + self.prefix.len();
-        // (the footer's fields are as long as its last two bytes tell)
-        let fields = u16::from_le_bytes(archive[archive.len() - 2..].try_into().unwrap()) as usize;
-        let n = archive.len() - front - (FOOTER_MAGIC.len() + 4 + fields);
-        archive.copy_within(front..front + n, 0);
-        archive.truncate(n);
-        b.bytes = archive;
     }
 
     /// Takes batch `b` as written after the blocks so far.
     pub fn commit(&mut self, b: &Batch) {
         for r in &b.added {
-            self.prefix.extend_from_slice(&b.bytes[r.clone()]);
+            self.prefix.extend_from_slice(&b.blocks()[r.clone()]);
         }
         // (the added blocks in the order of their kinds, modules and resources each in order)
         let mut adds = b.added.iter();
@@ -682,7 +698,7 @@ impl SegmentWriter {
         for &(i, d) in &b.leaf_dictionary {
             self.leaf_dictionary.insert(b.leaf_at[i], d);
         }
-        self.at += b.bytes.len();
+        self.at += b.blocks().len();
         self.mirrorable += (b.layout.iter())
             .filter(|(p, _)| matches!(p, Placed::Module | Placed::Resource | Placed::Dictionary | Placed::Formula(_)))
             .map(|&(_, n)| n)
@@ -832,9 +848,10 @@ impl Encoder {
             .map(|&(l, o)| ContentAt { leaf: b.leaf_at[l], output: o, size: s.leaves[l].outputs[o].len() })
             .collect();
         let (end, metadata) = w.finish(self, s.tree, &contents)?;
+        let archive = [&HEADER_MAGIC[..], b.blocks(), &end].concat();
         let mut layout = b.layout;
         layout.push((Placed::Metadata, metadata));
-        Ok(([&HEADER_MAGIC[..], &b.bytes, &end].concat(), layout))
+        Ok((archive, layout))
     }
 
     /// The formula data of `leaf`, its streams' non-leaf blocks at `ordinals` (from `first`,
@@ -1036,16 +1053,13 @@ mod tests {
         ] {
             let mut batch = w.batch(&enc, &f, &leaves).unwrap();
             let want = if at.is_empty() { &b"zyxolleh"[..] } else { b"ollehzyx" };
-            assert_eq!(decode(&w.standalone(&batch), &natives()).unwrap(), want);
-            // (alike of the batch's bytes taken, which are given back)
-            let (bytes, alone) = (batch.bytes.clone(), w.standalone(&batch));
-            let c = w.take_standalone(&mut batch);
-            assert!(c == alone && batch.bytes.is_empty());
-            w.give_back(&mut batch, c);
-            assert!(batch.bytes == bytes);
+            assert_eq!(decode(batch.standalone(), &natives()).unwrap(), want);
             assert_eq!(batch.layout.iter().filter(|p| p.0 == Placed::Module).count(), at.is_empty() as usize);
             w.commit(&batch);
-            out.extend_from_slice(&batch.bytes);
+            // (the bytes taken out, its blocks within them)
+            let (d, r) = batch.take_blocks();
+            out.extend_from_slice(&d[r]);
+            assert!(batch.blocks().is_empty() && batch.standalone().is_empty());
             at.push(batch.leaf_at[0]);
         }
         assert_eq!(w.len(), out.len());
@@ -1077,7 +1091,7 @@ mod tests {
             }];
             let batch = w.batch(&enc, &f, &leaves).unwrap();
             w.commit(&batch);
-            out.extend_from_slice(&batch.bytes);
+            out.extend_from_slice(batch.blocks());
             contents.push(ContentAt { leaf: batch.leaf_at[0], output: 0, size: names[k].len() as u64 });
             t.entries.push(entry(None, &format!("f{k}"), EntryNode::File(k)));
         }
@@ -1163,7 +1177,7 @@ mod tests {
         let batch = w.batch(&enc, &f, &leaves).unwrap();
         assert_eq!(batch.layout.iter().filter(|p| p.0 == Placed::Module).count(), 2);
         let want = [&b"olleh"[..], b"hello", &rev, &cut, &stored].concat();
-        assert_eq!(decode(&w.standalone(&batch), &natives()).unwrap(), want);
+        assert_eq!(decode(batch.standalone(), &natives()).unwrap(), want);
         // a module's block of other bytes
         let mut other = leaves;
         other[1].outputs = vec![Node::ModuleBytes(REV, cut)];
@@ -1185,7 +1199,7 @@ mod tests {
         let want: Vec<u8> = parts.iter().flat_map(|&(s, l)| d[s as usize..][..l as usize].to_vec()).collect();
         let w = SegmentWriter::new();
         let batch = w.batch(&Encoder::new(Level::Zstd(1)), &f, &leaves).unwrap();
-        assert!(decode(&w.standalone(&batch), &natives()).unwrap() == want);
+        assert!(decode(batch.standalone(), &natives()).unwrap() == want);
     }
 
     /// A segment of two batches of many small streams alike, of text records of the same
@@ -1235,10 +1249,10 @@ mod tests {
             }
             let batch = w.batch(enc, &f, &leaves).unwrap();
             let n = want.len() - leaves.len();
-            assert_eq!(decode(&w.standalone(&batch), &natives()).unwrap(), want[n..].concat());
+            assert_eq!(decode(batch.standalone(), &natives()).unwrap(), want[n..].concat());
             dictionaries.push(batch.layout.iter().filter(|p| p.0 == Placed::Dictionary).count());
             w.commit(&batch);
-            out.extend_from_slice(&batch.bytes);
+            out.extend_from_slice(batch.blocks());
             let sizes = leaves.iter().map(|l| l.outputs[0].len());
             contents.extend(batch.leaf_at.iter().zip(sizes).map(|(&leaf, size)| ContentAt { leaf, output: 0, size }));
         }
@@ -1462,7 +1476,7 @@ mod tests {
             out.extend_from_slice(w.pad());
             let b = w.batch(&enc, &f, &[Leaf { outputs: vec![lits[k].clone()], sums: vec![None] }]).unwrap();
             w.commit(&b);
-            out.extend_from_slice(&b.bytes);
+            out.extend_from_slice(b.blocks());
             let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
             let t = Tree { root: Extra::default(), entries: vec![entry(None, names[k], EntryNode::File(0))] };
             out.extend_from_slice(&w.close_as(&enc, &t, &contents, status).unwrap());
@@ -1527,7 +1541,7 @@ mod tests {
                 Some(k) => {
                     let b = w.batch(&enc, &f, &[Leaf { outputs: vec![lits[k].clone()], sums: vec![None] }]).unwrap();
                     w.commit(&b);
-                    out.extend_from_slice(&b.bytes);
+                    out.extend_from_slice(b.blocks());
                     let t = Tree { root: Extra::default(), entries: vec![entry(None, names[k], EntryNode::File(0))] };
                     (t, vec![ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }])
                 }
@@ -1581,7 +1595,7 @@ mod tests {
         let mut out = SegmentWriter::header().to_vec();
         let b = w.batch(&enc, &f, &[Leaf { outputs: vec![a.clone()], sums: vec![None] }]).unwrap();
         w.commit(&b);
-        out.extend_from_slice(&b.bytes);
+        out.extend_from_slice(b.blocks());
         let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
         let dir = entry(None, "d", EntryNode::Dir);
         let t = Tree { root: Extra::default(), entries: vec![dir.clone(), entry(Some(0), "a", EntryNode::File(0))] };
@@ -1634,7 +1648,7 @@ mod tests {
             }
             let b = w.batch(&enc, &f, &leaves).unwrap();
             w.commit(&b);
-            out.extend_from_slice(&b.bytes);
+            out.extend_from_slice(b.blocks());
             let mut t = Tree::default();
             let mut contents = Vec::new();
             for &(parent, name, d) in entries {
@@ -1754,7 +1768,7 @@ mod tests {
             let mut out = SegmentWriter::header().to_vec();
             let b = w.batch(&enc, &f, &[Leaf { outputs: vec![s.clone()], sums: vec![None] }]).unwrap();
             w.commit(&b);
-            out.extend_from_slice(&b.bytes);
+            out.extend_from_slice(b.blocks());
             let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
             let t = Tree { root: Extra::default(), entries: vec![entry(None, "a", EntryNode::File(0))] };
             let (ended, _) = w.end(&enc, &t, &contents, Status::Complete, base).unwrap();
@@ -1823,7 +1837,7 @@ mod tests {
             let b = w.batch(&enc, &f, &leaves).unwrap();
             assert_eq!(modules(&b), 1);
             w.commit(&b);
-            out.extend_from_slice(&b.bytes);
+            out.extend_from_slice(b.blocks());
             let contents: Vec<ContentAt> = (of.iter().enumerate())
                 .map(|(j, &i)| ContentAt { leaf: b.leaf_at[j], output: 0, size: names[i].len() as u64 })
                 .collect();
@@ -1869,7 +1883,7 @@ mod tests {
                     of.iter().map(|&i| Leaf { outputs: vec![lits[i].clone()], sums: vec![None] }).collect();
                 let b = w.batch(&enc, &f, &leaves).unwrap();
                 w.commit(&b);
-                out.extend_from_slice(&b.bytes);
+                out.extend_from_slice(b.blocks());
                 let contents: Vec<ContentAt> = (of.iter().enumerate())
                     .map(|(j, &i)| ContentAt { leaf: b.leaf_at[j], output: 0, size: names[i].len() as u64 })
                     .collect();
@@ -1922,7 +1936,7 @@ mod tests {
                 [Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![lits[k].clone()], len)], sums: vec![None] }];
             let b = w.batch(enc, &f, &leaves).unwrap();
             w.commit(&b);
-            out.extend_from_slice(&b.bytes);
+            out.extend_from_slice(b.blocks());
             let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: len }];
             let t = Tree { root: Extra::default(), entries: vec![entry(None, "f", EntryNode::File(0))] };
             if k == 0 {
