@@ -13,7 +13,6 @@ crate-type = ["cdylib"]
 # (begin: layout.py)
 aqr-dll-bcj = { path = "shared/bcj" }
 aqr-dll-bz2 = { path = "shared/bz2" }
-aqr-dll-cfg-if = { path = "shared/cfg-if" }
 aqr-dll-common = { path = "shared/common" }
 aqr-dll-digest = { path = "shared/digest" }
 aqr-dll-dwarf = { path = "shared/dwarf" }

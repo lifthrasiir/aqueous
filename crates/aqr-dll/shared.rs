@@ -1,7 +1,6 @@
 // Made by layout.py: the shared libraries, linked against by every module.
 extern crate aqr_dll_bcj;
 extern crate aqr_dll_bz2;
-extern crate aqr_dll_cfg_if;
 extern crate aqr_dll_common;
 extern crate aqr_dll_digest;
 extern crate aqr_dll_dwarf;

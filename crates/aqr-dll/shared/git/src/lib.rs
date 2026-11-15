@@ -1,6 +1,5 @@
 //! Made by layout.py: aqr-git.
 
-extern crate aqr_dll_cfg_if;
 extern crate aqr_dll_common;
 extern crate aqr_dll_digest;
 extern crate aqr_dll_flate;
