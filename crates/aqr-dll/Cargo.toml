@@ -26,6 +26,7 @@ aqr-dll-jpeg = { path = "shared/jpeg" }
 aqr-dll-lzma = { path = "shared/lzma" }
 aqr-dll-lzx = { path = "shared/lzx" }
 aqr-dll-memchr = { path = "shared/memchr" }
+aqr-dll-minecraft = { path = "shared/minecraft" }
 aqr-dll-num = { path = "shared/num" }
 aqr-dll-pdb = { path = "shared/pdb" }
 aqr-dll-png = { path = "shared/png" }
@@ -39,6 +40,7 @@ aqr-dll-tex = { path = "shared/tex" }
 aqr-dll-walk = { path = "shared/walk" }
 aqr-dll-wrt = { path = "shared/wrt" }
 aqr-dll-xxhash-rust = { path = "shared/xxhash-rust" }
+aqr-dll-zstd = { path = "shared/zstd" }
 # (end: layout.py)
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
 aqr-modules = { path = "../aqr-modules" }

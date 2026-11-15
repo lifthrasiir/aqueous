@@ -479,6 +479,7 @@ dependencies = [
  "aqr-dll-lzma",
  "aqr-dll-lzx",
  "aqr-dll-memchr",
+ "aqr-dll-minecraft",
  "aqr-dll-num",
  "aqr-dll-pdb",
  "aqr-dll-png",
@@ -492,6 +493,7 @@ dependencies = [
  "aqr-dll-walk",
  "aqr-dll-wrt",
  "aqr-dll-xxhash-rust",
+ "aqr-dll-zstd",
  "aqr-dwarf",
  "aqr-exe",
  "aqr-fasta",
@@ -703,6 +705,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-dll-minecraft"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-flate",
+ "aqr-dll-rt",
+ "aqr-dll-zstd",
+ "aqr-minecraft",
+]
+
+[[package]]
 name = "aqr-dll-num"
 version = "0.1.0"
 dependencies = [
@@ -840,6 +854,16 @@ version = "0.1.0"
 dependencies = [
  "aqr-dll-rt",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aqr-dll-zstd"
+version = "0.1.0"
+dependencies = [
+ "aqr-dll-cfg-if",
+ "aqr-dll-common",
+ "aqr-dll-rt",
+ "aqr-zstd",
 ]
 
 [[package]]
