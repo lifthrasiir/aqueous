@@ -192,7 +192,11 @@ enum Verdict { Take, Close { made: usize, kept: usize }, Reject }
 
 - **`Close`의 조건:** formula가 원본보다 크지만 `kept × (1 + DEFER_SLACK)` 이하(처음엔 25%)이고, 데이터가
   `DEFER_MIN`(16 KiB) 이상이고, 배치의 미루기 예산이 남았을 때. 예산은 남겨 둔 formula 스트림의 바이트
-  합이 배치 바이트의 절반을 넘지 않는 것이다. 예산을 넘으면 지금처럼 `Reject`다.
+  합이 문맥 데이터의 두 배를 넘지 않는 것이다(`defer:budget`). 예산을 넘으면 지금처럼 `Reject`다.
+  - 처음엔 절반이었는데, formula의 스트림은 x86 분할 등으로 데이터보다 크다. WinUHA 4.0 설치본은 남긴 것이
+    파일의 1.4배여서, 절반이면 대부분이 예산에 걸려 `Reject`였다(4.178 → 4.079 MB).
+  - 안쪽 대안의 스트림은 바깥 formula로 옮겨질 뿐 복사되지 않으므로, 바깥을 남길 때는 안쪽 대안의
+    스트림을 다시 세지 않는다(`kept_bytes`).
   - `Encoder::sizes_but`(두 크기를 돌려주는 `smaller_but`; 4.2의 측정 때 만들었다가 뺐다)가 필요하다.
 - **거쳐 올라가는 길:** `smaller_as`를 거치는 네 곳(`made_alone`의 스캔 둘, `Nest::As`, `recompress_sealed`의
   끝)이 `Close`를 받으면 `Made { f, gaps, close: Some(sizes) }`로 올린다.
@@ -231,7 +235,7 @@ enum Verdict { Take, Close { made: usize, kept: usize }, Reject }
   푼다. 그러니 형제가 없는 입력에서는 지금과 같은 아카이브가 나와야 한다(회귀 시험: 바이트 비교).
 - **검증:** 남긴 formula도 만들 때 사전 검증에 넘어가 있다(`recompress_sealed`가 `nested` 전에
   제출). 고른 쪽이 무엇이든 배치 검증(`check`)이 디코딩으로 확인한다.
-- **메모리:** 남긴 formula 스트림은 예산(배치 바이트의 절반)까지다. 버려지는 쪽은 `resolve`의 `compact`에서
+- **메모리:** 남긴 formula 스트림은 예산(문맥 데이터의 두 배)까지다. 버려지는 쪽은 `resolve`의 `compact`에서
   놓인다.
 - **시간:** 그룹마다 두 경우를 한 번씩 압축한다(기본 레벨, prefix 포함). 친족 시험과 같은 규모다.
 
@@ -273,7 +277,7 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
 3. **`laid`의 묶기와 결정:** WinUHA(목표: 기본 4.1 MB 이하, -9 3.95 MB 이하. 상한은 4.017 / 3.889 MB), PAQ 48개,
    - **했음, 묶기 없이 (2026-11-15, `choose.rs`):** likeness로 묶으려면 원본 쪽 바이트가 필요한데, 그 바이트는
      평가해야 나온다. 그래서 대안마다 따로, 안쪽부터 판정한다. 각 쪽의 바이트를 class별로 모아,
-     같은 class의 배치 안 다른 스트림을 prefix로 두고(그 대안이 쓰는 바이트는 빼고, `defer:prefix` 4 MiB까지)
+     같은 class의 배치 안 다른 스트림을 prefix로 두고(그 대안이 쓰는 바이트는 빼고, `defer:prefix` 1 MiB까지; 처음엔 4 MiB)
      기본 레벨로 압축한 크기를 비교한다. 다른 대안의 formula 쪽도 prefix에 든다. 형제도 같은 길을
      택한다는 가정이다.
      - WinUHA, 기본 레벨: 대안 12개 중 6개 채택. 4,233,874 → 4,178,436 B(−1.3%), 0.30 → 0.31 s.
@@ -291,11 +295,31 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
    - **probe가 거절한 Inno 분할 (4.3.5, `exe:inno-defer`, 기본 꺼짐):** 분할은 probe보다 먼저 계산되므로,
      거절된 것도 `Undo::defer`로 코딩된 바이트 옆에 남겨 고르게 했다. 판정은 이것들을 다시
      거절해서(Beta, RC1) 크기는 같고 시간만 0.31 → 0.49 s로 늘었다.
-   - **`-Z no-smaller`와의 차이:** 이 옵션은 probe도 끄고 모두 받는다. 그때가 4,016,994 B이고, 이득은
-     Beta(−161 KB)와 RC1(−93 KB)의 분할에서 나온다(2.0a는 +73 KB). 판정은 RC1의 분할을 formula 쪽
-     1,152 KB, 원본 쪽 1,131 KB로 본다. class별로 레벨 3 압축만 보는 시험은, 분할된 데이터 안이 더
-     깊이 재압축되는 것을 보지 못한다. 메우려면 formula 쪽을 실제 크기에 가깝게 재야 한다
-     (`Encoder::sizes_but`처럼 아카이브의 레벨로, 형제와 함께).
+   - **`-Z no-smaller`와의 차이 (2026-11-15):** 이 옵션은 probe도 끄고 모두 받는다(4,016,994 B). 처음에는
+     시험이 분할을 과소평가한다고 보았으나, 대안을 모두 formula로 강제해도 4.22 MB였다. 원인은
+     대안을 남기지 못한 데 있었다.
+     - **예산:** 남긴 formula 스트림을 문맥 데이터의 절반까지로 묶었는데, formula의 스트림은 데이터보다
+       크다(x86 분할 등; 4.0 설치본은 1.4배). 그래서 Inno 안쪽의 PE 파일들이 예산에 걸려 `Reject`였다.
+       두 배로 올리고(`defer:budget`), 안쪽 대안의 스트림을 바깥에서 다시 세지 않게 했다.
+       WinUHA 4,178,418 → 4,078,930 B. -9는 4,134,982 B 그대로다.
+     - **스트림을 가진 내용의 대안:** `make_later`는 스트림 전체인 내용의 formula를 가져간 바이트에서
+       잘라 내면서(`cut`) `close`를 버렸다. 그러면 원본 쪽이 부모가 둔 class(`zip/png`)가 아니라 스캔의
+       `raw` 틈이 된다. 크기도, 아카이브에서 놓이는 자리도 거절했을 때와 달라진다. `10gb/progs`의
+       `lyt-bluelinesgrad.otp` 안 PNG가 그랬다. 이 ZIP 파일은 거절되던 것이 채택되어 124 KB가 커졌다.
+       그래서 모두 원본으로 골라도(`defer:choose=kept`) 대안이 없을 때와 같지 않았다(182,931,669 대
+       182,808,039 B). 이제 `close`인 내용은 자르지 않고 바이트를 제 스트림에 되돌린다(182,809,249 B).
+     - **스캔이 찾은 파일이 모두 대안일 때:** 그 스캔은 원본과 비교하지 않고 통째로 남긴다(`scanned`).
+       원본을 고르면 데이터 그대로이기 때문이다. 비교하면 몇 바이트 차이로 채택되고, 그러면 원본 쪽이
+       스캔의 `raw` 틈이 된다.
+     - **시험의 메모리와 시간:** 모든 대안의 데이터와 prefix를 한꺼번에 만들어 두던 것을, 작업마다
+       시험할 때 만들게 했다(`progs` 힙 최고치 3.48 → 1.51 GB). prefix는 필요한 끝만 복사한다. 대안의
+       두 쪽은 class마다 prefix를 하나로 같이 쓴다. prefix가 4 MiB일 때 시험이 쓰는 시간 대부분은
+       spill된 스트림에서 prefix를 복사하는 데 들었다. 1 MiB로도 WinUHA와 `progs`의 결과가 바이트까지
+       같아서 기본을 1 MiB로 줄였다.
+     - **결과:** WinUHA 기본 4,078,930 B(목표 4.1 MB 달성). `10gb/progs` 182,808,039 → 182,700,885 B
+       (−107 KB). 시간은 아래 커밋 메시지에 적었다.
+     - **남은 몫:** WinUHA 4.079 → 4.017 MB. 아직 보지 않았다. 대안을 둘 수 없는 문맥에서 거절된 것들과
+       probe의 거절이 후보다.
    `10gb/progs`, `10gb/2011`에서 크기, 시간, 힙 최고치를 잰다.
 4. **probe의 거절 (4.3.5)과 공유 지도 (4.2):** 3의 결과를 본 뒤 정한다.
 
@@ -358,9 +382,9 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
 | `kin:level=N` | 3 | aqr-formula `KIN_LEVEL` | 레벨 1이면 이득의 절반만 잡혔다 |
 | `defer:slack=X`, `defer:no-slack` | 0.25 | lib.rs `verdict_as`의 `Close` 조건 | no-slack이면 아무것도 남기지 않는다(이전 동작) |
 | `defer:min=SIZE` | 16K | 같은 곳 | |
-| `defer:share=N` | 2 | `Cx::defer_budget` | 한 문맥의 데이터 중 1/N까지 |
+| `defer:budget=X` | 2 | `Cx::defer_budget` | 남긴 formula 스트림이 한 문맥 데이터의 X배까지 |
 | `defer:choose=trial\|made\|kept` | trial | choose.rs | made/kept는 측정용 강제(kept면 2단계와 같다) |
-| `defer:prefix=SIZE` | 4M | choose.rs `prefix` | 한 class의 나머지를 둘 prefix 한도 |
+| `defer:prefix=SIZE` | 1M | choose.rs `prefix` | 한 class의 나머지를 둘 prefix 한도(4M과 결과가 같고 더 빠르다) |
 | `defer:rounds=N` | 4 | choose.rs `trial` | 결정을 다시 하는 회수의 한도 |
 | `exe:[no-]inno-defer` | off | exe.rs `pe` | probe가 거절한 Inno 분할도 남겨 고르기 |
 

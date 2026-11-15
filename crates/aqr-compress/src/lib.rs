@@ -614,7 +614,7 @@ impl Cx {
             defer_for: Cell::new(None),
             closed: Cell::new(None),
             kept_beside: Cell::new(0),
-            defer_budget: n / DEFER_SHARE.get().max(1),
+            defer_budget: (n as f64 * DEFER_BUDGET.get().max(0.0)) as usize,
         }
     }
 
@@ -1439,14 +1439,30 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
 
 /// The formula of a scan of `d` where it is [`smaller`] (its alternatives sized with their data
 /// kept); else, where files it found were kept beside their data ([`find`]), all of it kept
-/// beside the data ([`Made::close`]), for the batch to choose where nothing else takes `d`.
+/// beside the data ([`Made::close`]), for the batch to choose where nothing else takes `d`. So is
+/// one whose files were all kept beside their data, not compared: with them all kept it is the
+/// data, which would otherwise be taken or not by a byte, and where taken be the scan's data
+/// between files (of its class `raw`), not the data as its parent keeps it (10gb/progs: a PNG in
+/// a ZIP file, in `zip/png` as it was turned down, its ZIP file taken then, 124 KB more).
 fn scanned(m: Option<Made>, d: &[u8], opt: &Options, cx: &Cx) -> (Option<Made>, Option<Made>) {
     let Some(m) = m else { return (None, None) };
-    if smaller(&m.f, m.gaps.as_deref(), d, opt, cx) {
+    let only_kept = !m.f.eithers().is_empty() && slices_only(&m.f.chosen(false), 0);
+    if !only_kept && smaller(&m.f, m.gaps.as_deref(), d, opt, cx) {
         return (Some(m), None);
     }
     let close = (cx.defers.get() && !m.f.eithers().is_empty()).then(|| Made { close: Some((0, d.len())), ..m });
     (None, close)
+}
+
+/// Whether formula `f` is slices of stream `s` only.
+fn slices_only(f: &Formula, s: usize) -> bool {
+    let mut only = f.shared.is_empty();
+    f.root.visit(&mut |n| match n {
+        &Node::Slice { stream, .. } => only &= stream == s,
+        Node::Concat(_) => {}
+        _ => only = false,
+    });
+    only
 }
 
 /// `d`, data in which a scan finds no file, as its tables of records and chains of entries
@@ -2148,9 +2164,11 @@ aqr_common::zopt! {
         Opt::value("defer:slack", Some(0.25), "keep a formula beside its data where it is up to this share larger").off(None);
     /// Data shorter than this is not kept beside its formula ([`Verdict::Close`]).
     static DEFER_MIN: Opt<usize> = Opt::size("defer:min", 16 << 10, "data shorter is not kept beside its formula");
-    /// Of the data of a context, at most a share of `1 / N` of formulas kept beside their data
-    /// ([`Cx::defer_budget`]).
-    static DEFER_SHARE: Opt<usize> = Opt::value("defer:share", 2, "formulas kept beside their data take at most 1/N of a context's data");
+    /// The bytes of formulas kept beside their data, of a context, at most this many times its
+    /// data ([`Cx::defer_budget`]): a formula's streams come to more than its data (WinUHA's
+    /// 4.0 installers', 1.4 times what each is).
+    static DEFER_BUDGET: Opt<f64> =
+        Opt::value("defer:budget", 2.0, "formulas kept beside their data take at most this many times a context's data");
 }
 
 /// [`smaller_as`] as a [`Verdict`]. A formula holding alternatives ([`Node::Either`]) is sized with
@@ -2219,7 +2237,7 @@ fn verdict_as(
             let apart = f.streams.iter().any(|s| s.data.sunk_in().is_some() || s.data.is_lazy());
             let slack = DEFER_SLACK.get().filter(|_| defer && !apart && d.len() >= DEFER_MIN.get());
             if n >= raw && slack.is_some_and(|slack| n as f64 <= raw as f64 * (1.0 + slack)) {
-                let bytes: usize = f.streams.iter().map(|s| s.data.len()).sum();
+                let bytes = kept_bytes(given);
                 if cx.kept_beside.get() + bytes <= cx.defer_budget {
                     cx.kept_beside.set(cx.kept_beside.get() + bytes);
                     return Verdict::Close((n, raw));
@@ -2235,6 +2253,25 @@ fn verdict_as(
         }
     }
     if smaller { Verdict::Take } else { Verdict::Reject }
+}
+
+/// The bytes that keeping formula `f` beside its data holds ([`Cx::defer_budget`]): of its streams,
+/// but those of its alternatives (either side), counted as they were kept (a content's streams are
+/// moved into its parent's formula, not copied).
+fn kept_bytes(f: &Formula) -> usize {
+    let mut within = vec![false; f.streams.len()];
+    for (_, e) in f.eithers() {
+        for side in [&e.kept, &e.made] {
+            side.visit(&mut |n| {
+                if let &Node::Slice { stream, .. } = n
+                    && let Some(w) = within.get_mut(stream)
+                {
+                    *w = true;
+                }
+            });
+        }
+    }
+    f.streams.iter().zip(within).filter(|(_, w)| !w).map(|(s, _)| s.data.len()).sum()
 }
 
 #[cfg(not(aqr_dist))]
@@ -2842,9 +2879,10 @@ fn make_later(
             );
             return (None, None, own.deferred.into_inner(), own.coded_held.into_inner(), None);
         }
-        // (cut out of the bytes taken, which are let go of; put back where it takes no place)
+        // (cut out of the bytes taken, which are let go of; put back where it takes no place, or
+        // is kept beside them: they are its data as it is, of their class, [`place_slices`])
         let back = match mine {
-            Some(mine) if child.is_some() => {
+            Some(mine) if child.as_ref().is_some_and(|c| c.close.is_none()) => {
                 child = child.map(|c| Made::from(c.cut(&mine)));
                 None
             }
@@ -3719,6 +3757,39 @@ mod tests {
         let ids: Vec<usize> = text.lines().map(|l| l[..8].parse().unwrap()).collect();
         assert!(ids.windows(2).all(|w| w[0] < w[1]));
         assert!(ids.iter().any(|&i| (140_000..160_000).contains(&i)));
+    }
+
+    /// A formula kept beside its data holds its streams but those of the alternatives within it,
+    /// held already as they were kept.
+    #[test]
+    fn kept_bytes_but_alternatives() {
+        let mut f = Formula::default();
+        let (raw, made, own) = (f.push("raw", vec![0; 100]), f.push("x", vec![1; 300]), f.push("y", vec![2; 50]));
+        let either = Node::Either(Box::new(aqr_formula::Either { kept: raw, made, len: 100, sizes: (0, 0) }));
+        f.root = Node::concat([either, own]);
+        assert_eq!(kept_bytes(&f), 50);
+        f.root = Node::concat([Node::slice(0, 0, 100), Node::slice(1, 0, 300)]);
+        assert_eq!(kept_bytes(&f), 450);
+    }
+
+    /// A scan whose files were all kept beside their data is not compared with the data (which
+    /// it is, with them kept): it is kept beside it in turn, so that its parent keeps the data as
+    /// it would have, had the files been turned down.
+    #[test]
+    fn scan_of_kept_files_kept() {
+        let d = aqr_common::rng::Rng::new(7).bytes(100_000);
+        let mut f = Formula::default();
+        let raw = f.push("raw", d.clone());
+        let made = f.push("x", d.clone());
+        f.root = Node::Either(Box::new(aqr_formula::Either { kept: raw, made, len: d.len() as u64, sizes: (0, 0) }));
+        let m = Made { f, gaps: Some(vec![0..d.len()]), close: None };
+        // (none compared: a scan would be taken whatever its size)
+        let opt = Options { smaller: false, ..Options::default() };
+        let cx = Cx::new(&d, &opt);
+        cx.defers.set(true);
+        let (taken, close) = scanned(Some(m), &d, &opt, &cx);
+        assert!(taken.is_none());
+        assert_eq!(close.and_then(|c| c.close), Some((0, d.len())));
     }
 
     thread_local! {
@@ -4634,6 +4705,34 @@ mod tests {
             out.extend_from_slice(&aqr_common::crc32::hash(&out[start..]).to_be_bytes());
         }
         out
+    }
+
+    /// A content that is all of its stream, whose formula is kept beside its data, keeps that
+    /// stream (of the class its parent gave it) as the data: not the data between the files a scan
+    /// of it found, of the scan's class (10gb/progs: a PNG file in a ZIP file, whose ZIP file's
+    /// formula was then taken, alike to raw files that compress better along with it).
+    #[test]
+    fn content_kept_beside_in_its_stream() {
+        let (_slack, _min) = (DEFER_SLACK.set_here(Some(100.0)), DEFER_MIN.set_here(1 << 10));
+        let png = variant(200, 150, Some((0, 0, 200, 150)));
+        let text = babble(2000);
+        let zip = stored_zip(&[("a.png", &png), ("b.txt", &text)]);
+        let opt = Options { level: Level::Of(9), threads: 1, ..Options::default() };
+        let cx = Cx::new(&zip, &opt);
+        let m = made_deferring(&zip, &opt, 0, Nest::Exact, &cx).expect("a formula");
+        let f = m.f;
+        // (the PNG file's formula loses to its data, by its module: kept beside it, outermost;
+        // within it, the scan's)
+        let eithers = f.eithers();
+        let outer = eithers.iter().filter(|(_, e)| e.len == png.len() as u64).min_by_key(|e| e.0);
+        let (_, e) = outer.expect("the PNG file kept beside its formula");
+        let mut classes = Vec::new();
+        e.kept.visit(&mut |n| {
+            if let &Node::Slice { stream, .. } = n {
+                classes.push(&f.streams[stream].class[..]);
+            }
+        });
+        assert_eq!(classes, ["zip/png"]);
     }
 
     /// The PNG files of a set are coded alone only where they have no parent: the others are

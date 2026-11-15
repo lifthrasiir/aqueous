@@ -1771,18 +1771,26 @@ impl Encoder {
         trials.into_iter().collect()
     }
 
-    /// Of each pair of data and prefix, what the data archives in at the base level after the
-    /// prefix (a raw prefix, as where they are one after another in a stream): its bytes where it
+    /// Of `n` trials, each of data (one or more) after a prefix, made by `of` as they are tried
+    /// (so that only those being tried are held), what each data archives in at the base level
+    /// after the prefix (a raw prefix, as where they are one after another in a stream): its bytes where it
     /// does not compress by 1/32 (stored). On up to the encoder's threads. To choose between
     /// alternatives of a batch's formula as they would be archived along with the rest.
-    pub fn len_after_each(&self, pairs: &[(&[u8], &[u8])]) -> Result<Vec<usize>> {
+    pub fn len_after_each(
+        &self,
+        n: usize,
+        of: impl Fn(usize) -> (Vec<Vec<u8>>, Vec<u8>) + Sync,
+    ) -> Result<Vec<Vec<usize>>> {
         let (level, stored) = (BASE_LEVEL.get(), self.level == Level::STORED);
-        let lens = aqr_common::pool::par_map(pairs.len(), self.threads, |i| -> Result<usize> {
-            let (d, prefix) = pairs[i];
-            if stored || d.is_empty() {
-                return Ok(d.len());
-            }
-            Ok(after_prefix_len(d, prefix, level)?.filter(|&n| saves(n, d.len())).unwrap_or(d.len()))
+        let lens = aqr_common::pool::par_map(n, self.threads, |i| -> Result<Vec<usize>> {
+            let (pieces, prefix) = of(i);
+            pieces
+                .iter()
+                .map(|d| match stored || d.is_empty() {
+                    true => Ok(d.len()),
+                    false => Ok(after_prefix_len(d, &prefix, level)?.filter(|&n| saves(n, d.len())).unwrap_or(d.len())),
+                })
+                .collect()
         });
         lens.into_iter().collect()
     }

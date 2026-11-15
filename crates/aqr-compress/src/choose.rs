@@ -17,7 +17,7 @@ aqr_common::zopt! {
     static CHOOSE: Opt<&'static str> =
         Opt::value("defer:choose", "trial", "how a batch's alternatives are chosen").choices(&["trial", "made", "kept"]);
     /// The most bytes of a class's other streams put before an alternative's bytes of the class.
-    static PREFIX: Opt<usize> = Opt::size("defer:prefix", 4 << 20, "bytes of the rest of a class put before an alternative's at most");
+    static PREFIX: Opt<usize> = Opt::size("defer:prefix", 1 << 20, "bytes of the rest of a class put before an alternative's at most");
     /// The most rounds of choosing, each after the others as the round before chose them.
     static ROUNDS: Opt<usize> = Opt::value("defer:rounds", 4, "rounds of choosing the alternatives, each after the last's choices");
 }
@@ -66,34 +66,48 @@ fn trial(f: &Formula, eithers: &[(usize, &Either)], enc: &Encoder) -> Vec<bool> 
     let deepest = eithers.iter().map(|e| e.0).max().unwrap_or(0);
     let used: Vec<HashMap<usize, Vec<(usize, usize)>>> =
         eithers.iter().map(|e| used_ranges(f, &e.1.kept, &e.1.made)).collect();
+    let streams: Vec<(&str, &[u8])> = f.streams.iter().map(|s| (&s.class[..], &s.data[..])).collect();
     let mut made = vec![false; eithers.len()];
     for _ in 0..ROUNDS.get() {
         let live = live_streams(f, &index, &made);
+        let mut by_class: HashMap<&str, Vec<usize>> = HashMap::new();
+        (0..streams.len()).filter(|&s| live[s]).for_each(|s| by_class.entry(streams[s].0).or_default().push(s));
         let mut next = made.clone();
         for depth in (0..=deepest).rev() {
             let at: Vec<usize> = (0..eithers.len()).filter(|&i| eithers[i].0 == depth).collect();
-            // of each, both ways: its pieces of each class, and the prefixes of the rest of
-            // the classes; tried all at once
-            let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-            let mut of: Vec<[Vec<usize>; 2]> = Vec::new();
+            // of each, both ways: its pieces of each class, after the prefix of the rest of the
+            // class (one for both); tried all at once, each made as it is tried
+            let mut jobs: Vec<(&str, usize, [Vec<&[u8]>; 2])> = Vec::new();
             for &i in &at {
                 let e = eithers[i].1;
-                let mut sides: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+                let mut by: HashMap<&str, [Vec<&[u8]>; 2]> = HashMap::new();
                 for (side, node) in [&e.kept, &e.made].into_iter().enumerate() {
                     let mut pieces = ByClass::new();
                     pieces_of(f, node, &index, &next, &mut pieces);
                     for (class, pieces) in pieces {
-                        sides[side].push(pairs.len());
-                        pairs.push((pieces.concat(), prefix(f, class, &used[i], &live)));
+                        by.entry(class).or_default()[side] = pieces;
                     }
                 }
-                of.push(sides);
+                // (in an order of their own, not the map's)
+                let mut by: Vec<_> = by.into_iter().collect();
+                by.sort_unstable_by_key(|b| b.0);
+                jobs.extend(by.into_iter().map(|(class, sides)| (class, i, sides)));
             }
-            let refs: Vec<(&[u8], &[u8])> = pairs.iter().map(|(d, p)| (&d[..], &p[..])).collect();
-            let lens = enc.len_after_each(&refs).expect("zstd");
-            for (k, &i) in at.iter().enumerate() {
-                let cost = |side: usize| of[k][side].iter().map(|&p| lens[p]).sum::<usize>();
-                next[i] = cost(1) < cost(0);
+            let lens = enc
+                .len_after_each(jobs.len(), |j| {
+                    let (class, i, sides) = &jobs[j];
+                    let of = by_class.get(class).map_or(&[][..], |v| &v[..]);
+                    (sides.iter().map(|p| p.concat()).collect(), prefix(&streams, of, &used[*i]))
+                })
+                .expect("zstd");
+            let mut cost: HashMap<usize, [usize; 2]> = HashMap::new();
+            for ((_, i, _), lens) in jobs.iter().zip(lens) {
+                let c = cost.entry(*i).or_default();
+                (c[0], c[1]) = (c[0] + lens[0], c[1] + lens[1]);
+            }
+            for &i in &at {
+                let c = cost.get(&i).copied().unwrap_or_default();
+                next[i] = c[1] < c[0];
             }
         }
         if next == made {
@@ -171,40 +185,46 @@ fn used_ranges(f: &Formula, kept: &Node, made: &Node) -> HashMap<usize, Vec<(usi
     used
 }
 
-/// What comes before an alternative's bytes of `class` in the archive: the bytes of the other
-/// streams of the class that are `live` (as the others are chosen; those nearest the
-/// alternative's first stream first, the nearest last), but those the alternative takes, up to
-/// [`PREFIX`] bytes.
-fn prefix(f: &Formula, class: &str, used: &HashMap<usize, Vec<(usize, usize)>>, live: &[bool]) -> Vec<u8> {
+/// What comes before an alternative's bytes of a class in the archive: the bytes of `of`, the
+/// streams of the class that are live (as the others are chosen; of `streams`, the formula's,
+/// their class and data), those nearest the alternative's first stream first, the nearest last,
+/// but those the alternative takes, up to [`PREFIX`] bytes: of each, only the end that fits.
+fn prefix(streams: &[(&str, &[u8])], of: &[usize], used: &HashMap<usize, Vec<(usize, usize)>>) -> Vec<u8> {
     let first = used.keys().copied().min().unwrap_or(0);
-    let mut streams: Vec<usize> = (0..f.streams.len()).filter(|&s| live[s] && f.streams[s].class == class).collect();
-    streams.sort_by_key(|&s| s.abs_diff(first));
+    let mut of = of.to_vec();
+    of.sort_by_key(|&s| s.abs_diff(first));
     let mut room = PREFIX.get();
-    let mut parts: Vec<Vec<u8>> = Vec::new();
-    for s in streams {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for s in of {
         if room == 0 {
             break;
         }
-        let d = &f.streams[s].data[..];
-        // (the stream but for what the alternative takes of it)
+        let d = streams[s].1;
+        // (the stream but for what the alternative takes of it, from its end)
         let mut cuts = used.get(&s).cloned().unwrap_or_default();
         cuts.sort_unstable();
-        let mut rest = Vec::new();
+        let mut rest: Vec<(usize, usize)> = Vec::new();
         let mut at = 0;
         for (a, b) in cuts {
             if a > at {
-                rest.extend_from_slice(&d[at..a.min(d.len())]);
+                rest.push((at, a.min(d.len())));
             }
             at = at.max(b);
         }
         if at < d.len() {
-            rest.extend_from_slice(&d[at..]);
+            rest.push((at, d.len()));
         }
-        let n = rest.len().min(room);
-        room -= n;
-        parts.push(rest[rest.len() - n..].to_vec());
+        for &(a, b) in rest.iter().rev() {
+            if room == 0 {
+                break;
+            }
+            let n = (b - a).min(room);
+            room -= n;
+            parts.push(&d[b - n..b]);
+        }
     }
-    parts.into_iter().rev().flatten().collect()
+    // (pieces from the end back, the nearest streams' first: all in order once turned around)
+    parts.into_iter().rev().flatten().copied().collect()
 }
 
 #[cfg(test)]
