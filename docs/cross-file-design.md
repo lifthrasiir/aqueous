@@ -146,16 +146,113 @@
 
 ### 4.3 배치 단위 재판정 (지점 a, b, 그리고 파일째 원본)
 
-판단은 지금처럼 하되, 공유 지도상 공유가 있는 항목은 **두 형태를 모두 남긴다**(받은 formula와 원본
-슬라이스). `laid`에서 kin 그룹 단위로 어느 쪽이 작은지 정한다.
+판단은 지금처럼 하되, 아깝게 진 항목은 **두 형태를 모두 남긴다**(만든 formula와 원본 슬라이스).
+배치가 다 만들어진 뒤 `laid`에서 친족 묶음 단위로 어느 쪽이 작은지 실제 압축으로 정한다.
 
-- **장점:** 추정이 아니라 실제 크기로 정한다. 공유가 부분적이거나 앵커가 오판해도 손해가 없다.
-- **비용:** 그룹마다 압축을 두 번 한다(또는 샘플로). 남겨 두는 메모리도 든다. 그룹이 클 때 조합이
-  폭발하지 않게, 그룹 안의 항목을 모두 받거나 모두 버리는 둘 중 하나로 한정한다.
-- **RC1 경우의 국소 수정 (공유와 무관, 먼저 할 수 있음):** 코딩된 스트림을 풀었는데 그 데이터의 재압축이
-  버려지면, 푼 것을 되돌려 원래 스트림을 둔다. 지금은 풀린 데이터가 원본보다 큰 채로 남아 파일째 원본이 된다.
-  - Inno의 `Arch::Inno`처럼 분할 결과를 콘텐츠로 넣는 곳 모두에 해당한다.
-  - `smaller`의 거절이 부모 formula까지 전해지는 길(`made`가 `None`을 돌려줄 때)에서 처리한다.
+- **RC1 경우의 국소 수정 (공유와 무관):** 했다(§5의 1). 코딩된 스트림을 풀었는데 그 데이터의 재압축이
+  버려지면, 푼 것을 되돌려 원래 스트림을 둔다.
+
+#### 4.3.1 표현: `Node::Either`
+
+aqr-formula에 메모리 안에서만 쓰는 노드를 더한다.
+
+```rust
+/// Either of two nodes of the same output, chosen before the formula is archived
+/// (`Formula::resolve`): what aqr-compress keeps where a formula lost to its data as it is by
+/// little, to choose with the batch.
+pub struct Either {
+    pub kept: Node,   // the data as it is: the slice the parent had
+    pub made: Node,   // the formula made of it, embedded (its streams the formula's)
+    pub len: u64,
+    pub sizes: (usize, usize), // what `made` and `kept` archived in alone (smaller_as's)
+}
+Node::Either(Box<Either>)
+```
+
+- **대안 표현을 노드로 하는 이유:** 대안을 곁의 표(side table)에 두면, 스트림을 합치고(`merge_classes`,
+  `compact`, `embed`, `place`) 번호를 다시 매길 때마다 표를 따로 고쳐야 한다. 노드 안에 두면 이 일들이
+  양쪽을 다 지나가므로 저절로 맞는다.
+- **빠짐없는 매치:** `Node`를 빠짐없이 매치하는 곳은 aqr-formula에 약 20곳, aqr-compress에 6곳이다.
+  - `visit`, `map_slices`, `slices_mut`: 양쪽을 다 지난다.
+  - `len`: `len`.
+  - `description_bound`: 두 쪽 중 큰 것.
+  - `applies`: 양쪽.
+- **풀기:** `Formula::resolve(&mut self, choose: impl FnMut(&Either) -> bool)`가 각 `Either`를 한쪽으로
+  바꾸고 `compact`한다(버려진 쪽의 스트림이 빠진다). 안쪽부터(안에 든 `Either`가 먼저) 고른다.
+- **밖으로 새지 않게:** 인코더(`aqr::encode`, `Batch`), 평가(`eval`), 사전 검증은 `Either`를 만나면
+  오류다(`"unresolved alternative"`). `laid` 밖으로 나가는 formula에는 남지 않는다.
+
+#### 4.3.2 남기는 곳: `smaller_as`의 판정 셋
+
+`smaller_as`가 bool 대신 판정을 돌려준다.
+
+```rust
+enum Verdict { Take, Close { made: usize, kept: usize }, Reject }
+```
+
+- **`Close`의 조건:** formula가 원본보다 크지만 `kept × (1 + DEFER_SLACK)` 이하(처음엔 25%)이고, 데이터가
+  `DEFER_MIN`(16 KiB) 이상이고, 배치의 미루기 예산이 남았을 때. 예산은 남겨 둔 formula 스트림의 바이트
+  합이 배치 바이트의 절반을 넘지 않는 것이다. 예산을 넘으면 지금처럼 `Reject`다.
+  - `Encoder::sizes_but`(두 크기를 돌려주는 `smaller_but`; 4.2의 측정 때 만들었다가 뺐다)가 필요하다.
+- **거쳐 올라가는 길:** `smaller_as`를 거치는 네 곳(`made_alone`의 스캔 둘, `Nest::As`, `recompress_sealed`의
+  끝)이 `Close`를 받으면 `Made { f, gaps, close: Some(sizes) }`로 올린다.
+- **감싸는 곳:** 부모의 `place`/`place_slices`가 `close`가 있는 자식을 그 슬라이스 대신
+  `Either { kept: 슬라이스, made: 자식의 root(embed), .. }`로 감싼다.
+- **위쪽 파일:** 배치의 파일(분석의 `nested`)도 같은 길로 감싼다(RC1처럼 파일째 원본이 되는 경우).
+- **바깥의 판정:** 부모 자신의 `smaller_as`는 안의 `Either`를 `made` 쪽으로 보고 잰다. 형제가 같은 길을
+  택한다는 가정이다. 둘 중 하나로 고정하지 않으면 바깥이 안을 이유로 지기 때문이다(4.2 측정의 비단조성).
+  바깥도 `Close`면 바깥 `Either` 안에 안쪽 `Either`가 남는다.
+- **곁에 딸린 상태:** `enc.forget(d)`, `note_held`는 `Take`에서만 한다. `Close`는 둘 다 남는다.
+
+#### 4.3.3 묶음과 결정: `laid`의 첫 단계
+
+`laid`에서 강등과 친족 판정, `merge_classes_within`보다 먼저 한다.
+
+1. **모으기:** formula의 `Either`를 깊이와 함께 모은다(안쪽이 깊다). 각각의 `kept` 데이터(원본 바이트)로
+   `probe::likeness`(MinHash, 512 B)를 구한다.
+2. **묶기:** 같은 깊이 안에서 likeness가 `GROUP_LIKENESS`(처음엔 16/64칸) 이상 같은 것끼리 묶는다
+   (union-find). 같은 형식이라는 조건도 둔다(자식 formula의 첫 모듈). 혼자인 `Either`도 그룹 하나다.
+   이미 `Take`된 형제는 그룹에 넣지 않지만, 다음 단계의 prefix가 된다.
+3. **결정 (안쪽 깊이부터):** 그룹마다 "모두 `made`"와 "모두 `kept`" 두 경우의 압축 크기를 비교한다.
+   - **스트림:** 그 경우에 생기는 스트림을 class·kind별로 이어 붙인 것이다. `made`면 formula의 스트림,
+     `kept`면 원본 바이트이고 그 class는 부모 스트림의 것이다.
+   - **크기:** 각 class 묶음을 기본 레벨로 압축한 크기다. 앞에 같은 class의 그룹 밖 스트림 샘플(친족
+     prefix, `KIN_PREFIX`까지)을 둔다. 친족 시험(`after_prefix_len`)과 같은 방식이다.
+   - **설명 비용:** 두 경우의 `description_bound` 차이를 더한다.
+   - 작은 쪽을 고른다. 같으면 `kept`다.
+   - 그룹이 `GROUP_BYTES`(처음엔 64 MiB)를 넘으면 샘플로 잰다(`sampled`).
+4. **풀기:** `Formula::resolve`로 고른 쪽만 남긴다. 이후 단계(강등, 친족, 합치기)는 지금과 같다.
+
+#### 4.3.4 성질
+
+- **결정성:** 모으기, 묶기, 결정이 모두 `laid`에서 formula의 순서로 이뤄진다. 스레드 수와 무관하다.
+  시험은 병렬로 해도 결과가 각자 독립이다.
+- **공유가 없을 때:** 혼자인 그룹은 "따로 잰 크기"(`sizes`)로 이미 `kept`가 이긴다. 시험 없이 `kept`로
+  푼다. 그러니 형제가 없는 입력에서는 지금과 같은 아카이브가 나와야 한다(회귀 시험: 바이트 비교).
+- **검증:** 남긴 formula도 만들 때 사전 검증에 넘어가 있다(`recompress_sealed`가 `nested` 전에
+  제출). 고른 쪽이 무엇이든 배치 검증(`check`)이 디코딩으로 확인한다.
+- **메모리:** 남긴 formula 스트림은 예산(배치 바이트의 절반)까지다. 버려지는 쪽은 `resolve`의 `compact`에서
+  놓인다.
+- **시간:** 그룹마다 두 경우를 한 번씩 압축한다(기본 레벨, prefix 포함). 친족 시험과 같은 규모다.
+
+#### 4.3.5 probe의 거절 (나중)
+
+probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지 않으니 남길 것도 없다. WinUHA
+기본 레벨에서 이 몫은 약 88 KB다(probe까지 강제: 4,016,994 B, `smaller`만 강제: 4,104,754 B).
+
+- **나중에 할 일:** probe가 "거의 이긴다" 쪽이면 만들어서 `Close`로 남기는 길을 연다. 만드는 비용(LZMA 분할
+  등)이 크니, 배치 안에 그 데이터의 친족이 있을 때로 한정한다. 친족이 있는지는 4.2의 공유 지도(예비 해제)가
+  답한다. 이때 4.2가 필요해진다.
+
+#### 4.3.6 단계
+
+1. **aqr-formula:** `Node::Either`, `resolve`, 인코더와 평가의 거절, 단위 시험.
+2. **aqr-compress, 남기기만:** `Verdict`, `Made::close`, `place`의 감싸기, 예산. 결정은 모두 `kept`로 둔다.
+   - 회귀: 10gb 일부와 WinUHA에서 아카이브가 바이트까지 같은지 본다.
+   - 남긴 개수, 바이트, 메모리를 `--stats`에 보인다.
+3. **`laid`의 묶기와 결정:** WinUHA(목표: 기본 4.1 MB 이하, -9 3.95 MB 이하. 상한은 4.017 / 3.889 MB), PAQ 48개,
+   `10gb/progs`, `10gb/2011`에서 크기, 시간, 힙 최고치를 잰다.
+4. **probe의 거절 (4.3.5)과 공유 지도 (4.2):** 3의 결과를 본 뒤 정한다.
 
 ## 5. 제안: 단계적 하이브리드
 
@@ -172,8 +269,9 @@
 3. **친족 (4.1):** 했다(압축 시험으로; 위 4.1의 측정). 원래 적은 계획은 다음과 같았다.
    **친족 태그 (4.1):** `laid`에서 지도로 kin 그룹을 정하고, 강등 예외와 `merge_plan`의 그룹 키에 쓴다.
    2와 3은 함께 있어야 효과가 난다. 커밋은 나누되 측정은 함께 한다.
-4. **재판정 (4.3 전체):** 2–3을 잰 뒤, 앵커 추정이 틀려 손해 보는 경우가 보이면 그때 넣는다.
-   처음부터 넣지 않는 이유는 비용(두 형태 보관, 그룹별 두 번 압축) 때문이다.
+4. **재판정 (4.3 전체):** 원래는 2–3을 잰 뒤 필요할 때 넣으려 했다. 그런데 4.2의 측정에서, 남은 이득의
+   대부분이 공유 비율로는 갈리지 않는 판정("같은 데이터의 formula 대 원본")에 있었다. 그래서 순서를 바꿔
+   4.3을 먼저 한다(§4.3.6의 단계). 공유 지도(2)는 4.3.5에서 필요해질 때 넣는다.
 
 이 뒤에 CALL 필터 되돌림(4.1 이후 Inno, `bcj-inno` 모듈)과 4.1 이후의 Setup.e32 해제가 효과를 낸다.
 둘 다 풀린 데이터가 버전 사이에 맞아야 이득이 나는 것들이다(조각으로 잰 값: −74 KB, −218 KB).
@@ -216,6 +314,12 @@
 | `kin-prefix` | 바이트(기본 4 MiB) | aqr-formula `KIN_PREFIX` | 친족 샘플을 둘 prefix 한도 |
 | `kin-level` | zstd 레벨(기본 3) | `compresses_after_each`의 `BASE.0` | 레벨 1이면 이득의 절반만 잡혔다 |
 | `smaller-slack` | 비율 | lib.rs `smaller_as` | 측정용(4.2의 여유 시험). 기본값으로 쓰지 않는다 |
+| `defer` | `off`, 비율(기본 `0.25`) | (4.3.2) `smaller_as`의 `Close` 조건 `DEFER_SLACK` | `off`면 지금과 같다 |
+| `defer-budget` | 배치 대비 비율(기본 `0.5`) | (4.3.2) 미루기 예산 | |
+| `defer-min` | 바이트(기본 16 KiB) | (4.3.2) `DEFER_MIN` | |
+| `group-likeness` | 칸 수(기본 16/64) | (4.3.3) `GROUP_LIKENESS` | |
+| `group-bytes` | 바이트(기본 64 MiB) | (4.3.3) 넘으면 샘플로 잼 | |
+| `choose` | `trial`, `made`, `kept` | (4.3.3) 결정 | `made`/`kept`는 측정용 강제 |
 | `force` | `probe`, `smaller`, `decoded` | `probe()`, `smaller_as` | 상한 측정용: 판단을 강제로 "받음" |
 | `peek` | `off`, 바이트 한도 | (4.2) 예비 해제 | 예비 해제의 예산 |
 | `share-free` | `on`, `off` | (4.2) `Probe::pays`, `smaller_as` | 공유 비율을 공짜로 칠지 |
