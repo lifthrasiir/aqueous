@@ -754,6 +754,24 @@ pub enum Node {
     /// The data of the resource block of a resource [`Resource::stored`] as stored (a
     /// ResourceBytes instruction).
     ResourceBytes(Resource),
+    /// Either of two nodes of the same output, to be chosen before the formula is archived
+    /// ([`Formula::resolve`]): in memory only, never in an archive (the encoder and evaluation
+    /// fail on one).
+    Either(Box<Either>),
+}
+
+/// Two nodes of the same output of `len` bytes ([`Node::Either`]): what aqr-compress keeps where
+/// a formula lost to its data as it is by little, to choose once the batch is made, with the
+/// others alike ([`Formula::resolve`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Either {
+    /// The data as it is (the slice that the formula made of it would have taken the place of).
+    pub kept: Node,
+    /// The formula made of the data, embedded (its streams those of the formula holding it).
+    pub made: Node,
+    pub len: u64,
+    /// What `made` and `kept` archived in on their own, as they were compared.
+    pub sizes: (usize, usize),
 }
 
 /// The output of `patch` ([`patch`]), of `len` bytes, against `source`.
@@ -952,6 +970,7 @@ impl Node {
             Node::Pack(ns) => ns.iter_mut().for_each(Node::flatten),
             Node::Apply(a) => a.inputs.iter_mut().for_each(Node::flatten),
             Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(Node::flatten),
+            Node::Either(e) => [&mut e.kept, &mut e.made].into_iter().for_each(Node::flatten),
             Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
         }
     }
@@ -1023,6 +1042,7 @@ impl Node {
             Node::Patch(p) => p.len,
             Node::ModuleBytes(_, d) => d.len() as u64,
             Node::ResourceBytes(r) => r.stored_data().map_or(0, |d| d.len() as u64),
+            Node::Either(e) => e.len,
         }
     }
 
@@ -1038,6 +1058,7 @@ impl Node {
             Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| n.visit(f)),
             Node::Apply(a) => a.inputs.iter().for_each(|n| n.visit(f)),
             Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| n.visit(f)),
+            Node::Either(e) => [&e.kept, &e.made].into_iter().for_each(|n| n.visit(f)),
         }
     }
 
@@ -1059,6 +1080,7 @@ impl Node {
             Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.map_slices(f)),
             Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.map_slices(f)),
             Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| n.map_slices(f)),
+            Node::Either(e) => [&mut e.kept, &mut e.made].into_iter().for_each(|n| n.map_slices(f)),
         }
     }
 
@@ -1070,6 +1092,7 @@ impl Node {
             Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.visit_mut(f)),
             Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.visit_mut(f)),
             Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| n.visit_mut(f)),
+            Node::Either(e) => [&mut e.kept, &mut e.made].into_iter().for_each(|n| n.visit_mut(f)),
         }
     }
 
@@ -1226,6 +1249,7 @@ impl Formula {
                 Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| walk(n, content, out)),
                 Node::Apply(a) => apply(a, out),
                 Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| walk(n, false, out)),
+                Node::Either(e) => [&e.kept, &e.made].into_iter().for_each(|n| walk(n, content, out)),
                 Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
             }
         }
@@ -1267,6 +1291,94 @@ impl Formula {
     pub fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
         self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.slices_mut(f));
         self.root.slices_mut(f);
+    }
+
+    /// The alternatives of the formula ([`Node::Either`]), each with how many are around it, in
+    /// the order [`Formula::resolve`] takes them: those in the applications of several outputs,
+    /// then the root's, each after those within it.
+    pub fn eithers(&self) -> Vec<(usize, &Either)> {
+        fn walk<'a>(n: &'a Node, depth: usize, out: &mut Vec<(usize, &'a Either)>) {
+            match n {
+                Node::Either(e) => {
+                    [&e.kept, &e.made].into_iter().for_each(|n| walk(n, depth + 1, out));
+                    out.push((depth, e));
+                }
+                Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| walk(n, depth, out)),
+                Node::Apply(a) => a.inputs.iter().for_each(|n| walk(n, depth, out)),
+                Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| walk(n, depth, out)),
+                Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+            }
+        }
+        let mut out = Vec::new();
+        self.shared.iter().flat_map(|s| s.inputs()).chain([&self.root]).for_each(|n| walk(n, 0, &mut out));
+        out
+    }
+
+    /// Puts in place of each alternative ([`Node::Either`]) what `made` tells of it, in the
+    /// order of [`Formula::eithers`] (true: the formula made, false: the data kept), and drops
+    /// what the others took ([`Formula::compact`]). The output is the same. Panics where
+    /// `made` is not of as many.
+    pub fn resolve(&mut self, made: &[bool]) {
+        fn walk(n: &mut Node, made: &mut std::slice::Iter<bool>) {
+            match n {
+                Node::Either(e) => {
+                    [&mut e.kept, &mut e.made].into_iter().for_each(|n| walk(n, made));
+                    let take = *made.next().expect("a choice of each alternative");
+                    let e = std::mem::replace(n, Node::Concat(Vec::new()));
+                    let Node::Either(e) = e else { unreachable!("an alternative") };
+                    *n = if take { e.made } else { e.kept };
+                }
+                Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| walk(n, made)),
+                Node::Apply(a) => a.inputs.iter_mut().for_each(|n| walk(n, made)),
+                Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| walk(n, made)),
+                Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+            }
+        }
+        let mut it = made.iter();
+        for s in &mut self.shared {
+            s.inputs_mut().iter_mut().for_each(|n| walk(n, &mut it));
+        }
+        walk(&mut self.root, &mut it);
+        assert!(it.next().is_none(), "as many choices as alternatives");
+        self.drop_shared_untaken();
+        self.compact();
+    }
+
+    /// Drops the applications of several outputs whose outputs nothing takes (those of the
+    /// alternatives not chosen, [`Formula::resolve`]), the others in their order.
+    fn drop_shared_untaken(&mut self) {
+        let outputs_of = |n: &Node, out: &mut Vec<usize>| {
+            n.visit(&mut |n| {
+                if let &Node::Output { shared, .. } = n {
+                    out.push(shared);
+                }
+            })
+        };
+        let mut taken = vec![false; self.shared.len()];
+        let mut todo = Vec::new();
+        outputs_of(&self.root, &mut todo);
+        while let Some(i) = todo.pop() {
+            if taken.get(i).is_none_or(|&t| t) {
+                continue;
+            }
+            taken[i] = true;
+            self.shared[i].inputs().iter().for_each(|n| outputs_of(n, &mut todo));
+        }
+        if taken.iter().all(|&t| t) {
+            return;
+        }
+        let kept: Vec<usize> = (0..self.shared.len()).filter(|&i| taken[i]).collect();
+        let mut to = vec![usize::MAX; self.shared.len()];
+        kept.iter().enumerate().for_each(|(new, &old)| to[old] = new);
+        let mut old: Vec<Option<Shared>> = std::mem::take(&mut self.shared).into_iter().map(Some).collect();
+        self.shared = kept.iter().map(|&i| old[i].take().expect("each once")).collect();
+        let mut remap = |n: &mut Node| {
+            if let Node::Output { shared, .. } = n {
+                *shared = to[*shared];
+            }
+        };
+        self.shared.iter_mut().flat_map(|s| s.inputs_mut()).for_each(|n| n.visit_mut(&mut remap));
+        self.root.visit_mut(&mut remap);
     }
 
     /// Drops what no slice points to: the bytes of a stream outside every slice of it, and
@@ -1875,6 +1987,7 @@ impl Formula {
             match n {
                 Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| visit(n, out)),
                 Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| visit(n, out)),
+                Node::Either(e) => [&e.kept, &e.made].into_iter().for_each(|n| visit(n, out)),
                 Node::Apply(a) => {
                     out.push(a);
                     a.inputs.iter().for_each(|n| visit(n, out));
@@ -1886,6 +1999,7 @@ impl Formula {
             match n {
                 Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| visit_mut(n, limits)),
                 Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| visit_mut(n, limits)),
+                Node::Either(e) => [&mut e.kept, &mut e.made].into_iter().for_each(|n| visit_mut(n, limits)),
                 Node::Apply(a) => {
                     let l = limits.next().expect("a limit for each application");
                     (a.memory_limit, a.task_limits) = (l.instance, l.tasks);
@@ -1922,7 +2036,8 @@ impl Formula {
 /// Indented, a node a line: `slice #stream [start, +len) CLASS` (and the kind of the stream
 /// unless [`Kind::Unknown`] and not [`Stream::content`], with `content` if it is), `concat LEN`, `pack LEN`, `apply MODULE LEN` with the lengths of its
 /// resources and its parameters in hex, `output #SHARED.INDEX LEN`, `patch LEN` (its source then
-/// its patch), `module bytes MODULE LEN`, `resource bytes LEN`: first each application of
+/// its patch), `module bytes MODULE LEN`, `resource bytes LEN`, `either LEN sizes MADE KEPT` (what
+/// is kept, then what is made): first each application of
 /// several outputs, `shared #I MODULE SIZES...` and its inputs, then the root.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1951,6 +2066,10 @@ impl fmt::Display for Formula {
                 Node::Patch(p) => {
                     writeln!(f, "patch {}", p.len)?;
                     [&p.source, &p.patch].into_iter().try_for_each(|n| node(fm, n, depth + 1, f))
+                }
+                Node::Either(e) => {
+                    writeln!(f, "either {} sizes {} {}", e.len, e.sizes.0, e.sizes.1)?;
+                    [&e.kept, &e.made].into_iter().try_for_each(|n| node(fm, n, depth + 1, f))
                 }
             }
         }
@@ -2182,6 +2301,43 @@ mod tests {
         let mut g = f.clone();
         g.merge_classes();
         assert_eq!(g.streams.len(), 2);
+    }
+
+    /// Alternatives, one within another and one of an application of several outputs: listed
+    /// innermost first, each resolved either way to the same output, what the others took
+    /// dropped; refused unresolved by the encoder and evaluation.
+    #[test]
+    fn eithers_resolved() {
+        let mut f = Formula::default();
+        let either = |kept, made, len| Node::Either(Box::new(Either { kept, made, len, sizes: (0, 0) }));
+        let raw = f.push("raw", b"hello world".to_vec());
+        let rev = f.push("rev", b"dlrow olleh".to_vec());
+        let parts = Node::concat([f.push("a", b"dlrow".to_vec()), f.push("b", b" olleh".to_vec())]);
+        let inner = either(rev, parts, 11);
+        let outer = either(raw, Node::apply(REV, vec![], vec![inner], 11), 11);
+        let ab = f.push("ab", b"ab".to_vec());
+        let ba = f.push("ba", b"ba".to_vec());
+        let Node::Apply(a) = Node::apply(REV, vec![], vec![ba], 2) else { unreachable!() };
+        let outs = f.split(*a, vec![1, 1]);
+        f.root = Node::concat([outer, either(ab, Node::concat(outs), 2)]);
+        assert_eq!(f.eithers().iter().map(|e| (e.0, e.1.len)).collect::<Vec<_>>(), [(1, 11), (0, 11), (0, 2)]);
+        assert!(f.eval(&Rev).is_err());
+        assert!(crate::aqr::encode(&f, None, crate::aqr::Level::MID).is_err());
+        for k in 0..8 {
+            let made = [k & 1 != 0, k & 2 != 0, k & 4 != 0];
+            let mut g = f.clone();
+            g.resolve(&made);
+            assert!(g.eithers().is_empty());
+            assert_eq!(g.eval(&Rev).unwrap(), b"hello worldab", "{made:?}");
+            assert_eq!(g.shared.len(), made[2] as usize, "{made:?}");
+            let classes: Vec<&str> = g.streams.iter().map(|s| &*s.class).collect();
+            let want: Vec<&str> = match (made[1], made[0]) {
+                (false, _) => vec!["raw"],
+                (true, false) => vec!["rev"],
+                (true, true) => vec!["a", "b"],
+            };
+            assert_eq!(classes, [want, vec![if made[2] { "ba" } else { "ab" }]].concat(), "{made:?}");
+        }
     }
 
     #[test]

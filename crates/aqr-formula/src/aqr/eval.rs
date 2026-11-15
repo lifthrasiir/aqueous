@@ -1901,6 +1901,8 @@ impl<'f> Graph<'f, 'f> {
                 let (source, patch) = (self.node(f, &p.source, outputs)?, self.node(f, &p.patch, outputs)?);
                 self.push(Op::Patch(source, patch, p.len), p.len)
             }
+            // (chosen before the formula is evaluated: [`crate::Formula::resolve`])
+            Node::Either(_) => return Err(Error::new("an alternative not resolved")),
         })
     }
 }

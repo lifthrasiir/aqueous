@@ -2838,8 +2838,14 @@ fn contents(
 ) {
     match n {
         &Node::Slice { stream, .. } if is_content(f, stream) => content_slices(n, f, apart, opt, depth, cx, out),
-        // (patches are made of recompressed data, not looked into)
-        Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        // (patches are made of recompressed data, not looked into; nor alternatives, of contents
+        // made already)
+        Node::Slice { .. }
+        | Node::Output { .. }
+        | Node::Patch(_)
+        | Node::ModuleBytes(..)
+        | Node::ResourceBytes(_)
+        | Node::Either(_) => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, apart, opt, depth, cx, out)),
         Node::Apply(a) => a.inputs.iter().for_each(|n| contents(n, f, apart, opt, depth, cx, out)),
     }
@@ -2889,7 +2895,7 @@ fn content_slices(
         }
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, f, apart, opt, depth, cx, out)),
         Node::Apply(_) => contents(n, f, apart, opt, depth, cx, out),
-        Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) | Node::Either(_) => {}
     }
 }
 
@@ -2899,7 +2905,12 @@ fn content_slices(
 fn place(n: &mut Node, f: &mut Formula, slices: &[usize], children: &mut impl Iterator<Item = Option<Placed>>) {
     match n {
         &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, children),
-        Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        Node::Slice { .. }
+        | Node::Output { .. }
+        | Node::Patch(_)
+        | Node::ModuleBytes(..)
+        | Node::ResourceBytes(_)
+        | Node::Either(_) => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, children)),
         Node::Apply(a) => a.inputs.iter_mut().for_each(|n| place(n, f, slices, children)),
     }
@@ -2927,7 +2938,7 @@ fn place_slices(n: &mut Node, f: &mut Formula, slices: &[usize], children: &mut 
         },
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, children)),
         Node::Apply(_) => place(n, f, slices, children),
-        Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) | Node::Either(_) => {}
     }
 }
 

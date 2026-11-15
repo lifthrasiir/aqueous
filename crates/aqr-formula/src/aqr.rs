@@ -998,12 +998,13 @@ impl Encoder {
         let (modules, resources) = f.blocks();
         let mut checked = Ok(());
         for n in f.shared.iter().flat_map(|s| s.inputs()).chain([&f.root]) {
-            n.visit(&mut |n| {
-                if let Node::ModuleBytes(m, d) = n
-                    && checked.is_ok()
-                {
-                    checked = self.check_module_bytes(*m, d, self.base_level());
+            n.visit(&mut |n| match n {
+                Node::ModuleBytes(m, d) if checked.is_ok() => {
+                    checked = self.check_module_bytes(*m, d, self.base_level())
                 }
+                // (chosen before the formula is archived: [`Formula::resolve`])
+                Node::Either(_) => checked = Err(Error::new("an alternative not resolved")),
+                _ => {}
             });
         }
         checked?;
@@ -1230,6 +1231,7 @@ impl Emit<'_> {
                 self.stack.truncate(self.stack.len() - 2);
                 self.stack.push(None);
             }
+            Node::Either(_) => unreachable!("an alternative not resolved, refused by formula_data"),
         }
     }
 
@@ -1337,6 +1339,7 @@ fn takes_output(n: &Node) -> bool {
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().any(takes_output),
         Node::Apply(a) => a.inputs.iter().any(takes_output),
         Node::Patch(p) => takes_output(&p.source) || takes_output(&p.patch),
+        Node::Either(e) => takes_output(&e.kept) || takes_output(&e.made),
     }
 }
 
@@ -1355,6 +1358,8 @@ pub fn description_bound(n: &Node) -> usize {
         Node::Output { .. } => 1 + 3,
         Node::ModuleBytes(..) | Node::ResourceBytes(_) => 1 + 2 + varint::len(n.len()),
         Node::Patch(p) => description_bound(&p.source) + description_bound(&p.patch) + 1 + varint::len(p.len),
+        // (whichever is chosen)
+        Node::Either(e) => description_bound(&e.kept).max(description_bound(&e.made)),
         &Node::Slice { start, len, .. } => match slice_blocks(start, len)[..] {
             [(_, at, n)] => 1 + 3 + varint::len(at) + varint::len(n),
             ref pieces => {
