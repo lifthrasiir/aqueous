@@ -220,6 +220,9 @@ pub struct Report {
     pub read: u64,
     /// Where the archive was stopped before it was whole ([`Stop`]): what it left out.
     pub stopped: Option<Stopped>,
+    /// How many formulas that lost to their data by little were kept beside it to be chosen
+    /// with the batch (`Node::Either`), and the bytes they archived in alone.
+    pub alternatives: (usize, usize),
 }
 
 /// An archive to append to ([`compress_tree_into`]; spec, "Appending to an archive"), as written
@@ -1075,6 +1078,8 @@ impl Writer {
         }
         r.sets.extend(made.sets.iter().map(|s| global(s)));
         r.unverified.extend(raw.iter().map(|&k| files[k].c));
+        (r.alternatives.0, r.alternatives.1) =
+            (r.alternatives.0 + made.alternatives.0, r.alternatives.1 + made.alternatives.1);
         Ok(())
     }
 
@@ -1753,6 +1758,7 @@ struct Made {
     solid: Vec<Solid>,
     sets: Vec<Vec<usize>>,
     bad: Vec<usize>,
+    alternatives: (usize, usize),
 }
 
 aqr_common::zopt! {
@@ -1787,6 +1793,8 @@ struct Analyzed {
     at: Vec<(usize, usize)>,
     enc: aqr::Encoder,
     memo: verify::Memo,
+    /// [`Report::alternatives`] of the batch.
+    alternatives: (usize, usize),
 }
 
 /// The formula of batch `i` of `files` (by index, the data of each in `data`), recompressed but
@@ -1861,6 +1869,9 @@ fn analyze(
         }
         place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets);
     }
+    // (the formulas that lost by little, kept beside their data: chosen now, the data kept as
+    // they were compared, before anything evaluates the formula)
+    let alternatives = crate::keep_eithers(&mut f, true);
     // (what the files hold of each other, by what they are taken for: a file and the same in
     // an archive, both kept as they are; files none of which is recompressed too)
     f.share_slices(SLICE_MIN.get());
@@ -1877,6 +1888,7 @@ fn analyze(
     notes.send(Note::Analyzed(i));
     let Cx { enc, .. } = cx;
     let mut a = laid(f, files, enc, memo, opt);
+    a.alternatives = alternatives;
     // (its streams compressed now, on the workers free, rather than by the writer as it comes
     // to the batch: the writer verified a batch and only then compressed the next, which the
     // workers waited for; The Crew's 766 MB in two batches, 6 of 12.6 s)
@@ -2010,7 +2022,7 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
-    Analyzed { f, leaves, at, enc, memo }
+    Analyzed { f, leaves, at, enc, memo, alternatives: (0, 0) }
 }
 
 /// Of streams `ds` and whether each compresses alone (`alone`, [`aqr::Encoder::compresses_each`]),
@@ -2066,7 +2078,7 @@ fn finish<S: Source + ?Sized>(
     opt: &Options,
     notes: &Notes,
 ) -> Made {
-    let Analyzed { f, leaves, at, mut enc, memo } = a;
+    let Analyzed { f, leaves, at, mut enc, memo, alternatives } = a;
     enc.on_precompress(Some(notes.encoding(i)));
     let encoding = aqr_common::trace::span("encode");
     let batch = w.batch(&enc, &f, &leaves).expect("slices within their streams");
@@ -2087,7 +2099,7 @@ fn finish<S: Source + ?Sized>(
     } else {
         Vec::new()
     };
-    Made { batch, at, files: reports, solid, sets, bad }
+    Made { batch, at, files: reports, solid, sets, bad, alternatives }
 }
 
 /// A batch's blocks held back ([`Writer::hold`]): its bytes, and where the blocks are in them.

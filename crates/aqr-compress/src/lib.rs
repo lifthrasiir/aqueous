@@ -456,6 +456,18 @@ pub(crate) struct Cx {
     /// made of their data ([`Undo`]): taken by [`recompress_with`] as the recompressor gives its
     /// formula, those of formulas made within it put aside meanwhile.
     undo: RefCell<Vec<Undo>>,
+    /// Whether a formula that loses to its data by little may be kept beside it ([`Verdict::Close`]):
+    /// where what takes it puts both in place ([`made_deferring`]).
+    defers: Cell<bool>,
+    /// The data (where it is, its length) whose formula [`recompress_with`] is to tell of as
+    /// [`Verdict::Close`] where it is, telling so in [`Cx::closed`]: its caller's, which puts both
+    /// in place.
+    defer_for: Cell<Option<(usize, usize)>>,
+    /// The data last told of so, and the sizes of [`Verdict::Close`].
+    closed: Cell<Option<((usize, usize), (usize, usize))>>,
+    /// Bytes of the formulas kept beside their data so far, of at most [`Cx::defer_budget`].
+    kept_beside: Cell<usize>,
+    defer_budget: usize,
 }
 
 /// A decoding a recompressor asks to be undone ([`undo`]): the application at `coded` of the data,
@@ -593,6 +605,11 @@ impl Cx {
             files: None,
             siblings: None,
             undo: Default::default(),
+            defers: Cell::new(false),
+            defer_for: Cell::new(None),
+            closed: Cell::new(None),
+            kept_beside: Cell::new(0),
+            defer_budget: n / DEFER_SHARE.get().max(1),
         }
     }
 
@@ -1317,17 +1334,60 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx:
             f.root = f.push_as("raw", if text { Kind::Text } else { kind }, d.to_vec());
             f
         },
-        |m| m.cut(d),
+        |m| {
+            let mut f = m.cut(d);
+            // (nothing chooses here: the data kept, as it was compared)
+            keep_eithers(&mut f, false);
+            f
+        },
     )
+}
+
+/// Resolves the alternatives of `f` ([`Node::Either`]) to the data kept, as they were compared
+/// ([`verdict_as`]); the root's parts staying its parts where `parts` (a batch's files). How
+/// many there were, and the bytes their formulas archived in alone.
+pub(crate) fn keep_eithers(f: &mut Formula, parts: bool) -> (usize, usize) {
+    let eithers = f.eithers();
+    let told = (eithers.len(), eithers.iter().map(|e| e.1.sizes.0).sum());
+    match (told.0 > 0, parts) {
+        (false, _) => {}
+        (true, true) => f.resolve_parts(&vec![false; told.0]),
+        (true, false) => f.resolve(&vec![false; told.0]),
+    }
+    told
 }
 
 /// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
 /// cut out of `d` yet.
 pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
+    made_as(d, opt, depth, how, cx, false)
+}
+
+/// [`made`] of a content whose formula, where it loses to the data by little, is kept beside it
+/// ([`Made::close`]; its files found by a scan alike, [`find`]): for its parent to put both in
+/// place ([`place_slices`]), and the batch to choose.
+fn made_deferring(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
+    made_as(d, opt, depth, how, cx, true)
+}
+
+fn made_as(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx, defers: bool) -> Option<Made> {
+    let outer = cx.defers.replace(defers);
     let m = made_alone(d, opt, depth, how, cx);
+    cx.defers.set(outer);
     // (where `d` is part of a file, that part is done)
     aqr_common::progress::done(d);
     m
+}
+
+/// `d` through the recompressor of `format` ([`recompress_as`]), its formula kept beside it
+/// where it loses by little and that may be ([`Cx::defers`], [`Made::close`]).
+fn made_by(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
+    let id = (d.as_ptr() as usize, d.len());
+    let outer = cx.defer_for.replace(cx.defers.get().then_some(id));
+    let f = recompress_as(format, d, opt, depth, cx);
+    cx.defer_for.set(outer);
+    let close = cx.closed.take().filter(|c| c.0 == id).map(|c| c.1);
+    f.map(|f| Made { f, gaps: None, close })
 }
 
 fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
@@ -1341,8 +1401,8 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
         _ if depth >= opt.depth || !opt.recompresses() => None,
         // a file of no header taken apart by another archived along (a VPK's archive by its
         // directory file, a resource file by its serialized file), whatever its first bytes are
-        _ if let Some(format) = siblings::format(d, cx) => recompress_as(format, d, opt, depth, cx).map(Made::from),
-        Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
+        _ if let Some(format) = siblings::format(d, cx) => made_by(format, d, opt, depth, cx),
+        Nest::Exact => detect(d).and_then(|format| made_by(format, d, opt, depth, cx)),
         // JSON lines or a table where aqr-jsonl or aqr-xsv takes it (and it is [`smaller`]);
         // else text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is
         // taken alike wherever it is; else scanned as other data is, or kept raw where named as
@@ -1351,21 +1411,37 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
             match table(d, opt, depth, cx).or_else(|| recompress_as(Format::Text, d, opt, depth, cx)) {
                 Some(f) => Some(Made::from(f)),
                 None if how == Nest::Scan => {
-                    scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+                    let (m, close) = scanned(scan(d, None, opt, depth, cx), d, opt, cx);
+                    m.or(close)
                 }
                 None => None,
             }
         }
         // else its samples after a header telling their size, or its tables of records, if any
-        Nest::Scan => scan(d, None, opt, depth, cx)
-            .filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
-            .or_else(|| recompress_as(Format::Sized, d, opt, depth, cx).map(Made::from))
-            .or_else(|| records(d, opt, depth, cx)),
+        Nest::Scan => {
+            let (m, close) = scanned(scan(d, None, opt, depth, cx), d, opt, cx);
+            m.or_else(|| recompress_as(Format::Sized, d, opt, depth, cx).map(Made::from))
+                .or_else(|| records(d, opt, depth, cx))
+                .or(close)
+        }
         Nest::As(format) => {
             let format = detect::named(format, d);
-            scan(d, Some(format), opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+            let (m, close) = scanned(scan(d, Some(format), opt, depth, cx), d, opt, cx);
+            m.or(close)
         }
     }
+}
+
+/// The formula of a scan of `d` where it is [`smaller`] (its alternatives sized with their data
+/// kept); else, where files it found were kept beside their data ([`find`]), all of it kept
+/// beside the data ([`Made::close`]), for the batch to choose where nothing else takes `d`.
+fn scanned(m: Option<Made>, d: &[u8], opt: &Options, cx: &Cx) -> (Option<Made>, Option<Made>) {
+    let Some(m) = m else { return (None, None) };
+    if smaller(&m.f, m.gaps.as_deref(), d, opt, cx) {
+        return (Some(m), None);
+    }
+    let close = (cx.defers.get() && !m.f.eithers().is_empty()).then(|| Made { close: Some((0, d.len())), ..m });
+    (None, close)
 }
 
 /// `d`, data in which a scan finds no file, as its tables of records and chains of entries
@@ -1471,18 +1547,22 @@ fn log_or_table(d: &[u8], xsv: bool) -> Option<Format> {
 pub(crate) struct Made {
     pub f: Formula,
     gaps: Option<Vec<Range<usize>>>,
+    /// Where the formula lost to the data as it is by little ([`Verdict::Close`]): the sizes they
+    /// archived in, the formula's and the data's. Whoever puts it in place keeps the data beside
+    /// it ([`Node::Either`]).
+    pub(crate) close: Option<(usize, usize)>,
 }
 
 impl From<Formula> for Made {
     fn from(f: Formula) -> Made {
-        Made { f, gaps: None }
+        Made { f, gaps: None, close: None }
     }
 }
 
 impl Made {
     /// The formula, cut out of `d`, the data it is of.
     fn cut(self, d: &[u8]) -> Formula {
-        let Made { mut f, gaps } = self;
+        let Made { mut f, gaps, .. } = self;
         if let Some(gaps) = gaps {
             // (of the store where it is large, see [`Options::spill`])
             let mut data = aqr_formula::store::Writer::new(Some(gaps.iter().map(Range::len).sum()));
@@ -1500,7 +1580,7 @@ impl Made {
         if d.is_shared() {
             return self.cut(&d);
         }
-        let Made { mut f, gaps } = self;
+        let Made { mut f, gaps, .. } = self;
         let mut d = d.into_vec();
         if let Some(gaps) = gaps {
             let mut at = 0;
@@ -1729,8 +1809,20 @@ fn recompress_sealed(
     if let Some(pre) = &cx.pre {
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
-    // (text as aqr-wrt tells, see [`made`])
-    (format == Format::Text || smaller_as(&f, None, d, of, opt, cx)).then_some(f)
+    // (text as aqr-wrt tells, see [`made`]; else kept beside the data where it loses by little
+    // and the caller puts both in place, [`made_by`])
+    if format == Format::Text {
+        return Some(f);
+    }
+    let id = (d.as_ptr() as usize, d.len());
+    match verdict_as(&f, None, d, of, opt, cx, cx.defer_for.get() == Some(id)) {
+        Verdict::Take => Some(f),
+        Verdict::Close(sizes) => {
+            cx.closed.set(Some((id, sizes)));
+            Some(f)
+        }
+        Verdict::Reject => None,
+    }
 }
 
 /// Undoes the decodings of `undos` of formula `f` of data `d` ([`Undo`]) where nothing is made of
@@ -1752,7 +1844,10 @@ fn undo(
     let of = |n: &Node, s: usize| matches!(n, &Node::Slice { stream, .. } if stream == s);
     let mut undone = false;
     for u in undos {
-        let made = children.as_ref().is_some_and(|c| c.iter().any(|(n, m)| of(n, u.stream) && m.is_some()));
+        // (a formula kept beside the data is not taken: [`Made::close`])
+        let made = children
+            .as_ref()
+            .is_some_and(|c| c.iter().any(|(n, m)| of(n, u.stream) && m.as_ref().is_some_and(|m| m.close.is_none())));
         let Some(data) = f.streams.get(u.stream).filter(|s| s.content && !s.data.is_lazy()) else { continue };
         let Some(coded) = d.get(u.coded.clone()) else { continue };
         if made || !undoes(coded.len(), u.record, &data.data, d, opt, cx) {
@@ -1999,10 +2094,65 @@ aqr_common::zopt! {
 /// contents are in place, its own streams may be gone (a WIM file's data, all of it cut into
 /// its contents' formulas).
 fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::Kinds, opt: &Options, cx: &Cx) -> bool {
+    verdict_as(f, gaps, d, of, opt, cx, false) == Verdict::Take
+}
+
+/// What [`smaller_as`] tells of a formula: taken, turned down, or turned down by little
+/// ([`DEFER_SLACK`]) and kept beside its data for the batch to choose (where `defer` lets it,
+/// of [`DEFER_MIN`] bytes or more, within [`Cx::defer_budget`]): with the sizes compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Take,
+    Close((usize, usize)),
+    Reject,
+}
+
+aqr_common::zopt_namespace!(
+    "defer",
+    "formulas that lose by little kept beside their data, for the batch to choose (aqr-compress)"
+);
+
+aqr_common::zopt! {
+    /// A formula that archives in up to this share more than its data does as it is is kept
+    /// beside it, where that may be ([`Verdict::Close`]); `-Z defer:no-slack`: none is.
+    static DEFER_SLACK: Opt<Option<f64>> =
+        Opt::value("defer:slack", Some(0.25), "keep a formula beside its data where it is up to this share larger").off(None);
+    /// Data shorter than this is not kept beside its formula ([`Verdict::Close`]).
+    static DEFER_MIN: Opt<usize> = Opt::size("defer:min", 16 << 10, "data shorter is not kept beside its formula");
+    /// Of the data of a context, at most a share of `1 / N` of formulas kept beside their data
+    /// ([`Cx::defer_budget`]).
+    static DEFER_SHARE: Opt<usize> = Opt::value("defer:share", 2, "formulas kept beside their data take at most 1/N of a context's data");
+}
+
+/// [`smaller_as`] as a [`Verdict`]. A formula holding alternatives ([`Node::Either`]) is sized with
+/// their data kept, as it would be archived where they are all turned down.
+#[allow(clippy::too_many_arguments)]
+fn verdict_as(
+    given: &Formula,
+    gaps: Option<&[Range<usize>]>,
+    d: &[u8],
+    of_given: bundle::Kinds,
+    opt: &Options,
+    cx: &Cx,
+    defer: bool,
+) -> Verdict {
+    // (sized as it would be made with its alternatives turned down: their data kept)
+    let (kept, of);
+    let f = match given.eithers().is_empty() {
+        true => {
+            of = of_given;
+            given
+        }
+        false => {
+            kept = given.chosen(false);
+            of = bundle::Kinds::of(&kept);
+            &kept
+        }
+    };
     let share_min = SHARE_MIN.get();
     let bundled = of.bundles && cx.held_by_others(d, d);
     if bundled {
-        cx.note_bundled(f);
+        cx.note_bundled(given);
     }
     let covered = gaps.is_some_and(|g| g.iter().all(Range::is_empty));
     // (an image coded against another's code holds a copy of it, which would only be compressed
@@ -2035,16 +2185,27 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
                     data.len() >= share_min && cx.held_by_others(data, d) || cx.coded_held(data)
                 })
                 .collect();
-            cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
+            let (n, raw) = cx.enc.sizes_but(f, stand_in, &free, d).expect("slices within their streams");
+            // (not of streams sealed already, nor of data not made yet: kept apart as they are made)
+            let apart = f.streams.iter().any(|s| s.data.sunk_in().is_some() || s.data.is_lazy());
+            let slack = DEFER_SLACK.get().filter(|_| defer && !apart && d.len() >= DEFER_MIN.get());
+            if n >= raw && slack.is_some_and(|slack| n as f64 <= raw as f64 * (1.0 + slack)) {
+                let bytes: usize = f.streams.iter().map(|s| s.data.len()).sum();
+                if cx.kept_beside.get() + bytes <= cx.defer_budget {
+                    cx.kept_beside.set(cx.kept_beside.get() + bytes);
+                    return Verdict::Close((n, raw));
+                }
+            }
+            n < raw
         };
     if smaller {
         // `d` is not archived as it is (`f` is, or is part of something larger kept raw)
         cx.enc.forget(d);
         if !bundled && d.len() >= share_min && cx.held_by_others(d, d) {
-            cx.note_held(f);
+            cx.note_held(given);
         }
     }
-    smaller
+    if smaller { Verdict::Take } else { Verdict::Reject }
 }
 
 #[cfg(not(aqr_dist))]
@@ -2077,7 +2238,7 @@ fn scan(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, cx: &Cx) -> 
 
 /// [`scan`] with `slack` for [`SCAN_SLACK`].
 fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Made> {
-    let found = find(d, first, opt, depth, slack, cx)?;
+    let (found, close) = find(d, first, opt, depth, slack, cx)?;
     // each file with the data before it, and the data after the last and the whole
     // (a slice of all of it anywhere: at the last byte of a block, over the most blocks)
     let around = description_bound(&Node::slice(0, aqr_formula::aqr::BLOCK as u64 - 1, d.len() as u64));
@@ -2087,23 +2248,74 @@ fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: 
     // the data between the files cut out of `d` once put in place
     let mut f = Formula::default();
     f.push("raw", Vec::new());
+    let found: Vec<Found> = found.into_iter().zip(keep).filter_map(|(c, keep)| keep.then_some(c)).collect();
+    let close = closes_held(close, &found);
     let (mut gaps, mut parts, mut at, mut len) = (Vec::new(), Vec::new(), 0, 0);
-    for ((p, n, child), keep) in found.into_iter().zip(keep) {
-        if keep {
-            parts.push(Node::slice(0, len as u64, (p - at) as u64));
-            gaps.push(at..p);
-            len += p - at;
-            parts.push(f.embed(child));
+    // (the bytes from `at` to `p` as they are: a slice of the data between the files)
+    let mut gap = |gaps: &mut Vec<Range<usize>>, at: usize, p: usize| {
+        gaps.push(at..p);
+        len += p - at;
+        Node::slice(0, (len - (p - at)) as u64, (p - at) as u64)
+    };
+    let mut found = found.into_iter().peekable();
+    let mut close = close.into_iter().peekable();
+    loop {
+        let next = found.peek().map(|c| c.0);
+        // a file kept beside what was found in it as it was turned down ([`find`]): those, then
+        // it
+        if let Some(&(p, ..)) = close.peek()
+            && next.is_none_or(|q| p <= q)
+        {
+            let (p, n, made, sizes) = close.next().expect("peeked");
+            parts.push(gap(&mut gaps, at, p));
+            let mut kept = Vec::new();
+            at = p;
+            while let Some(&(q, m, _)) = found.peek()
+                && q + m <= p + n
+            {
+                let (q, m, child) = found.next().expect("peeked");
+                kept.push(gap(&mut gaps, at, q));
+                kept.push(f.embed(child));
+                at = q + m;
+            }
+            kept.push(gap(&mut gaps, at, p + n));
             at = p + n;
+            let made = f.embed(made);
+            let e = aqr_formula::Either { kept: Node::concat(kept), made, len: n as u64, sizes };
+            parts.push(Node::Either(Box::new(e)));
+            continue;
         }
+        let Some((p, n, child)) = found.next() else { break };
+        parts.push(gap(&mut gaps, at, p));
+        parts.push(f.embed(child));
+        at = p + n;
     }
     if parts.is_empty() {
         return None;
     }
-    parts.push(Node::slice(0, len as u64, (d.len() - at) as u64));
-    gaps.push(at..d.len());
+    parts.push(gap(&mut gaps, at, d.len()));
     f.root = Node::concat(parts);
-    Some(Made { f, gaps: Some(gaps) })
+    Some(Made { f, gaps: Some(gaps), close: None })
+}
+
+/// A file found by a scan that lost to its data by little ([`find`]): where it starts, its
+/// length, its formula and the sizes compared.
+type Close = (usize, usize, Formula, (usize, usize));
+
+/// Of the files `close` kept beside their data ([`find`]), those whose bytes hold every file
+/// found in them (`found`, in order) whole, and no other of them: the others are turned down
+/// as they were.
+fn closes_held(close: Vec<Close>, found: &[Found]) -> Vec<Close> {
+    let mut held: Vec<Close> = Vec::new();
+    for c in close {
+        let (p, end) = (c.0, c.0 + c.1);
+        let crossing = found.iter().any(|&(q, m, _)| (q < p && q + m > p) || (q >= p && q < end && q + m > end));
+        if crossing || held.last().is_some_and(|h| h.0 + h.1 > p) {
+            continue;
+        }
+        held.push(c);
+    }
+    held
 }
 
 /// A file found in data: where it starts, its length and its formula.
@@ -2112,8 +2324,15 @@ type Found = (usize, usize, Formula);
 /// The files of [`scan_with`], in order; `None` where `d` starts with a file of `first` that is
 /// turned down and whose parts are not told ([`regions`]). Within a file turned down whose parts
 /// are told, files are looked for by them ([`within`]), else from each byte on.
-fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Vec<Found>> {
-    let mut found = Vec::new();
+fn find(
+    d: &[u8],
+    first: Option<Format>,
+    opt: &Options,
+    depth: u32,
+    slack: usize,
+    cx: &Cx,
+) -> Option<(Vec<Found>, Vec<Close>)> {
+    let (mut found, mut close) = (Vec::new(), Vec::new());
     let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
     // Where each format's last file turned down ends: within it, a file of that format again
     // would be part of the same (an archive from each of its local headers, MPEG audio from
@@ -2137,15 +2356,29 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
             if format == Format::Bvx && format_on(format, opt) && !made.0.contains_key(&p) {
                 ahead(d, p, &turned_down, opt, depth, cx, &mut made);
             }
+            // (where it may be, a file that loses by little is kept beside what is found in it
+            // as it is turned down, [`scan_with`])
+            let piece = &d[p..p + n];
+            let id = (piece.as_ptr() as usize, piece.len());
+            let defer = cx.defers.get() && !(p == 0 && n == d.len() && sealing.is_some());
+            let outer = cx.defer_for.replace(defer.then_some(id));
             let child = match made.0.remove(&p) {
-                Some(a) => a.take(&d[p..p + n], cx),
+                Some(a) => a.take(piece, cx),
                 None if p == 0 && n == d.len() => {
                     *cx.sealing.borrow_mut() = sealing.take();
                     let f = recompress_as(format, d, opt, depth, cx);
                     sealing = cx.sealing.take();
                     f
                 }
-                None => recompress_as(format, &d[p..p + n], opt, depth, cx),
+                None => recompress_as(format, piece, opt, depth, cx),
+            };
+            cx.defer_for.set(outer);
+            let child = match (child, cx.closed.take().filter(|c| c.0 == id)) {
+                (Some(f), Some((_, sizes))) => {
+                    close.push((p, n, f, sizes));
+                    None
+                }
+                (child, _) => child,
             };
             if child.is_none() {
                 budget = budget.saturating_sub(n);
@@ -2172,16 +2405,18 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
                     found.extend(inner.into_iter().map(|(q, m, f)| (p + q, m, f)));
                     p += n;
                 }
+                // (a file of `first` turned down, telling nothing of its parts: nothing found, but
+                // where it was kept beside its data)
                 None if p == 0 && first.is_some() => {
                     made.give_back(cx);
-                    return None;
+                    return (!close.is_empty()).then_some((Vec::new(), close));
                 }
                 None => p = detect::next_start(d, p + 1),
             },
         }
     }
     made.give_back(cx);
-    Some(found)
+    Some((found, close))
 }
 
 /// LZFSE and LZVN streams made ahead of a scan ([`ahead`]), by where they start: each its
@@ -2287,7 +2522,7 @@ fn within(d: &[u8], parts: &[Region], opt: &Options, depth: u32, cx: &Cx) -> Vec
     let scan_part = |found: &mut Vec<Found>, r: Range<usize>| {
         let r = r.start.max(1)..r.end;
         if !r.is_empty()
-            && let Some(inner) = find(&d[r.clone()], None, opt, depth, SCAN_SLACK.get(), cx)
+            && let Some((inner, _)) = find(&d[r.clone()], None, opt, depth, SCAN_SLACK.get(), cx)
         {
             found.extend(inner.into_iter().map(|(q, n, f)| (r.start + q, n, f)));
         }
@@ -2521,7 +2756,13 @@ fn make_later(
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
         let _item = aqr_common::trace::item(files.and_then(|f| f.content(d.as_ptr())));
-        let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| takes_place(&c.f));
+        // (a formula that loses by little kept beside its data, but where it is sealed as it is made)
+        let unsealed = own.sealing.borrow().is_none();
+        let mut child = match unsealed {
+            true => made_deferring(d, opt, depth + 1, *nest, &own),
+            false => made(d, opt, depth + 1, *nest, &own),
+        }
+        .filter(|c| takes_place(&c.f));
         files.inspect(|f| f.tell(d.as_ptr(), true));
         if let Some((s, slots)) = sealing.as_ref().zip(slots.as_ref()) {
             // (not a member of a set planned, which the sets are made of)
@@ -2890,7 +3131,7 @@ fn content_slices(
                 out.push((n.clone(), None));
                 return;
             }
-            let child = s.zip(d).and_then(|(s, d)| made(d, opt, depth + 1, Nest::Scan.of(s.kind)?, cx));
+            let child = s.zip(d).and_then(|(s, d)| made_deferring(d, opt, depth + 1, Nest::Scan.of(s.kind)?, cx));
             out.push((n.clone(), child.filter(|c| takes_place(&c.f))));
         }
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, f, apart, opt, depth, cx, out)),
@@ -2921,6 +3162,12 @@ fn place_slices(n: &mut Node, f: &mut Formula, slices: &[usize], children: &mut 
     match n {
         &mut Node::Slice { stream, start, len } => match children.next().flatten() {
             Some(Placed::Node(o)) => *n = o,
+            // (a formula that lost by little beside the data as it is, a copy of what it keeps of it)
+            Some(Placed::Made(child)) if let Some(sizes) = child.close => {
+                let made = child.cut(&f.streams[stream].data[start as usize..][..len as usize]);
+                let made = f.embed(made);
+                *n = Node::Either(Box::new(aqr_formula::Either { kept: n.clone(), made, len, sizes }));
+            }
             Some(Placed::Made(child)) => {
                 // (a child is of a slice within its stream)
                 let data = &mut f.streams[stream].data;
@@ -5320,7 +5567,7 @@ mod tests {
             f.push("raw", Vec::new());
             let found = f.push("found", b"FOUND".to_vec());
             f.root = Node::concat([Node::slice(0, 0, 3), found, Node::slice(0, 3, n as u64 - 16)]);
-            Made { f, gaps: Some(vec![2..5, 16..n]) }
+            Made { f, gaps: Some(vec![2..5, 16..n]), close: None }
         };
         let mut f = Formula::default();
         let whole = f.push("raw", data.clone());

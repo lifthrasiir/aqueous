@@ -250,6 +250,26 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
 2. **aqr-compress, 남기기만:** `Verdict`, `Made::close`, `place`의 감싸기, 예산. 결정은 모두 `kept`로 둔다.
    - 회귀: 10gb 일부와 WinUHA에서 아카이브가 바이트까지 같은지 본다.
    - 남긴 개수, 바이트, 메모리를 `--stats`에 보인다.
+   - **했음 (2026-11-15):** 남기는 곳은 설계(4.3.2)와 다르게 셋이 됐다.
+     - 스캔의 조각(`find`): 아깝게 진 조각은 지금처럼 거절로 처리하고 안쪽을 계속 찾는다. `scan_with`가
+       그 범위의 찾은 부분들을 `kept`로, 조각의 formula를 `made`로 감싼다. 원래 설계처럼 `Close`를
+       위로 올리면 호출하는 쪽의 대체 경로(거절된 파일 안에서 다시 찾기, `Sized`, `records`)를
+       건너뛰어서, 원본 쪽으로 풀어도 지금과 같은 결과가 나오지 않았다.
+     - 콘텐츠가 통째로 한 형식인 경우(`made_by`): 부모의 `place_slices`가 원래 슬라이스를 `kept`로 둔다.
+     - 스캔이 지고 다른 대체 경로도 없는데 안에 대안이 있는 경우(`scanned`): 위와 같다.
+   - **허용과 정리:**
+     - 허용은 `Cx::defers`로 한다. 감싸 줄 부모가 있는 경로(`made_deferring`: `content_slices`, `make_later`)에서
+       켜고, sealing 중이거나 sink에 쓰인 스트림이 있으면 끈다.
+     - 바깥 판정은 `Formula::chosen(false)`로 잰다. 버린 쪽 스트림만 빼고, 고른 쪽이 든 `Concat`은
+       다시 짓는다. 그래야 크기가 지금과 같다.
+     - `Undo`는 남긴 대안을 받아진 것으로 세지 않는다. 처음에 그렇게 세서 -9에서 LZMA 분할이 되돌려지지
+       않았다.
+   - **확인:** 남기기를 켠 것과 끈 것의 아카이브가 바이트까지 같았다.
+     - WinUHA: 기본 레벨과 -9. 기본 레벨에서 대안 14개(따로 압축하면 440.6 KB).
+     - `10gb/progs`: 대안 30개(220.2 KB). 34.3 s / 35.4 s, 힙 최고치 1.51 GB로 같다.
+     - `10gb/2011`: 대안 0개.
+   - **제약:** 배치의 위쪽 파일은 만들어지면서 sealing되므로 남기지 못한다(`2011`의 UPX PAQ들,
+     WinUHA 설치 파일 자체). 3단계에서 "파일째 원본" 경우를 다루려면 sealing과 함께 풀어야 한다.
 3. **`laid`의 묶기와 결정:** WinUHA(목표: 기본 4.1 MB 이하, -9 3.95 MB 이하. 상한은 4.017 / 3.889 MB), PAQ 48개,
    `10gb/progs`, `10gb/2011`에서 크기, 시간, 힙 최고치를 잰다.
 4. **probe의 거절 (4.3.5)과 공유 지도 (4.2):** 3의 결과를 본 뒤 정한다.
@@ -298,30 +318,36 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
 - **(b)의 부분 공짜 셈:** `smaller_but`의 구조를 바꿀지, 공유 비율만큼 데이터를 잘라 낸 대리(stand-in)로
   셀지.
 
-## 8. 디버그 옵션으로 옮길 손잡이 (예상)
+## 8. 손잡이 (`-Z` 옵션)
 
-디버그 옵션을 `-Z key=value`로 모으는 작업이 따로 있다. 이 작업에서 생겼거나 생길 판단의 손잡이를
-미리 적어 둔다. 지금은 코드에 옵션으로 드러나 있지 않다. 각 판단을 작은 함수로 떼어 두었으니,
-옵션이 생기면 그 함수에서 읽게 하면 된다. 이름은 가안이다.
+이 작업의 판단은 개발자 옵션(`aqr -Z NS:NAME[=VALUE]`, aqr-common의 `zopt`)으로 바꿀 수 있다.
+`-Z NS:help`가 기본값과 함께 보여 준다.
 
-| 가안 | 값 | 지금 판단하는 곳 | 비고 |
+| 옵션 | 기본 | 판단하는 곳 | 비고 |
 |---|---|---|---|
-| `inno-split` | `probe` (기본), `always`, `never` | exe.rs `inno_pays` | 레벨 7 이상은 지금 `always`. 측정 때 임시 환경 변수로 강제했다 |
-| `inno-zlib` | `on`, `off` | exe.rs `pe`의 `aqr_inno::zlib_streams` 호출 | 4.0의 zlib 스트림 |
-| `undo` | `on`, `off` | lib.rs `undo`, `undoes` | 1단계. `off`면 이전 동작 |
-| `demote` | `on`, `off` | archive.rs `laid`의 `compresses_each` | 강등 자체를 끔. 측정에 썼다 |
-| `kin` | `on`, `off` | archive.rs `kin` | 강등 면제 시험 |
-| `kin-prefix` | 바이트(기본 4 MiB) | aqr-formula `KIN_PREFIX` | 친족 샘플을 둘 prefix 한도 |
-| `kin-level` | zstd 레벨(기본 3) | `compresses_after_each`의 `BASE.0` | 레벨 1이면 이득의 절반만 잡혔다 |
-| `smaller-slack` | 비율 | lib.rs `smaller_as` | 측정용(4.2의 여유 시험). 기본값으로 쓰지 않는다 |
-| `defer` | `off`, 비율(기본 `0.25`) | (4.3.2) `smaller_as`의 `Close` 조건 `DEFER_SLACK` | `off`면 지금과 같다 |
-| `defer-budget` | 배치 대비 비율(기본 `0.5`) | (4.3.2) 미루기 예산 | |
-| `defer-min` | 바이트(기본 16 KiB) | (4.3.2) `DEFER_MIN` | |
-| `group-likeness` | 칸 수(기본 16/64) | (4.3.3) `GROUP_LIKENESS` | |
-| `group-bytes` | 바이트(기본 64 MiB) | (4.3.3) 넘으면 샘플로 잼 | |
-| `choose` | `trial`, `made`, `kept` | (4.3.3) 결정 | `made`/`kept`는 측정용 강제 |
-| `force` | `probe`, `smaller`, `decoded` | `probe()`, `smaller_as` | 상한 측정용: 판단을 강제로 "받음" |
-| `peek` | `off`, 바이트 한도 | (4.2) 예비 해제 | 예비 해제의 예산 |
-| `share-free` | `on`, `off` | (4.2) `Probe::pays`, `smaller_as` | 공유 비율을 공짜로 칠지 |
-| `redecide` | `on`, `off` | (4.3) `laid`의 그룹 재판정 | |
+| `exe:[no-]inno-zlib` | on | exe.rs `pe`의 `aqr_inno::zlib_streams` 호출 | 4.0의 zlib 스트림 |
+| `exe:[no-]inno-undo` | on | exe.rs `pe`의 `inno_undos` 등록 | 1단계(`Undo`). off면 이전 동작 |
+| `inno-level=N` | 4 | exe.rs | upstream. LZMA 분할을 여는 레벨 |
+| `kin:[no-]trial` | on | archive.rs `kin` | 강등 면제 시험 |
+| `kin:prefix=SIZE` | `zstd:sample`의 넷(4M) | aqr-formula `KIN_PREFIX` | 친족 샘플을 둘 prefix 한도 |
+| `kin:level=N` | 3 | aqr-formula `KIN_LEVEL` | 레벨 1이면 이득의 절반만 잡혔다 |
+| `defer:slack=X`, `defer:no-slack` | 0.25 | lib.rs `verdict_as`의 `Close` 조건 | no-slack이면 아무것도 남기지 않는다(이전 동작) |
+| `defer:min=SIZE` | 16K | 같은 곳 | |
+| `defer:share=N` | 2 | `Cx::defer_budget` | 한 문맥의 데이터 중 1/N까지 |
 
+측정에 쓴 강제는 upstream의 옵션으로 된다.
+
+- probe 끄기: `-Z probe=off`.
+- `smaller` 끄기(모두 받기): `-Z no-smaller`.
+- 강등 끄기: `-Z merge-probe=` 아주 큰 값. 그보다 짧은 스트림은 시험 없이 합쳐진다.
+- 풀린 데이터 쪽만 받기, 여유 시험(`smaller` slack): 옵션으로 두지 않았다. 4.2의 측정에서 쓸모가 없음을
+  보았다.
+
+남은 단계에서 생길 옵션(가안):
+
+| 가안 | 값 | 판단하는 곳 |
+|---|---|---|
+| `defer:group-likeness=N` | 칸 수(16/64) | (4.3.3) 묶기 |
+| `defer:group-bytes=SIZE` | 64M | (4.3.3) 넘으면 샘플로 잼 |
+| `defer:choose=trial\|made\|kept` | trial | (4.3.3) 결정. made/kept는 측정용 강제 |
+| `peek:...` | | (4.2) 예비 해제의 예산 |

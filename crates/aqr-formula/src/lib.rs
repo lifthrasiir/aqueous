@@ -1316,9 +1316,65 @@ impl Formula {
 
     /// Puts in place of each alternative ([`Node::Either`]) what `made` tells of it, in the
     /// order of [`Formula::eithers`] (true: the formula made, false: the data kept), and drops
-    /// what the others took ([`Formula::compact`]). The output is the same. Panics where
-    /// `made` is not of as many.
+    /// what the others took ([`Formula::compact`]). A concatenation holding one is made again
+    /// ([`Node::concat`]): what is chosen, a concatenation of slices of the data say, spliced
+    /// into it, as it would have been made without alternatives. The output is the same. Panics
+    /// where `made` is not of as many.
     pub fn resolve(&mut self, made: &[bool]) {
+        self.choose(made, false);
+        self.drop_shared_untaken();
+        self.compact();
+    }
+
+    /// [`Formula::resolve`] of a formula whose root's parts are each its own (the files of a
+    /// batch): the root not made again, its parts staying its parts.
+    pub fn resolve_parts(&mut self, made: &[bool]) {
+        self.choose(made, true);
+        self.drop_shared_untaken();
+        self.compact();
+    }
+
+    /// The formula with every alternative of it the formula made (`made`) or the data kept, as
+    /// it would have been made so: the streams that only the others took dropped (the rest in
+    /// their order, their bytes as they are; a stream no slice took before stays), and the
+    /// applications of several outputs nothing takes. To size it as either.
+    pub fn chosen(&self, made: bool) -> Formula {
+        let used = |f: &Formula| {
+            let mut used = vec![false; f.streams.len()];
+            let mut mark = |n: &Node| {
+                n.visit(&mut |n| {
+                    if let &Node::Slice { stream, .. } = n
+                        && let Some(u) = used.get_mut(stream)
+                    {
+                        *u = true;
+                    }
+                })
+            };
+            f.shared.iter().flat_map(|s| s.inputs()).for_each(&mut mark);
+            mark(&f.root);
+            used
+        };
+        let before = used(self);
+        let mut f = self.clone();
+        f.choose(&vec![made; f.eithers().len()], false);
+        f.drop_shared_untaken();
+        let after = used(&f);
+        let mut to = vec![usize::MAX; f.streams.len()];
+        let mut streams = Vec::new();
+        for (i, s) in std::mem::take(&mut f.streams).into_iter().enumerate() {
+            if after[i] || !before[i] {
+                to[i] = streams.len();
+                streams.push(s);
+            }
+        }
+        f.streams = streams;
+        f.slices_mut(&mut |stream, _, _| *stream = to[*stream]);
+        f
+    }
+
+    /// [`Formula::resolve`] but for dropping what the others took; the root's parts kept as
+    /// they are where `parts`.
+    fn choose(&mut self, made: &[bool], parts: bool) {
         fn walk(n: &mut Node, made: &mut std::slice::Iter<bool>) {
             match n {
                 Node::Either(e) => {
@@ -1328,7 +1384,15 @@ impl Formula {
                     let Node::Either(e) = e else { unreachable!("an alternative") };
                     *n = if take { e.made } else { e.kept };
                 }
-                Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| walk(n, made)),
+                // (made again where it held one: what is chosen spliced in)
+                Node::Concat(ns) => {
+                    let held = ns.iter().any(|n| matches!(n, Node::Either(_)));
+                    ns.iter_mut().for_each(|n| walk(n, made));
+                    if held {
+                        *n = Node::concat(std::mem::take(ns));
+                    }
+                }
+                Node::Pack(ns) => ns.iter_mut().for_each(|n| walk(n, made)),
                 Node::Apply(a) => a.inputs.iter_mut().for_each(|n| walk(n, made)),
                 Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| walk(n, made)),
                 Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
@@ -1338,10 +1402,11 @@ impl Formula {
         for s in &mut self.shared {
             s.inputs_mut().iter_mut().for_each(|n| walk(n, &mut it));
         }
-        walk(&mut self.root, &mut it);
+        match &mut self.root {
+            Node::Concat(ns) if parts => ns.iter_mut().for_each(|n| walk(n, &mut it)),
+            root => walk(root, &mut it),
+        }
         assert!(it.next().is_none(), "as many choices as alternatives");
-        self.drop_shared_untaken();
-        self.compact();
     }
 
     /// Drops the applications of several outputs whose outputs nothing takes (those of the
@@ -2323,6 +2388,18 @@ mod tests {
         assert_eq!(f.eithers().iter().map(|e| (e.0, e.1.len)).collect::<Vec<_>>(), [(1, 11), (0, 11), (0, 2)]);
         assert!(f.eval(&Rev).is_err());
         assert!(crate::aqr::encode(&f, None, crate::aqr::Level::MID).is_err());
+        // chosen as either: the streams only the others took dropped, the rest as they were
+        for made in [false, true] {
+            let g = f.chosen(made);
+            assert_eq!(g.eval(&Rev).unwrap(), b"hello worldab");
+            let classes: Vec<&str> = g.streams.iter().map(|s| &*s.class).collect();
+            assert_eq!(classes, if made { &["a", "b", "ba"][..] } else { &["raw", "ab"][..] });
+            assert_eq!(g.shared.len(), made as usize);
+        }
+        // a stream no slice took stays
+        let mut h = f.clone();
+        h.push("unused", b"z".to_vec());
+        assert_eq!(h.chosen(false).streams.last().map(|s| &*s.class), Some("unused"));
         for k in 0..8 {
             let made = [k & 1 != 0, k & 2 != 0, k & 4 != 0];
             let mut g = f.clone();

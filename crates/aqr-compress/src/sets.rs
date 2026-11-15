@@ -156,8 +156,12 @@ pub(crate) fn sets(
         let &Node::Slice { stream, start, len } = slice else { return None };
         f.streams.get(stream)?.data.get(start as usize..)?.get(..len as usize)
     };
-    // whether a content's formula is that of a PNG file, all of it
-    let png = |slice: &Node, c: &Made| matches!(&c.f.root, Node::Apply(a) if a.module == aqr_png::formula::MODULE && a.len == slice.len());
+    // whether a content's formula is that of a PNG file, all of it (taken: not one kept beside
+    // its data, [`Made::close`])
+    let png = |slice: &Node, c: &Made| {
+        c.close.is_none()
+            && matches!(&c.f.root, Node::Apply(a) if a.module == aqr_png::formula::MODULE && a.len == slice.len())
+    };
     let mut out = Vec::new();
     if !plan.is_empty() {
         let mut index = HashMap::new();

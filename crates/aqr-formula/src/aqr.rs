@@ -1900,7 +1900,30 @@ impl Encoder {
         self.smaller_of(f, stand_in, free, d)
     }
 
+    /// [`Encoder::smaller_but`] as sizes: what the formula archives in (`free` taken off), and
+    /// what `d` does as it is (where the formula is at most half of an estimate of it, that
+    /// estimate).
+    pub fn sizes_but(
+        &self,
+        f: &Formula,
+        stand_in: Option<(usize, &[&[u8]])>,
+        free: &[usize],
+        d: &[u8],
+    ) -> Result<(usize, usize)> {
+        self.sizes_of(f, stand_in, free, d)
+    }
+
     fn smaller_of(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>, free: &[usize], d: &[u8]) -> Result<bool> {
+        self.sizes_of(f, stand_in, free, d).map(|(n, raw)| n < raw)
+    }
+
+    fn sizes_of(
+        &self,
+        f: &Formula,
+        stand_in: Option<(usize, &[&[u8]])>,
+        free: &[usize],
+        d: &[u8],
+    ) -> Result<(usize, usize)> {
         // (the last of the work on `d`, told as its streams and `d` are compressed)
         let streams = f.streams.iter().enumerate().map(|(i, s)| match stand_in {
             Some((t, pieces)) if t == i => total(pieces),
@@ -1917,14 +1940,14 @@ impl Encoder {
         }
         // (`d` was compressed, so a formula of it of at most half of its estimate was not one)
         if let Some(&raw) = self.raw_lens.borrow().get(&key(&[d])) {
-            return Ok(n < raw);
+            return Ok((n, raw));
         }
         if !self.streams.borrow().contains_key(&key(&[d])) {
             let c = match self.plan(key(&[d]), &[d], How::Usual)? {
                 Plan::Done(c, _) => c,
                 Plan::Level(level, estimate) => {
                     if n <= estimate / 2 {
-                        return Ok(true);
+                        return Ok((n, estimate));
                     }
                     // Of compares at the base level, as a formula mostly is smaller, and what
                     // was compared is then not archived: a formula is taken over data that only
@@ -1938,7 +1961,7 @@ impl Encoder {
                         let c = compressed_len(&mut self.cctx(), &[d], counted, self.threads)?;
                         let raw = archived_raw_len(d, c);
                         self.raw_lens.borrow_mut().insert(key(&[d]), raw);
-                        return Ok(n < raw);
+                        return Ok((n, raw));
                     }
                     compressed_to(&mut self.cctx(), &[d], level, self.threads, estimate)?
                 }
@@ -1947,13 +1970,13 @@ impl Encoder {
                     let c = compressed_len(&mut self.cctx(), &[d], PROBE_LEVEL.get(), self.threads)?;
                     let raw = archived_raw_len(d, c.filter(|&c| saves(c, d.len())));
                     self.raw_lens.borrow_mut().insert(key(&[d]), raw);
-                    return Ok(n < raw);
+                    return Ok((n, raw));
                 }
                 Plan::Probe => Plan::Probe.carry_out(&mut self.cctx(), &[d], self.threads)?.0,
             };
             self.streams.borrow_mut().insert(key(&[d]), kept(c));
         }
-        Ok(n < self.raw_len(d)?)
+        Ok((n, self.raw_len(d)?))
     }
 }
 
