@@ -539,6 +539,54 @@ fn pe_rest_scanned() {
     assert_eq!(modules(&f), [X86.name, FLATE.name], "{f}");
 }
 
+/// An Inno Setup installer of before 5.1.5 (the table of version 05 at its end, found by the
+/// pointer at 0x30): [`pe`], then one LZMA chunk (of `alone`, a `.lzma` file), the setup program
+/// and the setup header (each a few bytes).
+fn inno_old(alone: &[u8]) -> Vec<u8> {
+    let (mut d, _) = pe();
+    let data = d.len();
+    d.extend_from_slice(b"zlb\x1a");
+    d.extend_from_slice(&alone[..5]);
+    d.extend_from_slice(&alone[13..]);
+    let exe = d.len();
+    d.extend_from_slice(&[0x5d; 40]);
+    let header = d.len();
+    d.extend_from_slice(b"Inno Setup Setup Data (4.0.5)");
+    let at = d.len();
+    let total = at + 40;
+    d.extend_from_slice(b"rDlPtS05\x87eVx");
+    for v in [total, exe, 40, 1000, 0, header, data] {
+        d.extend((v as u32).to_le_bytes());
+    }
+    d[0x30..0x34].copy_from_slice(b"Inno");
+    d[0x34..0x38].copy_from_slice(&(at as u32).to_le_bytes());
+    d[0x38..0x3c].copy_from_slice(&(!(at as u32)).to_le_bytes());
+    d
+}
+
+/// The LZMA stream of an Inno Setup installer of before 5.1.5 is rebuilt of its data where that
+/// may archive smaller; else it is kept as it is, apart from the rest of the image, whose code
+/// is filtered still (the file not kept as it is, all of it, for the stream's data costing more
+/// than the stream).
+#[test]
+fn pe_inno_old() {
+    let d = inno_old(&aqr_lzma::greedy::alone(&text(300_000)));
+    let f = roundtrip(&d, &Options::default());
+    assert!(modules(&f).contains(&aqr_decompress::LZMA.name), "{f}");
+    // (of data compressed already: literals, the stream hardly larger than its data)
+    use aqr_lzma::lzma::{Packet, Props, encode};
+    let props = Props { lc: 3, lp: 0, pb: 2 };
+    let files = noise(300_000);
+    let mut alone = vec![props.byte()];
+    alone.extend((1u32 << 20).to_le_bytes());
+    alone.extend(u64::MAX.to_le_bytes());
+    alone.extend(encode(&files, props, &vec![Packet::LIT; files.len()], true));
+    let d = inno_old(&alone);
+    let f = roundtrip(&d, &Options::default());
+    assert!(!modules(&f).contains(&aqr_decompress::LZMA.name), "{f}");
+    assert!(modules(&f).contains(&X86.name), "{f}");
+}
+
 /// aqr-exe's x86 and ARM64 filters take their plans at most, to the page.
 #[test]
 fn exe_plans_hold() {

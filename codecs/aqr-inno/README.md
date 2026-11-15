@@ -1,7 +1,7 @@
 # aqr-inno
 
-Inno Setup installers (5.1.5 and later, whose loader carries the offset table of version 1):
-the stream of LZMA that holds the files of a solid installer, found by that table and split by
+Inno Setup installers (4.0 and later: the offset table of version 1 that the loader carries
+from 5.1.5, the earlier tables at the installer's end before): the stream of LZMA that holds the files of a solid installer, found by that table and split by
 aqr-lzma into its data and a record of its parse. aqr-compress then stores the data, scanned in
 turn like any file (the installer's executables, DLLs and resources are each recompressed by
 their own crate), and `lzma-recons` rebuilds the stream bit for bit. The formula is one
@@ -18,8 +18,11 @@ let pieces = aqr_inno::split(&exe, threads); // each LZMA stream: its range, dat
 ```
 
 aqr-compress takes the streams of a PE image from level 4 (as `.lzma` files and 7z archives:
-rebuilding LZMA is slow), and counts the installer's data (up to the total the table gives, a
-certificate after it left to the PE extent) in the image's extent.
+rebuilding LZMA is slow), each where its data may archive smaller than it (by aqr-formula's
+probe; where the data hardly compresses itself, packed executables, not counting the files in it
+as nothing), and counts the installer's data (up to the total the table gives, a certificate
+after it left to the PE extent; before 5.1.5 only where it starts with a chunk of LZMA) in the
+image's extent, what is not taken of it kept in a stream of its own.
 
 ## Results
 
@@ -35,6 +38,11 @@ solid LZMA stream of 43.17 MB, dictionary 8 MiB), 16 threads, measured on 2026-1
 The record is 2.90 MB (6.7% of the stream); the rest is the data, recompressed as
 `aqr -c` does 107.71 MB of the same files (31.4 MB).
 
+WinUHA 2.0's four installers (Inno Setup 4.0.0a to 5.0.4, 4.51 MB; two of zlib chunks, two of a
+solid LZMA stream): their files are executables packed by PECompact or UPX, whose streams split
+come to more than they are (Beta: 832 KB to data of 945 KB, 849 KB by a zstd sample, and a
+record of 10 KB). Not taken: 4.34 MB, as before the earlier tables were read.
+
 ## Status
 
 Done: solid and per-file LZMA chunks that end with an end marker (what the Inno Setup compiler
@@ -46,7 +54,7 @@ Left:
   compressed setup program (the same in every installer of a version): both kept as they are.
 - Installers of zlib and bzip2 (Inno Setup before 5.3's default, `compression=zip|bzip`), and
   encrypted ones (6.4's `encryption`): no chunk is taken.
-- Installers before 5.1.5 (another table), and data in separate `setup-1.bin` files
-  (`DiskSpanning`, the offset table's data offset is then 0).
+- Data in separate `setup-1.bin` files (`DiskSpanning`, the offset table's data offset is then
+  0), and the earlier tables of other versions (`rDlPtS02`, `rDlPtS06`: no sample seen).
 - Files cut apart by the header's list (for the call instruction filter `CallInstructionOptimization`
   Inno applies to executables, and per-file kinds): the data is scanned as a whole instead.

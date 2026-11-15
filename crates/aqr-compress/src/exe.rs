@@ -64,12 +64,20 @@ enum Arch {
     /// The `k`-th LZMA stream of an Inno Setup installer's file data ([`aqr_inno`]): rebuilt from
     /// its data, a content of its own.
     Inno(usize),
+    /// Data compressed already (of an Inno Setup installer's data, what is not taken), kept as it
+    /// is in a stream of its own: in the rest, it would have the rest's compressible bytes stored
+    /// as they are along with it.
+    Kept,
     /// A Mach-O image's code signature, left out (for `exe-recons/macho-codesign` to put back).
     Signature,
     /// A section of data of a Mach-O image coded against its tree's root's, or the root's
     /// ([`Remaps::data`]).
     Data,
 }
+
+/// Bytes of an installer's data kept apart ([`Arch::Kept`]) at least: those between its streams
+/// (their heads) are left with the rest.
+const MIN_KEPT: usize = 64;
 
 /// Tables shorter than this are left with the rest.
 const MIN_TABLE: usize = 64;
@@ -78,7 +86,7 @@ const MIN_TABLE: usize = 64;
 /// module would cost more.
 const MIN_SYMBOLS: usize = 16 << 10;
 
-pub(crate) fn pe(d: &[u8], opt: &crate::Options) -> Option<Formula> {
+pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
     let arch = match code.machine {
         0x14c | 0x8664 => Some(Arch::X86(code.is64, 0)),
@@ -115,11 +123,24 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options) -> Option<Formula> {
             sections.push((0, b.start, b.len(), Arch::Stored(format.name())));
         }
     }
-    // the LZMA streams of an Inno Setup installer's data (slow for their bytes: from level 4)
+    // the LZMA streams of an Inno Setup installer's data (slow for their bytes: from level 4),
+    // each where its data may archive smaller than it (not of executables packed already)
     let inno = match opt.level.scale() >= 4 && opt.recompresses() {
         true => aqr_inno::split(d, opt.threads),
         false => Vec::new(),
     };
+    let inno: Vec<_> = inno.into_iter().filter(|p| inno_pays(p, d, opt, depth, cx)).collect();
+    // (and the rest of its data, the setup header and the setup program, compressed: apart from
+    // the rest of the image)
+    if let Some(t) = aqr_inno::table(d).filter(|_| aqr_inno::end(d).is_some()) {
+        let mut at = t.data;
+        for r in inno.iter().map(|p| p.range.clone()).chain([t.total.min(d.len())..usize::MAX]) {
+            if r.start >= at + MIN_KEPT {
+                sections.push((0, at, r.start - at, Arch::Kept));
+            }
+            at = r.end;
+        }
+    }
     sections.extend(inno.iter().enumerate().map(|(k, p)| (0, p.range.start, p.range.len(), Arch::Inno(k))));
     filtered(d, "pe", sections, &[], &[], None, &[], inno)
 }
@@ -568,6 +589,23 @@ pub(crate) fn resolve(f: &mut Formula) {
     });
 }
 
+/// Whether a stream of an Inno Setup installer `d`, `depth` formats deep, may pay split
+/// ([`aqr_formula::probe`]): its data judged as it is, or, the files in it recompressed in turn
+/// counted as nothing (as [`crate::probe`] does), where the data compresses by a quarter at
+/// least itself. An installer's files are executables and the like, which a scan finds all of
+/// the data, though they may be packed already (by UPX or PECompact): the stream is then about as
+/// small as they come, and the data hardly compresses (WinUHA 2.0's installers: a zstd sample
+/// takes 10% off, ALZip 12.37's 44%).
+fn inno_pays(p: &aqr_inno::Piece, d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> bool {
+    let Some(probe) = crate::probe(opt, depth) else { return true };
+    let pays = |probe: aqr_formula::probe::Probe| {
+        let held = || cx.held_by_others(&p.data, d) as u8 as f64;
+        probe.pays(&cx.enc, p.range.len(), || Some(p.record.len()), &p.data, held, Kind::Unknown)
+    };
+    let compresses = || cx.enc.least(&p.data, p.data.len() / 4 * 3).is_ok_and(|n| n <= p.data.len() / 4 * 3);
+    pays(aqr_formula::probe::Probe::flat(opt.level)) || compresses() && pays(probe)
+}
+
 /// `d` with each of `sections`, `(virtual address, offset, size, code)` within `d`, through
 /// its filter (or a table as its layout tells), and the rest of `d` in a stream of `class`; `None` where none is filtered.
 /// The images' code is remapped as `remaps` tells.
@@ -621,6 +659,7 @@ fn filtered(
                 let inputs = vec![data, f.push("lzma/record", p.record), f.push("lzma/index", Vec::new())];
                 Node::apply(aqr_lzma::formula::MODULE, Vec::new(), inputs, size as u64)
             }
+            Arch::Kept => f.push("pe/kept", section.to_vec()),
             Arch::Data => match data.and_then(|data| data.get(&off)) {
                 Some(d) => against(&mut f, section, d, DATA, "macho-delta"),
                 None => f.push(DATA, section.to_vec()),
@@ -732,6 +771,7 @@ fn code_apply(
         | Arch::Output(_)
         | Arch::Stored(_)
         | Arch::Inno(_)
+        | Arch::Kept
         | Arch::Signature
         | Arch::Data => {
             return None;
