@@ -61,9 +61,15 @@ offset: a chunk is taken where its properties byte is valid and its stream decod
 within the bytes before the setup header, and is what encoding its packets gives
 (aqr-lzma's `recons::split`). The walk ends at the first chunk that fails; those before it are taken.
 
+Of zlib (4.0): the chunks are `zlb\x1a`, then a zlib stream (RFC 1950: a header of deflate with a
+window of up to 32 KiB and no dictionary, then its Adler-32), walked as those of LZMA, a chunk
+taken where its stream inflates and its checksum holds; and the setup program, a zlib stream where
+it comes before the setup header (tables 04 and 05).
+
 ## The formula
 
 The streams are those of aqr-exe's formula of the image (the rest of the image, the 9 bytes before
 each stream included), and for each LZMA stream three more: `inno` (its data, a content scanned in
 turn), `lzma/record` and `lzma/index` (empty). The node of the stream is the application of
-`lzma-recons` to the three, of the stream's length.
+`lzma-recons` to the three, of the stream's length. A zlib stream is a content of the format zlib
+(class `inno`), recompressed in turn as zlib streams are (aqr-flate).

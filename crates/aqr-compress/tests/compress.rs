@@ -587,6 +587,35 @@ fn pe_inno_old() {
     assert!(modules(&f).contains(&X86.name), "{f}");
 }
 
+/// An Inno Setup 4.0 installer of zlib chunks (zlib's default, level 9, as Inno Setup 4.0 wrote
+/// them): each chunk's stream and the setup program's (an image of code, [`pe`]) are taken as
+/// zlib streams, the setup program's code filtered in turn.
+#[test]
+fn pe_inno_old_zlib() {
+    let (mut d, _) = pe();
+    let data = d.len();
+    for k in 0..2 {
+        d.extend_from_slice(b"zlb\x1a");
+        d.extend_from_slice(&zlib(&text(100_000 + k * 1000), 9));
+    }
+    let exe = d.len();
+    d.extend_from_slice(&zlib(&pe().0, 9));
+    let header = d.len();
+    d.extend_from_slice(b"Inno Setup Setup Data (4.0.5)");
+    let at = d.len();
+    d.extend_from_slice(b"rDlPtS05\x87eVx");
+    for v in [at + 40, exe, header - exe, 1000, 0, header, data] {
+        d.extend((v as u32).to_le_bytes());
+    }
+    d[0x30..0x34].copy_from_slice(b"Inno");
+    d[0x34..0x38].copy_from_slice(&(at as u32).to_le_bytes());
+    d[0x38..0x3c].copy_from_slice(&(!(at as u32)).to_le_bytes());
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    let m = modules(&f);
+    assert!(m.contains(&FLATE.name), "{f}");
+    assert_eq!(m.iter().filter(|&&m| m == X86.name).count(), 2, "{f}");
+}
+
 /// aqr-exe's x86 and ARM64 filters take their plans at most, to the page.
 #[test]
 fn exe_plans_hold() {

@@ -115,10 +115,40 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 
 /// Where an installer's own bytes end (before a certificate), if `d` is one: what the
 /// extent of its PE image takes in, as the loader reads it. Before 5.1.5, only where its data
-/// starts with a chunk of LZMA: of zlib or bzip2 (4.0's default), nothing of it is taken, and
-/// what the extent leaves out archives smaller apart.
+/// starts with a chunk of LZMA or zlib ([`zlib_streams`]): of bzip2, nothing of it is taken,
+/// and what the extent leaves out archives smaller apart.
 pub fn end(d: &[u8]) -> Option<usize> {
-    new_table(d).or_else(|| old_table(d).filter(|t| lzma_at(d, t.data))).map(|t| t.total)
+    new_table(d).or_else(|| old_table(d).filter(|t| lzma_at(d, t.data) || zlib_at(d, t.data + 4))).map(|t| t.total)
+}
+
+/// Whether a zlib stream starts at `at` of `d`, by its header: deflate of a window up to
+/// 32 KiB, no preset dictionary, its check.
+fn zlib_at(d: &[u8], at: usize) -> bool {
+    let Some(&[cmf, flg]) = d.get(at..at + 2) else { return false };
+    cmf & 0x0f == 8 && cmf >> 4 <= 7 && flg & 0x20 == 0 && (cmf as u16 * 256 + flg as u16).is_multiple_of(31)
+}
+
+/// The zlib streams of the installer `d` (Inno Setup 4.0's default compression): the chunks of
+/// its file data (each `zlb\x1a`, then the stream), one after another from where the data
+/// starts and as far as they go, and the compressed setup program where it is one (4.0's
+/// tables, 04 and 05). `len` tells the bytes of the zlib stream at the start of its argument
+/// (its checksum included), None where it does not inflate. Each range is of a whole stream.
+pub fn zlib_streams(d: &[u8], len: impl Fn(&[u8]) -> Option<usize>) -> Vec<Range<usize>> {
+    let Some(t) = table(d) else { return Vec::new() };
+    let (mut streams, mut at) = (Vec::new(), t.data);
+    let end = t.header.min(t.exe);
+    while at + 4 < end && d.get(at..at + 4) == Some(CHUNK) && zlib_at(d, at + 4) {
+        let Some(n) = len(&d[at + 4..end]) else { break };
+        streams.push(at + 4..at + 4 + n);
+        at += 4 + n;
+    }
+    // (the setup program, of 4.0: before the setup header, its compressed size in the table)
+    if t.exe < t.header && zlib_at(d, t.exe) {
+        if let Some(n) = len(&d[t.exe..t.header]) {
+            streams.push(t.exe..t.exe + n);
+        }
+    }
+    streams
 }
 
 /// Whether a chunk of LZMA starts at `at` of `d`: its signature, a valid properties byte, a
@@ -326,14 +356,75 @@ mod tests {
     }
 
     #[test]
-    fn old_zlib_installers_have_no_end() {
-        // (a chunk of zlib: what the image's extent leaves out is kept so, nothing taken of it)
+    fn old_bzip2_installers_have_no_end() {
+        // (a chunk of bzip2: what the image's extent leaves out is kept so, nothing taken of it)
         let (mut d, ranges) = old_installer(b'5', &[b"abc"]);
         assert!(end(&d).is_some());
         let at = ranges[0].start - 5;
-        d[at..at + 6].copy_from_slice(&[0x78, 0xda, 0xcc, 0xbd, 0x7d, 0x5c]);
+        d[at..at + 10].copy_from_slice(b"BZh91AY&SY");
         assert!(table(&d).is_some());
         assert_eq!(end(&d), None);
+    }
+
+    /// An installer of 4.0 (table 05) of zlib chunks, each `zlb\x1a` and a zlib stream (here of
+    /// stored blocks: a test needs no deflater): the chunks, the setup program (a zlib stream
+    /// too), the setup header, the table.
+    fn zlib_installer(chunks: &[&[u8]]) -> (Vec<u8>, Vec<Range<usize>>) {
+        fn stored(data: &[u8]) -> Vec<u8> {
+            let mut z = vec![0x78, 0x01, 1];
+            z.extend((data.len() as u16).to_le_bytes());
+            z.extend((!(data.len() as u16)).to_le_bytes());
+            z.extend_from_slice(data);
+            let (mut a, mut b) = (1u32, 0u32);
+            for &x in data {
+                a = (a + x as u32) % 65521;
+                b = (b + a) % 65521;
+            }
+            z.extend(((b << 16) | a).to_be_bytes());
+            z
+        }
+        let data = 0x80;
+        let mut d = vec![0u8; data];
+        let mut ranges = Vec::new();
+        for c in chunks {
+            d.extend_from_slice(CHUNK);
+            ranges.push(d.len()..d.len() + c.len() + 11);
+            d.extend(stored(c));
+        }
+        let exe = d.len();
+        ranges.push(exe..exe + 20 + 11);
+        d.extend(stored(&[7; 20]));
+        let header = d.len();
+        d.extend_from_slice(b"Inno Setup Setup Data (4.0.5)");
+        let at = d.len();
+        let mut t = b"rDlPtS05\x87eVx".to_vec();
+        for f in [at + OLD_TABLE, exe, 31, 20, 0, header, data] {
+            t.extend((f as u32).to_le_bytes());
+        }
+        d.extend(t);
+        d[0x30..0x34].copy_from_slice(b"Inno");
+        d[0x34..0x38].copy_from_slice(&(at as u32).to_le_bytes());
+        d[0x38..0x3c].copy_from_slice(&(!(at as u32)).to_le_bytes());
+        (d, ranges)
+    }
+
+    /// The bytes of a zlib stream of stored blocks at the start of `d` (as [`zlib_installer`]
+    /// makes them: one block).
+    fn stored_len(d: &[u8]) -> Option<usize> {
+        let n = u16::from_le_bytes([*d.get(3)?, *d.get(4)?]) as usize;
+        (d.len() >= 7 + n + 4).then_some(7 + n + 4)
+    }
+
+    #[test]
+    fn zlib_streams_are_found() {
+        let (d, ranges) = zlib_installer(&[b"one file", b"another file"]);
+        assert_eq!(end(&d), Some(d.len()));
+        assert_eq!(zlib_streams(&d, stored_len), ranges);
+        // (none of LZMA)
+        assert!(split(&d, 1).is_empty());
+        // the walk ends at a stream that does not inflate; the setup program is still found
+        let found = zlib_streams(&d, |s| stored_len(s).filter(|&n| n != ranges[1].len()));
+        assert_eq!(found, [ranges[0].clone(), ranges[2].clone()]);
     }
 
     #[test]

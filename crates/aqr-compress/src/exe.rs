@@ -8,7 +8,8 @@
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
 //! imports and runtime functions by `recs-fields`, their numbers as deltas; of an NSIS
 //! installer, the files its data stores, each a content of its format ([`crate::nsis`]); of an Inno
-//! Setup installer, the LZMA streams of its file data rebuilt from their data ([`aqr_inno`]). Of a 64-bit Mach-O
+//! Setup installer, the LZMA streams of its file data rebuilt from their data, and 4.0's zlib
+//! streams recompressed in turn ([`aqr_inno`]). Of a 64-bit Mach-O
 //! image, the symbol table and its string table by `exe-recons/macho-symtab`; of its `__DWARF`
 //! segment, its DWARF by aqr-dwarf's modules ([`crate::dwarf`]). ELF images, of their code and
 //! their DWARF.
@@ -64,6 +65,9 @@ enum Arch {
     /// The `k`-th LZMA stream of an Inno Setup installer's file data ([`aqr_inno`]): rebuilt from
     /// its data, a content of its own.
     Inno(usize),
+    /// A zlib stream of an Inno Setup installer (4.0's chunks of file data and setup program,
+    /// [`aqr_inno::zlib_streams`]): a content of its format, recompressed in turn.
+    InnoZlib,
     /// Data compressed already (of an Inno Setup installer's data, what is not taken), kept as it
     /// is in a stream of its own: in the rest, it would have the rest's compressible bytes stored
     /// as they are along with it.
@@ -84,6 +88,9 @@ aqr_common::zopt! {
     /// Bytes of an installer's data kept apart ([`Arch::Kept`]) at least: those between its streams
     /// (their heads) are left with the rest.
     static MIN_KEPT: Opt<usize> = Opt::size("exe:min-kept", 64, "installer data kept apart of at least this many bytes");
+    /// Whether an Inno Setup 4.0 installer's zlib streams are recompressed in turn
+    /// ([`aqr_inno::zlib_streams`]).
+    static INNO_ZLIB: Opt<bool> = Opt::flag("exe:inno-zlib", true, "recompress Inno Setup 4.0's zlib chunks and setup program");
     /// Tables shorter than this are left with the rest.
     static MIN_TABLE: Opt<usize> = Opt::size("exe:min-table", 64, "tables shorter than this are left with the rest");
     /// Symbol tables shorter than this, with their string tables, are left with the rest: the
@@ -164,18 +171,26 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
         false => Vec::new(),
     };
     let inno: Vec<_> = inno.into_iter().filter(|p| inno_pays(p, d, opt, depth, cx)).collect();
+    // its zlib streams (4.0's), each recompressed in turn as a zlib stream
+    let zlib = match opt.recompresses() && INNO_ZLIB.get() {
+        true => aqr_inno::zlib_streams(d, |s| crate::flate::zlib_deflate(s).map(|r| r.end + 4)),
+        false => Vec::new(),
+    };
     // (and the rest of its data, the setup header and the setup program, compressed: apart from
     // the rest of the image)
     if let Some(t) = aqr_inno::table(d).filter(|_| aqr_inno::end(d).is_some()) {
+        let mut taken: Vec<_> = inno.iter().map(|p| p.range.clone()).chain(zlib.iter().cloned()).collect();
+        taken.sort_by_key(|r| r.start);
         let mut at = t.data;
         let min_kept = MIN_KEPT.get();
-        for r in inno.iter().map(|p| p.range.clone()).chain([t.total.min(d.len())..usize::MAX]) {
+        for r in taken.into_iter().chain([t.total.min(d.len())..usize::MAX]) {
             if r.start >= at + min_kept {
                 sections.push((0, at, r.start - at, Arch::Kept));
             }
-            at = r.end;
+            at = at.max(r.end);
         }
     }
+    sections.extend(zlib.iter().map(|r| (0, r.start, r.len(), Arch::InnoZlib)));
     sections.extend(inno.iter().enumerate().map(|(k, p)| (0, p.range.start, p.range.len(), Arch::Inno(k))));
     filtered(d, "pe", sections, &[], &[], None, &[], inno)
 }
@@ -676,6 +691,7 @@ fn filtered(
                 let inputs = vec![data, f.push("lzma/record", p.record), f.push("lzma/index", Vec::new())];
                 Node::apply(aqr_lzma::formula::MODULE, Vec::new(), inputs, size as u64)
             }
+            Arch::InnoZlib => f.push_content("inno", Kind::Format(crate::Format::Zlib.name()), section.to_vec()),
             Arch::Kept => f.push("pe/kept", section.to_vec()),
             Arch::Data => match data.and_then(|data| data.get(&off)) {
                 Some(d) => against(&mut f, section, d, DATA, "macho-delta"),
@@ -788,6 +804,7 @@ fn code_apply(
         | Arch::Output(_)
         | Arch::Stored(_)
         | Arch::Inno(_)
+        | Arch::InnoZlib
         | Arch::Kept
         | Arch::Signature
         | Arch::Data => {
