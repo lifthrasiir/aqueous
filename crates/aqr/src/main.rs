@@ -951,7 +951,13 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         }
     }
     match aqr_common::zopt::apply(&zopts)? {
-        aqr_common::zopt::Applied::Set => aqr_common::mem::log_from_option(),
+        aqr_common::zopt::Applied::Set => {
+            aqr_common::mem::log_from_option();
+            // (the options' defaults that `Options` took when it was made, before `-Z`: taken
+            // again, as nothing else sets them)
+            let d = Options::default();
+            (a.opt.smaller, a.opt.description, a.opt.expansion) = (d.smaller, d.description, d.expansion);
+        }
         aqr_common::zopt::Applied::Help(h) => {
             print!("{h}");
             std::process::exit(0);
