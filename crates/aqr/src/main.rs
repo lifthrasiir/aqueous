@@ -2081,8 +2081,8 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
             eprintln!("mirror blocks: {}", size(r.mirrors as f64));
         }
         if a.verbose && r.alternatives.0 > 0 {
-            let (n, bytes) = r.alternatives;
-            eprintln!("formulas kept beside their data to choose: {n} ({} alone)", size(bytes as f64));
+            let (n, made, bytes) = r.alternatives;
+            eprintln!("formulas kept beside their data to choose: {n} ({} alone), {made} taken", size(bytes as f64));
         }
         summary(out, files, g.input_bytes() as usize, r.len, start);
     }

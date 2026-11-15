@@ -1771,6 +1771,22 @@ impl Encoder {
         trials.into_iter().collect()
     }
 
+    /// Of each pair of data and prefix, what the data archives in at the base level after the
+    /// prefix (a raw prefix, as where they are one after another in a stream): its bytes where it
+    /// does not compress by 1/32 (stored). On up to the encoder's threads. To choose between
+    /// alternatives of a batch's formula as they would be archived along with the rest.
+    pub fn len_after_each(&self, pairs: &[(&[u8], &[u8])]) -> Result<Vec<usize>> {
+        let (level, stored) = (BASE_LEVEL.get(), self.level == Level::STORED);
+        let lens = aqr_common::pool::par_map(pairs.len(), self.threads, |i| -> Result<usize> {
+            let (d, prefix) = pairs[i];
+            if stored || d.is_empty() {
+                return Ok(d.len());
+            }
+            Ok(after_prefix_len(d, prefix, level)?.filter(|&n| saves(n, d.len())).unwrap_or(d.len()))
+        });
+        lens.into_iter().collect()
+    }
+
     /// `sample` of the stream whose key is `k` compressed at `level`, as [`Encoder::least`]
     /// compressed it if it did.
     fn trial(&self, k: StreamKey, sample: &[u8], level: i32) -> Result<Option<Vec<u8>>> {

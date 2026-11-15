@@ -1,0 +1,205 @@
+//! The alternatives of a batch's formula chosen (`Node::Either`, docs/cross-file-design.md 4.3):
+//! where a formula lost to its data as it is by little ([`crate::Verdict::Close`]), both were
+//! kept; now that the batch is made, each is chosen by what its bytes archive in after the rest
+//! of the batch of their classes, as the archive puts a class's streams one after another: a
+//! formula of a version of a program, alike to another version's formula elsewhere in the batch,
+//! comes to less after it than the data as it is does after the other's data. The others'
+//! formulas count as made (siblings take the same way), those within it as chosen already
+//! (innermost first).
+
+use std::collections::HashMap;
+
+use aqr_formula::aqr::Encoder;
+use aqr_formula::{Either, Formula, Node};
+
+aqr_common::zopt! {
+    /// How the alternatives are chosen: by trial, or all made or all kept (to measure).
+    static CHOOSE: Opt<&'static str> =
+        Opt::value("defer:choose", "trial", "how a batch's alternatives are chosen").choices(&["trial", "made", "kept"]);
+    /// The most bytes of a class's other streams put before an alternative's bytes of the class.
+    static PREFIX: Opt<usize> = Opt::size("defer:prefix", 4 << 20, "bytes of the rest of a class put before an alternative's at most");
+}
+
+/// What the alternatives of a batch came to: how many, how many made, and the bytes the
+/// formulas archived in alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Chosen {
+    pub alternatives: usize,
+    pub made: usize,
+    pub bytes: usize,
+}
+
+/// Chooses the alternatives of `f`, a batch's formula (its root's parts its files), and resolves
+/// them ([`Formula::resolve_parts`]).
+pub(crate) fn choose(f: &mut Formula, enc: &Encoder) -> Chosen {
+    let eithers = f.eithers();
+    let n = eithers.len();
+    if n == 0 {
+        return Chosen::default();
+    }
+    let bytes = eithers.iter().map(|e| e.1.sizes.0).sum();
+    let made: Vec<bool> = match CHOOSE.get() {
+        "made" => vec![true; n],
+        "kept" => vec![false; n],
+        _ => {
+            let _s = aqr_common::trace::span("choose");
+            trial(f, &eithers, enc)
+        }
+    };
+    let count = made.iter().filter(|&&m| m).count();
+    f.resolve_parts(&made);
+    Chosen { alternatives: n, made: count, bytes }
+}
+
+/// Bytes of a stream, by class: the pieces of each.
+type ByClass<'a> = HashMap<&'a str, Vec<&'a [u8]>>;
+
+/// Of `eithers` (in [`Formula::eithers`]' order: those within one before it), whether each is
+/// made: the deepest first, those of a depth on threads.
+fn trial(f: &Formula, eithers: &[(usize, &Either)], enc: &Encoder) -> Vec<bool> {
+    let index: HashMap<*const Either, usize> = eithers.iter().enumerate().map(|(i, e)| (e.1 as *const _, i)).collect();
+    let mut made = vec![false; eithers.len()];
+    let deepest = eithers.iter().map(|e| e.0).max().unwrap_or(0);
+    for depth in (0..=deepest).rev() {
+        let at: Vec<usize> = (0..eithers.len()).filter(|&i| eithers[i].0 == depth).collect();
+        // of each, both ways: its pieces of each class, and the prefixes of the rest of the
+        // classes; tried all at once
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut of: Vec<[Vec<usize>; 2]> = Vec::new();
+        for &i in &at {
+            let e = eithers[i].1;
+            let used = used_ranges(f, &e.kept, &e.made);
+            let mut sides: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+            for (side, node) in [&e.kept, &e.made].into_iter().enumerate() {
+                let mut pieces = ByClass::new();
+                pieces_of(f, node, &index, &made, &mut pieces);
+                for (class, pieces) in pieces {
+                    sides[side].push(pairs.len());
+                    pairs.push((pieces.concat(), prefix(f, class, &used)));
+                }
+            }
+            of.push(sides);
+        }
+        let refs: Vec<(&[u8], &[u8])> = pairs.iter().map(|(d, p)| (&d[..], &p[..])).collect();
+        let lens = enc.len_after_each(&refs).expect("zstd");
+        for (k, &i) in at.iter().enumerate() {
+            let cost = |side: usize| of[k][side].iter().map(|&p| lens[p]).sum::<usize>();
+            made[i] = cost(1) < cost(0);
+        }
+    }
+    made
+}
+
+/// The bytes of node `n` of `f` by the class of their streams, the alternatives within it as
+/// `made` tells of them (by their indices in `index`).
+fn pieces_of<'a>(
+    f: &'a Formula,
+    n: &'a Node,
+    index: &HashMap<*const Either, usize>,
+    made: &[bool],
+    out: &mut ByClass<'a>,
+) {
+    match n {
+        &Node::Slice { stream, start, len } => {
+            if let Some(s) = f.streams.get(stream)
+                && let Some(d) = s.data.get(start as usize..).and_then(|d| d.get(..len as usize))
+            {
+                out.entry(&s.class).or_default().push(d);
+            }
+        }
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| pieces_of(f, n, index, made, out)),
+        Node::Apply(a) => a.inputs.iter().for_each(|n| pieces_of(f, n, index, made, out)),
+        Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| pieces_of(f, n, index, made, out)),
+        Node::Either(e) => {
+            let take = index.get(&(&**e as *const Either)).is_some_and(|&i| made[i]);
+            pieces_of(f, if take { &e.made } else { &e.kept }, index, made, out)
+        }
+        Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+    }
+}
+
+/// The ranges of each stream that nodes `ns` slice, by stream.
+fn used_ranges(f: &Formula, kept: &Node, made: &Node) -> HashMap<usize, Vec<(usize, usize)>> {
+    let mut used: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+    for n in [kept, made] {
+        n.visit(&mut |n| {
+            if let &Node::Slice { stream, start, len } = n
+                && stream < f.streams.len()
+            {
+                used.entry(stream).or_default().push((start as usize, (start + len) as usize));
+            }
+        });
+    }
+    used
+}
+
+/// What comes before an alternative's bytes of `class` in the archive: the bytes of the other
+/// streams of the class (those nearest the alternative's first stream first, the nearest last),
+/// but those the alternative takes, up to [`PREFIX`] bytes.
+fn prefix(f: &Formula, class: &str, used: &HashMap<usize, Vec<(usize, usize)>>) -> Vec<u8> {
+    let first = used.keys().copied().min().unwrap_or(0);
+    let mut streams: Vec<usize> = (0..f.streams.len()).filter(|&s| f.streams[s].class == class).collect();
+    streams.sort_by_key(|&s| s.abs_diff(first));
+    let mut room = PREFIX.get();
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for s in streams {
+        if room == 0 {
+            break;
+        }
+        let d = &f.streams[s].data[..];
+        // (the stream but for what the alternative takes of it)
+        let mut cuts = used.get(&s).cloned().unwrap_or_default();
+        cuts.sort_unstable();
+        let mut rest = Vec::new();
+        let mut at = 0;
+        for (a, b) in cuts {
+            if a > at {
+                rest.extend_from_slice(&d[at..a.min(d.len())]);
+            }
+            at = at.max(b);
+        }
+        if at < d.len() {
+            rest.extend_from_slice(&d[at..]);
+        }
+        let n = rest.len().min(room);
+        room -= n;
+        parts.push(rest[rest.len() - n..].to_vec());
+    }
+    parts.into_iter().rev().flatten().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aqr_formula::aqr::Level;
+
+    /// An alternative whose formula is like another file's formula is made; one whose formula is
+    /// like nothing, and larger than its data, is kept.
+    #[test]
+    fn made_where_alike_after_the_rest() {
+        let noise = |seed| aqr_common::rng::Rng::new(seed).bytes(200_000);
+        let (x, mut y) = (noise(1), noise(1));
+        y.iter_mut().step_by(50).for_each(|b| *b ^= 1);
+        let mut f = Formula::default();
+        let either = |kept, made, len| Node::Either(Box::new(Either { kept, made, len, sizes: (0, 0) }));
+        // two files, each its data kept or its formula: the first's alike to the second's, the
+        // second's like nothing
+        let (k1, k2) = (f.push("raw", noise(2)), f.push("raw", noise(3)));
+        let (m1, m2) = (f.push("x", x), f.push("x", noise(4)));
+        let other = f.push("x", y);
+        let longer = f.push("y", noise(5).repeat(2));
+        f.root = Node::Concat(vec![either(k1, m1, 200_000), either(k2, Node::concat([m2, longer]), 200_000), other]);
+        let chosen = choose(&mut f, &Encoder::new(Level::MID));
+        assert_eq!((chosen.alternatives, chosen.made), (2, 1));
+        assert!(f.eithers().is_empty());
+        // the root's parts stay its parts: the first file's formula, the second's data, the other
+        assert_eq!(f.root.len(), 600_000);
+        let Node::Concat(parts) = &f.root else { panic!("{f}") };
+        assert_eq!(parts.len(), 3);
+        let class = |n: &Node| match n {
+            &Node::Slice { stream, .. } => f.streams[stream].class.to_string(),
+            n => panic!("{n:?}"),
+        };
+        assert_eq!([class(&parts[0]), class(&parts[1])], ["x", "raw"]);
+    }
+}

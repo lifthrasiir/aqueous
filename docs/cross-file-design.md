@@ -271,6 +271,18 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
    - **제약:** 배치의 위쪽 파일은 만들어지면서 sealing되므로 남기지 못한다(`2011`의 UPX PAQ들,
      WinUHA 설치 파일 자체). 3단계에서 "파일째 원본" 경우를 다루려면 sealing과 함께 풀어야 한다.
 3. **`laid`의 묶기와 결정:** WinUHA(목표: 기본 4.1 MB 이하, -9 3.95 MB 이하. 상한은 4.017 / 3.889 MB), PAQ 48개,
+   - **했음, 묶기 없이 (2026-11-15, `choose.rs`):** likeness로 묶으려면 원본 쪽 바이트가 필요한데, 그 바이트는
+     평가해야 나온다. 그래서 대안마다 따로, 안쪽부터 판정한다. 각 쪽의 바이트를 class별로 모아,
+     같은 class의 배치 안 다른 스트림을 prefix로 두고(그 대안이 쓰는 바이트는 빼고, `defer:prefix` 4 MiB까지)
+     기본 레벨로 압축한 크기를 비교한다. 다른 대안의 formula 쪽도 prefix에 든다. 형제도 같은 길을
+     택한다는 가정이다.
+     - WinUHA, 기본 레벨: 대안 12개 중 6개 채택. 4,233,874 → 4,178,436 B(−1.3%), 0.30 → 0.31 s.
+       모두 formula로 강제하면 4,195,624 B.
+     - WinUHA, -9: 16개 중 6개. 4,208,354 → 4,140,704 B. 모두 formula면 4,153,452 B.
+     - `10gb/progs`: 30개 중 3개. 182,808,039 → 182,805,645 B, 34.3 → 35.5 s, 힙 최고치 1.51 → 1.50 GB.
+     - `10gb/2011`: 대안이 없어 같다.
+     - 상한(판단을 모두 강제했을 때 4,016,994 / 3,889,466 B)까지 남은 몫은 두 가지다. 하나는 위쪽
+       파일의 sealing(대안을 남기지 못함)이고, 다른 하나는 probe의 거절(4.3.5)이다.
    `10gb/progs`, `10gb/2011`에서 크기, 시간, 힙 최고치를 잰다.
 4. **probe의 거절 (4.3.5)과 공유 지도 (4.2):** 3의 결과를 본 뒤 정한다.
 
@@ -334,6 +346,8 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
 | `defer:slack=X`, `defer:no-slack` | 0.25 | lib.rs `verdict_as`의 `Close` 조건 | no-slack이면 아무것도 남기지 않는다(이전 동작) |
 | `defer:min=SIZE` | 16K | 같은 곳 | |
 | `defer:share=N` | 2 | `Cx::defer_budget` | 한 문맥의 데이터 중 1/N까지 |
+| `defer:choose=trial\|made\|kept` | trial | choose.rs | made/kept는 측정용 강제(kept면 2단계와 같다) |
+| `defer:prefix=SIZE` | 4M | choose.rs `prefix` | 한 class의 나머지를 둘 prefix 한도 |
 
 측정에 쓴 강제는 upstream의 옵션으로 된다.
 
@@ -349,5 +363,4 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
 |---|---|---|
 | `defer:group-likeness=N` | 칸 수(16/64) | (4.3.3) 묶기 |
 | `defer:group-bytes=SIZE` | 64M | (4.3.3) 넘으면 샘플로 잼 |
-| `defer:choose=trial\|made\|kept` | trial | (4.3.3) 결정. made/kept는 측정용 강제 |
 | `peek:...` | | (4.2) 예비 해제의 예산 |

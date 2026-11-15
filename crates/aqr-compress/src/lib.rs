@@ -128,6 +128,7 @@
 mod aqueous;
 mod archive;
 mod bundle;
+mod choose;
 mod chunked;
 mod detect;
 mod dwarf;
