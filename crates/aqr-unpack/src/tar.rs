@@ -21,8 +21,12 @@ use crate::stream;
 use crate::{Done, Filter, Select, Sink};
 
 const BLOCK: usize = 512;
-/// A batch is told once it holds this many bytes of contents, or this many files.
-const BATCH_BYTES: usize = 32 << 20;
+
+aqr_common::zopt! {
+    /// A batch is told once it holds this many bytes of contents, or [`BATCH_FILES`] files.
+    static BATCH_BYTES: Opt<usize> =
+        Opt::size("unpack:tar-batch-bytes", 32 << 20, "bytes of contents of a batch of tar members");
+}
 const BATCH_FILES: usize = 4096;
 
 /// Extracts tar archive `d` (under `f`) to `sink`; where `select` is given, the members it does
@@ -401,7 +405,7 @@ impl<'s> Parser<'s> {
             return self.member(h, Vec::new());
         }
         if keep {
-            self.body = Vec::with_capacity(size.min(BATCH_BYTES as u64) as usize);
+            self.body = Vec::with_capacity(size.min(BATCH_BYTES.get() as u64) as usize);
         }
         self.state = State::Body { h: Box::new(h), left: size, keep };
         Ok(())
@@ -500,7 +504,7 @@ impl Parser<'_> {
                     Ok(_) => {
                         self.batch_bytes += body.len();
                         self.batch.push((c, body));
-                        if self.batch_bytes >= BATCH_BYTES || self.batch.len() >= BATCH_FILES {
+                        if self.batch_bytes >= BATCH_BYTES.get() || self.batch.len() >= BATCH_FILES {
                             self.flush()?;
                         }
                     }

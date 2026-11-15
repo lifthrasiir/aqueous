@@ -40,7 +40,29 @@ pub struct Named {
 /// The size of the parts of a stream of `total` bytes on `threads` threads: one each, within
 /// `min` and `max`.
 fn part(total: u64, threads: usize, min: u64, max: u64) -> u64 {
-    total.div_ceil(threads.max(1) as u64).clamp(min, max)
+    // (not `clamp`, which panics where a setting puts `min` over `max`)
+    total.div_ceil(threads.max(1) as u64).max(min).min(max)
+}
+
+aqr_common::zopt! {
+    /// The shortest member of a gzip stream cut in members on several threads.
+    static GZIP_PART_MIN: Opt<usize> =
+        Opt::size("pack:gzip-part-min", 1 << 20, "shortest gzip member made on a thread of a large stream");
+    /// The longest.
+    static GZIP_PART_MAX: Opt<usize> =
+        Opt::size("pack:gzip-part-max", 16 << 20, "longest gzip member made on a thread of a large stream");
+    /// The shortest block of an xz stream made on several threads.
+    static XZ_BLOCK_MIN: Opt<usize> =
+        Opt::size("pack:xz-block-min", 1 << 20, "shortest xz block made on a thread of a large stream");
+    /// The longest block of an xz stream, in dictionaries of its level.
+    static XZ_BLOCK_DICTS: Opt<usize> =
+        Opt::value("pack:xz-block-dicts", 3, "longest xz block, in dictionaries of the level");
+    /// The shortest job of a multithreaded zstd stream.
+    static ZSTD_JOB_MIN: Opt<usize> =
+        Opt::size("pack:zstd-job-min", 512 << 10, "shortest zstd job made on a thread of a large stream");
+    /// The longest.
+    static ZSTD_JOB_MAX: Opt<usize> =
+        Opt::size("pack:zstd-job-max", 64 << 20, "longest zstd job made on a thread of a large stream");
 }
 
 /// A compressor of `f` at `level` writing to `w`, of `total` bytes (as far as known; 0 for
@@ -57,7 +79,7 @@ pub fn encoder<'w>(
     let wave = |part: u64| (part * threads as u64).min(o.batch.max(part)) as usize;
     Ok(match f {
         Filter::Gzip => {
-            let part = part(total, threads, 1 << 20, 16 << 20) as usize;
+            let part = part(total, threads, GZIP_PART_MIN.get() as u64, GZIP_PART_MAX.get() as u64) as usize;
             Box::new(Gzip { w, level, threads, part, wave: wave(part as u64), pending: Vec::new(), named, members: 0 })
         }
         Filter::Bzip2 => {
@@ -70,7 +92,7 @@ pub fn encoder<'w>(
             Box::new(Bzip2 { w, level, threads, wave, pending: Vec::new(), bits, crc: 0 })
         }
         Filter::Xz => {
-            let block = part(total, threads, 1 << 20, 3 * xz_dict(level));
+            let block = part(total, threads, XZ_BLOCK_MIN.get() as u64, XZ_BLOCK_DICTS.get() as u64 * xz_dict(level));
             let mut mt = liblzma::stream::MtStreamBuilder::new();
             mt.threads(threads as u32).block_size(block).preset(level as u32).check(liblzma::stream::Check::Crc64);
             let s = mt.encoder().map_err(io::Error::other)?;
@@ -86,7 +108,7 @@ pub fn encoder<'w>(
             e.include_checksum(true)?;
             if threads > 1 {
                 e.multithread(threads as u32)?;
-                let job = part(total, threads, 512 << 10, 64 << 20);
+                let job = part(total, threads, ZSTD_JOB_MIN.get() as u64, ZSTD_JOB_MAX.get() as u64);
                 // (libzstd's own where that is no larger: 4 windows of the level's)
                 if job < 8 << 20 {
                     e.set_parameter(zstd::stream::raw::CParameter::JobSize(job as u32))?;

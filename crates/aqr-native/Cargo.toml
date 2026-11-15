@@ -6,6 +6,7 @@ description = "How each module of aqr-modules runs natively: its native decoding
 publish = false
 
 [dependencies]
+aqr-common = { path = "../aqr-common" }
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
 aqr-ac3 = { path = "../../codecs/aqr-ac3", default-features = false }
 aqr-arsc = { path = "../../codecs/aqr-arsc", default-features = false }

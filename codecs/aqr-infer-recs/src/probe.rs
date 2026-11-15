@@ -16,9 +16,13 @@ use crate::fields::{self, Cost};
 use crate::module::lifted_width;
 use crate::{fixed, floats, zcost};
 
-/// Windows of WINDOW bytes, PROBES of them over the file (the file itself if not larger).
-const WINDOW: usize = 1 << 13;
-const PROBES: usize = 48;
+aqr_common::zopt! {
+    /// The bytes of a window of the quick estimate: [`PROBES`] of them over the file (the file
+    /// itself if not larger).
+    static WINDOW: Opt<usize> = Opt::size("recs:probe-window", 1 << 13, "bytes of a window of the quick estimate");
+    /// The windows of the quick estimate.
+    static PROBES: Opt<usize> = Opt::value("recs:probes", 48, "windows of the quick estimate over a file");
+}
 
 #[derive(Clone, Debug)]
 pub struct Estimate {
@@ -31,9 +35,10 @@ pub struct Estimate {
 
 pub fn estimate(data: &[u8]) -> Estimate {
     let n = data.len();
-    let w = WINDOW.min(n);
+    let w = WINDOW.get().min(n);
+    let probes = PROBES.get();
     let starts =
-        if n <= w * PROBES { (0..n / w.max(1)).map(|i| i * w).collect() } else { crate::linspace(n - w, PROBES) };
+        if n <= w * probes { (0..n / w.max(1)).map(|i| i * w).collect() } else { crate::linspace(n - w, probes) };
     let (mut before, mut after, mut hits) = (0usize, 0usize, 0usize);
     let mut counts = Vec::new();
     let mut t = Vec::with_capacity(w);
@@ -41,7 +46,7 @@ pub fn estimate(data: &[u8]) -> Estimate {
         let a = &data[s..s + w];
         let z = zcost::len(&[a]);
         before += z;
-        let (k, gain, h0) = fixed::scan_window(a, fixed::MAX_K, &mut counts);
+        let (k, gain, h0) = fixed::scan_window(a, fixed::MAX_K.get(), &mut counts);
         if k == 1 || gain < 0.05 || h0 > 7.8 {
             after += z;
             continue;

@@ -409,7 +409,7 @@ pub fn chains(data: &[u8]) -> Vec<(Vec<usize>, Rule)> {
         let more = follow(data, *p.last().unwrap(), &r, None);
         p.extend_from_slice(&more[1..]);
         let p = trim(data, &bg, p);
-        if p.len() > MIN_RECORDS {
+        if p.len() > MIN_RECORDS.get() {
             out.push((p, r));
         }
     }

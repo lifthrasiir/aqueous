@@ -22,7 +22,7 @@ pub type Give<'g> = dyn FnMut(Vec<u8>, usize) -> bool + 'g;
 /// Returns whether all was given (false: `give` stopped it).
 pub fn decode(f: Option<Filter>, d: &[u8], threads: usize, give: &mut Give) -> Result<bool, String> {
     match f {
-        None => Ok(d.chunks(CHUNK).all(|c| give(c.to_vec(), 0))),
+        None => Ok(d.chunks(CHUNK.get()).all(|c| give(c.to_vec(), 0))),
         Some(Filter::Gzip) => gzip(d, give),
         Some(Filter::Bzip2) => bzip2(d, threads, give),
         Some(Filter::Xz) => xz(d, threads, give),

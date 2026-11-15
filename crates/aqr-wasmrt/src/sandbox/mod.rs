@@ -35,16 +35,22 @@ use sha2::{Digest, Sha512_256};
 
 use proto::*;
 
-/// The bytes a worker takes beyond the memory limit of an application, as the system limits
-/// it ([`os::Child::limit_memory`]): of its code, its stacks and the modules it compiled.
-const OVERHEAD: u64 = 1 << 30;
+aqr_common::zopt_namespace!("sandbox", "worker processes of modules run as WebAssembly (aqr-wasmrt)");
 
-/// The bytes of inputs and outputs from which an application has them in the worker's arena,
-/// not in the messages.
-const ARENA_FROM: u64 = 1 << 16;
+aqr_common::zopt! {
+    /// The bytes a worker takes beyond the memory limit of an application, as the system limits
+    /// it ([`os::Child::limit_memory`]): of its code, its stacks and the modules it compiled.
+    static OVERHEAD: Opt<usize> =
+        Opt::size("sandbox:overhead", 1 << 30, "bytes a worker may take above an application's memory limit");
 
-/// The shortest arena made.
-const ARENA_MIN: u64 = 1 << 20;
+    /// The bytes of inputs and outputs from which an application has them in the worker's arena,
+    /// not in the messages.
+    static ARENA_FROM: Opt<usize> =
+        Opt::size("sandbox:arena-from", 1 << 16, "inputs and outputs from this size are shared with the worker");
+
+    /// The shortest arena made.
+    static ARENA_MIN: Opt<usize> = Opt::size("sandbox:arena-min", 1 << 20, "the shortest arena shared with a worker");
+}
 
 /// Whether this system locks workers down; where it does not, no worker starts (a resource
 /// failure of any module run in one).
@@ -251,7 +257,7 @@ impl Worker {
     }
 
     fn load(&mut self, hash: [u8; 32], wasm: &[u8]) -> io::Result<aqr::Decoded<()>> {
-        self.child.limit_memory(OVERHEAD.saturating_add(4 * wasm.len() as u64))?;
+        self.child.limit_memory((OVERHEAD.get() as u64).saturating_add(4 * wasm.len() as u64))?;
         put_u8(&mut self.to, LOAD)?;
         self.to.write_all(&hash)?;
         put_bytes(&mut self.to, wasm)?;
@@ -283,12 +289,12 @@ impl Worker {
         let sent = params.len() as u64
             + resources.iter().map(|r| r.len() as u64).sum::<u64>()
             + inputs.iter().map(|i| i.len() as u64).sum::<u64>();
-        self.child.limit_memory(OVERHEAD.saturating_add(bound).saturating_add(sent))?;
+        self.child.limit_memory((OVERHEAD.get() as u64).saturating_add(bound).saturating_add(sent))?;
         // the inputs and outputs in the arena where they are many and fit in the memories (else
         // the application fails before any of them is made)
         let lens = inputs.iter().map(|i| i.len() as u64).chain(sizes.iter().copied());
         let placed = match layout(lens) {
-            Some((places, len)) if (ARENA_FROM..=memory_limit).contains(&len) => {
+            Some((places, len)) if (ARENA_FROM.get() as u64..=memory_limit).contains(&len) => {
                 self.arena_for(len)?.map(|new| (places, new))
             }
             _ => None,
@@ -403,7 +409,7 @@ impl Worker {
         }
         // the last one unmapped first, so that both are never held
         self.arena = None;
-        let size = if len <= KEEP { len.next_power_of_two().max(ARENA_MIN) } else { len };
+        let size = if len <= KEEP { len.next_power_of_two().max(ARENA_MIN.get() as u64) } else { len };
         let Some(a) = usize::try_from(size).ok().and_then(|s| os::arena(s).ok()) else { return Ok(None) };
         let token = self.child.share(&a)?;
         self.arena = Some(a);

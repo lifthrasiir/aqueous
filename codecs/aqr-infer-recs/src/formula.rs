@@ -38,12 +38,20 @@ fn floats_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.initial() + crate::module::floats_plan(u.params, lifted)?)
 }
 
-/// A file shorter than this is not looked into.
-pub const MIN_LEN: usize = 16 << 10;
+aqr_common::zopt! {
+    /// A file shorter than this is not looked into.
+    pub static MIN_LEN: Opt<usize> = Opt::size("recs:min-len", 16 << 10, "files shorter are not looked into for records");
 
-/// The least a quick estimate must say the regions may save ([`crate::infer_if`]): where it says
-/// less, the inference would save little if anything, and it is not run.
-pub const LEAST: f64 = 0.05;
+    /// The least a quick estimate must say the regions may save ([`crate::infer_if`]): where it says
+    /// less, the inference would save little if anything, and it is not run.
+    pub static LEAST: Opt<f64> = Opt::value("recs:least", 0.05, "share of the size a quick estimate must say records save");
+
+    /// The bytes of a region that make a group of rows, an application of the modules (at most;
+    /// [`GROUP_ROWS`] too): their planes are field after field, so a group cannot be cut finer
+    /// than a whole table, and a table of many rows would be decoded whole in one instance.
+    pub static GROUP_BYTES: Opt<usize> =
+        Opt::size("recs:group-bytes", 32 << 20, "bytes of a region of records in one application of the modules");
+}
 
 /// The regions inferred in data, by its hash and length (None where the estimate turned it down
 /// or none was taken): the same data is often met again (the same object files in archives of
@@ -57,7 +65,7 @@ const MAX_KNOWN: usize = 1 << 16;
 /// they may save [`LEAST`] at least and some are taken; None otherwise. On one thread.
 pub fn encode(d: &[u8], threads: usize) -> Option<Formula> {
     static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
-    if d.len() < MIN_LEN {
+    if d.len() < MIN_LEN.get() {
         return None;
     }
     let key = (xxhash_rust::xxh3::xxh3_64(d), d.len());
@@ -65,7 +73,7 @@ pub fn encode(d: &[u8], threads: usize) -> Option<Formula> {
     let choices = match known {
         Some(c) => c,
         None => {
-            let c = crate::infer_if(d, LEAST, threads);
+            let c = crate::infer_if(d, LEAST.get(), threads);
             let c = c.filter(|c| !c.is_empty()).map(Arc::new);
             let mut k = KNOWN.lock().unwrap();
             let k = k.get_or_insert_with(HashMap::new);
@@ -92,11 +100,6 @@ pub fn apply_fields(
     Node::apply(FIELDS, fields_params(records.len() / k, k, fields), vec![planes], records.len() as u64)
 }
 
-/// The bytes of a region that make a group of rows, an application of the modules (at most;
-/// [`GROUP_ROWS`] too): their planes are field after field, so a group cannot be cut finer
-/// than a whole table, and a table of many rows would be decoded whole in one instance.
-pub const GROUP_BYTES: usize = 32 << 20;
-
 /// The most rows of a group: `recs-fields` holds 8 bytes a row more where fields refer to
 /// others.
 pub const GROUP_ROWS: usize = 1 << 22;
@@ -116,7 +119,7 @@ struct Sizes {
 
 /// The formula of `d` with the regions `choices` (sorted, apart) in their forms.
 pub fn formula(d: &[u8], choices: &[Choice]) -> Formula {
-    formula_in(d, choices, GROUP_BYTES, GROUP_ROWS)
+    formula_in(d, choices, GROUP_BYTES.get(), GROUP_ROWS)
 }
 
 /// [`formula`] with groups of `group_bytes` and `group_rows` at most (the test of groups at

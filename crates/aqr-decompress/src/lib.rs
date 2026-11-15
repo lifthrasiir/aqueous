@@ -734,6 +734,23 @@ impl Runner for WasmBounded {
     }
 }
 
+aqr_common::zopt_namespace!("native", "how the known modules run natively (aqr-decompress, aqr-native)");
+
+aqr_common::zopt! {
+    /// A known module run as WebAssembly rather than natively (`-Z native:MODULE=off`), to compare
+    /// the two or to find where they differ.
+    static NATIVE_MODULE: Family<bool> = Family::flags(
+        "native:MODULE",
+        || {
+            let mut names: Vec<&'static str> = MODULES.iter().map(|m| m.name).collect();
+            names.dedup();
+            names
+        },
+        "on",
+        "run a known module natively, or as WebAssembly with no-MODULE",
+    );
+}
+
 /// Runs every module of this crate natively. The output does not depend on `threads`.
 #[derive(Debug, Clone, Copy)]
 pub struct Native {
@@ -1127,7 +1144,10 @@ impl Loaded for NativeLoaded<'_> {
 impl Runner for Native {
     fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
         if let Some(module) = known(wasm) {
-            return Ok(Box::new(NativeLoaded::new(self, module, wasm)));
+            // (a module `-Z native:MODULE=off` is run as WebAssembly)
+            if !cfg!(feature = "wasm") || NATIVE_MODULE.get(module.name) != Some(false) {
+                return Ok(Box::new(NativeLoaded::new(self, module, wasm)));
+            }
         }
         #[cfg(feature = "wasm")]
         return Wasm.load(wasm);

@@ -2375,9 +2375,7 @@ fn flood(spawns: &[usize], chans: usize) -> String {
     let spawns: String = spawns
         .iter()
         .map(|n| {
-            format!(
-                "(drop (call $spawn (i32.const 0) (i32.const 1) (i32.const 0x200) (i32.const 0) (i32.const {n})))"
-            )
+            format!("(drop (call $spawn (i32.const 0) (i32.const 1) (i32.const 0x200) (i32.const 0) (i32.const {n})))")
         })
         .collect();
     format!(

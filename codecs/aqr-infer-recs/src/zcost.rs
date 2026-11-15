@@ -2,11 +2,13 @@
 
 use std::cell::RefCell;
 
-pub const LEVEL: i32 = 3;
+aqr_common::zopt! {
+    pub static LEVEL: Opt<i32> = Opt::value("recs:zcost-level", 3, "zstd level that forms are judged by");
+}
 
 thread_local! {
     static Z: RefCell<(zstd::bulk::Compressor<'static>, Vec<u8>, Vec<u8>)> =
-        RefCell::new((zstd::bulk::Compressor::new(LEVEL).unwrap(), Vec::new(), Vec::new()));
+        RefCell::new((zstd::bulk::Compressor::new(LEVEL.get()).unwrap(), Vec::new(), Vec::new()));
 }
 
 /// Compressed size of the parts one after another.

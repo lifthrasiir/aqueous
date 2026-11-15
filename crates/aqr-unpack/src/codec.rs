@@ -96,8 +96,10 @@ pub fn inflate(raw: &[u8], size: usize, max: usize) -> Result<(Vec<u8>, usize), 
     Ok((d.take(), l.end))
 }
 
-/// Bytes of data given at a time by [`inflate_chunks`] (but for the last).
-pub const CHUNK: usize = 4 << 20;
+aqr_common::zopt! {
+    /// Bytes of data given at a time by [`inflate_chunks`] (but for the last).
+    pub static CHUNK: Opt<usize> = Opt::size("unpack:chunk", 4 << 20, "bytes of data given at a time by inflate");
+}
 /// What DEFLATE may look back.
 const WINDOW: usize = 32 << 10;
 
@@ -118,7 +120,7 @@ impl Chunks<'_> {
     #[inline(never)]
     fn flush(&mut self, need: usize) {
         let keep = self.d.len.min(WINDOW);
-        let mut next = Data::new(CHUNK + keep + need);
+        let mut next = Data::new(CHUNK.get() + keep + need);
         // SAFETY: both of at least `keep` bytes, apart
         unsafe { std::ptr::copy_nonoverlapping(self.d.p.add(self.d.len - keep), next.p, keep) };
         next.len = keep;
@@ -160,7 +162,7 @@ impl Sink for Chunks<'_> {
 /// vector whose new bytes start at the index given; false: stop, nothing more decoded, and
 /// `Ok(None)` returned). Returns the bytes of the stream.
 pub fn inflate_chunks(raw: &[u8], give: &mut dyn FnMut(Vec<u8>, usize) -> bool) -> Result<Option<usize>, String> {
-    let mut c = Chunks { d: Data::new(CHUNK.min(raw.len().saturating_mul(4)).max(WINDOW)), start: 0, give };
+    let mut c = Chunks { d: Data::new(CHUNK.get().min(raw.len().saturating_mul(4)).max(WINDOW)), start: 0, give };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inflate::parse_head(raw, usize::MAX, &mut c)));
     match r {
         Ok(Ok(l)) => {
@@ -450,7 +452,7 @@ pub fn zstd_chunks(d: &[u8], give: &mut dyn FnMut(Vec<u8>) -> bool) -> Result<()
     let mut z = zstd::stream::read::Decoder::with_buffer(d).map_err(|e| format!("Zstandard: {e}"))?;
     z.window_log_max(31).map_err(|e| format!("Zstandard: {e}"))?;
     loop {
-        let mut chunk = vec![0u8; CHUNK];
+        let mut chunk = vec![0u8; CHUNK.get()];
         let mut n = 0;
         while n < chunk.len() {
             match z.read(&mut chunk[n..]) {
@@ -570,7 +572,7 @@ mod tests {
     #[test]
     fn inflate_in_chunks() {
         // stored, of more than a chunk
-        let data: Vec<u8> = (0..(CHUNK * 2 + 12345)).map(|i| (i * 7 / 3) as u8).collect();
+        let data: Vec<u8> = (0..(CHUNK.get() * 2 + 12345)).map(|i| (i * 7 / 3) as u8).collect();
         let mut raw = Vec::new();
         for (k, block) in data.chunks(65535).enumerate() {
             let last = (k + 1) * 65535 >= data.len();

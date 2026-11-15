@@ -7,9 +7,13 @@ use crate::{MIN_RECORDS, linspace};
 
 /// Big tables: a window of WINDOW bytes for each WINDOW_EVERY of the file (MAX_WINDOWS at most,
 /// one at least), records up to MAX_K.
-const WINDOW: usize = 1 << 16;
 const WINDOW_EVERY: usize = 1 << 19;
-pub const MAX_K: usize = 256;
+aqr_common::zopt! {
+    /// The bytes of a window of big tables.
+    static WINDOW: Opt<usize> = Opt::size("recs:window", 1 << 16, "bytes of a window to look for big tables in");
+    /// The widest record.
+    pub static MAX_K: Opt<usize> = Opt::value("recs:max-k", 256, "widest record of a fixed table, in bytes");
+}
 const MAX_WINDOWS: usize = 8;
 /// Small tables: windows over the whole file, records up to FINE_K.
 const FINE_WINDOW: usize = 1 << 12;
@@ -19,12 +23,15 @@ const MAX_FINE_WINDOWS: usize = 64;
 const FINE_SPAN: usize = 1 << 18;
 /// How far a region grows from a big window.
 const SPAN: usize = 1 << 22;
-const MAX_REGIONS: usize = 32;
+aqr_common::zopt! {
+    /// The most regions taken from the seeds.
+    static MAX_REGIONS: Opt<usize> = Opt::value("recs:max-regions", 32, "most regions of fixed records taken in a file");
+    /// The times a region is grown, its models refitted on the last.
+    static ROUNDS: Opt<usize> = Opt::value("recs:rounds", 2, "times a region is grown, its models refitted on the last");
+}
 /// The record sizes of a window measured: those of the most equal bytes (and their divisors),
 /// counted on its first quarter.
 const SCAN_KS: usize = 8;
-/// The times a region is grown, its models refitted on the last.
-const ROUNDS: usize = 2;
 
 /// The best k of a window and its code length against k = 1, in bits per byte, and the
 /// window's order-0 code length in bits per byte. The code length of the window under k
@@ -37,7 +44,7 @@ const ROUNDS: usize = 2;
 pub fn scan_window(a: &[u8], max_k: usize, counts: &mut Vec<u16>) -> (usize, f64, f64) {
     let t = kt::tables();
     let n = a.len();
-    let top = max_k.min(n / MIN_RECORDS);
+    let top = max_k.min(n / MIN_RECORDS.get());
     counts.resize(top.max(1) * 256, 0);
     let models = |k: usize| {
         // n % k columns of n / k + 1 bytes, the rest of n / k
@@ -122,7 +129,7 @@ pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: usize) -
     let mut llr = vec![0.0f64; k * 256];
     // the column of position i: (i - wo) mod k
     let phase = (k - wo % k) % k;
-    for _ in 0..ROUNDS {
+    for _ in 0..ROUNDS.get() {
         counts.fill(0);
         for (c, &b) in columns(s + phase, k).zip(&data[s..e]) {
             counts[c * 256 + b as usize] += 1;
@@ -172,7 +179,7 @@ pub fn grow_fields(
     let m = &data[lo..lo + nrec * k];
     let r0 = seed.0.saturating_sub(lo).div_ceil(k);
     let r1 = (seed.1.saturating_sub(lo) / k).min(nrec);
-    if r1 < r0 + MIN_RECORDS {
+    if r1 < r0 + MIN_RECORDS.get() {
         return seed;
     }
     let (fl, _, _) = fields::split(&m[r0 * k..r1 * k], k, Cost::Kt, false);
@@ -262,14 +269,15 @@ pub fn find(data: &[u8], threads: usize) -> Vec<(usize, usize, usize)> {
         wlen: usize,
     }
     let n = data.len();
-    let wlen = WINDOW.min(n);
+    let wlen = WINDOW.get().min(n);
+    let max_k = MAX_K.get();
     if wlen == 0 {
         return Vec::new();
     }
     // the windows: coarse, then fine
     let mut windows: Vec<(usize, usize, usize, usize)> = linspace(n - wlen, (n / WINDOW_EVERY).clamp(1, MAX_WINDOWS))
         .into_iter()
-        .map(|wo| (wo, wlen, MAX_K, SPAN))
+        .map(|wo| (wo, wlen, max_k, SPAN))
         .collect();
     if n >= 2 * FINE_WINDOW {
         windows.extend(
@@ -308,7 +316,7 @@ pub fn find(data: &[u8], threads: usize) -> Vec<(usize, usize, usize)> {
             if covered(&found, wo, wlen, k) {
                 continue;
             }
-            if (e - s) / k >= MIN_RECORDS {
+            if (e - s) / k >= MIN_RECORDS.get() {
                 found.push(Found { gain, s, e, k, wo, wlen });
             }
         }
@@ -327,7 +335,7 @@ pub fn find(data: &[u8], threads: usize) -> Vec<(usize, usize, usize)> {
     }
     let mut regions = Vec::new();
     let bg = kt::order0_log2(data);
-    let seeds = &seeds[..seeds.len().min(MAX_REGIONS)];
+    let seeds = &seeds[..seeds.len().min(MAX_REGIONS.get())];
     let spans = aqr_common::pool::par_map(seeds.len(), threads, |i| {
         let f = seeds[i];
         let s = if f.k <= FINE_K { phase(f.s, f.k) } else { f.s };
@@ -339,7 +347,7 @@ pub fn find(data: &[u8], threads: usize) -> Vec<(usize, usize, usize)> {
     });
     for (f, spans) in seeds.iter().zip(spans) {
         for (s, e) in spans {
-            if e > s && (e - s) / f.k >= MIN_RECORDS {
+            if e > s && (e - s) / f.k >= MIN_RECORDS.get() {
                 regions.push((s, f.k, (e - s) / f.k));
             }
         }

@@ -10,10 +10,16 @@
 use aqr_common::{crc32, pool};
 use aqr_flate::zlib;
 
-/// The bytes of a chunk.
-pub(crate) const CHUNK: usize = 512 << 10;
-/// The fewest bytes of data to cut in chunks.
-pub(crate) const MIN: usize = 4 << 20;
+aqr_common::zopt_namespace!("pack", "archives and streams written in other formats (aqr-pack)");
+
+aqr_common::zopt! {
+    /// The bytes of a chunk.
+    pub(crate) static CHUNK: Opt<usize> =
+        Opt::size("pack:deflate-chunk", 512 << 10, "bytes of a chunk of a file deflated on several threads");
+    /// The fewest bytes of data to cut in chunks.
+    pub(crate) static MIN: Opt<usize> =
+        Opt::size("pack:deflate-min", 4 << 20, "fewest bytes of a file deflated in chunks, else whole");
+}
 /// The preset dictionary of a chunk: the window's size.
 const DICT: usize = 32 << 10;
 
@@ -21,7 +27,7 @@ const DICT: usize = 32 << 10;
 /// (cut at multiples of `chunk`) on up to `threads` threads where `d` has `min` bytes at least
 /// and `threads` is above 1. `None` for invalid parameters.
 pub(crate) fn deflate_crc(d: &[u8], params: zlib::Params, threads: usize) -> Option<(Vec<u8>, u32)> {
-    deflate_crc_in(d, params, threads, CHUNK, MIN)
+    deflate_crc_in(d, params, threads, CHUNK.get(), MIN.get())
 }
 
 /// `d` as [`deflate_crc`] has it at `level` (zlib's, 1 to 9), where that is smaller than `d`.

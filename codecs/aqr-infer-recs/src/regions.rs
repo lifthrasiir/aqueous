@@ -55,7 +55,7 @@ impl Region {
             // the whole records within, and the two the region holds a part of where their floats
             // lift as those within do (not a header's, say)
             let (mut s, mut n) = (start + phase, (end - start - phase) / k);
-            if n >= MIN_RECORDS {
+            if n >= MIN_RECORDS.get() {
                 floats = floats::widths(&data[s..s + n * k], k, &fl);
             }
             if !floats.is_empty() {
@@ -97,9 +97,10 @@ impl Region {
             return self.clone();
         }
         let (count, shape) = match &self.shape {
-            Shape::Fixed { k } => ((bytes / k).max(MIN_RECORDS).min(self.count), self.shape.clone()),
+            Shape::Fixed { k } => ((bytes / k).max(MIN_RECORDS.get()).min(self.count), self.shape.clone()),
             Shape::Entries { rule, head, starts } => {
-                let n = starts.partition_point(|&s| s <= self.start + bytes).max(MIN_RECORDS + 1).min(starts.len());
+                let n =
+                    starts.partition_point(|&s| s <= self.start + bytes).max(MIN_RECORDS.get() + 1).min(starts.len());
                 (n - 1, Shape::Entries { rule: *rule, head: *head, starts: starts[..n].to_vec() })
             }
         };

@@ -100,6 +100,16 @@ pub(crate) fn application_bound_set() -> u64 {
     BOUND.load(Ordering::Relaxed)
 }
 
+aqr_common::zopt_namespace!("wasm", "modules run as WebAssembly (aqr-wasmrt)");
+
+aqr_common::zopt! {
+    /// The concurrency of every class of tasks, forced (lowered to its slots, at least 1), where set
+    /// (a class's own fits the bound of `-M` by [`choose_concurrency`] otherwise).
+    static CONCURRENCY: Opt<Option<usize>> =
+        Opt::value("wasm:concurrency", None, "force the concurrency of every class of tasks (up to its slots)")
+            .off(None);
+}
+
 /// The concurrency of each class of an application of the task `slots` of a module, its memory
 /// limit and task limits: the slots, lowered by one for the class of the largest task limit
 /// that is above 1 while the memory limit and the sum of concurrency times task limit exceed
@@ -112,6 +122,9 @@ pub(crate) fn choose_concurrency(
     bound: u64,
 ) -> Decoded<Vec<usize>> {
     let mut concurrency = slots.to_vec();
+    if let Some(n) = CONCURRENCY.get() {
+        concurrency.iter_mut().for_each(|c| *c = (*c).min(n.max(1)));
+    }
     if bound == u64::MAX || task_limits.len() != slots.len() {
         return Ok(concurrency);
     }

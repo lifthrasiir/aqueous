@@ -74,9 +74,12 @@ pub struct Listing<'d> {
     sealed: bool,
 }
 
-/// Bytes of the output of an encrypted folder decoded to check a passphrase by (a larger one
-/// is not checked).
-const CHECKED: u64 = 64 << 20;
+aqr_common::zopt! {
+    /// Bytes of the output of an encrypted folder decoded to check a passphrase by (a larger one
+    /// is not checked).
+    static CHECKED: Opt<usize> =
+        Opt::size("unpack:7z-check", 64 << 20, "bytes of an encrypted 7z folder decoded to check a passphrase");
+}
 
 /// Whether `folder` has an AES coder.
 /// The sum of `sizes`, `None` where it overflows.
@@ -284,7 +287,7 @@ impl<'d> Listing<'d> {
             .min_by_key(|&f| self.main.folders[f].size().unwrap_or(u64::MAX));
         let ok = match smallest {
             None => false,
-            Some(f) if self.main.folders[f].size().is_some_and(|n| n <= CHECKED) => {
+            Some(f) if self.main.folders[f].size().is_some_and(|n| n <= CHECKED.get() as u64) => {
                 folder_data(self.d, &self.main, &self.packs, &self.spans, f, 1, Some(pass)).is_ok()
             }
             Some(_) => true,

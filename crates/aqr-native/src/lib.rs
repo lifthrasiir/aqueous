@@ -13,6 +13,13 @@ use aqr_api::Window::{self, Input, Output};
 /// output's length and the threads it may use; the output.
 pub use aqr_api::dll::NativeDecode as Decode;
 
+aqr_common::zopt! {
+    /// The output length above which `dh-lods` and `zstd-frames` are streamed natively, not
+    /// applied whole.
+    static STREAM_ABOVE: Opt<usize> =
+        Opt::size("native:stream-above", 64 << 20, "output above which dh-lods and zstd-frames stream, not whole");
+}
+
 /// Whether a module applied as a part module is to be streamed rather than applied whole, by the
 /// lengths of its inputs and its output ([`Run::Streamed`]).
 pub type Streamed = fn(&[u64], u64) -> bool;
@@ -375,7 +382,7 @@ pub const NATIVE: &[Native] = &[
         ),
         |p, _, i, n, t| aqr_minecraft::lods::decode(p, i, n, t).map_err(err),
         // (whole of an output of 64 MiB at most, else streamed)
-        |_, len| len > 64 << 20,
+        |_, len| len > STREAM_ABOVE.get() as u64,
     ),
     streamed(
         "zstd-frames",
@@ -393,7 +400,7 @@ pub const NATIVE: &[Native] = &[
         |p, _, i, n, t| aqr_zstd::frames::decode(p, i, n, t).map_err(err),
         // (whole of an output of 64 MiB at most, its contents some ten times that at most; else
         // streamed, natively its frames made on threads ahead of where they are put all the same)
-        |_, len| len > 64 << 20,
+        |_, len| len > STREAM_ABOVE.get() as u64,
     ),
     threaded("png-recons", |p, _, i, n, t| aqr_png::module::decode(p, i, n, t).map_err(err)),
     bare("png-against", |p, _, i, n, t| aqr_png::module::decode_against(p, i, n, t).map_err(err)),

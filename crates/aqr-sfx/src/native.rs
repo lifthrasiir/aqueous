@@ -121,10 +121,16 @@ pub(crate) struct Fns {
     pub streamed: Option<StreamedFn>,
 }
 
-/// The most bytes of inputs and outputs of a part module's application gathered to be applied
-/// whole by its native decoding (on threads) rather than streamed: the stub has no plans of the
-/// modules' memory to judge by, as aqr-decompress has.
-const GATHERED: u64 = 256 << 20;
+aqr_common::zopt! {
+    /// The most bytes of inputs and outputs of a part module's application gathered to be applied
+    /// whole by its native decoding (on threads) rather than streamed: the stub has no plans of the
+    /// modules' memory to judge by, as aqr-decompress has.
+    static GATHERED: Opt<usize> = Opt::size(
+        "native:gathered",
+        256 << 20,
+        "bytes of a part module's inputs and outputs above which it streams (self-extracting)",
+    );
+}
 
 /// A module of a native blob, run as aqr-decompress runs it natively: by its native decoding of
 /// whole inputs (on `threads`) where it has one; a part module streamed where its inputs and
@@ -187,7 +193,7 @@ impl NativeLoaded {
         match (self.native.run, self.native.streamed) {
             // SAFETY: the lengths, as many as given
             (aqr_api::dll::RUN_STREAMED, Some(f)) => unsafe { f(lens.as_ptr(), lens.len(), sizes[0]) != 0 },
-            _ => lens.iter().chain(sizes).fold(0u64, |a, &n| a.saturating_add(n)) > GATHERED,
+            _ => lens.iter().chain(sizes).fold(0u64, |a, &n| a.saturating_add(n)) > GATHERED.get() as u64,
         }
     }
 }

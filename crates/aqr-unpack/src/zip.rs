@@ -56,9 +56,14 @@ enum Enc {
     Aes(u8, bool),
 }
 
-/// Bytes of an encrypted entry decoded whole to check a passphrase by (a larger one is checked
-/// by its header alone).
-const CHECKED: usize = 64 << 20;
+aqr_common::zopt_namespace!("unpack", "archives of other formats read (aqr-unpack)");
+
+aqr_common::zopt! {
+    /// Bytes of an encrypted entry decoded whole to check a passphrase by (a larger one is checked
+    /// by its header alone).
+    static CHECKED: Opt<usize> =
+        Opt::size("unpack:zip-check", 64 << 20, "bytes of an encrypted ZIP entry decoded to check a passphrase");
+}
 
 pub struct Listing<'d> {
     d: &'d [u8],
@@ -336,7 +341,7 @@ impl<'d> Listing<'d> {
         };
         let body = &self.d[u.body.clone()];
         let ok = match u.enc {
-            _ if body.len() <= CHECKED => decode(self.d, u, Some(pass)).is_ok(),
+            _ if body.len() <= CHECKED.get() => decode(self.d, u, Some(pass)).is_ok(),
             Enc::Zip(checks) => ZipCrypto::open(pass, &body[..12.min(body.len())], &checks).is_some(),
             Enc::Aes(strength, _) => crypt::winzip_aes_verifies(pass, strength, body),
             Enc::None => true,

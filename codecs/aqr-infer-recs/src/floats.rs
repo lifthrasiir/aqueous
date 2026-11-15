@@ -15,8 +15,10 @@ use std::borrow::Cow;
 use crate::kt;
 use crate::module::{Float, lifted_width, mask, ordered};
 
-/// A float is lifted where its q and differences cost this much of its bytes at most.
-const KEEP: f64 = 0.85;
+aqr_common::zopt! {
+    /// A float is lifted where its q and differences cost this much of its bytes at most.
+    static KEEP: Opt<f64> = Opt::value("recs:float-keep", 0.85, "share of its bytes a lifted float's coding may cost at most");
+}
 /// k is tried this many units in the last place each way of the least-squares scale.
 const NEAR: i64 = 64;
 /// The widest difference lifted.
@@ -231,7 +233,7 @@ fn fit(b: &[u64], wide: bool, big: bool) -> Option<(Float, f64)> {
     let q: Vec<i64> = b.iter().map(|&x| lift_one(&f, x).0).collect();
     let (lo, hi) = q.iter().fold((0, 0), |(lo, hi), &x| (x.min(lo), x.max(hi)));
     let after = rc + cost(&q, signed_width(lo, hi));
-    (after <= KEEP * before).then_some((f, before - after))
+    (after <= KEEP.get() * before).then_some((f, before - after))
 }
 
 /// The floats of records m (rows of k bytes, at `at` of the file) found on a sample of them,
@@ -241,7 +243,7 @@ fn fit(b: &[u64], wide: bool, big: bool) -> Option<(Float, f64)> {
 /// alike.
 pub fn find(m: &[u8], k: usize, at: usize) -> (usize, Vec<Float>) {
     let n = m.len() / k;
-    if n < crate::MIN_RECORDS {
+    if n < crate::MIN_RECORDS.get() {
         return (0, Vec::new());
     }
     let rows = rows(n);

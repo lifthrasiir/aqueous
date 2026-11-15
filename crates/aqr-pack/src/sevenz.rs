@@ -67,6 +67,15 @@ struct Coder {
     props: Vec<u8>,
 }
 
+aqr_common::zopt! {
+    /// The shortest part of a 7z folder's data made on a thread.
+    static SEVENZ_PART_MIN: Opt<usize> =
+        Opt::size("pack:7z-part-min", 1 << 20, "shortest part of a 7z folder made on a thread");
+    /// The longest part, in dictionaries of the level.
+    static SEVENZ_PART_DICTS: Opt<usize> =
+        Opt::value("pack:7z-part-dicts", 4, "longest part of a 7z folder made on a thread, in dictionaries");
+}
+
 /// A NUMBER: the first byte's high 1 bits count the bytes after it, little-endian.
 fn number(out: &mut Vec<u8>, v: u64) {
     let n = (0..8).find(|&n| v < 1u64 << (7 * (n + 1))).unwrap_or(8);
@@ -392,7 +401,8 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Output, tell: 
     };
     let total: u64 = items.iter().map(size).sum();
     let dict_max = xz_dict(level);
-    let part = total.div_ceil(threads as u64).clamp(1 << 20, 4 * dict_max);
+    let part =
+        total.div_ceil(threads as u64).max(SEVENZ_PART_MIN.get() as u64).min(SEVENZ_PART_DICTS.get() as u64 * dict_max);
     let wave = (part * threads as u64).min(o.batch.max(part)) / part * part;
     // (the key once; the IV of the folder)
     let key = o.passphrase.as_ref().map(|p| crypt::sevenz_key(p, &[], crypt::SEVENZ_POWER));

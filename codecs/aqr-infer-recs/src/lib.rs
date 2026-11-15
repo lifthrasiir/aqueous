@@ -36,8 +36,12 @@ mod zcost;
 #[cfg(feature = "encode")]
 pub use regions::*;
 
-/// The fewest records a region holds.
-pub const MIN_RECORDS: usize = 16;
+aqr_common::zopt_namespace!("recs", "records inferred in files of no known format (aqr-infer-recs)");
+
+aqr_common::zopt! {
+    /// The fewest records a region holds.
+    pub static MIN_RECORDS: Opt<usize> = Opt::value("recs:min-records", 16, "fewest records of a region");
+}
 
 /// `count` points over [0, last], rounded down, without repeats: numpy's `linspace`.
 #[cfg(feature = "encode")]

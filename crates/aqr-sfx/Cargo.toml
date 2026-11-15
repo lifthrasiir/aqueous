@@ -6,6 +6,7 @@ description = "The self-extracting apply logic: runs an archive's modules throug
 publish = false
 
 [dependencies]
+aqr-common = { path = "../aqr-common" }
 aqr-api = { path = "../aqr-api", default-features = false }
 aqr-blob = { path = "../aqr-blob", features = ["runner"] }
 aqr-formula = { path = "../aqr-formula" }
