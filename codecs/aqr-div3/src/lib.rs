@@ -12,6 +12,8 @@ extern crate std;
 aqr_common::zopt_namespace!("div3", "DivX 3 video in AVI (aqr-div3)");
 
 mod frame;
+// (generated: kept as scripts/div3-gen.py writes it)
+#[rustfmt::skip]
 pub mod tables;
 
 #[cfg(feature = "encode")]

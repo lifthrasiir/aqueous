@@ -324,7 +324,13 @@ impl<'h> Frame<'h> {
                         let (down, up) = (*bs <= -*bn, *bs > 0);
                         *bc += up as i32 - down as i32;
                         let (lowered, raised) = ((*bs + *bn).max(1 - *bn), (*bs - *bn).min(0));
-                        *bs = if down { lowered } else if up { raised } else { *bs };
+                        *bs = if down {
+                            lowered
+                        } else if up {
+                            raised
+                        } else {
+                            *bs
+                        };
                         ring[ci][rc + x] = value;
                         let cell = &mut st[ci].err[ry + x];
                         for j in 0..n {

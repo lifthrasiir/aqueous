@@ -1,8 +1,8 @@
 //! Made by layout.py: aqr-common, crc32fast, crossbeam-deque, crossbeam-epoch, crossbeam-utils, either, rayon, rayon-core, simd-adler32.
 
+pub extern crate aqr_common;
 extern crate aqr_dll_cfg_if;
 extern crate aqr_dll_rt;
-pub extern crate aqr_common;
 pub extern crate crc32fast;
 pub extern crate crossbeam_deque;
 pub extern crate crossbeam_epoch;

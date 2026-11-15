@@ -14,7 +14,8 @@ fn frames(data: &[u8]) -> Vec<&[u8]> {
             pos += 12;
             continue;
         }
-        let ok = id == b"JUNK" || (id[0].is_ascii_digit() && id[1].is_ascii_digit() && matches!(&id[2..], b"dc" | b"wb" | b"db"));
+        let ok = id == b"JUNK"
+            || (id[0].is_ascii_digit() && id[1].is_ascii_digit() && matches!(&id[2..], b"dc" | b"wb" | b"db"));
         if !ok || pos + 8 + sz > data.len() {
             break;
         }
@@ -78,5 +79,11 @@ fn main() {
     }
     let total: usize = fr.iter().map(|f| f.len()).sum();
     println!("I {oi} -> {ci}   P {op} -> {cp}   raw {or} -> {cr}");
-    println!("total {total} -> {} ({:.2}%)  mismatches {bad}  encode {:.1}s decode {:.1}s", out.len(), 100.0 * out.len() as f64 / total as f64, te.as_secs_f64(), td.as_secs_f64());
+    println!(
+        "total {total} -> {} ({:.2}%)  mismatches {bad}  encode {:.1}s decode {:.1}s",
+        out.len(),
+        100.0 * out.len() as f64 / total as f64,
+        te.as_secs_f64(),
+        td.as_secs_f64()
+    );
 }

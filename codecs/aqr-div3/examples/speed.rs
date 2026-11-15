@@ -46,6 +46,23 @@ fn main() {
         }
     }
     tot += enc2.finish().len();
-    println!("chunked every {} MB: {} bytes ({:+.3}% against one stream)", chunk >> 20, tot, 100.0 * (tot as f64 / out.len() as f64 - 1.0));
-    println!("{} frames, {:.1} MB, {ok} parse; check {:.2}s ({:.1} MB/s)  encode incl. check {:.2}s ({:.1} MB/s)  decode {:.2}s ({:.1} MB/s); {} -> {}", frames.len(), total as f64 / 1e6, tc, mb(tc), te, mb(te), td, mb(td), total, out.len());
+    println!(
+        "chunked every {} MB: {} bytes ({:+.3}% against one stream)",
+        chunk >> 20,
+        tot,
+        100.0 * (tot as f64 / out.len() as f64 - 1.0)
+    );
+    println!(
+        "{} frames, {:.1} MB, {ok} parse; check {:.2}s ({:.1} MB/s)  encode incl. check {:.2}s ({:.1} MB/s)  decode {:.2}s ({:.1} MB/s); {} -> {}",
+        frames.len(),
+        total as f64 / 1e6,
+        tc,
+        mb(tc),
+        te,
+        mb(te),
+        td,
+        mb(td),
+        total,
+        out.len()
+    );
 }

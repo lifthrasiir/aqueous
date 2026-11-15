@@ -185,8 +185,9 @@ def main():
                 lines.append(f'{p} = {{ version = "={version.split("+")[0]}", default-features = false }}')
         write(os.path.join(d, 'Cargo.toml'), '\n'.join(lines) + '\n')
         src = ['//! Made by layout.py: ' + ', '.join(sorted(ps)) + '.', '']
-        src += [f'extern crate aqr_dll_{ident(b)};' for b in sorted(below)]
-        src += [f'pub extern crate {p.replace("-", "_")};' for p in sorted(ps)]
+        # (in rustfmt's order: by the crate's name, `pub` or not)
+        crates = [(f'aqr_dll_{ident(b)}', '') for b in below] + [(p.replace('-', '_'), 'pub ') for p in ps]
+        src += [f'{vis}extern crate {name};' for name, vis in sorted(crates)]
         write(os.path.join(d, 'src', 'lib.rs'), '\n'.join(src) + '\n')
 
     names = sorted(named.values())

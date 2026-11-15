@@ -80,9 +80,7 @@ fn jobs(coded: &[Coded]) -> Vec<(usize, usize, usize)> {
     // what the job being grown takes of the script of the part module, and its room (the gap
     // before its first stream may be held as well)
     let mut script = 0;
-    let bytes = |c: &Coded, gap: usize| {
-        script_bytes(gap, c.header.start + 2 - c.soi, c.header.end - c.header.start)
-    };
+    let bytes = |c: &Coded, gap: usize| script_bytes(gap, c.header.start + 2 - c.soi, c.header.end - c.header.start);
     for (i, c) in coded.iter().enumerate() {
         let n = c.header.samples();
         if n >= BAND_MIN && c.header.restart == 0 {

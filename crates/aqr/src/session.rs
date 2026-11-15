@@ -71,11 +71,7 @@ static CACHE: Mutex<Option<(Key, Gathered)>> = Mutex::new(None);
 /// What was gathered for these inputs, as `a` has them gathered, where an inventory did.
 pub fn cached(a: &Args, inputs: Inputs) -> Option<Gathered> {
     let mut c = CACHE.lock().unwrap();
-    if c.as_ref().is_some_and(|(k, _)| *k == Key::new(a, inputs)) {
-        c.take().map(|(_, g)| g)
-    } else {
-        None
-    }
+    if c.as_ref().is_some_and(|(k, _)| *k == Key::new(a, inputs)) { c.take().map(|(_, g)| g) } else { None }
 }
 
 /// The arguments of a request, parsed as `aqr` would have them.

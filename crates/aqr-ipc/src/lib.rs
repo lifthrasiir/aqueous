@@ -585,7 +585,11 @@ pub enum Outcome {
     Silent,
     /// It failed: what happened, in what `aqr` told of it, and the last lines of its standard
     /// error where it said any.
-    Failed { main: String, text: String, log: Option<String> },
+    Failed {
+        main: String,
+        text: String,
+        log: Option<String>,
+    },
     /// A test found all intact.
     Tested { main: String, text: String },
     /// Done, with nothing to tell.
@@ -594,18 +598,35 @@ pub enum Outcome {
 
 /// The [`Outcome`] of the job whose [`State`] is `s`; `name` is the archive it names in what it
 /// tells.
-pub fn outcome(verb: Verb, count: usize, s: &State, status: Option<std::process::ExitStatus>, name: &str) -> Outcome {
+pub fn outcome(
+    verb: Verb,
+    count: usize,
+    s: &State,
+    status: Option<std::process::ExitStatus>,
+    name: &str,
+) -> Outcome {
     if s.stopped || s.cancelled {
         return Outcome::Silent;
     }
     if let Some(text) = failure(s, status) {
         let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
         let log = log.join("\n");
-        return Outcome::Failed { main: verb.failed(name), text, log: (!log.is_empty()).then_some(log) };
+        return Outcome::Failed {
+            main: verb.failed(name),
+            text,
+            log: (!log.is_empty()).then_some(log),
+        };
     }
     if verb == Verb::Test {
-        let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, count > 1)).collect();
-        return Outcome::Tested { main: intact(name, count), text: lines.join("\n") };
+        let lines: Vec<String> = s
+            .ended
+            .iter()
+            .map(|(n, e)| tested(n, e, count > 1))
+            .collect();
+        return Outcome::Tested {
+            main: intact(name, count),
+            text: lines.join("\n"),
+        };
     }
     Outcome::Done
 }
@@ -634,13 +655,25 @@ mod tests {
         assert_eq!(s.name(), "xy.aqr");
         assert_eq!(s.input(), Some(Path::new("x")));
         assert!(s.progress.is_none());
-        s.take(r#"{"event":"inventory","id":4,"files":12,"bytes":300,"walked":false,"done":false}"#);
+        s.take(
+            r#"{"event":"inventory","id":4,"files":12,"bytes":300,"walked":false,"done":false}"#,
+        );
         assert_eq!(
             s.inventory,
-            Some(Inventory { id: 4, files: 12, bytes: 300, walked: false, done: false, error: None })
+            Some(Inventory {
+                id: 4,
+                files: 12,
+                bytes: 300,
+                walked: false,
+                done: false,
+                error: None
+            })
         );
         s.take(r#"{"event":"inventory","id":4,"error":"no way","done":true}"#);
-        assert_eq!(s.inventory.as_ref().unwrap().error.as_deref(), Some("no way"));
+        assert_eq!(
+            s.inventory.as_ref().unwrap().error.as_deref(),
+            Some("no way")
+        );
         assert_eq!(s.ended.len(), 1);
         assert_eq!(s.ended[0].0, "a.aqr");
         assert_eq!(

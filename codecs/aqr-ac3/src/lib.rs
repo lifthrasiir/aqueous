@@ -12,6 +12,8 @@ extern crate std;
 aqr_common::zopt_namespace!("ac3", "AC-3 audio (aqr-ac3)");
 
 mod ac3;
+// (generated: kept as scripts/ac3-gen.py writes it)
+#[rustfmt::skip]
 mod ac3_tables;
 #[cfg(feature = "encode")]
 pub mod formula;

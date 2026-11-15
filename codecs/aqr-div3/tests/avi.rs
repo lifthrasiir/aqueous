@@ -32,7 +32,11 @@ fn avi(w: u32, h: u32, frames: &[&[u8]], sound: &[&[u8]]) -> Vec<u8> {
     strh2.extend_from_slice(&[0; 48]);
     let mut hdrl = chunk(b"avih", &[0; 56]);
     hdrl.extend(list(b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)].concat()));
-    hdrl.extend(list(b"strl", &[chunk(b"strh", &strh2), chunk(b"strf", &[0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])].concat()));
+    hdrl.extend(list(
+        b"strl",
+        &[chunk(b"strh", &strh2), chunk(b"strf", &[0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])]
+            .concat(),
+    ));
     let mut movi = Vec::new();
     for (i, f) in frames.iter().enumerate() {
         movi.extend(chunk(b"01wb", sound[i % sound.len()]));
@@ -61,7 +65,9 @@ fn roundtrip_real_frames() {
     let none = |a: &aqr_formula::Apply, i: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> {
         match a.module.name {
             "div3-recons" => formula::decode(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string())),
-            "ac3-recons" => aqr_ac3::formula::decode(&a.params, i, a.len, 2).map_err(|e| aqr_formula::Error(e.to_string())),
+            "ac3-recons" => {
+                aqr_ac3::formula::decode(&a.params, i, a.len, 2).map_err(|e| aqr_formula::Error(e.to_string()))
+            }
             m => panic!("{m}"),
         }
     };
@@ -69,8 +75,12 @@ fn roundtrip_real_frames() {
     assert!(back == file);
     let serial = |a: &aqr_formula::Apply, i: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> {
         match a.module.name {
-            "div3-recons" => aqr_div3::module::decode_serial(&a.params, i, a.len).map_err(|e| aqr_formula::Error(e.to_string())),
-            "ac3-recons" => aqr_ac3::module::decode_serial(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string())),
+            "div3-recons" => {
+                aqr_div3::module::decode_serial(&a.params, i, a.len).map_err(|e| aqr_formula::Error(e.to_string()))
+            }
+            "ac3-recons" => {
+                aqr_ac3::module::decode_serial(&a.params, i, a.len, 1).map_err(|e| aqr_formula::Error(e.to_string()))
+            }
             m => panic!("{m}"),
         }
     };
