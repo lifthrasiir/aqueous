@@ -22,7 +22,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     (zstd, ~6 MB); each blob is used only for the hash it was packed for, so `cargo aqr` runs
     pack.sh again where the pack's modules are not those of known.rs (where there is a pack).
     The release workflow runs pack.sh before building aqr.exe (without the pack, aqr.exe runs
-    no module as WebAssembly), then a smoke test of `--wasm` and of an SFX.
+    no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its

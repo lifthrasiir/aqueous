@@ -232,6 +232,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-api",
  "crc32fast",
+ "inventory",
  "libc",
  "rayon",
  "simd-adler32",
@@ -2549,6 +2550,15 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "block-padding",
  "generic-array",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]

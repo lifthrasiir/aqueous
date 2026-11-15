@@ -535,11 +535,6 @@ Which links are made:
 (the default: those whose targets stay in the directory extracted into; the others told),
 or
 .Cm all .
-.It Fl -wasm
-Run every module as WebAssembly, the known ones too.
-.It Fl -no-sandbox
-Run the WebAssembly modules in this process, not in worker processes locked down by the
-system; where the system cannot lock workers down, they run only so.
 .El
 .Ss General
 .Bl -tag -width Ds
@@ -561,6 +556,19 @@ Compressing (default 256M, or
 .Cm unlimited ) ,
 recompressions needing more are not used; decompressing (default 512M, which every
 decoder supports), an archive needing more fails.
+.It Fl Z Ar name Ns Op = Ns Ar value
+A developer option, not stable across versions: a bound, threshold or switch of a stage
+set without a rebuild.
+.Fl Z Cm help
+lists them and their namespaces,
+.Fl Z Ar ns Ns Cm :help
+those of a namespace; a switch is also given as
+.Fl Z Cm no- Ns Ar name .
+.Fl Z Cm wasm
+runs every module as WebAssembly, the known ones too;
+.Fl Z Cm no-sandbox
+runs the WebAssembly modules in this process, not in worker processes locked down by the
+system (where the system cannot lock workers down, they run only so).
 .It Fl h , Fl -help
 Show a summary of the options.
 .It Fl V , Fl -version

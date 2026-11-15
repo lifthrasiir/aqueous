@@ -29,6 +29,7 @@
 //! - [`fsio`]: files read and written at offsets (native).
 //! - [`text`]: bytes as text (native).
 //! - [`wasm`]: WebAssembly modules split into streams and joined back (aqr-wasm, module blocks).
+//! - [`zopt`]: developer options (`aqr -Z`), declared by the crates where they are read.
 
 pub mod adler32;
 #[cfg(not(target_family = "wasm"))]
@@ -76,6 +77,7 @@ pub mod trace;
 pub mod varint;
 pub mod wasm;
 pub mod wire;
+pub mod zopt;
 
 /// Malformed input; `.0` says what was wrong. The crates convert it into their own error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

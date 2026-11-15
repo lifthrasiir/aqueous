@@ -99,7 +99,7 @@ jobs:
           mkdir smoke
           cp codecs/aqr-jpeg/tests/data/gradient.jpg README.md smoke/
           target/dist/aqr.exe -c -q -o smoke.aqr smoke
-          target/dist/aqr.exe -d -q --wasm -o smoke-wasm smoke.aqr
+          target/dist/aqr.exe -d -q -Z wasm -o smoke-wasm smoke.aqr
           diff -r smoke smoke-wasm
           target/dist/aqr.exe -c -q --format sfx -o smoke.exe smoke
           ./smoke.exe smoke-out

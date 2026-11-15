@@ -66,6 +66,23 @@ fn formats() -> Vec<String> {
     std::iter::once("aqr").chain(aqr_pack::Format::names()).chain(["sfx"]).map(String::from).collect()
 }
 
+/// The developer options as given: `NAME`, `no-NAME` of a switch, `help` and `NS:help`.
+fn zopts() -> Vec<String> {
+    let mut v = vec!["help".to_string()];
+    v.extend(aqr_common::zopt::namespaces().into_iter().map(|n| format!("{}:help", n.0)));
+    for o in aqr_common::zopt::all() {
+        let usage = o.usage();
+        v.push(o.name().into());
+        if usage.contains("no-") {
+            v.push(match o.name().split_once(':') {
+                Some((ns, w)) => format!("{ns}:no-{w}"),
+                None => format!("no-{}", o.name()),
+            });
+        }
+    }
+    v
+}
+
 fn levels() -> Vec<String> {
     let words = ["low", "mid", "high"].into_iter().map(String::from);
     LEVELS.map(|n| n.to_string()).chain(words).chain((1..=19).map(|n| format!("zstd{n}"))).collect()
@@ -140,11 +157,10 @@ pub const OPTIONS: &[Opt] = &[
         "names not written as they are",
     ),
     opt(None, Some("links"), Value::Of(|| of(&["inside", "all"])), "which links are made"),
-    opt(None, Some("wasm"), Value::None, "run every module as WebAssembly"),
-    opt(None, Some("no-sandbox"), Value::None, "run the Wasm modules in this process"),
     opt(Some('T'), Some("threads"), Value::Text, "threads to use"),
     opt(Some('M'), Some("memory"), Value::Of(|| of(&["avail", "0"])), "about the most heap to take at once"),
     opt(None, Some("application-bound"), Value::Of(|| of(&["unlimited"])), "the most memory a module may need"),
+    many(Some('Z'), None, Value::Of(zopts), "a developer option (-Z help lists them)"),
     opt(Some('h'), Some("help"), Value::None, "show the help"),
     opt(Some('V'), Some("version"), Value::None, "show the version"),
     opt(None, Some("setup-autocomplete"), Value::Of(|| of(&SHELLS)), "set up this completion for SHELL, alone"),

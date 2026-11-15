@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -K | -t] [-o OUTPUT] [-L] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [-B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h]
+//! [-B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [-P] [--stats[=FILE]] [-Z NAME[=VALUE]]... [-h]
 //! INPUT [--rename TO]...
 //!
 //! aqr -d \[OPTIONS\] ARCHIVE [PATH [--rename TO]]...; aqr -d --each \[OPTIONS\] ARCHIVE...; aqr -t [-q | -v] ARCHIVE \[PATH\]...;
@@ -146,13 +146,10 @@
 //!   others told and not made (spec, "Extraction"); with `all`, every one as it is, those
 //!   reaching out of it, going round in a loop of links or through names a file system may
 //!   take as a link of the archive or not.
-//! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
-//!   otherwise).
-//! - `--no-sandbox`: in decoding, the modules not known run in this process. By default they
-//!   run in worker processes locked down by the system ([`aqr_decompress::sandbox`]; every
-//!   module with `--wasm`), started once the first of them is loaded, a sandbox for each
-//!   archive. Where the system cannot lock workers down, they do not run but with
-//!   `--no-sandbox` (the known ones with `--wasm` in this process).
+//! - `-Z`: developer options ([`aqr_common::zopt`]), declared by the crates where they are read:
+//!   bounds, thresholds and switches of the stages, set without a rebuild (`-Z help` lists
+//!   them, `-Z NS:help` those of a namespace). This crate's are [`WASM`] (`-Z wasm`) and
+//!   [`SANDBOX`] (`-Z no-sandbox`). They are not passed to the sandbox's workers.
 //! - `-l`: the level of compression ([`aqr::Level`]), `0` (nothing compressed: uncompressed
 //!   blocks only), `1` (zstd alone: nothing recompressed) to `9`; `low`, `mid` (the default)
 //!   and `high` are 2, 5 and 8. `zstdN` compresses every stream at zstd level `N`, the
@@ -431,10 +428,6 @@ Decompression:
       --links WHAT      links made: inside (the default: those whose targets stay in
                         the directory extracted into; the others told), or all (as
                         they are, those reaching out or going round in loops too)
-      --wasm            run every module as WebAssembly, the known ones too
-      --no-sandbox      run the Wasm modules (the ones not known, or all with --wasm)
-                        in this process, not in workers locked down by the system;
-                        where the system cannot lock workers down, they run only so
 
 General:
   -T, --threads N       threads to use (default 0: as many as the machine has)
@@ -447,6 +440,10 @@ General:
                         recompressions needing more are not used (default 256M, or
                         unlimited); decompressing, an archive needing more fails
                         (default 512M, which every decoder supports); independent of -M
+  -Z NAME[=VALUE]       a developer option, not stable across versions (-Z help lists
+                        them, -Z NS:help those of NS:; a switch also as -Z no-NAME):
+                        -Z wasm runs every module as WebAssembly, -Z no-sandbox the
+                        Wasm modules in this process, not in workers locked down
   -h, --help            show this help
   -V, --version         show the version
       --setup-autocomplete[=SHELL]
@@ -464,6 +461,21 @@ SIZE is a number of bytes, or of KiB, MiB or GiB with K, M or G. Short options m
 bundled (-cf, -T8, -oOUT); a long option's value may follow it after = (--memory=2G).
 ";
 
+aqr_common::zopt! {
+    /// In decoding, every module run as WebAssembly, the known ones too (natively otherwise).
+    pub(crate) static WASM: Opt<bool> =
+        Opt::flag("wasm", false, "decoding, run every module as WebAssembly, the known ones too");
+    /// In decoding, the modules not known (every one with [`WASM`]) run in worker processes locked
+    /// down by the system ([`aqr_decompress::sandbox`]), started once the first of them is loaded,
+    /// a sandbox for each archive; else in this process. Where the system cannot lock workers
+    /// down, they do not run but without it (the known ones with [`WASM`] in this process).
+    pub(crate) static SANDBOX: Opt<bool> = Opt::flag(
+        "sandbox",
+        true,
+        "decoding, run the Wasm modules not known (all with wasm) in workers locked down by the system",
+    );
+}
+
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
 const SANDBOX_WORKER: &str = "--sandbox-worker";
 
@@ -475,9 +487,6 @@ struct Args {
     list: bool,
     /// Telling all that an archive records (`-I`).
     info: bool,
-    wasm: bool,
-    /// The modules not known (all, with `wasm`) run in a sandbox.
-    sandbox: bool,
     output: Option<PathBuf>,
     /// Decompressing, a single entry at the top beside the archive, else a directory of its name.
     auto_dir: bool,
@@ -742,8 +751,6 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         test: false,
         list: false,
         info: false,
-        wasm: false,
-        sandbox: true,
         output: None,
         auto_dir: false,
         force: false,
@@ -798,6 +805,8 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     let mut application_bound = None;
     // (`-C`: the directory so far, by input the one it was given in, and the last given)
     let (mut dir, mut dirs, mut last_dir) = (PathBuf::new(), Vec::new(), None);
+    // (`-Z`: the developer options, set once all are read)
+    let mut zopts = Vec::new();
     let mut lex = Lexer { argv, short: Default::default(), only_inputs: false };
     while let Some(tok) = lex.next() {
         let (s, mut inline) = match tok {
@@ -830,8 +839,7 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "--delete" => a.edit = Some(edit::Edit::Delete),
             "--move" => a.edit = Some(edit::Edit::Move),
             "--compact" => a.compact = true,
-            "--wasm" => a.wasm = true,
-            "--no-sandbox" => a.sandbox = false,
+            "-Z" => zopts.push(text(value("-Z")?)),
             "-o" | "--output" => a.output = Some(value("-o")?.into()),
             "-C" | "--directory" => {
                 let to = dir.join(value("-C")?);
@@ -940,6 +948,13 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         }
         if inline.is_some() {
             return Err(format!("{s} takes no value"));
+        }
+    }
+    match aqr_common::zopt::apply(&zopts)? {
+        aqr_common::zopt::Applied::Set => {}
+        aqr_common::zopt::Applied::Help(h) => {
+            print!("{h}");
+            std::process::exit(0);
         }
     }
     if stats_alone {
@@ -1231,7 +1246,7 @@ enum Tok {
 
 /// The short options that take a value: in a bundle (`-cfo OUT`), the rest of the argument is
 /// theirs (`-oOUT`), or else the next argument.
-const SHORT_VALUES: &[u8] = b"oCTMlBbSExj";
+const SHORT_VALUES: &[u8] = b"oCTMlBbSExjZ";
 
 /// Reads the arguments as options and inputs, getopt's way: short options bundled (`-cf`), a
 /// value joined to its option (`-T8`, `--memory=2G`), `--` ending the options, `-` an input
@@ -3535,7 +3550,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         false => None,
     };
     let decoder =
-        Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
+        Decoder { native: Native { threads: a.opt.threads }, wasm: WASM.get(), sandbox: SANDBOX.get().then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
     let plain: &[u8] = match decrypting {
         Some(_) => &[],
@@ -4168,7 +4183,7 @@ impl aqr::Runner for Decoder {
             true => sandbox::Sandbox::current_exe([SANDBOX_WORKER])
                 .map(|s| s.title("aqr: sandbox worker"))
                 .map_err(|e| e.to_string()),
-            false => Err("this system does not lock workers down (--no-sandbox to run the modules not known in \
+            false => Err("this system does not lock workers down (-Z no-sandbox to run the modules not known in \
                  this process)"
                 .into()),
         });
@@ -4207,6 +4222,32 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every developer option of the crates linked: of a well-formed name, declared once, its help
+    /// and its namespace's told.
+    #[test]
+    fn zopts() {
+        let all = aqr_common::zopt::all();
+        for o in &all {
+            let name = match o.members() {
+                // (a family's `PREFIX:WHAT`, and its members)
+                Some(m) => {
+                    m.iter().for_each(|m| assert!(aqr_common::zopt::well_formed(&format!("x:{m}")), "{m}"));
+                    o.name().split(':').next().unwrap()
+                }
+                None => o.name(),
+            };
+            assert!(aqr_common::zopt::well_formed(name), "-Z {}: not a well-formed name", o.name());
+            assert!(!o.help().is_empty() && !o.help().ends_with('.'), "-Z {}: help", o.name());
+        }
+        for w in all.windows(2) {
+            assert_ne!(w[0].name(), w[1].name(), "declared twice");
+        }
+        assert!(aqr_common::zopt::help("").unwrap().contains("[no-]sandbox"));
+        for (ns, ..) in aqr_common::zopt::namespaces() {
+            aqr_common::zopt::help(ns).unwrap();
+        }
+    }
 
     /// The options `--help` tells of, as given (`-x`, `--long`).
     pub(crate) fn help_options() -> Vec<String> {
