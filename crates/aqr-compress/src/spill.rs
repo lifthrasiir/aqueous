@@ -28,8 +28,15 @@ use aqr_formula::Bytes;
 use aqr_formula::store::StoreWriter;
 use memmap2::{Mmap, MmapOptions};
 
-/// Bytes of a segment, a file and a mapping each; a region larger is a segment of its own.
-const SEGMENT: usize = 256 << 20;
+aqr_common::zopt_namespace!("spill", "spill files (aqr-compress)");
+
+aqr_common::zopt! {
+    /// Bytes of a segment, a file and a mapping each (a multiple of [`ALIGN`]); a region larger
+    /// is a segment of its own.
+    static SEGMENT: Opt<usize> = Opt::size("spill:segment", 256 << 20, "bytes of a spill segment, a file and a mapping each");
+    /// Bytes of the segment's own copied at once through the heap ([`Segment::maps`]).
+    static BOUNCE: Opt<usize> = Opt::size("spill:bounce", 1 << 20, "bytes of a segment's own copied at once through the heap");
+}
 /// Segments are of multiples of this (the mappings' granularity on Windows), the regions in
 /// them at multiples of [`REGION_ALIGN`].
 const ALIGN: usize = 64 << 10;
@@ -38,8 +45,6 @@ const REGION_ALIGN: usize = 16;
 /// its regions after them.
 const MAGIC: [u8; 6] = [0x69, 0x0a, 0xf9, 0xa6, 0x29, 0x7f];
 const HEADER: usize = 4 << 10;
-/// Bytes of the segment's own copied at once through the heap ([`Segment::maps`]).
-const BOUNCE: usize = 1 << 20;
 
 pub struct Spill {
     /// The path the files' names extend.
@@ -213,11 +218,12 @@ impl StoreWriter for Region {
         let at = (self.start + self.len) as u64;
         let written = if self.segment.maps(d) {
             // (bytes of its own segment: through the heap, see [`Segment::maps`])
-            let mut copy = Vec::with_capacity(d.len().min(BOUNCE));
-            d.chunks(BOUNCE).enumerate().try_for_each(|(i, c)| {
+            let bounce = BOUNCE.get();
+            let mut copy = Vec::with_capacity(d.len().min(bounce));
+            d.chunks(bounce).enumerate().try_for_each(|(i, c)| {
                 copy.clear();
                 copy.extend_from_slice(c);
-                aqr_common::fsio::write_all_at(&self.segment.file, &copy, at + (i * BOUNCE) as u64)
+                aqr_common::fsio::write_all_at(&self.segment.file, &copy, at + (i * bounce) as u64)
             })
         } else {
             aqr_common::fsio::write_all_at(&self.segment.file, d, at)
@@ -303,7 +309,12 @@ impl aqr_formula::store::Store for Spill {
         let mut state = self.state.lock().unwrap();
         // (the segment made before, if it is let go, dropped once the state is)
         let mut before = None;
-        let (segment, start, cap, own) = if n > SEGMENT / 2 {
+        let segment_len = SEGMENT.get();
+        assert!(
+            segment_len >= ALIGN && segment_len % ALIGN == 0,
+            "-Z spill:segment={segment_len}: not a multiple of 64K"
+        );
+        let (segment, start, cap, own) = if n > segment_len / 2 {
             let size = HEADER.checked_add(n)?.next_multiple_of(ALIGN);
             (self.grow(&mut state, size).ok()?, HEADER, size - HEADER, true)
         } else {
@@ -311,9 +322,9 @@ impl aqr_formula::store::Store for Spill {
             match state.take(need) {
                 Some((s, at)) => (s, at, need, false),
                 None => {
-                    let s = self.grow(&mut state, SEGMENT).ok()?;
+                    let s = self.grow(&mut state, segment_len).ok()?;
                     state.segments.insert(s.id, Arc::downgrade(&s));
-                    state.insert(s.id, HEADER + need, SEGMENT - HEADER - need);
+                    state.insert(s.id, HEADER + need, segment_len - HEADER - need);
                     before = state.open.replace(s.clone());
                     (s, HEADER, need, false)
                 }
@@ -515,7 +526,7 @@ mod tests {
         let head = |s: &Segment| unsafe { std::slice::from_raw_parts(s.base, 4096) }.to_vec();
         let mut magic = vec![0; 4096];
         magic[..6].copy_from_slice(&[0x69, 0x0a, 0xf9, 0xa6, 0x29, 0x7f]);
-        let segment = spill.grow(&mut spill.state.lock().unwrap(), SEGMENT).unwrap();
+        let segment = spill.grow(&mut spill.state.lock().unwrap(), SEGMENT.get()).unwrap();
         assert!(head(&segment) == magic);
         drop(segment);
         let (at, bytes) = take(&spill, 100, 0xff);

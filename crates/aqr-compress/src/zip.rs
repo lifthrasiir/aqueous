@@ -12,7 +12,7 @@ pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
     let zopt = aqr_zip::formula::Options {
         threads: opt.threads,
         profile,
-        zlib: true,
+        zlib: aqr_flate::ZLIB.get(),
         // (below level 4, no DEFLATE body rebuilt: files holding their data are made of them,
         // [`crate::inflated`])
         limit: if crate::inflated::on(opt) { 0 } else { cx.inflate_left() },

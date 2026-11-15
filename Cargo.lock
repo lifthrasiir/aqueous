@@ -894,6 +894,7 @@ name = "aqr-exe"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-common",
  "sha1",
  "sha2",
  "zstd",
@@ -1067,6 +1068,7 @@ dependencies = [
 name = "aqr-infer-pak"
 version = "0.1.0"
 dependencies = [
+ "aqr-common",
  "aqr-lz4",
  "aqr-lzo",
  "flate2",
@@ -1274,6 +1276,7 @@ dependencies = [
 name = "aqr-mkv"
 version = "0.1.0"
 dependencies = [
+ "aqr-common",
  "aqr-formula",
  "xxhash-rust",
 ]
@@ -1389,6 +1392,7 @@ dependencies = [
  "aqr-bvx",
  "aqr-bz2",
  "aqr-clip",
+ "aqr-common",
  "aqr-dex",
  "aqr-div3",
  "aqr-dwarf",
@@ -1625,6 +1629,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-api",
  "aqr-blob",
+ "aqr-common",
  "aqr-formula",
 ]
 

@@ -1,4 +1,4 @@
-"""How much of a sample's ground truth the scan finds by itself (AQR_PAKS=0, AQR_SCAN_DUMP).
+"""How much of a sample's ground truth the scan finds by itself (aqr -Z dump:scan).
 
     python scancov.py AQR GT_LAYOUT DIR
 """
@@ -8,8 +8,7 @@ aqr, gt, root = sys.argv[1:4]
 files = {f.lower(): os.path.getsize(os.path.join(root, f)) for f in os.listdir(root)}
 os.makedirs('work', exist_ok=True)
 out = os.path.join('work', 'scancov.aqr')
-env = dict(os.environ, AQR_PAKS='0', AQR_SCAN_DUMP='1')
-r = subprocess.run([aqr, '-c', '-q', '-o', out, root], env=env, capture_output=True, text=True, errors='replace')
+r = subprocess.run([aqr, '-c', '-q', '-Z', 'dump:scan', '-o', out, root], capture_output=True, text=True, errors='replace')
 os.remove(out)
 by_len = collections.defaultdict(list)  # data length -> [(depth, p, n, format)]
 for l in r.stderr.splitlines():

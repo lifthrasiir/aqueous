@@ -83,13 +83,30 @@ pub const DEFAULT_BOUND: u64 = 256 << 20;
 /// [`aqr_formula::SUPPORTED_BOUND`]): where 256 MiB loses much and splitting is no help. None yet.
 const EXCEPTIONS: &[(&str, u64)] = &[];
 
+aqr_common::zopt! {
+    /// The bound of a module's applications by default, in place of [`DEFAULT_BOUND`] or its exception
+    /// ([`EXCEPTIONS`]).
+    static BOUND: Family<u64> = Family::new(
+        "bound:MODULE",
+        || {
+            let mut names: Vec<&'static str> = aqr_decompress::MODULES.iter().map(|m| m.name).collect();
+            names.dedup();
+            names
+        },
+        "256M, or the module's exception",
+        "most bytes of the minimal bound of the module's applications, where application-bound is not given",
+    );
+}
+
 /// The most that the minimal bound of an application of `module` may be, under the `bound` of
 /// [`crate::Options::application_bound`]: that given, or by default [`DEFAULT_BOUND`] or the
 /// module's exception to it.
 pub(crate) fn bound_of(bound: Option<u64>, module: Module) -> u64 {
     match bound {
         Some(b) => b,
-        None => EXCEPTIONS.iter().find(|e| e.0 == module.name).map_or(DEFAULT_BOUND, |e| e.1.max(DEFAULT_BOUND)),
+        None => BOUND.get(module.name).unwrap_or_else(|| {
+            EXCEPTIONS.iter().find(|e| e.0 == module.name).map_or(DEFAULT_BOUND, |e| e.1.max(DEFAULT_BOUND))
+        }),
     }
 }
 
@@ -219,10 +236,19 @@ pub(crate) fn note_kept(f: &Formula, bound: Option<u64>, bytes: u64) {
     }
 }
 
+aqr_common::zopt! {
+    /// Whether the memory limits of the applications are declared ([`declare`]), the plans of their modules.
+    static DECLARE: Opt<bool> =
+        Opt::flag("memory:declare", true, "declare the memory limits of the applications (no-declare: none)");
+}
+
 /// Declares the memory limits of `f`'s applications: those declared already kept (of a formula
 /// sealed, whose inputs are no longer at hand), else those of `known` (worked out as the
 /// prevalidation ran them), else worked out, the inputs made by `m` as plans ask for them.
 pub(crate) fn declare(f: &mut Formula, m: &(impl Modules + Sync), known: &Limits) {
+    if !DECLARE.get() {
+        return;
+    }
     let declared = f.declare_memory(m, &|a, contents| {
         if a.memory_limit != aqr_formula::NO_LIMIT {
             return Some(Plan { instance: a.memory_limit, tasks: a.task_limits.clone() });

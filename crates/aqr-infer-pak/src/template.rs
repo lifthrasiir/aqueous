@@ -189,7 +189,7 @@ pub fn learn(files: &[File], key: usize, dirs: &[Directory]) -> Option<Template>
 /// None where one does not hold.
 pub fn verify(t: &Template, files: &[File], key: usize) -> Option<Vec<Directory>> {
     let why = |s: String| {
-        if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
+        if crate::VERBOSE.get() {
             eprintln!("    template: {s}");
         }
     };

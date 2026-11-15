@@ -22,6 +22,10 @@ fn stem(p: &Path) -> String {
 }
 
 fn main() {
+    // (`-Z pak:verbose` as the examples have no -Z: the environment)
+    if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
+        aqr_common::zopt::apply(&["pak:verbose"]).unwrap();
+    }
     let mut paths: Vec<PathBuf> = Vec::new();
     for a in std::env::args().skip(1) {
         let p = PathBuf::from(&a);
@@ -102,7 +106,7 @@ fn main() {
                 let (d, t) = infer(&files, &Options::default());
                 rows = t.rows;
                 if let Some(t) = template::learn(&files, 0, &d) {
-                    if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
+                    if aqr_infer_pak::VERBOSE.get() {
                         eprintln!("    learned {:?}", t.dirs);
                     }
                     templates.push(t);

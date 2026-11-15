@@ -59,8 +59,12 @@ use aqr_common::trace::{self, DEAD, NO_ITEM, Trace};
 
 use crate::{percent, size};
 
-/// How often the files are written as it runs.
-const EVERY: Duration = Duration::from_secs(10);
+aqr_common::zopt_namespace!("stats", "--stats (aqr)");
+
+aqr_common::zopt! {
+    /// How often the files are written as it runs, in seconds.
+    static EVERY: Opt<u64> = Opt::value("stats:every", 10, "seconds between the writes of the --stats files as it runs");
+}
 
 /// What `--stats` asked for.
 pub struct Stats {
@@ -122,9 +126,10 @@ pub fn init(outputs: Vec<PathBuf>) -> &'static Stats {
                 eprintln!("aqr: {e}");
             }
         });
+        let every = Duration::from_secs(EVERY.get());
         _ = std::thread::Builder::new().name("aqr-stats".into()).spawn(move || {
             loop {
-                std::thread::park_timeout(EVERY);
+                std::thread::park_timeout(every);
                 if !s.write_meanwhile() {
                     break;
                 }

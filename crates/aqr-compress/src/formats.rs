@@ -100,6 +100,56 @@ pub(crate) static BY_EXT: LazyLock<HashMap<&'static [u8], Kind>> = LazyLock::new
     m
 });
 
+fn format_names() -> Vec<&'static str> {
+    Format::ALL.iter().map(|f| f.name()).collect()
+}
+
+aqr_common::zopt! {
+    /// The heap each format's recompressor takes at most for each byte of its input
+    /// ([`Spec::heap`]), where another is tried.
+    static HEAP: Family<f64> = Family::new(
+        "heap:FORMAT",
+        format_names,
+        "as formats.rs has it",
+        "bytes of heap per input byte that the format's recompression takes, by which inputs are turned down",
+    );
+    /// The least level files of each format are taken at ([`Spec::level`]).
+    static LEVEL: Family<u8> = Family::new(
+        "level:FORMAT",
+        format_names,
+        "as formats.rs has it (0, or 4 or 9 for the slow ones)",
+        "least level at which files of the format are recompressed",
+    );
+    /// The thread-milliseconds that a MB of each format takes ([`Spec::cost`]): the order batches are
+    /// made in, not what they make.
+    static COST: Family<u64> = Family::new(
+        "cost:FORMAT",
+        format_names,
+        "as formats.rs has it (50 for most)",
+        "thread-milliseconds per MB of the format, for the order its files are made in",
+    );
+}
+
+impl Format {
+    /// [`Spec::heap`] (`-Z heap:FORMAT`).
+    pub(crate) fn heap(self) -> f64 {
+        HEAP.get(self.name()).unwrap_or(self.spec().heap)
+    }
+
+    /// [`Spec::level`] (`-Z level:FORMAT`; CHM's, which is [`crate::lzx_on`]'s, `-Z lzx-level`).
+    pub(crate) fn level(self) -> u8 {
+        LEVEL.get(self.name()).unwrap_or_else(|| match self {
+            Format::Chm => crate::LZX_LEVEL.get(),
+            f => f.spec().level,
+        })
+    }
+
+    /// [`Spec::cost`] (`-Z cost:FORMAT`).
+    pub(crate) fn cost(self) -> u64 {
+        COST.get(self.name()).unwrap_or(self.spec().cost)
+    }
+}
+
 /// The recompressor of a game engine's pack: its parts as slices of the input
 /// ([`crate::bundle::pack`]).
 macro_rules! pack {
@@ -426,7 +476,7 @@ formats! {
     Chm = "chm" {
         recompressor: Cx(|d, _, opt, _, cx| crate::chm(d, opt, cx)),
         heap: 9.0,
-        level: crate::LZX_LEVEL,
+        // (its level is `-Z lzx-level`'s: [`Format::level`])
     }
     /// ALZ archive (aqr-alz, and aqr-flate on its DEFLATE bodies, aqr-bz2 on its bzip2 bodies),
     /// known by its header and the record after it.

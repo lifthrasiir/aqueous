@@ -30,12 +30,16 @@ pub(crate) struct Set {
     pub members: Vec<usize>,
 }
 
-/// The most members of a set: each is an input of its application and, decoded as WebAssembly,
-/// a task of it, far under what a host lets an application spawn (`aqr_api::MAX_TASKS`).
-pub(crate) const MAX_SET_INPUTS: usize = 1024;
+aqr_common::zopt_namespace!("sets", "sets of similar files (aqr-compress)");
 
-/// Files less alike than this have no parent.
-const MIN_ALIKE: f64 = 0.25;
+aqr_common::zopt! {
+    /// The most members of a set: each is an input of its application and, decoded as WebAssembly,
+    /// a task of it, far under what a host lets an application spawn (`aqr_api::MAX_TASKS`), so
+    /// the option can only lower it (1 to 1024).
+    pub(crate) static MAX_SET_INPUTS: Opt<usize> = Opt::value("sets:max-inputs", 1024, "the most members of a set, 1 to 1024");
+    /// Files less alike than this have no parent.
+    static MIN_ALIKE: Opt<f64> = Opt::value("sets:min-alike", 0.25, "files less alike than this have no parent in a set");
+}
 
 /// Where a content's data is and its length, which tell the content while its formula is
 /// where it is.
@@ -116,7 +120,7 @@ fn forests(files: &[&[u8]], threads: usize, limit: usize) -> Vec<(Vec<usize>, Ve
         let rows = aqr_common::pool::par_map(n, threads, |i| {
             (0..n).map(|j| if i == j { 1.0 } else { sig(i).alike(sig(j)) }).collect()
         });
-        let (order, parents) = tree(&rows, MIN_ALIKE);
+        let (order, parents) = tree(&rows, MIN_ALIKE.get());
         for (order, parents) in cut(&order, &parents, |i| files[group[i]].len(), limit) {
             if parents.iter().any(Option::is_some) {
                 out.push((order.into_iter().map(|i| group[i]).collect(), parents));
@@ -294,10 +298,12 @@ fn cut(
     limit: usize,
 ) -> Vec<(Vec<usize>, Vec<Option<usize>>)> {
     let mut out: Vec<(Vec<usize>, Vec<Option<usize>>)> = Vec::new();
+    let max_inputs = MAX_SET_INPUTS.get();
+    assert!((1..=1024).contains(&max_inputs), "-Z sets:max-inputs={max_inputs}: not 1 to 1024");
     let (mut start, mut bytes) = (0, 0usize);
     for (i, &m) in order.iter().enumerate() {
         let n = len(m);
-        if i > start && (bytes.saturating_add(n) > limit || i - start == MAX_SET_INPUTS) {
+        if i > start && (bytes.saturating_add(n) > limit || i - start == max_inputs) {
             start = i;
             bytes = 0;
             out.push((Vec::new(), Vec::new()));
@@ -320,12 +326,12 @@ mod tests {
     /// A set has [`MAX_SET_INPUTS`] members at most, whatever its bytes.
     #[test]
     fn cut_by_members() {
-        let n = 2 * MAX_SET_INPUTS + 5;
+        let n = 2 * MAX_SET_INPUTS.get() + 5;
         let order: Vec<usize> = (0..n).collect();
         let parents: Vec<Option<usize>> = (0..n).map(|i| i.checked_sub(1)).collect();
         let pieces = cut(&order, &parents, |_| 1, usize::MAX);
         let lens: Vec<usize> = pieces.iter().map(|p| p.0.len()).collect();
-        assert_eq!(lens, [MAX_SET_INPUTS, MAX_SET_INPUTS, 5]);
+        assert_eq!(lens, [MAX_SET_INPUTS.get(), MAX_SET_INPUTS.get(), 5]);
         // (the first of a piece has no parent: its own was in the piece before)
         assert!(pieces.iter().all(|p| p.1[0].is_none() && p.1[1..].iter().enumerate().all(|(i, &q)| q == Some(i))));
     }
@@ -341,7 +347,7 @@ mod tests {
             vec![0.9, 0.5, 1.0, 0.0],
             vec![0.0, 0.1, 0.0, 1.0],
         ];
-        let (order, parents) = tree(&alike, MIN_ALIKE);
+        let (order, parents) = tree(&alike, MIN_ALIKE.default());
         assert_eq!(order, [2, 0, 1, 3]);
         assert_eq!(parents, [None, Some(0), Some(0), None]);
         // cut to 2 bytes of members of a byte each: 1 has no parent in its piece

@@ -332,8 +332,7 @@ fn extraction_stopped() {
     ok(&d, &["-q", "-B", "100K", "-o", "b.aqr", "src"]);
     let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
         .current_dir(&d)
-        .args(["-T", "1", "-d", "-o", "x", "b.aqr"])
-        .env("AQR_TEST_STOP_AFTER", "20")
+        .args(["-Z", "test:stop-after=20", "-T", "1", "-d", "-o", "x", "b.aqr"])
         .stdin(Stdio::null())
         .output()
         .unwrap();

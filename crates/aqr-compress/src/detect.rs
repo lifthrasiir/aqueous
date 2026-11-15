@@ -49,10 +49,32 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     detect_at(d, true)
 }
 
+aqr_common::zopt! {
+    /// A format recognised by its bytes, each turned off with `-Z format:no-NAME` (not recognised:
+    /// its files are taken as of no format, or as another's that tells them).
+    static FORMAT: Family<bool> = Family::flags(
+        "format:NAME",
+        || Format::ALL.iter().map(|f| f.name()).collect(),
+        "on",
+        "recognise files of the format by their bytes, or not with no-NAME",
+    );
+    /// The pages of a SQLite database that its blobs are sampled in, to tell one of zstd blobs
+    /// ([`sqlite_zstd`]).
+    static SQLITE_ZSTD_PAGES: Opt<usize> =
+        Opt::value("sqlite:zstd-pages", 1024, "pages of a SQLite database sampled for blobs of zstd frames");
+}
+
+/// The formats turned off ([`FORMAT`]), by their index, as detection first needs them.
+static OFF: LazyLock<[bool; Format::ALL.len()]> =
+    LazyLock::new(|| Format::ALL.map(|f| FORMAT.get(f.name()) == Some(false)));
+
 /// [`detect`], of data at its start (`start`) or in the middle of other data: the format of
 /// the first row of [`ROWS`] that tells it (of those looked for there).
 fn detect_at(d: &[u8], start: bool) -> Option<Format> {
-    ROWS.iter().find(|r| (start || r.anywhere.is_some()) && r.test.holds(d)).map(|r| r.format)
+    let off = &*OFF;
+    ROWS.iter()
+        .find(|r| (start || r.anywhere.is_some()) && !off[r.format as usize] && r.test.holds(d))
+        .map(|r| r.format)
 }
 
 /// How a row of [`ROWS`] tells a file of its format.
@@ -269,6 +291,9 @@ static STARTS: LazyLock<Starts> = LazyLock::new(|| {
         t.rows[a as usize] |= 1 << r;
     };
     for (r, row) in ROWS.iter().enumerate() {
+        if OFF[row.format as usize] {
+            continue;
+        }
         match (&row.anywhere, &row.test) {
             (None, _) => {}
             (Some(Pairs::Magic), Test::Magic([(0, m), ..])) if m.len() >= 2 => put(r, m[0], m[1]),
@@ -331,15 +356,16 @@ pub(crate) fn named(format: Format, d: &[u8]) -> Format {
 /// A SQLite database (of [`sqlite_header`]) whose blobs are a quarter of the pages that the first
 /// 1024 pages walked of its b-trees are, at least, in Zstandard frames.
 fn sqlite_zstd(d: &[u8]) -> bool {
-    const PAGES: usize = 1024;
     sqlite_header(d)
-        && aqr_sqlite::blobs::sample(d, 64, &|h| h.starts_with(&aqr_zstd::MAGIC), PAGES).is_some_and(|(b, pages)| {
-            let psize = match u16::from_be_bytes([d[16], d[17]]) {
-                1 => 65536,
-                p => p as usize,
-            };
-            pages > 0 && 4 * b.iter().map(|b| b.len()).sum::<usize>() >= pages * psize
-        })
+        && aqr_sqlite::blobs::sample(d, 64, &|h| h.starts_with(&aqr_zstd::MAGIC), SQLITE_ZSTD_PAGES.get()).is_some_and(
+            |(b, pages)| {
+                let psize = match u16::from_be_bytes([d[16], d[17]]) {
+                    1 => 65536,
+                    p => p as usize,
+                };
+                pages > 0 && 4 * b.iter().map(|b| b.len()).sum::<usize>() >= pages * psize
+            },
+        )
 }
 
 fn sqlite_header(d: &[u8]) -> bool {

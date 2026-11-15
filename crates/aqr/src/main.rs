@@ -951,7 +951,7 @@ fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         }
     }
     match aqr_common::zopt::apply(&zopts)? {
-        aqr_common::zopt::Applied::Set => {}
+        aqr_common::zopt::Applied::Set => aqr_common::mem::log_from_option(),
         aqr_common::zopt::Applied::Help(h) => {
             print!("{h}");
             std::process::exit(0);
@@ -2311,10 +2311,12 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
     );
 }
 
-/// The most threads that read what is found ([`gather`]): more only contend in the file system
-/// (on Windows, 402,844 files on an SSD: 11.0 s on 1, 4.2 s on 4, 4.5 s on 8, 4.4 s on 16 and
-/// 5.3 s on 32).
-const STAT_THREADS: usize = 8;
+aqr_common::zopt! {
+    /// The most threads that read what is found ([`gather`]): more only contend in the file system
+    /// (on Windows, 402,844 files on an SSD: 11.0 s on 1, 4.2 s on 4, 4.5 s on 8, 4.4 s on 16 and
+    /// 5.3 s on 32).
+    static STAT_THREADS: Opt<usize> = Opt::value("stat-threads", 8, "the most threads that read the files found");
+}
 
 /// An entry found as the inputs are walked ([`walk`]): its path and name, the one found that
 /// holds it (none: at the root), and whether it is a directory as it was listed; `plain`, a
@@ -2467,7 +2469,7 @@ fn gather(inputs: Inputs, g: &mut Gathered, l: &view::Listing, a: &Args) -> Resu
     g.warnings.append(&mut follow.warnings);
     l.walked();
     let early: Vec<_> = found.iter_mut().map(|f| f.stat.take()).collect();
-    let stats = aqr_common::pool::par_map(found.len(), threads.min(STAT_THREADS), |i| {
+    let stats = aqr_common::pool::par_map(found.len(), threads.min(STAT_THREADS.get()), |i| {
         if found[i].plain || early[i].is_some() {
             return None;
         }
@@ -3537,6 +3539,12 @@ fn by_index<'c, 'n>(
     }
 }
 
+aqr_common::zopt! {
+    /// For tests: an extraction stopped, as a signal would, once so many contents are written.
+    static TEST_STOP_AFTER: Opt<Option<usize>> =
+        Opt::value("test:stop-after", None, "stop an extraction as a signal would, after N contents are written");
+}
+
 /// Decodes (or tests) `input`, an Aqueous archive, to `to`: whether it was (not skipped, as a
 /// frontend answers).
 fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
@@ -3549,8 +3557,11 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         true => Some(unlock(&c, input)?),
         false => None,
     };
-    let decoder =
-        Decoder { native: Native { threads: a.opt.threads }, wasm: WASM.get(), sandbox: SANDBOX.get().then(OnceLock::new) };
+    let decoder = Decoder {
+        native: Native { threads: a.opt.threads },
+        wasm: WASM.get(),
+        sandbox: SANDBOX.get().then(OnceLock::new),
+    };
     let runner: &dyn aqr::Runner = &decoder;
     let plain: &[u8] = match decrypting {
         Some(_) => &[],
@@ -3783,7 +3794,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                 let (_stopping, requested) = stop::extracting();
                 let stopped = || requested.load(std::sync::atomic::Ordering::SeqCst);
                 // (for tests: stopped once so many contents are written, as a signal would)
-                let after = std::env::var("AQR_TEST_STOP_AFTER").ok().and_then(|v| v.parse::<usize>().ok());
+                let after = TEST_STOP_AFTER.get();
                 let written = std::sync::atomic::AtomicUsize::new(0);
                 let give = |c, d| {
                     if stopped() {
@@ -4232,7 +4243,9 @@ mod tests {
             let name = match o.members() {
                 // (a family's `PREFIX:WHAT`, and its members)
                 Some(m) => {
-                    m.iter().for_each(|m| assert!(aqr_common::zopt::well_formed(&format!("x:{m}")), "{m}"));
+                    // (a module's name may hold a `/`: `exe-recons/x86`)
+                    let ok = |m: &str| aqr_common::zopt::well_formed(&format!("x:{}", m.replace('/', "-")));
+                    m.iter().for_each(|m| assert!(ok(m), "{}: {m}", o.name()));
                     o.name().split(':').next().unwrap()
                 }
                 None => o.name(),

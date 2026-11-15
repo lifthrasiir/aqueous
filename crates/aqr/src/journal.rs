@@ -7,11 +7,17 @@ use std::path::Path;
 use aqr_foreign::time::{Civil, local_civil, local_secs};
 use aqr_formula::aqr::{self, JournalPoint};
 
+aqr_common::zopt! {
+    /// For tests: the clock of a run, in milliseconds since the epoch.
+    static TEST_NOW: Opt<Option<u64>> =
+        Opt::value("test:now", None, "the time a run is named by, in milliseconds since the epoch, for tests");
+}
+
 /// The time a run is named by, in milliseconds since the epoch (UTC): the clock's, or
-/// `AQR_TEST_NOW` (milliseconds) where it is set, for tests.
+/// `-Z test:now` (milliseconds) where it is set, for tests.
 pub fn now_ms() -> Result<u64, String> {
-    if let Ok(v) = std::env::var("AQR_TEST_NOW") {
-        return v.trim().parse().map_err(|_| "AQR_TEST_NOW takes milliseconds since the epoch".to_string());
+    if let Some(ms) = TEST_NOW.get() {
+        return Ok(ms);
     }
     let d =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "the clock is before 1970")?;

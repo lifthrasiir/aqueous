@@ -5,11 +5,11 @@ its format here, printing `relative/path<TAB>offset<TAB>size` a member a line), 
 archived by aqr three ways (`eval.py`): with no paks (`AQR_PAKS=0`), inferred (the plan
 written by `AQR_PAK_DUMP`), and given the ground truth (`AQR_PAK_LAYOUT`), the sizes and times
 of each and how many members the inference got right. `scancov.py` tells how many of the
-members the scan finds by itself (`AQR_SCAN_DUMP`).
+members the scan finds by itself (`aqr -Z dump:scan`).
 
 The switches are in aqr builds not of the dist profile (`aqr_dist`, aqr-compress's `build.rs`);
 `AQR_PAK_LAYOUT` and `AQR_PAK_DUMP` only as at `4a93bf8`, the paks' plan having been taken out of
-aqr-compress since (`AQR_SCAN_DUMP` stays).
+aqr-compress since (`-Z dump:scan` stays).
 Copy a sample into a directory of its own: aqr plans paks only for archives of several files.
 
 ```sh

@@ -12,18 +12,23 @@ use aqr_formula::{Bytes, Formula, Node};
 
 use crate::{Format, Options, detect};
 
-/// Data shorter than this is not looked for: a slice of its stream would not be shared
-/// ([`crate::archive::SLICE_MIN`]), and what it holds is found by compressing it solid.
-const MIN: usize = 4 << 10;
+aqr_common::zopt_namespace!("inflated", "files holding the data of DEFLATE streams (aqr-compress)");
 
-/// The most bytes of data of a zlib stream inflated to tell what it holds (its checksum tells
-/// nothing of that).
-const ZLIB_MAX: usize = 256 << 20;
+aqr_common::zopt! {
+    /// Data shorter than this is not looked for: a slice of its stream would not be shared
+    /// ([`crate::archive::SLICE_MIN`], `-Z slice-min`), and what it holds is found by compressing it solid.
+    static MIN: Opt<usize> = Opt::size("inflated:min", 4 << 10, "data shorter than this is not looked for among DEFLATE streams");
+    /// The most bytes of data of a zlib stream inflated to tell what it holds (its checksum tells
+    /// nothing of that).
+    static ZLIB_MAX: Opt<usize> = Opt::size("inflated:zlib-max", 256 << 20, "the most bytes a zlib stream is inflated to, to tell what it holds");
+    /// The level below which DEFLATE streams are kept as they are (see [`on`]).
+    static MAX_LEVEL: Opt<u8> = Opt::value("inflated:max-level", 4, "DEFLATE streams are shared only below this level");
+}
 
 /// Whether DEFLATE streams are kept as they are at the level of `opt`, and files holding their
 /// data made of them: below level 4, where anything is recompressed.
 pub(crate) fn on(opt: &Options) -> bool {
-    opt.recompresses() && opt.level.scale() < 4
+    opt.recompresses() && opt.level.scale() < MAX_LEVEL.get()
 }
 
 /// A DEFLATE stream of [`Bodies`]: the file holding it (by index), and where it is in the file.
@@ -46,15 +51,16 @@ impl Bodies {
     /// but those in `raw`, which are archived as they are; on up to `threads` threads.
     pub(crate) fn of(files: &[Bytes], raw: &HashSet<usize>, threads: usize) -> Bodies {
         let _s = aqr_common::trace::span("inflatable");
+        let (min, zlib_max) = (MIN.get(), ZLIB_MAX.get());
         let found = aqr_common::pool::par_map(files.len(), threads, |k| {
             let d = &files[k][..];
-            if raw.contains(&k) || d.len() < MIN {
+            if raw.contains(&k) || d.len() < min {
                 return Vec::new();
             }
             match detect(d) {
                 Some(Format::Zip) => aqr_zip::formula::deflated(d)
                     .into_iter()
-                    .filter(|b| b.1 >= MIN as u64)
+                    .filter(|b| b.1 >= min as u64)
                     .map(|(crc, n, r)| (crc, n as u32, r))
                     .collect(),
                 Some(Format::Gzip) => {
@@ -65,7 +71,7 @@ impl Bodies {
                 }
                 Some(Format::Zlib) => {
                     let Some(body) = zlib_body(d) else { return Vec::new() };
-                    match crate::flate::zlib_data(d, ZLIB_MAX) {
+                    match crate::flate::zlib_data(d, zlib_max) {
                         Some(data) => vec![(aqr_common::crc32::hash(&data), data.len() as u32, body)],
                         None => Vec::new(),
                     }
@@ -95,7 +101,7 @@ impl Bodies {
     /// The formula of `d` as the data of one of the streams, if it is, from a file other than
     /// the one `d` is in.
     pub(crate) fn formula(&self, d: &[u8]) -> Option<Formula> {
-        if d.len() < MIN || !self.lens.contains(&(d.len() as u32)) {
+        if d.len() < MIN.get() || !self.lens.contains(&(d.len() as u32)) {
             return None;
         }
         let candidates = self.by.get(&(aqr_common::crc32::hash(d), d.len() as u32))?;

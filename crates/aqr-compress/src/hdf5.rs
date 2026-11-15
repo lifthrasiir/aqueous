@@ -12,7 +12,7 @@ pub(crate) fn file(d: &[u8], opt: &Options, _depth: u32, cx: &Cx) -> Option<Form
     let mut hopt = aqr_hdf5::formula::Options {
         threads: opt.threads,
         profile,
-        zlib: true,
+        zlib: aqr_flate::ZLIB.get(),
         floats,
         limit: cx.inflate_left(),
         trial: true,

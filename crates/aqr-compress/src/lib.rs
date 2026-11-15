@@ -265,13 +265,48 @@ pub struct Options {
 /// The bytes of a segment of an archive of several files by default ([`Options::segment`]).
 pub const SEGMENT: usize = 256 << 20;
 
-/// Streams shorter than this are not taken as held by the files archived together ([`Held`]):
-/// what they share is found by compressing them solid.
-pub(crate) const SHARE_MIN: usize = 256 << 10;
+aqr_common::zopt_namespace!("heap", "bytes of heap per input byte of each format's recompression (aqr-compress)");
+aqr_common::zopt_namespace!("level", "least level each format is recompressed at (aqr-compress)");
+aqr_common::zopt_namespace!(
+    "cost",
+    "thread-milliseconds per MB of each format, for the order of batches (aqr-compress)"
+);
+aqr_common::zopt_namespace!("format", "formats recognised, each can be turned off (aqr-compress)");
+aqr_common::zopt_namespace!("bound", "application bounds of modules (aqr-compress)");
+aqr_common::zopt_namespace!("memory", "the memory the formulas declare (aqr-compress)");
+aqr_common::zopt_namespace!("table", "the choice of log, xsv and text for text (aqr-compress)");
+aqr_common::zopt_namespace!("scan", "scans of data for files (aqr-compress)");
+aqr_common::zopt_namespace!("dump", "dumps of what is found, to standard error (aqr-compress)");
+aqr_common::zopt_namespace!("test", "behaviour for tests (aqr-compress)");
 
-/// Bytes that DEFLATE, LZFSE and LZVN streams may inflate to on top of [`Options::expansion`]
-/// times the file.
-pub const EXPANSION_SLACK: u64 = 64 << 20;
+aqr_common::zopt! {
+    /// Streams shorter than this are not taken as held by the files archived together ([`Held`]):
+    /// what they share is found by compressing them solid.
+    pub(crate) static SHARE_MIN: Opt<usize> = Opt::size(
+        "share-min",
+        256 << 10,
+        "streams shorter are not taken as held by the files archived along",
+    );
+    /// Bytes that DEFLATE, LZFSE and LZVN streams may inflate to on top of [`Options::expansion`]
+    /// times the file.
+    pub static EXPANSION_SLACK: Opt<usize> = Opt::size(
+        "expansion-slack",
+        64 << 20,
+        "bytes DEFLATE, LZFSE and LZVN streams may inflate to, besides expansion times the file",
+    );
+    /// [`Options::expansion`] by default.
+    static EXPANSION: Opt<u64> =
+        Opt::value("expansion", 32, "bytes per byte of the file that its DEFLATE, LZFSE and LZVN streams inflate to");
+    /// [`Options::set_bytes`] by default.
+    static SET_BYTES: Opt<usize> =
+        Opt::size("set-bytes", 64 << 20, "most bytes of files coded against one another (a set)");
+    /// [`Options::smaller`] by default.
+    static SMALLER: Opt<bool> =
+        Opt::flag("smaller", true, "keep a recompression only where its archive is smaller than the data's");
+    /// [`Options::description`] by default: none, unlimited.
+    static DESCRIPTION: Opt<Option<usize>> =
+        Opt::size_or_off("description", None, "most bytes of a formula's description (unlimited unless given)");
+}
 
 /// How data is recompressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,7 +348,7 @@ impl Options {
     /// cost nothing more: detection turns them down at once.
     pub fn flate_profile(&self) -> u16 {
         match self.level.scale() {
-            ..7 => aqr_flate::DEFAULT_PROFILE,
+            ..7 => aqr_flate::PROFILE.get(),
             _ => aqr_flate::ADAPTIVE,
         }
     }
@@ -331,10 +366,10 @@ impl Default for Options {
             depth: 3,
             verify: true,
             file: Nest::Scan,
-            description: usize::MAX,
+            description: DESCRIPTION.get().unwrap_or(usize::MAX),
             level: Level::MID,
-            smaller: true,
-            expansion: 32,
+            smaller: SMALLER.get(),
+            expansion: EXPANSION.get(),
             shared_resources: false,
             shared_modules: false,
             modules: aqr_decompress::wasm_of,
@@ -342,7 +377,7 @@ impl Default for Options {
             dictionaries: false,
             size_hint: false,
             mirrors: false,
-            set_bytes: 64 << 20,
+            set_bytes: SET_BYTES.get(),
             batch: 512 << 20,
             segment: SEGMENT,
             spill: None,
@@ -442,10 +477,13 @@ enum Slot {
     Taken,
 }
 
-impl Once {
+aqr_common::zopt! {
     /// Texts longer than this are not evaluated beforehand ([`Once::evaluated`]).
-    const LARGE: usize = 64 << 20;
+    static ONCE_LARGE: Opt<usize> =
+        Opt::size("once-large", 64 << 20, "texts longer, coded once for several, are not evaluated beforehand");
+}
 
+impl Once {
     /// For the texts of these lengths and XXH3-128s.
     pub(crate) fn of(texts: impl IntoIterator<Item = (usize, u128)>) -> Once {
         let slots: HashMap<_, _> = texts.into_iter().map(|k| (k, std::sync::Mutex::new(Slot::Empty))).collect();
@@ -468,7 +506,7 @@ impl Once {
                 // (kept without a copy of its streams)
                 f.iter_mut().flat_map(|f| &mut f.streams).for_each(|s| s.data.share());
                 *slot = Slot::Kept(f.clone());
-                if d.len() > Self::LARGE {
+                if d.len() > ONCE_LARGE.get() {
                     self.copies.lock().unwrap().insert((d.as_ptr() as usize, d.len()));
                 }
                 f
@@ -516,7 +554,7 @@ impl Cx {
 
     /// A context of data of `n` bytes.
     fn of_len(n: usize, opt: &Options) -> Cx {
-        let inflate = opt.expansion.saturating_mul(n as u64).saturating_add(EXPANSION_SLACK);
+        let inflate = opt.expansion.saturating_mul(n as u64).saturating_add(EXPANSION_SLACK.get() as u64);
         Cx {
             enc: encoder(opt),
             inflate: Cell::new(inflate),
@@ -827,9 +865,9 @@ fn compress_with(
     let sink = match &direct {
         Some((place, room)) => {
             let at = (aqr::HEADER_MAGIC.len() as u64) + room;
-            aqr::sink::Sink::direct(&cx.enc, archive::SLICE_MIN, place.clone(), at, opt.threads.max(2))
+            aqr::sink::Sink::direct(&cx.enc, archive::SLICE_MIN.get(), place.clone(), at, opt.threads.max(2))
         }
-        None => aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN),
+        None => aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN.get()),
     };
     let order = Arc::new(seal::Order::new(sink));
     *cx.sealing.get_mut() = Some(seal::Sealing { order: order.clone(), slot: seal::ROOT });
@@ -838,7 +876,7 @@ fn compress_with(
     let mut f = recompress_at(d, opt, 0, kind, &cx);
     // (what the file's parts hold of each other, as a batch's files: the same body in two ZIP
     // archives in a tar archive, say)
-    f.share_slices(archive::SLICE_MIN);
+    f.share_slices(archive::SLICE_MIN.get());
     // (the root is one output: its parts flattened too)
     f.root.flatten();
     drop(watch);
@@ -857,8 +895,11 @@ fn compress_with(
 /// blocks.
 type Direct = (Arc<Placing>, u64);
 
-/// Bytes of a file of tensors (aqr-tensors') from which on it is archived directly ([`direct_room`]).
-const DIRECT: usize = 1 << 30;
+aqr_common::zopt! {
+    /// Bytes of a file of tensors (aqr-tensors') from which on it is archived directly ([`direct_room`]).
+    static DIRECT: Opt<usize> =
+        Opt::size("direct-min", 1 << 30, "bytes of a file of tensors from which on it is archived directly");
+}
 
 /// [`DIRECT`], or what the tests set.
 fn direct_min() -> usize {
@@ -866,7 +907,7 @@ fn direct_min() -> usize {
     if let Some(n) = tests::DIRECT_MIN.get() {
         return n;
     }
-    DIRECT
+    DIRECT.get()
 }
 
 /// Where file `d` of `kind` (of [`direct_min`] bytes or more) is archived alone by the formula
@@ -903,16 +944,19 @@ fn sealing_parts(sealing: &Option<seal::Sealing>) -> Option<Arc<seal::Order>> {
     sealing.as_ref().filter(|s| s.slot == seal::ROOT && s.order.sink().is_direct()).map(|s| s.order.clone())
 }
 
-/// Bytes of aqr-lzma's match finders' chains at once while compressing: two of a 64 MiB
-/// dictionary, the parts of a stream or the folders of a 7z archive side by side (decoding
-/// keeps to one, within its budget of memory).
-const LZMA_CHAINS: usize = 2 << 30;
+aqr_common::zopt! {
+    /// Bytes of aqr-lzma's match finders' chains at once while compressing: two of a 64 MiB
+    /// dictionary, the parts of a stream or the folders of a 7z archive side by side (decoding
+    /// keeps to one, within its budget of memory).
+    static LZMA_CHAINS: Opt<usize> =
+        Opt::size("lzma:chains", 2 << 30, "bytes of the match finders' chains of aqr-lzma at once while compressing");
+}
 
 /// Lets aqr-lzma's match finders take [`LZMA_CHAINS`], as compressing starts, and has them keep
 /// the plans of its applications to the application bound of `opt` (by the reach they look back,
 /// which a stream's record tells).
 pub(crate) fn compressing(opt: &Options) {
-    aqr_lzma::mf::allow_chains(LZMA_CHAINS);
+    aqr_lzma::mf::allow_chains(LZMA_CHAINS.get());
     let bound = |m| memory::bound_of(opt.application_bound, m);
     aqr_lzma::plan::set_bound(bound(aqr_lzma::formula::MODULE).min(bound(aqr_lzma::formula::LZMA2)));
 }
@@ -994,6 +1038,7 @@ fn finish(
         let runner = aqr_decompress::natives(&m);
         // (the bytes compared let go of as it goes, [`LET_GO`] at a time, where `d` is a file mapped)
         let (mut at, mut gone) = (0, 0);
+        let let_go = LET_GO.get();
         let decodes = aqr::open(c, &runner).is_ok_and(|mut a| {
             if mapped {
                 // SAFETY: the archive's file mapped read only ([`Sink::mapped`])
@@ -1002,7 +1047,7 @@ fn finish(
             let written = a.write_file(opt.threads, &mut |p: &[u8]| {
                 let same = d.get(at..at + p.len()) == Some(p);
                 at += p.len();
-                if same && at - gone >= LET_GO {
+                if same && at - gone >= let_go {
                     aqr_formula::store::let_go(&d[gone..at]);
                     gone = at;
                 }
@@ -1123,18 +1168,18 @@ struct Through {
 }
 
 /// [`Through`] of `d`, read once, its pages let go of as they are read ([`LET_GO`] at a time,
-/// where it is a file mapped): the content hash of each [`THROUGH`] bytes on up to `threads`
+/// where it is a file mapped): the content hash of each [`through_len`] bytes on up to `threads`
 /// threads (as many pages read in at once), on a worker of its own where one is free, while the
 /// checksum is taken of the stretch before.
 fn through(d: &[u8], threads: usize) -> Through {
     use aqr_formula::chash::Ch;
     let hashes = |part: &[u8]| -> Vec<Ch> {
-        let pieces: Vec<&[u8]> = part.chunks(LET_GO).collect();
+        let pieces: Vec<&[u8]> = part.chunks(LET_GO.get()).collect();
         aqr_common::pool::par_map(pieces.len(), threads.max(1), |k| Ch::of(pieces[k]))
     };
     let mut sum = xxhash_rust::xxh64::Xxh64::new(0);
     let mut ch = Ch::EMPTY;
-    let parts: Vec<&[u8]> = d.chunks(THROUGH).collect();
+    let parts: Vec<&[u8]> = d.chunks(through_len()).collect();
     let mut ahead = parts.first().map(|p| hashes(p));
     aqr_common::pool::scope(1, |s| {
         for (k, part) in parts.iter().enumerate() {
@@ -1159,7 +1204,9 @@ fn through(d: &[u8], threads: usize) -> Through {
 }
 
 /// Bytes of a file read through at once ([`through`]).
-const THROUGH: usize = 16 * LET_GO;
+fn through_len() -> usize {
+    16 * LET_GO.get()
+}
 
 /// Whether archive `c` of file `d` gives it back by its content hashes, worked out without
 /// running a module by what `memo` recorded (`aqr::Archive::hashed`): its outputs' hashes those
@@ -1196,10 +1243,11 @@ fn hashed(
     // (the hash of `d` made of those of its pieces, each read once for both, [`LET_GO`] at a
     // time, its pages then let go of: not all of a file mapped resident by the end)
     let (mut at, mut whole, mut of_d) = (0usize, Ch::EMPTY, Ch::EMPTY);
+    let let_go = LET_GO.get();
     for (h, sums) in roots {
         let Some(part) = d.get(at..at.saturating_add(h.len() as usize)) else { return Some(false) };
         let mut sum = xxhash_rust::xxh64::Xxh64::new(0);
-        for piece in part.chunks(LET_GO) {
+        for piece in part.chunks(let_go) {
             sum.update(piece);
             of_d = of_d.cat(Ch::of(piece));
             aqr_formula::store::let_go(piece);
@@ -1215,9 +1263,12 @@ fn hashed(
     Some(same)
 }
 
-/// Bytes of the input compared in verifying ([`finish`]) between the pages let go of: few calls,
-/// and few pages more resident.
-const LET_GO: usize = 4 << 20;
+aqr_common::zopt! {
+    /// Bytes of the input compared in verifying ([`finish`]) between the pages let go of: few calls,
+    /// and few pages more resident.
+    static LET_GO: Opt<usize> =
+        Opt::size("let-go", 4 << 20, "bytes of the input compared in verifying between letting its pages go");
+}
 
 /// What `write` writes to `out` (through a buffer), flushed.
 fn written<T>(out: &mut dyn Sink, write: impl FnOnce(&mut dyn Write) -> io::Result<T>) -> io::Result<T> {
@@ -1326,18 +1377,26 @@ fn table(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     })
 }
 
-/// The bytes of a window of the sample that aqr-log, aqr-xsv and the text path are compared on,
-/// and the number of windows ([`table_sample`]).
-const TABLE_WINDOW: usize = 256 << 10;
-const TABLE_WINDOWS: usize = 8;
-
-/// aqr-log takes text over the text path (aqr-wrt) where its streams on the sample, compressed
-/// by zstd -3, are at most this many percent of the sample compressed so. Prose and source code,
-/// whose words vary and fill the columns of templates of every length, come out at 120% and
-/// more; lines that repeat their shape, which the text path takes as words only, come out at
-/// 100% and less. On the 10gb corpus (files' archived bytes, as `--stats` tells them): at 85%
-/// 156 files took aqr-log, -10.8 MB in all; at 100% 272, -11.9 MB, the 116 more -1.1 MB.
-const LOG_PERCENT: usize = 100;
+aqr_common::zopt! {
+    /// The bytes of a window of the sample that aqr-log, aqr-xsv and the text path are compared on
+    /// ([`table_sample`]).
+    static TABLE_WINDOW: Opt<usize> =
+        Opt::size("table:window", 256 << 10, "bytes of a window of the sample that log, xsv and text are compared on");
+    /// The number of windows of that sample ([`table_sample`]).
+    static TABLE_WINDOWS: Opt<usize> =
+        Opt::value("table:windows", 8, "windows of the sample that log, xsv and text are compared on");
+    /// The level of zstd that the sample's streams are compared at ([`log_or_table`]).
+    static TABLE_ZSTD_LEVEL: Opt<i32> =
+        Opt::value("table:zstd-level", 3, "zstd level that log, xsv and text are compared at");
+    /// aqr-log takes text over the text path (aqr-wrt) where its streams on the sample, compressed
+    /// by zstd -3, are at most this many percent of the sample compressed so. Prose and source code,
+    /// whose words vary and fill the columns of templates of every length, come out at 120% and
+    /// more; lines that repeat their shape, which the text path takes as words only, come out at
+    /// 100% and less. On the 10gb corpus (files' archived bytes, as `--stats` tells them): at 85%
+    /// 156 files took aqr-log, -10.8 MB in all; at 100% 272, -11.9 MB, the 116 more -1.1 MB.
+    static LOG_PERCENT: Opt<usize> =
+        Opt::value("log:percent", 100, "percent of the text path's size under which aqr-log takes text");
+}
 
 /// The sample of text `d` that aqr-log and aqr-xsv are compared on: all of it up to
 /// [`TABLE_WINDOWS`] windows of [`TABLE_WINDOW`] bytes, else that many windows spread from the
@@ -1346,18 +1405,19 @@ const LOG_PERCENT: usize = 100;
 /// table, 261 bytes are streams (zeros), and aqr-xsv was 0.7% ahead on that of a load table that
 /// archives 7.7% larger with it than with aqr-log.
 fn table_sample(d: &[u8]) -> Cow<'_, [u8]> {
-    if d.len() <= TABLE_WINDOW * TABLE_WINDOWS {
+    let (window, windows) = (TABLE_WINDOW.get(), TABLE_WINDOWS.get());
+    if d.len() <= window * windows {
         return Cow::Borrowed(d);
     }
-    let mut s = Vec::with_capacity(TABLE_WINDOW * TABLE_WINDOWS);
-    for i in 0..TABLE_WINDOWS {
-        let at = (d.len() - TABLE_WINDOW) * i / (TABLE_WINDOWS - 1);
+    let mut s = Vec::with_capacity(window * windows);
+    for i in 0..windows {
+        let at = (d.len() - window) * i / (windows - 1);
         // (from the next line's start, unless at the start of `d`; to the last whole line)
         let from = match at {
             0 => 0,
             _ => d[at - 1..].iter().position(|&b| b == b'\n').map_or(d.len(), |j| at + j),
         };
-        let to = (at + TABLE_WINDOW).min(d.len());
+        let to = (at + window).min(d.len());
         if from < to
             && let Some(j) = d[from..to].iter().rposition(|&b| b == b'\n')
         {
@@ -1374,13 +1434,14 @@ fn table_sample(d: &[u8]) -> Cow<'_, [u8]> {
 /// none (the text path).
 fn log_or_table(d: &[u8], xsv: bool) -> Option<Format> {
     let s = &*table_sample(d);
-    let z = |b: &[u8]| zstd::bulk::compress(b, 3).map_or(b.len(), |c| c.len());
+    let level = TABLE_ZSTD_LEVEL.get();
+    let z = |b: &[u8]| zstd::bulk::compress(b, level).map_or(b.len(), |c| c.len());
     let coded = |f: Formula| f.streams.iter().map(|s| z(&s.data)).sum::<usize>();
     let log = aqr_log::formula::encode(s, 1).map(coded);
     let x = xsv.then(|| aqr_xsv::formula::encode(s, 1).map(coded)).flatten();
     match log {
         Some(log) if x.is_some_and(|x| x <= log) => Some(Format::Xsv),
-        Some(log) if log * 100 <= z(s) * LOG_PERCENT => Some(Format::Log),
+        Some(log) if log * 100 <= z(s) * LOG_PERCENT.get() => Some(Format::Log),
         _ => xsv.then_some(Format::Xsv),
     }
 }
@@ -1470,17 +1531,22 @@ fn wim(d: &[u8], threads: usize) -> Option<Formula> {
 /// files they hold: -33%).
 /// (CHM files are not known by their names: one known so and turned down would not be scanned.)
 fn lzx_on(opt: &Options) -> bool {
-    opt.level.scale() >= LZX_LEVEL
+    opt.level.scale() >= LZX_LEVEL.get()
 }
 
-/// The level LZX streams are taken from ([`lzx_on`]).
-const LZX_LEVEL: u8 = 9;
+aqr_common::zopt! {
+    /// The level LZX streams are taken from ([`lzx_on`]).
+    pub(crate) static LZX_LEVEL: Opt<u8> =
+        Opt::value("lzx-level", 9, "least level at which LZX streams (CAB, CHM) are rebuilt");
+    /// The level RAR's PPMd blocks are taken from ([`ppmd_on`]).
+    static PPMD_LEVEL: Opt<u8> = Opt::value("ppmd-level", 9, "least level at which RAR's PPMd blocks are rebuilt");
+}
 
 /// Whether RAR's streams with PPMd blocks are taken apart (and PPMd rebuilt): from level 9 only,
 /// as rebuilding PPMd is slow and its data seldom archives smaller apart (high-order PPMd is
 /// strong); below, they are turned down at their first PPMd block.
 fn ppmd_on(opt: &Options) -> bool {
-    opt.level.scale() >= 9
+    opt.level.scale() >= PPMD_LEVEL.get()
 }
 
 /// Whether files of `format` are taken at the level of `opt` (else kept as they are): none at
@@ -1490,7 +1556,7 @@ fn ppmd_on(opt: &Options) -> bool {
 /// ([`bvx`]) and CHM files ([`lzx_on`]) from level 9. Parts of a format taken (CAB's LZX
 /// folders, RAR's PPMd blocks) are its recompressor's to turn down: [`lzx_on`], [`ppmd_on`].
 pub(crate) fn format_on(format: Format, opt: &Options) -> bool {
-    opt.recompresses() && opt.level.scale() >= format.spec().level
+    opt.recompresses() && opt.level.scale() >= format.level()
 }
 
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
@@ -1649,9 +1715,15 @@ fn addr(b: &Bytes) -> usize {
     }
 }
 
-/// Text of the contents of a formula shorter than this in all is coded with dictionaries of each
-/// text's own (as [`archive`]'s batches have it).
-const SEGMENT_WORDS_MIN: usize = 256 << 10;
+aqr_common::zopt! {
+    /// Text of the contents of a formula shorter than this in all is coded with dictionaries of each
+    /// text's own (as [`archive`]'s batches have it).
+    static SEGMENT_WORDS_MIN: Opt<usize> = Opt::size(
+        "words:segment-min",
+        256 << 10,
+        "least bytes of the text in a formula's contents that share a dictionary",
+    );
+}
 
 /// Sets [`Cx::words`] for the contents of `f`, where none is set: a dictionary of the text of its
 /// contents (for JSON lines cut into segments, those of [`Kind::Text`]; for an archive that only
@@ -1678,7 +1750,7 @@ fn segment_words(f: &Formula, opt: &Options, cx: &Cx) -> Option<Arc<aqr_wrt::for
             .map(|s| &s.data[..])
             .collect(),
     };
-    if texts.len() < 2 || texts.iter().map(|t| t.len()).sum::<usize>() < SEGMENT_WORDS_MIN {
+    if texts.len() < 2 || texts.iter().map(|t| t.len()).sum::<usize>() < SEGMENT_WORDS_MIN.get() {
         return None;
     }
     let words = Arc::new(aqr_wrt::formula::Shared::of(&texts, opt.threads)?);
@@ -1740,6 +1812,18 @@ fn told_as_second_half(f: &Formula, d: &[u8]) -> Vec<aqr_common::progress::Watch
         .collect()
 }
 
+aqr_common::zopt! {
+    /// Whether [`probe`] is made: by default not at level 7 or more.
+    static PROBE: Opt<&'static str> = Opt::value(
+        "probe",
+        "auto",
+        "whether to probe if recompressing a stream may pay (auto: not from level 7)",
+    )
+    .choices(&["auto", "on", "off"])
+    .bare("on")
+    .off("off");
+}
+
 /// Unless [`Options::smaller`] is off, or the level is 7 or more (DEFLATE always rebuilt, a few
 /// seconds of 10gb), what tells whether recompressing a stream may pay, for its data `depth`
 /// formats deep: at the level of the archive, files looked for as [`Nest::of`] tells (scanned,
@@ -1747,8 +1831,11 @@ fn told_as_second_half(f: &Formula, d: &[u8]) -> Vec<aqr_common::progress::Watch
 /// for the files in it, as it gains nothing itself; text is told by its data, as aqr-wrt takes
 /// no more than a tenth off it.
 pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
-    if opt.level.scale() >= 7 {
-        return None;
+    match PROBE.get() {
+        "on" => {}
+        "off" => return None,
+        _ if opt.level.scale() >= 7 => return None,
+        _ => {}
     }
     let look = |kind| match Nest::Scan.of(kind) {
         None | Some(Nest::As(Format::Text)) => Look::No,
@@ -1806,13 +1893,27 @@ fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, 
     smaller_as(f, gaps, d, bundle::Kinds::of(f), opt, cx)
 }
 
-/// The size of a ProRes file from which on [`smaller`] takes its formula without comparing it.
-const PRORES_UNCOMPARED: usize = 16 << 20;
+aqr_common::zopt! {
+    /// The size of a ProRes file from which on [`smaller`] takes its formula without comparing it.
+    static PRORES_UNCOMPARED: Opt<usize> = Opt::size(
+        "prores:uncompared",
+        16 << 20,
+        "bytes of a ProRes file from which on its formula is not compared with zstd",
+    );
+    /// Whether [`smaller_as`] compares the formulas it takes without comparing by default (aqr-ppmd's,
+    /// aqr-tensors', aqr-wwise's and large ProRes files').
+    static SMALLER_ALWAYS: Opt<bool> = Opt::flag(
+        "smaller-always",
+        false,
+        "compare the formulas of ppmd, tensors, wwise and large ProRes files with zstd too",
+    );
+}
 
 /// [`smaller`] of formula `f` of what `of` tells, as its recompressor made it: once its
 /// contents are in place, its own streams may be gone (a WIM file's data, all of it cut into
 /// its contents' formulas).
 fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::Kinds, opt: &Options, cx: &Cx) -> bool {
+    let share_min = SHARE_MIN.get();
     let bundled = of.bundles && cx.held_by_others(d, d);
     if bundled {
         cx.note_bundled(f);
@@ -1829,10 +1930,11 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
         || against
         || inflated
         || of.files_apart
-        || aqr_ppmd::formula::is(f)
-        || (d.len() >= PRORES_UNCOMPARED && aqr_prores::formula::is(f))
-        || aqr_tensors::formula::is(f)
-        || aqr_wwise::formula::is(f)
+        || (!SMALLER_ALWAYS.get()
+            && (aqr_ppmd::formula::is(f)
+                || (d.len() >= PRORES_UNCOMPARED.get() && aqr_prores::formula::is(f))
+                || aqr_tensors::formula::is(f)
+                || aqr_wwise::formula::is(f)))
         || {
             #[cfg(test)]
             tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
@@ -1844,7 +1946,7 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
                 .filter(|&s| {
                     // (text coded alike as its copies, whose data was long enough to tell)
                     let data = &f.streams[s].data;
-                    data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
+                    data.len() >= share_min && cx.held_by_others(data, d) || cx.coded_held(data)
                 })
                 .collect();
             cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
@@ -1852,16 +1954,29 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
     if smaller {
         // `d` is not archived as it is (`f` is, or is part of something larger kept raw)
         cx.enc.forget(d);
-        if !bundled && d.len() >= SHARE_MIN && cx.held_by_others(d, d) {
+        if !bundled && d.len() >= share_min && cx.held_by_others(d, d) {
             cx.note_held(f);
         }
     }
     smaller
 }
 
-/// Bytes of the data that a scan may give to recompressors which turn it down, on top of
-/// twice the data: past them, no more files are looked for.
-const SCAN_SLACK: usize = 16 << 20;
+#[cfg(not(aqr_dist))]
+aqr_common::zopt! {
+    /// Each file a scan finds, told on standard error (`SCAN`, the data's length, depth, start,
+    /// length and format), for a measurement.
+    static SCAN_DUMP: Opt<bool> = Opt::flag("dump:scan", false, "tell each file a scan finds on standard error (SCAN lines)");
+}
+
+aqr_common::zopt! {
+    /// Bytes of the data that a scan may give to recompressors which turn it down, on top of
+    /// twice the data: past them, no more files are looked for.
+    static SCAN_SLACK: Opt<usize> = Opt::size(
+        "scan:slack",
+        16 << 20,
+        "bytes of data a scan may give to recompressors that turn it down, besides twice the data",
+    );
+}
 
 /// The files in `d`, if any is found: from the first byte on, a file whose recompressor takes
 /// it (up to its [`extent`]) is put in place, and the scan goes on after it; else, so that
@@ -1871,7 +1986,7 @@ const SCAN_SLACK: usize = 16 << 20;
 /// another. Where the data is known to start with a file of `first` ([`Nest::As`]), it is that
 /// file, or none where that is turned down and tells nothing of its parts.
 fn scan(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
-    scan_with(d, first, opt, depth, SCAN_SLACK, cx)
+    scan_with(d, first, opt, depth, SCAN_SLACK.get(), cx)
 }
 
 /// [`scan`] with `slack` for [`SCAN_SLACK`].
@@ -1956,10 +2071,10 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
         });
         match child {
             Some((n, child)) => {
-                // (`AQR_SCAN_DUMP`: each file found, for a measurement; not in builds for
+                // (`-Z dump:scan`: each file found, for a measurement; not in builds for
                 // distribution)
                 #[cfg(not(aqr_dist))]
-                if std::env::var_os("AQR_SCAN_DUMP").is_some() {
+                if SCAN_DUMP.get() {
                     eprintln!("SCAN\t{}\t{depth}\t{p}\t{n}\t{:?}", d.len(), format);
                 }
                 found.push((p, n, child));
@@ -2021,9 +2136,12 @@ impl Ahead {
     }
 }
 
-/// At most this many streams are made ahead at once ([`ahead`]): a number of its own, not the
-/// threads', so that the budget they take (and the archive) does not depend on the threads.
-const AHEAD: usize = 64;
+aqr_common::zopt! {
+    /// At most this many streams are made ahead at once ([`ahead`]): a number of its own, not the
+    /// threads', so that the budget they take (and the archive) does not depend on the threads.
+    static AHEAD: Opt<usize> =
+        Opt::value("bvx:ahead", 64, "most LZFSE and LZVN streams made ahead of the scan at once");
+}
 
 /// Makes the LZFSE and LZVN streams of `d` from `p` on at once, into `made`, as the scan of
 /// [`find`] would come to them one after another if each is taken: up to [`AHEAD`], up to the
@@ -2035,7 +2153,8 @@ const AHEAD: usize = 64;
 fn ahead(d: &[u8], p: usize, turned_down: &[(Format, usize)], opt: &Options, depth: u32, cx: &Cx, made: &mut Ahead) {
     let mut streams = Vec::new();
     let mut q = p;
-    while q < d.len() && streams.len() < AHEAD {
+    let most = AHEAD.get();
+    while q < d.len() && streams.len() < most {
         let format = match q == p {
             true => Some(Format::Bvx),
             false => detect::starts(&d[q..]),
@@ -2082,7 +2201,7 @@ fn within(d: &[u8], parts: &[Region], opt: &Options, depth: u32, cx: &Cx) -> Vec
     let scan_part = |found: &mut Vec<Found>, r: Range<usize>| {
         let r = r.start.max(1)..r.end;
         if !r.is_empty()
-            && let Some(inner) = find(&d[r.clone()], None, opt, depth, SCAN_SLACK, cx)
+            && let Some(inner) = find(&d[r.clone()], None, opt, depth, SCAN_SLACK.get(), cx)
         {
             found.extend(inner.into_iter().map(|(q, n, f)| (r.start + q, n, f)));
         }
@@ -2387,7 +2506,7 @@ fn make_later(
             later.len(),
             opt.threads,
             |i| {
-                if let Some(back) = i.checked_sub(SEAL_AHEAD * opt.threads.max(1)) {
+                if let Some(back) = i.checked_sub(SEAL_AHEAD.get() * opt.threads.max(1)) {
                     s.order.wait_done(slots[back]);
                 }
             },
@@ -2413,11 +2532,14 @@ fn make_later(
     }
 }
 
-/// Contents a content made apart starts at most ahead of the first not sealed, where they are
-/// sealed ([`make_later`]), for each thread. On the Windows Server DVD (16 threads), the spill's
-/// peak and the time: 5.29 GB and 169.1 s with none; 4.45 GB, 171.4 s at 4; 4.24 GB, 175.2 s at
-/// 2 (where a long content holds the turn, fewer start meanwhile).
-const SEAL_AHEAD: usize = 4;
+aqr_common::zopt! {
+    /// Contents a content made apart starts at most ahead of the first not sealed, where they are
+    /// sealed ([`make_later`]), for each thread. On the Windows Server DVD (16 threads), the spill's
+    /// peak and the time: 5.29 GB and 169.1 s with none; 4.45 GB, 171.4 s at 4; 4.24 GB, 175.2 s at
+    /// 2 (where a long content holds the turn, fewer start meanwhile).
+    static SEAL_AHEAD: Opt<usize> =
+        Opt::value("seal-ahead", 4, "contents made apart that start ahead of the first not sealed, per thread");
+}
 
 /// Of each stream of `f` of data not made yet that an application among what its root
 /// concatenates takes, that application and where its output starts in `f`'s.
@@ -2456,7 +2578,7 @@ fn applications_of_lazy(f: &Formula) -> HashMap<usize, (Node, usize)> {
 /// a byte: thread-milliseconds by MB of the files of each format of 10gb (`--stats`, an M4;
 /// rounded), 50 for the others ([`formats::Spec::cost`]).
 fn cost(d: &[u8]) -> u64 {
-    let per_mb = detect::detect(d).map_or(formats::Spec::DEFAULT.cost, |f| f.spec().cost);
+    let per_mb = detect::detect(d).map_or(formats::Spec::DEFAULT.cost, |f| f.cost());
     d.len() as u64 * per_mb
 }
 
@@ -2766,7 +2888,7 @@ impl Pure<'_> {
 /// aqr-tensors' formula of `d`, each segment coded sealed as it is made where `p` tells, else its
 /// streams spilled.
 fn tensors(d: &[u8], p: &Pure) -> Option<Formula> {
-    let segment = aqr_tensors::formula::SEGMENT;
+    let segment = aqr_tensors::formula::SEGMENT_BYTES.get();
     #[cfg(test)]
     let segment = tests::TENSORS_SEGMENT.get().unwrap_or(segment);
     match p.seal {
@@ -2903,7 +3025,7 @@ fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     let o = aqr_alz::formula::Options {
         threads: opt.threads,
         profile,
-        zlib: true,
+        zlib: aqr_flate::ZLIB.get(),
         limit: cx.inflate_left(),
         kind: kind_by_name,
     };
@@ -2917,7 +3039,12 @@ fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
 /// ([`Options::expansion`]).
 fn isc(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let profile = opt.flate_profile();
-    let o = aqr_isc::formula::Options { threads: opt.threads, profile, zlib: true, limit: cx.inflate_left() };
+    let o = aqr_isc::formula::Options {
+        threads: opt.threads,
+        profile,
+        zlib: aqr_flate::ZLIB.get(),
+        limit: cx.inflate_left(),
+    };
     let e = aqr_isc::formula::encode_with(d, &o)?;
     cx.inflate(e.inflated);
     Some(e.formula)
@@ -2933,7 +3060,7 @@ fn egg(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     let o = aqr_egg::formula::Options {
         threads: opt.threads,
         profile,
-        zlib: true,
+        zlib: aqr_flate::ZLIB.get(),
         limit: cx.inflate_left(),
         kind: kind_by_name,
     };
@@ -2986,7 +3113,7 @@ fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let o = aqr_mszip::formula::Options {
         threads: opt.threads,
         profile,
-        zlib: true,
+        zlib: aqr_flate::ZLIB.get(),
         limit: cx.inflate_left(),
         kind: kind_by_name,
         lzx: lzx_on(opt),
@@ -3018,7 +3145,7 @@ fn pdf_options(opt: &Options) -> aqr_pdf::encode::Options {
     let profile = opt.flate_profile();
     let default = aqr_pdf::encode::Options::default();
     let speed = if opt.level.scale() >= 7 { f64::INFINITY } else { default.speed };
-    aqr_pdf::encode::Options { speed, profile, zlib: true, threads: opt.threads, ..default }
+    aqr_pdf::encode::Options { speed, profile, zlib: aqr_flate::ZLIB.get(), threads: opt.threads, ..default }
 }
 
 /// Whether `format` is one of [`pure`].
@@ -3075,6 +3202,13 @@ fn sqlite_zstd(d: &[u8], threads: usize) -> Option<Formula> {
     aqr_zstd::formula::frames_in(d, &frames, 3, Kind::Table, threads)
 }
 
+aqr_common::zopt! {
+    /// Whether the estimate of the heap turns inputs down ([`fits`]); off (`-Z test:no-estimate`),
+    /// everything fits, to see the limit hold as it runs.
+    static ESTIMATE: Opt<bool> =
+        Opt::flag("test:estimate", true, "inputs turned down by their heap's estimate (off: to see the limit hold as it runs)");
+}
+
 /// The recompressor of `format` ([`formats::Spec::recompressor`]).
 fn recompressor(format: Format) -> Recompressor {
     format.spec().recompressor
@@ -3084,16 +3218,14 @@ fn recompressor(format: Format) -> Recompressor {
 /// ([`formats::Spec::heap`]) than one recompression may ([`aqr_common::budget::attempt_limit`]: what
 /// `aqr -M` asks for, else the budget of the process or half the system's memory where more),
 /// which it is then held to as it runs ([`attempted`]). The estimate turns down up front what
-/// would give up after much of the work. (With `AQR_TEST_NO_ESTIMATE` set and not empty,
+/// would give up after much of the work. (With [`ESTIMATE`] off (`-Z test:no-estimate`),
 /// everything fits, so that what is held to the limit as it runs can be seen.)
 fn fits(format: Format, len: usize) -> bool {
-    static NO_ESTIMATE: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var_os("AQR_TEST_NO_ESTIMATE").is_some_and(|v| !v.is_empty()));
-    *NO_ESTIMATE || fits_within(format, len, aqr_common::budget::attempt_limit())
+    !ESTIMATE.get() || fits_within(format, len, aqr_common::budget::attempt_limit())
 }
 
 fn fits_within(format: Format, len: usize, limit: u64) -> bool {
-    format.spec().heap * len as f64 <= limit as f64
+    format.heap() * len as f64 <= limit as f64
 }
 
 /// Makes the formulas of the files of [`pure`] formats among the contents of `f` beforehand,
@@ -3204,9 +3336,10 @@ mod tests {
         let small: String = (0..1000).map(line).collect();
         assert!(matches!(table_sample(small.as_bytes()), Cow::Borrowed(s) if s == small.as_bytes()));
         let big: String = (0..300_000).map(line).collect();
-        assert!(big.len() > TABLE_WINDOW * TABLE_WINDOWS * 2);
+        let (window, windows) = (TABLE_WINDOW.get(), TABLE_WINDOWS.get());
+        assert!(big.len() > window * windows * 2);
         let s = table_sample(big.as_bytes());
-        assert!(s.len() <= TABLE_WINDOW * TABLE_WINDOWS && s.len() > TABLE_WINDOW * (TABLE_WINDOWS - 1));
+        assert!(s.len() <= window * windows && s.len() > window * (windows - 1));
         assert!(s.starts_with(&big.as_bytes()[..30]));
         assert!(s.ends_with(&big.as_bytes()[big.len() - 30..]));
         let text = std::str::from_utf8(&s).unwrap();
@@ -4061,7 +4194,7 @@ mod tests {
     /// the first where the text is large.
     #[test]
     fn once_evaluated() {
-        let (small, large) = (vec![b'a'; 1000], vec![b'a'; Once::LARGE + 1]);
+        let (small, large) = (vec![b'a'; 1000], vec![b'a'; ONCE_LARGE.get() + 1]);
         let key = |d: &[u8]| (d.len(), xxhash_rust::xxh3::xxh3_128(d));
         let once = Once::of([key(&small), key(&large)]);
         let (small2, large2) = (small.clone(), large.clone());
@@ -4872,7 +5005,7 @@ mod tests {
     #[test]
     fn read_through() {
         let d: Vec<u8> =
-            (0..THROUGH * 2 + 12345).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[3]).collect();
+            (0..through_len() * 2 + 12345).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[3]).collect();
         for threads in [1, 3] {
             let t = through(&d, threads);
             assert_eq!(t.sum, aqr::checksum(&d));

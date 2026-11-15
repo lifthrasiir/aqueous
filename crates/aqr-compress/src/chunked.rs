@@ -19,16 +19,20 @@ use aqr_formula::{Formula, Kind, Node};
 
 use crate::{Cx, Options};
 
-/// Chunks deconstructed at once (of 1 MiB of data each, as hdiutil writes them), their data written
-/// to the disk as each batch is done.
-const BATCH: usize = 64;
+aqr_common::zopt_namespace!("chunked", "disk images of zlib chunks, as DMG (aqr-compress)");
 
-/// Chunks (from the disk's start) among which the largest of zlib's is tried for zlib's emulation.
-const SAMPLED: usize = 64;
-
-/// Bytes of data at most of the zlib chunks rebuilt by one application, as aqr-disk's
-/// `compressed::STREAM_DATA` (but one chunk of more).
-const GROUP_DATA: usize = 32 << 20;
+aqr_common::zopt! {
+    /// Chunks deconstructed at once (of 1 MiB of data each, as hdiutil writes them), their data written
+    /// to the disk as each batch is done.
+    static BATCH: Opt<usize> = Opt::value("chunked:batch", 64, "chunks deconstructed at once");
+    /// Chunks (from the disk's start) among which the largest of zlib's is tried for zlib's emulation.
+    static SAMPLED: Opt<usize> =
+        Opt::value("chunked:sampled", 64, "chunks from the start among which the largest is tried for zlib's emulation");
+    /// Bytes of data at most of the zlib chunks rebuilt by one application, as aqr-disk's
+    /// `compressed::STREAM_DATA` (but one chunk of more).
+    static GROUP_DATA: Opt<usize> =
+        Opt::size("chunked:group-data", 32 << 20, "bytes of data of the zlib chunks rebuilt by one application");
+}
 
 /// Whether `d` is a UDIF image of compressed chunks this takes (zlib's; raw ones and zeros too).
 pub(crate) fn starts(d: &[u8]) -> bool {
@@ -99,7 +103,7 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
         _ => (aqr_flate::Hints::default(), 0),
     };
     let mut params = None;
-    let sample = (by_disk.iter().take(SAMPLED).map(|&k| &u.chunks[k]))
+    let sample = (by_disk.iter().take(SAMPLED.get()).map(|&k| &u.chunks[k]))
         .filter(|c| matches!(c.how, How::Zlib | How::Deflate) && c.file.len() > 2)
         .max_by_key(|c| (c.disk.end - c.disk.start, c.file.len()));
     if let Some(c) = sample {
@@ -122,11 +126,15 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
     if params.is_some() {
         profile = profile.max(aqr_flate::ADAPTIVE);
     }
-    let fopt =
-        aqr_flate::Options { threads: 1, zlib: true, store: true, ..aqr_flate::Options::for_profile(profile).ok()? };
+    let fopt = aqr_flate::Options {
+        threads: 1,
+        zlib: aqr_flate::ZLIB.get(),
+        store: true,
+        ..aqr_flate::Options::for_profile(profile).ok()?
+    };
     let mut made: Vec<Made> = vec![Made::Kept; u.chunks.len()];
     let mut disk = Writer::new(Some(len));
-    for batch in by_disk.chunks(BATCH) {
+    for batch in by_disk.chunks(BATCH.get()) {
         let taken = aqr_common::pool::par_map(batch.len(), opt.threads.max(1), |i| {
             let c = &u.chunks[batch[i]];
             let (m, n) = (&d[c.file.clone()], (c.disk.end - c.disk.start) as usize);
@@ -224,12 +232,13 @@ fn chunked(d: &[u8], u: &Chunked, kept: &'static str, opt: &Options, cx: &Cx) ->
     // where it is evaluated beforehand), their records and indexes one stream each, sliced
     let mut file_order: Vec<usize> = (0..u.chunks.len()).collect();
     file_order.sort_by_key(|&k| u.chunks[k].file.start);
+    let group_data = GROUP_DATA.get();
     let groups = |of: &dyn Fn(&Made) -> bool| {
         let mut out: Vec<Vec<usize>> = Vec::new();
         let mut data = 0;
         for &k in file_order.iter().filter(|&&k| of(&made[k])) {
             match out.last_mut() {
-                Some(g) if data + size(k) as usize <= GROUP_DATA => g.push(k),
+                Some(g) if data + size(k) as usize <= group_data => g.push(k),
                 _ => {
                     out.push(vec![k]);
                     data = 0;

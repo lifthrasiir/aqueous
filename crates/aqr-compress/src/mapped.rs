@@ -20,9 +20,12 @@ use std::sync::{Arc, Mutex};
 
 use aqr_formula::Bytes;
 
-/// Files of at least this many bytes are mapped rather than read: of fewer, a copy costs less
-/// than a mapping.
-pub const MAP_MIN: u64 = 64 << 10;
+aqr_common::zopt! {
+    /// Files of at least this many bytes are mapped rather than read: of fewer, a copy costs less
+    /// than a mapping.
+    pub static MAP_MIN: Opt<usize> =
+        Opt::size("map-min", 64 << 10, "files of at least this many bytes are mapped, not read");
+}
 
 /// Reads files, mapped into memory where they are of at least [`MAP_MIN`] bytes, and tells of
 /// those cut short while mapped.
@@ -42,7 +45,7 @@ impl Mapper {
     pub fn read(&self, path: &Path) -> io::Result<Bytes> {
         let mut f = open(path)?;
         let len = f.metadata()?.len();
-        if len >= MAP_MIN {
+        if len >= MAP_MIN.get() as u64 {
             let cut = self.cut.lock().unwrap().entry(path.to_path_buf()).or_default().clone();
             // SAFETY: the file is not to change while it is mapped; where it is cut short, the
             // handler takes the fault, and where it changes otherwise, the archive's

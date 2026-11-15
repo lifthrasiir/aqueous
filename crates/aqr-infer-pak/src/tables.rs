@@ -7,10 +7,19 @@ use std::sync::OnceLock;
 
 use crate::par_map;
 
-pub const KMIN: usize = 4;
 pub const KMAX: usize = 128;
-/// Fewer rows than this are no evidence (docs/pak-inference-design.md, small directories).
-pub const MINROWS: usize = 8;
+
+aqr_common::zopt! {
+    /// The least stride of a table's records, in bytes (the most is [`KMAX`]).
+    pub static KMIN: Opt<usize> = Opt::value("pak:kmin", 4, "least stride of a pak directory's records");
+    /// Fewer rows than this are no evidence (docs/pak-inference-design.md, small directories).
+    pub static MINROWS: Opt<usize> = Opt::value("pak:minrows", 8, "fewest rows of a pak directory's table");
+    /// Bytes at the start of a file that tables are looked for in first (it grows to 4 MiB).
+    static HEAD: Opt<usize> = Opt::size("pak:head", 1 << 20, "bytes at the start of a file that tables are first looked for in");
+    /// The density of bytes equal to the byte a stride before, by blocks, from which a region is
+    /// taken as records.
+    static DENSITY: Opt<f64> = Opt::value("pak:density", 0.12, "share of bytes equal to the byte a stride before, from which a region is records");
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Table {
@@ -104,7 +113,7 @@ fn log2_half() -> &'static [f64] {
 
 /// Share of bytes equal to the byte k before, for k = KMIN..=KMAX.
 fn autocorrelation(z: &[u8]) -> Vec<f64> {
-    (KMIN..=KMAX.min(z.len() / 4))
+    (KMIN.get()..=KMAX.min(z.len() / 4))
         .map(|k| {
             let n = z.len() - k;
             let eq = z[..n].iter().zip(&z[k..]).filter(|(a, b)| a == b).count();
@@ -117,6 +126,7 @@ fn autocorrelation(z: &[u8]) -> Vec<f64> {
 /// window's), those repeating over the tile's median and not explained by a divisor, and
 /// their divisors and multiples (a table of a divisor's stride may sit next to a bigger one).
 fn strides(w: &[u8]) -> Vec<usize> {
+    let kmin = KMIN.get();
     let mut cand = Vec::new();
     // tiles of 4 KiB over the first 64 KiB and of 16 KiB to 256 KiB (a table among data whose
     // bytes repeat at any stride stands out only in a tile near its own size: 480 bytes of a
@@ -127,7 +137,7 @@ fn strides(w: &[u8]) -> Vec<usize> {
         .chain(w[h1..h2].chunks(1 << 14))
         .chain(w[h2..].chunks(1 << 16).map(|z| &z[..z.len().min(1 << 14)]));
     for z in tiles {
-        if z.len() < 16 * KMIN {
+        if z.len() < 16 * kmin {
             continue;
         }
         let eq = autocorrelation(z);
@@ -138,14 +148,14 @@ fn strides(w: &[u8]) -> Vec<usize> {
         order.sort_by(|&a, &b| eq[b].partial_cmp(&eq[a]).unwrap());
         let mut got: Vec<usize> = Vec::new();
         for i in order {
-            let k = i + KMIN;
+            let k = i + kmin;
             // over the median by a share and a margin both: a table of many zero bytes in its
             // tile repeats at every stride (a median of 0.06 by 0.078 at its own), data with
             // repeated bytes too (0.08 by 0.119), random data hardly (0.004 by 0.0055)
             if eq[i] < (base * 1.15).max(base + 0.01) || got.len() >= 3 {
                 break;
             }
-            if got.iter().any(|&c| k.is_multiple_of(c) && eq[c - KMIN] >= 0.85 * eq[i]) {
+            if got.iter().any(|&c| k.is_multiple_of(c) && eq[c - kmin] >= 0.85 * eq[i]) {
                 continue;
             }
             got.push(k);
@@ -155,7 +165,7 @@ fn strides(w: &[u8]) -> Vec<usize> {
     let mut all = cand.clone();
     for &k in &cand {
         for d in [k / 2, k / 4] {
-            if d >= KMIN && k % d == 0 {
+            if d >= kmin && k % d == 0 {
                 all.push(d);
             }
         }
@@ -225,6 +235,7 @@ fn refine(
 /// Tables in b[lo..hi], the strides' densities, the windows' labels and the runs' ends
 /// computed on `threads` (each in order: the tables are the same on any number).
 pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
+    let (kmin, minrows, density) = (KMIN.get(), MINROWS.get(), DENSITY.get() as f32);
     let w = &b[lo..hi];
     let n = w.len();
     if n < 64 {
@@ -274,12 +285,12 @@ pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
     let mut regions: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
     while i < nb {
-        if top[i] < 0.12 {
+        if top[i] < density {
             i += 1;
             continue;
         }
         let s = i;
-        while i < nb && top[i] >= 0.12 {
+        while i < nb && top[i] >= density {
             i += 1;
         }
         match regions.last_mut() {
@@ -322,7 +333,7 @@ pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
             let z = &w[a..(a + wn).min(re)];
             COUNTS.with_borrow_mut(|counts| {
                 cand.iter()
-                    .filter(|&&k| z.len() >= MINROWS * k)
+                    .filter(|&&k| z.len() >= minrows * k)
                     .map(|&k| (colcost(z, k, counts), k))
                     .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap())
                     .map(|(_, k)| k)
@@ -344,7 +355,7 @@ pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
                 // window may label a 32-byte table 56: both miss what the other finds)
                 let mut related: Vec<usize> = [k / 4, k / 2, 2 * k, 4 * k]
                     .into_iter()
-                    .filter(|&x| (KMIN..=KMAX).contains(&x) && (x % k == 0 || k % x == 0))
+                    .filter(|&x| (kmin..=KMAX).contains(&x) && (x % k == 0 || k % x == 0))
                     .chain(cand.iter().copied().filter(|&x| x != k).take(4))
                     .collect();
                 related.sort_unstable();
@@ -367,13 +378,13 @@ pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
         par_map(runs.len(), threads, |i| {
             let (a, z, kk, primary, ta, tz) = runs[i];
             refine(w, a, z, kk, &bg, ta, tz)
-                .filter(|&(st, en, _)| (en - st) / kk >= MINROWS)
+                .filter(|&(st, en, _)| (en - st) / kk >= minrows)
                 .map(|(st, en, sc)| Table { start: lo + st, end: lo + en, k: kk, score: sc, primary })
         })
         .into_iter()
         .flatten()
         .collect();
-    if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
+    if crate::VERBOSE.get() {
         eprintln!(
             "  find {lo:#x}..{hi:#x}: {} strides {:?} ({:.1} ms), regions ({:.1} ms), labels {:.1} ms, all {:.1} ms, {} tables",
             cand.len(),
@@ -458,13 +469,13 @@ pub fn rank_near(tables: Vec<Table>, len: usize, keep: usize, per: usize, near_o
 /// The tables of a file: its head (grown while a table runs to the window's end, up to
 /// 4 MiB) and tail, or the whole of a small file.
 pub fn of_file(b: &[u8], keep: usize, per: usize, threads: usize) -> Vec<Table> {
-    const HEAD: usize = 1 << 20;
+    let head = HEAD.get();
     const TAIL: usize = 256 << 10;
     let n = b.len();
-    if n <= 2 * HEAD {
+    if n <= 2 * head {
         return rank(find(b, 0, n, threads), n, keep, per);
     }
-    let mut hi = HEAD;
+    let mut hi = head;
     // the head grows while tables from the head, one meeting the next, run to its end
     // (MetadataEtc's entries run 1.6 MB, in fragments of different strides, its chunks' sizes
     // after them), to 4 MiB: texture data looks like tables run on (Ori's `.resS` grew to

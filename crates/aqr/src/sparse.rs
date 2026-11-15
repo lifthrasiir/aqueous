@@ -17,11 +17,14 @@ use std::ops::Range;
 /// silicon, under which holes slow reads).
 pub const UNIT: usize = 64 << 10;
 
-/// The least bytes of a hole: runs of zeros shorter are written.
-pub const HOLE: u64 = 256 << 10;
+aqr_common::zopt_namespace!("sparse", "sparse files written on extraction (aqr)");
 
-/// The most bytes of data held before they are written.
-const BUFFER: usize = 1 << 20;
+aqr_common::zopt! {
+    /// The least bytes of a hole: runs of zeros shorter are written.
+    static HOLE: Opt<usize> = Opt::size("sparse:hole", 256 << 10, "the least bytes of a hole: runs of zeros shorter are written");
+    /// The most bytes of data held before they are written.
+    static BUFFER: Opt<usize> = Opt::size("sparse:buffer", 1 << 20, "the most bytes of data held before they are written");
+}
 
 /// A file written from its start, sparse ([`Sparse::finish`] ends it).
 pub struct Sparse<'f> {
@@ -69,7 +72,7 @@ impl<'f> Sparse<'f> {
     /// Ends the file: what is held written, and its length set (where it ends in a hole).
     pub fn finish(mut self) -> io::Result<()> {
         let head = std::mem::take(&mut self.head);
-        match zero(&head) && self.zeros + head.len() as u64 >= HOLE {
+        match zero(&head) && self.zeros + head.len() as u64 >= HOLE.get() as u64 {
             // (zeros to the end: a hole, of a unit not whole at its end)
             true => self.zeros += head.len() as u64,
             false => self.data(&head)?,
@@ -104,10 +107,10 @@ impl<'f> Sparse<'f> {
     /// Writes data `d` after the zeros counted.
     fn data(&mut self, d: &[u8]) -> io::Result<()> {
         self.settle()?;
-        if self.out.len() + d.len() > BUFFER {
+        if self.out.len() + d.len() > BUFFER.get() {
             self.flush()?;
         }
-        if d.len() < BUFFER {
+        if d.len() < BUFFER.get() {
             self.out.extend_from_slice(d);
             return Ok(());
         }
@@ -123,7 +126,7 @@ impl<'f> Sparse<'f> {
         if n == 0 {
             return Ok(());
         }
-        if n < HOLE {
+        if n < HOLE.get() as u64 {
             self.out.resize(self.out.len() + n as usize, 0);
             return Ok(());
         }
@@ -259,7 +262,7 @@ mod tests {
             &[U, 4 * U, U],
             &[100, 3 * U, 5, 8 * U, 3, 4 * U - 1, 2, 6 * U],
             &[3 * U + 1, 2 * U, 1, 10 * U, U / 2],
-            &[0, 20 * U, 2 * BUFFER + 3, 20 * U, 1],
+            &[0, 20 * U, 2 * BUFFER.get() + 3, 20 * U, 1],
         ];
         for parts in cases {
             for piece in [1 << 30, 1000, U, U + 1, 3 * U / 2] {

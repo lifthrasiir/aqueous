@@ -8,9 +8,13 @@
 use aqr_dwarf::Section;
 use aqr_formula::{Formula, Kind, Node};
 
-/// Tables shorter than this are left as they are: the module's application, which copies
-/// `.debug_str`, would cost more.
-const MIN_TABLE: usize = 4 << 10;
+aqr_common::zopt_namespace!("dwarf", "DWARF debugging information (aqr-compress)");
+
+aqr_common::zopt! {
+    /// Tables shorter than this are left as they are: the module's application, which copies
+    /// `.debug_str`, would cost more.
+    static MIN_TABLE: Opt<usize> = Opt::size("dwarf:min-table", 4 << 10, "DWARF tables shorter than this are left as they are");
+}
 
 /// A section of debugging information of an image of a file: its kind, the image's index, and
 /// where it is.
@@ -76,7 +80,7 @@ pub(crate) fn place(f: &mut Formula, d: &[u8], debug: &[Debug]) -> Vec<(usize, u
         }
         if strs.is_some() {
             for kind in [Section::AppleNames, Section::AppleTypes, Section::AppleNamespaces, Section::AppleObjc] {
-                let Some(t) = of(kind).filter(|t| t.size >= MIN_TABLE) else { continue };
+                let Some(t) = of(kind).filter(|t| t.size >= MIN_TABLE.get()) else { continue };
                 let node = |f: &mut Formula| inputs.node(f, Section::Str, strs, "dwarf/str", Kind::Text);
                 if let Some(apply) = aqr_dwarf::formula::apple(f, bytes(Some(t)), bytes(strs), node) {
                     inputs.placed.push((t.off, t.size, apply));

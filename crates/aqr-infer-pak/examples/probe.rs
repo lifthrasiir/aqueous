@@ -24,6 +24,10 @@ fn family(path: &Path) -> Vec<std::path::PathBuf> {
 }
 
 fn main() {
+    // (`-Z pak:verbose` as the examples have no -Z: the environment)
+    if std::env::var_os("AQR_PAK_VERBOSE").is_some() {
+        aqr_common::zopt::apply(&["pak:verbose"]).unwrap();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("usage: aqr-infer-pak-probe FILE...");
@@ -42,7 +46,7 @@ fn main() {
             .collect();
         let sizes: Vec<String> = files.iter().map(|f| format!("{} {}", f.name, f.data.len())).collect();
         let t0 = Instant::now();
-        let mut opt = Options { verbose: std::env::var_os("AQR_PAK_VERBOSE").is_some(), ..Options::default() };
+        let mut opt = Options::default();
         // (AQR_PAK_THREADS: the threads, for a comparison)
         if let Some(t) = std::env::var("AQR_PAK_THREADS").ok().and_then(|v| v.parse().ok()) {
             opt.threads = t;

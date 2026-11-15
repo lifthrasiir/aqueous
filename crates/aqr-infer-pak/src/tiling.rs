@@ -6,13 +6,19 @@ use std::collections::HashSet;
 use crate::fields::{Field, Profile};
 use crate::tables::{MINROWS, Table};
 
-/// Bytes a member's room may exceed its size by (padding).
-pub const SLACK: u64 = 4096;
-/// Bits of evidence a directory needs: about 2^24 offsets times 2^14 sizes are tried for a
-/// table by brute force, fewer by the profile; 48 leave a margin.
-pub const EVIDENCE: f64 = 48.0;
-/// Edge of a table's end the sums are tried in, in rows before (after: 4 KiB).
-const EDGE: usize = 8;
+aqr_common::zopt! {
+    /// Bytes a member's room may exceed its size by (padding).
+    pub static SLACK: Opt<usize> = Opt::value("pak:slack", 4096, "bytes a pak member's room may exceed its size by (padding)");
+    /// Bits of evidence a directory needs: about 2^24 offsets times 2^14 sizes are tried for a
+    /// table by brute force, fewer by the profile; 48 leave a margin.
+    pub static EVIDENCE: Opt<f64> = Opt::value("pak:evidence", 48.0, "bits of evidence a pak directory needs");
+    /// Edge of a table's end the sums are tried in, in rows before (after: 4 KiB).
+    static EDGE: Opt<usize> = Opt::value("pak:edge", 8, "rows before a table's end where sums of sizes are tried");
+    /// The fit a table's size field must reach to count as an offset-and-size directory.
+    static FIT_ACCEPT: Opt<f64> = Opt::value("pak:fit-accept", 0.8, "fit of sizes and offsets a pak directory is accepted at");
+    /// The fit a size field must reach to be considered.
+    static FIT_MIN: Opt<f64> = Opt::value("pak:fit-min", 0.3, "least fit of a field to be considered a size");
+}
 /// Bytes before a table its sizes laid end to end may start at: twice the table's (it may be
 /// a fragment), within these.
 const BACK: (usize, usize) = (4096, 1 << 16);
@@ -46,7 +52,7 @@ pub(crate) fn even(n: usize, m: usize) -> Vec<i64> {
 /// empty room (a member shared with the next): else any small room takes it, and a field of
 /// zeros "fits" a table's rows of its neighbour.
 pub(crate) fn fits(room: u64, s: u64) -> bool {
-    room >= s && room - s < SLACK && (s > 0 || room == 0)
+    room >= s && room - s < SLACK.get() as u64 && (s > 0 || room == 0)
 }
 
 fn fit_of(rooms: &[u64], sizes: &[u64]) -> f64 {
@@ -162,8 +168,10 @@ fn gate(b: &[u8], t: &Table, cands: &[Field], l: u64, any_rows: bool) -> Vec<Fie
 /// Offset fields of the table into a target of length `l` whose rooms its sizes fill, the
 /// sizes among `sizes`.
 pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) -> Vec<Cand> {
+    let (minrows, slack, evidence) = (MINROWS.get(), SLACK.get() as u64, EVIDENCE.get());
+    let (fit_min, fit_accept) = (FIT_MIN.get(), FIT_ACCEPT.get());
     let n = t.rows();
-    if n < MINROWS || sizes.is_empty() {
+    if n < minrows || sizes.is_empty() {
         return Vec::new();
     }
     let k = t.k as i64;
@@ -187,7 +195,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         let mut sorted = v.clone();
         sorted.sort_unstable();
         let distinct = 1 + sorted.windows(2).filter(|w| w[0] != w[1]).count();
-        if distinct * 10 < v.len() || distinct < MINROWS {
+        if distinct * 10 < v.len() || distinct < minrows {
             continue;
         }
         let inr = v.iter().filter(|&&x| x < l).count();
@@ -241,7 +249,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
                 })
                 .min()
                 .unwrap_or(u64::MAX);
-            (gap >= SLACK, gap.min(d), off)
+            (gap >= slack, gap.min(d), off)
         })
         .collect();
     ranked.sort_by_key(|x| (x.0, x.1));
@@ -254,7 +262,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         let o = off.values(b, t, &all);
         let rm = edge_rooms(&o, before as usize, l);
         let members: Vec<(i64, u64)> = all.iter().zip(&rm).filter_map(|(&r, x)| x.map(|x| (r, x))).collect();
-        if members.len() < MINROWS {
+        if members.len() < minrows {
             continue;
         }
         // sizes within a record of the offset: a quick look on 48 members first
@@ -274,7 +282,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         let mut scored: Vec<(f64, Field)> = near.iter().map(|f| (fit_of(&mroom, &f.values(b, t, &mr)), *f)).collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
         let (mut fit, mut size) = scored[0];
-        if fit < 0.3 {
+        if fit < fit_min {
             continue;
         }
         // widen as far as the fit holds (the sample may not reach the field's top bits)
@@ -325,7 +333,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         };
         let mut ctrl_s = used.clone();
         ctrl_s.rotate_right(1);
-        if binomial_bits(mroom.len(), fit_g(&used), fit_g(&ctrl_s)) < EVIDENCE {
+        if binomial_bits(mroom.len(), fit_g(&used), fit_g(&ctrl_s)) < evidence {
             continue;
         }
         // the rows that are the directory: the longest run of rows that fit (+1 each, -3 for
@@ -368,7 +376,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
                 _ => break,
             }
         }
-        if bj - bi < MINROWS {
+        if bj - bi < minrows {
             continue;
         }
         let at = |i: usize| (t.start as i64 + (i as i64 - before) * k) as usize;
@@ -376,7 +384,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         // its rooms again, from its own offsets
         let rm2 = edge_rooms(&o[bi..bj], (before as usize).saturating_sub(bi), l);
         let mem2: Vec<(usize, u64)> = (0..bj - bi).filter_map(|i| rm2[i].map(|r| (bi + i, r))).collect();
-        if mem2.len() < MINROWS {
+        if mem2.len() < minrows {
             continue;
         }
         let idx = even(mem2.len(), 512);
@@ -403,7 +411,7 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
         // (and sizes fitting wrong members half the time are no evidence, however many: sizes
         // about as alike as their rooms, of data or of a table of another kind, Outer Wilds'
         // and Slime Rancher's Unity files at 0.60 and 0.41; NMS's decoded entries 0.36)
-        if fit >= 0.8 && ev >= EVIDENCE && ctrl < 0.5 {
+        if fit >= fit_accept && ev >= evidence && ctrl < 0.5 {
             out.push(Cand { layout: Layout::Explicit { off, size, alt, fit, ctrl }, table: tt, ev });
         }
     }
@@ -420,15 +428,16 @@ pub fn explicit(b: &[u8], t: &Table, prof: &Profile, l: u64, sizes: &[Field]) ->
 /// last record, or aligned up from there to 16, 512, 2048 or 4096; in another target, within
 /// 16 bytes of its start.
 pub fn implicit(b: &[u8], t0: &Table, sizes: &[Field], l: u64, same: bool) -> Vec<Cand> {
+    let (minrows, edge) = (MINROWS.get(), EDGE.get());
     let k = t0.k;
     let back = t0.start.min((2 * (t0.end - t0.start)).clamp(BACK.0, BACK.1)) / k;
     let fwd = (4096 / k).min(b.len().saturating_sub(t0.end) / k);
     let t = Table { start: t0.start - back * k, end: t0.end + fwd * k, ..*t0 };
     let n = t.rows();
-    if n < MINROWS {
+    if n < minrows {
         return Vec::new();
     }
-    let lo1 = (n - fwd).saturating_sub(4 * EDGE).max(MINROWS);
+    let lo1 = (n - fwd).saturating_sub(4 * edge).max(minrows);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     let mut g = vec![0u64; n];
@@ -462,13 +471,13 @@ pub fn implicit(b: &[u8], t0: &Table, sizes: &[Field], l: u64, same: bool) -> Ve
         anchors.dedup();
         let field_end = |i1: usize| (t.start + (i1 - 1) * k) as i64 + f.end();
         for &anchor in &anchors {
-            for d0 in 0..=EDGE {
+            for d0 in 0..=edge {
                 let i0 = (anchor + 1) as usize + d0;
-                if i0 + MINROWS > n {
+                if i0 + minrows > n {
                     break;
                 }
                 // the ends: rows [i0, i1) all sizes, i1 in the edge tried
-                let (lo, hi) = (lo1.max(i0 + MINROWS), n.min(nextbad[i0]));
+                let (lo, hi) = (lo1.max(i0 + minrows), n.min(nextbad[i0]));
                 if lo > hi {
                     continue;
                 }

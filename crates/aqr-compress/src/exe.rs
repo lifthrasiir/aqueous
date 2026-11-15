@@ -75,16 +75,49 @@ enum Arch {
     Data,
 }
 
-/// Bytes of an installer's data kept apart ([`Arch::Kept`]) at least: those between its streams
-/// (their heads) are left with the rest.
-const MIN_KEPT: usize = 64;
+aqr_common::zopt_namespace!("exe", "executable files (aqr-compress)");
 
-/// Tables shorter than this are left with the rest.
-const MIN_TABLE: usize = 64;
-
-/// Symbol tables shorter than this, with their string tables, are left with the rest: the
-/// module would cost more.
-const MIN_SYMBOLS: usize = 16 << 10;
+aqr_common::zopt! {
+    /// The level from which an Inno Setup installer's LZMA streams are opened (slow for their
+    /// bytes).
+    static INNO_LEVEL: Opt<u8> = Opt::value("inno-level", 4, "the lowest level at which Inno Setup's LZMA streams are opened");
+    /// Bytes of an installer's data kept apart ([`Arch::Kept`]) at least: those between its streams
+    /// (their heads) are left with the rest.
+    static MIN_KEPT: Opt<usize> = Opt::size("exe:min-kept", 64, "installer data kept apart of at least this many bytes");
+    /// Tables shorter than this are left with the rest.
+    static MIN_TABLE: Opt<usize> = Opt::size("exe:min-table", 64, "tables shorter than this are left with the rest");
+    /// Symbol tables shorter than this, with their string tables, are left with the rest: the
+    /// module would cost more.
+    static MIN_SYMBOLS: Opt<usize> = Opt::size("exe:min-symbols", 16 << 10, "symbol tables with their strings shorter than this are left alone");
+    /// Whether the code of Mach-O and ELF images is remapped against those of their tree's root.
+    static REMAP: Opt<bool> = Opt::flag("exe:remap", true, "remap the code of images against those of the same tree");
+    /// Whether a Mach-O image's code signature is left out, for the module to put it back.
+    static CODESIGN: Opt<bool> = Opt::flag("exe:codesign", true, "take a Mach-O image's code signature out of the rest");
+    /// Images less alike than this (`Signature::alike`) have no parent: builds of aqr a day
+    /// apart are 0.14 to 0.16 alike (their code remapped 33 to 36% smaller against each other),
+    /// Chrome's 156.0.8078.49 and .76 0.36, Electron 42 and 43 0.21 (20%), Chromium and Electron
+    /// 0.05 (0.7%), programs not related 0.003.
+    static MIN_ALIKE: Opt<f64> = Opt::value("exe:min-alike", 0.1, "images less alike than this have no parent in a tree");
+    /// The pieces of an ARM64 code stream coded against its root's are of 1/this of a solid
+    /// block's bound (and of [`PIECE_MIN`] at least), and those of the root's stream (a stream each,
+    /// apart) of the bound: with [`MOST`] of the root's, a piece decodes from a block's bound.
+    ///
+    /// With a bound of 16 MiB, of Electron 43 to 44 (arm64), its code stream against the root's
+    /// archives to 14.3 MB whole (`aqr-exe-bench-delta`, zstd -19), of pieces of 4 MiB each against
+    /// three of 4 MiB 15.0 MB, against two of 8 MiB 15.0 MB, against one of 16 MiB 16.1 MB, of 8 MiB
+    /// against one of 8 MiB 23.5 MB; but the root's stream is larger in pieces, at zstd -9 by 6.1%,
+    /// 2.9% and 1.9% in pieces of 4, 8 and 16 MiB (Chrome 156.0.8078.47's). As `aqr -c` archives
+    /// them, of the arm64 images of Chrome Framework .47 and .49, .49 and .76, and Electron Framework
+    /// 43 and 44: 90.06, 97.29, 97.35 MB against two of 8 MiB; 88.71, 96.04, 97.75 MB against one of
+    /// 16 MiB (the first, against three of 4 MiB, 91.56 MB).
+    static PIECE_SHARE: Opt<usize> = Opt::value("exe:piece-share", 4, "an ARM64 code piece is 1/N of a block's bound (against the root's)");
+    /// The least pieces ([`PIECE_SHARE`]).
+    static PIECE_MIN: Opt<usize> = Opt::size("exe:piece-min", 64 << 10, "the least bytes of a piece coded against the root's");
+    /// The pieces of the root's stream that a piece is coded against at most.
+    static MOST: Opt<usize> = Opt::value("exe:piece-most", 1, "the pieces of the root's stream that a piece is coded against at most");
+    /// One word in 2^this, by its content, looked up for matches to pick the root's pieces.
+    static SAMPLE: Opt<u32> = Opt::value("exe:piece-sample", 3, "words sampled for matches to pick the root's pieces: one in 2^N");
+}
 
 pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
@@ -111,21 +144,22 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
     }
     // the tables outside the code
     let code: Vec<_> = sections.iter().map(|s| s.1..s.1 + s.2).collect();
+    let min_table = MIN_TABLE.get();
     sections.extend(
         tables(d)
             .into_iter()
-            .filter(|t| t.len >= MIN_TABLE && !code.iter().any(|c| t.off < c.end && c.start < t.off + t.len))
+            .filter(|t| t.len >= min_table && !code.iter().any(|c| t.off < c.end && c.start < t.off + t.len))
             .map(|t| (0, t.off, t.len, Arch::Table(t.kind))),
     );
     // the files stored in an installer's data
-    for b in crate::nsis::in_pe(d).unwrap_or_default().into_iter().filter(|b| b.len() >= crate::nsis::MIN_BLOCK) {
+    for b in crate::nsis::in_pe(d).unwrap_or_default().into_iter().filter(|b| b.len() >= crate::nsis::MIN_BLOCK.get()) {
         if let Some(format) = crate::nsis::format(&d[b.clone()]) {
             sections.push((0, b.start, b.len(), Arch::Stored(format.name())));
         }
     }
     // the LZMA streams of an Inno Setup installer's data (slow for their bytes: from level 4),
     // each where its data may archive smaller than it (not of executables packed already)
-    let inno = match opt.level.scale() >= 4 && opt.recompresses() {
+    let inno = match opt.level.scale() >= INNO_LEVEL.get() && opt.recompresses() {
         true => aqr_inno::split(d, opt.threads),
         false => Vec::new(),
     };
@@ -134,8 +168,9 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
     // the rest of the image)
     if let Some(t) = aqr_inno::table(d).filter(|_| aqr_inno::end(d).is_some()) {
         let mut at = t.data;
+        let min_kept = MIN_KEPT.get();
         for r in inno.iter().map(|p| p.range.clone()).chain([t.total.min(d.len())..usize::MAX]) {
-            if r.start >= at + MIN_KEPT {
+            if r.start >= at + min_kept {
                 sections.push((0, at, r.start - at, Arch::Kept));
             }
             at = r.end;
@@ -209,7 +244,8 @@ pub(crate) fn macho(
         let arch = Arch::Symbols { ext: s.ext, stroff: s.stroff, strsize: s.strsize };
         (0, s.symoff, s.nsyms as usize * 16, arch)
     });
-    let symbols = symbols.filter(|s| matches!(s.3, Arch::Symbols { strsize, .. } if s.2 + strsize >= MIN_SYMBOLS));
+    let min_symbols = MIN_SYMBOLS.get();
+    let symbols = symbols.filter(|s| matches!(s.3, Arch::Symbols { strsize, .. } if s.2 + strsize >= min_symbols));
     let debug: Vec<_> = images
         .iter()
         .enumerate()
@@ -222,14 +258,20 @@ pub(crate) fn macho(
         .collect();
     // the code signatures whose code slots are the pages' hashes, left out of the rest and put
     // back by `exe-recons/macho-codesign` (around all of the file)
-    let signatures: Vec<_> = images.iter().filter_map(|i| i.signature.map(|(at, n)| (i.range.start, at, n))).collect();
+    let signatures: Vec<_> = images
+        .iter()
+        .filter_map(|i| i.signature.map(|(at, n)| (i.range.start, at, n)))
+        .filter(|_| CODESIGN.get())
+        .collect();
     let signed = aqr_exe::codesign::encode(d, &signatures);
     let left: Vec<_> = signed.iter().flat_map(|s| &s.ranges).map(|r| (0, r.start, r.len(), Arch::Signature)).collect();
     // the sections of data coded against those of the root of the image's tree, or the root's
     let pointers: Vec<_> = images
         .iter()
         .flat_map(|i| &i.data)
-        .filter(|s| data.is_some_and(|m| m.contains_key(&s.1)) || POINTERS.contains(&&s.0[..]) && s.2 >= MIN_TABLE)
+        .filter(|s| {
+            data.is_some_and(|m| m.contains_key(&s.1)) || POINTERS.contains(&&s.0[..]) && s.2 >= MIN_TABLE.get()
+        })
         .map(|s| (0, s.1, s.2, Arch::Data))
         .collect();
     let all = sections.chain(symbols).chain(left).chain(pointers).collect();
@@ -245,12 +287,6 @@ pub(crate) fn macho(
     }
     Some(f)
 }
-
-/// Images less alike than this (`Signature::alike`) have no parent: builds of aqr a day
-/// apart are 0.14 to 0.16 alike (their code remapped 33 to 36% smaller against each other),
-/// Chrome's 156.0.8078.49 and .76 0.36, Electron 42 and 43 0.21 (20%), Chromium and Electron
-/// 0.05 (0.7%), programs not related 0.003.
-const MIN_ALIKE: f64 = 0.1;
 
 /// The remap of an image of code of either architecture.
 pub(crate) enum Remap {
@@ -323,29 +359,6 @@ const POINTERS: [&[u8]; 3] = [b"__DATA_CONST,__const", b"__DATA,__const", b"__AU
 /// The class of the pieces of a root's sections of data ([`POINTERS`]), apart.
 const DATA: &str = "macho/data";
 
-/// The pieces of an ARM64 code stream coded against its root's are of a fourth of a solid
-/// block's bound (and of [`PIECE_MIN`] at least), and those of the root's stream (a stream each,
-/// apart) of the bound: with [`MOST`] of the root's, a piece decodes from a block's bound.
-///
-/// With a bound of 16 MiB, of Electron 43 to 44 (arm64), its code stream against the root's
-/// archives to 14.3 MB whole (`aqr-exe-bench-delta`, zstd -19), of pieces of 4 MiB each against
-/// three of 4 MiB 15.0 MB, against two of 8 MiB 15.0 MB, against one of 16 MiB 16.1 MB, of 8 MiB
-/// against one of 8 MiB 23.5 MB; but the root's stream is larger in pieces, at zstd -9 by 6.1%,
-/// 2.9% and 1.9% in pieces of 4, 8 and 16 MiB (Chrome 156.0.8078.47's). As `aqr -c` archives
-/// them, of the arm64 images of Chrome Framework .47 and .49, .49 and .76, and Electron Framework
-/// 43 and 44: 90.06, 97.29, 97.35 MB against two of 8 MiB; 88.71, 96.04, 97.75 MB against one of
-/// 16 MiB (the first, against three of 4 MiB, 91.56 MB).
-const PIECE_SHARE: usize = 4;
-
-/// The least pieces ([`PIECE_SHARE`]).
-const PIECE_MIN: usize = 64 << 10;
-
-/// The pieces of the root's stream that a piece is coded against at most.
-const MOST: usize = 1;
-
-/// One word in 2^this, by its content, looked up for matches to pick the root's pieces.
-const SAMPLE: u32 = 3;
-
 /// The class of the copy of the root's code stream or section of data in a formula of an image
 /// coded against it, which [`resolve`] makes the root's own.
 pub(crate) const REFERENCE: &str = "exe/root";
@@ -373,6 +386,9 @@ pub(crate) struct Delta {
 /// as their files do, rarely with their parents': remapped, they cost more.) Of each ARM64 tree,
 /// the deltas of its images ([`Delta`]).
 pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
+    if !REMAP.get() {
+        return Remaps::default();
+    }
     // each image: its file, its index in the file, its architecture (x86-64, x86-32 or ARM64)
     // and its code sections
     let mut images = Vec::new();
@@ -414,7 +430,7 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
             })
             .collect()
     });
-    let (order, parents) = crate::sets::tree(&rows, MIN_ALIKE);
+    let (order, parents) = crate::sets::tree(&rows, MIN_ALIKE.get());
     let raw = aqr_common::pool::par_map(n, threads, |i| {
         let p = parents[i]?;
         let (a, b) = (order[p], order[i]);
@@ -461,7 +477,8 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
         Arc::new(arm64::encode(code, va).streams()[0].clone())
     });
     let code_of: HashMap<usize, Arc<Vec<u8>>> = roots.into_iter().zip(codes).collect();
-    let (piece, root_piece) = ((min * 2 / PIECE_SHARE).max(PIECE_MIN), (min * 2).max(PIECE_MIN));
+    let piece_min = PIECE_MIN.get();
+    let (piece, root_piece) = ((min * 2 / PIECE_SHARE.get()).max(piece_min), (min * 2).max(piece_min));
     let mut deltas: HashMap<usize, Vec<Option<Delta>>> = HashMap::new();
     for i in (0..n).filter(|&i| matches!(images[order[i]].2, Arch::Arm64(_))) {
         let Some(root) = code_of.get(&root_of(i)) else { continue };
@@ -477,7 +494,7 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
         let Some(image) = macho::images(files[file]).and_then(|mut v| (k < v.len()).then(|| v.swap_remove(k))) else {
             return Vec::new();
         };
-        image.data.into_iter().filter(|s| POINTERS.contains(&&s.0[..]) && s.2 >= PIECE_MIN).collect()
+        image.data.into_iter().filter(|s| POINTERS.contains(&&s.0[..]) && s.2 >= piece_min).collect()
     };
     let of: Vec<Vec<(Vec<u8>, usize, usize)>> = aqr_common::pool::par_map(n, threads, sections);
     let mut data: HashMap<usize, HashMap<usize, Delta>> = HashMap::new();
@@ -520,7 +537,7 @@ fn against(f: &mut Formula, code: &[u8], d: &Delta, class: &'static str, delta: 
         return Node::concat(code.chunks(d.root_piece).map(|p| f.push_apart(class, p.to_vec())));
     }
     let size = d.root_piece;
-    let refs = arm64::delta::references(&d.root, size, code, d.piece, MOST, SAMPLE);
+    let refs = arm64::delta::references(&d.root, size, code, d.piece, MOST.get(), SAMPLE.get());
     let Node::Slice { stream: root, .. } = f.push_apart(REFERENCE, Bytes::shared(d.root.clone())) else {
         unreachable!("a stream's slice")
     };

@@ -128,11 +128,7 @@ pub fn decoded_size(src: &[u8]) -> Option<u64> {
 /// The decoded size a zstd member's frame header tells, its bounds known (only the header is
 /// read: a pak's chunks are each touched once, of a file mapped and maybe not yet read).
 pub fn zstd_header_size(src: &[u8]) -> Option<u64> {
-    if is_zstd(src) {
-        zstd::zstd_safe::get_frame_content_size(&src[..src.len().min(18)]).ok().flatten()
-    } else {
-        None
-    }
+    if is_zstd(src) { zstd::zstd_safe::get_frame_content_size(&src[..src.len().min(18)]).ok().flatten() } else { None }
 }
 
 /// Decodes a member known to be of `codec`.

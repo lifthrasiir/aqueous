@@ -20,10 +20,11 @@ fn day(n: u64) -> String {
 
 fn aqr_at(dir: &Path, now: Option<&str>, args: &[&str]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"));
-    c.current_dir(dir).args(args).stdin(Stdio::null());
+    c.current_dir(dir).stdin(Stdio::null());
     if let Some(now) = now {
-        c.env("AQR_TEST_NOW", now);
+        c.arg("-Z").arg(format!("test:now={now}"));
     }
+    c.args(args);
     c.output().unwrap()
 }
 

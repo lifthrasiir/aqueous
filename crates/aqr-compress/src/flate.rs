@@ -299,7 +299,7 @@ fn member(
     let fopt = aqr_flate::Options {
         threads: opt.threads,
         max_data: usize::try_from(cx.inflate_left()).unwrap_or(usize::MAX),
-        zlib: true,
+        zlib: aqr_flate::ZLIB.get(),
         store: true,
         ..aqr_flate::Options::for_profile(profile).ok()?
     };

@@ -87,8 +87,10 @@ pub struct Profile {
     rises: Vec<usize>,
 }
 
-/// Rows of a table sampled for its profile.
-const PROFILE_ROWS: usize = 4096;
+aqr_common::zopt! {
+    /// Rows of a table sampled for its profile.
+    static PROFILE_ROWS: Opt<usize> = Opt::value("pak:profile-rows", 4096, "rows of a table sampled for its bit profile");
+}
 
 impl Profile {
     pub fn new(b: &[u8], t: &Table) -> Profile {
@@ -99,7 +101,7 @@ impl Profile {
         let mut m = 0u32;
         let lo = 1usize;
         let hi = n.saturating_sub(2).max(lo);
-        let step = ((hi - lo) / PROFILE_ROWS).max(1);
+        let step = ((hi - lo) / PROFILE_ROWS.get()).max(1);
         let mut j = lo;
         while j < hi {
             let p = t.start as i64 + (j * k) as i64 - k as i64;

@@ -47,9 +47,14 @@ use aqr_formula::{Bytes, Formula, Kind, Module, Node};
 use crate::progress::{Event, Files, Note, Notes, Tracker};
 use crate::{Cx, Once, Options, bundle, detect, kind_by_name, nested, place_all, sets, verify};
 
-/// Streams shorter than this are put together with those of their class and kind without
-/// telling whether they compress.
-const MERGE_PROBE: usize = 4 << 10;
+aqr_common::zopt_namespace!("together", "contents that hold each other, kept in one batch (aqr-compress)");
+
+aqr_common::zopt! {
+    /// Streams shorter than this are put together with those of their class and kind without
+    /// telling whether they compress.
+    static MERGE_PROBE: Opt<usize> =
+        Opt::size("merge-probe", 4 << 10, "streams shorter are merged into their class without a compression test");
+}
 
 /// A file's content to archive: its data, and a name telling its kind ([`kind_by_name`]).
 #[derive(Debug, Clone, Copy)]
@@ -402,7 +407,8 @@ fn compress_tree_noting<S: Source + ?Sized>(
     // those made alone first: between others, one would wait for those before it to be
     // written, and those after it for it, the threads idle as the longest file of either is made
     let weight = |b: &Vec<usize>| b.iter().map(|&c| src.size(c)).sum::<u64>();
-    batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(AHEAD));
+    let ahead = AHEAD.get();
+    batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(ahead));
 
     let w = match from {
         Some(a) if a.kill => SegmentWriter::appending(a.footer.clone(), a.metadata),
@@ -416,8 +422,10 @@ fn compress_tree_noting<S: Source + ?Sized>(
     let w_at = w.len();
     let weights: Vec<u64> = batches.iter().map(weight).collect();
     // (the files of no header taken apart by others: VPKs' archives, Unity's resource files)
-    let siblings =
-        opt.recompresses().then(|| crate::siblings::plan(src)).filter(|p| !p.is_empty()).map(std::sync::Arc::new);
+    let siblings = (opt.recompresses() && SIBLINGS.get())
+        .then(|| crate::siblings::plan(src))
+        .filter(|p| !p.is_empty())
+        .map(std::sync::Arc::new);
     let cx =
         Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop, siblings };
     let pipe = Pipe {
@@ -525,25 +533,41 @@ fn compress_tree_noting<S: Source + ?Sized>(
     Ok(r)
 }
 
-/// Bytes of the batches let in and not yet written, as so many batches' ([`Options::batch`]): a
-/// batch is read and analyzed while the one before it is still analyzed (as its longest files
-/// leave threads idle), encoded or verified. One longer than these is made alone (and first);
-/// one longer than a batch (contents that hold each other, kept together) beside others as
-/// these allow. (10gb: of about 1,550 core-seconds of compression, 815 were idle with a batch at
-/// a time.)
-const AHEAD: u64 = 2;
+aqr_common::zopt! {
+    /// Bytes of the batches let in and not yet written, as so many batches' ([`Options::batch`]): a
+    /// batch is read and analyzed while the one before it is still analyzed (as its longest files
+    /// leave threads idle), encoded or verified. One longer than these is made alone (and first);
+    /// one longer than a batch (contents that hold each other, kept together) beside others as
+    /// these allow. (10gb: of about 1,550 core-seconds of compression, 815 were idle with a batch at
+    /// a time.)
+    static AHEAD: Opt<u64> = Opt::value("batch-ahead", 2, "batches let in at once, times the batch size");
+}
 
-/// [`AHEAD`] below level 2 ([`Options::recompresses`]), where a batch let in holds little but its
-/// files (mapped), the small ones' copies in the streams of their class and their blocks, and
-/// several are made at once ([`plain_helpers`]). (10gb at level 1, 16 threads, 3 helpers: 21.0 s
-/// and a heap peak of 2.04 GB at 2, 18.3 s and 2.52 GB at 3, 17.8 s and 3.08 GB at 4.)
-const PLAIN_AHEAD: u64 = 3;
+aqr_common::zopt! {
+    /// [`AHEAD`] below level 2 ([`Options::recompresses`]), where a batch let in holds little but its
+    /// files (mapped), the small ones' copies in the streams of their class and their blocks, and
+    /// several are made at once ([`plain_helpers`]). (10gb at level 1, 16 threads, 3 helpers: 21.0 s
+    /// and a heap peak of 2.04 GB at 2, 18.3 s and 2.52 GB at 3, 17.8 s and 3.08 GB at 4.)
+    static PLAIN_AHEAD: Opt<u64> =
+        Opt::value("plain-ahead", 3, "batches let in at once below level 2, times the batch size");
+}
 
 /// The helpers making batches below level 2 ([`Pipe::help`]): one for each 4 workers of the
 /// pool, 1 to 3. (10gb at level 1, 16 threads, 4 batches ahead: about 20 s with 1, 17.6 s
 /// with 3.)
 fn plain_helpers() -> usize {
-    (aqr_common::pool::size() / 4).clamp(1, 3)
+    PLAIN_HELPERS.get()
+}
+
+aqr_common::zopt! {
+    /// The helpers making batches below level 2.
+    static PLAIN_HELPERS: Opt<usize> = Opt::value("plain-helpers", 0, "helper threads making batches below level 2")
+        .derived(|| (aqr_common::pool::size() / 4).clamp(1, 3), "a quarter of the pool's workers, 1 to 3");
+}
+
+aqr_common::zopt! {
+    /// Whether the files of no header are taken apart by others archived along.
+    static SIBLINGS: Opt<bool> = Opt::flag("siblings", true, "take apart files of no header by others archived along (VPKs, .resS)");
 }
 
 /// What the batches being made share ([`compress_tree_noting`]).
@@ -607,7 +631,11 @@ impl State {
         let w = cx.weights[self.claimed];
         self.held == 0
             || (self.held.saturating_add(w)
-                <= (cx.opt.batch as u64).saturating_mul(if cx.opt.recompresses() { AHEAD } else { PLAIN_AHEAD })
+                <= (cx.opt.batch as u64).saturating_mul(if cx.opt.recompresses() {
+                    AHEAD.get()
+                } else {
+                    PLAIN_AHEAD.get()
+                })
                 && aqr_common::budget::global().room().fits(w))
     }
 }
@@ -1281,38 +1309,62 @@ impl Writer {
     }
 }
 
-/// Contents of at least this many bytes are looked into for others they may hold
-/// ([`together`]), as [`Held`] is.
-const TOGETHER_MIN: u64 = Held::MIN as u64;
+aqr_common::zopt! {
+    /// Contents of at least this many bytes are looked into for others they may hold
+    /// ([`together`]), as [`Held`] is.
+    static TOGETHER_MIN: Opt<usize> = Opt::size("together:min", Held::MIN, "contents of at least this are looked into for others they hold");
+}
 
-/// Samples of FSB5 banks of at least this many bytes tell banks that hold each other: a bank and
-/// its patches share many samples of tens of KiB (of The Crew's, 44 of 46 MB of Vorbis samples
-/// repeated, against 27 MB of samples of 256 KiB or more).
-const FSB_SAMPLE_MIN: u64 = 16 << 10;
+aqr_common::zopt! {
+    /// Samples of FSB5 banks of at least this many bytes tell banks that hold each other: a bank and
+    /// its patches share many samples of tens of KiB (of The Crew's, 44 of 46 MB of Vorbis samples
+    /// repeated, against 27 MB of samples of 256 KiB or more).
+    static FSB_SAMPLE_MIN: Opt<usize> = Opt::size("together:fsb-sample-min", 16 << 10, "FSB5 samples of at least this tell banks that hold each other");
+}
 
-/// Members of ar, tar and cpio archives of at least this many bytes are looked for among the
-/// contents ([`together`]): the files of a tar archive are mostly small.
-const MEMBER_MIN: u64 = 4 << 10;
+aqr_common::zopt! {
+    /// Members of ar, tar and cpio archives of at least this many bytes are looked for among the
+    /// contents ([`together`]): the files of a tar archive are mostly small.
+    static MEMBER_MIN: Opt<usize> = Opt::size("together:member-min", 4 << 10, "ar, tar and cpio members of at least this are looked for among the contents");
+}
 
-/// Slices shorter than this are not shared with others ([`Formula::share_slices`]): what they
-/// share is found by compressing them solid, or not at all where they are apart (a tar
-/// archive's members of a kind, and the same files of other kinds, apart from it).
-pub(crate) const SLICE_MIN: usize = 1 << 10;
+aqr_common::zopt! {
+    /// Slices shorter than this are not shared with others ([`Formula::share_slices`]): what they
+    /// share is found by compressing them solid, or not at all where they are apart (a tar
+    /// archive's members of a kind, and the same files of other kinds, apart from it).
+    pub(crate) static SLICE_MIN: Opt<usize> =
+        Opt::size("slice-min", 1 << 10, "slices shorter than this are not shared with others");
+}
 
-/// Pieces of the starts of more distinct contents than this tell nothing of which are alike
-/// ([`together`]).
-const CHUNK_COMMON: usize = 8;
+aqr_common::zopt! {
+    /// Pieces of the starts of more distinct contents than this tell nothing of which are alike
+    /// ([`together`]).
+    static CHUNK_COMMON: Opt<usize> = Opt::value("together:chunk-common", 8, "pieces of the starts of more distinct contents than this tell nothing");
+}
 
-/// Two to this many contents of the same start (its first bytes) are taken for one file; more
-/// have a header in common ([`together`]).
-const SAME_HEADS: usize = 8;
+aqr_common::zopt! {
+    /// Two to this many contents of the same start (its first bytes) are taken for one file; more
+    /// have a header in common ([`together`]).
+    static SAME_HEADS: Opt<usize> = Opt::value("together:same-heads", 8, "two to this many contents of the same start are one file");
+}
 
-/// Contents of at least this many bytes of the same bytes as others are put in one batch
-/// ([`together`]): one smaller costs little made again in a segment of its own.
-const SAME_MIN: u64 = 64 << 10;
+aqr_common::zopt! {
+    /// Contents of at least this many bytes of the same bytes as others are put in one batch
+    /// ([`together`]): one smaller costs little made again in a segment of its own.
+    static SAME_MIN: Opt<usize> = Opt::size("together:same-min", 64 << 10, "contents of the same bytes as others, of at least this, share a batch");
+}
 
-/// The most bytes of contents put in one batch for holding each other ([`together`]).
-const TOGETHER_MAX: u64 = 2 << 30;
+aqr_common::zopt! {
+    /// The most bytes of contents put in one batch for holding each other ([`together`]).
+    static TOGETHER_MAX: Opt<usize> = Opt::size("together:max", 2 << 30, "the most bytes of contents put in one batch for holding each other");
+}
+
+aqr_common::zopt! {
+    /// The start of a content that [`together`] reads.
+    static HEAD: Opt<usize> = Opt::size("together:head", 64 << 10, "the start of each content that is read to tell those that hold each other");
+    /// The end of a content that [`together`] reads (a ZIP archive's central directory, mostly).
+    static TAIL: Opt<usize> = Opt::size("together:tail", 1 << 20, "the end of each content that is read to tell its entries");
+}
 
 /// For each content of `src`, the first of those that may hold each other (where the archive
 /// stores what they share once, [`Formula::share_slices`], only within a batch): a ZIP archive,
@@ -1338,11 +1390,13 @@ fn together<S: Source + ?Sized>(
     notes: &Notes,
 ) -> io::Result<(Vec<usize>, HashSet<usize>, Vec<usize>)> {
     let _s = aqr_common::trace::span("probe");
-    const HEAD: u64 = 64 << 10;
-    // (the end of a ZIP archive holding its central directory, mostly)
-    const TAIL: u64 = 1 << 20;
+    let (head_len, tail_len) = (HEAD.get() as u64, TAIL.get() as u64);
     let n = src.len();
-    let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
+    let (together_min, together_max, member_min) =
+        (TOGETHER_MIN.get() as u64, TOGETHER_MAX.get() as u64, MEMBER_MIN.get() as u64);
+    let (fsb_sample_min, same_min) = (FSB_SAMPLE_MIN.get() as u64, SAME_MIN.get() as u64);
+    let (chunk_common, same_heads) = (CHUNK_COMMON.get(), SAME_HEADS.get());
+    let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= together_min).collect();
     notes.send(Note::More(large.len() as u64));
     // of each: the hash of its start and those of its start's pieces, the CRC-32 and size of
     // the entries it holds, and whether it only bundles files (whose members are known once it
@@ -1350,11 +1404,13 @@ fn together<S: Source + ?Sized>(
     type Looked = (u64, Vec<u64>, Vec<(u32, u64)>, bool, bool);
     let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<Looked> {
         let (c, size) = (large[i], src.size(large[i]));
-        let head = src.read_range(c, 0..HEAD)?;
+        let head = src.read_range(c, 0..head_len)?;
         // (what is not taken at this level holds nothing)
         let format = detect(&head).filter(|&f| crate::format_on(f, opt));
         let held = match format {
-            Some(detect::Format::Zip) => aqr_zip::zip::entry_sums(&src.read_range(c, size.saturating_sub(TAIL)..size)?),
+            Some(detect::Format::Zip) => {
+                aqr_zip::zip::entry_sums(&src.read_range(c, size.saturating_sub(tail_len)..size)?)
+            }
             // (its header and the packed stream of an encoded one: at its end, mostly)
             Some(detect::Format::SevenZip) => aqr_7z::formula::entry_sums(&mut |r| {
                 src.read_range(c, r.clone()).ok().filter(|d| d.len() as u64 == r.end - r.start)
@@ -1374,24 +1430,24 @@ fn together<S: Source + ?Sized>(
                 }
             }
             // a git loose object (inflated whole where its header tells a large object)
-            Some(detect::Format::Zlib) if size <= TOGETHER_MAX => {
-                crate::flate::git_loose_sum(&head, || src.read(c).ok(), TOGETHER_MIN).into_iter().collect()
+            Some(detect::Format::Zlib) if size <= together_max => {
+                crate::flate::git_loose_sum(&head, || src.read(c).ok(), together_min).into_iter().collect()
             }
             _ => Vec::new(),
         };
-        let mut held: Vec<(u32, u64)> = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
-        if format == Some(detect::Format::Lzma) && size <= TOGETHER_MAX {
+        let mut held: Vec<(u32, u64)> = held.into_iter().filter(|e| e.1 >= together_min).collect();
+        if format == Some(detect::Format::Lzma) && size <= together_max {
             held.extend(stream_sums(aqr_lzma::formula::data(&src.read(c)?).as_deref()));
         }
-        if format == Some(detect::Format::Xz) && size <= TOGETHER_MAX {
+        if format == Some(detect::Format::Xz) && size <= together_max {
             held.extend(stream_sums(aqr_lzma::formula::data_xz(&src.read(c)?).as_deref()));
         }
         // (a Zstandard file's frames, which the files they hold are taken from: `crate::zst`)
-        if opt.recompresses() && aqr_zstd::starts(&head) && size <= TOGETHER_MAX {
+        if opt.recompresses() && aqr_zstd::starts(&head) && size <= together_max {
             held.extend(stream_sums(crate::zst::content(&src.read(c)?, crate::zst::bound(opt)).as_deref()));
         }
         // (an NSIS installer's stored files: tarballs of the files installed, mostly)
-        if format == Some(detect::Format::Pe) && size <= TOGETHER_MAX {
+        if format == Some(detect::Format::Pe) && size <= together_max {
             let at = crate::extent::pe_overlay(&head).filter(|&at| at < size);
             let first = at.map(|at| src.read_range(c, at..at + crate::nsis::FIRST_HEADER as u64)).transpose()?;
             if first.is_some_and(|h| crate::nsis::data_len(&h).is_some()) {
@@ -1401,8 +1457,8 @@ fn together<S: Source + ?Sized>(
             }
         }
         // (banks sharing samples: a bank and its patches)
-        if format == Some(detect::Format::Fsb5) && size <= TOGETHER_MAX {
-            held.extend(aqr_fsb::fsb5::sample_sums(&src.read(c)?, FSB_SAMPLE_MIN));
+        if format == Some(detect::Format::Fsb5) && size <= together_max {
+            held.extend(aqr_fsb::fsb5::sample_sums(&src.read(c)?, fsb_sample_min));
         }
         let bundle = format.is_some_and(detect::Format::is_bundle);
         notes.send(Note::Looked);
@@ -1419,7 +1475,7 @@ fn together<S: Source + ?Sized>(
     }
     let mut join = |a: usize, b: usize| {
         let (a, b) = (root(&mut parent, a), root(&mut parent, b));
-        if a != b && bytes[a].saturating_add(bytes[b]) <= TOGETHER_MAX {
+        if a != b && bytes[a].saturating_add(bytes[b]) <= together_max {
             let (a, b) = (a.min(b), a.max(b));
             parent[b] = a;
             bytes[a] += bytes[b];
@@ -1441,7 +1497,7 @@ fn together<S: Source + ?Sized>(
             exes.push(c);
         }
         // (one past what a batch may hold is not put with others)
-        if bundle && src.size(c) <= TOGETHER_MAX {
+        if bundle && src.size(c) <= together_max {
             entries = member_sums(&src.read(c)?, opt.threads);
         }
         heads.entry(head).or_default().push(c);
@@ -1450,18 +1506,18 @@ fn together<S: Source + ?Sized>(
         entries.into_iter().for_each(|e| by_entry.entry(e).or_default().push(c));
     }
     // (of those that may be a member)
-    for c in (0..n).filter(|&c| src.size(c) >= MEMBER_MIN) {
+    for c in (0..n).filter(|&c| src.size(c) >= member_min) {
         sizes.entry(src.size(c)).or_default().push(c);
     }
-    for cs in heads.values().filter(|cs| (2..=SAME_HEADS).contains(&cs.len())) {
+    for cs in heads.values().filter(|cs| (2..=same_heads).contains(&cs.len())) {
         cs.iter().for_each(|&c| join(cs[0], c));
     }
     // and by pieces of their starts, two or more in common ([`probe::chunks`]: the same start
     // but for some bytes, or shifted), but those that many files have (a common header, the
     // same stub), which tell little
     let mut common: HashMap<(usize, usize), u32> = HashMap::new();
-    for cs in by_chunk.values().filter(|cs| (2..=CHUNK_COMMON * 8).contains(&cs.len())) {
-        if cs.iter().map(|c| same[c]).collect::<HashSet<_>>().len() > CHUNK_COMMON {
+    for cs in by_chunk.values().filter(|cs| (2..=chunk_common * 8).contains(&cs.len())) {
+        if cs.iter().map(|c| same[c]).collect::<HashSet<_>>().len() > chunk_common {
             continue;
         }
         for (i, &a) in cs.iter().enumerate() {
@@ -1521,8 +1577,8 @@ fn together<S: Source + ?Sized>(
     // [`SAME_MIN`] bytes) that others have, hashed whole; but those of a start that 2 to 8 have,
     // joined by it already
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
-    for c in (0..n).filter(|&c| src.size(c) >= SAME_MIN) {
-        if same.get(&c).is_some_and(|s| (2..=SAME_HEADS).contains(&heads[&s.1].len())) {
+    for c in (0..n).filter(|&c| src.size(c) >= same_min) {
+        if same.get(&c).is_some_and(|s| (2..=same_heads).contains(&heads[&s.1].len())) {
             continue;
         }
         by_size.entry(src.size(c)).or_default().push(c);
@@ -1604,7 +1660,9 @@ fn windowed<S: Source + ?Sized>(src: &S, c: usize) -> impl FnMut(Range<u64>) -> 
 pub(crate) fn stream_sums(data: Option<&[u8]>) -> Vec<(u32, u64)> {
     match data {
         Some(data) if detect(data).is_some_and(detect::Format::is_bundle) => member_sums(data, 1),
-        Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(aqr_common::crc32::hash(data), data.len() as u64)],
+        Some(data) if data.len() as u64 >= MEMBER_MIN.get() as u64 => {
+            vec![(aqr_common::crc32::hash(data), data.len() as u64)]
+        }
         _ => Vec::new(),
     }
 }
@@ -1612,8 +1670,8 @@ pub(crate) fn stream_sums(data: Option<&[u8]>) -> Vec<(u32, u64)> {
 /// The CRC-32 and size of the files' contents in ar, tar, cpio or asar archive or disk image `d`,
 /// those of at least [`MEMBER_MIN`] bytes.
 fn member_sums(d: &[u8], threads: usize) -> Vec<(u32, u64)> {
-    let bodies: Vec<&[u8]> =
-        member_spans(d).into_iter().filter(|s| s.len() as u64 >= MEMBER_MIN).map(|s| &d[s]).collect();
+    let min = MEMBER_MIN.get();
+    let bodies: Vec<&[u8]> = member_spans(d).into_iter().filter(|s| s.len() >= min).map(|s| &d[s]).collect();
     aqr_common::pool::par_map(bodies.len(), threads, |i| (aqr_common::crc32::hash(bodies[i]), bodies[i].len() as u64))
 }
 
@@ -1695,9 +1753,11 @@ struct Made {
     bad: Vec<usize>,
 }
 
-/// Text of the files of a batch shorter than this in all is coded with dictionaries of each
-/// text's own: one of them all would cost more than it saves.
-const WORDS_MIN: usize = 256 << 10;
+aqr_common::zopt! {
+    /// Text of the files of a batch shorter than this in all is coded with dictionaries of each
+    /// text's own: one of them all would cost more than it saves.
+    static WORDS_MIN: Opt<usize> = Opt::size("words:min", 256 << 10, "text shorter in all than this is coded with dictionaries of each text");
+}
 
 /// The dictionary of the text of a batch ([`Cx::words`]): of the files that are text (at least
 /// [`aqr_wrt::formula::MIN_LEN`] bytes, but those kept raw and OBJ files, which aqr-obj takes),
@@ -1710,7 +1770,7 @@ fn words(regions: &[&[u8]], files: &[File], raw: &HashSet<usize>, opt: &Options)
         .filter(|k| !raw.contains(k) && aqr_wrt::formula::starts(regions[*k]) && !aqr_obj::formula::starts(regions[*k]))
         .map(|k| regions[k])
         .collect();
-    if texts.iter().map(|t| t.len()).sum::<usize>() < WORDS_MIN {
+    if texts.iter().map(|t| t.len()).sum::<usize>() < WORDS_MIN.get() {
         return None;
     }
     aqr_wrt::formula::Shared::of(&texts, opt.threads)
@@ -1801,7 +1861,7 @@ fn analyze(
     }
     // (what the files hold of each other, by what they are taken for: a file and the same in
     // an archive, both kept as they are; files none of which is recompressed too)
-    f.share_slices(SLICE_MIN);
+    f.share_slices(SLICE_MIN.get());
     // (a text formula kept that none took)
     cx.once = Default::default();
     let deferred: Vec<_> = cx.deferred.borrow_mut().drain(..).collect();
@@ -1834,7 +1894,7 @@ fn analyze_plain(i: usize, files: &[File], data: Vec<Bytes>, opt: &Options, note
     let mut f = Formula::default();
     let slices = files.iter().zip(data).map(|(file, d)| f.push_as("raw", file.kind, d)).collect();
     f.root = Node::Concat(slices);
-    f.share_slices(SLICE_MIN);
+    f.share_slices(SLICE_MIN.get());
     notes.send(Note::Analyzed(i));
     let mut enc = crate::encoder(opt);
     enc.share_modules();
@@ -1920,8 +1980,9 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
 
     // the streams of a class together, within a block each; but those that do not compress,
     // which would gain nothing and only make a file read alone read more
+    let merge_probe = MERGE_PROBE.get();
     let probed: Vec<usize> = (0..f.streams.len())
-        .filter(|&s| f.streams[s].kind != Kind::Compressed && f.streams[s].data.len() >= MERGE_PROBE)
+        .filter(|&s| f.streams[s].kind != Kind::Compressed && f.streams[s].data.len() >= merge_probe)
         .collect();
     let ds: Vec<&[u8]> = probed.iter().map(|&s| &f.streams[s].data[..]).collect();
     let compresses = {

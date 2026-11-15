@@ -67,6 +67,23 @@ pub struct Times {
     pub rows: u64,
 }
 
+aqr_common::zopt_namespace!("pak", "inferring the directories of pak files (aqr-infer-pak)");
+
+aqr_common::zopt! {
+    /// Tables of a file tested, by default ([`Options::keep`]).
+    static KEEP: Opt<usize> = Opt::value("pak:keep", 16, "tables of a pak file tested");
+    /// Tables of one region of a file tested, by default ([`Options::per`]).
+    static PER: Opt<usize> = Opt::value("pak:per", 4, "tables of one region of a pak file tested");
+    /// Candidates of each kind a table's best is chosen among, by default ([`Options::tries`]).
+    static TRIES: Opt<usize> = Opt::value("pak:tries", 16, "candidates of each kind a pak table's best is chosen among");
+    /// Tells on standard error what each table gave, and the steps below [`infer`] that take no
+    /// [`Options`] ([`tables::find`], [`template::verify`]) what they do.
+    pub static VERBOSE: Opt<bool> = Opt::flag("pak:verbose", false, "tell on standard error what each table of a pak file gave");
+    /// Share of the target from its first member on, and of the whole, the members must fill:
+    /// fields shifted down (offsets and sizes both divided by 2^j) tile too, but only a part.
+    static COVER: Opt<f64> = Opt::value("pak:cover", 0.9, "share of a target its members must fill");
+}
+
 pub struct Options {
     /// Tables of a file tested, and for one region of it.
     pub keep: usize,
@@ -82,18 +99,15 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            keep: 16,
-            per: 4,
-            tries: 16,
-            verbose: false,
+            keep: KEEP.get(),
+            per: PER.get(),
+            tries: TRIES.get(),
+            verbose: VERBOSE.get(),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         }
     }
 }
 
-/// Share of the target from its first member on, and of the whole, the members must fill:
-/// fields shifted down (offsets and sizes both divided by 2^j) tile too, but only a part.
-const COVER: f64 = 0.9;
 const SAMPLE: usize = 24;
 
 /// The values of a row's 16-, 32- and 64-bit fields (a decoded size must be among them for
@@ -253,6 +267,7 @@ struct Tested {
 
 /// The directories of a family.
 pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
+    let (cover_min, evidence) = (COVER.get(), EVIDENCE.get());
     let mut times = Times::default();
     let t0 = Instant::now();
     let mut tables: Vec<(usize, Table)> = Vec::new();
@@ -329,14 +344,14 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
                 }
                 let fill = filled(&ms);
                 let first = ms.iter().map(|m| m.offset).min().unwrap();
-                if (fill as f64) < COVER * (l - first) as f64 || fill < l / 2 {
+                if (fill as f64) < cover_min * (l - first) as f64 || fill < l / 2 {
                     continue;
                 }
                 // in a target the table is not in, the members start near its start: a
                 // table's rooms fill any target as long, from where its offsets begin
                 // (Slime Rancher's `level3`, a Unity file, its objects' rows taken for its
                 // `level3.resS` from 2.7 MB on)
-                if !(tg.is_file() && tg.file == owner) && first > tiling::SLACK.max(l / 64) {
+                if !(tg.is_file() && tg.file == owner) && first > (tiling::SLACK.get() as u64).max(l / 64) {
                     continue;
                 }
                 let idx: Vec<usize> = if ms.len() <= SAMPLE {
@@ -381,7 +396,7 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
             if opt.verbose {
                 eprintln!("      best {:.0} bits, {} members", best.ev, best.members.len());
             }
-            if best.ev < EVIDENCE {
+            if best.ev < evidence {
                 continue;
             }
             // the same directory by another view of its table: its members nearly the same
@@ -411,7 +426,7 @@ pub fn infer(files: &[File], opt: &Options) -> (Vec<Directory>, Times) {
             let mut decoded = None;
             let name = format!("{}~decoded", tg.name);
             if coded * 10 >= best.codecs.len() * 9
-                && cover > COVER
+                && cover > cover_min
                 && tg.is_file()
                 && !targets.iter().chain(&new_targets).any(|x| x.name == name)
             {

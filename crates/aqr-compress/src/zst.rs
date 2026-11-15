@@ -8,8 +8,14 @@ use std::ops::Range;
 
 use aqr_formula::{Formula, Node};
 
-/// The most bytes of content decompressed of a file of frames, which is held as it is looked at.
-const CONTENT_MAX: u64 = 2 << 30;
+aqr_common::zopt! {
+    /// The most bytes of content decompressed of a file of frames, which is held as it is looked at.
+    static CONTENT_MAX: Opt<usize> = Opt::size(
+        "zst:content-max",
+        2 << 30,
+        "most bytes of content decompressed of a zstd file, to share with the files of its batch",
+    );
+}
 
 /// The most bytes of content of a frame taken from ([`share`]): the bound of an application
 /// ([`crate::Options::application_bound`]), as a decoder makes a patch's output whole.
@@ -26,7 +32,7 @@ fn frames(d: &[u8], bound: u64) -> Option<aqr_zstd::Frames> {
 /// The content of the frames of `d`, a Zstandard file, where they decompress ([`CONTENT_MAX`]
 /// bytes at most) and some may be taken from ([`frames`]).
 pub(crate) fn content(d: &[u8], bound: u64) -> Option<Vec<u8>> {
-    frames(d, bound).and_then(|fr| aqr_zstd::decode(d, &fr, CONTENT_MAX)).map(|(c, _)| c)
+    frames(d, bound).and_then(|fr| aqr_zstd::decode(d, &fr, CONTENT_MAX.get() as u64)).map(|(c, _)| c)
 }
 
 /// Takes the files of `f` (its root's parts, each all of a stream of its own; of `files`' sizes
@@ -62,7 +68,7 @@ pub(crate) fn share(f: &mut Formula, files: &[(usize, u128)], bound: u64) {
         let s = streams[k].expect("a stream");
         let d = &f.streams[s].data[..];
         let Some(fr) = frames(d, bound) else { continue };
-        let Some((content, lens)) = aqr_zstd::decode(d, &fr, CONTENT_MAX) else { continue };
+        let Some((content, lens)) = aqr_zstd::decode(d, &fr, CONTENT_MAX.get() as u64) else { continue };
         // the pieces of the content that files are: the whole, or a member; within frames of
         // the bound
         let ends: Vec<u64> = lens

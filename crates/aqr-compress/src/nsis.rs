@@ -53,8 +53,14 @@ pub(crate) fn in_pe(d: &[u8]) -> Option<Vec<Range<usize>>> {
     stored(d, usize::try_from(crate::extent::pe_overlay(d)?).ok()?)
 }
 
-/// Stored blocks shorter than this are left with the rest of the image.
-pub(crate) const MIN_BLOCK: usize = 4 << 10;
+aqr_common::zopt_namespace!("nsis", "NSIS installers (aqr-compress)");
+
+aqr_common::zopt! {
+    /// Stored blocks shorter than this are left with the rest of the image.
+    pub(crate) static MIN_BLOCK: Opt<usize> = Opt::size("nsis:min-block", 4 << 10, "stored blocks shorter than this are left with the rest of the image");
+    /// The most bytes a block is decoded to for [`sums`].
+    static DATA_MAX: Opt<usize> = Opt::size("nsis:data-max", 1 << 30, "the most bytes an NSIS block is decoded to, to tell what it holds");
+}
 
 /// The format a stored block is taken as, if any: those that detect at its start.
 pub(crate) fn format(b: &[u8]) -> Option<Format> {
@@ -65,13 +71,14 @@ pub(crate) fn format(b: &[u8]) -> Option<Format> {
 /// of each, and of what it holds as `archive::together` takes those of files: the members of
 /// a tarball (gzip, bzip2, `.lzma` or `.xz`, or none), the entries of a ZIP archive.
 pub(crate) fn sums(d: &[u8], blocks: &[Range<usize>], threads: usize) -> Vec<(u32, u64)> {
-    let blocks: Vec<&[u8]> = blocks.iter().map(|b| &d[b.clone()]).filter(|b| b.len() >= MIN_BLOCK).collect();
+    let (min_block, data_max) = (MIN_BLOCK.get(), DATA_MAX.get());
+    let blocks: Vec<&[u8]> = blocks.iter().map(|b| &d[b.clone()]).filter(|b| b.len() >= min_block).collect();
     let each = aqr_common::pool::par_map(blocks.len(), threads, |i| {
         let b = blocks[i];
         let mut sums = vec![(aqr_common::crc32::hash(b), b.len() as u64)];
         let data: Option<Cow<[u8]>> = match format(b) {
-            Some(Format::Gzip) => crate::flate::gunzip(b, DATA_MAX).map(Cow::Owned),
-            Some(Format::Bzip2) => aqr_bz2::stream::decode(b, true, DATA_MAX).ok().map(|s| Cow::Owned(s.data)),
+            Some(Format::Gzip) => crate::flate::gunzip(b, data_max).map(Cow::Owned),
+            Some(Format::Bzip2) => aqr_bz2::stream::decode(b, true, data_max).ok().map(|s| Cow::Owned(s.data)),
             Some(Format::Lzma) => aqr_lzma::formula::data(b).map(Cow::Owned),
             Some(Format::Xz) => aqr_lzma::formula::data_xz(b).map(Cow::Owned),
             Some(Format::Zip) => {
@@ -86,9 +93,6 @@ pub(crate) fn sums(d: &[u8], blocks: &[Range<usize>], threads: usize) -> Vec<(u3
     });
     each.into_iter().flatten().collect()
 }
-
-/// The most bytes a block is decoded to for [`sums`].
-const DATA_MAX: usize = 1 << 30;
 
 #[cfg(test)]
 mod tests {

@@ -59,15 +59,23 @@ impl Records for Memo {
     }
 
     fn learn(&self, key: u128, outputs: &[Ch]) {
-        if outputs.iter().map(Ch::len).sum::<u64>() >= LARGE_OUTPUT {
+        if outputs.iter().map(Ch::len).sum::<u64>() >= LARGE_OUTPUT.get() as u64 {
             LARGE.lock().unwrap().insert(key, outputs.to_vec());
         }
     }
 }
 
-/// Bytes of the outputs of an application at least for its record to be kept for every archive
-/// and batch after it ([`LARGE`]).
-const LARGE_OUTPUT: u64 = 1 << 20;
+aqr_common::zopt_namespace!("verify", "verifying the batches (aqr-compress)");
+
+aqr_common::zopt! {
+    /// Bytes of the outputs of an application at least for its record to be kept for every archive
+    /// and batch after it ([`LARGE`]).
+    static LARGE_OUTPUT: Opt<usize> = Opt::size("verify:large-output", 1 << 20, "outputs of at least this many bytes keep their record for later batches");
+    /// Bytes of an input of an application applied as a part module at most for it to be held, for
+    /// the plan of the memory to read it (the records and the index of a module, say): the data of
+    /// such an application is far longer.
+    static HOLD: Opt<usize> = Opt::size("verify:hold", 256 << 20, "inputs of a part module up to this many bytes are held for its plan");
+}
 
 /// The hashes of the outputs of the applications of large outputs recorded so far in the process,
 /// by [`key`]: the formula of a file evaluated once though it is in several (`enwik9` and the
@@ -109,9 +117,10 @@ impl Modules for Recording {
     fn apply_part(&self, a: &Apply, inputs: &mut [&mut dyn PartIn], output: &mut dyn PartOut) -> Result<()> {
         // (the inputs and the output hashed as they go by, none held but the short inputs, which
         // the plan of the memory may read: the hashes are the same as of the bytes whole)
+        let hold = HOLD.get() as u64;
         let mut tees: Vec<InTee> = inputs
             .iter_mut()
-            .map(|i| InTee { held: (i.len() <= HOLD).then(Vec::new), inner: &mut **i, ch: Ch::EMPTY, done: 0 })
+            .map(|i| InTee { held: (i.len() <= hold).then(Vec::new), inner: &mut **i, ch: Ch::EMPTY, done: 0 })
             .collect();
         let mut out = OutTee { inner: output, ch: Ch::EMPTY };
         {
@@ -149,11 +158,6 @@ impl Modules for Recording {
         Ok(outs)
     }
 }
-
-/// Bytes of an input of an application applied as a part module at most for it to be held, for
-/// the plan of the memory to read it (the records and the index of a module, say): the data of
-/// such an application is far longer.
-const HOLD: u64 = 256 << 20;
 
 /// An input of a part module hashed as it is pulled, and held if it is short ([`HOLD`]).
 struct InTee<'a> {
@@ -396,7 +400,7 @@ impl Prevalidator {
             let pieces = aqr_common::pool::par_map(s.sizes.len(), threads.max(1), |k| Ch::of(&data[at[k]..at[k + 1]]));
             let whole = pieces.iter().fold(Ch::EMPTY, |w, &c| w.cat(c));
             let key = split_key(whole, &s.sizes);
-            if len >= LARGE_OUTPUT {
+            if len >= LARGE_OUTPUT.get() as u64 {
                 LARGE.lock().unwrap().insert(key, pieces.clone());
             }
             self.memo.lock().unwrap().0.insert(key, Record { outputs: pieces, file: None });
@@ -447,7 +451,7 @@ fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
         let seen = seen.into_inner().unwrap();
         let mut large = LARGE.lock().unwrap();
         for (k, r) in &seen {
-            if r.outputs.iter().map(Ch::len).sum::<u64>() >= LARGE_OUTPUT {
+            if r.outputs.iter().map(Ch::len).sum::<u64>() >= LARGE_OUTPUT.get() as u64 {
                 large.insert(*k, r.outputs.clone());
             }
         }
