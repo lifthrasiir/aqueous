@@ -209,6 +209,7 @@ preset_fast = "빠르게"
 preset_smallest = "최소 크기"
 preset_archival = "장기 보관"
 preset_zip = "공유용 ZIP"
+preset_sfx = "자동 압축 해제 (.exe)"
 preset_custom = "사용자 지정"
 
 level_store = "0 · 저장만"

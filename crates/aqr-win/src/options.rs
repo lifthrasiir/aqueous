@@ -76,8 +76,9 @@ fn level_name(l: i32) -> String {
         l => l.to_string(),
     }
 }
-const FORMATS: [(&str, &str); 16] = [
+const FORMATS: [(&str, &str); 17] = [
     ("aqr", "Aqueous (.aqr)"),
+    ("sfx", "Aqueous + SFX (.exe)"),
     ("zip", "ZIP"),
     ("7z", "7z"),
     ("alz", "ALZ"),
@@ -94,15 +95,22 @@ const FORMATS: [(&str, &str); 16] = [
     ("lzma", "lzma"),
     ("zst", "zst"),
 ];
-const PRESET_COUNT: usize = 5;
+const PRESET_COUNT: usize = 6;
 fn presets() -> [&'static str; PRESET_COUNT] {
-    [t::preset_balanced(), t::preset_fast(), t::preset_smallest(), t::preset_archival(), t::preset_zip()]
+    [
+        t::preset_balanced(),
+        t::preset_fast(),
+        t::preset_smallest(),
+        t::preset_archival(),
+        t::preset_zip(),
+        t::preset_sfx(),
+    ]
 }
 
 /// The levels of a format: lowest, highest and default; none where it has no level (tar).
 fn levels(format: &str) -> Option<(i32, i32, i32)> {
     match format {
-        "aqr" => Some((0, 9, 5)),
+        "aqr" | "sfx" => Some((0, 9, 5)),
         "7z" => Some((0, 9, 6)),
         "zip" | "alz" | "egg" | "tar.gz" | "gz" | "tar.xz" | "tar.lzma" | "xz" | "lzma" => Some((0, 9, 6)),
         "tar.bz2" | "bz2" => Some((1, 9, 9)),
@@ -174,6 +182,7 @@ impl Opts {
             2 => (o.level, o.dict, o.batch, o.block, o.depth) = (9, true, 5, 6, 5),
             3 => (o.level, o.archival, o.atomic) = (8, true, true),
             4 => (o.format, o.level) = ("zip", 6),
+            5 => o.format = "sfx",
             _ => {}
         }
         o
@@ -186,8 +195,26 @@ impl Opts {
             && (self.archival, self.atomic, self.zstd_scale) == (p.archival, p.atomic, p.zstd_scale)
     }
 
+    /// Whether an Aqueous archive is made (by itself or in a self-extracting program).
     fn aqr(&self) -> bool {
-        self.format == "aqr"
+        matches!(self.format, "aqr" | "sfx")
+    }
+
+    fn sfx(&self) -> bool {
+        self.format == "sfx"
+    }
+
+    /// The settings made to fit the format: a self-extracting program is not made with a
+    /// passphrase (it does not ask for one), mirrors, a journal or appended to (`aqr`'s
+    /// `--format sfx` turns them away).
+    fn fit(&mut self) {
+        if self.sfx() {
+            (self.encrypt, self.archival) = (false, false);
+            self.journal.clear();
+            if self.mode >= 2 {
+                self.mode = 0;
+            }
+        }
     }
 
     /// How many settings differ from the defaults, by section.
@@ -216,7 +243,7 @@ impl Opts {
         }
         let mut a: Vec<String> = vec!["-c".into()];
         let aqr = self.aqr();
-        if !aqr {
+        if self.format != "aqr" {
             two(&mut a, "--format", self.format);
         }
         if let Some((_, _, def)) = levels(self.format) {
@@ -439,7 +466,7 @@ struct App {
 impl App {
     /// The name of the archive made.
     fn out_name(&self) -> String {
-        format!("{}.{}", self.stem, self.o.format)
+        format!("{}.{}", self.stem, if self.o.sfx() { "exe" } else { self.o.format })
     }
 
     /// What the line under the names of the inputs tells: where they go and, as `aqr` finds
@@ -1137,6 +1164,10 @@ fn refresh(a: &mut App) {
         for &h in &a.aqr_only {
             EnableWindow(h, aqr as i32);
         }
+        // what a self-extracting program does not take ([`Opts::fit`])
+        for id in [ENCRYPT, ARCHIVAL, JOURNAL] {
+            EnableWindow(c(id), (!o.sfx() && (aqr || id != ARCHIVAL)) as i32);
+        }
         EnableWindow(c(ZL), (aqr && o.zstd_scale) as i32);
         EnableWindow(c(ZL + VALUE), (aqr && o.zstd_scale) as i32);
         ShowWindow(c(WARN), if aqr && !o.check && o.rm { SW_SHOW } else { SW_HIDE });
@@ -1248,6 +1279,7 @@ fn changed(a: &mut App, id: i32, code: u32) {
             _ => return,
         }
     }
+    a.o.fit();
     refresh(a);
 }
 
@@ -1505,5 +1537,24 @@ fn wheel(msg: &mut MSG, main: HWND, pane: HWND) -> bool {
             SendMessageW(pane, WM_MOUSEWHEEL, msg.wParam, msg.lParam);
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sfx_args() {
+        let mut o = Opts::preset(5, &[]);
+        (o.encrypt, o.archival, o.journal, o.mode) = (true, true, "v1".into(), 2);
+        o.fit();
+        assert!(o.same(&Opts::preset(5, &[])));
+        o.batch = 4;
+        let args = o.args("a.exe", &["x".into()]);
+        assert_eq!(args, ["-c", "--format", "sfx", "-B", BATCH[4], "-o", "a.exe", "--", "x"]);
+        // the same settings in an archive alone
+        o.format = "aqr";
+        assert_eq!(o.args("a.aqr", &["x".into()]), ["-c", "-B", BATCH[4], "-o", "a.aqr", "--", "x"]);
     }
 }

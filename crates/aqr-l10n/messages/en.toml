@@ -235,6 +235,7 @@ preset_fast = "Fast"
 preset_smallest = "Smallest"
 preset_archival = "Archival"
 preset_zip = "ZIP for sharing"
+preset_sfx = "Self-extracting (.exe)"
 preset_custom = "Custom"
 
 level_store = "0 · Store"
