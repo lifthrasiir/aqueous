@@ -19,11 +19,14 @@ pub const FRAME_MAX: usize = 4 << 20;
 const BUF: usize = 16 << 10;
 
 /// The memory plan of `div3-recons` as a part module ([`aqr_api::stack`]): what [`decode_part`] takes beyond
-/// its initial memory (`initial` bytes) at most, whatever the inputs: the model, the frame, and four buffers.
-pub fn plan(initial: u64) -> u64 {
+/// its initial memory (`initial` bytes) at most, whatever the inputs: the model and the frame (not where the frames are
+/// `kept`), and four buffers.
+pub fn plan(initial: u64, kept: bool) -> u64 {
     let mut m = aqr_api::stack::Sim::new(initial);
-    m.take(Model::bytes(MODEL_BITS));
-    m.take(FRAME_MAX as u64 + 8);
+    if !kept {
+        m.take(Model::bytes(MODEL_BITS));
+        m.take(FRAME_MAX as u64 + 8);
+    }
     m.take(BUF as u64);
     m.take(BUF as u64);
     m.take(BUF as u64);
@@ -31,8 +34,9 @@ pub fn plan(initial: u64) -> u64 {
     m.plan()
 }
 
-/// The file of `size` bytes from the coded frames, the skeleton and the layout (see `FORMAT.md`), put to `out`.
-/// The chunks are decoded one after the other here; `formula::decode` does it at once natively.
+/// The file of `size` bytes from the coded frames (or those kept, where `width` and `height` are 0), the skeleton,
+/// the layout and the audio (see `FORMAT.md`), put to `out`. The chunks are decoded one after the other here;
+/// `formula::decode` does it at once natively.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     coded: &mut dyn Pull,
@@ -45,14 +49,18 @@ pub fn run(
     height: usize,
     size: u64,
 ) -> Result<()> {
+    let kept = width == 0 && height == 0;
     // (in the order of the plan)
-    let mut codec = Codec::new(width, height);
-    let mut frame: Vec<u8> = Vec::with_capacity(FRAME_MAX + 8);
+    let mut codec = (!kept).then(|| Codec::new(width, height));
+    let mut frame: Vec<u8> = Vec::with_capacity(if kept { 0 } else { FRAME_MAX + 8 });
     let cod = RefCell::new(Reader::new(coded, BUF));
     let mut skel = Reader::new(skeleton, BUF);
     let mut lay = Reader::new(layout, BUF);
     let mut aud = Reader::new(audio, BUF);
-    let chunks = chunks::read(&mut cod.borrow_mut(), coded_len).map_err(|_| corrupt())?;
+    let chunks = match kept {
+        true => Vec::new(),
+        false => chunks::read(&mut cod.borrow_mut(), coded_len).map_err(|_| corrupt())?,
+    };
     let mut chunks = chunks.into_iter();
     let mut dec: Option<Decoder<&RefCell<Reader>>> = None;
     let mut left = 0u64;
@@ -70,6 +78,13 @@ pub fn run(
             if n as usize > FRAME_MAX {
                 return Err(corrupt());
             }
+            let Some(codec) = codec.as_mut() else {
+                if !cod.borrow_mut().copy(n, out) {
+                    return Err(Error("input of another length"));
+                }
+                written += gap + n;
+                continue;
+            };
             if left == 0 {
                 if dec.is_some() {
                     cod.borrow_mut().skip_rest();
@@ -91,10 +106,16 @@ pub fn run(
     if !skel.copy(size - written, out) {
         return Err(Error("input of another length"));
     }
-    if left != 0 || chunks.next().is_some() || skel.next().is_some() || aud.next().is_some() {
+    let coded_left = kept && cod.borrow_mut().next().is_some();
+    if left != 0 || chunks.next().is_some() || coded_left || skel.next().is_some() || aud.next().is_some() {
         return Err(Error("input of another length"));
     }
     Ok(())
+}
+
+/// Whether `params` are of frames kept as they are (width and height 0).
+pub fn kept(params: &[u8]) -> bool {
+    params == [0; 4]
 }
 
 pub(crate) fn dims(params: &[u8]) -> Result<(usize, usize)> {

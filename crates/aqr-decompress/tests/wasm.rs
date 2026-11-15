@@ -3089,10 +3089,11 @@ fn snappy_plan_holds() {
     assert!(seen >= 10, "{seen} streams");
 }
 
-/// div3-recons lays its memory out as a stack, its limit its plan (constant: the model, a frame at most, three
-/// buffers): an AVI of synthetic DivX 3 frames (the syntax is walked on whatever the bits give, and the frames that do
-/// not parse are kept as they are), rebuilt as WebAssembly within the limit of the plan alone, the working memory that
-/// of the plan to the page, for a short file and a longer one.
+/// div3-recons lays its memory out as a stack, its limit its plan (constant: the model, a frame at most, four
+/// buffers; the buffers alone where the frames are kept): an AVI of synthetic DivX 3 frames (the syntax is walked on
+/// whatever the bits give, and the frames that do not parse are stored as they are), rebuilt as WebAssembly within the
+/// limit of the plan alone, the working memory that of the plan to the page, for a short file and a longer one; and the
+/// same frames as XviD's, kept.
 #[test]
 fn div3_plan_holds() {
     fn chunk(id: &[u8; 4], d: &[u8]) -> Vec<u8> {
@@ -3111,8 +3112,9 @@ fn div3_plan_holds() {
         v.extend_from_slice(body);
         v
     }
-    let avi = |frames: &[Vec<u8>]| {
-        let mut strh = b"vidsdiv3".to_vec();
+    let avi = |handler: &[u8; 4], frames: &[Vec<u8>]| {
+        let mut strh = b"vids".to_vec();
+        strh.extend_from_slice(handler);
         strh.extend_from_slice(&[0; 48]);
         let mut strf = Vec::new();
         for v in [40u32, 64, 48, 0x0018_0001, u32::from_le_bytes(*b"DIV3")] {
@@ -3149,9 +3151,13 @@ fn div3_plan_holds() {
         let frames: Vec<Vec<u8>> = (0..n)
             .map(|i| if i % 5 == 4 { aqr_common::rng::noise(97 + i) } else { p_skip(2 + (i % 3) as u8) })
             .collect();
-        let file = avi(&frames);
-        let f = aqr_div3::formula::encode_unchecked(&file, 1).expect("a formula");
-        plan_holds(&format!("div3 {n}"), f, &file);
+        for handler in [b"div3", b"XVID"] {
+            let file = avi(handler, &frames);
+            let f = aqr_div3::formula::encode_unchecked(&file, 1).expect("a formula");
+            let Node::Apply(a) = &f.root else { panic!("an application") };
+            assert_eq!(aqr_div3::module::kept(&a.params), handler == b"XVID");
+            plan_holds(&format!("div3 {} {n}", String::from_utf8_lossy(handler)), f, &file);
+        }
     }
 }
 

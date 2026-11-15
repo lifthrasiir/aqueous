@@ -1,9 +1,10 @@
 # aqr-div3 format
 
-aqr-div3 turns an AVI file with a DivX 3 video stream into four streams: the video frames **coded**
-by a context model (§4–§5), the **skeleton** (every byte of the file that is no frame and no audio
-chunk), the **layout** (where the frames and audio chunks are) and the **audio** (the audio
-chunks' bytes, as they are or by [aqr-ac3](../aqr-ac3/FORMAT.md)). The module `div3-recons`
+aqr-div3 turns an AVI file into four streams: the video frames, **coded** by a context model
+(§4–§5) where the video is DivX 3, else **kept** as they are (§5.1); the **skeleton** (every byte
+of the file that is no frame and no audio chunk), the **layout** (where the frames and audio
+chunks are) and the **audio** (the audio chunks' bytes, as they are or by
+[aqr-ac3](../aqr-ac3/FORMAT.md) or [aqr-mp3](../aqr-mp3/FORMAT.md)). The module `div3-recons`
 (§7) puts the file together again bit for bit.
 
 The coding of elements (the range coder, probabilities and hashing) is that of
@@ -38,11 +39,12 @@ The file is `RIFF` `AVI ` chunks (little-endian 32-bit sizes, chunks padded to e
 encoder looks at
 
 - the header list `hdrl`: its `strl` lists in order, each with `strh` and `strf`. The **video
-  stream** is the first one whose `strh` type is `vids` and whose handler (fourcc, ASCII
-  case-insensitive) is `div3`, `mp43`, `div4`, `div5` or `div6`; its width and height are from
-  `strf` (the bitmap header: width at offset 4, height at offset 8, as signed 32-bit; width in
-  1..=4096, height non-zero, at most 4096 in magnitude). The **audio stream** is the first
-  with type `auds`; it is **AC-3** if its `strf`'s format tag is `0x2000`.
+  stream** is the first one whose `strh` type is `vids`. It is **DivX 3** if its handler
+  (fourcc, ASCII case-insensitive) is `div3`, `mp43`, `div4`, `div5` or `div6`; its width and
+  height are then from `strf` (the bitmap header: width at offset 4, height at offset 8, as
+  signed 32-bit; width in 1..=4096, height non-zero, at most 4096 in magnitude). The **audio
+  stream** is the first with type `auds`; it is **AC-3** if its `strf`'s format tag is
+  `0x2000`, **MP3** if it is `0x55`.
 - the data list `movi` (found by its fourcc), walked chunk by chunk from there; `LIST` chunks are
   entered. A chunk `NNdc` whose `NN` is the video stream's index (two decimal digits) is a
   **frame**; `NNwb` of the audio stream is an **audio chunk**; the walk ends at the first chunk
@@ -209,6 +211,12 @@ their initial value) and a new range coder, by §4. The sum of `frames` is the n
 in the layout. The encoder starts a new chunk at the first frame after the bytes of its frames
 have reached 16 MiB (§8).
 
+### 5.1 Kept frames
+
+Where the params are of width and height 0 (§7), the stream `div3/kept` takes the place of
+`div3/frames`: the frames' bytes as they are, one after the other in file order, with no table
+and no coding. Its length is the sum of the frames' lengths in the layout.
+
 ## 6. Layout, skeleton and audio
 
 - `div3/layout`: for each item in file order two varints: `gap`, the bytes of the skeleton before
@@ -217,19 +225,22 @@ have reached 16 MiB (§8).
 - `div3/skeleton`: the bytes of the file that are in no item.
 - audio: the audio chunks' bytes one after the other; as the class `div3/audio`, or, for AC-3
   audio that comes to less than 97% by aqr-ac3, the output of the module `ac3-recons` on the class
-  `ac3/frames` with the length of the audio.
+  `ac3/frames` with the length of the audio, or, for MP3 audio that comes to less by aqr-mp3, the
+  output of the module `mp3-recons` on its streams (aqr-mp3's formula of the audio, whole).
 
 The file is rebuilt by taking, for each layout entry, `gap` bytes from the skeleton, then the item:
-a frame decoded (§4) in order, or `length` bytes of the audio; then the rest of the skeleton.
+a frame decoded (§4) in order (or `length` bytes of the kept frames, §5.1), or `length` bytes of
+the audio; then the rest of the skeleton.
 The total must be the file's length.
 
 ## 7. Formula module
 
-`div3-recons` version 2: params the width and the height as two little-endian 16-bit numbers;
-inputs, in order, the coded frames (§5), the skeleton, the layout and the audio (§6); the
-output length the file's. It is a **part module**: the inputs are read and the output written in
-windows of 4 pages, and the working memory is constant: the model (16 MiB), the frame buffer
-(`FRAME_MAX` + 8), and four buffers of 16 KiB; plus the stack. `aqr_div3::module::plan` is the
+`div3-recons` version 3: params the width and the height as two little-endian 16-bit numbers,
+both 0 where the frames are kept (§5.1); inputs, in order, the coded frames (§5) or the kept
+ones, the skeleton, the layout and the audio (§6); the output length the file's. (Version 2 had
+no kept frames.) It is a **part module**: the inputs are read and the output written in
+windows of 4 pages, and the working memory is constant: the model (16 MiB) and the frame buffer
+(`FRAME_MAX` + 8), not where the frames are kept, and four buffers of 16 KiB; plus the stack. `aqr_div3::module::plan` is the
 plan the formula declares (`div3_plan_holds` tests it to the page).
 
 In Wasm the chunks are decoded one after another, the model reset in place at each start. Natively
@@ -237,14 +248,19 @@ In Wasm the chunks are decoded one after another, the model reset in place at ea
 the result is the same.
 
 A stream is corrupt when: a count or length is cut, a frame is longer than `FRAME_MAX`, the chunks
-do not account for the frames of the layout, the output would be longer than the length, a frame
-does not decode to its length, or bytes are left in an input.
+do not account for the frames of the layout (or the kept frames are not as long as the
+layout's), the output would be longer than the length, a frame does not decode to its length, or
+bytes are left in an input.
 
 ## 8. The encoder *(informative)*
 
-`formula::encode(file, threads)` returns a formula only if the file has a video stream of DivX 3,
-at least 4 frames, none longer than `FRAME_MAX`, and the coded frames come to at most 97% of the
-frames' bytes. The frames are cut into chunks of about 16 MiB (a chunk is closed before the first frame
+`formula::encode(file, threads)` returns a formula only if the file has a video stream with at
+least 4 frames, none longer than `FRAME_MAX`, and either the video is DivX 3 and the coded frames
+come to at most 97% of the frames' bytes, or the audio comes to less by its module (AC-3: under
+97%; MP3: aqr-mp3's own rule). Where the frames do not come to 97%, or are not DivX 3, they are
+kept: an AVI of MPEG-4 Part 2 video (DivX 4 and later, XviD) with MP3 audio is taken for its
+audio, and its audio is then the same stream as that of another AVI of the same sound, held once
+in an archive of both. The frames are cut into chunks of about 16 MiB (a chunk is closed before the first frame
 once the frames in it have reached 16 MiB), and the chunks coded on `threads` threads. Cutting
 the stream in chunks costs 0.12% of the video; the coded model is not shared.
 

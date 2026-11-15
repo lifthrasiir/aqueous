@@ -167,8 +167,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "div3-recons",
-        version: 2,
-        sha512_256: hex("d719e53c14d17fe57c32dcfb145b2cca976e69572a4727aa3e9714e388531c3e"),
+        version: 3,
+        sha512_256: hex("d2c3baf856662ca52cbe404df409f02af5435b5f671d6334636f52a7e3aacf62"),
         block: include_bytes!("../wasm/div3-recons.block"),
     },
     Known {

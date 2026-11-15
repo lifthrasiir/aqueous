@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use aqr_common::varint;
 use aqr_walk::chunks;
 
-use crate::module::{FRAME_MAX, dims};
+use crate::module::{FRAME_MAX, dims, kept};
 use crate::{Codec, Decoder, Error, Result, SliceSource, corrupt};
 
 /// The module `div3-recons` on whole inputs, natively: the chunks of frames decoded at once on `threads`, then the file
@@ -22,9 +22,13 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         let tag = varint::get(layout, &mut pos).map_err(|_| corrupt())?;
         items.push((gap as usize, (tag >> 1) as usize, tag & 1 == 1));
     }
-    // the table of chunks
+    // the table of chunks (the frames kept: one chunk of them all, as they are)
     let mut pos = 0;
-    let table = chunks::read_at(coded, &mut pos).map_err(|_| corrupt())?;
+    let kept = kept(params);
+    let table = match kept {
+        true => Vec::new(),
+        false => chunks::read_at(coded, &mut pos).map_err(|_| corrupt())?,
+    };
     // the frames' lengths of each chunk, and where its coded bytes are
     let mut lens = items.iter().filter(|i| !i.2).map(|i| i.1);
     let mut chunks = Vec::new();
@@ -39,7 +43,12 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         chunks.push((at..end, l));
         at = end;
     }
-    if lens.next().is_some() || at != coded.len() {
+    let rest = lens.collect::<Vec<_>>();
+    if kept {
+        if rest.iter().any(|&n| n > FRAME_MAX) || rest.iter().sum::<usize>() != coded.len() {
+            return Err(corrupt());
+        }
+    } else if !rest.is_empty() || at != coded.len() {
         return Err(corrupt());
     }
     let decoded = aqr_common::pool::par_map(chunks.len(), threads, |i| -> Result<Vec<u8>> {
@@ -55,7 +64,9 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         Ok(out)
     });
     let decoded = decoded.into_iter().collect::<Result<Vec<_>>>()?;
-    let mut out = Vec::with_capacity(skeleton.len() + audio.len() + decoded.iter().map(Vec::len).sum::<usize>());
+    // the frames' bytes in order: the chunks decoded, or those kept
+    let decoded: Vec<&[u8]> = if kept { alloc::vec![coded] } else { decoded.iter().map(|d| &d[..]).collect() };
+    let mut out = Vec::with_capacity(skeleton.len() + audio.len() + decoded.iter().map(|d| d.len()).sum::<usize>());
     let (mut sk, mut au) = (0usize, 0usize);
     let (mut chunk, mut cpos) = (0usize, 0usize);
     for &(gap, n, is_audio) in &items {

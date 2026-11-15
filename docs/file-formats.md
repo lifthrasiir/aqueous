@@ -270,7 +270,7 @@ bytes. Gains are estimates unless a tool is cited.
 | Theora | old web video, game cutscenes | VP3: DCT tokens with Huffman tables set in the stream header | as Vorbis | the Vorbis work |
 | CineForm, ProRes RAW | high-end cameras, post-production | wavelets, or a RAW-specific coding | after ProRes (aqr-prores) | |
 | MPEG-TS, M2TS | AVCHD camcorders, DVB and IPTV recordings, Blu-ray | 188-byte packets (192 in M2TS) of PES around the streams; null packets padding a constant rate | the packets' headers (continuity counters, PCR, M2TS's timestamps) derived and the null packets dropped; the streams handed to their recompressors (MPEG-2, MP2, AC-3; H.264 CABAC is Hard) | aqr-mkv's handling |
-| AVI, ASF (WMV, WMA), FLV | old downloads, camera and screen recordings, Flash video | chunks or packets interleaved, with an index (`idx1`, ASF's simple index, FLV's keyframes) | the indexes derived from the chunks; the streams handed to their recompressors (Motion JPEG, MP3, VC-1, WMA); aqr-div3 takes AVIs of DivX 3 (the skeleton and layout kept apart) | aqr-div3's layout, aqr-mkv's handling |
+| AVI, ASF (WMV, WMA), FLV | old downloads, camera and screen recordings, Flash video | chunks or packets interleaved, with an index (`idx1`, ASF's simple index, FLV's keyframes) | the indexes derived from the chunks; the streams handed to their recompressors (Motion JPEG, MP3, VC-1, WMA); aqr-div3 takes AVIs of DivX 3 (the skeleton and layout kept apart), and of other video with AC-3 or MP3 audio (the frames kept, the audio to aqr-ac3 or aqr-mp3) | aqr-div3's layout, aqr-mkv's handling |
 
 ### Audio
 

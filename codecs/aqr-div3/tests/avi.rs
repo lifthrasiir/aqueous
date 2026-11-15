@@ -21,21 +21,26 @@ fn list(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
 }
 
 fn avi(w: u32, h: u32, frames: &[&[u8]], sound: &[&[u8]]) -> Vec<u8> {
-    let mut strh = b"vidsdiv3".to_vec();
+    avi_of(b"div3", 0x2000, w, h, frames, sound)
+}
+
+/// An AVI of video `handler` and audio of format `tag`, the audio chunks before the frames in turn.
+fn avi_of(handler: &[u8; 4], tag: u16, w: u32, h: u32, frames: &[&[u8]], sound: &[&[u8]]) -> Vec<u8> {
+    let mut strh = b"vids".to_vec();
+    strh.extend_from_slice(handler);
     strh.extend_from_slice(&[0; 48]);
     let mut strf = Vec::new();
     for v in [40u32, w, h, 0x0018_0001, u32::from_le_bytes(*b"DIV3")] {
         strf.extend_from_slice(&v.to_le_bytes());
     }
     strf.extend_from_slice(&[0; 20]);
-    let mut strh2 = b"audsac3 ".to_vec();
+    let mut strh2 = b"auds\0\0\0\0".to_vec();
     strh2.extend_from_slice(&[0; 48]);
     let mut hdrl = chunk(b"avih", &[0; 56]);
     hdrl.extend(list(b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)].concat()));
     hdrl.extend(list(
         b"strl",
-        &[chunk(b"strh", &strh2), chunk(b"strf", &[0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])]
-            .concat(),
+        &[chunk(b"strh", &strh2), chunk(b"strf", &[&tag.to_le_bytes()[..], &[0; 16]].concat())].concat(),
     ));
     let mut movi = Vec::new();
     for (i, f) in frames.iter().enumerate() {
@@ -98,4 +103,35 @@ fn roundtrip_real_frames() {
         audio,
         size("ac3/frames") + size("div3/audio")
     );
+}
+
+/// An AVI whose video is not DivX 3 (noise as XviD frames, kept as they are) and whose audio is MP3 (a fixture of
+/// aqr-mp3 cut into chunks across its frames): taken for the audio alone, rebuilt by the module from the kept frames
+/// and mp3-recons's output, the audio coded smaller.
+#[test]
+fn kept_video_mp3_audio() {
+    let mp3 = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../aqr-mp3/tests/data/cbr128.mp3")).unwrap();
+    let noise: Vec<Vec<u8>> = (0..40).map(|i| aqr_common::rng::noise(500 + 37 * i)).collect();
+    let frames: Vec<&[u8]> = noise.iter().map(|f| &f[..]).collect();
+    let sound: Vec<&[u8]> = mp3.chunks(mp3.len().div_ceil(frames.len())).collect();
+    let file = avi_of(b"XVID", 0x55, 320, 240, &frames, &sound);
+    let f = formula::encode(&file, 2).expect("a formula for the audio");
+    let modules = |a: &aqr_formula::Apply, i: &[&[u8]], serial: bool| -> aqr_formula::Result<Vec<u8>> {
+        let err = |e: &dyn std::fmt::Display| aqr_formula::Error(e.to_string());
+        match a.module.name {
+            "div3-recons" if serial => aqr_div3::module::decode_serial(&a.params, i, a.len).map_err(|e| err(&e)),
+            "div3-recons" => formula::decode(&a.params, i, a.len, 2).map_err(|e| err(&e)),
+            "mp3-recons" => {
+                let r: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+                aqr_mp3::formula::decode(&a.params, &r, i, a.len, 2).map_err(|e| err(&e))
+            }
+            m => panic!("{m}"),
+        }
+    };
+    assert!(f.eval(&|a: &aqr_formula::Apply, i: &[&[u8]]| modules(a, i, false)).unwrap() == file);
+    assert!(f.eval(&|a: &aqr_formula::Apply, i: &[&[u8]]| modules(a, i, true)).unwrap() == file, "serial differs");
+    let size = |c: &str| f.streams.iter().filter(|s| s.class.starts_with(c)).map(|s| s.data.len()).sum::<usize>();
+    assert_eq!(size("div3/kept"), noise.iter().map(Vec::len).sum::<usize>());
+    assert_eq!(size("div3/frames") + size("div3/audio"), 0);
+    assert!(size("mp3/") < mp3.len(), "{} -> {}", mp3.len(), size("mp3/"));
 }
