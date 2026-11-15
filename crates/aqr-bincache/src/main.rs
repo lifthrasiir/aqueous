@@ -17,6 +17,9 @@
 //! The binaries are in `crates/aqr-bincache/cache/` (gitignored), the `AQR_BINCACHE_MAX` (16)
 //! least recently used ones kept. Debug info is not kept: on macOS it stays in `target/`'s object
 //! files, so backtraces of a kept binary lose their lines once `target/` is cleaned.
+//!
+//! Before the binary of the working copy is looked up, the Wasm modules and the SFX pack are made
+//! again where what they are made of changed ([`modules`]: build.sh and pack.sh run as needed).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -25,6 +28,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod modules;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -63,6 +68,7 @@ fn target() -> PathBuf {
 
 /// The kept binary of the working copy, built and kept first if there is none.
 fn current() -> Result<PathBuf> {
+    modules::refresh()?;
     let manifests = manifests()?;
     let env = environment()?;
     let blobs = blobs(manifests.values().flatten())?;
@@ -88,9 +94,8 @@ fn build(env: &str) -> Result<PathBuf> {
     }
     let exe = target().join(format!("aqr{EXE}"));
     let paths = dep_info(&target().join("aqr.d"))?;
-    let changed =
-        paths.iter().find(|p| fs::metadata(root().join(p)).and_then(|m| m.modified()).is_ok_and(|t| t >= start));
-    if let Some(path) = changed {
+    let built = target().parent().map_or_else(target, Path::to_path_buf);
+    if let Some(path) = changed_since(&paths, &root(), &built, start) {
         eprintln!("aqr-bincache: {path} changed during the build; running the binary without keeping it");
         return Ok(target());
     }
@@ -122,6 +127,17 @@ fn build(env: &str) -> Result<PathBuf> {
         eprintln!("aqr-bincache: {} not kept; running the binary without keeping it", dir.display());
         target()
     }))
+}
+
+/// The first of `paths` (relative to `root`, or absolute) modified since `start`, but those under
+/// `built` (the target directory): what the build made itself, such as a build script's files
+/// in its `OUT_DIR`, is no source changed during it.
+fn changed_since<'a>(paths: &'a BTreeSet<String>, root: &Path, built: &Path, start: SystemTime) -> Option<&'a String> {
+    paths
+        .iter()
+        .map(|p| (p, root.join(p)))
+        .filter(|(_, path)| !path.starts_with(built))
+        .find_map(|(p, path)| fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t >= start).then_some(p))
 }
 
 /// Moves the binary made in `tmp` to `dir` by `rename`, giving `dir`; tried again for a while
@@ -448,7 +464,7 @@ fn run(dir: &Path, args: &[OsString]) -> Result<ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{deps, keep};
+    use super::{changed_since, deps, keep};
     use std::cell::Cell;
     use std::fs;
     use std::io;
@@ -511,6 +527,26 @@ mod tests {
         assert_eq!(keep(&tmp, &dir, |from, to| fs::rename(from, to)), Some(dir.clone()));
         assert_eq!(fs::read_to_string(dir.join("info")).unwrap(), "theirs");
         assert!(!tmp.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A source written during the build is told; what the build wrote in the target directory
+    /// (a build script's `OUT_DIR`, as aqr's `sfx.pack`) is not.
+    #[test]
+    fn changed_sources_only() {
+        let root = scratch("changed");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("target/release/build/x/out")).unwrap();
+        let start = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+        fs::write(root.join("target/release/build/x/out/sfx.pack"), "made").unwrap();
+        let paths = ["src/lib.rs", "target/release/build/x/out/sfx.pack"].map(String::from).into_iter().collect();
+        let built = root.join("target");
+        assert_eq!(changed_since(&paths, &root, &built, start), None);
+        // (also as an absolute path, as dep-info names what is outside the root)
+        let abs = [root.join("target/release/build/x/out/sfx.pack").to_string_lossy().into_owned()].into();
+        assert_eq!(changed_since(&abs, &root, &built, start), None);
+        fs::write(root.join("src/lib.rs"), "edited").unwrap();
+        assert_eq!(changed_since(&paths, &root, &built, start).map(String::as_str), Some("src/lib.rs"));
         fs::remove_dir_all(&root).unwrap();
     }
 

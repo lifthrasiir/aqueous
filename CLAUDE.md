@@ -19,9 +19,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     the modules that have native blobs, after aqr-sfx-shim with those blobs (and the interpreter
     blob, if any module is in full) merged in. What it merges is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.sh` gathers and `build.rs` packs into the binary
-    (zstd, ~6 MB); rerun pack.sh after rebuilding modules, as each blob is used only for the hash
-    it was packed for. The release workflow runs pack.sh before building aqr.exe (without the
-    pack, aqr.exe runs no module as WebAssembly), then a smoke test of `--wasm` and of an SFX.
+    (zstd, ~6 MB); each blob is used only for the hash it was packed for, so `cargo aqr` runs
+    pack.sh again where the pack's modules are not those of known.rs (where there is a pack).
+    The release workflow runs pack.sh before building aqr.exe (without the pack, aqr.exe runs
+    no module as WebAssembly), then a smoke test of `--wasm` and of an SFX.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
@@ -153,7 +154,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 - **Build and run the release `aqr` only through `cargo aqr <args>…`** (crates/aqr-bincache),
   never `cargo build -p aqr`, `cargo run -p aqr` or `target/release/aqr` directly: it builds
   as needed and keeps each binary by a hash of its sources, so a rebuild for a source tree
-  already built is skipped and earlier binaries stay at hand.
+  already built is skipped and earlier binaries stay at hand. It also runs
+  `crates/aqr-modules/build.sh` (and pack.sh) first where what the modules are made of changed
+  (`src/modules.rs`; `AQR_BINCACHE_MODULES=0` skips it).
   `cargo aqr +` lists the kept binaries; `cargo aqr +<id> <args>…` runs an earlier one, e.g. as
   the "before" of a comparison.
 - Format with the `rustfmt.toml`s (width 120).
@@ -206,9 +209,10 @@ optimization picked by hash.
   `src/known.rs` (name, version, SHA-512/256) and the registry's table in `spec/index.bs`.
   Every host builds the same bytes: aqr-ld, as rustc's wrapper there, makes the crates' `-C
   metadata` (of their paths, with the host's separators, by Cargo) of no path (`src/metadata.rs`).
-- **After changing any code a module links, rerun `crates/aqr-modules/build.sh`** and commit
-  the results; a test in aqr-decompress catches stale ones. If you don't rebuild, say so in
-  the commit message.
+- **After changing any code a module links, commit the modules rebuilt**: `cargo aqr` runs
+  `crates/aqr-modules/build.sh` where that code changed and names the modules it changed
+  (run build.sh by hand otherwise); a test in aqr-decompress catches stale ones. If you don't
+  rebuild, say so in the commit message.
 - aqr-decompress: a known hash runs natively when the application's declared limits hold its
   plan (`needed_by`: the same function the encoder declares with), anything else in wasmtime.
 - Whole modules take their inputs at once; part modules (`entry! … windows(…)`, spec "Module

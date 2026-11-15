@@ -14,8 +14,8 @@
 # - pack.id, a digest of the files.
 #
 # The modules named are packed (all by default). It needs the nightly toolchain of the file
-# nightly-toolchain (AQR_NIGHTLY to use another) and build-std (as NOTLS does). Rerun it after
-# crates/aqr-modules/build.sh, then rebuild aqr (`cargo aqr`).
+# nightly-toolchain (AQR_NIGHTLY to use another) and build-std (as NOTLS does). `cargo aqr`
+# (aqr-bincache) runs it again where its modules.txt is not of the modules of known.rs.
 set -eu
 cd "$(dirname "$0")/../.."
 case $(uname -s) in
