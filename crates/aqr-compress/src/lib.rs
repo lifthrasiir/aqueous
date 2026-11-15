@@ -483,6 +483,10 @@ pub(crate) struct Undo {
     pub coded: Range<usize>,
     pub record: usize,
     pub kept: &'static str,
+    /// Kept beside the coded bytes whatever is made of its data, for the batch to choose
+    /// ([`Node::Either`], `choose`): a split that a probe turned down, taken still where that
+    /// may be ([`Cx::defers`]).
+    pub defer: bool,
 }
 
 /// Text coded once, for the files of an archive that other files of it hold as the contents of
@@ -1851,6 +1855,14 @@ fn undo(
             .is_some_and(|c| c.iter().any(|(n, m)| of(n, u.stream) && m.as_ref().is_some_and(|m| m.close.is_none())));
         let Some(data) = f.streams.get(u.stream).filter(|s| s.content && !s.data.is_lazy()) else { continue };
         let Some(coded) = d.get(u.coded.clone()) else { continue };
+        // (beside the coded bytes, whatever is made of the data: its children placed in it)
+        if u.defer {
+            let kept = f.push(u.kept, coded.to_vec());
+            if !wrap_apply(&mut f.root, u.stream, &kept, (0, coded.len())) {
+                f.streams.pop();
+            }
+            continue;
+        }
         if made || !undoes(coded.len(), u.record, &data.data, d, opt, cx) {
             continue;
         }
@@ -1873,6 +1885,22 @@ fn undo(
 fn undoes(coded: usize, record: usize, data: &[u8], within: &[u8], opt: &Options, cx: &Cx) -> bool {
     let held = || cx.held_by_others(data, within) as u8 as f64;
     !Probe::flat(opt.level).pays(&cx.enc, coded, || Some(record), data, held, Kind::Unknown)
+}
+
+/// Puts the application below `n` that takes a slice of `stream` among its inputs beside `kept`
+/// ([`Node::Either`]), of the `sizes` told. Whether there was one.
+fn wrap_apply(n: &mut Node, stream: usize, kept: &Node, sizes: (usize, usize)) -> bool {
+    match n {
+        Node::Apply(a) if a.inputs.iter().any(|i| matches!(i, &Node::Slice { stream: s, .. } if s == stream)) => {
+            let len = a.len;
+            let made = std::mem::replace(n, Node::Concat(Vec::new()));
+            *n = Node::Either(Box::new(aqr_formula::Either { kept: kept.clone(), made, len, sizes }));
+            true
+        }
+        Node::Apply(a) => a.inputs.iter_mut().any(|i| wrap_apply(i, stream, kept, sizes)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().any(|n| wrap_apply(n, stream, kept, sizes)),
+        _ => false,
+    }
 }
 
 /// Puts `with` in place of the application below `n` that takes a slice of `stream` among its
@@ -3147,12 +3175,10 @@ fn content_slices(
 fn place(n: &mut Node, f: &mut Formula, slices: &[usize], children: &mut impl Iterator<Item = Option<Placed>>) {
     match n {
         &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, children),
-        Node::Slice { .. }
-        | Node::Output { .. }
-        | Node::Patch(_)
-        | Node::ModuleBytes(..)
-        | Node::ResourceBytes(_)
-        | Node::Either(_) => {}
+        Node::Slice { .. } | Node::Output { .. } | Node::Patch(_) | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        // (a decoding kept beside its coded bytes, [`Undo::defer`]: its contents are in the
+        // formula made)
+        Node::Either(e) => place(&mut e.made, f, slices, children),
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, children)),
         Node::Apply(a) => a.inputs.iter_mut().for_each(|n| place(n, f, slices, children)),
     }

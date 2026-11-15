@@ -18,6 +18,8 @@ aqr_common::zopt! {
         Opt::value("defer:choose", "trial", "how a batch's alternatives are chosen").choices(&["trial", "made", "kept"]);
     /// The most bytes of a class's other streams put before an alternative's bytes of the class.
     static PREFIX: Opt<usize> = Opt::size("defer:prefix", 4 << 20, "bytes of the rest of a class put before an alternative's at most");
+    /// The most rounds of choosing, each after the others as the round before chose them.
+    static ROUNDS: Opt<usize> = Opt::value("defer:rounds", 4, "rounds of choosing the alternatives, each after the last's choices");
 }
 
 /// What the alternatives of a batch came to: how many, how many made, and the bytes the
@@ -55,39 +57,75 @@ pub(crate) fn choose(f: &mut Formula, enc: &Encoder) -> Chosen {
 type ByClass<'a> = HashMap<&'a str, Vec<&'a [u8]>>;
 
 /// Of `eithers` (in [`Formula::eithers`]' order: those within one before it), whether each is
-/// made: the deepest first, those of a depth on threads.
+/// made. Each is tried after what the others leave as they are chosen so far, the deepest first
+/// (those of a depth on threads): from all kept, again until nothing changes, at most
+/// [`ROUNDS`] times. (Counting the others' formulas as made from the start took one alike to a
+/// formula that was not kept in the end: WinUHA's Beta split, 137 KB larger.)
 fn trial(f: &Formula, eithers: &[(usize, &Either)], enc: &Encoder) -> Vec<bool> {
     let index: HashMap<*const Either, usize> = eithers.iter().enumerate().map(|(i, e)| (e.1 as *const _, i)).collect();
-    let mut made = vec![false; eithers.len()];
     let deepest = eithers.iter().map(|e| e.0).max().unwrap_or(0);
-    for depth in (0..=deepest).rev() {
-        let at: Vec<usize> = (0..eithers.len()).filter(|&i| eithers[i].0 == depth).collect();
-        // of each, both ways: its pieces of each class, and the prefixes of the rest of the
-        // classes; tried all at once
-        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let mut of: Vec<[Vec<usize>; 2]> = Vec::new();
-        for &i in &at {
-            let e = eithers[i].1;
-            let used = used_ranges(f, &e.kept, &e.made);
-            let mut sides: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
-            for (side, node) in [&e.kept, &e.made].into_iter().enumerate() {
-                let mut pieces = ByClass::new();
-                pieces_of(f, node, &index, &made, &mut pieces);
-                for (class, pieces) in pieces {
-                    sides[side].push(pairs.len());
-                    pairs.push((pieces.concat(), prefix(f, class, &used)));
+    let used: Vec<HashMap<usize, Vec<(usize, usize)>>> =
+        eithers.iter().map(|e| used_ranges(f, &e.1.kept, &e.1.made)).collect();
+    let mut made = vec![false; eithers.len()];
+    for _ in 0..ROUNDS.get() {
+        let live = live_streams(f, &index, &made);
+        let mut next = made.clone();
+        for depth in (0..=deepest).rev() {
+            let at: Vec<usize> = (0..eithers.len()).filter(|&i| eithers[i].0 == depth).collect();
+            // of each, both ways: its pieces of each class, and the prefixes of the rest of
+            // the classes; tried all at once
+            let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            let mut of: Vec<[Vec<usize>; 2]> = Vec::new();
+            for &i in &at {
+                let e = eithers[i].1;
+                let mut sides: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+                for (side, node) in [&e.kept, &e.made].into_iter().enumerate() {
+                    let mut pieces = ByClass::new();
+                    pieces_of(f, node, &index, &next, &mut pieces);
+                    for (class, pieces) in pieces {
+                        sides[side].push(pairs.len());
+                        pairs.push((pieces.concat(), prefix(f, class, &used[i], &live)));
+                    }
                 }
+                of.push(sides);
             }
-            of.push(sides);
+            let refs: Vec<(&[u8], &[u8])> = pairs.iter().map(|(d, p)| (&d[..], &p[..])).collect();
+            let lens = enc.len_after_each(&refs).expect("zstd");
+            for (k, &i) in at.iter().enumerate() {
+                let cost = |side: usize| of[k][side].iter().map(|&p| lens[p]).sum::<usize>();
+                next[i] = cost(1) < cost(0);
+            }
         }
-        let refs: Vec<(&[u8], &[u8])> = pairs.iter().map(|(d, p)| (&d[..], &p[..])).collect();
-        let lens = enc.len_after_each(&refs).expect("zstd");
-        for (k, &i) in at.iter().enumerate() {
-            let cost = |side: usize| of[k][side].iter().map(|&p| lens[p]).sum::<usize>();
-            made[i] = cost(1) < cost(0);
+        if next == made {
+            break;
         }
+        made = next;
     }
     made
+}
+
+/// The streams of `f` that a slice takes, the alternatives as `made` tells of them.
+fn live_streams(f: &Formula, index: &HashMap<*const Either, usize>, made: &[bool]) -> Vec<bool> {
+    fn walk(n: &Node, index: &HashMap<*const Either, usize>, made: &[bool], live: &mut [bool]) {
+        match n {
+            &Node::Slice { stream, .. } => {
+                if let Some(l) = live.get_mut(stream) {
+                    *l = true;
+                }
+            }
+            Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| walk(n, index, made, live)),
+            Node::Apply(a) => a.inputs.iter().for_each(|n| walk(n, index, made, live)),
+            Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| walk(n, index, made, live)),
+            Node::Either(e) => {
+                let take = index.get(&(&**e as *const Either)).is_some_and(|&i| made[i]);
+                walk(if take { &e.made } else { &e.kept }, index, made, live)
+            }
+            Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        }
+    }
+    let mut live = vec![false; f.streams.len()];
+    f.shared.iter().flat_map(|s| s.inputs()).chain([&f.root]).for_each(|n| walk(n, index, made, &mut live));
+    live
 }
 
 /// The bytes of node `n` of `f` by the class of their streams, the alternatives within it as
@@ -134,11 +172,12 @@ fn used_ranges(f: &Formula, kept: &Node, made: &Node) -> HashMap<usize, Vec<(usi
 }
 
 /// What comes before an alternative's bytes of `class` in the archive: the bytes of the other
-/// streams of the class (those nearest the alternative's first stream first, the nearest last),
-/// but those the alternative takes, up to [`PREFIX`] bytes.
-fn prefix(f: &Formula, class: &str, used: &HashMap<usize, Vec<(usize, usize)>>) -> Vec<u8> {
+/// streams of the class that are `live` (as the others are chosen; those nearest the
+/// alternative's first stream first, the nearest last), but those the alternative takes, up to
+/// [`PREFIX`] bytes.
+fn prefix(f: &Formula, class: &str, used: &HashMap<usize, Vec<(usize, usize)>>, live: &[bool]) -> Vec<u8> {
     let first = used.keys().copied().min().unwrap_or(0);
-    let mut streams: Vec<usize> = (0..f.streams.len()).filter(|&s| f.streams[s].class == class).collect();
+    let mut streams: Vec<usize> = (0..f.streams.len()).filter(|&s| live[s] && f.streams[s].class == class).collect();
     streams.sort_by_key(|&s| s.abs_diff(first));
     let mut room = PREFIX.get();
     let mut parts: Vec<Vec<u8>> = Vec::new();

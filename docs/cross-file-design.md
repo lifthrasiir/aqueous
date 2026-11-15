@@ -281,8 +281,21 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
      - WinUHA, -9: 16개 중 6개. 4,208,354 → 4,140,704 B. 모두 formula면 4,153,452 B.
      - `10gb/progs`: 30개 중 3개. 182,808,039 → 182,805,645 B, 34.3 → 35.5 s, 힙 최고치 1.51 → 1.50 GB.
      - `10gb/2011`: 대안이 없어 같다.
-     - 상한(판단을 모두 강제했을 때 4,016,994 / 3,889,466 B)까지 남은 몫은 두 가지다. 하나는 위쪽
-       파일의 sealing(대안을 남기지 못함)이고, 다른 하나는 probe의 거절(4.3.5)이다.
+     - 상한(판단을 모두 강제했을 때 4,016,994 / 3,889,466 B)까지의 몫을 처음에는 위쪽 파일의 sealing과
+       probe의 거절(4.3.5)로 보았다. 그런데 sealing은 파일 하나를 바로 아카이브할 때만 쓰인다. 배치의
+       파일은 대안을 남길 수 있고, 남은 몫은 아래에 적은 대로다.
+   - **반복 결정 (2026-11-15):** 다른 대안의 formula를 처음부터 "만든다"로 보면, 결국 원본으로 정해진
+     formula와의 일치를 이득으로 친다. 그래서 모두 원본에서 시작해, 그때까지의 결정으로 살아 있는
+     스트림만 prefix로 삼고 결정이 바뀌지 않을 때까지(`defer:rounds` 4회) 다시 고른다.
+     WinUHA -9: 4,140,704 → 4,134,996 B. 기본 레벨은 거의 같다(4,178,432 B).
+   - **probe가 거절한 Inno 분할 (4.3.5, `exe:inno-defer`, 기본 꺼짐):** 분할은 probe보다 먼저 계산되므로,
+     거절된 것도 `Undo::defer`로 코딩된 바이트 옆에 남겨 고르게 했다. 판정은 이것들을 다시
+     거절해서(Beta, RC1) 크기는 같고 시간만 0.31 → 0.49 s로 늘었다.
+   - **`-Z no-smaller`와의 차이:** 이 옵션은 probe도 끄고 모두 받는다. 그때가 4,016,994 B이고, 이득은
+     Beta(−161 KB)와 RC1(−93 KB)의 분할에서 나온다(2.0a는 +73 KB). 판정은 RC1의 분할을 formula 쪽
+     1,152 KB, 원본 쪽 1,131 KB로 본다. class별로 레벨 3 압축만 보는 시험은, 분할된 데이터 안이 더
+     깊이 재압축되는 것을 보지 못한다. 메우려면 formula 쪽을 실제 크기에 가깝게 재야 한다
+     (`Encoder::sizes_but`처럼 아카이브의 레벨로, 형제와 함께).
    `10gb/progs`, `10gb/2011`에서 크기, 시간, 힙 최고치를 잰다.
 4. **probe의 거절 (4.3.5)과 공유 지도 (4.2):** 3의 결과를 본 뒤 정한다.
 
@@ -348,6 +361,8 @@ probe(`inno_pays`, zlib의 `member`)가 미리 거절하면 formula를 만들지
 | `defer:share=N` | 2 | `Cx::defer_budget` | 한 문맥의 데이터 중 1/N까지 |
 | `defer:choose=trial\|made\|kept` | trial | choose.rs | made/kept는 측정용 강제(kept면 2단계와 같다) |
 | `defer:prefix=SIZE` | 4M | choose.rs `prefix` | 한 class의 나머지를 둘 prefix 한도 |
+| `defer:rounds=N` | 4 | choose.rs `trial` | 결정을 다시 하는 회수의 한도 |
+| `exe:[no-]inno-defer` | off | exe.rs `pe` | probe가 거절한 Inno 분할도 남겨 고르기 |
 
 측정에 쓴 강제는 upstream의 옵션으로 된다.
 

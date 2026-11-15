@@ -94,6 +94,11 @@ aqr_common::zopt! {
     /// Whether an Inno Setup installer's LZMA stream split is put back as it was where nothing is
     /// made of its data ([`crate::Undo`]).
     static INNO_UNDO: Opt<bool> = Opt::flag("exe:inno-undo", true, "put an Inno Setup LZMA stream back where nothing is made of its data");
+    /// Whether an Inno Setup installer's LZMA stream that the probe turns down is split still,
+    /// kept beside its coded bytes for the batch to choose ([`crate::Undo::defer`]). Off: the
+    /// batch's trial (`choose`) turns them down again (WinUHA 2.0's Beta and RC1), the time spent
+    /// (0.31 -> 0.49 s), though all taken they come to less (-Z no-smaller: 4.02 MB, not 4.18).
+    static INNO_DEFER: Opt<bool> = Opt::flag("exe:inno-defer", false, "keep a split the probe turns down beside its stream, for the batch to choose");
     /// Tables shorter than this are left with the rest.
     static MIN_TABLE: Opt<usize> = Opt::size("exe:min-table", 64, "tables shorter than this are left with the rest");
     /// Symbol tables shorter than this, with their string tables, are left with the rest: the
@@ -173,7 +178,15 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
         true => aqr_inno::split(d, opt.threads),
         false => Vec::new(),
     };
-    let inno: Vec<_> = inno.into_iter().filter(|p| inno_pays(p, d, opt, depth, cx)).collect();
+    // (those turned down kept beside their coded bytes still where that may be, for the batch to
+    // choose: [`crate::Undo::defer`]; the split is made already)
+    let defers = INNO_DEFER.get() && cx.defers.get();
+    let (mut inno, close): (Vec<_>, Vec<_>) = inno.into_iter().partition(|p| inno_pays(p, d, opt, depth, cx));
+    let close_at: HashSet<usize> = close.iter().filter(|_| defers).map(|p| p.range.start).collect();
+    if defers {
+        inno.extend(close);
+        inno.sort_by_key(|p| p.range.start);
+    }
     // its zlib streams (4.0's), each recompressed in turn as a zlib stream
     let zlib = match opt.recompresses() && INNO_ZLIB.get() {
         true => aqr_inno::zlib_streams(d, |s| crate::flate::zlib_deflate(s).map(|r| r.end + 4)),
@@ -196,9 +209,10 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
     sections.extend(zlib.iter().map(|r| (0, r.start, r.len(), Arch::InnoZlib)));
     sections.extend(inno.iter().enumerate().map(|(k, p)| (0, p.range.start, p.range.len(), Arch::Inno(k))));
     let f = filtered(d, "pe", sections, &[], &[], None, &[], inno)?;
-    if INNO_UNDO.get() {
-        cx.undo.borrow_mut().extend(inno_undos(&f));
-    }
+    let mut undos = inno_undos(&f);
+    undos.iter_mut().for_each(|u| u.defer = close_at.contains(&u.coded.start));
+    undos.retain(|u| u.defer || INNO_UNDO.get());
+    cx.undo.borrow_mut().extend(undos);
     Some(f)
 }
 
@@ -220,6 +234,7 @@ fn inno_undos(f: &Formula) -> Vec<crate::Undo> {
                 coded: at..at + len,
                 record: record.len() as usize,
                 kept: "pe/kept",
+                defer: false,
             });
         }
         at += len;
