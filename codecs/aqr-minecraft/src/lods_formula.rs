@@ -167,10 +167,26 @@ fn lods(
     let content_of = |r: &Row| contents(input, frames, &r.frames, 1);
     let mut states = States::default();
     {
-        let maps = aqr_common::pool::par_map(rows.len(), threads, |i| contents(input, frames, &[rows[i].frames[7]], 1));
-        for m in maps.iter().flatten() {
-            for r in dh::mapping(m).ok()? {
-                states.id(&m[r]);
+        // (each group's states, each once: not the mappings, which are some 2-5% of the contents)
+        const GROUP: usize = 256;
+        let groups = aqr_common::pool::par_map(rows.len().div_ceil(GROUP), threads, |g| {
+            let mut own = States::default();
+            let ok = rows[g * GROUP..(g * GROUP + GROUP).min(rows.len())].iter().all(|r| {
+                let m = contents(input, frames, &[r.frames[7]], 1).pop().unwrap_or_default();
+                dh::mapping(&m)
+                    .map(|rs| {
+                        rs.into_iter().for_each(|x| {
+                            own.id(&m[x]);
+                        })
+                    })
+                    .is_ok()
+            });
+            ok.then_some(own)
+        });
+        for own in groups {
+            let own = own?;
+            for i in 0..own.len() as u32 {
+                states.id(own.get(i));
             }
         }
     }

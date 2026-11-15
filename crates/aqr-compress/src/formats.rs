@@ -380,7 +380,7 @@ formats! {
         cost: 120,
     }
     Sqlite = "sqlite" {
-        recompressor: Pure(aqr_sqlite::formula::encode),
+        recompressor: PureWith(crate::sqlite),
         heap: 9.0,
         exts: &["sqlite", "sqlite3"],
         extent: extent::sqlite,

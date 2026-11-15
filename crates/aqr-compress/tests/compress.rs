@@ -1455,6 +1455,11 @@ fn distant_horizons_whole() {
     let f = roundtrip(&db, &all());
     let m = modules(&f);
     assert!(m.contains(&aqr_decompress::ZSTD_FRAMES.name) && m.contains(&aqr_decompress::DH_LODS.name), "{m:?}");
+    // named as SQLite's databases are (as in a directory, here a gzip member's name): the same,
+    // not aqr-sqlite's
+    let f = roundtrip(&gzip_named(&db, "DistantHorizons.sqlite"), &all());
+    let m = modules(&f);
+    assert!(m.contains(&aqr_decompress::DH_LODS.name) && !m.contains(&SQLITE.name), "{m:?}");
 }
 
 /// What recompressors know of their data refines what is made of it: the data of a gzip member

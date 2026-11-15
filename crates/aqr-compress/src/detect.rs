@@ -318,6 +318,16 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
 /// A SQLite database header: the magic string, a page size, and the fields that must have one
 /// value (the file format's versions 1 or 2, payload fractions 64, 32 and 32). SQLite's code
 /// holds the magic string too.
+/// The format of a file taken as `format` by its name, of its bytes `d`: a database named as
+/// SQLite's whose blobs are Zstandard frames is [`Format::SqliteZstd`] (which has no names of its
+/// own); any other `format` as it is.
+pub(crate) fn named(format: Format, d: &[u8]) -> Format {
+    match format {
+        Format::Sqlite if sqlite_zstd(d) => Format::SqliteZstd,
+        f => f,
+    }
+}
+
 /// A SQLite database (of [`sqlite_header`]) whose blobs are a quarter of the pages that the first
 /// 1024 pages walked of its b-trees are, at least, in Zstandard frames.
 fn sqlite_zstd(d: &[u8]) -> bool {

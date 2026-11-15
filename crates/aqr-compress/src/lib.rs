@@ -1292,6 +1292,7 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
             .or_else(|| recompress_as(Format::Sized, d, opt, depth, cx).map(Made::from))
             .or_else(|| records(d, opt, depth, cx)),
         Nest::As(format) => {
+            let format = detect::named(format, d);
             scan(d, Some(format), opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
         }
     }
@@ -2097,6 +2098,7 @@ fn within(d: &[u8], parts: &[Region], opt: &Options, depth: u32, cx: &Cx) -> Vec
             None => {}
             Some(Nest::As(format)) => {
                 let file = &d[r.clone()];
+                let format = detect::named(format, file);
                 let n = extent(format, file).filter(|&n| n > 0).unwrap_or(file.len());
                 match recompress_with(format, &file[..n], part.contents, opt, depth, cx) {
                     Some(f) => found.push((r.start, n, f)),
@@ -3051,6 +3053,16 @@ fn disk(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     Some(f)
 }
 
+/// The formula of a SQLite database ([`Format::Sqlite`], aqr-sqlite's), but of one longer than the
+/// bound of an application: `sqlite-recons` is a whole module, its plan more than the database it
+/// makes (some 5 times it), and that much heap is not taken to have it turned down then.
+fn sqlite(d: &[u8], p: &Pure) -> Option<Formula> {
+    if d.len() as u64 > memory::bound_of(p.opt.application_bound, aqr_decompress::SQLITE) {
+        return None;
+    }
+    aqr_sqlite::formula::encode(d, p.opt.threads)
+}
+
 /// The formula of a SQLite database whose blobs are Zstandard frames ([`Format::SqliteZstd`]):
 /// those that libzstd's emulation makes again at level 3, of aqr-zstd's `zstd-frames`.
 fn sqlite_zstd(d: &[u8], threads: usize) -> Option<Formula> {
@@ -3138,7 +3150,7 @@ fn pure_contents<'a>(n: &Node, f: &'a Formula, opt: &Options, out: &mut Vec<(For
         let (nest, d, at) = found[i];
         // (a scan takes the file it starts with as one of the format it starts like)
         let format = match nest {
-            Nest::As(format) => Some(format),
+            Nest::As(format) => Some(detect::named(format, d)),
             Nest::Scan => detect(d),
             _ => None,
         };
