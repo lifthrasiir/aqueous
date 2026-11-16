@@ -81,12 +81,12 @@ aqr_common::zopt! {
         Opt::size("unpack:7z-check", 64 << 20, "bytes of an encrypted 7z folder decoded to check a passphrase");
 }
 
-/// Whether `folder` has an AES coder.
 /// The sum of `sizes`, `None` where it overflows.
 fn total(sizes: &[u64]) -> Option<u64> {
     sizes.iter().try_fold(0u64, |a, &n| a.checked_add(n))
 }
 
+/// Whether `folder` has an AES coder.
 fn encrypted(folder: &Folder) -> bool {
     folder.coders.iter().any(|c| c.id == SEVENZ_AES_ID)
 }
@@ -276,8 +276,9 @@ impl<'d> Listing<'d> {
     }
 
     /// Whether `pass` decrypts the encrypted folders, taken for them where it does: as the
-    /// smallest of them decodes by it (where not too large to check). The passphrase of an
-    /// encrypted header is taken already.
+    /// smallest of them decodes by it, its files' CRC-32s checked (where not too large to check:
+    /// what a wrong one decrypts may well decode, a stored folder's always). The passphrase of
+    /// an encrypted header is taken already.
     pub fn unlock(&mut self, pass: &[u8]) -> bool {
         if self.pass.as_deref() == Some(pass) {
             return true;
@@ -288,7 +289,12 @@ impl<'d> Listing<'d> {
         let ok = match smallest {
             None => false,
             Some(f) if self.main.folders[f].size().is_some_and(|n| n <= CHECKED.get() as u64) => {
-                folder_data(self.d, &self.main, &self.packs, &self.spans, f, 1, Some(pass)).is_ok()
+                let before = self.pass.replace(pass.to_vec());
+                let ok = self.decode(f, 1).is_ok();
+                if !ok {
+                    self.pass = before;
+                }
+                return ok;
             }
             Some(_) => true,
         };
@@ -670,6 +676,20 @@ impl<'d> Listing<'d> {
                 return Ok(());
             }
             sink.step(Step::Started(f));
+            // (an encrypted folder of no CRC: what a wrong passphrase decrypts to, if it decodes,
+            // is written as its files, nothing telling it apart)
+            let first: usize = self.main.subs[..f].iter().map(Vec::len).sum();
+            let crc_of = |k: usize| self.main.sub_crcs.get(first + k).copied().flatten();
+            if encrypted(&self.main.folders[f])
+                && self.main.folders[f].crc.is_none()
+                && (0..u.files.len()).all(|k| crc_of(k).is_none())
+            {
+                for (k, (c, name)) in u.files.iter().enumerate() {
+                    if decodes(f, k) && c.is_some() {
+                        sink.note(&format!("{name}: encrypted, of no CRC: a wrong passphrase not told"));
+                    }
+                }
+            }
             let tick = |k: u64| {
                 let k = done.fetch_add(k, Relaxed) + k;
                 let p = done_packed.load(Relaxed);
@@ -687,9 +707,8 @@ impl<'d> Listing<'d> {
                     r.into_iter().collect::<Result<(), String>>().map_err(Error::Bad)
                 }
                 None => {
-                    let first: usize = self.main.subs[..f].iter().map(Vec::len).sum();
                     let each = |k: usize, d: &[u8]| {
-                        if self.main.sub_crcs.get(first + k).copied().flatten().is_some_and(|c| crc32::hash(d) != c) {
+                        if crc_of(k).is_some_and(|c| crc32::hash(d) != c) {
                             return Err(format!("{}: CRC mismatch", u.files[k].1));
                         }
                         match u.files[k].0 {
@@ -806,5 +825,23 @@ mod tests {
             assert_eq!(kept.keys().collect::<Vec<_>>(), [&c], "part {damaged} damaged");
             assert_eq!(kept[&c], good[&c], "part {damaged} damaged");
         }
+    }
+
+    /// An encrypted folder of no CRC (enc-stored.7z's, its files' CRCs taken off): a wrong
+    /// passphrase is taken, as nothing tells it, and its files are told as not checked.
+    #[test]
+    fn encrypted_of_no_crc_told() {
+        let d = std::fs::read(format!("{}/tests/data/enc-stored.7z", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut l = Listing::read(&d, None).unwrap().unwrap();
+        assert!(!l.unlock(b"wrong"));
+        l.main.sub_crcs.iter_mut().for_each(|c| *c = None);
+        assert!(l.main.folders.iter().all(|f| f.crc.is_none()));
+        assert!(l.unlock(b"wrong"));
+        let kept = Kept::default();
+        let done = l.unpack(4, &kept, None).unwrap();
+        assert_eq!(done.skipped, 0);
+        let notes = kept.1.into_inner().unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.iter().all(|n| n.contains("of no CRC")), "{notes:?}");
     }
 }

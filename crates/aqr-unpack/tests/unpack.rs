@@ -527,6 +527,8 @@ fn encrypted() {
         ("enc-aes256.zip", Format::Zip, "pass word"),
         ("enc.7z", Format::SevenZip, "päss wörd"),
         ("enc-headers.7z", Format::SevenZip, "päss wörd"),
+        // (stored: what a wrong passphrase decrypts decodes too, the files' CRCs telling it)
+        ("enc-stored.7z", Format::SevenZip, "päss wörd"),
     ] {
         let d = data(name);
         let (took, done, r) = unpack_with(f, &d, pass.as_bytes()).unwrap();

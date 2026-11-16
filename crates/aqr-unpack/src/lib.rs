@@ -311,8 +311,9 @@ pub(crate) mod testing {
 
     use super::{EntryNode, Select, Sink, Tree};
 
+    /// The contents given, and the notes told.
     #[derive(Default)]
-    pub struct Kept(pub Mutex<BTreeMap<usize, Vec<u8>>>);
+    pub struct Kept(pub Mutex<BTreeMap<usize, Vec<u8>>>, pub Mutex<Vec<String>>);
 
     impl Sink for Kept {
         fn entries(&self, _: &Tree, _: &[usize]) -> Result<(), String> {
@@ -324,7 +325,9 @@ pub(crate) mod testing {
             Ok(())
         }
 
-        fn note(&self, _: &str) {}
+        fn note(&self, what: &str) {
+            self.1.lock().unwrap().push(what.to_string());
+        }
     }
 
     /// The selection of the file of content `c` of `t`.

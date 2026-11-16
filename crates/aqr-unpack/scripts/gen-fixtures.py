@@ -17,7 +17,8 @@ readers must take or leave out.
   Korean path; RAR5's with a hard link too, left out) archived by RARLAB's rar 7.23 and 6.24
   (`-ma4`, RAR 3.x's format) of third_party/rar-dl, where they are there (else not written).
 - enc-zipcrypto.zip (Info-ZIP's zip), enc-aes128.zip, enc-aes256.zip, enc.7z, enc-headers.7z
-  (7-Zip's 7zz, the last of encrypted headers): `secret.txt` (the text) and `small.txt`
+  (7-Zip's 7zz, the last of encrypted headers), enc-stored.7z (stored: only the files' CRCs
+  tell a wrong passphrase): `secret.txt` (the text) and `small.txt`
   encrypted with the passphrase `pass word` (7z's `päss wörd`, of UTF-8 to UTF-16). Written
   alone with `--encrypted` (their salts are random: written again, they differ).
 
@@ -154,7 +155,8 @@ def encrypted():
                 ('enc-aes128.zip', ['7zz', 'a', '-bso0', '-tzip', '-mem=AES128', '-ppass word']),
                 ('enc-aes256.zip', ['7zz', 'a', '-bso0', '-tzip', '-mem=AES256', '-ppass word']),
                 ('enc.7z', ['7zz', 'a', '-bso0', '-t7z', '-ppäss wörd']),
-                ('enc-headers.7z', ['7zz', 'a', '-bso0', '-t7z', '-mhe=on', '-ppäss wörd'])]
+                ('enc-headers.7z', ['7zz', 'a', '-bso0', '-t7z', '-mhe=on', '-ppäss wörd']),
+                ('enc-stored.7z', ['7zz', 'a', '-bso0', '-t7z', '-mx0', '-ppäss wörd'])]
         for name, cmd in runs:
             out = os.path.join(d, name)
             subprocess.run([*cmd, out, *files], cwd=src, env=env, check=True)
