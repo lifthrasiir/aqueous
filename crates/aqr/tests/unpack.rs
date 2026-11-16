@@ -282,3 +282,73 @@ fn auto_dir() {
     unlock(&d);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// A pax header of `records` (keys and values) for the member after it.
+#[cfg(unix)]
+fn pax(records: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut d = Vec::new();
+    for (k, v) in records {
+        // (the length counts itself)
+        let rest = 1 + k.len() + 1 + v.len() + 1;
+        let mut n = rest + 1;
+        while format!("{n}").len() + rest != n {
+            n += 1;
+        }
+        d.extend_from_slice(format!("{n} {k}=").as_bytes());
+        d.extend_from_slice(v);
+        d.push(b'\n');
+    }
+    let mut out = tar(&[("PaxHeaders/x".into(), Some(&d))]);
+    out.truncate(out.len() - 1024);
+    out[156] = b'x';
+    out[148..156].fill(b' ');
+    let sum: u32 = out[..512].iter().map(|&b| b as u32).sum();
+    out[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    out
+}
+
+/// The extended attributes of a tar's member applied without `-p` only where they are of the
+/// users' namespace: one that may give privileges (`security.capability` on Linux) is not
+/// written, told once for all the entries having it.
+#[cfg(unix)]
+#[test]
+fn privileged_xattrs_held() {
+    let d = scratch("xattrs");
+    let held = if cfg!(target_os = "macos") { "com.apple.system.aqr" } else { "security.capability" };
+    let records: [(&str, &[u8]); 2] =
+        [(&format!("SCHILY.xattr.{held}"), b"\x01\x00\x00\x02"), ("SCHILY.xattr.user.aqr", b"kept")];
+    let mut t = Vec::new();
+    for name in ["a", "b"] {
+        t.extend(pax(&records));
+        let mut m = tar(&[(name.into(), Some(b"x"))]);
+        m.truncate(m.len() - 1024);
+        t.extend(m);
+    }
+    t.resize(t.len() + 1024, 0);
+    let archive = d.join("x.tar");
+    fs::write(&archive, t).unwrap();
+    let out = d.join("out");
+    let o = aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    let told = format!("extended attribute {held} not written, nor of any other entry (-p to write it)");
+    assert_eq!(err.matches(&told).count(), 1, "{err}");
+    let xattr = |p: &Path, name: &str| {
+        let c = |s: &[u8]| std::ffi::CString::new(s).unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let (p, n) = (c(p.as_os_str().as_bytes()), c(name.as_bytes()));
+        let mut b = [0u8; 64];
+        // SAFETY: the buffer is of its length
+        #[cfg(target_os = "macos")]
+        let r = unsafe { libc::getxattr(p.as_ptr(), n.as_ptr(), b.as_mut_ptr().cast(), b.len(), 0, 0) };
+        // SAFETY: as above
+        #[cfg(not(target_os = "macos"))]
+        let r = unsafe { libc::getxattr(p.as_ptr(), n.as_ptr(), b.as_mut_ptr().cast(), b.len()) };
+        (r >= 0).then(|| b[..r as usize].to_vec())
+    };
+    for name in ["a", "b"] {
+        assert_eq!(xattr(&out.join(name), "user.aqr").as_deref(), Some(&b"kept"[..]), "{name}");
+        assert_eq!(xattr(&out.join(name), held), None, "{name}");
+    }
+    fs::remove_dir_all(&d).unwrap();
+}

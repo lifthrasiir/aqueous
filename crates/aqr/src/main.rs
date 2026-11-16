@@ -3302,7 +3302,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
             })
             .map_err(|e| err(&exit::seen(e)))?
         } else {
-            write_whole(&to.named, force, |w| {
+            let n = write_whole(&to.named, force, |w| {
                 ticking(a, &view, || {
                     opened.decompress(
                         threads,
@@ -3315,11 +3315,13 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
                     )
                 })
                 .map_err(std::io::Error::other)
-            })?
+            })?;
+            meta::Applier::new(false, a.quiet).marking(input).mark(&to.named, meta::Kind::File);
+            n
         };
         (1, n, None, 0, (!a.test).then(|| to.named.clone()))
     } else {
-        let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
+        let ap = meta::Applier::new(a.preserve, a.quiet).marking(input);
         let r = ticking(a, &view, || -> Result<_, String> {
             let x = match place {
                 None => None,
@@ -3762,6 +3764,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                     (Err(e), None) => Err(std::io::Error::other(e.to_string())),
                 }
             })?;
+            meta::Applier::new(false, a.quiet).marking(input).mark(&to.named, meta::Kind::File);
             (1, n, Some(to.named.clone()))
         }
         Some(t) if a.test => {
@@ -3789,7 +3792,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             (n.into_inner(), total.into_inner(), None)
         }
         Some(t) => {
-            let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
+            let ap = meta::Applier::new(a.preserve, a.quiet).marking(input);
             let r = ticking(a, &*view, || {
                 let x =
                     extract::Extractor::new(place.unwrap(), force, a.links, &ap, &seen, a.select.clone(), &a.names)?

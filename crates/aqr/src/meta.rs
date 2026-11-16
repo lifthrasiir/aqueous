@@ -4,7 +4,8 @@
 //!
 //! What is not commonly kept is read and applied only where asked (`-p`, `privileged`): the
 //! access, status change and backup times are read then, and the ownership, the superuser's
-//! flags and the set-user-ID and set-group-ID bits applied then. The access time is not kept
+//! flags, the set-user-ID and set-group-ID bits and the extended attributes (and forks) out of
+//! the users' namespace ([`os::user_xattr`]) applied then. The access time is not kept
 //! otherwise, as reading a file for archiving may change it (so that an archive of the same
 //! files would differ each time it is made); where it is kept, the files' are put back once
 //! they are archived ([`restore_atime`]).
@@ -342,9 +343,57 @@ pub enum Kind {
 pub struct Applier {
     pub privileged: bool,
     pub quiet: bool,
+    /// The mark of the archive extracted, given to what is extracted ([`Mark`]).
+    mark: Option<Mark>,
+    /// The names of the attributes not written for not being asked to (`-p`), told once each.
+    #[cfg(unix)]
+    held: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 
 impl Applier {
+    pub fn new(privileged: bool, quiet: bool) -> Applier {
+        Applier {
+            privileged,
+            quiet,
+            mark: None,
+            #[cfg(unix)]
+            held: Default::default(),
+        }
+    }
+
+    /// The applier giving what it applies to the mark of `archive` too, where it has one.
+    pub fn marking(mut self, archive: &Path) -> Applier {
+        self.mark = Mark::of(archive);
+        self
+    }
+
+    /// Gives `path`, a `kind` just written, the mark of the archive (told where it cannot).
+    pub fn mark(&self, path: &Path, kind: Kind) {
+        if let Some(m) = &self.mark
+            && let Err(e) = m.put(path, kind)
+        {
+            self.tell(path, &format!("{} not written: {e}", Mark::NAME));
+        }
+    }
+
+    /// Whether extended attribute `name` may be written to `path` (told once a name where it
+    /// may not): any where asked, else only those of the users' namespace, as an attribute of
+    /// another (Linux's `security.capability`, `trusted.*`, ACLs) gives what the owner (root,
+    /// extracting) has, as the set-user-ID bit would.
+    #[cfg(unix)]
+    fn may_write(&self, path: &Path, name: &[u8], what: &str) -> bool {
+        if self.privileged || os::user_xattr(name) {
+            return true;
+        }
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if !held.iter().any(|n| n == name) {
+            held.push(name.to_vec());
+            let shown = String::from_utf8_lossy(name);
+            self.tell(path, &format!("{what} {shown} not written, nor of any other entry (-p to write it)"));
+        }
+        false
+    }
+
     pub fn tell(&self, path: &Path, what: &str) {
         if !self.quiet {
             eprintln!("{}: {what}", path.display());
@@ -353,6 +402,10 @@ impl Applier {
 
     /// Writes fork `name` of `data` to `path`, a `kind` (told where it cannot be written).
     pub fn fork(&self, path: &Path, kind: Kind, name: &[u8], data: &[u8]) {
+        #[cfg(unix)]
+        if os::fork_xattr(kind, name).is_some_and(|n| !self.may_write(path, n, "fork")) {
+            return;
+        }
         let shown = String::from_utf8_lossy(name);
         if let Err(e) = os::fork(path, kind, name, data) {
             self.tell(path, &format!("fork {shown} not written: {e}"));
@@ -386,11 +439,15 @@ impl Applier {
                 let shown = String::from_utf8_lossy(name);
                 if forks.contains(&&name[..]) {
                     self.tell(path, &format!("extended attribute {shown} not written: a fork of the same name"));
-                } else if let Err(e) = os::set_xattr(path, name, value) {
+                } else if self.may_write(path, name, "extended attribute")
+                    && let Err(e) = os::set_xattr(path, name, value)
+                {
                     self.tell(path, &format!("extended attribute {shown} not written: {e}"));
                 }
             }
         }
+        // (over a fork or an attribute of the same name, before the permissions forbid it)
+        self.mark(path, kind);
         #[cfg(unix)]
         if self.privileged && (x.uid.is_some() || x.uname.is_some() || x.gid.is_some() || x.gname.is_some()) {
             let uid = x.uname.as_deref().and_then(os::user_id).or(x.uid.and_then(|u| u32::try_from(u).ok()));
@@ -440,7 +497,7 @@ impl Applier {
         let x = &*x.instants();
         #[cfg(windows)]
         {
-            let _ = self;
+            self.mark(path, Kind::File);
             let attrs = x.win_attrs.or(x.mode.map(|m| (m & 0o200 == 0) as u32));
             os::set_basic(f, x, attrs).map_err(|e| format!("{}: {e}", path.display()))
         }
@@ -449,6 +506,48 @@ impl Applier {
             let _ = f;
             self.apply(path, Kind::File, x)
         }
+    }
+}
+
+/// What marks a file as come from elsewhere, as a download: Windows' mark of the web (the stream
+/// `Zone.Identifier`), macOS' quarantine (the attribute `com.apple.quarantine`). The archive's
+/// is given to what is extracted of it (the files on Windows, all but links on macOS), so that
+/// the system asks before running them as it would the archive (SmartScreen, Gatekeeper),
+/// over any the archive has for them.
+pub struct Mark(Vec<u8>);
+
+impl Mark {
+    #[cfg(windows)]
+    pub const NAME: &str = "Zone.Identifier";
+    #[cfg(not(windows))]
+    pub const NAME: &str = "com.apple.quarantine";
+
+    /// The mark of `archive`, where it has one (not of standard input).
+    pub fn of(archive: &Path) -> Option<Mark> {
+        if crate::stdio::is(archive) {
+            return None;
+        }
+        #[cfg(windows)]
+        let m = fs::read(os::stream(archive, OsStr::new(Mark::NAME))).ok();
+        #[cfg(target_os = "macos")]
+        let m = os::xattr(archive, Mark::NAME.as_bytes()).ok();
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let m = None;
+        m.map(Mark)
+    }
+
+    /// Gives `path`, a `kind`, this mark.
+    pub fn put(&self, path: &Path, kind: Kind) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if kind == Kind::File {
+            return fs::write(os::stream(path, OsStr::new(Mark::NAME)), &self.0);
+        }
+        #[cfg(target_os = "macos")]
+        if kind != Kind::Link {
+            return os::set_xattr(path, Mark::NAME.as_bytes(), &self.0);
+        }
+        let _ = (path, kind);
+        Ok(())
     }
 }
 
@@ -520,6 +619,13 @@ mod os {
         unsafe { libc::lgetxattr(p.as_ptr(), name.as_ptr(), b.cast(), n) }
     }
 
+    /// Extended attribute `name` of `path` (not followed).
+    #[cfg(target_os = "macos")]
+    pub fn xattr(path: &Path, name: &[u8]) -> io::Result<Vec<u8>> {
+        let (p, c) = (c_path(path)?, c_name(name)?);
+        sized(|b, n| get(&p, &c, b, n))
+    }
+
     /// The extended attributes of `path` (not followed), by name.
     pub fn xattrs(path: &Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let p = c_path(path)?;
@@ -556,6 +662,18 @@ mod os {
         #[cfg(target_os = "linux")]
         let r = unsafe { libc::lsetxattr(p.as_ptr(), n.as_ptr(), v, len, 0) };
         check(r)
+    }
+
+    /// Whether extended attribute `name` is of the users' namespace, written without `-p`: on
+    /// Linux `user.*` (the others give privileges or access: `security.capability`,
+    /// `security.selinux`, `trusted.*`, `system.posix_acl_*`); on macOS any but those the
+    /// system keeps (`com.apple.system.*`, `com.apple.rootless`), as none gives privileges.
+    pub fn user_xattr(name: &[u8]) -> bool {
+        if cfg!(target_os = "macos") {
+            !name.starts_with(b"com.apple.system.") && name != b"com.apple.rootless"
+        } else {
+            name.starts_with(b"user.")
+        }
     }
 
     /// The extended attribute that fork `name` of a `kind` is written as (the resource fork
@@ -797,7 +915,7 @@ mod os {
     }
 
     /// The path of stream `name` of `path`.
-    fn stream(path: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    pub fn stream(path: &Path, name: &std::ffi::OsStr) -> PathBuf {
         let mut p = path.as_os_str().to_owned();
         p.push(":");
         p.push(name);

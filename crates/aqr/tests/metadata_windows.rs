@@ -1,6 +1,6 @@
 //! The metadata of a directory kept through `aqr -c` and `aqr -d` on Windows: times (the
 //! creation time too, of a read-only file as well), file attributes, alternate data streams and
-//! hard links.
+//! hard links; and the mark of the web of an archive given to the files extracted of it.
 #![cfg(windows)]
 
 use std::fs;
@@ -163,5 +163,32 @@ fn long_paths() {
     assert!(got.as_os_str().len() > 260);
     assert_eq!(fs::metadata(&got).unwrap().file_attributes() & HIDDEN, HIDDEN);
     assert_eq!(fs::read_to_string(got.join("x")).unwrap(), "x");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// The mark of the web of an archive (`Zone.Identifier`) given to the files extracted of it, over
+/// any they had, of an archive of several files and of one alike.
+#[test]
+fn mark_of_the_web_carried() {
+    let d = scratch("mark");
+    let src = source(&d);
+    let (tree, single) = (d.join("src.aqr"), d.join("one.aqr"));
+    aqr(&["-c".as_ref(), "-o".as_ref(), tree.as_os_str(), src.as_os_str()]);
+    aqr(&["-c".as_ref(), "-o".as_ref(), single.as_os_str(), src.join("sub/s").as_os_str()]);
+    let mark = "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.com/src.aqr\r\n";
+    for a in [&tree, &single] {
+        fs::write(stream(a, "Zone.Identifier"), mark).unwrap();
+    }
+    let out = d.join("out");
+    aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), tree.as_os_str()]);
+    let zone = |p: &Path| fs::read_to_string(stream(p, "Zone.Identifier")).ok();
+    for p in ["a", "hard", "ro", "sub/s"] {
+        assert_eq!(zone(&out.join(p)).as_deref(), Some(mark), "{p}");
+    }
+    assert_eq!(zone(&out.join("sub")), None);
+    let one = d.join("one");
+    aqr(&["-d".as_ref(), "-o".as_ref(), one.as_os_str(), single.as_os_str()]);
+    assert_eq!(zone(&one).as_deref(), Some(mark));
+    unreadonly(&d);
     fs::remove_dir_all(&d).unwrap();
 }

@@ -199,3 +199,31 @@ fn access_times() {
     Command::new("chmod").args(["-R", "u+w"]).arg(&d).status().unwrap();
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// The quarantine of an archive (`com.apple.quarantine`) given to what is extracted of it but
+/// links, over any it had, of an archive of several files and of one alike.
+#[cfg(target_os = "macos")]
+#[test]
+fn quarantine_carried() {
+    let d = scratch("quarantine");
+    let src = source(&d);
+    set_xattr(&src.join("sub/s"), "com.apple.quarantine", b"0081;00000000;aqr;");
+    let (tree, single) = (d.join("src.aqr"), d.join("one.aqr"));
+    aqr(&["-c".as_ref(), "-o".as_ref(), tree.as_os_str(), src.as_os_str()]);
+    aqr(&["-c".as_ref(), "-o".as_ref(), single.as_os_str(), src.join("a").as_os_str()]);
+    let mark = b"0083;00000000;Safari;";
+    for a in [&tree, &single] {
+        set_xattr(a, "com.apple.quarantine", mark);
+    }
+    let out = d.join("out");
+    aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), tree.as_os_str()]);
+    for p in ["a", "ro", "sub", "sub/s"] {
+        assert_eq!(xattr(&out.join(p), "com.apple.quarantine").as_deref(), Some(&mark[..]), "{p}");
+    }
+    assert_eq!(xattr(&out.join("link"), "com.apple.quarantine"), None);
+    let one = d.join("one");
+    aqr(&["-d".as_ref(), "-o".as_ref(), one.as_os_str(), single.as_os_str()]);
+    assert_eq!(xattr(&one, "com.apple.quarantine").as_deref(), Some(&mark[..]));
+    Command::new("chmod").args(["-R", "u+w"]).arg(&d).status().unwrap();
+    fs::remove_dir_all(&d).unwrap();
+}

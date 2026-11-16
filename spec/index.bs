@@ -5614,6 +5614,9 @@ A decompressor doing so is subject to the following requirements:
 * It MAY ignore the extra of any node, e.g. [=file node/extra=] and [=directory node/extra=].
     It SHOULD NOT apply ownership information, i.e. `unix-uid`, `unix-gid`, `unix-uname` and `unix-gname`,
     nor flags only the superuser can change, i.e. the `SF_` flags of `mac-flags`, unless explicitly requested.
+    Nor SHOULD it apply extended attributes, in `xattrs` or written for [=forks=], that may grant privileges or access,
+    e.g. those outside the `user.` namespace on Linux (`security.capability`, `trusted.*`, `system.posix_acl_access`),
+    unless explicitly requested; an attribute not applied for this reason is reported as any other not written.
     When applying the ownership, it SHOULD use `unix-uname` and `unix-gname` where they name a user and a group on the platform,
     and `unix-uid` and `unix-gid` otherwise.
 * It SHOULD write the [=forks=] of a node where the platform allows:
