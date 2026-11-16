@@ -84,7 +84,9 @@ impl Spool {
 pub(super) static FILES: AtomicU64 = AtomicU64::new(0);
 
 /// A file of its own in the system's temporary directory, gone once closed: deleted on close
-/// (Windows, hidden and not indexed until then), or unlinked as it is made (Unix).
+/// (Windows, hidden and not indexed until then), or unlinked as it is made (Unix, of the owner
+/// alone until then: the directory is shared, and what is spooled may be an encrypted archive's
+/// payload decrypted).
 fn spool_file() -> io::Result<File> {
     #[cfg(test)]
     FILES.fetch_add(1, Ordering::Relaxed);
@@ -95,6 +97,11 @@ fn spool_file() -> io::Result<File> {
         use std::os::windows::fs::OpenOptionsExt;
         // FILE_FLAG_DELETE_ON_CLOSE; shared to read, write and delete; hidden and not indexed
         o.custom_flags(0x0400_0000).share_mode(7).attributes(0x2 | 0x2000);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
     }
     loop {
         static MADE: AtomicU64 = AtomicU64::new(0);
@@ -116,6 +123,16 @@ fn spool_file() -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A spool's file is the owner's alone while it has a name (the system's directory is
+    /// shared).
+    #[cfg(unix)]
+    #[test]
+    fn file_of_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = spool_file().unwrap();
+        assert_eq!(f.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
 
     /// What is put beyond the memory's bound goes to the file and comes back in order, pushes
     /// and pops interleaved; once all is taken, the memory takes it again.

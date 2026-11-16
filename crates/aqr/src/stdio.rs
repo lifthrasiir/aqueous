@@ -26,9 +26,14 @@ fn dir() -> Result<PathBuf, String> {
         return Ok(d.clone());
     }
     let base = std::env::temp_dir();
+    // (of the owner alone: the base is shared, and what is spooled may be read by no one else)
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
     let made = (0..100).find_map(|k| {
         let p = base.join(format!("aqr-{}-{k}", std::process::id()));
-        std::fs::create_dir(&p).ok().map(|()| p)
+        b.create(&p).ok().map(|()| p)
     });
     let p = made.ok_or(format!("{}: no directory made for standard input or output", base.display()))?;
     crate::stop::on_end(remove);
@@ -91,4 +96,18 @@ pub fn set_streamed() {
 
 pub fn streamed() -> bool {
     STREAMED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod tests {
+    /// The temporary directory is the owner's alone (the system's is shared).
+    #[cfg(unix)]
+    #[test]
+    fn dir_of_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = super::dir().unwrap();
+        let mode = std::fs::metadata(&d).unwrap().permissions().mode();
+        super::remove();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 }
