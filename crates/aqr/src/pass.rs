@@ -157,6 +157,12 @@ impl Keys {
     }
 
     /// Why no passphrase opened an archive, as the failure tells it.
+    /// Whether `-P` (or `--passphrase-from`) was given: an archive not encrypted is then not
+    /// taken as it is, as one put in place of the encrypted archive meant would be.
+    pub fn given(&self) -> bool {
+        self.given
+    }
+
     pub fn none_opens(&self) -> &'static str {
         match (self.given || !self.known.lock().unwrap().is_empty(), self.asks) {
             (_, true) => "encrypted, and no passphrase given opens it",

@@ -554,6 +554,9 @@ pub struct Check {
     pub mirrors: Vec<Found>,
     /// The blocks of a mirror block type that are not intact (as read one after another).
     pub broken: usize,
+    /// Whether it is of an encrypted archive's payload ([`check_sealed`]): its mirror blocks only
+    /// those its trusted bytes tell the places of, restoring only blocks of bytes not trusted.
+    pub sealed: bool,
 }
 
 impl Check {
@@ -600,6 +603,57 @@ pub fn check(a: &[u8]) -> Check {
     Check { mirrors: scan(a, start), ..Check::default() }
 }
 
+/// The mirror blocks of an encrypted archive's payload `a` (decrypted; its bytes `erased` not to
+/// be trusted, of chunks that do not authenticate, and `cut` short where its last chunk
+/// authenticates only as not the last), checked as [`check`] does but never found by their
+/// magic: a mirror block so found may be of a file's content, an attacker's, which would then
+/// stand for a block of the archive. Where all of `a` is trusted and it reads to its footer, as
+/// `check`; else only the mirror blocks of the blocks read one after another through trusted
+/// bytes from places the payload's trusted bytes tell (spec, "Repair"): its header, and the last
+/// metadata block that its footer tells where the footer is trusted (the mirror blocks being
+/// after it as an archive is written, [`Mirroring`]).
+pub fn check_sealed(a: &[u8], erased: &[Range<usize>], cut: bool) -> Check {
+    let headed = a.starts_with(&HEADER_MAGIC) || a.starts_with(&OVERLAY_HEADER_MAGIC);
+    let trusted = |r: Range<usize>| !erased.iter().any(|e| overlap(e, &r));
+    if headed
+        && erased.is_empty()
+        && !cut
+        && let Some(c) = walk(a)
+    {
+        return Check { sealed: true, ..c };
+    }
+    // (the trusted bytes from `at` on: up to the first byte erased)
+    let upto = |at: usize| erased.iter().filter(|e| e.end > at).map(|e| e.start).min().unwrap_or(a.len()).max(at);
+    let mut anchors = Vec::new();
+    if headed && trusted(0..HEADER_MAGIC.len()) {
+        anchors.push(HEADER_MAGIC.len());
+    }
+    if !cut
+        && let Ok((fields, end, _, back)) = super::footer_fields(super::Payload::Plain(a))
+        && back != 0
+        && trusted(end..a.len())
+        && let Some(meta) = usize::try_from(back).ok().and_then(|b| fields.checked_sub(b))
+        && meta >= HEADER_MAGIC.len()
+    {
+        anchors.push(meta);
+    }
+    let mut c = Check { sealed: true, ..Check::default() };
+    let mut seen = HashSet::new();
+    for at in anchors {
+        let (blocks, _) = blocks_from(&a[..upto(at)], at);
+        for (start, ty, data) in blocks {
+            if is_mirror(ty) && seen.insert(start) {
+                match mirror_at(a, start, ty, data, Some(HEADER_MAGIC.len())) {
+                    Some(m) => c.mirrors.push(m),
+                    None => c.broken += 1,
+                }
+            }
+        }
+    }
+    c.mirrors.sort_by_key(|m| m.at);
+    c
+}
+
 /// How reading the blocks of an archive one after another ended ([`blocks`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ended {
@@ -615,8 +669,12 @@ enum Ended {
 /// The blocks of archive `a` read one after another from its header on (where each starts, its
 /// type and data), as far as they go, and how that ended.
 fn blocks(a: &[u8]) -> (Vec<(usize, u64, Range<usize>)>, Ended) {
+    blocks_from(a, HEADER_MAGIC.len())
+}
+
+/// [`blocks`] read from `at` on, the start of a block.
+fn blocks_from(a: &[u8], mut at: usize) -> (Vec<(usize, u64, Range<usize>)>, Ended) {
     let mut out = Vec::new();
-    let mut at = HEADER_MAGIC.len();
     loop {
         let start = at;
         if at >= a.len() {
@@ -823,6 +881,11 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
     let mut lost = Vec::new();
     for m in &mirrors {
         if good.contains(&m.target) || restored.contains(&m.target) {
+            continue;
+        }
+        // (of an encrypted archive's payload, its trusted bytes are as sealed: only those not
+        // trusted, or not there, restored)
+        if c.sealed && m.target_end() <= a.len() && !erased.iter().any(|e| overlap(e, &(m.target..m.target_end()))) {
             continue;
         }
         let b = v.get_or_insert_with(|| a.to_vec());
@@ -1412,6 +1475,58 @@ mod tests {
         let (r, ok, got) = salvaged(&d, std::slice::from_ref(&e));
         assert!(r.lost.len() == 1 && r.lost[0] == (start..meta) && !ok, "{:?}", r.lost);
         assert_eq!(got[..2], [Some(want[0].clone()), Some(want[1].clone())]);
+    }
+
+    /// Of an encrypted archive's payload, a mirror block in a file's content (an attacker's file
+    /// in someone's encrypted archive) is not taken for a block of the archive, cut short or its
+    /// blocks damaged: the mirror blocks only those read one after another through its trusted
+    /// bytes, from its header and from the metadata block its footer tells; and only the blocks
+    /// not trusted restored.
+    #[test]
+    fn sealed_takes_no_planted_mirror() {
+        let m = mirrored(&segment(&[3000, 3000, 3000], false, None), 4096, true);
+        let c = check(&m);
+        let (blocks, _) = blocks(&m);
+        let leaf = blocks.iter().rfind(|b| (0x40..0x4c).contains(&b.1)).unwrap();
+        let t = c.targets.iter().find(|t| t.1 & !7 == 0x70).unwrap().0;
+        let target = blocks.iter().find(|b| b.0 == t).unwrap().clone();
+        // a mirror block of the formula block, its data another's, in the leaf block's data
+        let mut forged = m[target.0..target.2.end].to_vec();
+        *forged.last_mut().unwrap() ^= 1;
+        // (at an even offset, as blocks are)
+        let at = (leaf.2.start + 2) & !1;
+        let planted = mirror_of(&forged, t as u64, at as u64, false);
+        assert!(planted.len() < leaf.2.len() - 2);
+        let mut d = m.clone();
+        d[at..at + planted.len()].copy_from_slice(&planted);
+        let restored =
+            |r: Option<Repaired>, d: &[u8]| r.map_or(d.to_vec(), |r| r.bytes)[target.0..target.2.end].to_vec();
+        let e = target.0..target.2.end;
+        let mut g = d.clone();
+        g[e.start + 3] ^= 0x5a;
+        // cut short before its footer: as found by their magic, the planted one would restore the
+        // formula block (not trusted, garbled); of a payload, no mirror block reached for it
+        let footer = d.len() - (FOOTER_MAGIC.len() + 4 + (d[d.len() - 2] as usize));
+        let cut = &g[..footer];
+        assert!(check(cut).mirrors.iter().any(|f| f.at == at));
+        assert_eq!(restored(repair(cut, &check(cut), true, std::slice::from_ref(&e)), cut), forged);
+        let s = check_sealed(cut, std::slice::from_ref(&e), true);
+        assert!(s.sealed && !s.mirrors.iter().any(|f| f.at == at));
+        assert_ne!(restored(repair(cut, &s, true, std::slice::from_ref(&e)), cut), forged);
+        // all trusted but cut: its own mirror blocks reached from the header, nothing restored
+        let s = check_sealed(&d[..footer], &[], true);
+        assert!(s.mirrors.len() == 5 && !s.mirrors.iter().any(|f| f.at == at));
+        assert_eq!(restored(repair(&d[..footer], &s, true, &[]), &d[..footer]), &m[e.clone()]);
+        // not cut: restored from its own mirror block, found from the metadata block the footer
+        // tells
+        let s = check_sealed(&g, std::slice::from_ref(&e), false);
+        assert!(!s.mirrors.iter().any(|f| f.at == at) && s.mirrors.len() == 5);
+        let r = repair(&g, &s, true, std::slice::from_ref(&e));
+        assert_eq!(restored(r, &g), &m[target.0..target.2.end]);
+        // all trusted: as read one after another, nothing restored
+        let s = check_sealed(&d, &[], false);
+        assert!(s.walked && s.sealed);
+        assert_eq!(repair(&d, &s, true, &[]), None);
     }
 
     /// A mirror block of an archive within the archive (as a file of it, stored) is not taken

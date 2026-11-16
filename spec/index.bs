@@ -4630,8 +4630,13 @@ given the passphrase:
         and if it is the last one and fails to authenticate, again with the flag not set.
     6. Decrypt each encrypted chunk failing to authenticate anyway, as ChaCha20 [[!RFC8439]] without its authentication tag,
         and take its bytes as [=untrusted=].
-    7. Return the payload, the concatenation of the decrypted chunks, and its untrusted bytes.
+    7. Return the payload, the concatenation of the decrypted chunks, and its untrusted bytes,
+        and whether it is <dfn>cut after a chunk</dfn>: whether the last chunk authenticated only with the flag not set.
 </ol>
+
+A decompressor MUST report a payload [=cut after a chunk=] and MUST treat it as a failure of the extraction or the test,
+even if what is left of it can be interpreted:
+every chunk then authenticates, but whatever came after the last one is lost, including any later segment.
 
 <div class=note>
   An encrypted chunk failing to authenticate is decrypted correctly but for the bytes actually damaged,
@@ -4659,6 +4664,12 @@ from its [=archive/header_magic=] on, with a set |untrusted| of the bytes of |a|
         as described in [[#mirror-block]], in the order of their [=block/block_start=],
         that are [=mirror/intact=] when [=archive/archive_start=] is taken as the start of the archive they imply
         and that have no [=untrusted=] byte.
+        If |a| is the payload of an encrypted archive, |found| is instead the list of the mirror blocks reached
+        by reading blocks by the generic structure ([[#block]]) through bytes that are not [=untrusted=],
+        from the offset 6 if the first 6 bytes of |a| are not untrusted,
+        and from the [=block/block_start=] of the metadata block that the footer tells
+        if |a| is not [=cut after a chunk=] and ends with a footer that has no untrusted byte,
+        each reading stopping before the first untrusted byte or where a block can't be read.
         Their target blocks may lie beyond the end of |a|.
         Let |rfound| be the list of [=recovery blocks=] found likewise by scanning |a|
         for [=const/RECOVERY_MAGIC=] and [=const/OVERLAY_RECOVERY_MAGIC=] ([[#recovery-sets]]),
@@ -4674,6 +4685,7 @@ from its [=archive/header_magic=] on, with a set |untrusted| of the bytes of |a|
         1. Let |restored| be the bytes that the first mirror block of |found| for |t| requires of its target block.
         2. If the bytes of |a| from |t| are those required by any mirror block of |found| for |t|,
             remove the bytes of the target block from |untrusted| and continue.
+            If |a| is the payload of an encrypted archive and the target block lies within |a| and has no [=untrusted=] byte, continue.
         3. If |a| is shorter than |t|, continue.
         4. If |a| is shorter than |t| + the length of |restored|, append bytes to |a| up to that length.
         5. Replace the bytes of |a| from |t| with |restored|,
@@ -4728,6 +4740,18 @@ taking |start| as [=archive/archive_start=]:
   even in an encrypted chunk that fails to authenticate, since the mirror block lies in chunks that do authenticate.
   An unencrypted archive has no untrusted bytes:
   its bytes are only as trustworthy as the checksums verifying them, damaged or not.
+</div>
+
+<div class=note>
+  The payload of an encrypted archive is not scanned for mirror blocks:
+  a file's content, stored as it is, may hold bytes of an [=mirror/intact=] mirror block,
+  e.g. a file of an attacker in the encrypted archive of someone else,
+  and taking it would replace a block of the archive with the attacker's
+  once the attacker damages or truncates the ciphertext.
+  The blocks read from the header and from the last metadata block,
+  where the mirror blocks are placed as [[#mirror-block]] recommends,
+  are those that the encryption authenticates as blocks.
+  For the same reason, a block that authenticates is never replaced.
 </div>
 
 To <dfn>reconstruct the footer</dfn> of a [=byte sequence=] |a| starting with a header magic:

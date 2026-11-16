@@ -425,3 +425,30 @@ fn repairs_encrypted() {
     assert!(t.contains(&format!("{}: lost (", gone.0)), "{t}");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// A mirror block intact but differing from its block, which is intact too (as only one made to
+/// differ would be): `-K` tests the blocks `-d` extracts, and fails, telling it, rather than
+/// testing those of the mirror blocks.
+#[test]
+fn differing_mirror_fails_test() {
+    use aqr_formula::aqr::mirror;
+    let d = scratch("differing");
+    let want = source(&d);
+    aqr_in(&d, &["-q", "-A", "-o", "a.aqr", "src"]);
+    let mut a = fs::read(d.join("a.aqr")).unwrap();
+    let c = mirror::check(&a);
+    let m = c.mirrors.iter().find(|m| (0x70..0x78).contains(&m.ty)).unwrap();
+    let mut forged = a[m.target..m.target_end()].to_vec();
+    let mid = m.head.len() + m.data.len() / 2;
+    forged[mid] ^= 0x5a;
+    let planted = mirror::mirror_of(&forged, m.target as u64, m.at as u64, false);
+    a[m.at..m.at + planted.len()].copy_from_slice(&planted);
+    assert_eq!(mirror::check(&a).differing(&a).count(), 1);
+    fs::write(d.join("forged.aqr"), &a).unwrap();
+    let o = aqr_fed(&d, &["-K", "forged.aqr"], b"");
+    assert_eq!(o.status.code(), Some(3), "{}", stderr(&o));
+    assert!(stderr(&o).contains("1 block differing from intact mirror blocks"), "{}", stderr(&o));
+    aqr_in(&d, &["-q", "-d", "-o", "out", "forged.aqr"]);
+    assert_eq!(files(&d.join("out")), want);
+    fs::remove_dir_all(&d).unwrap();
+}

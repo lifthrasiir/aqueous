@@ -39,6 +39,10 @@ fn codes() {
     fs::write(d.join("wrong"), "open\n").unwrap();
     assert_eq!(code(&d, &["--passphrase-from=pass", "-o", "p.aqr", "t"]), Some(0));
     assert_eq!(code(&d, &["-d", "--passphrase-from=wrong", "-o", "p", "p.aqr"]), Some(4));
+    // a passphrase given, the archive not encrypted (one put in place of the encrypted archive)
+    assert_eq!(code(&d, &["-d", "--passphrase-from=pass", "-o", "plain", "t.aqr"]), Some(4));
+    assert_eq!(code(&d, &["-K", "--passphrase-from=pass", "t.aqr"]), Some(4));
+    fs::remove_dir_all(d.join("plain")).ok();
     if gz.is_ok_and(|s| s.success()) {
         assert_eq!(code(&d, &["-f", "-o", "t.aqr", "t"]), Some(0));
         assert_eq!(code(&d, &["-d", "--application-bound", "1K", "-o", "small", "t.aqr"]), Some(5));
@@ -47,5 +51,38 @@ fn codes() {
     fs::write(d.join("f"), b"f").unwrap();
     assert_eq!(code(&d, &["f"]), Some(0));
     assert_eq!(code(&d, &["-d", "-f", "--rm", "-o", "f.aqr", "f.aqr"]), Some(7));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// An encrypted archive cut short at the end of one of its chunks (every chunk left
+/// authenticating, the last as not the last): not taken as it is, but told and failing.
+#[test]
+fn encrypted_cut_at_a_chunk() {
+    let d = scratch("cut");
+    fs::create_dir(d.join("t")).unwrap();
+    let mut x = 1u64;
+    let noise: Vec<u8> = (0..300_000)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 56) as u8
+        })
+        .collect();
+    fs::write(d.join("t/n.bin"), &noise).unwrap();
+    fs::write(d.join("pass"), "sesame\n").unwrap();
+    assert_eq!(code(&d, &["--passphrase-from=pass", "-o", "p.aqr", "t"]), Some(0));
+    let b = fs::read(d.join("p.aqr")).unwrap();
+    // (after chunk 1: a header of 105 bytes, of 113 mirrored, then a mirrored header of 117
+    // before chunk 1; chunks of 64 KiB and a tag)
+    let cut = if b[6] == 2 { 113 + 117 } else { 105 } + 2 * (65_536 + 16);
+    assert!(b.len() > cut + 65_552);
+    fs::write(d.join("cut.aqr"), &b[..cut]).unwrap();
+    for args in
+        [&["-K", "--passphrase-from=pass", "cut.aqr"][..], &["-d", "--passphrase-from=pass", "-o", "c", "cut.aqr"]]
+    {
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(&d).args(args).output().unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(3), "{args:?}: {err}");
+        assert!(err.contains("cut short after an encrypted chunk"), "{args:?}: {err}");
+    }
     fs::remove_dir_all(&d).unwrap();
 }

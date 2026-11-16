@@ -586,13 +586,16 @@ impl<'c> Unlocked<'c> {
     /// The payload decrypted into `out` (of [`Unlocked::len`] bytes) as [`Unlocked::decrypt_into`]
     /// does, but of chunks that do not authenticate too: decrypted without it (their bytes not to
     /// be trusted, spec "Repair"), the last one tried as not the last too (the archive cut short
-    /// after it). Returns the chunks that do not authenticate.
-    pub fn decrypt_lossy(&self, out: &mut [u8], threads: usize) -> Vec<usize> {
+    /// after it). Returns the chunks that do not authenticate, and whether the last one
+    /// authenticates only as not the last: the payload cut short after it, what came after it
+    /// lost, though all of what is there is as it was sealed.
+    pub fn decrypt_lossy(&self, out: &mut [u8], threads: usize) -> (Vec<usize>, bool) {
         use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
         assert_eq!(out.len(), self.len());
         const TASK: usize = 64;
         let last = self.chunks.len() - 1;
         let parts: Vec<std::sync::Mutex<&mut [u8]>> = out.chunks_mut(CHUNK * TASK).map(std::sync::Mutex::new).collect();
+        let cut = std::sync::atomic::AtomicBool::new(false);
         let failed = aqr_common::pool::par_map(parts.len(), threads, |t| {
             let mut part = parts[t].lock().unwrap();
             let mut failed = Vec::new();
@@ -600,10 +603,19 @@ impl<'c> Unlocked<'c> {
                 let m = t * TASK + i;
                 let c = self.chunks[m];
                 let (body, tag) = (&c[..c.len() - 16], Tag::from_slice(&c[c.len() - 16..]));
-                let authentic = [m == last, false].into_iter().take(1 + (m == last) as usize).any(|is_last| {
+                let opens = |is_last: bool, d: &mut [u8]| {
                     d.copy_from_slice(body);
                     self.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, is_last), &[], d, tag).is_ok()
-                });
+                };
+                let authentic = match m == last {
+                    true if opens(true, d) => true,
+                    true if opens(false, d) => {
+                        cut.store(true, std::sync::atomic::Ordering::Relaxed);
+                        true
+                    }
+                    true => false,
+                    false => opens(false, d),
+                };
                 if !authentic {
                     // (ChaCha20-Poly1305's keystream: from the second block, the first the MAC's key)
                     d.copy_from_slice(body);
@@ -615,7 +627,7 @@ impl<'c> Unlocked<'c> {
             }
             failed
         });
-        failed.into_iter().flatten().collect()
+        (failed.into_iter().flatten().collect(), cut.into_inner())
     }
 
     /// The bytes of the payload of chunk `m`.
@@ -942,18 +954,21 @@ mod tests {
             let (e, o) = open_damaged(c).unwrap();
             let u = e.unlock(b"pass").unwrap();
             let mut d = vec![0; u.len()];
-            let failed = u.decrypt_lossy(&mut d, 2);
+            let (failed, cut) = u.decrypt_lossy(&mut d, 2);
             let ranges: Vec<_> = failed.iter().map(|&m| u.chunk_range(m)).collect();
-            (d, failed, o, ranges)
+            (d, (failed, cut), o, ranges)
         };
         let (d, failed, o, _) = lossy(&c);
-        assert!(d == a && failed.is_empty() && o == Opened::default());
+        assert!(d == a && failed == (vec![], false) && o == Opened::default());
+        // cut at the end of a chunk: all of it authenticates, the last as not the last, told
+        let (d, failed, o, _) = lossy(&c[..chunk_at(5, true) as usize]);
+        assert!(!o.cut && failed == (vec![], true) && d[..] == a[..5 * CHUNK]);
         // (chunk 2: after the mirrored headers before chunks 1 and 3)
         let at = chunk_at(2, true) as usize + 1000;
         let mut x = c.clone();
         x[at] ^= 0x40;
         let (d, failed, _, ranges) = lossy(&x);
-        assert!(failed == [2] && ranges.len() == 1 && ranges[0] == (2 * CHUNK..3 * CHUNK));
+        assert!(failed == (vec![2], false) && ranges.len() == 1 && ranges[0] == (2 * CHUNK..3 * CHUNK));
         let diff: Vec<usize> = (0..a.len()).filter(|&i| d[i] != a[i]).collect();
         assert_eq!(diff, [2 * CHUNK + 1000]);
         // the header magic and its checksum damaged: from the first mirrored header
@@ -962,12 +977,12 @@ mod tests {
         x[50] ^= 1;
         assert!(is_damaged_encrypted(&x) && !is_damaged_encrypted(&c));
         let (d, failed, o, _) = lossy(&x);
-        assert!(d == a && failed.is_empty() && o.header_from == Some(1));
+        assert!(d == a && failed == (vec![], false) && o.header_from == Some(1));
         // cut in the last chunk: what is left of it, too short, left out, the chunk before it
         // taken as the last
         let cut = chunk_at(5, true) as usize + 10;
         let (d, failed, o, _) = lossy(&c[..cut]);
-        assert!(o.cut && failed.is_empty() && d[..] == a[..5 * CHUNK]);
+        assert!(o.cut && failed == (vec![], true) && d[..] == a[..5 * CHUNK]);
     }
 
     #[test]
