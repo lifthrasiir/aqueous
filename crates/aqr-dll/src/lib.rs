@@ -1,5 +1,5 @@
 //! A module of aqr-modules (`AQR_DLL_MODULE`, the name of its binary) built as a native library,
-//! exporting the interface of `aqr_api::dll`: `build.sh` builds one for each module into
+//! exporting the interface of `aqr_api::dll`: `build.py` builds one for each module into
 //! `target/aqr-dll/`. The binary's source is taken as it is (`build.rs`), its entry point
 //! `apply` applied under aqr-api's emulation; and how the module runs natively is aqr-native's
 //! entry of its name ([`NATIVE`]: its native decoding, `aqr_dll_decode`), only that entry's code

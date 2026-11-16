@@ -18,7 +18,7 @@ trap 'rm -rf "$dir"' EXIT
 # the modules the cases use, built for the no-TLS target and digested into blobs for the merge,
 # with the shared libraries they link against (the imports between them bound)
 mods=$(cat "$dir"/cases/*/info | sed -n 's/^module //p' | sort -u)
-NOTLS=1 crates/aqr-dll/build.sh $mods
+NOTLS=1 "${PYTHON:-python}" crates/aqr-dll/build.py $mods
 libs=$(for d in crates/aqr-dll/shared/*/; do echo "aqr_dll_$(basename "$d" | tr - _)"; done)
 # shellcheck disable=SC2046
 "$ld" blobs --out "$dir/blobs" $(for l in $libs; do echo "target/aqr-dll/$l.dll"; done) \

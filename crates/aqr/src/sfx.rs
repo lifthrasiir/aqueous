@@ -3,7 +3,7 @@
 //! through aqr-exe's x86 disfilter, then zstd), which the stub places in memory as it runs, and
 //! the archive.
 //!
-//! The stub and blobs are those `crates/aqr-sfx/pack.sh` gathered when this program was built
+//! The stub and blobs are those `crates/aqr-sfx/pack.py` gathered when this program was built
 //! (build.rs: `sfx.pack`). The archive names a module with a native blob there by a shorthand
 //! module block, its hash alone ([`wasm_of`]), and the bundle has the blob (named by the hash and
 //! the module's task slots, [`aqr_sfx::native_name`]) and the shared libraries that blob links
@@ -18,11 +18,11 @@ use crate::hex;
 use aqr_formula::Module;
 use aqr_formula::aqr::{self, Wasm};
 
-/// What `crates/aqr-sfx/pack.sh` gathered, as build.rs packed it (empty where it was not there).
+/// What `crates/aqr-sfx/pack.py` gathered, as build.rs packed it (empty where it was not there).
 static PACKED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sfx.pack"));
 
 /// The digest of the pack's files (`pack.id`; empty where there is none), included from where
-/// pack.sh wrote it so that the build's dep-info has it: `cargo aqr` keeps a binary by the files
+/// pack.py wrote it so that the build's dep-info has it: `cargo aqr` keeps a binary by the files
 /// of its dep-info, and the packed file in `OUT_DIR` changes only once the build script runs.
 pub const PACK_ID: &str = include_str!(env!("AQR_SFX_ID"));
 
@@ -49,7 +49,7 @@ pub fn interpreter() -> Result<Vec<u8>, String> {
 fn frames() -> Result<(&'static [u8], &'static [u8]), String> {
     if PACKED.is_empty() {
         return Err("this aqr carries no blobs (the interpreter's and the self-extracting stub's: \
-                    built without target/aqr-sfx/, which crates/aqr-sfx/pack.sh gathers on Windows \
+                    built without target/aqr-sfx/, which crates/aqr-sfx/pack.py gathers on Windows \
                     x86-64)"
             .into());
     }

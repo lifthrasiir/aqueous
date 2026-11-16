@@ -19,10 +19,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     the modules that have native blobs, after aqr-sfx-shim (packed by UPX) and the bundle of
     those blobs (and of the interpreter blob, if any module is in full: aqr-sfx's `bundle`). What
     it bundles is `target/aqr-sfx/` (or
-    `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.sh` gathers and `build.rs` packs into the binary
+    `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and `build.rs` packs into the binary
     (zstd, ~6 MB); each blob is used only for the hash it was packed for, so `cargo aqr` runs
-    pack.sh again where the pack's modules are not those of known.rs (where there is a pack).
-    The release workflow runs pack.sh before building aqr.exe (without the pack, aqr.exe runs
+    pack.py again where the pack's modules are not those of known.rs (where there is a pack).
+    The release workflow runs pack.py before building aqr.exe (without the pack, aqr.exe runs
     no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
@@ -101,7 +101,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     last function, through aqr-exe's x86 disfilter, the streams of all the blobs one after
     another by stream and the rest apart, each a zstd frame at 19; feature `encode` makes them),
     placed by `aqr_blob::load`. `extract` writes a decoded archive's files out. Shared by the
-    stub and aqr. `pack.sh` gathers what aqr embeds (the stub, packed by UPX `-9` where `AQR_UPX` or
+    stub and aqr. `pack.py` gathers what aqr embeds (the stub, packed by UPX `-9` where `AQR_UPX` or
     `upx` is found, the blobs of the modules and of the shared libraries).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
     1.6 MB, 0.54 MB packed by UPX): the small executable that `aqr --format sfx` appends a bundle
@@ -115,15 +115,15 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     linked (~12 MB).
     Built for the no-TLS target (`NOTLS`) it is mergeable into a stub: the fallback for modules the
     stub has no native blob for.
-  - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.sh` builds
+  - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.py` builds
     them into `target/aqr-dll/`) exporting `aqr_api::dll`, toward self-extracting archives. The
     crates that several modules use are Rust dylibs it links against (`layout.py`, run by
-    build.sh, writes `shared/NAME/`, `shared.rs` and its Cargo.toml's block: one dylib for each
+    build.py, writes `shared/NAME/`, `shared.rs` and its Cargo.toml's block: one dylib for each
     set of modules using the same crates, the runtime `aqr-dll-rt`, std and aqr-api, used by all);
-    building every module, build.sh links them again until each exports only what the others
+    building every module, build.py links them again until each exports only what the others
     import (aqr-ld's `exports`): all modules and libraries 8 MB as blobs, not 25 MB;
     `aqr-dll-shim` records applications from archives and runs the libraries on them (its own, or
-    the ones merged into it). `NOTLS=1 build.sh` builds for `x86_64-aqr-windows-msvc.json` (native
+    the ones merged into it). `NOTLS=1 build.py` builds for `x86_64-aqr-windows-msvc.json` (native
     thread-locals off, so std uses TlsAlloc, not a TLS directory), which `aqr-ld merge` can take;
     `merge-test.sh ARCHIVE...` is the end-to-end test (needs nightly and build-std). The nightly of
     these builds (and of the release's win7 job) is pinned by the root file `nightly-toolchain`
@@ -161,7 +161,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   never `cargo build -p aqr`, `cargo run -p aqr` or `target/release/aqr` directly: it builds
   as needed and keeps each binary by a hash of its sources, so a rebuild for a source tree
   already built is skipped and earlier binaries stay at hand. It also runs
-  `crates/aqr-modules/build.sh` (and pack.sh) first where what the modules are made of changed
+  `crates/aqr-modules/build.py` (and pack.py) first where what the modules are made of changed
   (`src/modules.rs`; `AQR_BINCACHE_MODULES=0` skips it).
   `cargo aqr +` lists the kept binaries; `cargo aqr +<id> <args>…` runs an earlier one, e.g. as
   the "before" of a comparison.
@@ -210,14 +210,14 @@ optimization picked by hash.
 
 - Codec crates: feature `encode` (default) brings in `formula`, aqr-formula, zstd and rayon;
   `module.rs` is the decoding code without aqr-formula. Natively they stay plain libraries.
-- aqr-modules: one `[[bin]]` per module (never one module doing several things). `build.sh`
+- aqr-modules: one `[[bin]]` per module (never one module doing several things). `build.py`
   builds them through aqr-ld and writes `wasm/*.wasm`, `*.block` (the module blocks' data),
   `src/known.rs` (name, version, SHA-512/256) and the registry's table in `spec/index.bs`.
   Every host builds the same bytes: aqr-ld, as rustc's wrapper there, makes the crates' `-C
   metadata` (of their paths, with the host's separators, by Cargo) of no path (`src/metadata.rs`).
 - **After changing any code a module links, commit the modules rebuilt**: `cargo aqr` runs
-  `crates/aqr-modules/build.sh` where that code changed and names the modules it changed
-  (run build.sh by hand otherwise); a test in aqr-decompress catches stale ones. If you don't
+  `crates/aqr-modules/build.py` where that code changed and names the modules it changed
+  (run build.py by hand otherwise); a test in aqr-decompress catches stale ones. If you don't
   rebuild, say so in the commit message.
 - aqr-decompress: a known hash runs natively when the application's declared limits hold its
   plan (`needed_by`: the same function the encoder declares with), anything else in wasmtime.

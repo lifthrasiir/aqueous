@@ -1,6 +1,6 @@
 //! Self-extracting programs made by `aqr -c --format sfx` (Windows x86-64): run, they write the
 //! files out as they were. Skipped where this aqr carries no stub (built without
-//! `target/aqr-sfx/`, which `crates/aqr-sfx/pack.sh` gathers).
+//! `target/aqr-sfx/`, which `crates/aqr-sfx/pack.py` gathers).
 
 mod common;
 

@@ -1,4 +1,4 @@
-//! aqr-ld as Cargo's `RUSTC_WORKSPACE_WRAPPER` (crates/aqr-modules/build.sh): rustc run with the
+//! aqr-ld as Cargo's `RUSTC_WORKSPACE_WRAPPER` (crates/aqr-modules/build.py): rustc run with the
 //! `-C metadata` that Cargo gives each crate of the workspace replaced by one of what does not
 //! depend on the host.
 //!

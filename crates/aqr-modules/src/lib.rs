@@ -1,5 +1,5 @@
 //! The modules of aqr-decompress as Wasm modules, built from the recompressors' code by
-//! `build.sh` into `wasm/` (a binary of `src/bin` each), with [`KNOWN`] made from them. The
+//! `build.py` into `wasm/` (a binary of `src/bin` each), with [`KNOWN`] made from them. The
 //! modules are kept with their hashes so that archives name them by their bytes, and a
 //! decompressor runs one it knows natively.
 //!

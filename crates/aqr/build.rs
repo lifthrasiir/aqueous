@@ -2,7 +2,7 @@
 //! its `VERSIONINFO`, embedded in `aqr.exe`.
 //!
 //! And on Windows x86-64, what `--format sfx` puts into a self-extracting archive: the files of
-//! `target/aqr-sfx/` (or of the directory `AQR_SFX_PACK` names), which `crates/aqr-sfx/pack.sh`
+//! `target/aqr-sfx/` (or of the directory `AQR_SFX_PACK` names), which `crates/aqr-sfx/pack.py`
 //! gathers, packed into `$OUT_DIR/sfx.pack` (src/sfx.rs reads it): the interpreter blob in a zstd
 //! frame of its own (its length before it), unpacked alone where only it is needed, then the
 //! other files in one frame, the modules' blobs sharing much (each its own copy of the standard
@@ -50,7 +50,7 @@ fn sfx_pack() {
         return;
     };
     let id = from.join("pack.id");
-    assert!(id.exists(), "{}: no pack.id (crates/aqr-sfx/pack.sh writes it)", from.display());
+    assert!(id.exists(), "{}: no pack.id (crates/aqr-sfx/pack.py writes it)", from.display());
     println!("cargo:rustc-env=AQR_SFX_ID={}", std::path::absolute(&id).unwrap().display());
     let libs = std::fs::read_to_string(from.join("libs.txt")).unwrap_or_default();
     let mut names = ["aqr-sfx-shim.exe", "modules.txt", "libs.txt"].map(String::from).to_vec();

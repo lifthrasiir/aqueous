@@ -1,4 +1,4 @@
-# The modules' bytes (and hashes) depend on the toolchain: crates/aqr-modules/build.sh builds
+# The modules' bytes (and hashes) depend on the toolchain: crates/aqr-modules/build.py builds
 # them with this one.
 [toolchain]
 channel = "1.99.1"

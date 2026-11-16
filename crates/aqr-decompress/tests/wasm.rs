@@ -50,11 +50,11 @@ fn built_modules_known() {
     }
     for k in aqr_modules::KNOWN {
         let m = MODULES.iter().find(|m| m.name == k.name);
-        assert_eq!(m.map(|m| m.version), Some(k.version), "{}: run crates/aqr-modules/build.sh", k.name);
+        assert_eq!(m.map(|m| m.version), Some(k.version), "{}: run crates/aqr-modules/build.py", k.name);
         let wasm = k.read_wasm().unwrap();
         assert_eq!(known(&wasm), m.copied());
         assert_eq!(wasm_of(*m.unwrap()), Some(aqr::Wasm::Block(k.block.into())));
-        assert!(aqr::module_block_data(&wasm).unwrap() == k.block, "{}: run crates/aqr-modules/build.sh", k.name);
+        assert!(aqr::module_block_data(&wasm).unwrap() == k.block, "{}: run crates/aqr-modules/build.py", k.name);
     }
     assert_eq!(known(b"\0asm\x01\0\0\0"), None);
 }

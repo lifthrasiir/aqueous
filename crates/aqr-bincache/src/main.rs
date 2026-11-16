@@ -19,7 +19,7 @@
 //! files, so backtraces of a kept binary lose their lines once `target/` is cleaned.
 //!
 //! Before the binary of the working copy is looked up, the Wasm modules and the SFX pack are made
-//! again where what they are made of changed ([`modules`]: build.sh and pack.sh run as needed).
+//! again where what they are made of changed ([`modules`]: build.py and pack.py run as needed).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

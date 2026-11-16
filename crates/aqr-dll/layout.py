@@ -1,4 +1,4 @@
-"""The shared libraries of the modules built as native libraries (build.sh runs it).
+"""The shared libraries of the modules built as native libraries (build.py runs it).
 
 Each module's library would hold a copy of everything it uses, the standard library among them
 (about 190 KB each). Instead, the crates that more than one module uses go into Rust dylibs

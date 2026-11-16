@@ -299,7 +299,7 @@ mod tests {
         assert!(super::unpack(&p[..p.len() - 1]).is_err());
     }
 
-    /// The blobs of the pack (`target/aqr-sfx/`, crates/aqr-sfx/pack.sh) bundled and back, with
+    /// The blobs of the pack (`target/aqr-sfx/`, crates/aqr-sfx/pack.py) bundled and back, with
     /// their sizes: as they are, by zstd alone, bundled.
     #[test]
     #[ignore]

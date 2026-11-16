@@ -11,7 +11,7 @@
 //!   library the symbols that the others import from it.
 //! - `aqr-ld merge --stub S --out O NAME=MODULE.dll ...` merges native module libraries into a
 //!   stub executable as sections, with no loader ([`pemerge`]), toward self-extracting archives.
-//! - As Cargo's `RUSTC_WORKSPACE_WRAPPER` (crates/aqr-modules/build.sh), it runs rustc with the
+//! - As Cargo's `RUSTC_WORKSPACE_WRAPPER` (crates/aqr-modules/build.py), it runs rustc with the
 //!   crates' `-C metadata` made the same on any host ([`metadata`]).
 //!
 //! With `AQR_LD_NAMES` set, the name section is kept, to see what is left in a module.

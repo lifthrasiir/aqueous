@@ -1,4 +1,4 @@
-// Made by build.sh.
+// Made by build.py.
 
 use crate::{Known, hex};
 

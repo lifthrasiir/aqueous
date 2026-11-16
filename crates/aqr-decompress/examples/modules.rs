@@ -1,5 +1,5 @@
 //! Prints every module of aqr-decompress, a line each: its name, its version and the name of
-//! its binary in aqr-modules (`/` as `-`), for crates/aqr-modules/build.sh. Given files of Wasm
+//! its binary in aqr-modules (`/` as `-`), for crates/aqr-modules/build.py. Given files of Wasm
 //! modules, writes the data of their module blocks next to each instead (`.block`).
 
 fn main() {

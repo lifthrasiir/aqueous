@@ -2,7 +2,7 @@
 name = "aqr-dll"
 version = "0.1.0"
 edition = "2024"
-description = "A module of aqr-modules built as a native library (DLL), its entry point applied under aqr-api's emulation (build.sh)"
+description = "A module of aqr-modules built as a native library (DLL), its entry point applied under aqr-api's emulation (build.py)"
 publish = false
 
 [lib]

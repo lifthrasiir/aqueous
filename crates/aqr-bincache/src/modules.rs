@@ -1,17 +1,18 @@
 //! The modules and the SFX pack made again before aqr is built, where what they are made of
-//! changed, so that no one has to remember `crates/aqr-modules/build.sh` and
-//! `crates/aqr-sfx/pack.sh` (both build the same bytes on any host).
+//! changed, so that no one has to remember `crates/aqr-modules/build.py` and
+//! `crates/aqr-sfx/pack.py` (both build the same bytes on any host; Python runs them: `PYTHON`,
+//! else the `.venv`'s at the root, else `python3` or `python` on PATH).
 //!
 //! - The modules: a stamp (`cache/modules.stamp`) holds the git blob ids of what the last
-//!   build.sh read (the dep-info of each module's binary and of aqr-ld, which links them, with
-//!   their crates' manifests, build.sh and the toolchain's file) and of what it wrote
+//!   build.py read (the dep-info of each module's binary and of aqr-ld, which links them, with
+//!   their crates' manifests, build.py and the toolchain's file) and of what it wrote
 //!   (`wasm/*.wasm`, `wasm/*.block`, `src/known.rs`), with the environment and the binaries of
-//!   `src/bin`. Where any of it differs, build.sh runs (a minute or so even with nothing to do,
+//!   `src/bin`. Where any of it differs, build.py runs (a minute or so even with nothing to do,
 //!   hence the stamp), and the modules whose hashes it changed are told.
-//! - The pack (Windows x86-64 alone, where pack.sh runs, and where it is `target/aqr-sfx`, not
+//! - The pack (Windows x86-64 alone, where pack.py runs, and where it is `target/aqr-sfx`, not
 //!   `AQR_SFX_PACK`'s): where there is one and its `modules.txt` is not of the modules of
-//!   known.rs, pack.sh runs. Where there is none it is left so (pack.sh needs the nightly of
-//!   `nightly-toolchain` and build-std); where pack.sh fails, it is not run again for the same
+//!   known.rs, pack.py runs. Where there is none it is left so (pack.py needs the nightly of
+//!   `nightly-toolchain` and build-std); where pack.py fails, it is not run again for the same
 //!   known.rs.
 //!
 //! `AQR_BINCACHE_MODULES=0` leaves both as they are. One `cargo aqr` at a time does this (a lock
@@ -26,8 +27,8 @@ use std::time::SystemTime;
 use super::{Result, blobs, cache, dep_info, environment, git, root};
 
 const STAMP: &str = "aqr-bincache modules 1\n";
-const BUILD: &str = "crates/aqr-modules/build.sh";
-const PACK: &str = "crates/aqr-sfx/pack.sh";
+const BUILD: &str = "crates/aqr-modules/build.py";
+const PACK: &str = "crates/aqr-sfx/pack.py";
 const KNOWN: &str = "crates/aqr-modules/src/known.rs";
 
 /// The modules, and the pack, made again where they are not of their sources.
@@ -59,7 +60,7 @@ fn modules() -> Result<()> {
     eprintln!("aqr-bincache: {why}; running {BUILD}");
     let before = known()?;
     let start = SystemTime::now();
-    sh(BUILD)?;
+    python(BUILD)?;
     tell(&before, &known()?);
     let paths = inputs()?.ok_or_else(|| format!("{BUILD} left no dep-info of the modules"))?;
     let changed = paths.iter().find(|p| modified_since(&root().join(p), start));
@@ -82,9 +83,9 @@ fn bins() -> Result<BTreeSet<String>> {
     Ok(entries.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".rs").map(String::from)).collect())
 }
 
-/// What build.sh read, by the dep-info its builds left: `None` where some is missing.
+/// What build.py read, by the dep-info its builds left: `None` where some is missing.
 fn inputs() -> Result<Option<BTreeSet<String>>> {
-    // (build.sh's paths: it builds in `target/` whatever CARGO_TARGET_DIR is)
+    // (build.py's paths: it builds in `target/` whatever CARGO_TARGET_DIR is)
     let target = root().join("target");
     let wasm = target.join("wasm32-unknown-unknown/release-wasm");
     let mut infos: Vec<PathBuf> = bins()?.iter().map(|b| wasm.join(format!("{b}.d"))).collect();
@@ -97,13 +98,13 @@ fn inputs() -> Result<Option<BTreeSet<String>>> {
         paths.extend(dep_info(&d)?);
     }
     paths.extend([BUILD, "rust-toolchain.toml"].map(String::from));
-    // (not Cargo.lock, which pack.sh writes after build.sh: the registry crates' versions are in
+    // (not Cargo.lock, which pack.py writes after build.py: the registry crates' versions are in
     // the paths of their sources)
     paths.remove("Cargo.lock");
     Ok(Some(paths))
 }
 
-/// What build.sh writes and the stamp follows (not the spec, which other changes touch too).
+/// What build.py writes and the stamp follows (not the spec, which other changes touch too).
 fn outputs() -> Result<BTreeSet<String>> {
     let dir = root().join("crates/aqr-modules/wasm");
     let entries = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -149,7 +150,7 @@ fn parse_known(text: &str) -> BTreeMap<String, String> {
     map
 }
 
-/// Tells the modules build.sh changed, to be committed.
+/// Tells the modules build.py changed, to be committed.
 fn tell(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) {
     let names: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
     let changed: Vec<&str> = names.into_iter().filter(|n| before.get(*n) != after.get(*n)).map(|n| &n[..]).collect();
@@ -163,7 +164,7 @@ fn tell(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) {
     }
 }
 
-/// Runs pack.sh where the pack is there and not of known.rs.
+/// Runs pack.py where the pack is there and not of known.rs.
 fn pack() -> Result<()> {
     if !cfg!(all(windows, target_arch = "x86_64")) || std::env::var_os("AQR_SFX_PACK").is_some() {
         return Ok(());
@@ -178,7 +179,7 @@ fn pack() -> Result<()> {
         return Ok(());
     }
     eprintln!("aqr-bincache: the SFX pack (target/aqr-sfx) is not of the modules of known.rs; running {PACK}");
-    match sh(PACK) {
+    match python(PACK) {
         Ok(()) => {
             let _ = fs::remove_file(&failed);
             // (the shared libraries' layout, crates/aqr-dll/layout.py's, is committed)
@@ -206,33 +207,37 @@ fn pack_of(list: &str, known: &BTreeMap<String, String>) -> bool {
     have == want
 }
 
-/// Runs a script of the working copy by `sh` from its root, its output on standard error (that of
+/// Runs a Python script of the working copy from its root, its output on standard error (that of
 /// `cargo aqr` is aqr's).
-fn sh(script: &str) -> Result<()> {
-    let status = Command::new(shell())
+fn python(script: &str) -> Result<()> {
+    let python = interpreter().ok_or_else(|| format!("{script}: no Python (set PYTHON)"))?;
+    let status = Command::new(&python)
         .current_dir(root())
-        .arg(script)
+        .args(["-I", script])
         .stdout(Stdio::from(std::io::stderr()))
         .status()
-        .map_err(|e| format!("sh {script}: {e}"))?;
+        .map_err(|e| format!("{} {script}: {e}", python.display()))?;
     if !status.success() {
         return Err(format!("{script} failed ({status})"));
     }
     Ok(())
 }
 
-/// `sh`: on PATH, or (on Windows, run from PowerShell or cmd) Git for Windows' own.
-fn shell() -> PathBuf {
-    let on_path = Command::new("sh").args(["-c", ":"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
-    if on_path.is_ok_and(|s| s.success()) || !cfg!(windows) {
-        return "sh".into();
+/// Python: `PYTHON`, else the venv's at the root, else `python3` or `python` that runs (Windows'
+/// `python3` may be the Store's stand-in).
+fn interpreter() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("PYTHON") {
+        return Some(p.into());
     }
-    // (`git --exec-path`: <Git>/mingw64/libexec/git-core; sh is <Git>/usr/bin/sh.exe)
-    let exec = Command::new("git").arg("--exec-path").output().ok();
-    let git = exec.and_then(|o| String::from_utf8(o.stdout).ok()).map(|p| PathBuf::from(p.trim()));
-    git.and_then(|p| Some(p.ancestors().nth(3)?.join("usr/bin/sh.exe")))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| "sh".into())
+    let venv = [".venv/Scripts/python.exe", ".venv/bin/python"].map(|p| root().join(p));
+    if let Some(p) = venv.into_iter().find(|p| p.exists()) {
+        return Some(p);
+    }
+    let runs = |p: &str| {
+        let s = Command::new(p).args(["-c", ""]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        s.is_ok_and(|s| s.success())
+    };
+    ["python3", "python"].into_iter().find(|p| runs(p)).map(PathBuf::from)
 }
 
 #[cfg(test)]

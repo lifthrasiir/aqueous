@@ -81,7 +81,7 @@ jobs:
         if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # What aqr's build.rs packs into aqr.exe (target/aqr-sfx/, crates/aqr-sfx/pack.sh): the
+      # What aqr's build.rs packs into aqr.exe (target/aqr-sfx/, crates/aqr-sfx/pack.py): the
       # interpreter blob, which runs the modules as WebAssembly (aqr links no Wasmtime on Windows
       # x86-64), and the stub and the modules' blobs of `--format sfx`. Built by the nightly with
       # build-std (the no-TLS target of crates/aqr-dll), and Python for crates/aqr-dll/layout.py.
@@ -97,7 +97,7 @@ jobs:
           curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
           echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
           unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
-      - run: PYTHON=python AQR_UPX=./upx.exe crates/aqr-sfx/pack.sh
+      - run: AQR_UPX=./upx.exe python crates/aqr-sfx/pack.py
       - run: cargo build --profile dist -p aqr -p aqr-win
       # aqr.exe runs modules as WebAssembly (by the interpreter blob it carries) and makes a
       # self-extracting program that gives the files back: a build without the pack fails here.

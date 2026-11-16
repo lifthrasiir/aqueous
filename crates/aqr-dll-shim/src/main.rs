@@ -265,7 +265,7 @@ mod sys {
     type Sym = unsafe extern "system" fn() -> isize;
 
     pub fn open(path: &std::path::Path) -> Result<(InfoFn, ApplyFn), String> {
-        // (the shared libraries it links against looked for beside it, as build.sh puts them)
+        // (the shared libraries it links against looked for beside it, as build.py puts them)
         let path = std::path::absolute(path).map_err(|e| e.to_string())?;
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
         let h = unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH) };

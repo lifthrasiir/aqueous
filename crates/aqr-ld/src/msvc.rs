@@ -1,5 +1,5 @@
 //! As the MSVC linker of crates/aqr-dll's no-TLS target (`CARGO_TARGET_X86_64_AQR_WINDOWS_MSVC_LINKER`,
-//! build.sh): the shared libraries of the modules (Rust dylibs, crates/aqr-dll/layout.py) export
+//! build.py): the shared libraries of the modules (Rust dylibs, crates/aqr-dll/layout.py) export
 //! every Rust symbol of their crates, which keeps all of their code; where `AQR_LD_EXPORTS` names
 //! a directory holding `LIBRARY.txt` (the symbols that the others import from it, `aqr-ld exports`)
 //! for the library linked, the export list rustc gives (`/DEF:`) is cut to those, so that the
