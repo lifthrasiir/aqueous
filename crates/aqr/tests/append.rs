@@ -183,12 +183,14 @@ fn appended() {
     let differ = (0..before.len()).filter(|&k| before[k] != after[k]).count();
     assert!(differ > 0 && differ < 30, "{differ}");
     // the commit written whole but its footer before not made a spacer: read as the archive
-    // before, then made by the next append
+    // before, and cut off by the next append, which appends it again (not made: what a reader
+    // was given would change under it)
     fs::write(d.join("b.aqr"), [&before[..], &after[before.len()..]].concat()).unwrap();
     assert_eq!(extracted(&d, "b.aqr").len(), 6);
     let o = ok(&d, &["-a", "b.aqr", "src"]);
-    assert!(stderr(&o).contains("was whole: committed") && stderr(&o).contains("nothing to append"), "{}", stderr(&o));
-    assert_eq!(fs::read(d.join("b.aqr")).unwrap(), after);
+    let e = stderr(&o);
+    assert!(e.contains("an append not committed cut off") && !e.contains("nothing to append"), "{e}");
+    assert_eq!(extracted(&d, "b.aqr"), files(&src));
     // a file taken away: kept in the archive, but synchronizing
     fs::remove_file(src.join("t2.txt")).unwrap();
     fs::remove_dir_all(src.join("new")).unwrap();
@@ -258,8 +260,7 @@ fn append_archive_checked_first() {
 }
 
 /// An archive appended to whose append was not committed (bytes after it, as a process killed
-/// leaves): the bytes cut off, or the commit made where it was written whole; other bytes after
-/// it not taken away.
+/// leaves): the bytes cut off; other bytes after it not taken away.
 #[test]
 fn appended_after_append_not_committed() {
     let d = scratch("tail");

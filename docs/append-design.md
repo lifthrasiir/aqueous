@@ -127,8 +127,10 @@ overlay 아카이브의 footer(`OVERLAY_FOOTER_TYPE`)도 똑같이 죽인다.
 | F_{k+1}을 다 쓴 뒤, commit 전 | 옛 상태. 꼬리는 완결된 commit 하나다 |
 | commit 뒤 | 새 상태 |
 
-다음 `-a`는 꼬리를 보고 판단한다. 꼬리가 완결된 commit(F_{k+1}까지 맞음)이면 F_k를 죽여 앞으로 진행하고,
-아니면 잘라 낸다.
+다음 `-a`는 꼬리를 잘라 낸다. 꼬리가 완결된 commit(F_{k+1}까지 맞음)이어도 F_k를 죽여 앞으로 진행하지
+않는다. 그때까지 파일은 옛 상태로 읽혔으므로, commit되지 않은 것이 나중에 보이게 되면 읽은 쪽이 본 것이
+바뀐다. spec은 두 처리를 다 허용한다("Appending to an archive"). 잃는 것은 마지막 sync 하나만 남기고 멈춘
+append인데, 그것도 commit되지 않았으니 잃는 것이 맞다.
 
 ### 고려하고 버린 것
 
@@ -161,7 +163,7 @@ overlay 아카이브의 footer(`OVERLAY_FOOTER_TYPE`)도 똑같이 죽인다.
 ## commit 규약
 
 1. `-a`는 아카이브를 연다. advisory lock(`flock`, `LockFileEx`)으로 쓰는 쪽을 하나로 묶는다. 끝을 찾고,
-   꼬리가 있으면 위의 표대로 앞으로 진행하거나 잘라 낸다.
+   꼬리가 있으면 잘라 낸다(위).
 2. 블록과 metadata block을 쓰고 sync, footer를 쓰고 sync, 옛 footer를 죽이고 sync, 남은 바이트를 0으로
    채운다. macOS의 `fsync`는 순서를 보장하지 않으므로 중간 sync에는 `F_BARRIERFSYNC`를, commit에는
    `F_FULLFSYNC`를 쓴다.
@@ -204,7 +206,7 @@ overlay 아카이브의 footer(`OVERLAY_FOOTER_TYPE`)도 똑같이 죽인다.
 - **`--atomic`은 전부 아니면 전무다.** `-a`는 실행 내내 처음의 footer를 살려 두고, 끝에 한 번만 죽인다.
   중간 segment는 쓰되 footer는 마지막 것만 쓴다. 중간에 죽으면 시작 전 상태와 꼬리가 남는다. `-c`는
   지금처럼 `.part`에 쓰고 끝에 rename한다.
-- **꼬리**는 다음 `-a`가 처리한다(앞으로 진행하거나 잘라 낸다). 읽는 쪽은 경고만 한다.
+- **꼬리**는 다음 `-a`가 잘라 낸다. 읽는 쪽은 경고만 한다.
 
 ## 출력 이름 (`-c`)
 

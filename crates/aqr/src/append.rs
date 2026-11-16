@@ -2,9 +2,9 @@
 //! archive does not, as a tree of segments to append ([`open`], [`Opened::against`]).
 //!
 //! The archive is opened to be written, locked against another writer, and located in its file
-//! (after a stub, say). Bytes after it are those of an append not committed: where they end with
-//! a commit written whole, it is made (its footer before made a spacer block), else they are cut
-//! off; bytes after it that are not blocks are not taken away, and the archive is not appended to.
+//! (after a stub, say). Bytes after it are those of an append not committed, cut off (even where
+//! they end with a commit written whole: it was not committed); bytes after it that are not
+//! blocks are not taken away, and the archive is not appended to.
 //! An encrypted archive is not appended to (its nonces would be used again), nor one of a single
 //! file, nor one of a size hint block (to be written over).
 //!
@@ -50,7 +50,7 @@ pub struct Opened {
 }
 
 /// Archive `path` opened to be appended to: locked, located, the bytes after it of an append not
-/// committed made or cut off ([module](self)).
+/// committed cut off ([module](self)).
 pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let file = fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| err(&e))?;
@@ -69,12 +69,9 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
         if aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c) {
             return Err(err(&"an encrypted archive is not appended to (its nonces would be used again)"));
         }
-        let mut at = aqr::locate(&c).ok_or_else(|| err(&"no archive found in it (aqr -K tells more)"))?;
+        let at = aqr::locate(&c).ok_or_else(|| err(&"no archive found in it (aqr -K tells more)"))?;
         if at.end < c.len() {
-            (at, cut) = tail(&file, &c, at, path)?;
-            if cut.is_none() && !quiet {
-                eprintln!("{}: an append not committed was whole: committed", path.display());
-            }
+            cut = Some(tail(&c, at.clone(), path)?);
         }
         let a = &c[at.clone()];
         let (footer, metadata) = aqr::footer_of(a).ok_or_else(|| err(&"no footer"))?;
@@ -128,30 +125,16 @@ impl Opened {
     }
 }
 
-/// The archive at `at` of file `c` (of `file`) where bytes follow it: an append not committed,
-/// made where it ends with a commit written whole, else to be cut off (the bytes after it, which
-/// the caller cuts once `c` is not mapped); where they are not blocks, an error.
-fn tail(file: &fs::File, c: &[u8], at: Range<usize>, path: &Path) -> Result<(Range<usize>, Option<usize>), String> {
+/// The bytes after the archive `at` of file `c`, where some follow it: those of an append not
+/// committed, to be cut off (which the caller does once `c` is not mapped), how many; where they
+/// are not blocks, an error.
+///
+/// An append whose commit was written whole but for its footer before made a spacer block is cut
+/// off too, not made: until then the file was the archive before (what a reader saw of it), and
+/// what was not committed is not to be seen afterwards (spec, "Appending to an archive": the
+/// trailing bytes removed).
+fn tail(c: &[u8], at: Range<usize>, path: &Path) -> Result<usize, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let whole = &c[at.start..];
-    // (a commit written whole: the archive to the end of the file, once the footer it was
-    // written after is made a spacer block)
-    if let Some((f, _)) = aqr::footer_of(&c[at.clone()])
-        && aqr::footer_of(whole).is_some()
-    {
-        let k = aqr::kill(f.len());
-        let mut made = whole.to_vec();
-        made[f.start..f.start + k.len()].copy_from_slice(&k);
-        made[f.start + k.len()..f.end].fill(0);
-        if aqr::locate(&made) == Some(0..made.len()) && aqr::open(&made, &aqr::NoModules).is_ok() {
-            let base = at.start as u64;
-            crate::write_at(file, base + f.start as u64, &k).map_err(|e| err(&e))?;
-            crate::sync_file(file).map_err(|e| err(&e))?;
-            crate::write_at(file, base + (f.start + k.len()) as u64, &vec![0; f.len() - k.len()])
-                .map_err(|e| err(&e))?;
-            return Ok((at.start..c.len(), None));
-        }
-    }
     // (blocks after the footer, and its padding byte, as an append writes them)
     let mut e = at.end + (at.end - at.start) % 2;
     let ours = e >= c.len() || aqr::block_at(c, e).is_some() || c.len() - e < 16;
@@ -161,7 +144,7 @@ fn tail(file: &fs::File, c: &[u8], at: Range<usize>, path: &Path) -> Result<(Ran
     if !ours {
         return Err(err(&"bytes after the archive not of an append: not appended to"));
     }
-    Ok((at.clone(), Some(c.len() - at.end)))
+    Ok(c.len() - at.end)
 }
 
 /// The path of each entry of `t`, by its names.
