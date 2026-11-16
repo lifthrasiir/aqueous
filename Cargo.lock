@@ -1630,6 +1630,7 @@ dependencies = [
  "aqr-common",
  "aqr-exe",
  "aqr-formula",
+ "liblzma",
  "zstd",
 ]
 

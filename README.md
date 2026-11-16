@@ -86,6 +86,14 @@ and opens `.aqr` files, its progress shown on the files in Finder: [crates/aqr-m
 For binaries to distribute, build with `cargo build --profile dist -p aqr` (into `target/dist`):
 fat LTO, a few minutes for 0.3–0.7% fewer instructions than `-r`.
 
+On Windows x86-64, `aqr.exe` links no WebAssembly runtime: it runs the modules that it has no
+native code for (those of earlier releases' archives, `-Z wasm`) by an interpreter it carries,
+and `--format sfx` needs the stub and the modules' native blobs. Gather them first with
+`python crates/aqr-sfx/pack.py` (Python 3; the nightly toolchain of the file `nightly-toolchain`
+with `rust-src`; UPX on the path, or `AQR_UPX`, to pack the stub) into `target/aqr-sfx/`, which
+aqr's build includes; once it is there, `cargo aqr` runs it again as the modules change.
+Without it, `aqr.exe` runs only the modules it knows natively, and makes no SFX.
+
 The workspace's tests are slow in debug builds; run them with `cargo rt` (`cargo test --profile
 release-test`: optimised and incremental). The tests of aqr-flate, aqr-png and aqr-pdf compress
 with [flate-zoo](https://crates.io/crates/flate-zoo)'s encoders, which want a C/C++ compiler; with

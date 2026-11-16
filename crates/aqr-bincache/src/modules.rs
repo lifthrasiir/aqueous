@@ -11,7 +11,7 @@
 //!   hence the stamp), and the modules whose hashes it changed are told.
 //! - The pack (Windows x86-64 alone, where pack.py runs, and where it is `target/aqr-sfx`, not
 //!   `AQR_SFX_PACK`'s): where there is one and its `modules.txt` is not of the modules of
-//!   known.rs, pack.py runs. Where there is none it is left so (pack.py needs the nightly of
+//!   known.rs, or its `sfx.pack` is missing or of an earlier form, pack.py runs. Where there is none it is left so (pack.py needs the nightly of
 //!   `nightly-toolchain` and build-std); where pack.py fails, it is not run again for the same
 //!   known.rs.
 //!
@@ -164,13 +164,13 @@ fn tell(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) {
     }
 }
 
-/// Runs pack.py where the pack is there and not of known.rs.
+/// Runs pack.py where the pack is there and not of known.rs, or not packed as aqr reads it.
 fn pack() -> Result<()> {
     if !cfg!(all(windows, target_arch = "x86_64")) || std::env::var_os("AQR_SFX_PACK").is_some() {
         return Ok(());
     }
     let Ok(list) = fs::read_to_string(root().join("target/aqr-sfx/modules.txt")) else { return Ok(()) };
-    if pack_of(&list, &known()?) {
+    if pack_of(&list, &known()?) && packed() {
         return Ok(());
     }
     let failed = cache().join("pack.failed");
@@ -196,6 +196,15 @@ fn pack() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the pack's `sfx.pack` is there, of the form aqr's build.rs takes (the magic of
+/// aqr-sfx's `aqr-sfx-pack`).
+fn packed() -> bool {
+    let mut head = [0; 8];
+    fs::File::open(root().join("target/aqr-sfx/sfx.pack"))
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
+        .is_ok_and(|()| &head == b"AQRSFXP1")
 }
 
 /// Whether the pack's `modules.txt` (`NAME HASH` lines, the binaries' names) has the modules of

@@ -12,7 +12,17 @@ aqr-blob = { path = "../aqr-blob", features = ["runner"] }
 aqr-formula = { path = "../aqr-formula" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 zstd = { version = "0.13", default-features = false }
+# (XZ Utils' liblzma, as aqr-pack builds it: the pack aqr carries, `xz`)
+liblzma = { version = "0.4", default-features = false, features = ["static"], optional = true }
 
 [features]
 # Making bundles of blobs (`bundle::pack`), for aqr; the stub only unpacks them.
 encode = ["aqr-exe/encode"]
+# Bundles of raw LZMA2 frames (`bundle::pack_xz`, `bundle::unpack`): the pack that aqr carries,
+# which its stub never reads.
+xz = ["dep:liblzma"]
+
+# The pack that aqr carries (crates/aqr-sfx/pack.py runs it): `aqr-sfx-pack DIR` writes DIR/sfx.pack.
+[[bin]]
+name = "aqr-sfx-pack"
+required-features = ["encode", "xz"]

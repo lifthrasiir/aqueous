@@ -7,9 +7,14 @@
 //! blob's code one after another, by stream, and the rest of the blobs apart, each a zstd frame
 //! of its own. The stub ([`unpack`]) places them in memory at run time (`aqr_blob::load`).
 //!
+//! With the feature `xz`, the same bundle can be made with its frames of raw LZMA2 instead
+//! ([`pack_xz`], of the magic `AQRSFXX1`; preset 9, a dictionary no larger than the frame nor than
+//! 8 MiB): the pack that aqr carries (`sfx.pack`, `src/bin/aqr-sfx-pack.rs`), which aqr alone reads.
+//! A self-extracting program's bundle is of zstd: its stub links no liblzma.
+//!
 //! ```text
 //! bundle = "AQRSFXB2" le64:len frame:meta frame:x86[13] frame:rest
-//! frame  = le32:raw le32:n zstd[n]
+//! frame  = le32:raw le32:n zstd[n]                            (AQRSFXX1: lzma2[n])
 //! meta   = count blob*                                         (varints)
 //! blob   = str:entry str:name apply_rva info_rva pdata_rva pdata_count import_dir_rva first
 //!          image_base count str:lib* count (slot lib rva)* count reloc-delta*
@@ -29,12 +34,27 @@ use aqr_exe::arch::x86;
 
 pub const MAGIC: &[u8; 8] = b"AQRSFXB2";
 
+/// The magic of a bundle of raw LZMA2 frames ([`pack_xz`]).
+pub const MAGIC_XZ: &[u8; 8] = b"AQRSFXX1";
+
+/// What a bundle's frames are compressed by.
+#[derive(Clone, Copy)]
+enum Codec {
+    Zstd,
+    #[cfg(feature = "xz")]
+    Xz,
+}
+
 /// The frames of a bundle: `meta`, the x86 streams, `rest`.
 const FRAMES: usize = x86::NUM_STREAMS + 2;
 
 /// The length of the bundle at the start of `d`, if one is there (else `None`).
 pub fn len(d: &[u8]) -> Option<usize> {
-    let n = d.strip_prefix(MAGIC)?.first_chunk::<8>()?;
+    len_of(d, MAGIC)
+}
+
+fn len_of(d: &[u8], magic: &[u8; 8]) -> Option<usize> {
+    let n = d.strip_prefix(magic)?.first_chunk::<8>()?;
     usize::try_from(u64::from_le_bytes(*n)).ok().filter(|&n| (MAGIC.len() + 8..=d.len()).contains(&n))
 }
 
@@ -52,6 +72,17 @@ fn code_len(b: &Blob) -> usize {
 /// The bundle of `blobs` (each its name in the program and its bytes, `Blob::to_bytes`).
 #[cfg(feature = "encode")]
 pub fn pack(blobs: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    pack_with(blobs, Codec::Zstd)
+}
+
+/// [`pack`] with frames of raw LZMA2 ([`MAGIC_XZ`]).
+#[cfg(all(feature = "encode", feature = "xz"))]
+pub fn pack_xz(blobs: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    pack_with(blobs, Codec::Xz)
+}
+
+#[cfg(feature = "encode")]
+fn pack_with(blobs: &[(String, Vec<u8>)], codec: Codec) -> Result<Vec<u8>, String> {
     let mut meta = Vec::new();
     let mut streams: [Vec<u8>; x86::NUM_STREAMS] = std::array::from_fn(|_| Vec::new());
     let mut rest = Vec::new();
@@ -119,10 +150,14 @@ pub fn pack(blobs: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
     frames.push(&rest);
     // (the frames compressed at once, each on a thread of its own)
     let frames: Vec<Vec<u8>> = std::thread::scope(|s| {
-        let hs: Vec<_> = frames.iter().map(|&f| s.spawn(move || frame(f))).collect();
+        let hs: Vec<_> = frames.iter().map(|&f| s.spawn(move || frame(f, codec))).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect::<Result<_, _>>()
     })?;
-    let mut out = MAGIC.to_vec();
+    let mut out = match codec {
+        Codec::Zstd => MAGIC.to_vec(),
+        #[cfg(feature = "xz")]
+        Codec::Xz => MAGIC_XZ.to_vec(),
+    };
     let len = MAGIC.len() + 8 + frames.iter().map(Vec::len).sum::<usize>();
     out.extend_from_slice(&(len as u64).to_le_bytes());
     frames.iter().for_each(|f| out.extend_from_slice(f));
@@ -133,16 +168,14 @@ pub fn pack(blobs: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
 #[cfg(feature = "encode")]
 const LEVEL: i32 = 19;
 
+/// `d` as a frame: its length, and compressed by `codec` (with its length before it).
 #[cfg(feature = "encode")]
-fn frame(d: &[u8]) -> Result<Vec<u8>, String> {
-    use zstd::zstd_safe::CParameter;
-    let mut z = zstd::bulk::Compressor::new(LEVEL).map_err(|e| e.to_string())?;
-    // (a window as large as the data, and no larger than the decoder takes by default)
-    let log = (usize::BITS - d.len().max(1).leading_zeros()).clamp(10, 27);
-    for p in [CParameter::WindowLog(log), CParameter::ContentSizeFlag(false), CParameter::ChecksumFlag(false)] {
-        z.set_parameter(p).map_err(|e| e.to_string())?;
-    }
-    let z = z.compress(d).map_err(|e| e.to_string())?;
+fn frame(d: &[u8], codec: Codec) -> Result<Vec<u8>, String> {
+    let z = match codec {
+        Codec::Zstd => zstd_frame(d)?,
+        #[cfg(feature = "xz")]
+        Codec::Xz => xz::compress(d)?,
+    };
     let mut f = Vec::with_capacity(8 + z.len());
     f.extend_from_slice(&(d.len() as u32).to_le_bytes());
     f.extend_from_slice(&(z.len() as u32).to_le_bytes());
@@ -150,10 +183,85 @@ fn frame(d: &[u8]) -> Result<Vec<u8>, String> {
     Ok(f)
 }
 
+#[cfg(feature = "encode")]
+fn zstd_frame(d: &[u8]) -> Result<Vec<u8>, String> {
+    use zstd::zstd_safe::CParameter;
+    let mut z = zstd::bulk::Compressor::new(LEVEL).map_err(|e| e.to_string())?;
+    // (a window as large as the data, and no larger than the decoder takes by default)
+    let log = (usize::BITS - d.len().max(1).leading_zeros()).clamp(10, 27);
+    for p in [CParameter::WindowLog(log), CParameter::ContentSizeFlag(false), CParameter::ChecksumFlag(false)] {
+        z.set_parameter(p).map_err(|e| e.to_string())?;
+    }
+    z.compress(d).map_err(|e| e.to_string())
+}
+
+/// Raw LZMA2 frames (the bundles of [`MAGIC_XZ`]).
+#[cfg(feature = "xz")]
+mod xz {
+    use liblzma::stream::{Action, Error, Filters, LzmaOptions, Status, Stream};
+
+    /// The dictionary of a frame of `raw` bytes: as large as the frame (a power of two), 8 MiB
+    /// at most, so that decoding takes little memory.
+    fn dict(raw: usize) -> u32 {
+        raw.max(1).next_power_of_two().clamp(1 << 12, 8 << 20) as u32
+    }
+
+    fn filters(raw: usize) -> Result<Filters, Error> {
+        let mut opts = LzmaOptions::new_preset(9)?;
+        opts.dict_size(dict(raw));
+        let mut f = Filters::new();
+        f.lzma2(&opts);
+        Ok(f)
+    }
+
+    #[cfg(feature = "encode")]
+    pub fn compress(d: &[u8]) -> Result<Vec<u8>, String> {
+        let e = |e: Error| format!("LZMA2: {e}");
+        let mut s = Stream::new_raw_encoder(&filters(d.len()).map_err(e)?).map_err(e)?;
+        let mut out = Vec::with_capacity(d.len() / 4 + 4096);
+        loop {
+            let at = s.total_in() as usize;
+            if out.capacity() - out.len() < 4096 {
+                out.reserve(out.capacity() / 2 + 4096);
+            }
+            if s.process_vec(&d[at..], &mut out, Action::Finish).map_err(e)? == Status::StreamEnd {
+                return Ok(out);
+            }
+        }
+    }
+
+    /// The `raw` bytes of frame `z` (more or fewer: the caller tells).
+    pub fn decompress(z: &[u8], raw: usize) -> Result<Vec<u8>, String> {
+        let e = |e: Error| format!("the bundle of blobs: LZMA2: {e}");
+        let mut s = Stream::new_raw_decoder(&filters(raw).map_err(e)?).map_err(e)?;
+        // (a byte more than it should be, so that a frame of more is told)
+        let mut out = Vec::with_capacity(raw + 1);
+        loop {
+            let (at, had) = (s.total_in() as usize, out.len());
+            match s.process_vec(&z[at..], &mut out, Action::Finish).map_err(e)? {
+                Status::StreamEnd => return Ok(out),
+                _ if s.total_in() as usize == at && out.len() == had => {
+                    return Err("the bundle of blobs: a frame cut short".into());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// The blobs of bundle `d` (as [`pack`] took them: each its name in the program and its bytes).
+///
+/// A bundle of [`MAGIC_XZ`] is taken with the feature `xz` alone.
 pub fn unpack(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let cut = || "the bundle of blobs is cut short".to_string();
-    let n = len(d).ok_or("not a bundle of blobs")?;
+    let (n, codec) = match (len(d), len_of(d, MAGIC_XZ)) {
+        (Some(n), _) => (n, Codec::Zstd),
+        #[cfg(feature = "xz")]
+        (None, Some(n)) => (n, Codec::Xz),
+        #[cfg(not(feature = "xz"))]
+        (None, Some(_)) => return Err("a bundle of blobs of LZMA2, which this program does not read".into()),
+        (None, None) => return Err("not a bundle of blobs".into()),
+    };
     let mut d = &d[MAGIC.len() + 8..n];
     let mut zs: Vec<(usize, &[u8])> = Vec::with_capacity(FRAMES);
     for _ in 0..FRAMES {
@@ -168,10 +276,13 @@ pub fn unpack(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         let hs: Vec<_> = zs
             .iter()
             .map(|&(raw, z)| {
-                s.spawn(move || match zstd::bulk::decompress(z, raw) {
-                    Ok(f) if f.len() == raw => Ok(f),
-                    Ok(_) => Err("a frame of the bundle of another length".to_string()),
-                    Err(e) => Err(format!("the bundle of blobs: {e}")),
+                s.spawn(move || {
+                    let f = match codec {
+                        Codec::Zstd => zstd::bulk::decompress(z, raw).map_err(|e| format!("the bundle of blobs: {e}")),
+                        #[cfg(feature = "xz")]
+                        Codec::Xz => xz::decompress(z, raw),
+                    }?;
+                    if f.len() == raw { Ok(f) } else { Err("a frame of the bundle of another length".to_string()) }
                 })
             })
             .collect();
@@ -311,10 +422,21 @@ mod tests {
         assert_eq!(super::len(&p), Some(p.len()));
         assert!(super::unpack(&p).unwrap() == blobs);
         assert!(super::unpack(&p[..p.len() - 1]).is_err());
+        #[cfg(feature = "xz")]
+        {
+            let x = super::pack_xz(&blobs).unwrap();
+            assert_eq!((super::len(&x), super::len_of(&x, super::MAGIC_XZ)), (None, Some(x.len())));
+            assert!(super::unpack(&x).unwrap() == blobs);
+            assert!(super::unpack(&x[..x.len() - 1]).is_err());
+            // (a frame of LZMA2 cut short: its last byte, the end of the stream, gone)
+            let (raw, n) = (&x[16..20], u32::from_le_bytes(x[20..24].try_into().unwrap()) as usize);
+            let raw = u32::from_le_bytes(raw.try_into().unwrap()) as usize;
+            assert!(super::xz::decompress(&x[24..24 + n - 1], raw).is_err());
+        }
     }
 
     /// The blobs of the pack (`target/aqr-sfx/`, crates/aqr-sfx/pack.py) bundled and back, with
-    /// their sizes: as they are, by zstd alone, bundled.
+    /// their sizes: as they are, by zstd alone, bundled (and bundled of LZMA2, with `xz`).
     #[test]
     #[ignore]
     fn pack_round_trips() {
@@ -335,7 +457,7 @@ mod tests {
         let raw: usize = blobs.iter().map(|b| b.1.len()).sum();
         let whole: Vec<u8> = blobs.iter().flat_map(|b| b.1.iter().copied()).collect();
         let t = std::time::Instant::now();
-        let z = super::frame(&whole).unwrap().len();
+        let z = super::frame(&whole, super::Codec::Zstd).unwrap().len();
         let zt = t.elapsed().as_secs_f64();
         let t = std::time::Instant::now();
         let p = super::pack(&blobs).unwrap();
@@ -349,5 +471,14 @@ mod tests {
             blobs.len(),
             p.len()
         );
+        #[cfg(feature = "xz")]
+        {
+            let t = std::time::Instant::now();
+            let x = super::pack_xz(&blobs).unwrap();
+            let xt = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            assert!(super::unpack(&x).unwrap() == blobs);
+            eprintln!("bundled of LZMA2 {} ({xt:.1} s, unpacked in {:.2} s)", x.len(), t.elapsed().as_secs_f64());
+        }
     }
 }

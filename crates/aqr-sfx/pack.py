@@ -1,6 +1,6 @@
-"""Gathers what `aqr --format sfx` embeds (Windows x86-64) into target/aqr-sfx/.
-
-aqr's build script packs it into the binary:
+"""Gathers what aqr embeds (Windows x86-64: the interpreter blob, and what `aqr --format sfx` puts
+into a self-extracting program) into target/aqr-sfx/, and packs it into sfx.pack, which aqr's
+build script includes:
 
 - aqr-sfx-shim.exe, the stub (release), packed by UPX (`upx -9`, as the release packs aqr.exe; the
   one AQR_UPX names (not UPX: upx reads that as its options), else `upx` on the path; where there
@@ -13,6 +13,8 @@ aqr's build script packs it into the binary:
   imports between them bound); and modules.txt: each NAME and the SHA-512/256 of its module
   when packed (crates/aqr-modules/src/known.rs), so that aqr uses a blob only for the module it
   was built from;
+- sfx.pack, all of these as aqr carries them (aqr-sfx's `aqr-sfx-pack`: the blobs' code through
+  aqr-exe's x86 disfilter, then raw LZMA2 at preset 9, which aqr alone reads);
 - pack.id, a digest of the files.
 
 The modules named (`python crates/aqr-sfx/pack.py [MODULE...]`) are packed (all by default). It
@@ -97,6 +99,7 @@ def main():
     write(OUT / "modules.txt", "".join(lines))
     lib_names = sorted(p.name for p in (OUT / "libs").iterdir())
     write(OUT / "libs.txt", "".join(f"{n}\n" for n in lib_names))
+    run("cargo", "run", "-q", "--release", "-p", "aqr-sfx", "-F", "encode,xz", "--bin", "aqr-sfx-pack", "--", OUT)
 
     # what the pack is, for builds to tell one from another (aqr includes it, so that its build is
     # not taken for one of another pack): sha256sum's lines of the files, digested

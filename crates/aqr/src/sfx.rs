@@ -4,8 +4,10 @@
 //! the archive.
 //!
 //! The stub and blobs are those `crates/aqr-sfx/pack.py` gathered when this program was built
-//! (build.rs: `sfx.pack`). The archive names a module with a native blob there by a shorthand
-//! module block, its hash alone ([`wasm_of`]), and the bundle has the blob (named by the hash and
+//! (build.rs: `sfx.pack`, aqr-sfx's `aqr-sfx-pack`: the blobs in bundles of LZMA2, which this
+//! program alone reads; the bundles it writes into self-extracting programs are of zstd). The
+//! archive names a module with a native blob there by a shorthand module block, its hash alone
+//! ([`wasm_of`]), and the bundle has the blob (named by the hash and
 //! the module's task slots, [`aqr_sfx::native_name`]) and the shared libraries that blob links
 //! against (crates/aqr-dll/layout.py: the runtime among them; the imports between them bound as
 //! the stub places them); any other module is written in full, and the interpreter blob is in the
@@ -38,24 +40,36 @@ pub struct Pack {
 }
 
 /// The interpreter blob of the pack: what runs the modules as WebAssembly where this program
-/// links no Wasmtime (`aqr_decompress::set_interpreter`), unpacked alone (its frame of its own,
-/// the first, its length before it).
+/// links no Wasmtime (`aqr_decompress::set_interpreter`), unpacked alone (its bundle of its own,
+/// the first).
 pub fn interpreter() -> Result<Vec<u8>, String> {
-    let (frame, _) = frames()?;
-    zstd::decode_all(frame).map_err(|e| format!("the interpreter blob: {e}"))
+    let (interp, _, _) = parts()?;
+    let mut blobs = aqr_sfx::bundle::unpack(interp).map_err(|e| format!("the interpreter blob: {e}"))?;
+    match (blobs.pop(), blobs.is_empty()) {
+        (Some((name, blob)), true) if name == "aqr-interp.blob" => Ok(blob),
+        _ => Err("the self-extracting pack has no interpreter blob".into()),
+    }
 }
 
-/// The frames of [`PACKED`]: the interpreter blob's, and the other files'.
-fn frames() -> Result<(&'static [u8], &'static [u8]), String> {
+/// The parts of [`PACKED`] (aqr-sfx's `aqr-sfx-pack`): the bundle of the interpreter blob, the
+/// bundle of the other blobs, and the other files.
+fn parts() -> Result<(&'static [u8], &'static [u8], &'static [u8]), String> {
     if PACKED.is_empty() {
         return Err("this aqr carries no blobs (the interpreter's and the self-extracting stub's: \
                     built without target/aqr-sfx/, which crates/aqr-sfx/pack.py gathers on Windows \
                     x86-64)"
             .into());
     }
-    let n = PACKED.first_chunk::<8>().map(|n| u64::from_le_bytes(*n) as usize);
-    let n = n.filter(|&n| n <= PACKED.len() - 8).ok_or("the self-extracting pack is cut short")?;
-    Ok((&PACKED[8..8 + n], &PACKED[8 + n..]))
+    let cut = || "the self-extracting pack is cut short".to_string();
+    let mut d = PACKED.strip_prefix(b"AQRSFXP1").ok_or("the self-extracting pack is not valid")?;
+    let mut bundle = || -> Result<&'static [u8], String> {
+        let (n, r) = d.split_first_chunk::<8>().ok_or_else(cut)?;
+        let (b, r) = r.split_at_checked(u64::from_le_bytes(*n) as usize).ok_or_else(cut)?;
+        d = r;
+        Ok(b)
+    };
+    let (interp, blobs) = (bundle()?, bundle()?);
+    Ok((interp, blobs, d))
 }
 
 /// The pack, unpacked once; an error where this program carries none.
@@ -65,9 +79,8 @@ pub fn pack() -> Result<&'static Pack, String> {
 }
 
 fn unpack() -> Result<Pack, String> {
-    let (_, rest) = frames()?;
-    let raw = zstd::decode_all(rest).map_err(|e| format!("the self-extracting pack: {e}"))?;
-    let mut files = HashMap::new();
+    let (_, blobs, raw) = parts()?;
+    let mut files: HashMap<String, Vec<u8>> = aqr_sfx::bundle::unpack(blobs)?.into_iter().collect();
     let mut at = 0;
     let take = |at: &mut usize| -> Option<&[u8]> {
         let n = u32::from_le_bytes(raw.get(*at..*at + 4)?.try_into().ok()?) as usize;

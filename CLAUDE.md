@@ -19,9 +19,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     the modules that have native blobs, after aqr-sfx-shim (packed by UPX) and the bundle of
     those blobs (and of the interpreter blob, if any module is in full: aqr-sfx's `bundle`). What
     it bundles is `target/aqr-sfx/` (or
-    `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and `build.rs` packs into the binary
-    (zstd, ~6 MB); each blob is used only for the hash it was packed for, so `cargo aqr` runs
-    pack.py again where the pack's modules are not those of known.rs (where there is a pack).
+    `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and packs (`sfx.pack`, the blobs as
+    bundles of LZMA2, ~4.7 MB: only aqr reads it) and `build.rs` includes; each blob is used only
+    for the hash it was packed for, so `cargo aqr` runs pack.py again where the pack's modules
+    are not those of known.rs (where there is a pack), or its `sfx.pack` is not of this form.
     The release workflow runs pack.py before building aqr.exe (without the pack, aqr.exe runs
     no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
@@ -99,10 +100,12 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     entries `lib:NAME` (their images registered, nothing else). `Sfx::load` takes the same
     blobs from a bundle (`bundle`: each blob's code, up to the end of its exception table's
     last function, through aqr-exe's x86 disfilter, the streams of all the blobs one after
-    another by stream and the rest apart, each a zstd frame at 19; feature `encode` makes them),
+    another by stream and the rest apart, each a zstd frame at 19; feature `encode` makes them;
+    feature `xz` the same of raw LZMA2 frames, for the pack aqr carries alone, not the stub),
     placed by `aqr_blob::load`. `extract` writes a decoded archive's files out. Shared by the
     stub and aqr. `pack.py` gathers what aqr embeds (the stub, packed by UPX `-9` where `AQR_UPX` or
-    `upx` is found, the blobs of the modules and of the shared libraries).
+    `upx` is found, the blobs of the modules and of the shared libraries) and packs it
+    (`aqr-sfx-pack`: `sfx.pack`).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
     1.6 MB, 0.54 MB packed by UPX): the small executable that `aqr --format sfx` appends a bundle
     of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle and
