@@ -1,7 +1,8 @@
 //! Workers on Windows, locked down as Chromium's renderers are:
 //!
 //! - its token restricted: every SID of the user's deny-only, of no privileges, the null SID
-//!   restricting it (so that it opens nothing by name), of low integrity;
+//!   restricting it (so that it opens nothing by name), of low integrity, and (Windows 8 on) a
+//!   lowbox token of no capabilities, which keeps it off the network ([`lowbox`]);
 //! - in a job of no other process, no UI, killed with the job's handle (the decoder's), and of
 //!   the memory the decoder limits it to;
 //! - of the mitigations that keep it off win32k, fonts and images not of the system, and from
@@ -33,11 +34,11 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::{
-    CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, DuplicateTokenEx, GetLengthSid,
-    GetTokenInformation, IsTokenRestricted, RevertToSelf, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
-    SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    TOKEN_USER, TokenGroups, TokenImpersonation, TokenIntegrityLevel, TokenUser, WELL_KNOWN_SID_TYPE, WinLowLabelSid,
-    WinNullSid, WinRestrictedCodeSid,
+    AllocateAndInitializeSid, CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, DuplicateTokenEx,
+    FreeSid, GetLengthSid, GetTokenInformation, IsTokenRestricted, RevertToSelf, SECURITY_MAX_SID_SIZE,
+    SID_AND_ATTRIBUTES, SID_IDENTIFIER_AUTHORITY, SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS,
+    TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenImpersonation, TokenIntegrityLevel,
+    TokenIsAppContainer, TokenUser, WELL_KNOWN_SID_TYPE, WinLowLabelSid, WinNullSid, WinRestrictedCodeSid,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
@@ -45,6 +46,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicUIRestrictions,
     JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
     UnmapViewOfFile,
@@ -292,7 +294,8 @@ fn tokens() -> io::Result<(OwnedHandle, OwnedHandle)> {
         )
     };
     check(r, "the initial token")?;
-    let initial = owned(initial);
+    // (a lowbox token made is primary: made so before the impersonation token is made of it)
+    let initial = lowbox(owned(initial))?;
     let mut imp = null_mut();
     // SAFETY: of the token just made
     let r = unsafe {
@@ -308,7 +311,159 @@ fn tokens() -> io::Result<(OwnedHandle, OwnedHandle)> {
     check(r, "the initial token to impersonate")?;
     let imp = owned(imp);
     set_low_integrity(&imp)?;
-    Ok((locked, imp))
+    Ok((lowbox(locked)?, imp))
+}
+
+/// `token` made a lowbox (AppContainer) token of no capabilities, where the system has them
+/// (Windows 8 on), as Chromium's sandbox does: a restricted token does not keep a process off
+/// the network (the device of sockets, `\Device\Afd`, opens for any, Winsock left out), while
+/// the network of a lowbox token of no capabilities is closed to it where its connections are
+/// made (by the system's filtering, the loopback's too). Its package is a SID of the workers'
+/// alone, of no profile.
+fn lowbox(token: OwnedHandle) -> io::Result<OwnedHandle> {
+    type CreateLowBox = unsafe extern "system" fn(
+        *mut HANDLE,
+        HANDLE,
+        u32,
+        *const c_void,
+        *mut c_void,
+        u32,
+        *const SID_AND_ATTRIBUTES,
+        u32,
+        *const HANDLE,
+    ) -> i32;
+    if version() < (6, 2, 0) {
+        return Ok(token);
+    }
+    let ntdll = wide(OsStr::new("ntdll.dll"));
+    // SAFETY: ntdll is in every process; the function's type is that of its definition
+    let create: CreateLowBox = unsafe {
+        let m = GetModuleHandleW(ntdll.as_ptr());
+        match GetProcAddress(m, c"NtCreateLowBoxToken".as_ptr().cast()) {
+            Some(f) => std::mem::transmute::<unsafe extern "system" fn() -> isize, CreateLowBox>(f),
+            None => return Err(io::Error::other("no NtCreateLowBoxToken")),
+        }
+    };
+    // (S-1-15-2-..., an AppContainer's: SECURITY_APP_PACKAGE_AUTHORITY and its base RID, then
+    // seven of no meaning but being aqr's)
+    let authority = SID_IDENTIFIER_AUTHORITY { Value: [0, 0, 0, 0, 0, 15] };
+    let mut sid = null_mut();
+    let rids = [2, 0x6171_7200, 0x7361_6e64, 0x626f_7800, 1, 2, 3, 4];
+    // SAFETY: of eight subauthorities, as it takes at most
+    let r = unsafe {
+        AllocateAndInitializeSid(
+            &authority, 8, rids[0], rids[1], rids[2], rids[3], rids[4], rids[5], rids[6], rids[7], &mut sid,
+        )
+    };
+    check(r, "the workers' package")?;
+    let mut lowbox = null_mut();
+    // SAFETY: of the token and the SID above; no capabilities, no handles
+    let status = unsafe {
+        let s = create(&mut lowbox, token.as_raw_handle(), TOKEN_ALL_ACCESS, null(), sid, 0, null(), 0, null());
+        FreeSid(sid);
+        s
+    };
+    if status < 0 {
+        return Err(io::Error::other(format!("the lowbox token: NTSTATUS {status:#x}")));
+    }
+    Ok(owned(lowbox))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Security::TokenPrimary;
+
+    /// What the child of [`lowbox_off_the_network`] tells by its exit code: 0 connected to the
+    /// loopback's port of `AQR_LOWBOX_PORT`, 1 kept from it, 2 something else.
+    #[test]
+    #[ignore = "the child of lowbox_off_the_network"]
+    fn lowbox_child() {
+        let Some(port) = std::env::var("AQR_LOWBOX_PORT").ok().and_then(|p| p.parse::<u16>().ok()) else { return };
+        let t = std::time::Duration::from_secs(3);
+        std::process::exit(match std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), t) {
+            Ok(_) => 0,
+            Err(e) if matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::TimedOut) => 1,
+            Err(_) => 2,
+        })
+    }
+
+    /// A process of a lowbox token ([`lowbox`]) is kept off the network: Winsock starts there
+    /// (unlike in a worker, of its restricted token), and the connection is refused where it is
+    /// made, as one made on the device of sockets directly would be; of the same token not made
+    /// one, it connects.
+    #[test]
+    fn lowbox_off_the_network() {
+        if version() < (6, 2, 0) {
+            return;
+        }
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || l.incoming().for_each(drop));
+        let exit = |boxed: bool| {
+            let mut me = null_mut();
+            // SAFETY: of this process; the tokens, strings and structures outlive the calls
+            unsafe {
+                check(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut me), "the token").unwrap();
+                let me = owned(me);
+                let mut primary = null_mut();
+                let r = DuplicateTokenEx(
+                    me.as_raw_handle(),
+                    TOKEN_ALL_ACCESS,
+                    null(),
+                    SecurityImpersonation,
+                    TokenPrimary,
+                    &mut primary,
+                );
+                check(r, "the primary token").unwrap();
+                let token = match boxed {
+                    true => lowbox(owned(primary)).unwrap(),
+                    false => owned(primary),
+                };
+                let exe = std::env::current_exe().unwrap();
+                let mut cmd = Vec::new();
+                quote(&mut cmd, exe.as_os_str());
+                for a in ["--exact", "sandbox::os::windows::tests::lowbox_child", "--ignored", "--test-threads=1"] {
+                    quote(&mut cmd, OsStr::new(a));
+                }
+                cmd.push(0);
+                let mut env: Vec<u16> = std::env::vars_os()
+                    .filter(|(k, _)| k != "AQR_LOWBOX_PORT")
+                    .flat_map(|(k, v)| {
+                        let mut kv = k;
+                        kv.push("=");
+                        kv.push(v);
+                        kv.encode_wide().chain([0]).collect::<Vec<u16>>()
+                    })
+                    .collect();
+                env.extend(OsStr::new(&format!("AQR_LOWBOX_PORT={port}")).encode_wide().chain([0, 0]));
+                let mut si: STARTUPINFOEXW = zeroed();
+                si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+                let mut pi: PROCESS_INFORMATION = zeroed();
+                let r = CreateProcessAsUserW(
+                    token.as_raw_handle(),
+                    null(),
+                    cmd.as_mut_ptr(),
+                    null(),
+                    null(),
+                    0,
+                    CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+                    env.as_ptr() as *const c_void,
+                    null(),
+                    &si.StartupInfo,
+                    &mut pi,
+                );
+                check(r, "the child").unwrap();
+                let (process, _thread) = (owned(pi.hProcess), owned(pi.hThread));
+                assert_eq!(WaitForSingleObject(process.as_raw_handle(), 30_000), WAIT_OBJECT_0);
+                let mut code = 0;
+                GetExitCodeProcess(process.as_raw_handle(), &mut code);
+                code
+            }
+        };
+        assert_eq!(exit(false), 0, "not a lowbox: connected");
+        assert_eq!(exit(true), 1, "a lowbox: kept off");
+    }
 }
 
 /// `arg` appended to `cmd` as the C runtime parses it back.
@@ -561,6 +716,19 @@ pub fn lockdown() -> io::Result<()> {
         let token = owned(token);
         if IsTokenRestricted(token.as_raw_handle()) == 0 {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "a worker not started by a sandbox"));
+        }
+        // (and of a lowbox token, where the system has them: off the network)
+        let mut boxed = 0u32;
+        let mut n = 0;
+        let r = GetTokenInformation(
+            token.as_raw_handle(),
+            TokenIsAppContainer,
+            &mut boxed as *mut u32 as *mut c_void,
+            4,
+            &mut n,
+        );
+        if version() >= (6, 2, 0) && (r == 0 || boxed == 0) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "a worker not of a lowbox token"));
         }
         check(RevertToSelf(), "the impersonation given up")?;
     }

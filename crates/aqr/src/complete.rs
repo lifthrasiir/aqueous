@@ -369,8 +369,15 @@ fn default_shell() -> Result<String, String> {
     }
 }
 
+/// The user's home directory: on Windows `USERPROFILE`, not `std::env::home_dir`, whose fallback
+/// links USERENV.dll, which a sandbox worker (aqr.exe too) of a lowbox token cannot load as it
+/// starts (aqr-wasmrt's sandbox/os/windows.rs).
 fn home() -> Result<PathBuf, String> {
-    std::env::home_dir().ok_or("--setup-autocomplete: no home directory".into())
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()).map(PathBuf::from);
+    #[cfg(not(windows))]
+    let home = std::env::home_dir();
+    home.ok_or("--setup-autocomplete: no home directory".into())
 }
 
 /// The directory of this user's data of aqr.
