@@ -68,10 +68,38 @@ codegen-units = 1
 # MSVC is unaffected: its debug info is in the .pdb.
 strip = "debuginfo"
 
-# The Wasm modules (crates/aqr-modules/build.py): fat LTO and one
-# codegen unit as in dist, for small modules and for their bytes (hence hashes) to stay as they
-# were.
+# The crates of dist's binaries that no codec's work runs through (the command line, other
+# archive formats, disk images and packs, the frontends' parts, the SFX's making), optimised
+# for size: aqr.exe 31.44 -> 28.77 MB (.text 19.6 -> 17.1 MB), no slower compressing ZIPs, PSDs
+# and 10gb/2011 or testing them (opt-level "s" for every crate: 24.90 MB, 15-24% slower).
+# `aqr` takes the generic code it instantiates (core's, alloc's, hashbrown's) along.
+[profile.dist.package]
+aqr.opt-level = "s"
+aqr-unpack.opt-level = "s"
+aqr-pack.opt-level = "s"
+aqr-foreign.opt-level = "s"
+aqr-ipc.opt-level = "s"
+aqr-l10n.opt-level = "s"
+aqr-sfx.opt-level = "s"
+aqr-blob.opt-level = "s"
+aqr-bundle.opt-level = "s"
+aqr-disk.opt-level = "s"
+aqr-iso.opt-level = "s"
+aqr-fat.opt-level = "s"
+aqr-ntfs.opt-level = "s"
+aqr-ext.opt-level = "s"
+aqr-apfs.opt-level = "s"
+aqr-hfs.opt-level = "s"
+encoding_rs.opt-level = "s"
+unicode-normalization.opt-level = "s"
+wasmparser.opt-level = "s"
+
+# The Wasm modules (crates/aqr-modules/build.py): fat LTO and one codegen unit as in dist (not
+# inheriting it, so as not to take its crates optimised for size), for small modules and for
+# their bytes (hence hashes) to stay as they were.
 [profile.release-wasm]
-inherits = "dist"
+inherits = "release"
+lto = "fat"
+codegen-units = 1
 debug = false
 strip = true
