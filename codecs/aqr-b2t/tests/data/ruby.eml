@@ -1,0 +1,104 @@
+From: a@example.org
+Subject: test
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x0"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D0">link 0</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 0 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x1"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D1">link 1</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 1 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x2"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D2">link 2</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 2 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x3"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D3">link 3</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 3 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x4"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D4">link 4</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 4 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x5"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D5">link 5</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 5 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x6"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D6">link 6</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 6 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x7"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D7">link 7</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 7 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x8"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D8">link 8</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 8 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x9"><a=
+ href=3D"http://example.com/?a=3D1&b=3D2&c=3D9">link 9</a> caf=C3=A9 =E2=80=
+=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=94=
+ mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 9 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x10"><=
+a href=3D"http://example.com/?a=3D1&b=3D2&c=3D10">link 10</a> caf=C3=A9 =E2=
+=80=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=
+=94 mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 10 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x11"><=
+a href=3D"http://example.com/?a=3D1&b=3D2&c=3D11">link 11</a> caf=C3=A9 =E2=
+=80=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=
+=94 mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 11 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x12"><=
+a href=3D"http://example.com/?a=3D1&b=3D2&c=3D12">link 12</a> caf=C3=A9 =E2=
+=80=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=
+=94 mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 12 for sure.
+
+<p style=3D"margin:0 0 10px;font-family:Arial,sans-serif" class=3D"x13"><=
+a href=3D"http://example.com/?a=3D1&b=3D2&c=3D13">link 13</a> caf=C3=A9 =E2=
+=80=94 =E2=80=9Cquoted=E2=80=9D =EC=95=88=EB=85=95=ED=95=98=EC=84=B8=EC=9A=
+=94 mail body text goes on and on</p>
+A line of plain words that wraps past the line limit of seventy-six chara=
+cters 13 for sure.
+

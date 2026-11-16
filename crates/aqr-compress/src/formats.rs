@@ -987,14 +987,25 @@ formats! {
         heap: 2.0,
         text: true,
     }
-    /// Text with base64 blocks (aqr-base64): MIME messages, PEM, data URIs, base64 in JSON and
-    /// XML. The text without the blocks and the bytes they decode to are contents, recompressed
-    /// as what they are. A whole file known by its text, never detected: [`crate::made`] tries
-    /// it on text before the other text formats.
-    Base64 = "base64" {
-        recompressor: Pure(aqr_base64::formula::encode),
-        // the text and the bytes of its blocks (at most its 3/4 of it) held at once, the
+    /// Text with base64 and hexadecimal blocks (aqr-b2t): MIME messages, PEM, data URIs, base64
+    /// in JSON and XML, RTF pictures, SQL dumps' blobs. The text without the blocks and the bytes
+    /// they decode to are contents, recompressed as what they are. A whole file known by its
+    /// text, never detected: [`crate::made`] tries it on text before the other text formats.
+    B2t = "b2t" {
+        recompressor: Pure(aqr_b2t::formula::encode),
+        // the text and the bytes of its blocks (at most 3/4 of it, of base64) held at once, the
         // streams of the formula sharing them: 2.0 for the largest ratio
+        heap: 2.0,
+        text: true,
+    }
+    /// Text with quoted-printable bodies (aqr-b2t's `quopri`): MIME messages in mbox, EML and
+    /// MHTML. The text without the bodies and the bytes they decode to are contents,
+    /// recompressed as what they are. A whole file known by its text, never detected:
+    /// [`crate::made`] tries it on text after base64's.
+    Quopri = "b2t-quopri" {
+        recompressor: Pure(aqr_b2t::quopri::formula::encode),
+        // the text and the bytes of its bodies (not more than it) held at once, the streams of
+        // the formula sharing them
         heap: 2.0,
         text: true,
     }

@@ -2517,7 +2517,7 @@ fn hdf5_fits_plans_hold() {
 
 /// `d` as base64 of the standard alphabet, padded, in lines of `line` characters joined by `sep`.
 fn base64_lines(d: &[u8], line: usize, sep: &[u8]) -> Vec<u8> {
-    let table = aqr_base64::module::STANDARD;
+    let table = aqr_b2t::module::STANDARD;
     let mut chars = Vec::new();
     for g in d.chunks(3) {
         let v = (g[0] as u32) << 16 | (*g.get(1).unwrap_or(&0) as u32) << 8 | *g.get(2).unwrap_or(&0) as u32;
@@ -2530,7 +2530,7 @@ fn base64_lines(d: &[u8], line: usize, sep: &[u8]) -> Vec<u8> {
 /// A MIME message with JPEG attachments is the message without them (as text) and each
 /// attachment as the file it is; a message with none of them is text.
 #[test]
-fn base64_attachments() {
+fn b2t_attachments() {
     let jpeg = [
         fixture("codecs/aqr-jpeg/tests/data/gradient.jpg"),
         fixture("codecs/aqr-jpeg/tests/data/prog_script_recode.jpg"),
@@ -2545,9 +2545,94 @@ fn base64_attachments() {
     }
     d.extend_from_slice(b"--XX--\r\n");
     let f = roundtrip(&d, &all());
-    assert_eq!(modules(&f).iter().filter(|&&m| m == "base64-recons").count(), 1, "{f}");
+    assert_eq!(modules(&f).iter().filter(|&&m| m == "b2t-recons").count(), 1, "{f}");
     assert_eq!(modules(&f).iter().filter(|&&m| m == JPEG.name).count(), 2, "{f}");
     // (no block: the text, as before)
     let f = roundtrip(&text(5000), &all());
-    assert!(!modules(&f).contains(&"base64-recons"), "{f}");
+    assert!(!modules(&f).contains(&"b2t-recons"), "{f}");
+}
+
+/// `d` as hexadecimal of lowercase digits in lines of `line` characters joined by CRLF.
+fn hex_lines(d: &[u8], line: usize) -> Vec<u8> {
+    let chars: Vec<u8> = d
+        .iter()
+        .flat_map(|&b| [b"0123456789abcdef"[(b >> 4) as usize], b"0123456789abcdef"[(b & 15) as usize]])
+        .collect();
+    chars.chunks(line).collect::<Vec<_>>().join(&b"\r\n"[..])
+}
+
+/// An RTF file with JPEG pictures in `\pict` is the file without them (as text) and each
+/// picture as the JPEG it is.
+#[test]
+fn b2t_hexadecimal_pictures() {
+    let jpeg = [
+        fixture("codecs/aqr-jpeg/tests/data/gradient.jpg"),
+        fixture("codecs/aqr-jpeg/tests/data/prog_script_recode.jpg"),
+    ];
+    let mut d = b"{\\rtf1\\ansi\\deff0 ".to_vec();
+    d.extend_from_slice(&natural(3000, false));
+    for j in &jpeg {
+        d.extend_from_slice(b"\r\n{\\pict\\jpegblip\\picw100\\pich100\r\n");
+        d.extend(hex_lines(j, 128));
+        d.extend_from_slice(b"}\r\n");
+    }
+    d.extend_from_slice(b"}\r\n");
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f).iter().filter(|&&m| m == "b2t-recons").count(), 1, "{f}");
+    assert_eq!(modules(&f).iter().filter(|&&m| m == JPEG.name).count(), 2, "{f}");
+}
+
+/// The body of a message of quoted-printable HTML is its bytes decoded and recompressed as the
+/// text they are; a message with a base64 attachment and a quoted-printable body is both, the
+/// text left by the first looked at for the second.
+#[test]
+fn quopri_bodies_and_base64_together() {
+    let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+    let words = natural(6000, false);
+    let mut qp = Vec::new();
+    for &b in &words {
+        match b {
+            b'\n' => qp.extend_from_slice(b"\r\n"),
+            b'=' => qp.extend_from_slice(b"=3D"),
+            0x20..=0x7e => qp.push(b),
+            _ => qp.extend_from_slice(format!("={b:02X}").as_bytes()),
+        }
+    }
+    // (lines cut at 76 with soft breaks, as an encoder does: a canonical one's soft breaks)
+    let mut cut = Vec::new();
+    let mut col = 0;
+    let mut i = 0;
+    while i < qp.len() {
+        if qp[i..].starts_with(b"\r\n") {
+            cut.extend_from_slice(b"\r\n");
+            (col, i) = (0, i + 2);
+            continue;
+        }
+        let w = if qp[i] == b'=' { 3 } else { 1 };
+        let end = qp[i + w..].starts_with(b"\r\n") || i + w == qp.len();
+        if col + w > if end { 76 } else { 75 } {
+            cut.extend_from_slice(b"=\r\n");
+            col = 0;
+        }
+        cut.extend_from_slice(&qp[i..i + w]);
+        (col, i) = (col + w, i + w);
+    }
+    let mut d = b"From: a@example.org\r\nContent-Type: multipart/mixed; boundary=XX\r\n\r\n--XX\r\n".to_vec();
+    d.extend_from_slice(
+        b"Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n",
+    );
+    d.extend_from_slice(&cut);
+    d.extend_from_slice(b"\r\n--XX\r\nContent-Type: image/jpeg\r\nContent-Transfer-Encoding: base64\r\n\r\n");
+    d.extend(base64_lines(&jpeg, 76, b"\r\n"));
+    d.extend_from_slice(b"\r\n--XX--\r\n");
+    let f = roundtrip(&d, &all());
+    let m = modules(&f);
+    assert_eq!(m.iter().filter(|&&m| m == "b2t-recons").count(), 1, "{f}");
+    assert_eq!(m.iter().filter(|&&m| m == "b2t-recons-quopri").count(), 1, "{f}");
+    assert_eq!(m.iter().filter(|&&m| m == JPEG.name).count(), 1, "{f}");
+    // (a message of quoted-printable alone)
+    let mut d = b"From: a@example.org\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n".to_vec();
+    d.extend_from_slice(&cut);
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f).iter().filter(|&&m| m == "b2t-recons-quopri").count(), 1, "{f}");
 }

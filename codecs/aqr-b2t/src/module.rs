@@ -1,4 +1,4 @@
-//! The code of the module `base64-recons` (see `formula`, and `FORMAT.md`), which needs no
+//! The code of the module `b2t-recons` (see `formula`, and `FORMAT.md`), which needs no
 //! aqr-formula, so that aqr-modules builds it into its Wasm module. A part module: the text, the
 //! decoded bytes and the layout are taken in order through windows and the file put out in order,
 //! in pieces, so that nothing is held of their lengths.
@@ -19,11 +19,17 @@ pub const MAX_SEP: usize = 32;
 pub const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 pub const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/// The flags of a run: padded with `=`; and its alphabet's index (`ALPHABET_SHIFT`).
+/// The hexadecimal alphabets of a run: lowercase and uppercase.
+pub const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
+pub const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+
+/// The flags of a run: padded with `=` (base64's alphabets only); and its alphabet's index
+/// (`ALPHABET_SHIFT`): 0 standard, 1 URL-safe, 2 lowercase hex, 3 uppercase hex.
 pub const PADDED: u8 = 1;
 pub const ALPHABET_SHIFT: u32 = 1;
-/// The alphabets that exist: standard and URL-safe.
-const ALPHABETS: u8 = 2;
+/// The alphabets that exist; those from `FIRST_HEX` on are hexadecimal.
+const ALPHABETS: u8 = 4;
+pub const FIRST_HEX: u8 = 2;
 
 /// Bytes of the layout read at a time.
 const LAYOUT_PIECE: usize = 4096;
@@ -32,7 +38,7 @@ const PIECE: usize = 3 * 8192;
 /// Characters of a piece of decoded data (a last piece may end in a partial group, and padding).
 const CHARS: usize = PIECE / 3 * 4 + 4;
 /// Bytes of output put at a time.
-const OUT: usize = 1 << 16;
+pub(crate) const OUT: usize = 1 << 16;
 
 /// The most bytes that the output's vector is made room for beforehand.
 const PREALLOC: u64 = 1 << 30;
@@ -50,14 +56,18 @@ pub fn plan() -> u64 {
 }
 
 /// The output, put in pieces of [`OUT`] bytes.
-struct Emit<'a> {
+pub(crate) struct Emit<'a> {
     buf: Vec<u8>,
     out: &'a mut dyn Put,
-    total: u64,
+    pub(crate) total: u64,
 }
 
-impl Emit<'_> {
-    fn put(&mut self, mut d: &[u8]) -> Result<()> {
+impl<'a> Emit<'a> {
+    pub(crate) fn new(out: &'a mut dyn Put) -> Emit<'a> {
+        Emit { buf: Vec::with_capacity(OUT), out, total: 0 }
+    }
+
+    pub(crate) fn put(&mut self, mut d: &[u8]) -> Result<()> {
         while !d.is_empty() {
             let k = (OUT - self.buf.len()).min(d.len());
             self.buf.extend_from_slice(&d[..k]);
@@ -69,7 +79,7 @@ impl Emit<'_> {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
+    pub(crate) fn flush(&mut self) -> Result<()> {
         self.out.put(&self.buf).ok_or(Error("output of another length"))?;
         self.total += self.buf.len() as u64;
         self.buf.clear();
@@ -78,7 +88,7 @@ impl Emit<'_> {
 }
 
 /// Fills `buf` from `src`; an error where it ends before.
-fn fill(src: &mut dyn Pull, buf: &mut [u8]) -> Result<()> {
+pub(crate) fn fill(src: &mut dyn Pull, buf: &mut [u8]) -> Result<()> {
     let mut at = 0;
     while at < buf.len() {
         match src.pull(&mut buf[at..]) {
@@ -142,6 +152,16 @@ fn encode_chars(src: &[u8], table: &[u8; 64], padded: bool, out: &mut [u8]) -> u
     at
 }
 
+/// The hexadecimal of `src`, two characters a byte, high nibble first: into `out`, which has
+/// room for all of it; the number of characters.
+fn encode_hex(src: &[u8], table: &[u8; 16], out: &mut [u8]) -> usize {
+    for (&b, o) in src.iter().zip(out.as_chunks_mut::<2>().0) {
+        o[0] = table[(b >> 4) as usize];
+        o[1] = table[(b & 15) as usize];
+    }
+    src.len() * 2
+}
+
 /// The characters of a run of `n` bytes.
 fn chars_of(n: u64, padded: bool) -> Option<u64> {
     match padded {
@@ -172,7 +192,7 @@ pub fn build(
     let mut seps = Seps { bytes: vec![0; MAX_SEPS * MAX_SEP], lens: [0; MAX_SEPS], count: 0 };
     let mut piece = vec![0u8; PIECE];
     let mut chars = vec![0u8; CHARS];
-    let mut e = Emit { buf: Vec::with_capacity(OUT), out, total: 0 };
+    let mut e = Emit::new(out);
     let c = |_| corrupt();
     // the separators
     let count = layout.num().map_err(c)?;
@@ -211,12 +231,15 @@ pub fn build(
         if run.flags & !(PADDED | (ALPHABETS - 1) << ALPHABET_SHIFT) != 0 || alphabet >= ALPHABETS {
             return Err(Error("unknown flags of a run"));
         }
-        let table = [STANDARD, URL_SAFE][alphabet as usize];
         let padded = run.flags & PADDED != 0;
+        let hex = alphabet >= FIRST_HEX;
+        if hex && padded {
+            return Err(Error("padded hexadecimal"));
+        }
         if run.n == 0 || run.n > data_left {
             return Err(Error("run of bytes the data does not have"));
         }
-        let total = chars_of(run.n, padded).ok_or_else(corrupt)?;
+        let total = if hex { run.n.checked_mul(2) } else { chars_of(run.n, padded) }.ok_or_else(corrupt)?;
         // (lines: none of a run on one; else a first line shorter than the run, and lines)
         let mut line_left = match run.first {
             0 => {
@@ -234,11 +257,18 @@ pub fn build(
         };
         let sep = if run.first == 0 { &[][..] } else { seps.get(run.sep) };
         let mut left = run.n;
+        // (a piece of hexadecimal takes half the bytes: its characters fit `chars` as well)
+        let step = if hex { PIECE / 2 } else { PIECE } as u64;
         while left > 0 {
-            let k = left.min(PIECE as u64) as usize;
+            let k = left.min(step) as usize;
             fill(data, &mut piece[..k])?;
             left -= k as u64;
-            let m = encode_chars(&piece[..k], table, padded, &mut chars);
+            let m = match alphabet {
+                0 => encode_chars(&piece[..k], STANDARD, padded, &mut chars),
+                1 => encode_chars(&piece[..k], URL_SAFE, padded, &mut chars),
+                2 => encode_hex(&piece[..k], HEX_LOWER, &mut chars),
+                _ => encode_hex(&piece[..k], HEX_UPPER, &mut chars),
+            };
             let mut s = &chars[..m];
             while !s.is_empty() {
                 if line_left == 0 {
@@ -286,7 +316,7 @@ fn part(params_len: u64, text_len: u64, data_len: u64, layout_len: u64, size: u6
     }
 }
 
-/// The module `base64-recons`: the file of `len` bytes from the text, the decoded bytes and the
+/// The module `b2t-recons`: the file of `len` bytes from the text, the decoded bytes and the
 /// layout (see `FORMAT.md`).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let (&[], &[text, data, layout]) = (params, inputs) else { return Err(corrupt()) };

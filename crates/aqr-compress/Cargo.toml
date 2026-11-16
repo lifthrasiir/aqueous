@@ -16,7 +16,7 @@ aqr-egg = { path = "../../codecs/aqr-egg" }
 aqr-lha = { path = "../../codecs/aqr-lha" }
 aqr-rar = { path = "../../codecs/aqr-rar" }
 aqr-asar = { path = "../../codecs/aqr-asar" }
-aqr-base64 = { path = "../../codecs/aqr-base64" }
+aqr-b2t = { path = "../../codecs/aqr-b2t" }
 aqr-bundle = { path = "../../codecs/aqr-bundle" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["encode"] }
 aqr-flate = { path = "../../codecs/aqr-flate" }

@@ -469,12 +469,20 @@ pub const NATIVE: &[Native] = &[
     bare("xsv-recons", |p, _, i, n, t| aqr_xsv::module::decode(p, i, n, t).map_err(err)),
     bare("jsonl-recons", |p, _, i, n, t| aqr_jsonl::module::decode(p, i, n, t).map_err(err)),
     part(
-        "base64-recons",
+        "b2t-recons",
         false,
-        aqr_api::emu::Entry::part(&same::<4>(3, 1, aqr_base64::module::WINDOW), 5, |a| {
-            aqr_base64::module::decode_part(a[0], a[1], a[2], a[3], a[4])
+        aqr_api::emu::Entry::part(&same::<4>(3, 1, aqr_b2t::module::WINDOW), 5, |a| {
+            aqr_b2t::module::decode_part(a[0], a[1], a[2], a[3], a[4])
         }),
-        |p, _, i, n, _| aqr_base64::module::decode(p, i, n).map_err(err),
+        |p, _, i, n, _| aqr_b2t::module::decode(p, i, n).map_err(err),
+    ),
+    part(
+        "b2t-recons-quopri",
+        false,
+        aqr_api::emu::Entry::part(&same::<4>(3, 1, aqr_b2t::quopri::module::WINDOW), 5, |a| {
+            aqr_b2t::quopri::module::decode_part(a[0], a[1], a[2], a[3], a[4])
+        }),
+        |p, _, i, n, _| aqr_b2t::quopri::module::decode(p, i, n).map_err(err),
     ),
     bare("log-recons", |p, _, i, n, t| aqr_log::module::decode(p, i, n, t).map_err(err)),
     takes("wrt-recons", |p, r, i, n, t| aqr_wrt::module::decode(p, r, i, n, t).map_err(err)),

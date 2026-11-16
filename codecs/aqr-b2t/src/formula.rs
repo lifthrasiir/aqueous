@@ -1,4 +1,4 @@
-//! aqr-base64 as a module of entry formulas (see aqr-formula): the text of a file without its
+//! aqr-b2t as a module of entry formulas (see aqr-formula): the text of a file without its
 //! base64 blocks, the bytes they decode to, and the layout that writes them again (FORMAT.md).
 //! The text and each block's bytes are contents, recompressed as what they are.
 //!
@@ -10,11 +10,11 @@ use aqr_api::stream::{Put, Slice};
 use aqr_common::varint;
 use aqr_formula::{Formula, Kind, Module, Node};
 
-use crate::module::{self, ALPHABET_SHIFT, MAX_SEP, MAX_SEPS, PADDED, STANDARD, URL_SAFE};
+use crate::module::{self, ALPHABET_SHIFT, HEX_LOWER, HEX_UPPER, MAX_SEP, MAX_SEPS, PADDED, STANDARD, URL_SAFE};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("base64-recons", 1).with_plan(memory).with_contents(&[0, 1]);
+pub const MODULE: Module = Module::new("b2t-recons", 1).with_plan(memory).with_contents(&[0, 1]);
 
 /// The memory of the module: its initial memory, and its plan ([`module::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -23,16 +23,18 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 
 aqr_common::zopt! {
     /// The bytes that a base64 block decodes to at least to be taken.
-    pub static MIN: Opt<usize> = Opt::size("base64:min", 192, "bytes a base64 block decodes to at least");
+    pub static MIN: Opt<usize> = Opt::size("b2t:min", 192, "bytes a base64 block decodes to at least");
     /// The bytes a block decodes to at least to be a content of its own; the others between
     /// such blocks are one content together.
     pub static APART: Opt<usize> =
-        Opt::size("base64:apart", 16 << 10, "bytes a base64 block decodes to at least to be recompressed apart");
+        Opt::size("b2t:apart", 16 << 10, "bytes a base64 block decodes to at least to be recompressed apart");
+    /// Whether hexadecimal blocks are taken (base64's are in any case).
+    pub static HEX: Opt<bool> = Opt::flag("b2t:hex", true, "take hexadecimal blocks");
     /// The percent of a file that its blocks decode to at least for them to be taken: the
     /// formula copies all of the text, which for a few blocks in much text (enwik9: 4 blocks
     /// of 1,883 bytes in 1 GB) costs the copy and gains nothing.
     pub static SHARE: Opt<usize> =
-        Opt::value("base64:share", 1, "percent of a file its base64 blocks decode to at least to be taken");
+        Opt::value("b2t:share", 1, "percent of a file its base64 blocks decode to at least to be taken");
 }
 
 /// The least characters of a line that a block may start with: a block starts at a line that
@@ -42,43 +44,82 @@ pub const MIN_LINE: usize = 40;
 /// The names of the inputs' streams, in order.
 pub const STREAM_NAMES: [&str; 3] = ["text", "data", "layout"];
 
-/// What a byte is of the alphabets: bit 0 of the standard's, bit 1 of the URL-safe's.
+/// The alphabets a run may be of: the flags' alphabet index (`module`) is the discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alpha {
+    Standard = 0,
+    UrlSafe = 1,
+    HexLower = 2,
+    HexUpper = 3,
+}
+
+impl Alpha {
+    pub const ALL: [Alpha; 4] = [Alpha::Standard, Alpha::UrlSafe, Alpha::HexLower, Alpha::HexUpper];
+
+    /// The bit of the alphabet in [`CLASS`] (and in what [`worth_a_look`] gives).
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+
+    fn is_hex(self) -> bool {
+        self as u8 >= module::FIRST_HEX
+    }
+
+    /// The value of each character of the alphabet, 0xff for the others.
+    fn values(self) -> [u8; 256] {
+        let table: &[u8] = match self {
+            Alpha::Standard => STANDARD,
+            Alpha::UrlSafe => URL_SAFE,
+            Alpha::HexLower => HEX_LOWER,
+            Alpha::HexUpper => HEX_UPPER,
+        };
+        let mut v = [0xffu8; 256];
+        for (i, &c) in table.iter().enumerate() {
+            v[c as usize] = i as u8;
+        }
+        v
+    }
+}
+
+/// What a byte is of the alphabets: bit 0 of the standard's, bit 1 of the URL-safe's, bit 2 of
+/// the lowercase hexadecimal's (`0-9a-f`), bit 3 of the uppercase's.
 const fn classes() -> [u8; 256] {
     let mut t = [0u8; 256];
     let mut i = 0;
     while i < 256 {
         let b = i as u8;
         let alnum = b.is_ascii_alphanumeric();
-        t[i] = (alnum || b == b'+' || b == b'/') as u8 | ((alnum || b == b'-' || b == b'_') as u8) << 1;
+        t[i] = (alnum || b == b'+' || b == b'/') as u8
+            | ((alnum || b == b'-' || b == b'_') as u8) << 1
+            | ((b.is_ascii_digit() || matches!(b, b'a'..=b'f')) as u8) << 2
+            | ((b.is_ascii_digit() || matches!(b, b'A'..=b'F')) as u8) << 3;
         i += 1;
     }
     t
 }
 static CLASS: [u8; 256] = classes();
 
-/// What `d` has of the alphabets: bit 0 where a line of [`MIN_LINE`] characters of the standard
-/// one, bit 1 where one of the URL-safe.
+/// What `d` has of the alphabets: the bit of each ([`Alpha::bit`]) of which there is a line of
+/// [`MIN_LINE`] characters (for hexadecimal, of the characters of 2 bytes' worth each).
 fn worth_a_look(d: &[u8]) -> u8 {
-    let (mut a, mut b) = (0usize, 0usize);
+    let mut n = [0usize; 4];
     let mut found = 0u8;
     for &c in d {
         let k = CLASS[c as usize];
-        a = if k & 1 != 0 { a + 1 } else { 0 };
-        b = if k & 2 != 0 { b + 1 } else { 0 };
-        if a >= MIN_LINE {
-            found |= 1;
+        for (i, n) in n.iter_mut().enumerate() {
+            *n = if k >> i & 1 != 0 { *n + 1 } else { 0 };
+            if *n >= MIN_LINE {
+                found |= 1 << i;
+            }
         }
-        if b >= MIN_LINE {
-            found |= 2;
-        }
-        if found == 3 {
+        if found == 15 {
             break;
         }
     }
     found
 }
 
-/// Whether `d` may have base64 blocks that [`encode`] takes: it is long enough, and has a line of
+/// Whether `d` may have blocks that [`encode`] takes: it is long enough, and has a line of
 /// [`MIN_LINE`] characters of an alphabet (where it would not take any).
 pub fn starts(d: &[u8]) -> bool {
     d.len() >= MIN.get() * 4 / 3 && worth_a_look(d) != 0
@@ -95,15 +136,6 @@ pub struct Found {
     pub sep: Option<(usize, usize)>,
     pub flags: u8,
     pub bytes: Vec<u8>,
-}
-
-/// The value of each character of an alphabet, 0xff for the others.
-fn values(table: &[u8; 64]) -> [u8; 256] {
-    let mut v = [0xffu8; 256];
-    for (i, &c) in table.iter().enumerate() {
-        v[c as usize] = i as u8;
-    }
-    v
 }
 
 /// The bytes of `chars` (of the alphabet of `value`) if they are a block's characters
@@ -142,17 +174,34 @@ fn decode_chars(chars: &[u8], value: &[u8; 256]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Whether the characters of a block are the kind of a base64 payload and not another string:
-/// capitals, lowercase letters and digits all in them, and not hexadecimal digits alone.
-fn looks_like_data(chars: &[u8]) -> bool {
-    let (mut upper, mut lower, mut digit, mut hex) = (false, false, false, true);
+/// The bytes of `chars` (of the alphabet of `value`, hexadecimal) if there is an even number of
+/// them.
+fn decode_hex(chars: &[u8], value: &[u8; 256]) -> Option<Vec<u8>> {
+    chars
+        .len()
+        .is_multiple_of(2)
+        .then(|| chars.as_chunks::<2>().0.iter().map(|p| value[p[0] as usize] << 4 | value[p[1] as usize]).collect())
+}
+
+/// Whether the characters of a block are the kind of a payload and not another string. Base64:
+/// capitals, lowercase letters and digits all in them, and not hexadecimal digits alone (with
+/// the `x` of a prefix, `0x` or `\x`, before them: those are of the hexadecimal scans).
+/// Hexadecimal: digits and letters both (a number of decimal digits, or a word, is not data).
+fn looks_like_data(chars: &[u8], hex: bool) -> bool {
+    let (mut upper, mut lower, mut digit, mut hexdigits) = (false, false, false, true);
     for &c in chars {
         upper |= c.is_ascii_uppercase();
         lower |= c.is_ascii_lowercase();
         digit |= c.is_ascii_digit();
-        hex &= c.is_ascii_hexdigit();
     }
-    upper && lower && digit && !hex
+    let body = [&b"0x"[..], b"0X", b"x", b"X"].iter().find_map(|p| chars.strip_prefix(*p)).unwrap_or(chars);
+    for &c in body {
+        hexdigits &= c.is_ascii_hexdigit();
+    }
+    match hex {
+        true => digit && (upper || lower),
+        false => upper && lower && digit && !hexdigits,
+    }
 }
 
 /// The characters at `at` of an alphabet's: how many.
@@ -160,10 +209,11 @@ fn run_len(d: &[u8], at: usize, bit: u8) -> usize {
     d[at..].iter().take_while(|&&c| CLASS[c as usize] & bit != 0).count()
 }
 
-/// The blocks of `d` of the alphabet of `url`, in order.
-pub fn scan(d: &[u8], url: bool) -> Vec<Found> {
-    let bit = if url { 2 } else { 1 };
-    let value = values(if url { URL_SAFE } else { STANDARD });
+/// The blocks of `d` of the alphabet `alpha`, in order.
+pub fn scan(d: &[u8], alpha: Alpha) -> Vec<Found> {
+    let bit = alpha.bit();
+    let (hex, url) = (alpha.is_hex(), alpha == Alpha::UrlSafe);
+    let value = alpha.values();
     let min = MIN.get();
     let mut found = Vec::new();
     let mut lines: Vec<(usize, usize)> = Vec::new();
@@ -193,6 +243,7 @@ pub fn scan(d: &[u8], url: bool) -> Vec<Found> {
         let mut sep = None;
         let mut line_len = 0;
         // (a line with signs after it is the last)
+        let pads_at = |d: &[u8], at: usize| if hex { 0 } else { pads_at(d, at) };
         match separator(d, e, bit).filter(|_| pads_at(d, e) == 0) {
             None => {
                 pads = pads_at(d, e);
@@ -240,7 +291,8 @@ pub fn scan(d: &[u8], url: bool) -> Vec<Found> {
         }
         // the characters of the first `n` lines and `pd` signs: as a block, or not; the lines
         // as they are, else without the signs, else without the last line (where the text
-        // goes on with something that is not of the block)
+        // goes on with something that is not of the block); hexadecimal of an odd number of
+        // characters gives the last back to the text
         let mut cands = vec![(lines.len(), pads)];
         if pads > 0 {
             cands.push((lines.len(), 0));
@@ -255,16 +307,26 @@ pub fn scan(d: &[u8], url: bool) -> Vec<Found> {
             if pd > 0 && !(chars.len() + pd).is_multiple_of(4) {
                 continue;
             }
-            if let Some(bytes) = decode_chars(&chars, &value) {
-                let (a, l) = lines[n - 1];
-                chosen = Some((n, pd, a + l + pd, bytes));
+            let (a, l) = lines[n - 1];
+            let mut back = 0;
+            if hex && chars.len() % 2 == 1 {
+                // (not a line of that character alone: the separator before it would end the block)
+                if l == 1 {
+                    continue;
+                }
+                chars.pop();
+                back = 1;
+            }
+            let bytes = if hex { decode_hex(&chars, &value) } else { decode_chars(&chars, &value) };
+            if let Some(bytes) = bytes {
+                chosen = Some((n, pd, a + l + pd - back, bytes));
                 break;
             }
         }
         let ok = chosen.as_ref().is_some_and(|&(n, _, end, ref b)| {
-            (n > 1 || delimited(d, s, end))
+            (n > 1 || (if hex { hex_prefixed(d, s) && delimited_after(d, end) } else { delimited(d, s, end) }))
                 && b.len() >= min
-                && looks_like_data(&chars)
+                && looks_like_data(&chars, hex)
                 && (!url || chars.iter().any(|&c| c == b'-' || c == b'_'))
         });
         let Some((n, pd, end, bytes)) = chosen.filter(|_| ok) else {
@@ -278,7 +340,7 @@ pub fn scan(d: &[u8], url: bool) -> Vec<Found> {
             first: if single { 0 } else { lines[0].1 },
             line: if single { 0 } else { line_len },
             sep: if single { None } else { sep },
-            flags: ((pd > 0) as u8 * PADDED) | ((url as u8) << ALPHABET_SHIFT),
+            flags: ((pd > 0) as u8 * PADDED) | ((alpha as u8) << ALPHABET_SHIFT),
             bytes,
         });
         p = end;
@@ -296,10 +358,22 @@ fn delimited(d: &[u8], s: usize, e: usize) -> bool {
         _ if s >= 2 && d[s - 2] == b'\\' && matches!(d[s - 1], b'n' | b'r' | b't') => true,
         _ => matches!(d[s - 1], b',' | b'"' | b'\'' | b'>' | b':' | b'=' | b'(' | b' ' | b'\t' | b'\n' | b'\r'),
     };
-    let after = d.get(e).is_none_or(|c| {
+    before && delimited_after(d, e)
+}
+
+/// Whether the byte at `e`, after a block of one line, delimits a value in text (or it is the end
+/// of the file).
+fn delimited_after(d: &[u8], e: usize) -> bool {
+    d.get(e).is_none_or(|c| {
         matches!(c, b'"' | b'\'' | b'<' | b')' | b',' | b';' | b'&' | b'\\' | b' ' | b'\t' | b'\n' | b'\r')
-    });
-    before && after
+    })
+}
+
+/// Whether a hexadecimal block of one line at `s` follows the prefix of a literal: the `x` of
+/// `0x` (MySQL's `--hex-blob`, C), `\x` (PostgreSQL's bytea, in a string or in COPY's text) or
+/// `X'` (SQLite's `.dump`, SQL's).
+fn hex_prefixed(d: &[u8], s: usize) -> bool {
+    s >= 2 && matches!(&d[s - 2..s], b"0x" | b"0X" | b"\\x" | b"X'" | b"x'")
 }
 
 /// The `=` signs at `at`, up to two.
@@ -330,7 +404,7 @@ fn separator(d: &[u8], e: usize, bit: u8) -> Option<usize> {
 }
 
 /// What of a file is left to be written: a [`Put`] that takes only the bytes of it, in order.
-struct Same<'a>(&'a [u8]);
+pub(crate) struct Same<'a>(pub(crate) &'a [u8]);
 
 impl Put for Same<'_> {
     fn put(&mut self, d: &[u8]) -> Option<()> {
@@ -340,7 +414,7 @@ impl Put for Same<'_> {
     }
 }
 
-/// The formula of text `d` with its base64 blocks cut out, or `None` where it has none that
+/// The formula of text `d` with its base64 and hexadecimal blocks cut out, or `None` where it has none that
 /// this crate takes. The same whatever `threads` is.
 pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
     if d.len() < MIN.get() * 4 / 3 {
@@ -350,12 +424,15 @@ pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
     if seen == 0 {
         return None;
     }
-    let mut runs = if seen & 1 != 0 { scan(d, false) } else { Vec::new() };
-    if seen & 2 != 0 {
-        // (where blocks of the two overlap, the later goes: below)
-        runs.extend(scan(d, true));
-        runs.sort_by_key(|r| r.start);
-    }
+    // (where blocks of two alphabets overlap, the later goes: below; of the same start, the
+    // alphabet of the lower index, as the sort is stable. A block of hexadecimal digits alone is
+    // never taken as base64: its scan turns it down)
+    let mut runs: Vec<Found> = Alpha::ALL
+        .iter()
+        .filter(|a| seen & a.bit() != 0 && (!a.is_hex() || HEX.get()))
+        .flat_map(|&a| scan(d, a))
+        .collect();
+    runs.sort_by_key(|r| r.start);
     if runs.is_empty() {
         return None;
     }
@@ -420,17 +497,22 @@ pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
         return None;
     }
     let mut f = Formula::default();
-    let text = f.push_content("base64/text", Kind::Text, text);
-    let Node::Slice { stream, .. } = f.push_content("base64/data", Kind::Unknown, data) else { unreachable!() };
-    let layout = f.push("base64/layout", layout);
-    // (a slice for each block of `APART` bytes or more, a content of its own; the blocks between
-    // them joined, one content: a PEM bundle's certificates, each its own, cost more as contents
-    // than they gain)
-    let apart = APART.get();
+    let text = f.push_content("b2t/text", Kind::Text, text);
+    let Node::Slice { stream, .. } = f.push_content("b2t/data", Kind::Unknown, data) else { unreachable!() };
+    let layout = f.push("b2t/layout", layout);
+    let blocks = apart_slices(stream, &lens, APART.get());
+    f.root = Node::apply(MODULE, Vec::new(), vec![text, Node::Concat(blocks), layout], d.len() as u64);
+    Some(f)
+}
+
+/// The slices of the stream `stream`, of the bytes of `lens` one after another: a slice for each
+/// of `apart` bytes or more, a content of its own; the smaller ones between them joined, one
+/// content (a PEM bundle's certificates, each its own, cost more as contents than they gain).
+pub(crate) fn apart_slices(stream: usize, lens: &[u64], apart: usize) -> Vec<Node> {
     let mut blocks: Vec<(u64, u64)> = Vec::new();
     let mut start = 0;
     let mut joins = false;
-    for n in lens {
+    for &n in lens {
         let big = n >= apart as u64;
         match blocks.last_mut() {
             Some(b) if joins && !big => b.1 += n,
@@ -439,7 +521,5 @@ pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
         joins = !big;
         start += n;
     }
-    let blocks = blocks.into_iter().map(|(s, n)| Node::slice(stream, s, n)).collect();
-    f.root = Node::apply(MODULE, Vec::new(), vec![text, Node::Concat(blocks), layout], d.len() as u64);
-    Some(f)
+    blocks.into_iter().map(|(s, n)| Node::slice(stream, s, n)).collect()
 }

@@ -3,7 +3,7 @@
 //! identifiers, blocks written otherwise than the module writes them); layouts that are not
 //! right turned down.
 
-use aqr_base64::{formula, module};
+use aqr_b2t::{formula, module};
 use aqr_common::rng::Rng;
 use aqr_formula::{Apply, Formula};
 
@@ -62,7 +62,7 @@ fn taken(d: &[u8]) -> Formula {
 }
 
 fn data_of(f: &Formula) -> Vec<u8> {
-    f.streams.iter().find(|s| s.class == "base64/data").unwrap().data.to_vec()
+    f.streams.iter().find(|s| s.class == "b2t/data").unwrap().data.to_vec()
 }
 
 fn not_taken(d: &[u8]) {
@@ -208,10 +208,13 @@ fn non_canonical_bits_are_not_taken_or_written_as_they_were() {
 }
 
 #[test]
-fn not_base64() {
+fn not_base64_but_hex() {
     let mut rng = Rng::new(11);
     let hex: Vec<u8> = (0..2000).map(|_| b"0123456789abcdef"[rng.below(16) as usize]).collect();
-    not_taken(&wrap(&hex, 64, 64, b"\n"));
+    // (hexadecimal is of its own alphabet, never base64's: 2 and 3 of the layout's flags)
+    let f = taken(&wrap(&hex, 64, 64, b"\n"));
+    assert_eq!(f.streams.iter().find(|s| s.class == "b2t/layout").unwrap().data.last().copied(), Some(4));
+    // (a single line without the prefix of a literal)
     not_taken(&wrap(&hex, 0, 2000, b"\n"));
     let ident = b"ThisIsAVeryLongCamelCaseIdentifierWithoutAnyDigitsInItAtAll".repeat(30);
     not_taken(&ident);
@@ -343,7 +346,7 @@ fn lines_shorter_than_an_encoders_are_not_a_block() {
     d.extend_from_slice(&words(100, 12));
     if let Some(f) = formula::encode(&d, 1) {
         assert_eq!(eval(&f).unwrap(), d);
-        let layout = &f.streams.iter().find(|s| s.class == "base64/layout").unwrap().data;
+        let layout = &f.streams.iter().find(|s| s.class == "b2t/layout").unwrap().data;
         // (no separator: the block, where taken, is the first line alone)
         assert_eq!(layout[0], 0, "wrapped at lines of 4");
     }
@@ -362,4 +365,164 @@ fn mangled_names_between_nuls_are_not_blocks() {
         d.push(0);
     }
     not_taken(&d);
+}
+
+// ---- hexadecimal (alphabets 2 and 3)
+
+fn hex(d: &[u8], upper: bool) -> Vec<u8> {
+    let t = if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
+    d.iter().flat_map(|&b| [t[(b >> 4) as usize], t[(b & 15) as usize]]).collect()
+}
+
+/// Bytes whose hex has digits and letters of both cases' alphabets alike.
+fn bytes_for_hex(n: usize, seed: u64) -> Vec<u8> {
+    payload(n, seed)
+}
+
+#[test]
+fn rtf_pict_lines_of_128() {
+    for (n, sep) in [(1500usize, &b"\r\n"[..]), (1501, b"\n"), (640, b"\r\n")] {
+        let p = bytes_for_hex(n, 20);
+        let mut d = b"{\\rtf1\\ansi{\\pict\\pngblip\\picw100\\pich100\r\n".to_vec();
+        d.extend(wrap(&hex(&p, false), 128, 128, sep));
+        d.extend_from_slice(b"}}\r\n");
+        assert_eq!(data_of(&taken(&d)), p, "{n}");
+    }
+}
+
+#[test]
+fn single_line_hex_with_a_prefix() {
+    let p = bytes_for_hex(1200, 21);
+    // mysqldump --hex-blob: uppercase after 0x
+    let mut d = b"INSERT INTO `t` VALUES (1,0x".to_vec();
+    d.extend(hex(&p, true));
+    d.extend_from_slice(b"),(2,NULL);\n");
+    assert_eq!(data_of(&taken(&d)), p);
+    // PostgreSQL bytea
+    let mut d = b"INSERT INTO t VALUES (1, '\\x".to_vec();
+    d.extend(hex(&p, false));
+    d.extend_from_slice(b"');\n");
+    assert_eq!(data_of(&taken(&d)), p);
+    // SQLite .dump
+    let mut d = b"INSERT INTO t VALUES(1,X'".to_vec();
+    d.extend(hex(&p, true));
+    d.extend_from_slice(b"');\n");
+    assert_eq!(data_of(&taken(&d)), p);
+    // COPY's text format: a doubled backslash, tab delimited
+    let mut d = b"COPY t (a, b) FROM stdin;\n1\t\\\\x".to_vec();
+    d.extend(hex(&p, false));
+    d.extend_from_slice(b"\n\\.\n");
+    assert_eq!(data_of(&taken(&d)), p);
+    // (no prefix: a long hexadecimal string alone is not taken)
+    let mut d = b"INSERT INTO t VALUES (1, '".to_vec();
+    d.extend(hex(&p, false));
+    d.extend_from_slice(b"');\n");
+    not_taken(&d);
+}
+
+#[test]
+fn postscript_and_xxd_lines() {
+    let p = bytes_for_hex(3000, 22);
+    let mut d =
+        b"%!PS-Adobe-3.0\n/pic 100 string def\n100 100 8 [1 0 0 1 0 0]\n{currentfile pic readhexstring pop}\nimage\n"
+            .to_vec();
+    d.extend(wrap(&hex(&p, true), 78, 78, b"\n"));
+    d.extend_from_slice(b"\nshowpage\n");
+    assert_eq!(data_of(&taken(&d)), p);
+    for line in [60usize, 64, 80] {
+        let mut d = wrap(&hex(&p, false), line, line, b"\n");
+        d.push(b'\n');
+        assert_eq!(data_of(&taken(&d)), p, "xxd -p {line}");
+    }
+}
+
+#[test]
+fn odd_hex_gives_its_last_char_back() {
+    let p = bytes_for_hex(400, 23);
+    let mut c = hex(&p, false);
+    c.push(b'7');
+    let mut d = b"data\n".to_vec();
+    d.extend(wrap(&c, 64, 64, b"\n"));
+    d.extend_from_slice(b"\nend\n");
+    let f = taken(&d);
+    assert_eq!(data_of(&f), p);
+}
+
+#[test]
+fn mixed_case_and_digits_alone_are_not_hex() {
+    let mut rng = Rng::new(24);
+    let mixed: Vec<u8> = (0..4000).map(|_| b"0123456789abcdefABCDEF"[rng.below(22) as usize]).collect();
+    not_taken(&wrap(&mixed, 64, 64, b"\n"));
+    let digits: Vec<u8> = (0..4000).map(|_| b'0' + rng.below(10) as u8).collect();
+    not_taken(&wrap(&digits, 64, 64, b"\n"));
+    let mut d = b"x = 0x".to_vec();
+    d.extend(&digits);
+    d.extend_from_slice(b";\n");
+    not_taken(&d);
+    let letters: Vec<u8> = (0..4000).map(|_| b"abcdef"[rng.below(6) as usize]).collect();
+    not_taken(&wrap(&letters, 64, 64, b"\n"));
+}
+
+#[test]
+fn a_list_of_hashes_is_harmless() {
+    // (one hash a line: wrapped hex, taken or not, it is written again)
+    let mut rng = Rng::new(25);
+    let mut d = Vec::new();
+    for _ in 0..200 {
+        d.extend(hex(&rng.bytes(32), false));
+        d.push(b'\n');
+    }
+    if let Some(f) = formula::encode(&d, 1) {
+        assert_eq!(eval(&f).unwrap(), d);
+    }
+}
+
+#[test]
+fn hex_layouts_that_are_wrong_are_errors() {
+    let data = payload(100, 26);
+    let run = |l: &[u8]| formula::decode(&[], &[b"ab", &data, l], 2 + 200 + 2);
+    // right: 100 bytes, 200 chars, lines of 128, flags 4 (lowercase) and 6 (uppercase)
+    for flags in [4u8, 6] {
+        let out = run(&layout(&[b"\r\n"], &[(1, 100, 128, 128, 0, flags)])).unwrap();
+        assert_eq!(out.len(), 204);
+        assert_eq!(&out[1..1 + 200 - 72], &hex(&data, flags == 6)[..128]);
+        assert_eq!(out[1 + 128], b'\r');
+    }
+    let bad = |l: Vec<u8>| assert!(run(&l).is_err(), "{l:?}");
+    // padded hex, an alphabet past the hex ones, hex with the bits of 8
+    bad(layout(&[b"\r\n"], &[(1, 100, 128, 128, 0, 5)]));
+    bad(layout(&[b"\r\n"], &[(1, 100, 128, 128, 0, 7)]));
+    bad(layout(&[b"\r\n"], &[(1, 100, 128, 128, 0, 8)]));
+    bad(layout(&[b"\r\n"], &[(1, 100, 128, 128, 0, 12)]));
+    // a first line past the chars (200), unwrapped with lines
+    bad(layout(&[b"\r\n"], &[(1, 100, 200, 128, 0, 4)]));
+    bad(layout(&[b"\r\n"], &[(1, 100, 0, 128, 0, 4)]));
+}
+
+#[test]
+fn a_prefix_does_not_make_hex_base64() {
+    // (`0x` or `\x` and hexadecimal is a run of the base64 alphabet too, valid by its bytes'
+    // luck: of every length)
+    for n in 1200..1208 {
+        let p = bytes_for_hex(n, 40 + n as u64);
+        for (head, upper, tail) in [
+            (&b"INSERT INTO t VALUES (1,0x"[..], true, &b");\n"[..]),
+            (b"INSERT INTO t VALUES (1,0x", false, b");\n"),
+            (b"INSERT INTO t VALUES (1, '\\x", false, b"');\n"),
+            (b"1\tname\t\\\\x", false, b"\n"),
+        ] {
+            let mut d = head.to_vec();
+            d.extend(hex(&p, upper));
+            d.extend_from_slice(tail);
+            assert!(data_of(&taken(&d)) == p, "{n} {head:?}");
+            // (the layout's flags: hexadecimal)
+            let flags = *f_layout(&d).last().unwrap();
+            assert!(flags == 4 || flags == 6, "{n} {head:?}: flags {flags}");
+        }
+    }
+}
+
+fn f_layout(d: &[u8]) -> Vec<u8> {
+    let f = formula::encode(d, 1).unwrap();
+    f.streams.iter().find(|s| s.class == "b2t/layout").unwrap().data.to_vec()
 }

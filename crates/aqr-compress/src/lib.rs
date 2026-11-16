@@ -1408,10 +1408,12 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
         // directory file, a resource file by its serialized file), whatever its first bytes are
         _ if let Some(format) = siblings::format(d, cx) => made_by(format, d, opt, depth, cx),
         Nest::Exact => detect(d).and_then(|format| made_by(format, d, opt, depth, cx)),
-        // text with base64 blocks where aqr-base64 takes them (and it is [`smaller`]), of any
-        // length: the text without them and each block's bytes are made as what they are
+        // text with base64 or hexadecimal blocks or quoted-printable bodies where aqr-b2t takes
+        // them (and it is [`smaller`]), of any length: the text without them and each block's
+        // bytes are made as what they are (the text left by one is looked at by the other, a
+        // level deeper: a mail of both)
         _ if matches!(how, Nest::As(Format::Text) | Nest::Scan)
-            && let Some(f) = base64(d, opt, depth, cx) =>
+            && let Some(f) = b2t(d, opt, depth, cx).or_else(|| quopri(d, opt, depth, cx)) =>
         {
             Some(Made::from(f))
         }
@@ -1484,16 +1486,25 @@ fn is_text(format: Option<Format>) -> bool {
     format.is_some_and(|f| f.spec().text)
 }
 
-/// `d`, text of any length, as the text without its base64 blocks and the bytes they decode to
-/// where aqr-base64 finds blocks (a MIME message's attachments, PEM, data URIs, base64 in JSON)
-/// and the formula is [`smaller`]: each is recompressed as what it is. Asked of every text, so
-/// that [`aqr_base64::formula::starts`] is a quick look; the text path (aqr-wrt) takes only
-/// that of [`aqr_wrt::formula::MIN_LEN`] bytes, and a message with an attachment is often short.
-fn base64(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+/// `d`, text of any length, as the text without its base64 and hexadecimal blocks and the bytes
+/// they decode to where aqr-b2t finds blocks (a MIME message's attachments, PEM, data URIs,
+/// base64 in JSON, RTF's pictures, SQL dumps' blobs) and the formula is [`smaller`]: each is
+/// recompressed as what it is. Asked of every text, so that [`aqr_b2t::formula::starts`] is a
+/// quick look; the text path (aqr-wrt) takes only that of [`aqr_wrt::formula::MIN_LEN`] bytes,
+/// and a message with an attachment is often short.
+fn b2t(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     // (mostly_text first: it gives up on a binary file within its first pieces, `starts` would
     // go over all of it)
-    (aqr_wrt::formula::mostly_text(d) && aqr_base64::formula::starts(d))
-        .then(|| recompress_as(Format::Base64, d, opt, depth, cx))
+    (aqr_wrt::formula::mostly_text(d) && aqr_b2t::formula::starts(d))
+        .then(|| recompress_as(Format::B2t, d, opt, depth, cx))
+        .flatten()
+}
+
+/// `d`, text, as the text without its quoted-printable bodies and the bytes they decode to
+/// where aqr-b2t finds bodies (a header names the encoding) and the formula is [`smaller`].
+fn quopri(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    (aqr_wrt::formula::mostly_text(d) && aqr_b2t::quopri::formula::starts(d))
+        .then(|| recompress_as(Format::Quopri, d, opt, depth, cx))
         .flatten()
 }
 

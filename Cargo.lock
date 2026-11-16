@@ -160,7 +160,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aqr-base64"
+name = "aqr-b2t"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
@@ -257,7 +257,7 @@ dependencies = [
  "aqr-apfs",
  "aqr-arsc",
  "aqr-asar",
- "aqr-base64",
+ "aqr-b2t",
  "aqr-bundle",
  "aqr-bvx",
  "aqr-bz2",
@@ -339,7 +339,7 @@ dependencies = [
  "aqr-arsc",
  "aqr-asar",
  "aqr-azo",
- "aqr-base64",
+ "aqr-b2t",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",
@@ -470,7 +470,7 @@ dependencies = [
  "aqr-arsc",
  "aqr-asar",
  "aqr-azo",
- "aqr-base64",
+ "aqr-b2t",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",
@@ -1276,7 +1276,7 @@ dependencies = [
  "aqr-arsc",
  "aqr-asar",
  "aqr-azo",
- "aqr-base64",
+ "aqr-b2t",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",
@@ -1374,7 +1374,7 @@ dependencies = [
  "aqr-arsc",
  "aqr-asar",
  "aqr-azo",
- "aqr-base64",
+ "aqr-b2t",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",

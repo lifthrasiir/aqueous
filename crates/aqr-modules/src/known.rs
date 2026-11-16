@@ -34,10 +34,16 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/azo-recons.block"),
     },
     Known {
-        name: "base64-recons",
+        name: "b2t-recons-quopri",
         version: 1,
-        sha512_256: hex("7e18ddcbb5714bb70d6f5d65dd111a7079c8b5b02acf3955ebe847690daafc48"),
-        block: include_bytes!("../wasm/base64-recons.block"),
+        sha512_256: hex("e33ddb74d885e215d86f56a52d2845ddc4ef9ef12090ee8c920bc205423d4a09"),
+        block: include_bytes!("../wasm/b2t-recons-quopri.block"),
+    },
+    Known {
+        name: "b2t-recons",
+        version: 1,
+        sha512_256: hex("c586cd2eb9ea405891552c5b2ef82d6ec1c4263c3df041744f419220dc3f0599"),
+        block: include_bytes!("../wasm/b2t-recons.block"),
     },
     Known {
         name: "bc6h-recons",

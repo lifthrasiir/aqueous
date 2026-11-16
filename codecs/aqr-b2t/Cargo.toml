@@ -1,5 +1,5 @@
 [package]
-name = "aqr-base64"
+name = "aqr-b2t"
 version = "0.1.0"
 edition = "2024"
 description = "Base64 blocks in text files (MIME, PEM, data URIs, JSON) decoded for the decoded bytes to be recompressed, and written again bit for bit"
@@ -22,5 +22,5 @@ aqr-formula = { path = "../../crates/aqr-formula" }
 # that names do not collide in the workspace's target directory.
 
 [[example]]
-name = "aqr-base64-check"
+name = "aqr-b2t-check"
 path = "examples/check.rs"

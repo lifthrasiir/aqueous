@@ -5283,13 +5283,13 @@ fn jsonl_plans_hold() {
     }
 }
 
-/// base64-recons (a part module of windows of four pages) lays its memory out as a stack, its limit
+/// b2t-recons (a part module of windows of four pages) lays its memory out as a stack, its limit
 /// its plan, the same whatever the lengths: blocks of a MIME message and of a JSON file, of
 /// every length mod 3 and past the pieces it takes (text, bytes and layout), padded and not,
-/// URL-safe, wrapped and not, and text between them longer than a piece; and a file of nothing
-/// but a block.
+/// URL-safe, hexadecimal of both cases (wrapped, and of a line with a prefix), wrapped and not,
+/// and text between them longer than a piece; and a file of nothing but a block.
 #[test]
-fn base64_plans_hold() {
+fn b2t_plans_hold() {
     fn b64(d: &[u8], table: &[u8; 64], pad: bool) -> Vec<u8> {
         let mut out = Vec::new();
         for g in d.chunks(3) {
@@ -5306,14 +5306,14 @@ fn base64_plans_hold() {
     }
     let mut rng = aqr_common::rng::Rng::new(21);
     let words: Vec<&[u8]> = vec![b"mail ", b"body ", b"text\n", b"header: "];
-    let mut text = |n: usize, rng: &mut aqr_common::rng::Rng| {
+    let text = |n: usize, rng: &mut aqr_common::rng::Rng| {
         let mut t = Vec::new();
         while t.len() < n {
             t.extend_from_slice(words[rng.below(words.len() as u64) as usize]);
         }
         t
     };
-    let m = aqr_base64::formula::MODULE;
+    let m = aqr_b2t::formula::MODULE;
     let plan_of = |n: u64| {
         let usage = aqr_formula::Usage {
             params: &[],
@@ -5327,8 +5327,8 @@ fn base64_plans_hold() {
     };
     assert_eq!(plan_of(3 << 10), plan_of(900 << 20));
     assert!(plan_of(900 << 20) < 2 << 20, "{}", plan_of(900 << 20));
-    let std = aqr_base64::module::STANDARD;
-    let url = aqr_base64::module::URL_SAFE;
+    let std = aqr_b2t::module::STANDARD;
+    let url = aqr_b2t::module::URL_SAFE;
     let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
     for n in [200usize, 4999, 5000, 5001, 70_000, 300_001, 300_002] {
         let p = rng.bytes(n);
@@ -5342,12 +5342,111 @@ fn base64_plans_hold() {
         d.extend_from_slice(b"\",\"b\":\"");
         d.extend(wrap(&b64(&q, std, false), 64, b"\\n"));
         d.extend_from_slice(b"\"}\n");
+        // (hexadecimal: RTF's lines, then a literal's one line, a piece's worth and more)
+        let hex = |p: &[u8], t: &[u8; 16]| -> Vec<u8> {
+            p.iter().flat_map(|&b| [t[(b >> 4) as usize], t[(b & 15) as usize]]).collect()
+        };
+        d.extend_from_slice(b"{\\pict\\pngblip\r\n");
+        d.extend(wrap(&hex(&p, aqr_b2t::module::HEX_LOWER), 128, b"\r\n"));
+        d.extend_from_slice(b"}\nINSERT INTO t VALUES (1,0x");
+        d.extend(hex(&p, aqr_b2t::module::HEX_UPPER));
+        d.extend_from_slice(b");\n");
         cases.push((format!("mime {n}"), d));
     }
     cases.push(("alone".into(), wrap(&b64(&rng.bytes(9000), std, true), 76, b"\n")));
     for (what, d) in cases {
-        let f = aqr_base64::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}: none taken"));
-        plan_holds(&format!("base64 {what}"), f, &d);
+        let f = aqr_b2t::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}: none taken"));
+        plan_holds(&format!("b2t {what}"), f, &d);
+    }
+}
+
+/// b2t-recons-quopri (a part module of windows of four pages) lays its memory out as a stack, its
+/// limit its plan, the same whatever the lengths: bodies of CRLF and LF, of lowercase and
+/// uppercase escapes, ending in a soft break, with exceptions (an escaped letter) among them, of
+/// several pieces' length, and text between them longer than a piece.
+#[test]
+fn b2t_quopri_plans_hold() {
+    fn encode(data: &[u8], crlf: bool, lower: bool, soft_end: bool) -> Vec<u8> {
+        let eol: &[u8] = if crlf { b"\r\n" } else { b"\n" };
+        let digits = if lower { b"0123456789abcdef" } else { b"0123456789ABCDEF" };
+        let (mut out, mut col, mut i) = (Vec::new(), 0, 0);
+        while i < data.len() {
+            if data[i..].starts_with(eol) {
+                out.extend_from_slice(eol);
+                (col, i) = (0, i + eol.len());
+                continue;
+            }
+            let b = data[i];
+            let end = i + 1 == data.len() || data[i + 1..].starts_with(eol);
+            let ws = b == b' ' || b == b'\t';
+            // (every 997th byte written as an escape, an exception of the layout)
+            let esc = !((33..=126).contains(&b) && b != b'=' || ws) || (ws && end) || i % 997 == 500;
+            let w = if esc { 3 } else { 1 };
+            if col + w > if end { 76 } else { 75 } {
+                out.push(b'=');
+                out.extend_from_slice(eol);
+                col = 0;
+            }
+            match esc {
+                true => out.extend_from_slice(&[b'=', digits[(b >> 4) as usize], digits[(b & 15) as usize]]),
+                false => out.push(b),
+            }
+            (col, i) = (col + w, i + 1);
+        }
+        if soft_end {
+            out.push(b'=');
+            out.extend_from_slice(eol);
+        }
+        out
+    }
+    let mut rng = aqr_common::rng::Rng::new(22);
+    let words: Vec<&str> = vec!["mail ", "caf\u{e9} ", "\u{c548}\u{b155} ", "<a href=\"x\">", "= ", "text\n", "\ttab "];
+    let text = |n: usize, rng: &mut aqr_common::rng::Rng| {
+        let mut t = Vec::new();
+        while t.len() < n {
+            t.extend_from_slice(words[rng.below(words.len() as u64) as usize].as_bytes());
+        }
+        t
+    };
+    let m = aqr_b2t::quopri::formula::MODULE;
+    let plan_of = |n: u64| {
+        let usage = aqr_formula::Usage {
+            params: &[],
+            resources: &[],
+            inputs: &[n, n, n],
+            outputs: &[n],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
+    };
+    assert_eq!(plan_of(3 << 10), plan_of(900 << 20));
+    assert!(plan_of(900 << 20) < 2 << 20, "{}", plan_of(900 << 20));
+    let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+    for (k, n) in [300usize, 4999, 24_575, 24_576, 24_577, 70_000, 200_001].into_iter().enumerate() {
+        let (crlf, lower, soft_end) = (k % 2 == 0, k % 3 == 0, k % 2 == 1);
+        let data = text(n, &mut rng);
+        let data: Vec<u8> = match crlf {
+            true => String::from_utf8(data).unwrap().replace('\n', "\r\n").into_bytes(),
+            false => data,
+        };
+        let nl = if crlf { "\r\n" } else { "\n" };
+        // (text around it a share of the file that is taken: a hundredth)
+        let around = (n * 40).min(100_000);
+        let mut d = text(around, &mut rng);
+        d.extend_from_slice(format!("{nl}Content-Transfer-Encoding: quoted-printable{nl}{nl}").as_bytes());
+        d.extend(encode(&data, crlf, lower, soft_end));
+        d.extend_from_slice(nl.as_bytes());
+        d.extend_from_slice(format!("From a:b{nl}").as_bytes());
+        d.extend(text(around * 7 / 10, &mut rng));
+        let small = text(900, &mut rng);
+        d.extend_from_slice(format!("{nl}Content-Transfer-Encoding: quoted-printable{nl}{nl}").as_bytes());
+        d.extend(encode(&small, false, false, false));
+        cases.push((format!("body {n}"), d));
+    }
+    for (what, d) in cases {
+        let f = aqr_b2t::quopri::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}: none taken"));
+        plan_holds(&format!("b2t-quopri {what}"), f, &d);
     }
 }
 
