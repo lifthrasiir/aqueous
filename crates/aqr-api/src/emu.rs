@@ -221,8 +221,8 @@ thread_local! {
     /// The host of the application this thread runs (null: none). A pointer, not a borrow: an
     /// application may pull its inputs from (or push its outputs to) another application run on
     /// the same thread within the call (a decoder's chain of part applications), which installs
-    /// its own host for the while and puts this one back ([`run`]); and nothing of one host is
-    /// reached through another's calls.
+    /// its own host for the while and puts this one back ([`run`]); and the host is off the
+    /// thread while a call has it ([`current`]), so nothing reaches it twice.
     static HOST: std::cell::Cell<*mut Host> = const { std::cell::Cell::new(std::ptr::null_mut()) };
     /// The channels this thread made that no spawn has given to a gang yet, and the gang it is a
     /// task of.
@@ -558,15 +558,26 @@ fn end_of(ch: &mut Chan, send: bool) -> Result<(), String> {
     }
 }
 
-/// The host of the application this thread runs, if any.
-fn current<'a>() -> Option<&'a mut Host> {
-    // SAFETY: the host installed lives until it is taken off again (`run`, a task's thread), and
-    // is reached only from this thread, by the application's own calls
-    unsafe { HOST.get().as_mut() }
+/// `f` of the host of the application this thread runs, if any. The host is taken off the
+/// thread while `f` has it, and put back after (however `f` ends): what `f` calls out to (a
+/// feed's pull, a drain's push) may call the emulation again, which must not reach this host a
+/// second time, as `f` holds it (an application run there installs its own and puts none back).
+fn current<R>(f: impl FnOnce(&mut Host) -> R) -> Option<R> {
+    struct Back(*mut Host);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            HOST.set(self.0);
+        }
+    }
+    let back = Back(HOST.replace(std::ptr::null_mut()));
+    // SAFETY: the host installed lives until it is taken off again (`run`, a task's thread),
+    // is reached only from this thread, and (off the thread until `back` is dropped) only here
+    let h = unsafe { back.0.as_mut() }?;
+    Some(f(h))
 }
 
 fn with<R>(f: impl FnOnce(&mut Host) -> Result<R, String>) -> R {
-    let r = f(current().expect("aqr_api used outside emu::apply"));
+    let r = current(f).expect("aqr_api used outside emu::apply");
     r.unwrap_or_else(|msg| trap(msg))
 }
 
@@ -733,7 +744,7 @@ pub(crate) mod sys {
         struct Send(crate::task::Record);
         // SAFETY: the closure `rec` refers to is `Sync`, and outlives the threads
         unsafe impl std::marker::Send for Send {}
-        let kind = super::current().map(|h| h.kind);
+        let kind = super::current(|h| h.kind);
         // (the channels made so far are given to this gang, or there are none to give)
         let pending = super::PENDING.with_borrow_mut(std::mem::take);
         let id = super::GANGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -815,11 +826,12 @@ pub(crate) mod sys {
 
     #[cfg(feature = "alloc")]
     pub fn chan(cap: u32) -> u32 {
-        if let Some(h) = super::current() {
+        if super::current(|h| {
             h.chans += 1;
-            if h.chans > crate::MAX_CHANNELS {
-                super::exceeded(format!("more than {} channels made", crate::MAX_CHANNELS));
-            }
+            h.chans > crate::MAX_CHANNELS
+        }) == Some(true)
+        {
+            super::exceeded(format!("more than {} channels made", crate::MAX_CHANNELS));
         }
         let mut chans = super::CHANS.write().unwrap_or_else(|e| e.into_inner());
         chans.push(std::sync::Arc::new(super::Shared {
@@ -887,9 +899,7 @@ pub(crate) mod sys {
     /// Also outside [`apply`](super::apply), where the code of a module runs as a library.
     pub fn log(msg: &[u8]) {
         eprintln!("aqr_log: {}", String::from_utf8_lossy(msg));
-        if let Some(h) = super::current() {
-            h.last_log = Some(msg.to_vec());
-        }
+        super::current(|h| h.last_log = Some(msg.to_vec()));
     }
 
     pub fn trap() -> ! {

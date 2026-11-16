@@ -60,6 +60,29 @@ impl Drain for Kept {
     }
 }
 
+/// An output whose taker calls the emulation itself, as code of a module run as a library may.
+struct Reaching(Vec<u8>);
+
+impl Drain for Reaching {
+    fn push(&mut self, d: &[u8]) -> Result<(), String> {
+        self.0.extend_from_slice(d);
+        // (the host of the application pushing is not reached again from within its call)
+        _ = Input::<0>::size();
+        aqr_api::log(b"pushed");
+        Ok(())
+    }
+}
+
+#[test]
+fn host_not_reached_from_its_own_call() {
+    let source = [1u8, 2, 3, 4];
+    let mut input = aqr_api::emu::SliceFeed::new(&source);
+    let (mut even, mut odd) = (Reaching(Vec::new()), Kept(Vec::new()));
+    let f = apply_streaming(&alternate::ENTRY, &mut [&mut input], &[], &[], &mut [&mut even, &mut odd], &[2, 2])
+        .unwrap_err();
+    assert!(f.what.contains("outside emu::apply"), "{}", f.what);
+}
+
 #[test]
 fn nested_on_one_thread() {
     let source: Vec<u8> = (0..10_000u32).map(|i| (i * 13) as u8).collect();
