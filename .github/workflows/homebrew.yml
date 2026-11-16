@@ -11,7 +11,8 @@ name: homebrew
 #
 # The secret HOMEBREW_TAP_TOKEN is a fine-grained token for that repository alone, with
 # Contents: read and write, a secret of the environment homebrew (its deployments limited to the
-# tags v*), so that no other ref's workflow can read it.
+# tags v*), so that no other ref's workflow can read it. Called, the workflow sees it only with
+# the caller's secrets: inherit (release.yml's), though the job is of the environment.
 
 on:
   release:
@@ -51,5 +52,7 @@ jobs:
           if [ -n "$missing" ]; then
             echo "::notice::$TAG: assets not all uploaded yet:"$'\n'"$missing"; exit 0
           fi
+          # (empty where the caller does not pass secrets: inherit)
+          : "${TAP_TOKEN:?no HOMEBREW_TAP_TOKEN}"
           GH_TOKEN=$TAP_TOKEN gh api repos/lifthrasiir/homebrew-aqueous/dispatches \
             -f event_type=release -f "client_payload[tag]=$TAG"
