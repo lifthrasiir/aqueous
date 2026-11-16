@@ -565,10 +565,14 @@ impl<'d> Listing<'d> {
                 tick(given.iter().map(|&j| sizes[j]).sum());
                 k = m;
             }
-            // SAFETY: all decoded
-            let all = unsafe { std::slice::from_raw_parts(raw.0, size) };
-            if whole && self.main.folders[f].crc.is_some_and(|c| crc32::hash(all) != c) {
-                return Err("a folder's CRC mismatch".into());
+            // (the bytes looked at whole only where all were decoded: of a folder's substreams
+            // not all given, those past the last given may not be)
+            if whole && let Some(c) = self.main.folders[f].crc {
+                // SAFETY: all decoded, as all its substreams were given
+                let all = unsafe { std::slice::from_raw_parts(raw.0, size) };
+                if crc32::hash(all) != c {
+                    return Err("a folder's CRC mismatch".into());
+                }
             }
             Ok(())
         };
