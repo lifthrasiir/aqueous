@@ -199,7 +199,7 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
         taken.sort_by_key(|r| r.start);
         let mut at = t.data;
         let min_kept = MIN_KEPT.get();
-        for r in taken.into_iter().chain([t.total.min(d.len())..usize::MAX]) {
+        for r in taken.into_iter().chain(std::iter::once(t.total.min(d.len())..usize::MAX)) {
             if r.start >= at + min_kept {
                 sections.push((0, at, r.start - at, Arch::Kept));
             }

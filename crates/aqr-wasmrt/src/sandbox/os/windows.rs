@@ -369,103 +369,6 @@ fn lowbox(token: OwnedHandle) -> io::Result<OwnedHandle> {
     Ok(owned(lowbox))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use windows_sys::Win32::Security::TokenPrimary;
-
-    /// What the child of [`lowbox_off_the_network`] tells by its exit code: 0 connected to the
-    /// loopback's port of `AQR_LOWBOX_PORT`, 1 kept from it, 2 something else.
-    #[test]
-    #[ignore = "the child of lowbox_off_the_network"]
-    fn lowbox_child() {
-        let Some(port) = std::env::var("AQR_LOWBOX_PORT").ok().and_then(|p| p.parse::<u16>().ok()) else { return };
-        let t = std::time::Duration::from_secs(3);
-        std::process::exit(match std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), t) {
-            Ok(_) => 0,
-            Err(e) if matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::TimedOut) => 1,
-            Err(_) => 2,
-        })
-    }
-
-    /// A process of a lowbox token ([`lowbox`]) is kept off the network: Winsock starts there
-    /// (unlike in a worker, of its restricted token), and the connection is refused where it is
-    /// made, as one made on the device of sockets directly would be; of the same token not made
-    /// one, it connects.
-    #[test]
-    fn lowbox_off_the_network() {
-        if version() < (6, 2, 0) {
-            return;
-        }
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = l.local_addr().unwrap().port();
-        std::thread::spawn(move || l.incoming().for_each(drop));
-        let exit = |boxed: bool| {
-            let mut me = null_mut();
-            // SAFETY: of this process; the tokens, strings and structures outlive the calls
-            unsafe {
-                check(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut me), "the token").unwrap();
-                let me = owned(me);
-                let mut primary = null_mut();
-                let r = DuplicateTokenEx(
-                    me.as_raw_handle(),
-                    TOKEN_ALL_ACCESS,
-                    null(),
-                    SecurityImpersonation,
-                    TokenPrimary,
-                    &mut primary,
-                );
-                check(r, "the primary token").unwrap();
-                let token = match boxed {
-                    true => lowbox(owned(primary)).unwrap(),
-                    false => owned(primary),
-                };
-                let exe = std::env::current_exe().unwrap();
-                let mut cmd = Vec::new();
-                quote(&mut cmd, exe.as_os_str());
-                for a in ["--exact", "sandbox::os::windows::tests::lowbox_child", "--ignored", "--test-threads=1"] {
-                    quote(&mut cmd, OsStr::new(a));
-                }
-                cmd.push(0);
-                let mut env: Vec<u16> = std::env::vars_os()
-                    .filter(|(k, _)| k != "AQR_LOWBOX_PORT")
-                    .flat_map(|(k, v)| {
-                        let mut kv = k;
-                        kv.push("=");
-                        kv.push(v);
-                        kv.encode_wide().chain([0]).collect::<Vec<u16>>()
-                    })
-                    .collect();
-                env.extend(OsStr::new(&format!("AQR_LOWBOX_PORT={port}")).encode_wide().chain([0, 0]));
-                let mut si: STARTUPINFOEXW = zeroed();
-                si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-                let mut pi: PROCESS_INFORMATION = zeroed();
-                let r = CreateProcessAsUserW(
-                    token.as_raw_handle(),
-                    null(),
-                    cmd.as_mut_ptr(),
-                    null(),
-                    null(),
-                    0,
-                    CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
-                    env.as_ptr() as *const c_void,
-                    null(),
-                    &si.StartupInfo,
-                    &mut pi,
-                );
-                check(r, "the child").unwrap();
-                let (process, _thread) = (owned(pi.hProcess), owned(pi.hThread));
-                assert_eq!(WaitForSingleObject(process.as_raw_handle(), 30_000), WAIT_OBJECT_0);
-                let mut code = 0;
-                GetExitCodeProcess(process.as_raw_handle(), &mut code);
-                code
-            }
-        };
-        assert_eq!(exit(false), 0, "not a lowbox: connected");
-        assert_eq!(exit(true), 1, "a lowbox: kept off");
-    }
-}
-
 /// `arg` appended to `cmd` as the C runtime parses it back.
 fn quote(cmd: &mut Vec<u16>, arg: &OsStr) {
     if !cmd.is_empty() {
@@ -733,4 +636,101 @@ pub fn lockdown() -> io::Result<()> {
         check(RevertToSelf(), "the impersonation given up")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Security::TokenPrimary;
+
+    /// What the child of [`lowbox_off_the_network`] tells by its exit code: 0 connected to the
+    /// loopback's port of `AQR_LOWBOX_PORT`, 1 kept from it, 2 something else.
+    #[test]
+    #[ignore = "the child of lowbox_off_the_network"]
+    fn lowbox_child() {
+        let Some(port) = std::env::var("AQR_LOWBOX_PORT").ok().and_then(|p| p.parse::<u16>().ok()) else { return };
+        let t = std::time::Duration::from_secs(3);
+        std::process::exit(match std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), t) {
+            Ok(_) => 0,
+            Err(e) if matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::TimedOut) => 1,
+            Err(_) => 2,
+        })
+    }
+
+    /// A process of a lowbox token ([`lowbox`]) is kept off the network: Winsock starts there
+    /// (unlike in a worker, of its restricted token), and the connection is refused where it is
+    /// made, as one made on the device of sockets directly would be; of the same token not made
+    /// one, it connects.
+    #[test]
+    fn lowbox_off_the_network() {
+        if version() < (6, 2, 0) {
+            return;
+        }
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || l.incoming().for_each(drop));
+        let exit = |boxed: bool| {
+            let mut me = null_mut();
+            // SAFETY: of this process; the tokens, strings and structures outlive the calls
+            unsafe {
+                check(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut me), "the token").unwrap();
+                let me = owned(me);
+                let mut primary = null_mut();
+                let r = DuplicateTokenEx(
+                    me.as_raw_handle(),
+                    TOKEN_ALL_ACCESS,
+                    null(),
+                    SecurityImpersonation,
+                    TokenPrimary,
+                    &mut primary,
+                );
+                check(r, "the primary token").unwrap();
+                let token = match boxed {
+                    true => lowbox(owned(primary)).unwrap(),
+                    false => owned(primary),
+                };
+                let exe = std::env::current_exe().unwrap();
+                let mut cmd = Vec::new();
+                quote(&mut cmd, exe.as_os_str());
+                for a in ["--exact", "sandbox::os::windows::tests::lowbox_child", "--ignored", "--test-threads=1"] {
+                    quote(&mut cmd, OsStr::new(a));
+                }
+                cmd.push(0);
+                let mut env: Vec<u16> = std::env::vars_os()
+                    .filter(|(k, _)| k != "AQR_LOWBOX_PORT")
+                    .flat_map(|(k, v)| {
+                        let mut kv = k;
+                        kv.push("=");
+                        kv.push(v);
+                        kv.encode_wide().chain([0]).collect::<Vec<u16>>()
+                    })
+                    .collect();
+                env.extend(OsStr::new(&format!("AQR_LOWBOX_PORT={port}")).encode_wide().chain([0, 0]));
+                let mut si: STARTUPINFOEXW = zeroed();
+                si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+                let mut pi: PROCESS_INFORMATION = zeroed();
+                let r = CreateProcessAsUserW(
+                    token.as_raw_handle(),
+                    null(),
+                    cmd.as_mut_ptr(),
+                    null(),
+                    null(),
+                    0,
+                    CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+                    env.as_ptr() as *const c_void,
+                    null(),
+                    &si.StartupInfo,
+                    &mut pi,
+                );
+                check(r, "the child").unwrap();
+                let (process, _thread) = (owned(pi.hProcess), owned(pi.hThread));
+                assert_eq!(WaitForSingleObject(process.as_raw_handle(), 30_000), WAIT_OBJECT_0);
+                let mut code = 0;
+                GetExitCodeProcess(process.as_raw_handle(), &mut code);
+                code
+            }
+        };
+        assert_eq!(exit(false), 0, "not a lowbox: connected");
+        assert_eq!(exit(true), 1, "a lowbox: kept off");
+    }
 }

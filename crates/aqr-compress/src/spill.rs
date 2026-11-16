@@ -311,7 +311,7 @@ impl aqr_formula::store::Store for Spill {
         let mut before = None;
         let segment_len = SEGMENT.get();
         assert!(
-            segment_len >= ALIGN && segment_len % ALIGN == 0,
+            segment_len >= ALIGN && segment_len.is_multiple_of(ALIGN),
             "-Z spill:segment={segment_len}: not a multiple of 64K"
         );
         let (segment, start, cap, own) = if n > segment_len / 2 {

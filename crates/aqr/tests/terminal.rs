@@ -30,9 +30,13 @@ fn names_escaped() {
     };
     let clean = |s: &str| !s.contains(['\x1b', '\x07', '\u{202e}']);
     let (out, err) = run(&["-t", "-q", "a.aqr"]);
-    assert_eq!(out, r"a\u{1b}]0;title\u{7}\u{a}fake.txt
+    assert_eq!(
+        out,
+        r"a\u{1b}]0;title\u{7}\u{a}fake.txt
 \u{202e}txt.exe
-", "{err}");
+",
+        "{err}"
+    );
     let (out, _) = run(&["-t", "a.aqr"]);
     assert!(clean(&out) && out.contains("fake.txt"), "{out}");
     let (out, _) = run(&["-I", "-v", "a.aqr"]);

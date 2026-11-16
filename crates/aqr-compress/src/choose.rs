@@ -56,6 +56,9 @@ pub(crate) fn choose(f: &mut Formula, enc: &Encoder) -> Chosen {
 /// Bytes of a stream, by class: the pieces of each.
 type ByClass<'a> = HashMap<&'a str, Vec<&'a [u8]>>;
 
+/// The pieces of an Either's two sides (kept, made) of a class.
+type Sides<'a> = [Vec<&'a [u8]>; 2];
+
 /// Of `eithers` (in [`Formula::eithers`]' order: those within one before it), whether each is
 /// made. Each is tried after what the others leave as they are chosen so far, the deepest first
 /// (those of a depth on threads): from all kept, again until nothing changes, at most
@@ -77,10 +80,10 @@ fn trial(f: &Formula, eithers: &[(usize, &Either)], enc: &Encoder) -> Vec<bool> 
             let at: Vec<usize> = (0..eithers.len()).filter(|&i| eithers[i].0 == depth).collect();
             // of each, both ways: its pieces of each class, after the prefix of the rest of the
             // class (one for both); tried all at once, each made as it is tried
-            let mut jobs: Vec<(&str, usize, [Vec<&[u8]>; 2])> = Vec::new();
+            let mut jobs: Vec<(&str, usize, Sides)> = Vec::new();
             for &i in &at {
                 let e = eithers[i].1;
-                let mut by: HashMap<&str, [Vec<&[u8]>; 2]> = HashMap::new();
+                let mut by: HashMap<&str, Sides> = HashMap::new();
                 for (side, node) in [&e.kept, &e.made].into_iter().enumerate() {
                     let mut pieces = ByClass::new();
                     pieces_of(f, node, &index, &next, &mut pieces);

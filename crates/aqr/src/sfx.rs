@@ -43,7 +43,7 @@ pub struct Pack {
 /// links no Wasmtime (`aqr_decompress::set_interpreter`), unpacked alone (its bundle of its own,
 /// the first).
 pub fn interpreter() -> Result<Vec<u8>, String> {
-    let (interp, _, _) = parts()?;
+    let [interp, _, _] = parts()?;
     let mut blobs = aqr_sfx::bundle::unpack(interp).map_err(|e| format!("the interpreter blob: {e}"))?;
     match (blobs.pop(), blobs.is_empty()) {
         (Some((name, blob)), true) if name == "aqr-interp.blob" => Ok(blob),
@@ -53,7 +53,7 @@ pub fn interpreter() -> Result<Vec<u8>, String> {
 
 /// The parts of [`PACKED`] (aqr-sfx's `aqr-sfx-pack`): the bundle of the interpreter blob, the
 /// bundle of the other blobs, and the other files.
-fn parts() -> Result<(&'static [u8], &'static [u8], &'static [u8]), String> {
+fn parts() -> Result<[&'static [u8]; 3], String> {
     if PACKED.is_empty() {
         return Err("this aqr carries no blobs (the interpreter's and the self-extracting stub's: \
                     built without target/aqr-sfx/, which crates/aqr-sfx/pack.py gathers on Windows \
@@ -69,7 +69,7 @@ fn parts() -> Result<(&'static [u8], &'static [u8], &'static [u8]), String> {
         Ok(b)
     };
     let (interp, blobs) = (bundle()?, bundle()?);
-    Ok((interp, blobs, d))
+    Ok([interp, blobs, d])
 }
 
 /// The pack, unpacked once; an error where this program carries none.
@@ -79,7 +79,7 @@ pub fn pack() -> Result<&'static Pack, String> {
 }
 
 fn unpack() -> Result<Pack, String> {
-    let (_, blobs, raw) = parts()?;
+    let [_, blobs, raw] = parts()?;
     let mut files: HashMap<String, Vec<u8>> = aqr_sfx::bundle::unpack(blobs)?.into_iter().collect();
     let mut at = 0;
     let take = |at: &mut usize| -> Option<&[u8]> {

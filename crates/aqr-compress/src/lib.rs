@@ -465,7 +465,7 @@ pub(crate) struct Cx {
     /// in place.
     defer_for: Cell<Option<(usize, usize)>>,
     /// The data last told of so, and the sizes of [`Verdict::Close`].
-    closed: Cell<Option<((usize, usize), (usize, usize))>>,
+    closed: Cell<Option<(Span, (usize, usize))>>,
     /// Bytes of the formulas kept beside their data so far, of at most [`Cx::defer_budget`].
     kept_beside: Cell<usize>,
     defer_budget: usize,
@@ -2173,6 +2173,9 @@ fn smaller_as(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], of: bundle::
     verdict_as(f, gaps, d, of, opt, cx, false) == Verdict::Take
 }
 
+/// Where data is and its length, as [`Cx::defer_for`] names it.
+type Span = (usize, usize);
+
 /// What [`smaller_as`] tells of a formula: taken, turned down, or turned down by little
 /// ([`DEFER_SLACK`]) and kept beside its data for the batch to choose (where `defer` lets it,
 /// of [`DEFER_MIN`] bytes or more, within [`Cx::defer_budget`]): with the sizes compared.
@@ -3813,7 +3816,8 @@ mod tests {
         let raw = f.push("raw", d.clone());
         let made = f.push("x", d.clone());
         f.root = Node::Either(Box::new(aqr_formula::Either { kept: raw, made, len: d.len() as u64, sizes: (0, 0) }));
-        let m = Made { f, gaps: Some(vec![0..d.len()]), close: None };
+        let all = 0..d.len();
+        let m = Made { f, gaps: Some(vec![all]), close: None };
         // (none compared: a scan would be taken whatever its size)
         let opt = Options { smaller: false, ..Options::default() };
         let cx = Cx::new(&d, &opt);

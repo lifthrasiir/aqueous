@@ -273,8 +273,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         // (a stream of long data in an application of its own, which is streamed and applied at
         // once with the others; the rest together)
         let alone = ALONE.get() as u64;
-        let (long, short): (Vec<_>, Vec<_>) =
-            streams.into_iter().zip(at).partition(|(s, _)| s.data.len() as u64 >= alone);
+        let (long, short): (Vec<_>, Vec<_>) = streams.into_iter().zip(at).partition(|(s, _)| s.data.len() >= alone);
         for group in long.into_iter().map(|s| vec![s]).chain((!short.is_empty()).then_some(short)) {
             let (streams, at): (Vec<_>, Vec<_>) = group.into_iter().unzip();
             let sizes: Vec<u64> = at.iter().map(|a| a.1).collect();

@@ -69,7 +69,7 @@ pub fn list_all(a: &Args) -> Result<(), String> {
             writeln!(out, "{}:", crate::term::name(&input.display().to_string())).map_err(|e| e.to_string())?;
         }
         // (JSON escaped as such)
-        let text = if a.json { text.into() } else { crate::term::safe(&text, true).into_owned() };
+        let text = if a.json { text } else { crate::term::safe(&text, true).into_owned() };
         out.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     }
     out.flush().map_err(|e| e.to_string())

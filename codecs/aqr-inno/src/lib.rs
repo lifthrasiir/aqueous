@@ -26,8 +26,6 @@ const CHUNK: &[u8; 4] = b"zlb\x1a";
 /// Bytes before a chunk's stream: the signature, the properties and the dictionary size.
 const CHUNK_HEAD: usize = 9;
 
-/// The most data a stream is split to.
-
 /// The loader's offset table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Table {
@@ -143,10 +141,11 @@ pub fn zlib_streams(d: &[u8], len: impl Fn(&[u8]) -> Option<usize>) -> Vec<Range
         at += 4 + n;
     }
     // (the setup program, of 4.0: before the setup header, its compressed size in the table)
-    if t.exe < t.header && zlib_at(d, t.exe) {
-        if let Some(n) = len(&d[t.exe..t.header]) {
-            streams.push(t.exe..t.exe + n);
-        }
+    if t.exe < t.header
+        && zlib_at(d, t.exe)
+        && let Some(n) = len(&d[t.exe..t.header])
+    {
+        streams.push(t.exe..t.exe + n);
     }
     streams
 }
@@ -341,7 +340,7 @@ mod tests {
     #[test]
     fn old_tables_are_found_and_split() {
         let text: Vec<u8> = (0..30000).flat_map(|i: u32| format!("{} ", i % 113).into_bytes()).collect();
-        for v in [b'4', b'5', b'7'] {
+        for &v in b"457" {
             let (d, ranges) = old_installer(v, &[&text, &text[..9000]]);
             let t = table(&d).unwrap_or_else(|| panic!("version 0{}", v as char));
             assert_eq!((t.total, t.data), (d.len(), 0x80));
