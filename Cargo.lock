@@ -1701,6 +1701,7 @@ dependencies = [
  "aqr-rar",
  "aqr-zip",
  "encoding_rs",
+ "sha2",
  "zstd",
 ]
 

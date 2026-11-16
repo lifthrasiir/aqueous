@@ -20,4 +20,5 @@ aqr-lzma = { path = "../../codecs/aqr-lzma" }
 aqr-rar = { path = "../../codecs/aqr-rar", default-features = false }
 aqr-zip = { path = "../../codecs/aqr-zip" }
 encoding_rs = "0.8"
+sha2 = "0.10"
 zstd = "0.13"

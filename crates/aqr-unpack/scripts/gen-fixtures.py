@@ -135,6 +135,7 @@ def main():
     write('one.txt.gz', gzip.compress(TEXT, mtime=0))
     write('one.txt.bz2', bz2.compress(TEXT))
     write('one.txt.xz', lzma.compress(TEXT))
+    write('one.txt.sha256.xz', lzma.compress(TEXT, check=lzma.CHECK_SHA256))
     write('one.txt.lzma', lzma.compress(TEXT, format=lzma.FORMAT_ALONE))
 
     rar_trees()

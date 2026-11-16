@@ -23,9 +23,10 @@ use aqr_foreign::crypt::{self, Fail, ZipCrypto};
 use aqr_foreign::time;
 use aqr_foreign::zip as zipf;
 
-/// Hosts of "version made by" whose names may separate by `\` and whose attributes are MS-DOS's.
+/// Hosts of "version made by" whose names may separate by `\` and whose attributes are MS-DOS's:
+/// MS-DOS, Windows NTFS and VFAT (APPNOTE 4.4.2.2).
 fn dos_host(host: u8) -> bool {
-    matches!(host, 0 | 11 | 14)
+    matches!(host, 0 | 10 | 14)
 }
 
 /// Hosts whose external attributes hold a Unix mode in their high 16 bits.
@@ -573,6 +574,15 @@ mod tests {
         // kept as they are, split between Shift_JIS's characters still
         let l = Listing::read(&zip, &Choice::Raw).unwrap();
         assert_eq!(paths(l.tree()), ["<955c8ea6>/", "<955c8ea6>/<835c837483672e747874>", "<975c92e8955c>"]);
+    }
+
+    /// Of Windows NTFS's host (10), `\` separates names as MS-DOS's; of MVS's (11), not.
+    #[test]
+    fn ntfs_backslash() {
+        let zip = zip_of(&[(b"dir\\a.txt", b"x")], 10, 0);
+        assert_eq!(paths(Listing::read(&zip, &Choice::Auto).unwrap().tree()), ["dir/", "dir/a.txt"]);
+        let zip = zip_of(&[(b"dir\\a.txt", b"x")], 11, 0);
+        assert_eq!(paths(Listing::read(&zip, &Choice::Auto).unwrap().tree()).len(), 1);
     }
 
     #[test]

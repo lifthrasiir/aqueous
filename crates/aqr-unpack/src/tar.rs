@@ -298,7 +298,7 @@ impl<'s> Parser<'s> {
                     d = &d[n..];
                     if self.buf.len() == BLOCK {
                         // (another follows where its last byte but 7 is set)
-                        self.state = if self.buf[504] != 0 { State::Sparse { size } } else { skip(size) };
+                        self.state = if self.buf[504] != 0 { State::Sparse { size } } else { skip(size)? };
                         self.buf.clear();
                     }
                 }
@@ -591,11 +591,13 @@ impl Parser<'_> {
     }
 }
 
-/// Skipping a body of `size` bytes and its padding.
-fn skip(size: u64) -> State {
-    match size.div_ceil(BLOCK as u64) * BLOCK as u64 {
-        0 => State::Header,
-        n => State::Skip(n),
+/// Skipping a body of `size` bytes and its padding; a size whose padding is past 2^64 (which no
+/// archive is) fails, rather than wrapping to none and reading the body as headers.
+fn skip(size: u64) -> Result<State, String> {
+    match size.checked_next_multiple_of(BLOCK as u64) {
+        Some(0) => Ok(State::Header),
+        Some(n) => Ok(State::Skip(n)),
+        None => Err(format!("tar: a body of {size} bytes")),
     }
 }
 
@@ -637,5 +639,16 @@ mod tests {
         assert_eq!(base64(b"aGVsbG8="), Some(b"hello".to_vec()));
         assert_eq!(base64(b"aGVsbG8"), Some(b"hello".to_vec()));
         assert_eq!(unescape(b"user.a%3Db"), b"user.a=b");
+    }
+
+    /// A body's padding past 2^64 fails, rather than wrapping to no body (the bytes after its
+    /// header then read as members other tools do not see).
+    #[test]
+    fn huge_bodies_fail() {
+        assert!(matches!(skip(0), Ok(State::Header)));
+        assert!(matches!(skip(1), Ok(State::Skip(512))));
+        assert!(matches!(skip(u64::MAX - 511), Ok(State::Skip(n)) if n == u64::MAX - 511));
+        assert!(skip(u64::MAX - 510).is_err());
+        assert!(skip(u64::MAX).is_err());
     }
 }

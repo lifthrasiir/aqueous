@@ -261,7 +261,8 @@ fn xz_blocks(d: &[u8]) -> Result<(Vec<XzBlock>, u64), String> {
     }
 }
 
-/// The data of block `b` of `d`, its check checked (but SHA-256's).
+/// The data of block `b` of `d`, its check checked (CRC-32, CRC-64, SHA-256; none of a check
+/// of none, or of a type not defined).
 fn xz_block(d: &[u8], b: &XzBlock, threads: usize) -> Result<Vec<u8>, String> {
     let limit = b.size.map_or(isize::MAX as usize, |s| s as usize);
     let (mut out, used) = codec::lzma2_par(&d[b.lzma2.clone()], limit, threads).map_err(|e| format!("xz: {e}"))?;
@@ -276,6 +277,10 @@ fn xz_block(d: &[u8], b: &XzBlock, threads: usize) -> Result<Vec<u8>, String> {
             let mut c = Crc64::new();
             c.update(&out);
             c.finish().to_le_bytes() == want
+        }
+        10 => {
+            use sha2::Digest;
+            sha2::Sha256::digest(&out)[..] == *want
         }
         _ => true,
     };

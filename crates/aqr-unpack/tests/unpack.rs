@@ -280,6 +280,31 @@ fn single_files() {
     }
 }
 
+/// An xz stream of SHA-256 checks: decoded, and its check verified (a byte of it changed fails).
+#[test]
+fn xz_sha256_checked() {
+    let decoded = |d: &[u8]| {
+        let o = Opened::open(Format::Single(Filter::Xz), d).unwrap();
+        let mut out = Vec::new();
+        let n = o.decompress(
+            4,
+            &mut |b| {
+                out.extend_from_slice(b);
+                Ok(())
+            },
+            &|_| {},
+        );
+        n.map(|_| out)
+    };
+    let mut d = data("one.txt.sha256.xz");
+    assert!(decoded(&d).unwrap() == text());
+    // (the check: the 32 bytes before the index, which the footer's backward size tells)
+    let n = d.len();
+    let index = n - 12 - (u32::from_le_bytes(d[n - 8..n - 4].try_into().unwrap()) as usize + 1) * 4;
+    d[index - 1] ^= 1;
+    assert!(decoded(&d).is_err());
+}
+
 #[test]
 fn damage_fails() {
     // a byte of the compressed data changed: an error, not files of other contents
