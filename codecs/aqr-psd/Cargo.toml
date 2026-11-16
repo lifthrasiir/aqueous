@@ -7,8 +7,9 @@ publish = false
 
 [features]
 default = ["encode"]
-# The formulas (`formula`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-png/encode", "aqr-jpeg/encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`). (And the
+# registry of `-Z`, for src/main.rs.)
+encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-png/encode", "aqr-jpeg/encode", "aqr-common/registry"]
 
 [dependencies]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }

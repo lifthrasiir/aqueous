@@ -63,7 +63,7 @@ def main():
 
     wasm_dir = MODULES / "wasm"
     wasm_dir.mkdir(exist_ok=True)
-    known = ["// Made by build.py.", "", "use crate::{Known, hex};", "", "pub const KNOWN: &[Known] = &["]
+    known = ["// Made by build.py.", "", "use crate::{Known, hex};", "", "pub static KNOWN: &[Known] = &["]
     rows = []
     for src in sorted((MODULES / "src/bin").glob("*.rs")):
         bin = src.stem

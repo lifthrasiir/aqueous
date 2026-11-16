@@ -2,7 +2,7 @@
 
 use crate::{Known, hex};
 
-pub const KNOWN: &[Known] = &[
+pub static KNOWN: &[Known] = &[
     Known {
         name: "ac3-recons",
         version: 1,

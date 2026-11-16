@@ -13,7 +13,8 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [features]
 default = ["encode"]
-# The formulas (`formula`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula"]
+# The formulas (`formula`); without it, the code of the module alone (`module`). (And the
+# registry of `-Z`, for src/main.rs.)
+encode = ["dep:aqr-formula", "aqr-common/registry"]
 # Heap use at phase marks, to stderr.
 memprof = ["aqr-common/memprof"]

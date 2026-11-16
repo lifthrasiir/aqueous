@@ -27,6 +27,41 @@ pub trait Value: Copy + Send + Sync + 'static {
     const META: &'static str;
     fn parse(s: &str) -> Result<Self, String>;
     fn show(&self) -> String;
+    /// What the registry does with an option of this type (natively). The types here have theirs
+    /// as statics of this crate, so that a crate declaring options of them does not compile its
+    /// own copy of that code (generics are not shared across crates in optimised builds).
+    #[cfg(not(target_family = "wasm"))]
+    #[doc(hidden)]
+    const OPS: &'static Ops = &Ops::of::<Self>();
+    /// [`Value::OPS`] of `Option<Self>` and of `&[Self]`, of the same crate as `OPS`.
+    #[cfg(not(target_family = "wasm"))]
+    #[doc(hidden)]
+    const OPTION_OPS: &'static Ops = &Ops::of::<Option<Self>>();
+    #[cfg(not(target_family = "wasm"))]
+    #[doc(hidden)]
+    const LIST_OPS: &'static Ops = &Ops::of::<&'static [Self]>();
+}
+
+/// [`Value::OPS`], [`Value::OPTION_OPS`] and [`Value::LIST_OPS`] of a type of this crate,
+/// statics of it.
+macro_rules! own_ops_of {
+    ($t:ty) => {
+        #[cfg(not(target_family = "wasm"))]
+        const OPS: &'static Ops = {
+            static OPS: Ops = Ops::of::<$t>();
+            &OPS
+        };
+        #[cfg(not(target_family = "wasm"))]
+        const OPTION_OPS: &'static Ops = {
+            static OPS: Ops = Ops::of::<Option<$t>>();
+            &OPS
+        };
+        #[cfg(not(target_family = "wasm"))]
+        const LIST_OPS: &'static Ops = {
+            static OPS: Ops = Ops::of::<&'static [$t]>();
+            &OPS
+        };
+    };
 }
 
 /// A developer option of type `T`. Declared by [`zopt!`](crate::zopt!).
@@ -184,11 +219,13 @@ impl Value for bool {
     fn show(&self) -> String {
         if *self { "on" } else { "off" }.into()
     }
+    own_ops_of!(bool);
 }
 
 macro_rules! numbers {
     ($($t:ty),*) => {$(
         impl Value for $t {
+            own_ops_of!($t);
             const META: &'static str = "N";
             fn parse(s: &str) -> Result<Self, String> {
                 // (sizes too, as counts are often of powers of two)
@@ -213,6 +250,7 @@ impl Value for f64 {
     fn show(&self) -> String {
         self.to_string()
     }
+    own_ops_of!(f64);
 }
 
 impl Value for &'static str {
@@ -223,6 +261,7 @@ impl Value for &'static str {
     fn show(&self) -> String {
         self.to_string()
     }
+    own_ops_of!(&'static str);
 }
 
 /// A list, of values separated by `,`.
@@ -238,6 +277,8 @@ impl<T: Value> Value for &'static [T] {
     fn show(&self) -> String {
         self.iter().map(T::show).collect::<Vec<_>>().join(",")
     }
+    #[cfg(not(target_family = "wasm"))]
+    const OPS: &'static Ops = T::LIST_OPS;
 }
 
 /// A value, or none (off).
@@ -249,6 +290,8 @@ impl<T: Value> Value for Option<T> {
     fn show(&self) -> String {
         self.as_ref().map_or("off".into(), T::show)
     }
+    #[cfg(not(target_family = "wasm"))]
+    const OPS: &'static Ops = T::OPTION_OPS;
 }
 
 /// A word naming a namespace (`-Z NS:help`), and what it covers. Declared by
@@ -358,7 +401,24 @@ mod here {
         if !ANY.load(Ordering::Relaxed) {
             return None;
         }
-        VALUES.with(|v| v.borrow().get(&(at, member.to_owned())).and_then(|b| b.downcast_ref::<T>()).copied())
+        let mut v = std::mem::MaybeUninit::<T>::uninit();
+        // (copied by `copy`: `T` is `Copy`, and of the type checked)
+        let copy = &mut |b: &dyn Any| unsafe {
+            std::ptr::copy_nonoverlapping(b as *const dyn Any as *const T, v.as_mut_ptr(), 1)
+        };
+        find(at, member, std::any::TypeId::of::<T>(), copy).then(|| unsafe { v.assume_init() })
+    }
+
+    /// Gives `copy` the value at (`at`, `member`) if it is of type `id`: of no type, so that the
+    /// crates reading options do not each compile the lookup.
+    fn find(at: usize, member: &str, id: std::any::TypeId, copy: &mut dyn FnMut(&dyn Any)) -> bool {
+        VALUES.with(|v| match v.borrow().get(&(at, member.to_owned())) {
+            Some(b) if (**b).type_id() == id => {
+                copy(&**b);
+                true
+            }
+            _ => false,
+        })
     }
 
     pub(super) fn put(key: Key, v: Option<Box<dyn Any>>) -> Option<Box<dyn Any>> {
@@ -428,8 +488,7 @@ macro_rules! zopt {
             use $crate::zopt::{Family, Opt};
             $init
         };
-        #[cfg(not(target_family = "wasm"))]
-        $crate::zopt::inventory::submit! { $crate::zopt::Entry(&$name) }
+        $crate::__zopt_submit! { $crate::zopt::Entry::$kind(&$name) }
     )*};
 }
 
@@ -437,9 +496,28 @@ macro_rules! zopt {
 #[macro_export]
 macro_rules! zopt_namespace {
     ($name:literal, $help:literal) => {
-        #[cfg(not(target_family = "wasm"))]
-        $crate::zopt::inventory::submit! { $crate::zopt::Namespace { name: $name, help: $help } }
+        $crate::__zopt_submit! { $crate::zopt::Namespace { name: $name, help: $help } }
     };
+}
+
+/// Registers an option or a namespace where the registry is built (feature `registry`: the
+/// programs taking `-Z`). Elsewhere (the modules' native libraries and the blobs, which take no
+/// `-Z`) nothing is registered: a registration is kept by the linker with all it reaches, of
+/// every crate linked, read or not.
+#[cfg(all(not(target_family = "wasm"), any(feature = "registry", test)))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __zopt_submit {
+    ($($t:tt)*) => {
+        $crate::zopt::inventory::submit! { $($t)* }
+    };
+}
+
+#[cfg(not(all(not(target_family = "wasm"), any(feature = "registry", test))))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __zopt_submit {
+    ($($t:tt)*) => {};
 }
 
 crate::zopt! {
@@ -471,8 +549,119 @@ pub use native::*;
 mod native {
     use super::{Default, Family, Namespace, Opt, Value, show_size};
 
-    /// An option as registered, of any type.
-    pub struct Entry(pub &'static dyn Dyn);
+    /// An option or a family as registered, of any type: where it is and its type's [`Ops`].
+    pub struct Entry {
+        at: *const (),
+        ops: &'static Ops,
+        family: bool,
+    }
+
+    // (`at` is an `Opt` or a `Family`, which are `Sync`)
+    unsafe impl Sync for Entry {}
+    unsafe impl Send for Entry {}
+
+    #[allow(non_snake_case)]
+    impl Entry {
+        /// The entry of an option ([`zopt!`](crate::zopt!) names the kind).
+        pub const fn Opt<T: Value>(o: &'static Opt<T>) -> Entry {
+            Entry { at: o as *const Opt<T> as *const (), ops: T::OPS, family: false }
+        }
+
+        /// The entry of a family.
+        pub const fn Family<T: Value>(f: &'static Family<T>) -> Entry {
+            Entry { at: f as *const Family<T> as *const (), ops: T::OPS, family: true }
+        }
+    }
+
+    /// What the registry does with an [`Opt`] or a [`Family`] of a type, by where it is: the
+    /// functions of [`Dyn`] made for the type once, not in every crate declaring options of it.
+    #[doc(hidden)]
+    pub struct Ops {
+        opt: Fns,
+        family: Fns,
+    }
+
+    struct Fns {
+        name: fn(*const ()) -> &'static str,
+        help: fn(*const ()) -> &'static str,
+        usage: fn(*const ()) -> String,
+        default_text: fn(*const ()) -> String,
+        set_text: fn(*const ()) -> Option<String>,
+        member: fn(*const (), &str) -> Option<&'static str>,
+        members: fn(*const ()) -> Option<Vec<&'static str>>,
+        value_of: ValueOf,
+    }
+
+    type ValueOf = fn(*const (), &'static str, Option<&str>, bool) -> Result<Box<dyn FnOnce() -> bool>, String>;
+
+    impl Ops {
+        pub const fn of<T: Value>() -> Ops {
+            Ops { opt: fns::<Opt<T>>(), family: fns::<Family<T>>() }
+        }
+    }
+
+    /// [`Fns`] of an `Opt` or a `Family`, at a pointer that is of `D` (an [`Entry`]'s).
+    const fn fns<D: Dyn + 'static>() -> Fns {
+        // (`at` points to a static of `D`, as `Entry`'s constructors make it)
+        fn d<D: 'static>(at: *const ()) -> &'static D {
+            unsafe { &*(at as *const D) }
+        }
+        Fns {
+            name: |at| d::<D>(at).name(),
+            help: |at| d::<D>(at).help(),
+            usage: |at| d::<D>(at).usage(),
+            default_text: |at| d::<D>(at).default_text(),
+            set_text: |at| d::<D>(at).set_text(),
+            member: |at, name| d::<D>(at).member(name),
+            members: |at| d::<D>(at).members(),
+            value_of: |at, member, v, negated| d::<D>(at).value_of(member, v, negated),
+        }
+    }
+
+    impl Entry {
+        fn fns(&self) -> &'static Fns {
+            if self.family { &self.ops.family } else { &self.ops.opt }
+        }
+    }
+
+    impl Dyn for Entry {
+        fn name(&self) -> &'static str {
+            (self.fns().name)(self.at)
+        }
+
+        fn help(&self) -> &'static str {
+            (self.fns().help)(self.at)
+        }
+
+        fn usage(&self) -> String {
+            (self.fns().usage)(self.at)
+        }
+
+        fn default_text(&self) -> String {
+            (self.fns().default_text)(self.at)
+        }
+
+        fn set_text(&self) -> Option<String> {
+            (self.fns().set_text)(self.at)
+        }
+
+        fn member(&self, name: &str) -> Option<&'static str> {
+            (self.fns().member)(self.at, name)
+        }
+
+        fn members(&self) -> Option<Vec<&'static str>> {
+            (self.fns().members)(self.at)
+        }
+
+        fn value_of(
+            &'static self,
+            member: &'static str,
+            value: Option<&str>,
+            negated: bool,
+        ) -> Result<Box<dyn FnOnce() -> bool>, String> {
+            (self.fns().value_of)(self.at, member, value, negated)
+        }
+    }
 
     inventory::collect!(Entry);
     inventory::collect!(Namespace);
@@ -655,7 +844,7 @@ mod native {
 
     /// The options registered, by name.
     pub fn all() -> Vec<&'static dyn Dyn> {
-        let mut v: Vec<_> = inventory::iter::<Entry>.into_iter().map(|e| e.0).collect();
+        let mut v: Vec<&'static dyn Dyn> = inventory::iter::<Entry>.into_iter().map(|e| e as &dyn Dyn).collect();
         v.sort_by_key(|o| o.name());
         v
     }

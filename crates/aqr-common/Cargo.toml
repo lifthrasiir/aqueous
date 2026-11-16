@@ -10,6 +10,9 @@ publish = false
 zstd = ["dep:zstd"]
 # Phase marks of `mem::mark`, to stderr.
 memprof = []
+# The registry of the developer options of `zopt` (`zopt::apply`, `all`): for the programs
+# taking `-Z`. Without it no option is registered (the modules' native libraries, the blobs).
+registry = []
 # rayon thread pools whose threads are workers of `pool` (`pool::rayon_pool`).
 rayon = ["dep:rayon"]
 

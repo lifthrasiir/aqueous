@@ -14,6 +14,8 @@ zstd = "0.13"
 
 [dev-dependencies]
 memmap2 = "0.9"
+# (the registry of `-Z`, for the examples)
+aqr-common = { path = "../aqr-common", features = ["registry"] }
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
 # directory.
