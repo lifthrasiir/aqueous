@@ -253,6 +253,16 @@ use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+/// `eprintln!` and `eprint!` of text a terminal shows as it is ([`term::safe`]): what is told
+/// names files and archives' entries, whose names may hold escape sequences.
+macro_rules! eprintln {
+    () => { ::std::eprintln!() };
+    ($($t:tt)*) => { ::std::eprintln!("{}", $crate::term::safe(&::std::format!($($t)*), true)) };
+}
+macro_rules! eprint {
+    ($($t:tt)*) => { ::std::eprint!("{}", $crate::term::safe(&::std::format!($($t)*), true)) };
+}
+
 mod append;
 mod complete;
 mod edit;
@@ -272,6 +282,7 @@ mod sparse;
 mod stats;
 mod stdio;
 mod stop;
+mod term;
 mod view;
 
 pub(crate) use aqr_common::text::hex;

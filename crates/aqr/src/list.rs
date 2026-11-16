@@ -66,8 +66,10 @@ pub fn list_all(a: &Args) -> Result<(), String> {
             if i > 0 {
                 writeln!(out).map_err(|e| e.to_string())?;
             }
-            writeln!(out, "{}:", input.display()).map_err(|e| e.to_string())?;
+            writeln!(out, "{}:", crate::term::name(&input.display().to_string())).map_err(|e| e.to_string())?;
         }
+        // (JSON escaped as such)
+        let text = if a.json { text.into() } else { crate::term::safe(&text, true).into_owned() };
         out.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     }
     out.flush().map_err(|e| e.to_string())
@@ -229,8 +231,9 @@ fn listed(
     }
     // by their paths, a name at a time
     rows.sort_by(|x, y| x.path.split(|&b| b == b'/').cmp(y.path.split(|&b| b == b'/')));
+    // (each one line, whatever its names hold)
     let shown = |r: &Row| {
-        let p = String::from_utf8_lossy(&r.path).into_owned();
+        let p = crate::term::name(&String::from_utf8_lossy(&r.path)).into_owned();
         if r.is_dir { p + "/" } else { p }
     };
     if a.json {

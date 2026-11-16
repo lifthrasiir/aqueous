@@ -36,6 +36,7 @@ use crate::{Args, hex, plural};
 pub fn info(a: &Args) -> Result<(), String> {
     let input = &a.inputs[0];
     let text = info_of(a, input)?;
+    let text = crate::term::safe(&text, true);
     let mut out = std::io::stdout().lock();
     out.write_all(text.as_bytes()).and_then(|_| out.flush()).map_err(|e| e.to_string())
 }
@@ -331,7 +332,7 @@ fn path(s: &mut String, i: &Inspection, states: &[Vec<State>], p: &Path) -> Resu
 fn shown(names: &[Vec<u8>]) -> String {
     match names.is_empty() {
         true => "/".into(),
-        false => crate::names::shown_path(names),
+        false => crate::term::name(&crate::names::shown_path(names)).into_owned(),
     }
 }
 

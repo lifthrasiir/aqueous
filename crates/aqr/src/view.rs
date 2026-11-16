@@ -110,7 +110,7 @@ impl<'g> View<'g> {
     /// The lines of the log of `contents`, written as of `r`, and the solid blocks, sets and
     /// contents kept raw that `r` has past those `logged`.
     fn log(&self, contents: &[usize], r: &Report, logged: &mut (usize, usize, usize)) -> Vec<String> {
-        let path = |c: usize| self.g.contents[c].0.display().to_string();
+        let path = |c: usize| crate::term::name(&self.g.contents[c].0.display().to_string()).into_owned();
         let (solid, sets, raw) = *logged;
         let mut solid_of: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, s) in r.solid.iter().enumerate().skip(solid) {
@@ -199,7 +199,8 @@ impl<'g> View<'g> {
     fn slowest(&self, s: &State) -> Option<String> {
         let (&c, since) = s.working.iter().min_by_key(|(_, t)| **t)?;
         let t = since.elapsed();
-        let (path, len) = (self.g.contents[c].0.display(), self.g.contents[c].2);
+        let (path, len) =
+            (crate::term::name(&self.g.contents[c].0.display().to_string()).into_owned(), self.g.contents[c].2);
         let far = match s.reached.get(&c) {
             Some(&n) if len > 0 => format!(", {}%", (100 * n / len).min(99)),
             _ => String::new(),
@@ -258,7 +259,7 @@ impl Decoding {
     /// Leaf `i` for people: its name, or its number.
     fn leaf(&self, i: usize) -> String {
         match self.names.get(i) {
-            Some(n) if !n.is_empty() => n.clone(),
+            Some(n) if !n.is_empty() => crate::term::name(n).into_owned(),
             _ => format!("leaf #{}", i + 1),
         }
     }
@@ -462,7 +463,14 @@ impl Ticking for Listing {
         if let Some((d, t)) = dir {
             lines.push(format!(
                 "  {}",
-                fit(&format!("{}, {}", d.display(), aqr_l10n::duration(t.elapsed().as_secs() as f64, 0)), WIDTH - 2)
+                fit(
+                    &format!(
+                        "{}, {}",
+                        crate::term::name(&d.display().to_string()),
+                        aqr_l10n::duration(t.elapsed().as_secs() as f64, 0)
+                    ),
+                    WIDTH - 2
+                )
             ));
         }
         paint(&mut std::io::stderr().lock(), s.drawn, &lines);
