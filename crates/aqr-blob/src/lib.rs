@@ -45,8 +45,26 @@ pub struct Blob {
     pub name: String,
     pub binds: Vec<Bind>,
     pub relocs: Vec<u32>,
+    /// The library's sections in the image, for whoever places it to protect each as the loader
+    /// would (none: a blob of the earlier version, [`MAGIC_V2`], placed all writable and
+    /// executable).
+    pub sections: Vec<Section>,
     pub image: Vec<u8>,
 }
+
+/// A section of a blob's image: its RVA, its bytes in memory, and the access it is given (of
+/// its PE characteristics, [`SCN_EXECUTE`], [`SCN_READ`], [`SCN_WRITE`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Section {
+    pub rva: u32,
+    pub len: u32,
+    pub flags: u32,
+}
+
+/// The access of a section (`IMAGE_SCN_MEM_*`).
+pub const SCN_EXECUTE: u32 = 0x2000_0000;
+pub const SCN_READ: u32 = 0x4000_0000;
+pub const SCN_WRITE: u32 = 0x8000_0000;
 
 impl fmt::Debug for Blob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -54,7 +72,10 @@ impl fmt::Debug for Blob {
     }
 }
 
-pub const MAGIC: &[u8; 4] = b"AQB2";
+pub const MAGIC: &[u8; 4] = b"AQB3";
+/// The magic of the blobs of no sections (read still: placed as before, all of the image
+/// writable and executable).
+pub const MAGIC_V2: &[u8; 4] = b"AQB2";
 
 /// The size of an import descriptor of a PE image's import directory (the directory ends with
 /// an all-zero one).
@@ -286,7 +307,8 @@ impl Blob {
     }
 
     /// The blob serialized: the header, its name, the libraries it binds imports from, the
-    /// binds (slot, library by index, RVA), the relocations, then the image.
+    /// binds (slot, library by index, RVA), the relocations, the sections (RVA, length, flags),
+    /// then the image.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::new();
         let put = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
@@ -315,6 +337,10 @@ impl Blob {
         for &r in &self.relocs {
             put(&mut b, r);
         }
+        put(&mut b, self.sections.len() as u32);
+        for s in &self.sections {
+            [s.rva, s.len, s.flags].into_iter().for_each(|v| put(&mut b, v));
+        }
         put(&mut b, self.image.len() as u32);
         b.extend_from_slice(&self.image);
         b
@@ -322,7 +348,8 @@ impl Blob {
 
     /// A blob parsed from bytes.
     pub fn from_bytes(b: &[u8]) -> Result<Blob> {
-        if b.len() < 36 || &b[0..4] != MAGIC {
+        let v2 = b.get(0..4) == Some(MAGIC_V2);
+        if b.len() < 36 || !(v2 || &b[0..4] == MAGIC) {
             return Err("not a module blob (of this version)".into());
         }
         let mut r = Reader { b, at: MAGIC.len() };
@@ -338,6 +365,12 @@ impl Blob {
             binds.push(Bind { slot, lib, rva });
         }
         let relocs = (0..r.word()?).map(|_| r.word()).collect::<Result<Vec<_>>>()?;
+        let sections = match v2 {
+            true => Vec::new(),
+            false => (0..r.word()?)
+                .map(|_| Ok(Section { rva: r.word()?, len: r.word()?, flags: r.word()? }))
+                .collect::<Result<Vec<_>>>()?,
+        };
         let n = r.word()? as usize;
         let image = r.take(n)?.to_vec();
         Ok(Blob {
@@ -351,6 +384,7 @@ impl Blob {
             name,
             binds,
             relocs,
+            sections,
             image,
         })
     }
@@ -399,6 +433,10 @@ mod tests {
                 Bind { slot: 0x2110, lib: "a.dll".into(), rva: 0x9abc },
             ],
             relocs: vec![0x1100, 0x1108],
+            sections: vec![
+                Section { rva: 0x1000, len: 0x1800, flags: SCN_EXECUTE | SCN_READ },
+                Section { rva: 0x3000, len: 0x1000, flags: SCN_READ | SCN_WRITE },
+            ],
             image: (0..0x3000u32).map(|i| i as u8).collect(),
         };
         let c = Blob::from_bytes(&b.to_bytes()).unwrap();
@@ -448,5 +486,67 @@ mod tests {
         let mut img = image(&["memset", "strlen"]);
         let e = take_vcruntime(&mut img, 0x1000, 0x1000).unwrap_err();
         assert!(e.contains("strlen"), "{e}");
+    }
+
+    /// A blob placed as its sections are: its code executable and not writable, its data
+    /// writable and not executable, its read-only data neither; one of no sections (of the
+    /// earlier version) all writable and executable, as before.
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[test]
+    fn placed_as_its_sections() {
+        #[repr(C)]
+        struct Info {
+            base: usize,
+            alloc_base: usize,
+            alloc_protect: u32,
+            partition: u16,
+            size: usize,
+            state: u32,
+            protect: u32,
+            ty: u32,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn VirtualQuery(addr: usize, info: *mut Info, len: usize) -> usize;
+        }
+        let protect = |addr: usize| {
+            let mut i = std::mem::MaybeUninit::<Info>::zeroed();
+            assert_ne!(unsafe { VirtualQuery(addr, i.as_mut_ptr(), size_of::<Info>()) }, 0);
+            unsafe { i.assume_init() }.protect
+        };
+        // (code: `mov eax, [rip + data]; ret`, of the data's first word, 42)
+        let mut image = vec![0u8; 0x3000];
+        image[..7].copy_from_slice(&[0x8b, 0x05, 0xfa, 0x1f, 0x00, 0x00, 0xc3]);
+        image[0x2000..0x2004].copy_from_slice(&42u32.to_le_bytes());
+        let mut b = Blob {
+            apply_rva: 0x1000,
+            info_rva: 0,
+            pdata_rva: 0,
+            pdata_count: 0,
+            import_dir_rva: 0,
+            first: 0x1000,
+            image_base: 0x1_8000_0000,
+            name: String::new(),
+            binds: Vec::new(),
+            relocs: Vec::new(),
+            sections: vec![
+                Section { rva: 0x1000, len: 7, flags: SCN_EXECUTE | SCN_READ },
+                Section { rva: 0x2000, len: 0x800, flags: SCN_READ },
+                Section { rva: 0x3000, len: 4, flags: SCN_READ | SCN_WRITE },
+            ],
+            image,
+        };
+        let (rx, ro, rw, rwx) = (0x20, 0x02, 0x04, 0x40);
+        let placed = load(&[&b.to_bytes()]).unwrap().blobs.remove(0);
+        let f: extern "C" fn() -> u32 = unsafe { std::mem::transmute(placed.at(0x1000)) };
+        assert_eq!(f(), 42);
+        assert_eq!([0x1000, 0x2000, 0x3000].map(|r| protect(placed.at(r))), [rx, ro, rw]);
+        // (of the earlier version: no sections)
+        b.sections.clear();
+        let mut v2 = b.to_bytes();
+        v2[..4].copy_from_slice(MAGIC_V2);
+        v2.drain(v2.len() - b.image.len() - 8..v2.len() - b.image.len() - 4);
+        let placed = load(&[&v2]).unwrap().blobs.remove(0);
+        assert_eq!([0x1000, 0x2000, 0x3000].map(|r| protect(placed.at(r))), [rwx; 3]);
     }
 }

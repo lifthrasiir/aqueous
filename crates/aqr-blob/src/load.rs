@@ -5,12 +5,13 @@
 //! own ([`crate::VCRUNTIME`]), those from system libraries bound (`LoadLibraryExA` of
 //! System32 alone, so that a library of the same name beside the program, as a self-extracting
 //! archive's in a folder of downloads, is not the one taken; `GetProcAddress`), its exception table registered for the unwinder, and its image for its
-//! panics ([`crate::register_image`]). No DllMain or TLS
-//! callback runs, as none does in a merge. What is placed stays for the life of the process.
+//! panics ([`crate::register_image`]), and its pages protected as its sections are (code not
+//! writable, data not executable). No DllMain or TLS callback runs, as none does in a merge.
+//! What is placed stays for the life of the process.
 
 use core::ffi::c_void;
 
-use crate::{Blob, IMPORT_BY_ORDINAL, IMPORT_DESCRIPTOR_LEN, Result, u32_at, u64_at};
+use crate::{Blob, IMPORT_BY_ORDINAL, IMPORT_DESCRIPTOR_LEN, Result, SCN_EXECUTE, SCN_WRITE, u32_at, u64_at};
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -25,7 +26,9 @@ unsafe extern "system" {
 
 const MEM_COMMIT: u32 = 0x1000;
 const MEM_RESERVE: u32 = 0x2000;
+const PAGE_READONLY: u32 = 0x02;
 const PAGE_READWRITE: u32 = 0x04;
+const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
 
@@ -144,11 +147,38 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
             }
         }
     }
+    // each page protected as the sections over it are (what is in none read-only); a blob of no
+    // sections (of the earlier version) all writable and executable
+    let mut runs: Vec<(usize, usize, u32)> = Vec::new();
+    for (b, &o) in blobs.iter().zip(&offsets) {
+        for p in 0..b.image.len().div_ceil(page) {
+            let (lo, hi) = (b.first as usize + p * page, b.first as usize + (p + 1) * page);
+            let flags = match b.sections.is_empty() {
+                true => SCN_EXECUTE | SCN_WRITE,
+                false => (b.sections.iter())
+                    .filter(|s| (s.rva as usize) < hi && lo < s.rva as usize + s.len as usize)
+                    .fold(0, |f, s| f | s.flags),
+            };
+            let protect = match (flags & SCN_EXECUTE != 0, flags & SCN_WRITE != 0) {
+                (true, true) => PAGE_EXECUTE_READWRITE,
+                (true, false) => PAGE_EXECUTE_READ,
+                (false, true) => PAGE_READWRITE,
+                (false, false) => PAGE_READONLY,
+            };
+            let at = o + p * page;
+            match runs.last_mut() {
+                Some((start, len, pr)) if *pr == protect && *start + *len == at => *len += page,
+                _ => runs.push((at, page, protect)),
+            }
+        }
+    }
     let mut old = 0;
     // SAFETY: the region allocated above; nothing runs in it until this returns
     unsafe {
-        if VirtualProtect(mem, total, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
-            return Err(format!("blobs not made executable: {}", std::io::Error::last_os_error()));
+        for &(at, len, protect) in &runs {
+            if VirtualProtect(mem.add(at), len, protect, &mut old) == 0 {
+                return Err(format!("blobs not protected as their sections: {}", std::io::Error::last_os_error()));
+            }
         }
         FlushInstructionCache(GetCurrentProcess(), mem, total);
     }

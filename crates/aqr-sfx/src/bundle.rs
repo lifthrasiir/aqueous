@@ -8,25 +8,26 @@
 //! of its own. The stub ([`unpack`]) places them in memory at run time (`aqr_blob::load`).
 //!
 //! ```text
-//! bundle = "AQRSFXB1" le64:len frame:meta frame:x86[13] frame:rest
+//! bundle = "AQRSFXB2" le64:len frame:meta frame:x86[13] frame:rest
 //! frame  = le32:raw le32:n zstd[n]
 //! meta   = count blob*                                         (varints)
 //! blob   = str:entry str:name apply_rva info_rva pdata_rva pdata_count import_dir_rva first
 //!          image_base count str:lib* count (slot lib rva)* count reloc-delta*
-//!          image_len code_len sentinel x86-len[13]
+//!          count (rva len flags)* image_len code_len sentinel x86-len[13]
 //! str    = len byte[len]
 //! ```
 //!
 //! `len` is the bundle's length, its magic included; the archive comes right after. `rest` is,
 //! for each blob in order, its image after its code. The x86 streams of a blob are at its origin
 //! `image_base + first`. Every number of `meta` is a varint (aqr-common's), a relocation the
-//! difference from the one before it (from 0).
+//! difference from the one before it (from 0). The sections are the blob's ([`Section`]), by
+//! which the stub protects its pages.
 
-use aqr_blob::{Bind, Blob};
+use aqr_blob::{Bind, Blob, Section};
 use aqr_common::varint;
 use aqr_exe::arch::x86;
 
-pub const MAGIC: &[u8; 8] = b"AQRSFXB1";
+pub const MAGIC: &[u8; 8] = b"AQRSFXB2";
 
 /// The frames of a bundle: `meta`, the x86 streams, `rest`.
 const FRAMES: usize = x86::NUM_STREAMS + 2;
@@ -87,6 +88,10 @@ pub fn pack(blobs: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
         for &r in &b.relocs {
             put(&mut meta, u64::from(r.wrapping_sub(last)));
             last = r;
+        }
+        put(&mut meta, b.sections.len() as u64);
+        for s in &b.sections {
+            [s.rva, s.len, s.flags].into_iter().for_each(|v| put(&mut meta, v.into()));
         }
         // the code through the disfilter (else none of it: the image as it is)
         let mut n = code_len(&b);
@@ -196,6 +201,10 @@ pub fn unpack(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
             last = last.wrapping_add(r.u32()?);
             relocs.push(last);
         }
+        let mut sections = Vec::new();
+        for _ in 0..r.u64()? {
+            sections.push(Section { rva: r.u32()?, len: r.u32()?, flags: r.u32()? });
+        }
         let (image_len, code_len, sentinel) = (r.u64()? as usize, r.u64()? as usize, r.u64()?);
         let mut parts: [&[u8]; x86::NUM_STREAMS] = [&[]; x86::NUM_STREAMS];
         for (i, p) in parts.iter_mut().enumerate() {
@@ -225,6 +234,7 @@ pub fn unpack(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
             name,
             binds,
             relocs,
+            sections,
             image,
         };
         out.push((entry, b.to_bytes()));
@@ -260,7 +270,7 @@ impl Meta<'_> {
 
 #[cfg(all(test, feature = "encode"))]
 mod tests {
-    use aqr_blob::{Bind, Blob};
+    use aqr_blob::{Bind, Blob, SCN_EXECUTE, SCN_READ, SCN_WRITE, Section};
 
     /// Blobs of code (an exception table naming its end), of none, and with binds and
     /// relocations, bundled and back as they were; a bundle cut short is not taken.
@@ -286,6 +296,10 @@ mod tests {
             name: name.into(),
             binds: vec![Bind { slot: pdata_rva + 8, lib: "aqr_dll_common.dll".into(), rva: 0x1234 }],
             relocs: vec![first + 100, first + 300, first + 200],
+            sections: vec![
+                Section { rva: first, len: code_len, flags: SCN_EXECUTE | SCN_READ },
+                Section { rva: first + 0x1000, len: 16, flags: SCN_READ | SCN_WRITE },
+            ],
             image,
         };
         let blobs = vec![

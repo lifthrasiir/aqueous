@@ -73,6 +73,8 @@ struct Section {
     vsize: u32,
     raw_ptr: u32,
     raw_size: u32,
+    /// Its characteristics.
+    flags: u32,
 }
 
 /// A parsed PE image (PE32+).
@@ -111,6 +113,7 @@ impl Pe {
                     va: u32(&buf, s + 12),
                     raw_size: u32(&buf, s + 16),
                     raw_ptr: u32(&buf, s + 20),
+                    flags: u32(&buf, s + 36),
                 }
             })
             .collect();
@@ -412,6 +415,14 @@ fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&E
         name,
         binds,
         relocs: pe.relocs()?,
+        // (each protected as it is where the blob is placed in memory, aqr_blob::load)
+        sections: (kept.iter())
+            .map(|s| aqr_blob::Section {
+                rva: s.va,
+                len: s.vsize.max(s.raw_size),
+                flags: s.flags & (aqr_blob::SCN_EXECUTE | aqr_blob::SCN_READ | aqr_blob::SCN_WRITE),
+            })
+            .collect(),
         image,
     })
 }
