@@ -405,6 +405,9 @@ pub const HDF5_FLOAT: Module = aqr_hdf5::formula::FLOAT;
 pub const XSV: Module = aqr_xsv::formula::MODULE;
 /// JSON lines from their values stored by key path (aqr-jsonl).
 pub const JSONL: Module = aqr_jsonl::formula::MODULE;
+/// A text file from its text without base64 blocks, the bytes of the blocks and a layout writing
+/// them again (aqr-base64). A part module. No params or resources.
+pub const BASE64: Module = aqr_base64::formula::MODULE;
 /// Lines of text from their templates and the fields in columns (aqr-log).
 pub const LOG: Module = aqr_log::formula::MODULE;
 /// Text of words and markup replaced by codes of a dictionary (aqr-wrt). Resources: the
@@ -543,6 +546,7 @@ const NATIVE: &[Known] = &[
     entry(HDF5_FLOAT),
     entry(XSV),
     entry(JSONL),
+    entry(BASE64),
     entry(LOG),
     entry(WRT),
     entry(WRT_HANGUL),

@@ -1408,6 +1408,13 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
         // directory file, a resource file by its serialized file), whatever its first bytes are
         _ if let Some(format) = siblings::format(d, cx) => made_by(format, d, opt, depth, cx),
         Nest::Exact => detect(d).and_then(|format| made_by(format, d, opt, depth, cx)),
+        // text with base64 blocks where aqr-base64 takes them (and it is [`smaller`]), of any
+        // length: the text without them and each block's bytes are made as what they are
+        _ if matches!(how, Nest::As(Format::Text) | Nest::Scan)
+            && let Some(f) = base64(d, opt, depth, cx) =>
+        {
+            Some(Made::from(f))
+        }
         // JSON lines or a table where aqr-jsonl or aqr-xsv takes it (and it is [`smaller`]);
         // else text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is
         // taken alike wherever it is; else scanned as other data is, or kept raw where named as
@@ -1475,6 +1482,19 @@ fn records(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
 /// Whether data detected as `format` is text: taken as a table, else as text ([`made`]).
 fn is_text(format: Option<Format>) -> bool {
     format.is_some_and(|f| f.spec().text)
+}
+
+/// `d`, text of any length, as the text without its base64 blocks and the bytes they decode to
+/// where aqr-base64 finds blocks (a MIME message's attachments, PEM, data URIs, base64 in JSON)
+/// and the formula is [`smaller`]: each is recompressed as what it is. Asked of every text, so
+/// that [`aqr_base64::formula::starts`] is a quick look; the text path (aqr-wrt) takes only
+/// that of [`aqr_wrt::formula::MIN_LEN`] bytes, and a message with an attachment is often short.
+fn base64(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    // (mostly_text first: it gives up on a binary file within its first pieces, `starts` would
+    // go over all of it)
+    (aqr_wrt::formula::mostly_text(d) && aqr_base64::formula::starts(d))
+        .then(|| recompress_as(Format::Base64, d, opt, depth, cx))
+        .flatten()
 }
 
 /// `d`, text, as JSON lines if aqr-jsonl takes it, else as a table if aqr-xsv does or as lines

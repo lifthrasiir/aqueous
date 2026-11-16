@@ -34,6 +34,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/azo-recons.block"),
     },
     Known {
+        name: "base64-recons",
+        version: 1,
+        sha512_256: hex("7e18ddcbb5714bb70d6f5d65dd111a7079c8b5b02acf3955ebe847690daafc48"),
+        block: include_bytes!("../wasm/base64-recons.block"),
+    },
+    Known {
         name: "bc6h-recons",
         version: 1,
         sha512_256: hex("292160510dc876b2454bd65d404685858012e202c75f22d5d5fb606adf942832"),

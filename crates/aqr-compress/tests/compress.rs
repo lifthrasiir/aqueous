@@ -2514,3 +2514,40 @@ fn hdf5_fits_plans_hold() {
     assert!(images > 0, "no application of fits-recons-image");
     assert!(seen + tables + images >= 12, "{seen} + {tables} + {images} applications");
 }
+
+/// `d` as base64 of the standard alphabet, padded, in lines of `line` characters joined by `sep`.
+fn base64_lines(d: &[u8], line: usize, sep: &[u8]) -> Vec<u8> {
+    let table = aqr_base64::module::STANDARD;
+    let mut chars = Vec::new();
+    for g in d.chunks(3) {
+        let v = (g[0] as u32) << 16 | (*g.get(1).unwrap_or(&0) as u32) << 8 | *g.get(2).unwrap_or(&0) as u32;
+        (0..g.len() + 1).for_each(|i| chars.push(table[(v >> (18 - 6 * i) & 63) as usize]));
+        chars.resize(chars.len() + 3 - g.len(), b'=');
+    }
+    chars.chunks(line).collect::<Vec<_>>().join(sep)
+}
+
+/// A MIME message with JPEG attachments is the message without them (as text) and each
+/// attachment as the file it is; a message with none of them is text.
+#[test]
+fn base64_attachments() {
+    let jpeg = [
+        fixture("codecs/aqr-jpeg/tests/data/gradient.jpg"),
+        fixture("codecs/aqr-jpeg/tests/data/prog_script_recode.jpg"),
+    ];
+    let mut d =
+        b"From: a@example.org\r\nSubject: pictures\r\nContent-Type: multipart/mixed; boundary=XX\r\n\r\n".to_vec();
+    d.extend_from_slice(&natural(3000, false));
+    for (i, j) in jpeg.iter().enumerate() {
+        d.extend_from_slice(b"--XX\r\nContent-Type: image/jpeg\r\nContent-Transfer-Encoding: base64\r\n\r\n");
+        d.extend(base64_lines(j, 76, b"\r\n"));
+        d.extend_from_slice(format!("\r\n\r\nattachment {i}\r\n").as_bytes());
+    }
+    d.extend_from_slice(b"--XX--\r\n");
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f).iter().filter(|&&m| m == "base64-recons").count(), 1, "{f}");
+    assert_eq!(modules(&f).iter().filter(|&&m| m == JPEG.name).count(), 2, "{f}");
+    // (no block: the text, as before)
+    let f = roundtrip(&text(5000), &all());
+    assert!(!modules(&f).contains(&"base64-recons"), "{f}");
+}

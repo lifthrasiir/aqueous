@@ -13,6 +13,7 @@ aqr-arsc = { path = "../../codecs/aqr-arsc", default-features = false }
 aqr-asar = { path = "../../codecs/aqr-asar", default-features = false }
 aqr-azo = { path = "../../codecs/aqr-azo", default-features = false }
 aqr-bcj = { path = "../../codecs/aqr-bcj", default-features = false }
+aqr-base64 = { path = "../../codecs/aqr-base64", default-features = false }
 aqr-bundle = { path = "../../codecs/aqr-bundle", default-features = false }
 aqr-bvx = { path = "../../codecs/aqr-bvx", default-features = false }
 aqr-bz2 = { path = "../../codecs/aqr-bz2", default-features = false }

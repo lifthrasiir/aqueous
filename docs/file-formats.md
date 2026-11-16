@@ -335,7 +335,7 @@ container is TIFF/EXIF.
 | HWP 5.0 | Korean government, schools and businesses (Hancom Office) | an OLE compound file whose streams are raw deflate | the deflate streams (aqr-ole takes the compound file apart already) | aqr-ole, aqr-flate |
 | DOC, XLS, PPT (OLE) | legacy Microsoft Office | a compound file of uncompressed streams, embedded pictures (PNG, JPEG, EMF, often zlib-wrapped in PPT) | aqr-ole separates the streams (Done); the pictures inside them through their recompressors | aqr-ole, aqr-png, aqr-jpeg, aqr-flate |
 | Outlook PST, OST | mail archives | "compressible encryption": a fixed byte substitution, then the messages and attachments as they are | the substitution undone (it is a table), then the contents recompressed | everything |
-| mbox, EML, MHTML | mail archives, saved web pages | attachments in base64 or quoted-printable | the transfer encoding undone where its line layout is regular, then the attachments recompressed | everything |
+| mbox, EML, MHTML | mail archives, saved web pages | attachments in base64 or quoted-printable | base64 undone, the attachments recompressed (Done: aqr-base64); quoted-printable | everything |
 | MOBI, AZW, PalmDOC | e-books | PalmDOC's simple LZ77, or HUFF/CDIC | the PalmDOC encoder reproduced (it is small and deterministic) | |
 | SWF | Flash archives (Flashpoint and others) | `CWS` is the whole file in zlib; `ZWS` is LZMA | the zlib ones, then the tags, JPEG and lossless bitmaps (zlib) inside | aqr-flate, aqr-jpeg |
 | PostScript, EPS | print, old figures | images in ASCII85, RunLength, LZW, Flate or DCT filters | the filters undone as in PDF | aqr-pdf's stream coding |
@@ -427,7 +427,7 @@ files (pages, logs) copied by a backup tool. What they share:
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | WARC (`.warc.gz`) | web archives (Common Crawl, Internet Archive) | a gzip member per record | the gzip, then the HTTP bodies (gzip again, images) | aqr-flate, everything |
-| HAR, data URIs, base64 in JSON and XML; uuencode, yEnc | web tooling, inline assets; Usenet binaries | base64 (uuencode and yEnc alike: text of 6 or 8 bits a byte, in lines) | base64 undone, the bytes recompressed | everything |
+| HAR, data URIs, base64 in JSON and XML; uuencode, yEnc | web tooling, inline assets; Usenet binaries | base64 (uuencode and yEnc alike: text of 6 or 8 bits a byte, in lines) | base64 undone, the bytes recompressed (Done: aqr-base64); uuencode, yEnc | everything |
 | Browser HTTP caches (Chrome, Firefox, Safari) | browser profiles | bodies as sent: gzip, Brotli, zstd; images | the gzip bodies and images (Brotli and zstd are hard, below) | aqr-flate, aqr-png, aqr-jpeg |
 | Rotated logs (`*.log.N.gz`) | every server | gzip, usually zlib's level 6 or 9 | reproduced by zlib emulation | aqr-flate |
 | systemd journal | Linux logs | field data over a size threshold in xz, LZ4 or zstd | the LZ4 objects; the journal's hash tables and offsets derived | aqr-lz4 |

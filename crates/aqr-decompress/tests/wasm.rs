@@ -5283,6 +5283,74 @@ fn jsonl_plans_hold() {
     }
 }
 
+/// base64-recons (a part module of windows of four pages) lays its memory out as a stack, its limit
+/// its plan, the same whatever the lengths: blocks of a MIME message and of a JSON file, of
+/// every length mod 3 and past the pieces it takes (text, bytes and layout), padded and not,
+/// URL-safe, wrapped and not, and text between them longer than a piece; and a file of nothing
+/// but a block.
+#[test]
+fn base64_plans_hold() {
+    fn b64(d: &[u8], table: &[u8; 64], pad: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for g in d.chunks(3) {
+            let v = (g[0] as u32) << 16 | (*g.get(1).unwrap_or(&0) as u32) << 8 | *g.get(2).unwrap_or(&0) as u32;
+            (0..g.len() + 1).for_each(|i| out.push(table[(v >> (18 - 6 * i) & 63) as usize]));
+            if pad {
+                out.resize(out.len() + 3 - g.len(), b'=');
+            }
+        }
+        out
+    }
+    fn wrap(c: &[u8], line: usize, sep: &[u8]) -> Vec<u8> {
+        c.chunks(line).collect::<Vec<_>>().join(sep)
+    }
+    let mut rng = aqr_common::rng::Rng::new(21);
+    let words: Vec<&[u8]> = vec![b"mail ", b"body ", b"text\n", b"header: "];
+    let mut text = |n: usize, rng: &mut aqr_common::rng::Rng| {
+        let mut t = Vec::new();
+        while t.len() < n {
+            t.extend_from_slice(words[rng.below(words.len() as u64) as usize]);
+        }
+        t
+    };
+    let m = aqr_base64::formula::MODULE;
+    let plan_of = |n: u64| {
+        let usage = aqr_formula::Usage {
+            params: &[],
+            resources: &[],
+            inputs: &[n, n, n],
+            outputs: &[n],
+            contents: &vec![],
+            initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
+        };
+        m.plan_for(&usage).unwrap().instance
+    };
+    assert_eq!(plan_of(3 << 10), plan_of(900 << 20));
+    assert!(plan_of(900 << 20) < 2 << 20, "{}", plan_of(900 << 20));
+    let std = aqr_base64::module::STANDARD;
+    let url = aqr_base64::module::URL_SAFE;
+    let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+    for n in [200usize, 4999, 5000, 5001, 70_000, 300_001, 300_002] {
+        let p = rng.bytes(n);
+        let mut d = text(100_000, &mut rng);
+        d.extend(wrap(&b64(&p, std, true), 76, b"\r\n"));
+        d.extend_from_slice(b"\r\n");
+        d.extend(text(70_000, &mut rng));
+        let q = rng.bytes(1000);
+        d.extend_from_slice(b"{\"a\":\"");
+        d.extend(b64(&q, url, false));
+        d.extend_from_slice(b"\",\"b\":\"");
+        d.extend(wrap(&b64(&q, std, false), 64, b"\\n"));
+        d.extend_from_slice(b"\"}\n");
+        cases.push((format!("mime {n}"), d));
+    }
+    cases.push(("alone".into(), wrap(&b64(&rng.bytes(9000), std, true), 76, b"\n")));
+    for (what, d) in cases {
+        let f = aqr_base64::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}: none taken"));
+        plan_holds(&format!("base64 {what}"), f, &d);
+    }
+}
+
 /// log-recons lays its memory out as a stack, its limit its plan: of lines of templates of
 /// words, digit runs and whole numbers, lines kept as they are, a last line with no LF, and
 /// segments (each its own application, its own params).

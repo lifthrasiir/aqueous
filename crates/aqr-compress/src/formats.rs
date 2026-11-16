@@ -987,6 +987,17 @@ formats! {
         heap: 2.0,
         text: true,
     }
+    /// Text with base64 blocks (aqr-base64): MIME messages, PEM, data URIs, base64 in JSON and
+    /// XML. The text without the blocks and the bytes they decode to are contents, recompressed
+    /// as what they are. A whole file known by its text, never detected: [`crate::made`] tries
+    /// it on text before the other text formats.
+    Base64 = "base64" {
+        recompressor: Pure(aqr_base64::formula::encode),
+        // the text and the bytes of its blocks (at most its 3/4 of it) held at once, the
+        // streams of the formula sharing them: 2.0 for the largest ratio
+        heap: 2.0,
+        text: true,
+    }
     /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.
     Text = "text" {
         // (with the dictionary given, if any)
