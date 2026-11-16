@@ -243,6 +243,19 @@ fn zeros(len: usize, window: Option<u64>) -> Vec<u8> {
 
 /// Applies the module `entry` to `inputs`, `resources` and `params` with the declared output sizes
 /// `sizes`; returns the outputs.
+/// For tests: the task (of each spawn of this thread) whose thread fails to start, as where the
+/// system lets no more threads start (`usize::MAX`: none).
+#[cfg(feature = "alloc")]
+#[doc(hidden)]
+pub fn test_spawn_fails_at(task: usize) {
+    SPAWN_FAILS_AT.set(task);
+}
+
+#[cfg(feature = "alloc")]
+std::thread_local! {
+    static SPAWN_FAILS_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
 pub fn apply(
     entry: &Entry,
     inputs: &[&[u8]],
@@ -736,11 +749,16 @@ pub(crate) mod sys {
         let gang = gang.then_some(id);
         // (the spawner's item and spans: what the tasks do is its work)
         let mut inherit: Vec<_> = (0..n).map(|_| super::inherit()).collect();
-        (0..n)
-            .map(|i| {
-                let rec = Send(rec.clone());
-                let inherit = inherit[i].take();
-                Some(std::thread::spawn(move || {
+        let mut started = Vec::with_capacity(n);
+        for i in 0..n {
+            let rec = Send(rec.clone());
+            let inherit = inherit[i].take();
+            let fails = super::SPAWN_FAILS_AT.get() == i;
+            let builder = std::thread::Builder::new();
+            let spawned = if fails {
+                Err(std::io::Error::other("injected"))
+            } else {
+                builder.spawn(move || {
                     let rec = rec;
                     let _traced = inherit.map(|f| f());
                     // (the task's host, this thread's while it runs)
@@ -770,9 +788,29 @@ pub(crate) mod sys {
                         super::trap("a task ended with channels made and not given to a gang".into());
                     }
                     out
-                }))
-            })
-            .collect()
+                })
+            };
+            match spawned {
+                Ok(h) => started.push(Some(h)),
+                // (the tasks started joined before this fails, as they use what `rec` refers to:
+                // the gang's channels closed first, so that none waits for a task not started)
+                Err(e) => {
+                    let chans = super::CHANS.read().unwrap_or_else(|e| e.into_inner());
+                    for &c in &pending {
+                        let s = &chans[c as usize];
+                        s.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+                        s.readable.notify_all();
+                        s.writable.notify_all();
+                    }
+                    drop(chans);
+                    for h in started.into_iter().flatten() {
+                        let _ = h.join();
+                    }
+                    super::exceeded(format!("task {i} of {n} not started: {e}"));
+                }
+            }
+        }
+        started
     }
 
     #[cfg(feature = "alloc")]

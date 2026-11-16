@@ -221,3 +221,32 @@ fn limits_of_the_host() {
     let f = apply(&many_channels::ENTRY, &[b"xx"], &[], b"", &[0]).unwrap_err();
     assert!(f.resource && f.what.contains("channels"), "{f}");
 }
+
+static FIRST_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+aqr_api::entry! {
+    // three tasks reading the spawner's data a while, the first noting it is done
+    whole fn slow_readers(params_len, in0_len, size) {
+        let data = vec![7u8; 1 << 16];
+        let f = |i: usize, out: &mut Vec<u8>| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            out.push(data.iter().fold(0u8, |a, &b| a.wrapping_add(b)));
+            if i == 0 {
+                FIRST_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+        drop(unsafe { task::spawn(3, &f) });
+    }
+}
+
+/// A task's thread failing to start: a resource failure, once the tasks started are done (as
+/// they read what the spawner's frame holds, which the failure unwinds).
+#[test]
+fn spawn_failing_joins_the_started() {
+    aqr_api::emu::test_spawn_fails_at(1);
+    let f = apply(&slow_readers::ENTRY, &[b""], &[], b"", &[0]);
+    aqr_api::emu::test_spawn_fails_at(usize::MAX);
+    let f = f.unwrap_err();
+    assert!(f.resource && f.what.contains("not started"), "{f}");
+    assert!(FIRST_DONE.load(std::sync::atomic::Ordering::SeqCst), "failed before the first task was done");
+}
