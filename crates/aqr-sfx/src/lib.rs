@@ -185,11 +185,13 @@ use std::path::Path;
 
 use aqr_formula::aqr::{EntryNode, Value};
 
-/// Writes the files of `value` under `dest`, returning how many were written.
+/// Writes the files of `value` under `dest`, returning how many were written. Nothing there is
+/// written over or through: a file there already fails, and so does a link (or junction) where a
+/// directory of the archive goes, which would lead out of `dest`.
 pub fn extract(value: Value, dest: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     match value {
         Value::File(data) => {
-            std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
             write(&dest.join("aqr-sfx-output"), &data)?;
             Ok(1)
         }
@@ -204,7 +206,7 @@ pub fn extract(value: Value, dest: &Path) -> Result<usize, String> {
                 };
                 let path = base.join(sanitized(&e.name));
                 match &e.node {
-                    EntryNode::Dir => std::fs::create_dir_all(&path).map_err(|x| format!("{}: {x}", path.display()))?,
+                    EntryNode::Dir => dir(&path)?,
                     EntryNode::File(c) => {
                         let data = contents.get(*c).ok_or_else(|| format!("{}: no content", path.display()))?;
                         write(&path, data)?;
@@ -220,12 +222,27 @@ pub fn extract(value: Value, dest: &Path) -> Result<usize, String> {
     }
 }
 
-/// Writes `data` to `path`, making its parent directory.
-fn write(path: &Path, data: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+/// Makes directory `path` (its parent there), or takes the one there: not a link to one.
+fn dir(path: &Path) -> Result<(), String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(err(&"there already, not a directory (or a link), not written through")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(path).map_err(|e| err(&e)),
+        Err(e) => Err(err(&e)),
     }
-    std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Writes `data` to `path` (its directory made already), a new file: not over one there, nor
+/// through a link there.
+fn write(path: &Path, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let err = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => format!("{}: there already, not written over", path.display()),
+        _ => format!("{}: {e}", path.display()),
+    };
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(err)?;
+    f.write_all(data).map_err(err)
 }
 
 /// An entry name (WTF-8) as a path component, lossily, as a Windows name cannot escape its
@@ -251,7 +268,45 @@ fn sanitized(name: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitized;
+    use super::{extract, sanitized};
+    use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, Value};
+
+    /// A tree of a directory `sub` holding a file `x`.
+    fn tree() -> Value {
+        let e = |parent, name: &str, node| Entry { parent, name: name.into(), node, extra: Extra::default() };
+        let t = Tree {
+            entries: vec![e(None, "sub", EntryNode::Dir), e(Some(0), "x", EntryNode::File(0))],
+            ..Tree::default()
+        };
+        Value::Tree(Box::new(t), vec![b"new".to_vec()])
+    }
+
+    /// What is there already is not written over, nor written through where it is a link.
+    #[test]
+    fn nothing_written_over_or_through() {
+        let d = std::env::temp_dir().join(format!("aqr-sfx-extract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (dest, out) = (d.join("dest"), d.join("out"));
+        std::fs::create_dir_all(dest.join("sub")).unwrap();
+        std::fs::write(dest.join("sub/x"), b"old").unwrap();
+        let e = extract(tree(), &dest).unwrap_err();
+        assert!(e.contains("not written over"), "{e}");
+        assert_eq!(std::fs::read(dest.join("sub/x")).unwrap(), b"old");
+        // (a link where the directory goes, out of the destination: where links can be made)
+        std::fs::remove_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&out, dest.join("sub")).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&out, dest.join("sub")).is_ok();
+        if linked {
+            let e = extract(tree(), &dest).unwrap_err();
+            assert!(e.contains("not written through"), "{e}");
+            assert!(!out.join("x").exists());
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 
     #[test]
     fn names_stay_in_their_directory() {
