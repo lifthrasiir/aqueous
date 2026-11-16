@@ -97,7 +97,7 @@ jobs:
           curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
           echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
           unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
-      - run: PYTHON=python UPX=./upx.exe crates/aqr-sfx/pack.sh
+      - run: PYTHON=python AQR_UPX=./upx.exe crates/aqr-sfx/pack.sh
       - run: cargo build --profile dist -p aqr -p aqr-win
       # aqr.exe runs modules as WebAssembly (by the interpreter blob it carries) and makes a
       # self-extracting program that gives the files back: a build without the pack fails here.

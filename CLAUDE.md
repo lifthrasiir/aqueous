@@ -101,7 +101,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     last function, through aqr-exe's x86 disfilter, the streams of all the blobs one after
     another by stream and the rest apart, each a zstd frame at 19; feature `encode` makes them),
     placed by `aqr_blob::load`. `extract` writes a decoded archive's files out. Shared by the
-    stub and aqr. `pack.sh` gathers what aqr embeds (the stub, packed by UPX `-9` where `UPX` or
+    stub and aqr. `pack.sh` gathers what aqr embeds (the stub, packed by UPX `-9` where `AQR_UPX` or
     `upx` is found, the blobs of the modules and of the shared libraries).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
     1.6 MB, 0.54 MB packed by UPX): the small executable that `aqr --format sfx` appends a bundle
