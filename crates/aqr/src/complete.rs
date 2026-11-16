@@ -224,7 +224,9 @@ pub fn bash() -> String {
         let words = match o.value {
             Value::None | Value::OptionalFile => continue,
             Value::File => "COMPREPLY=(); return 0".to_string(),
-            Value::Dir => "COMPREPLY=($(compgen -d -- \"$cur\")); return 0".to_string(),
+            // (each quoted as the shell reads it back, one a line: a name of `$(...)` or `;` is
+            // not run, nor one of spaces split)
+            Value::Dir => "local IFS=$'\\n'; COMPREPLY=($(compgen -d -- \"$cur\" | while IFS= read -r d; do printf '%q\\n' \"$d\"; done)); return 0".to_string(),
             Value::Text => "COMPREPLY=(); return 0".to_string(),
             Value::Of(f) => format!("COMPREPLY=($(compgen -W {} -- \"$cur\")); return 0", quoted(&f().join(" "))),
         };
@@ -326,7 +328,9 @@ pub fn powershell() -> String {
          \x20     }}\n\
          \x20   }} elseif ($v -eq 'dir') {{\n\
          \x20     Get-ChildItem -Directory -Path \"$word*\" -ErrorAction SilentlyContinue | ForEach-Object {{\n\
-         \x20       [System.Management.Automation.CompletionResult]::new($prefix + $_.Name, $_.Name, 'ProviderContainer', $_.FullName)\n\
+         \x20       $n = $_.Name\n\
+         \x20       if ($n -match '[\\s$`''\"(){{}}\\[\\];,&|<>@#]') {{ $n = \"'\" + ($n -replace \"'\", \"''\") + \"'\" }}\n\
+         \x20       [System.Management.Automation.CompletionResult]::new($prefix + $n, $_.Name, 'ProviderContainer', $_.FullName)\n\
          \x20     }}\n\
          \x20   }}\n\
          \x20   return\n\
@@ -514,6 +518,9 @@ mod tests {
         };
         let path = std::env::temp_dir().join(format!("aqr-complete-ps-{}.ps1", std::process::id()));
         std::fs::write(&path, powershell()).unwrap();
+        // (a directory whose name PowerShell would take as code where it went in unquoted)
+        let dirs = std::env::temp_dir().join(format!("aqr-complete-ps-{}", std::process::id()));
+        std::fs::create_dir_all(dirs.join("x$(1+1) 'y'")).unwrap();
         let probe =
             |line: &str| format!("(TabExpansion2 '{line}' {}).CompletionMatches.CompletionText -join ' '", line.len());
         let cmd = format!(
@@ -524,9 +531,11 @@ mod tests {
             probe("aqr --normalize="),
             probe("aqr --b"),
         );
+        let cmd = format!("{cmd}; cd '{}'; {}", dirs.display(), probe("aqr --directory x"));
         let o =
             std::process::Command::new(exe).args(["-NoProfile", "-NonInteractive", "-Command", &cmd]).output().unwrap();
         _ = std::fs::remove_file(&path);
+        _ = std::fs::remove_dir_all(&dirs);
         let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
         assert!(err.trim().is_empty(), "{err}");
         let lines: Vec<&str> = out.lines().collect();
@@ -536,5 +545,7 @@ mod tests {
             "{out}"
         );
         assert!(lines[3] == "--batch --block-size --bad-names", "{out}");
+        // (in single quotes, its own doubled)
+        assert_eq!(lines[4], ["'x$(1+1) ", "''y'", "''"].concat(), "{out}");
     }
 }

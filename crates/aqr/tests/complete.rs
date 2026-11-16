@@ -90,6 +90,12 @@ fn setup() {
         assert_eq!(complete(&["aqr", "--normalize="]), "auto nfc nfd keep");
         assert_eq!(complete(&["aqr", "-o", "x"]), "");
         assert_eq!(complete(&["aqr", "x"]), "");
+        // a directory's name of `$(...)` and a space: quoted as bash reads it back, not run
+        let dirs = home.join("dirs");
+        fs::create_dir_all(dirs.join("x$(touch ran) y")).unwrap();
+        std::env::set_current_dir(&dirs).unwrap();
+        assert_eq!(complete(&["aqr", "-C", "x"]), r"x\$\(touch\ ran\)\ y");
+        assert!(!dirs.join("ran").exists());
     }
     fs::remove_dir_all(&home).unwrap();
 }
