@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 # The crates that the binaries of aqr-modules use, natively (the decoding code only).
 [dependencies]
 # (begin: layout.py)
+aqr-dll-b2t = { path = "shared/b2t" }
 aqr-dll-bcj = { path = "shared/bcj" }
 aqr-dll-bz2 = { path = "shared/bz2" }
 aqr-dll-common = { path = "shared/common" }

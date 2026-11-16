@@ -478,6 +478,7 @@ dependencies = [
  "aqr-clip",
  "aqr-dex",
  "aqr-div3",
+ "aqr-dll-b2t",
  "aqr-dll-bcj",
  "aqr-dll-bz2",
  "aqr-dll-common",
@@ -554,6 +555,15 @@ dependencies = [
  "aqr-xsv",
  "aqr-zip",
  "aqr-zstd",
+]
+
+[[package]]
+name = "aqr-dll-b2t"
+version = "0.1.0"
+dependencies = [
+ "aqr-b2t",
+ "aqr-dll-common",
+ "aqr-dll-rt",
 ]
 
 [[package]]
