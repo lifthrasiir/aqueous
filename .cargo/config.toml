@@ -14,12 +14,17 @@ win7 = "build --profile dist --target x86_64-win7-windows-msvc -Zbuild-std"
 # the redistributable installs it), the UCRT of the system (Windows 10's own) linked as a DLL.
 # The blobs (the no-TLS target's builds) still import vcruntime140.dll; the programs placing them
 # bind those imports to their own copy (aqr_blob::VCRUNTIME).
+# The libraries a program imports are taken from System32 alone (`/DEPENDENTLOADFLAG`, of
+# LOAD_LIBRARY_SEARCH_SYSTEM32; Windows 10 1607 on): bcryptprimitives.dll and the others not of
+# KnownDLLs would otherwise be looked for beside the program first, where a self-extracting
+# archive or aqr-win.exe run from a folder of downloads would take one planted there.
 [target.x86_64-pc-windows-msvc]
 rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/NODEFAULTLIB:libucrt.lib",
     "-C", "link-arg=/DEFAULTLIB:ucrt.lib",
+    "-C", "link-arg=/DEPENDENTLOADFLAG:0x800",
 ]
 
 [target.x86_64-win7-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]
