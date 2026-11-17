@@ -2024,6 +2024,9 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     // (with -Z lzma, the streams in groups of several outputs, taken by all the leaves: one
     // leaf of them all, each output taken in the leaf it is made in)
     let solid = crate::lzma::apply(&mut f, opt.threads);
+    // (with -Z together:always, the streams of all classes in one: those that -Z lzma's groups
+    // left)
+    crate::together::apply(&mut f);
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());

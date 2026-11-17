@@ -6,16 +6,18 @@
 //! output split into the slices. The formula takes each output once, so that what several
 //! files share (the slices of `Formula::share_slices`) is in the group as often as it is
 //! taken, which LZMA's window codes as matches (as NOSSO does, with no dedup of its own). The
-//! streams left: those of [`Kind::Compressed`], those not made yet or that a sink has written
-//! already (`aqr::sink`), and those that a slice goes past the end of.
+//! streams left are those that [`crate::together::survey`] does not take, and those of groups
+//! that LZMA saves little of; `together:always`, which `-Z lzma` implies, puts the latter in one
+//! stream for zstd.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use aqr_formula::{Formula, Kind, Node};
 
 aqr_common::zopt! {
-    /// Whether the streams are compressed by LZMA rather than zstd ([`apply`]).
-    pub(crate) static LZMA: Opt<bool> = Opt::flag("lzma", false, "streams compressed by LZMA (liblzma, lzma-decode) rather than zstd");
+    /// Whether the streams are compressed by LZMA rather than zstd ([`apply`]), all of a batch
+    /// together as `together:always` puts them.
+    pub(crate) static LZMA: Opt<bool> = Opt::flag("lzma", false, "streams compressed by LZMA (liblzma, lzma-decode) rather than zstd, a batch's together (implies together:always)");
     /// The most bytes of a group, compressed as one `.lzma` file.
     static GROUP: Opt<usize> = Opt::size("lzma:group", 128 << 20, "most bytes of -Z lzma's groups, each compressed as one .lzma file");
     /// The largest dictionary.
@@ -60,36 +62,9 @@ pub(crate) fn apply(f: &mut Formula, threads: usize) -> bool {
     }
     let _s = aqr_common::trace::span("lzma");
     let n = f.streams.len();
-    let lens: Vec<u64> = f.streams.iter().map(|s| s.data.len() as u64).collect();
-    // (every slice where the formula takes it, in the order that `map_slices` visits them)
-    let mut slices: Vec<(usize, u64, u64)> = Vec::new();
-    let mut past = vec![false; n];
-    f.map_slices(&mut |stream, start, len| {
-        if stream < n {
-            past[stream] |= start.checked_add(len).is_none_or(|e| e > lens[stream]);
-        }
-        slices.push((stream, start, len));
-        Node::Slice { stream, start, len }
-    });
-    let taken: Vec<bool> = (0..n)
-        .map(|s| {
-            let st = &f.streams[s];
-            !past[s] && st.kind != Kind::Compressed && !st.data.is_lazy() && st.data.sunk_in().is_none()
-        })
-        .collect();
     // (the order of the bytes: the classes in the order of their first streams, each stream's
     // slices by where they start, the longest first)
-    let mut rank: Vec<usize> = vec![0; n];
-    {
-        let mut classes: Vec<(&str, Kind)> = Vec::new();
-        for (s, st) in f.streams.iter().enumerate() {
-            let c = (&*st.class, st.kind);
-            rank[s] = classes.iter().position(|&k| k == c).unwrap_or_else(|| {
-                classes.push(c);
-                classes.len() - 1
-            });
-        }
-    }
+    let (slices, taken, rank) = crate::together::survey(f);
     let mut order: Vec<usize> =
         (0..slices.len()).filter(|&k| slices[k].0 < n && taken[slices[k].0] && slices[k].2 > 0).collect();
     order.sort_by_key(|&k| {

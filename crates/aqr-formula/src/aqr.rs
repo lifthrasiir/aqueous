@@ -258,6 +258,10 @@ aqr_common::zopt! {
     /// (ending with `/`).
     static DENSE_CLASSES: Opt<&'static [&'static str]> =
         Opt::value("zstd:dense-classes", &["text", "pe", "x86/", "arm64/"], "classes of dense streams: text, a name, or a prefix ending in /");
+    /// The zstd level of the streams of [`TOGETHER`] from [`DENSE_FROM`] on, as dense streams
+    /// are: of AdbeRdr940_hu_HU at -9 (one stream of 121 MB), 30.65 MB at 16, 28.86 MB at 19
+    /// (23 s rather than 17), 28.71 MB at 22 (42 s).
+    static TOGETHER_LEVEL: Opt<i32> = Opt::value("zstd:together-level", 19, "zstd level of the stream of all of a batch's classes (together:always) from zstd:dense-from on");
     /// Streams shorter than this are compressed at the base by [`Level::Of`], as picking would
     /// take longer than any level.
     static SMALL: Opt<usize> = Opt::size("zstd:small", 64 << 10, "streams shorter are compressed at the base level without picking");
@@ -323,9 +327,14 @@ enum How {
     /// Of [`Kind::Compressed`]: stored as it is, unless all of it compresses at [`PROBE_LEVEL`].
     Light,
     Usual,
-    /// PE code or text, at the dense level of the [`Pick`] (which has one).
-    Dense,
+    /// PE code or text, or the stream of [`TOGETHER`], at this zstd level where the [`Pick`] has
+    /// a dense level.
+    Dense(i32),
 }
+
+/// The class of a stream of all the classes of a batch (aqr-compress's `-Z together:always`),
+/// compressed as dense streams are, at [`TOGETHER_LEVEL`].
+pub const TOGETHER: &str = "together";
 
 /// What an [`Encoder`] makes of a stream: compressed already ([`compressed`]), to be
 /// compressed at a zstd level, to about so many bytes (by a sample), or to be compressed at
@@ -869,7 +878,7 @@ impl Encoder {
 
     /// How stream `s` is compressed: light if of [`Kind::Compressed`]; dense where the level
     /// has a dense level ([`Pick`]), if PE code (an x86 or ARM64 filter's streams, or the rest
-    /// of a PE file) or text.
+    /// of a PE file) or text, or of [`TOGETHER`].
     fn how(&self, s: &crate::Stream) -> How {
         how_of(self.level, &s.class, s.kind)
     }
@@ -1160,7 +1169,8 @@ pub fn footer_bytes(blocks: usize) -> Vec<u8> {
 
 /// [`Encoder::how`] of a stream of `class` and `kind` at `level`.
 fn how_of(level: Level, class: &str, kind: Kind) -> How {
-    let dense = matches!(level, Level::Of(n) if n.clamp(1, Level::MAX) >= DENSE_FROM.get())
+    let from = matches!(level, Level::Of(n) if n.clamp(1, Level::MAX) >= DENSE_FROM.get());
+    let dense = from
         && DENSE_CLASSES.get().iter().any(|&c| match c {
             "text" => kind == Kind::Text,
             _ => match c.strip_suffix('/') {
@@ -1170,7 +1180,8 @@ fn how_of(level: Level, class: &str, kind: Kind) -> How {
         });
     match kind {
         Kind::Compressed => How::Light,
-        _ if dense => How::Dense,
+        _ if from && class == TOGETHER => How::Dense(TOGETHER_LEVEL.get()),
+        _ if dense => How::Dense(DENSE_LEVEL.get()),
         _ => How::Usual,
     }
 }
@@ -2211,9 +2222,9 @@ fn plan_of(p: &Pick, how: How, n: usize, sample: &[u8], compress: &mut Compress)
     let size = scaled(len(&best.1), sample.len(), n);
     // (dense data at the dense level above any picked: where larger than a sample, as
     // a sample does not tell; else where it is smaller, as the sample is all of it)
-    match p.dense {
-        Some(dense) if how == How::Dense && sample.len() < n && level >= p.base.0 => Ok(Plan::Level(dense, size)),
-        Some(dense) if how == How::Dense && sample.len() == n && level >= p.base.0 => {
+    match how {
+        How::Dense(dense) if p.dense.is_some() && sample.len() < n && level >= p.base.0 => Ok(Plan::Level(dense, size)),
+        How::Dense(dense) if p.dense.is_some() && sample.len() == n && level >= p.base.0 => {
             let c = compress(Some(sample), dense)?;
             Ok(if len(&c) < len(&best.1) { Plan::Done(c, dense) } else { Plan::Done(best.1, best.0) })
         }
@@ -2404,7 +2415,7 @@ fn key_how(data: &[&[u8]], how: How) -> StreamKey {
     let (h, n) = key(data);
     let h = match how {
         How::Usual => h,
-        How::Dense => !h,
+        How::Dense(l) => !h ^ (l as u128) << 64,
         How::Light => h.rotate_left(64),
     };
     (h, n)
@@ -2541,7 +2552,7 @@ aqr_common::zopt! {
 
 /// The largest window, as a power of two, that every decoder takes (spec, "Zstandard
 /// compression method").
-pub(crate) const WINDOW_LOG_MAX: u32 = 27;
+pub const WINDOW_LOG_MAX: u32 = 27;
 aqr_common::zopt! {
     /// How much of the window each job takes over from the data before it (9: all of it).
     static ZSTD_OVERLAP: Opt<u32> = Opt::value("zstd:overlap", 9, "log of the overlap of jobs with the data before them (9: all of it)");
@@ -6733,8 +6744,11 @@ mod tests {
         };
         for (level, dense) in [(Level::MID, false), (Level::Of(7), false), (Level::HIGH, true), (Level::Of(9), true)] {
             let enc = Encoder::new(level);
-            assert_eq!(enc.how(&s(&long, Kind::Text, "raw")) == How::Dense, dense, "{level:?}");
-            assert_eq!(enc.how(&s(&long, Kind::Unknown, "x86/OP")) == How::Dense, dense, "{level:?}");
+            let d = How::Dense(DENSE_LEVEL.get());
+            assert_eq!(enc.how(&s(&long, Kind::Text, "raw")) == d, dense, "{level:?}");
+            assert_eq!(enc.how(&s(&long, Kind::Unknown, "x86/OP")) == d, dense, "{level:?}");
+            let t = How::Dense(TOGETHER_LEVEL.get());
+            assert_eq!(enc.how(&s(&long, Kind::Unknown, TOGETHER)) == t, dense, "{level:?}");
             assert_eq!(enc.how(&s(&long, Kind::Unknown, "raw")), How::Usual);
             assert_eq!(enc.how(&s(&long, Kind::Compressed, "raw")), How::Light);
             let at = |d: &[u8], how| match enc.plan(key(&[d]), &[d], how).unwrap() {
@@ -6742,11 +6756,12 @@ mod tests {
                 Plan::Done(..) => 0,
                 Plan::Probe => PROBE_LEVEL.get(),
             };
-            assert_eq!(at(&long, How::Dense) == DENSE_LEVEL.get(), dense, "{level:?}");
+            assert_eq!(at(&long, d) == DENSE_LEVEL.get(), dense, "{level:?}");
+            assert_eq!(at(&long, t) == TOGETHER_LEVEL.get(), dense, "{level:?}");
             // (at 9, picked from as any other)
             assert_eq!(at(&long, How::Usual) == DENSE_LEVEL.get(), level == Level::Of(9), "{level:?}");
             // no longer than a sample: compressed whole, at the dense level where smaller so
-            let Plan::Done(Some(c), _) = enc.plan(key(&[&text]), &[&text], How::Dense).unwrap() else {
+            let Plan::Done(Some(c), _) = enc.plan(key(&[&text]), &[&text], d).unwrap() else {
                 panic!("{level:?}: not compressed whole")
             };
             let at_dense = compressed(&mut enc.cctx(), &[&text], DENSE_LEVEL.get(), 1).unwrap().unwrap();

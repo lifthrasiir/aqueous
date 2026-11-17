@@ -149,6 +149,7 @@ mod seal;
 mod sets;
 mod siblings;
 pub mod spill;
+mod together;
 mod verify;
 mod zip;
 mod zst;
@@ -1040,6 +1041,7 @@ fn finish(
         false => out,
     };
     lzma::apply(&mut f, opt.threads);
+    together::apply(&mut f);
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     memory::note_kept(&f, opt.application_bound, d.len() as u64);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not
