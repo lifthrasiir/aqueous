@@ -104,9 +104,16 @@ wasmparser.opt-level = "s"
 # 2.4-2.6 s with the stub of release and of this. Release's 1,463,296 bytes -> 875,008 (UPX -9:
 # 510,976 -> 354,304); fat LTO also leaves libzstd's compressor out, which the encoding code of
 # aqr-formula, dead but linked, pulls in otherwise.
+#
+# It does not unwind (std built with panic_abort, pack.py's `-Z build-std`): nothing in it
+# catches a panic, the blobs catching their own within their frames (aqr-api's `dll`), which
+# pemerge-test.sh checks with its stub built so too. 875,008 -> 668,160 bytes (UPX -9: 354,304 ->
+# 304,640), its unwind tables and landing pads gone; the same files written by the same SFXs
+# (native and through the interpreter blob), as fast.
 [profile.sfx]
 inherits = "dist"
 opt-level = "s"
+panic = "abort"
 
 [profile.sfx.package.zstd-sys]
 opt-level = 3

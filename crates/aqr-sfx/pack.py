@@ -81,9 +81,10 @@ LD = ROOT / "target/release/aqr-ld.exe"
 def modules_part(nightly, modules):
     """The stub, the modules' and the shared libraries' blobs, modules.txt and libs.txt."""
     # (the stub for the target of Windows 7 on, std built for it and the C runtime static, as the
-    # blobs are of its no-TLS target: one self-extracting program for every Windows aqr runs on)
+    # blobs are of its no-TLS target: one self-extracting program for every Windows aqr runs on;
+    # panic_abort for the profile's panic = "abort")
     run("cargo", f"+{nightly}", "build", "-q", "--profile", "sfx", "-p", "aqr-sfx-shim", "--target",
-        "x86_64-win7-windows-msvc", "-Z", "build-std")
+        "x86_64-win7-windows-msvc", "-Z", "build-std=std,panic_abort")
     # (all of them, for build.py to cut the shared libraries to what they use)
     run(sys.executable, "-I", "crates/aqr-dll/build.py", *modules, env=dict(os.environ, NOTLS="1"))
     modules = modules or sorted(p.stem for p in Path("crates/aqr-modules/src/bin").glob("*.rs"))

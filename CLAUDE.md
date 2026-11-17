@@ -119,7 +119,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `upx` is found, the blobs of the modules and of the shared libraries) and packs it
     (`aqr-sfx-pack`: `sfx.pack`).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
-    0.88 MB, 0.35 MB packed by UPX: the profile `sfx`): the small executable that `aqr --format sfx` appends a bundle
+    0.67 MB, 0.30 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
     of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle and
     the archive from right after its image (else it scans itself from the end for the archive's
     header magic), decodes the archive running the modules through the blobs, and writes the
