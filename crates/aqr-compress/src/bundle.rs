@@ -74,14 +74,20 @@ pub(crate) fn files_apart(f: &Formula) -> bool {
 
 /// Whether the contents of formula `f` are made apart, each on a thread of its own: files
 /// ([`files_apart`]), the entries of a ZIP archive (an APK's DEX files, libraries and
-/// resources one after another took most of its time) and the files of a CAB file (an
-/// installer's `Data1.cab` of 267 files, 121 MB: 10.3 s on 1.7 threads), and the members of a
-/// data file of an unknown archive format (The Crew's took 5 s on a thread or two).
+/// resources one after another took most of its time), the files of the other archives of
+/// files ([`ARCHIVES`]: an installer's `Data1.cab` of 267 files, 121 MB, took 10.3 s on 1.7
+/// threads), and the members of a data file of an unknown archive format (The Crew's took 5 s
+/// on a thread or two).
 pub(crate) fn contents_apart(f: &Formula) -> bool {
     files_apart(f)
-        || f.applies().iter().any(|a| a.module == aqr_decompress::ZIP || a.module == aqr_decompress::MSZIP)
-        || f.streams.first().is_some_and(|s| s.class == aqr_lzo::formula::MEMBERS)
+        || f.applies().iter().any(|a| a.module == aqr_decompress::ZIP)
+        || f.streams.first().is_some_and(|s| s.class == aqr_lzo::formula::MEMBERS || ARCHIVES.contains(&&*s.class))
 }
+
+/// The classes of the first stream (the container's) of the formulas of archives of files
+/// whose contents are made apart ([`contents_apart`]): CAB, 7z, RAR, LHA, ALZ, EGG and
+/// InstallShield's cabinets.
+const ARCHIVES: [&str; 7] = ["cab", "7z", "rar", "lha", "alz", "egg", "isc"];
 
 /// What a formula is as its recompressor made it ([`bundles`], [`files_apart`]): told by its
 /// streams, which may be gone once its contents are in place.

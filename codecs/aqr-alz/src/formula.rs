@@ -197,7 +197,13 @@ pub fn encode_with(
     let stored_sizes = sizes(|m| matches!(m, Made::Stored));
     let stored_nodes = match stored_sizes.is_empty() {
         true => Vec::new(),
-        false => by_kind(&mut f, stored).cut(&stored_sizes),
+        false => {
+            let first = f.streams.len();
+            let nodes = by_kind(&mut f, stored).cut(&stored_sizes);
+            // (the stored files' contents as they are, in no application)
+            f.streams[first..].iter_mut().for_each(|s| s.content = true);
+            nodes
+        }
     };
     let flate_sizes = sizes(|m| matches!(m, Made::Deflated(..)));
     let flate_nodes = match flate_sizes.is_empty() {

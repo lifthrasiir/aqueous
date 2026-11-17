@@ -321,7 +321,10 @@ pub fn encode_with(
     let mut nodes: [std::vec::IntoIter<Node>; 5] = Default::default();
     let stored_sizes = sizes(0);
     if !stored_sizes.is_empty() {
+        let first = f.streams.len();
         nodes[0] = by_kind(&mut f, stored).cut(&stored_sizes).into_iter();
+        // (the stored blocks' contents as they are, in no application)
+        f.streams[first..].iter_mut().for_each(|s| s.content = true);
     }
     let flate_sizes = sizes(1);
     if !flate_sizes.is_empty() {

@@ -14,8 +14,8 @@ use crate::{rar4, rar5, recons3, recons5};
 
 pub use crate::module::{decode3, decode5, index, params3};
 
-pub const MODULE5: Module = Module::new("rar5-recons", 2).with_plan(plan5);
-pub const MODULE3: Module = Module::new("rar3-recons", 2).with_plan(plan3);
+pub const MODULE5: Module = Module::new("rar5-recons", 2).with_plan(plan5).with_contents(&[0]);
+pub const MODULE3: Module = Module::new("rar3-recons", 2).with_plan(plan3).with_contents(&[0]);
 
 /// The memory of `rar5-recons`: its plan ([`crate::plan::decode5`]).
 fn plan5(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -275,7 +275,13 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     };
     let kept_nodes = match kept_sizes.is_empty() {
         true => Vec::new(),
-        false => by_kind(&mut f, kept).cut(&kept_sizes),
+        false => {
+            let first = f.streams.len();
+            let nodes = by_kind(&mut f, kept).cut(&kept_sizes);
+            // (the stored files' contents as they are, in no application)
+            f.streams[first..].iter_mut().for_each(|s| s.content = true);
+            nodes
+        }
     };
     let split_nodes = match split_sizes.is_empty() {
         true => Vec::new(),

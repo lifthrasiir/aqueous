@@ -179,3 +179,18 @@ fn entry_sums_as_parsed() {
         assert!(a.solid || !sums.is_empty() || a.entries.iter().all(|e| e.encrypted || e.blocks.len() != 1), "{name}");
     }
 }
+
+/// The files' contents, stored or compressed, are contents of the formula (`mark_contents`):
+/// every stream but the container's and the records and indexes, so that whoever takes the
+/// formula recompresses them in turn.
+#[test]
+fn files_are_contents() {
+    for (name, d) in fixtures() {
+        let Some(mut f) = formula::encode(&d, 2) else { continue };
+        f.mark_contents();
+        for s in &f.streams[1..] {
+            let data = !s.class.ends_with("/record") && !s.class.ends_with("/index");
+            assert!(!data || s.data.is_empty() || s.content, "{name}: {} not a content", s.class);
+        }
+    }
+}

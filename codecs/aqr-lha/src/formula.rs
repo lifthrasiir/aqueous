@@ -14,7 +14,7 @@ use crate::recons;
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: Module = Module::new("lha-recons", 2).with_plan(plan);
+pub const MODULE: Module = Module::new("lha-recons", 2).with_plan(plan).with_contents(&[0]);
 
 /// The memory of the module: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -190,7 +190,13 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let kept_sizes = sizes(false);
     let kept_nodes = match kept_sizes.is_empty() {
         true => Vec::new(),
-        false => by_kind(&mut f, kept).cut(&kept_sizes),
+        false => {
+            let first = f.streams.len();
+            let nodes = by_kind(&mut f, kept).cut(&kept_sizes);
+            // (the stored files' contents as they are, in no application)
+            f.streams[first..].iter_mut().for_each(|s| s.content = true);
+            nodes
+        }
     };
     let split_sizes = sizes(true);
     let split_nodes = match split_sizes.is_empty() {
