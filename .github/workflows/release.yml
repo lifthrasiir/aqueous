@@ -254,7 +254,51 @@ jobs:
             target/x86_64-win7-windows-msvc/dist/aqr_win_install.pdb
           if-no-files-found: error
 
+  # The Mac's, in three jobs: aqr and aqr-mac for each architecture at once (each its own runner,
+  # x86_64 built across), then mac joins them (lipo) and bundles them (crates/aqr-mac/bundle.sh).
+  mac-build:
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: rustup toolchain install && rustup target add "$TARGET"
+      - uses: Swatinem/rust-cache@v2.9.3
+        # (a tag's run takes no cache)
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ matrix.target }}
+      # (split-debuginfo "packed": dsymutil run before profile.dist's strip, leaving a dSYM for
+      # each binary, a symlink into deps/; by default, "unpacked", the DWARF stays in the objects
+      # and the strip takes the binary's map of them)
+      - env:
+          TARGET: ${{ matrix.target }}
+          CARGO_PROFILE_DIST_SPLIT_DEBUGINFO: packed
+        run: cargo build --profile dist --target "$TARGET" -p aqr -p aqr-mac
+      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
+      - run: git diff --exit-code -- Cargo.lock
+      - env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "out/$TARGET"
+          cp "target/$TARGET/dist/aqr" "target/$TARGET/dist/aqr-mac" "out/$TARGET/"
+          cp -RL "target/$TARGET/dist/aqr.dSYM" "target/$TARGET/dist/aqr-mac.dSYM" "out/$TARGET/"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: mac-build-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
   mac:
+    needs: mac-build
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -264,28 +308,28 @@ jobs:
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "STEM=${s#v}" >> "$GITHUB_ENV"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
-      - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2.9.3
-        # (a tag's run takes no cache)
-        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@v8.0.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # (split-debuginfo "packed": dsymutil run before profile.dist's strip, leaving a dSYM for
-      # each binary of each architecture, a symlink into deps/; by default, "unpacked", the
-      # DWARF stays in the objects and the strip takes the binary's map of them)
-      - run: crates/aqr-mac/bundle.sh --universal
-        env:
-          CARGO_PROFILE_DIST_SPLIT_DEBUGINFO: packed
+          path: build
+          pattern: mac-build-*
+          merge-multiple: true
+      # (the binaries where bundle.sh --universal takes them; an artifact keeps no mode)
+      - run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+              mkdir -p "target/$t/dist"
+              cp "build/$t/aqr" "build/$t/aqr-mac" "target/$t/dist/"
+              chmod +x "target/$t/dist/aqr" "target/$t/dist/aqr-mac"
+          done
+      - run: crates/aqr-mac/bundle.sh --no-build --universal
       - run: |
           mkdir out
           cp target/dist/Aqueous.zip "out/aqr-$STEM-mac.zip"
-      - run: |
+          mkdir debug
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-              mkdir -p "debug/$t"
-              cp -RL "target/$t/dist/aqr.dSYM" "target/$t/dist/aqr-mac.dSYM" "debug/$t/"
+              mkdir "debug/$t"
+              mv "build/$t/aqr.dSYM" "build/$t/aqr-mac.dSYM" "debug/$t/"
           done
-      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
       - run: git diff --exit-code -- Cargo.lock
       - uses: actions/upload-artifact@v7.0.2
         with:
