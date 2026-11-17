@@ -59,7 +59,120 @@ env:
   UPX_SHA256: 1cff6d6ee01c404d4a1ae56003056bd4cfa28d0a5cea1d0950daaf872a4facc9
 
 jobs:
+  # Windows, in four jobs, three of them at once (each its own runner): the self-extracting stub
+  # and the modules' blobs (sfx-modules), the interpreter blob (sfx-interp), and the binaries
+  # (windows); then windows-release packs the blobs (crates/aqr-sfx/pack.py's sfx.pack), writes
+  # the pack into aqr.exe as resources (`aqr-sfx-pack --embed`: no part of aqr's build, so that it
+  # need not wait), tries it, and builds the installer of it.
+  #
+  # Every Windows binary is for the target of Windows 7 on (`cargo win7`, .cargo/config.toml: the
+  # tier-3 x86_64-win7-windows-msvc, std built with the nightly and the C runtime static), the
+  # blobs for the no-TLS target of crates/aqr-dll (of Windows 7 on too). What the newer systems
+  # have (the sandbox's mitigations, placeholders) is looked up as it runs; std's locks are SRW
+  # locks rather than of WaitOnAddress, no slower on the 10gb benchmark. The nightly is that of
+  # nightly-toolchain (pinned: AQR_NIGHTLY for the scripts), Python for the scripts.
+  sfx-modules:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # (the toolchain of rust-toolchain.toml, for aqr-ld)
+      - run: rustup toolchain install
+      - run: |
+          echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
+          rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2.9.3
+        # (a tag's run takes no cache)
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.x'
+      # (UPX packs the self-extracting stub)
+      - run: |
+          curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
+          echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
+          unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
+      - run: AQR_UPX=./upx.exe python crates/aqr-sfx/pack.py --part=modules
+      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
+      - run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sfx-modules
+          path: target/aqr-sfx/
+          if-no-files-found: error
+
+  sfx-interp:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: |
+          echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
+          rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2.9.3
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.x'
+      - run: python crates/aqr-sfx/pack.py --part=interp
+      # (and aqr-sfx-pack, which windows-release runs, built here meanwhile)
+      - run: |
+          cargo build -q --release -p aqr-sfx -F encode,xz --bin aqr-sfx-pack
+          cp target/release/aqr-sfx-pack.exe target/aqr-sfx/
+      - run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: sfx-interp
+          path: |
+            target/aqr-sfx/aqr-interp.blob
+            target/aqr-sfx/aqr-sfx-pack.exe
+          if-no-files-found: error
+
   windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
+      - run: |
+          echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
+          rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2.9.3
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr -p aqr-win
+      - run: git diff --exit-code -- Cargo.lock
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: windows-build
+          path: |
+            target/x86_64-win7-windows-msvc/dist/aqr.exe
+            target/x86_64-win7-windows-msvc/dist/aqr-win.exe
+            target/x86_64-win7-windows-msvc/dist/aqr.pdb
+            target/x86_64-win7-windows-msvc/dist/aqr_win.pdb
+          if-no-files-found: error
+
+  windows-release:
+    needs: [sfx-modules, sfx-interp, windows]
     runs-on: windows-latest
     defaults:
       run:
@@ -73,37 +186,35 @@ jobs:
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "STEM=${s#v}" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
-      # (the toolchain of rust-toolchain.toml)
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2.9.3
-        # (a tag's run takes no cache)
-        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # What aqr's build.rs packs into aqr.exe (target/aqr-sfx/, crates/aqr-sfx/pack.py): the
-      # interpreter blob, which runs the modules as WebAssembly (aqr links no Wasmtime on Windows
-      # x86-64), and the stub and the modules' blobs of `--format sfx`. Built by the nightly with
-      # build-std (the no-TLS target of crates/aqr-dll), and Python for crates/aqr-dll/layout.py.
-      # (the nightly of nightly-toolchain, pinned: AQR_NIGHTLY for the scripts)
       - run: |
           echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
           rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2.9.3
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.x'
-      # (UPX packs the self-extracting stub here, and aqr.exe last)
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sfx-modules
+          path: target/aqr-sfx
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sfx-interp
+          path: sfx-interp
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: windows-build
+          path: target/x86_64-win7-windows-msvc/dist
+      # The pack, written into aqr.exe
       - run: |
-          curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
-          echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
-          unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
-      - run: AQR_UPX=./upx.exe python crates/aqr-sfx/pack.py
-      # Every Windows binary for the target of Windows 7 on (`cargo win7`, .cargo/config.toml: the
-      # tier-3 x86_64-win7-windows-msvc, std built with the nightly and the C runtime static). What
-      # the newer systems have (the sandbox's mitigations, placeholders) is looked up as it runs;
-      # std's locks are SRW locks rather than of WaitOnAddress, no slower on the 10gb benchmark.
-      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr -p aqr-win
+          mv sfx-interp/aqr-interp.blob target/aqr-sfx/
+          AQR_SFX_PACK_BIN=sfx-interp/aqr-sfx-pack.exe python crates/aqr-sfx/pack.py --part=pack
+          sfx-interp/aqr-sfx-pack.exe --embed target/aqr-sfx target/x86_64-win7-windows-msvc/dist/aqr.exe
       # aqr.exe runs modules as WebAssembly (by the interpreter blob it carries) and makes a
-      # self-extracting program that gives the files back: a build without the pack fails here.
+      # self-extracting program that gives the files back: one without the pack fails here.
       - run: |
           mkdir smoke
           cp codecs/aqr-jpeg/tests/data/gradient.jpg README.md smoke/
@@ -114,8 +225,13 @@ jobs:
           $aqr -c -q --format sfx -o smoke.exe smoke
           ./smoke.exe smoke-out
           diff -r smoke smoke-out
-      # build.rs packs target/x86_64-win7-windows-msvc/dist/{aqr,aqr-win}.exe, built above.
+      # build.rs packs target/x86_64-win7-windows-msvc/dist/{aqr,aqr-win}.exe, as above.
       - run: cargo "+$AQR_NIGHTLY" win7 -p aqr-win-install
+      - run: git diff --exit-code -- Cargo.lock
+      - run: |
+          curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
+          echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
+          unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
       - run: |
           mkdir out
           cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-$STEM.exe"
@@ -123,13 +239,12 @@ jobs:
       # Last, aqr.exe alone packed by UPX (the installer carries it unpacked, which its own
       # payload compresses better; the installer itself is not packed).
       - run: ./upx.exe -9 -q "out/aqr-$STEM.exe"
-      # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
-      - run: git diff --exit-code -- Cargo.lock
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: bin-windows
           path: out/*
           if-no-files-found: error
+      # (aqr.pdb still matches aqr.exe: the resources written leave its debug directory as it was)
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: debug-windows
@@ -238,7 +353,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: [windows, mac, linux]
+    needs: [windows-release, mac, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write # the release made and its assets uploaded

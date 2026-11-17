@@ -11,9 +11,10 @@
 //!   hence the stamp), and the modules whose hashes it changed are told.
 //! - The pack (Windows x86-64 alone, where pack.py runs, and where it is `target/aqr-sfx`, not
 //!   `AQR_SFX_PACK`'s): where there is one and its `modules.txt` is not of the modules of
-//!   known.rs, or its `sfx.pack` is missing or of an earlier form, pack.py runs. Where there is none it is left so (pack.py needs the nightly of
-//!   `nightly-toolchain` and build-std); where pack.py fails, it is not run again for the same
-//!   known.rs.
+//!   known.rs, or its `sfx.pack` is missing or of an earlier form, pack.py runs. Where there is
+//!   none it is left so (pack.py needs the nightly of `nightly-toolchain` and build-std); where
+//!   pack.py fails, it is not run again for the same known.rs. The binary kept has the pack (of
+//!   `AQR_SFX_PACK` where that is set) written in by `aqr-sfx-pack --embed` ([`embed`]).
 //!
 //! `AQR_BINCACHE_MODULES=0` leaves both as they are. One `cargo aqr` at a time does this (a lock
 //! on `cache/modules.lock`), as the scripts write the working copy and `target/`.
@@ -198,8 +199,40 @@ fn pack() -> Result<()> {
     Ok(())
 }
 
-/// Whether the pack's `sfx.pack` is there, of the form aqr's build.rs takes (the magic of
-/// aqr-sfx's `aqr-sfx-pack`).
+/// The directory of the pack written into aqr: `AQR_SFX_PACK`, else `target/aqr-sfx` (Windows
+/// x86-64 alone).
+fn pack_dir() -> Option<PathBuf> {
+    if !cfg!(all(windows, target_arch = "x86_64")) {
+        return None;
+    }
+    Some(std::env::var_os("AQR_SFX_PACK").map_or_else(|| root().join("target/aqr-sfx"), PathBuf::from))
+}
+
+/// The pack's `pack.id`, for the manifest of a binary (relative to the root where under it): a
+/// binary is of the pack written into it as of its sources.
+pub fn pack_id() -> Option<String> {
+    let id = pack_dir()?.join("pack.id");
+    Some(id.strip_prefix(root()).unwrap_or(&id).to_string_lossy().replace('\\', "/"))
+}
+
+/// Writes the pack into the binary `exe` (`aqr-sfx-pack --embed`), where there is one.
+pub fn embed(exe: &Path) -> Result<()> {
+    let Some(dir) = pack_dir().filter(|d| d.join("sfx.pack").is_file()) else { return Ok(()) };
+    let cargo = std::env::var_os("CARGO").unwrap_or("cargo".into());
+    let status = Command::new(cargo)
+        .current_dir(root())
+        .args(["run", "-q", "--release", "-p", "aqr-sfx", "-F", "encode,xz", "--bin", "aqr-sfx-pack", "--", "--embed"])
+        .args([dir.as_os_str(), exe.as_os_str()])
+        .status()
+        .map_err(|e| format!("cargo: {e}"))?;
+    match status.success() {
+        true => Ok(()),
+        false => Err(format!("the pack of {} not written into aqr", dir.display())),
+    }
+}
+
+/// Whether the pack's `sfx.pack` is there, of the form `aqr-sfx-pack --embed` takes (the magic
+/// of aqr-sfx's `aqr-sfx-pack`).
 fn packed() -> bool {
     let mut head = [0; 8];
     fs::File::open(root().join("target/aqr-sfx/sfx.pack"))

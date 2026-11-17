@@ -1,6 +1,6 @@
-//! `aqr-sfx-pack DIR`: the pack that aqr carries (`DIR/sfx.pack`, which aqr's build.rs includes)
-//! of the files that crates/aqr-sfx/pack.py gathered in DIR (`target/aqr-sfx`), which aqr alone
-//! reads (`crates/aqr/src/sfx.rs`): the interpreter blob, then the modules' and the shared
+//! `aqr-sfx-pack DIR`: the pack that aqr carries (`DIR/sfx.pack`) of the files that
+//! crates/aqr-sfx/pack.py gathered in DIR (`target/aqr-sfx`), which aqr alone reads
+//! (`crates/aqr/src/sfx.rs`): the interpreter blob, then the modules' and the shared
 //! libraries' blobs, each set a bundle of raw LZMA2 frames ([`aqr_sfx::bundle::pack_xz`]: their
 //! code through the disfilter), then the stub (packed by UPX already) and the lists as they are.
 //!
@@ -12,24 +12,50 @@
 //! The first bundle has the blob `aqr-interp.blob` alone; the second each `modules/NAME.blob`
 //! of modules.txt and `libs/LIB` of libs.txt, by those names. The files are aqr-sfx-shim.exe,
 //! modules.txt and libs.txt.
+//!
+//! `aqr-sfx-pack --embed DIR EXE` writes DIR's `sfx.pack` and `pack.id` into the executable EXE
+//! (aqr, linked: [`aqr_sfx::resource`]), checking that the pack is of this form first.
 
 use std::path::Path;
 use std::process::ExitCode;
 
-/// The magic of the pack (crates/aqr/build.rs and aqr-bincache check it).
+/// The magic of the pack (`--embed` and aqr-bincache check it, crates/aqr/src/sfx.rs reads it).
 const MAGIC: &[u8; 8] = b"AQRSFXP2";
 
 fn main() -> ExitCode {
-    let Some(dir) = std::env::args_os().nth(1) else {
-        eprintln!("usage: aqr-sfx-pack DIR");
-        return ExitCode::from(2);
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let result = match &args[..] {
+        [dir] => pack(Path::new(dir)),
+        [e, dir, exe] if e == "--embed" => embed(Path::new(dir), Path::new(exe)),
+        _ => {
+            eprintln!("usage: aqr-sfx-pack DIR | aqr-sfx-pack --embed DIR EXE");
+            return ExitCode::from(2);
+        }
     };
-    match pack(Path::new(&dir)) {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("aqr-sfx-pack: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// DIR's pack and its id written into EXE.
+fn embed(dir: &Path, exe: &Path) -> Result<(), String> {
+    let read = |name: &str| std::fs::read(dir.join(name)).map_err(|e| format!("{}: {e}", dir.join(name).display()));
+    let (pack, id) = (read("sfx.pack")?, read("pack.id")?);
+    if !pack.starts_with(MAGIC) {
+        return Err(format!("{}: not a pack of this form (run crates/aqr-sfx/pack.py again)", dir.display()));
+    }
+    #[cfg(windows)]
+    {
+        aqr_sfx::resource::embed(exe, &pack, String::from_utf8_lossy(&id).trim())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (exe, id);
+        Err("--embed: Windows only (the resources of a PE executable)".into())
     }
 }
 

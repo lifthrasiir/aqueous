@@ -1856,7 +1856,7 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
             size(made.bundle as f64),
             size(archived as f64),
             match a.verbose {
-                true => format!(", pack {}", sfx::PACK_ID.get(..12).unwrap_or("-")),
+                true => format!(", pack {}", sfx::pack_id().get(..12).unwrap_or("-")),
                 false => String::new(),
             }
         );

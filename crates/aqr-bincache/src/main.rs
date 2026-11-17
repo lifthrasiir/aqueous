@@ -20,6 +20,8 @@
 //!
 //! Before the binary of the working copy is looked up, the Wasm modules and the SFX pack are made
 //! again where what they are made of changed ([`modules`]: build.py and pack.py run as needed).
+//! The pack is no part of aqr's build: the binary kept has it written in (Windows x86-64:
+//! [`modules::embed`]), its `pack.id` in the manifest (`-` where there is no pack).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -93,7 +95,8 @@ fn build(env: &str) -> Result<PathBuf> {
         return Err("cargo build failed".into());
     }
     let exe = target().join(format!("aqr{EXE}"));
-    let paths = dep_info(&target().join("aqr.d"))?;
+    let mut paths = dep_info(&target().join("aqr.d"))?;
+    paths.extend(modules::pack_id());
     let built = target().parent().map_or_else(target, Path::to_path_buf);
     if let Some(path) = changed_since(&paths, &root(), &built, start) {
         eprintln!("aqr-bincache: {path} changed during the build; running the binary without keeping it");
@@ -118,7 +121,12 @@ fn build(env: &str) -> Result<PathBuf> {
         fs::write(tmp.join("manifest"), &text).map_err(|e| e.to_string())?;
         fs::rename(tmp.join("manifest"), &dest).map_err(|e| e.to_string())?;
     }
-    fs::copy(&exe, tmp.join(format!("aqr{EXE}"))).map_err(|e| format!("{}: {e}", exe.display()))?;
+    // (the pack written into a copy in the target directory first: a file just written in the
+    // cache, which a sync client such as Dropbox may be reading, is not opened for the update)
+    let packed = target().join(format!("aqr-packed{EXE}"));
+    fs::copy(&exe, &packed).map_err(|e| format!("{}: {e}", exe.display()))?;
+    modules::embed(&packed)?;
+    fs::copy(&packed, tmp.join(format!("aqr{EXE}"))).map_err(|e| format!("{}: {e}", packed.display()))?;
     let info = format!("created={}\nmanifest={manifest}\n{}", now(), commit(&paths, &blobs)?);
     fs::write(tmp.join("info"), info).map_err(|e| e.to_string())?;
     let kept = keep(&tmp, &dir, |from, to| fs::rename(from, to));
@@ -224,7 +232,7 @@ fn environment() -> Result<String> {
     text += &String::from_utf8_lossy(&out.stdout);
     let mut vars: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| {
-            // (and aqr's build script's: what `--format sfx` embeds)
+            // (and the pack written into the binary kept, modules::embed)
             matches!(&k[..], "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" | "RUSTC" | "RUSTC_WRAPPER" | "AQR_SFX_PACK")
                 || ["CARGO_PROFILE_", "CARGO_BUILD_", "CARGO_TARGET_"].iter().any(|p| k.starts_with(p))
                     && !k.ends_with("TARGET_DIR")

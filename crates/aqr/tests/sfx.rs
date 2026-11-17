@@ -1,6 +1,7 @@
 //! Self-extracting programs made by `aqr -c --format sfx` (Windows x86-64): run, they write the
-//! files out as they were. Skipped where this aqr carries no stub (built without
-//! `target/aqr-sfx/`, which `crates/aqr-sfx/pack.py` gathers).
+//! files out as they were. The aqr built has the pack of `target/aqr-sfx/` (`AQR_SFX_PACK`'s
+//! where that is set; `crates/aqr-sfx/pack.py` makes it) written into a copy of it, as the
+//! release does; skipped where there is none.
 
 mod common;
 
@@ -12,8 +13,29 @@ fn scratch(name: &str) -> PathBuf {
     common::scratch("sfx", name)
 }
 
+/// The aqr built, with the pack written into a copy of it where there is one.
+fn aqr() -> &'static Path {
+    static AQR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    AQR.get_or_init(|| {
+        let exe = PathBuf::from(env!("CARGO_BIN_EXE_aqr"));
+        #[cfg(windows)]
+        {
+            // (the target directory: the exe's is that of its profile)
+            let target = exe.parent().and_then(Path::parent).unwrap();
+            let dir = std::env::var_os("AQR_SFX_PACK").map_or_else(|| target.join("aqr-sfx"), PathBuf::from);
+            if let (Ok(pack), Ok(id)) = (fs::read(dir.join("sfx.pack")), fs::read_to_string(dir.join("pack.id"))) {
+                let copy = scratch("aqr").join("aqr.exe");
+                fs::copy(&exe, &copy).unwrap();
+                aqr_sfx::resource::embed(&copy, &pack, id.trim()).unwrap();
+                return copy;
+            }
+        }
+        exe
+    })
+}
+
 fn aqr_in(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(dir).args(args).output().unwrap()
+    Command::new(aqr()).current_dir(dir).args(args).output().unwrap()
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]

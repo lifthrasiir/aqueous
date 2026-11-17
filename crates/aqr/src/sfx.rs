@@ -3,9 +3,11 @@
 //! through aqr-exe's x86 disfilter, then zstd), which the stub places in memory as it runs, and
 //! the archive.
 //!
-//! The stub and blobs are those `crates/aqr-sfx/pack.py` gathered when this program was built
-//! (build.rs: `sfx.pack`, aqr-sfx's `aqr-sfx-pack`: the blobs in bundles of LZMA2, which this
-//! program alone reads; the bundles it writes into self-extracting programs are of zstd). The
+//! The stub and blobs are those `crates/aqr-sfx/pack.py` gathered (`sfx.pack`, aqr-sfx's
+//! `aqr-sfx-pack`: the blobs in bundles of LZMA2, which this program alone reads; the bundles it
+//! writes into self-extracting programs are of zstd), written into this program's executable as
+//! resources once it was linked (`aqr-sfx-pack --embed`, [`aqr_sfx::resource`]: the release
+//! workflow and `cargo aqr` do), so that the program is built without waiting for the pack. The
 //! archive names a module with a native blob there by a shorthand module block, its hash alone
 //! ([`wasm_of`]), and the bundle has the blob (named by the hash and
 //! the module's task slots, [`aqr_sfx::native_name`]) and the shared libraries that blob links
@@ -20,15 +22,25 @@ use crate::hex;
 use aqr_formula::Module;
 use aqr_formula::aqr::{self, Wasm};
 
-/// What `crates/aqr-sfx/pack.py` gathered, as build.rs packed it (empty where it was not there).
-static PACKED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sfx.pack"));
+/// The pack this program's executable carries, in place, and the digest of its files (`pack.id`);
+/// both empty where it carries none.
+fn embedded() -> (&'static [u8], &'static str) {
+    #[cfg(windows)]
+    {
+        aqr_sfx::resource::embedded()
+    }
+    #[cfg(not(windows))]
+    {
+        (&[], "")
+    }
+}
 
-/// The digest of the pack's files (`pack.id`; empty where there is none), included from where
-/// pack.py wrote it so that the build's dep-info has it: `cargo aqr` keeps a binary by the files
-/// of its dep-info, and the packed file in `OUT_DIR` changes only once the build script runs.
-pub const PACK_ID: &str = include_str!(env!("AQR_SFX_ID"));
+/// The digest of the pack's files (`pack.id`; empty where there is none).
+pub fn pack_id() -> &'static str {
+    embedded().1
+}
 
-/// The stub and the blobs of [`PACKED`] but the interpreter blob ([`interpreter`]).
+/// The stub and the blobs of the pack but the interpreter blob ([`interpreter`]).
 pub struct Pack {
     stub: Vec<u8>,
     /// The native blob of each module by its hash, with the bytes of its task slots (the custom
@@ -51,17 +63,18 @@ pub fn interpreter() -> Result<Vec<u8>, String> {
     }
 }
 
-/// The parts of [`PACKED`] (aqr-sfx's `aqr-sfx-pack`): the bundle of the interpreter blob, the
+/// The parts of the pack (aqr-sfx's `aqr-sfx-pack`): the bundle of the interpreter blob, the
 /// bundle of the other blobs, and the other files.
 fn parts() -> Result<[&'static [u8]; 3], String> {
-    if PACKED.is_empty() {
+    let packed = embedded().0;
+    if packed.is_empty() {
         return Err("this aqr carries no blobs (the interpreter's and the self-extracting stub's: \
-                    built without target/aqr-sfx/, which crates/aqr-sfx/pack.py gathers on Windows \
-                    x86-64)"
+                    their pack, which crates/aqr-sfx/pack.py makes on Windows x86-64, not written \
+                    into it by `aqr-sfx-pack --embed`)"
             .into());
     }
     let cut = || "the self-extracting pack is cut short".to_string();
-    let mut d = PACKED.strip_prefix(b"AQRSFXP2").ok_or("the self-extracting pack is not valid")?;
+    let mut d = packed.strip_prefix(b"AQRSFXP2").ok_or("the self-extracting pack is not valid")?;
     let mut bundle = || -> Result<&'static [u8], String> {
         let (n, r) = d.split_first_chunk::<8>().ok_or_else(cut)?;
         let (b, r) = r.split_at_checked(u64::from_le_bytes(*n) as usize).ok_or_else(cut)?;

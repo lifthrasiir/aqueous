@@ -20,11 +20,16 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     those blobs (and of the interpreter blob, if any module is in full: aqr-sfx's `bundle`). What
     it bundles is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and packs (`sfx.pack`, the blobs as
-    bundles of LZMA2, ~4.7 MB: only aqr reads it) and `build.rs` includes; each blob is used only
-    for the hash it was packed for, so `cargo aqr` runs pack.py again where the pack's modules
-    are not those of known.rs (where there is a pack), or its `sfx.pack` is not of this form.
-    The release workflow runs pack.py before building aqr.exe (without the pack, aqr.exe runs
-    no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX. Every Windows
+    bundles of LZMA2, ~4.7 MB: only aqr reads it); it is no part of aqr's build but written into
+    the linked executable as resources (`aqr-sfx-pack --embed DIR EXE`, aqr-sfx's `resource`, read
+    in place as it runs): `cargo aqr` writes it into the binary it keeps (`pack.id` in its
+    manifest), aqr's tests/sfx.rs into a copy of theirs. Each blob is used only for the hash it
+    was packed for, so `cargo aqr` runs pack.py again where the pack's modules are not those of
+    known.rs (where there is a pack), or its `sfx.pack` is not of this form. Without the pack,
+    aqr.exe runs no module as WebAssembly. The release workflow builds the stub and the modules'
+    blobs (`pack.py --part=modules`), the interpreter blob (`--part=interp`) and the binaries in
+    three jobs at once, then packs (`--part=pack`), writes the pack into aqr.exe, smoke-tests
+    `-Z wasm` and an SFX, and builds the installer. Every Windows
     binary of a release (aqr, aqr-win, the installer, the stub, the blobs) is of the target of
     Windows 7 on (`cargo +NIGHTLY win7`, `.cargo/config.toml`; pack.py's stub for
     `x86_64-win7-windows-msvc`): what newer systems add is looked up as it runs (the sandbox's

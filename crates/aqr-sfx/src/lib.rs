@@ -9,6 +9,8 @@
 
 pub mod bundle;
 mod native;
+#[cfg(windows)]
+pub mod resource;
 
 use aqr_blob::interp::Interpreter;
 #[cfg(windows)]
