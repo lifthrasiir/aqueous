@@ -3579,7 +3579,7 @@ impl<'c, 'n> Archive<'c, 'n> {
         threads: usize,
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
-        self.each_leaf_into(threads, None, None, f)
+        self.each_leaf_into(threads, None, None, &f)
     }
 
     /// [`Archive::each_leaf`] of the leaves (by index) marked in `only`: the others not evaluated,
@@ -3590,7 +3590,7 @@ impl<'c, 'n> Archive<'c, 'n> {
         only: &[bool],
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
-        self.each_leaf_into(threads, Some(only), None, f)
+        self.each_leaf_into(threads, Some(only), None, &f)
     }
 
     /// The file of an archive of a single file, written to `sink` as it is evaluated: of a
@@ -3611,7 +3611,7 @@ impl<'c, 'n> Archive<'c, 'n> {
             sink(d)
         };
         let streaming: Mutex<&mut Sink> = Mutex::new(&mut counted);
-        self.each_leaf_into(threads, None, Some(&streaming), |_, outputs| {
+        self.each_leaf_into(threads, None, Some(&streaming), &|_, outputs| {
             let mut sink = streaming.lock().unwrap();
             outputs?.iter().try_for_each(|d| sink(d))
         })?;
@@ -3740,7 +3740,7 @@ impl<'c, 'n> Archive<'c, 'n> {
         threads: usize,
         only: Option<&[bool]>,
         sink: Option<&Mutex<&mut Sink>>,
-        f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
+        f: &(dyn Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync),
     ) -> Decoded<()> {
         // (of an archive indexed, those of the leaves taken alone read)
         let partial;
@@ -3961,7 +3961,7 @@ impl<'c, 'n> Archive<'c, 'n> {
         let mut of: Vec<Vec<(usize, usize, u64)>> = vec![Vec::new(); self.leaves_len()];
         refs.iter().enumerate().filter(|&(c, _)| wanted(c)).for_each(|(c, &(l, o, n))| of[l].push((o, c, n)));
         let leaves: Option<Vec<bool>> = only.map(|_| of.iter().map(|o| !o.is_empty()).collect());
-        self.each_leaf_into(threads, leaves.as_deref(), None, |i, outputs| {
+        self.each_leaf_into(threads, leaves.as_deref(), None, &|i, outputs| {
             let mut outputs = outputs?;
             for &(o, c, n) in &of[i] {
                 let Some(d) = outputs.get_mut(o).map(std::mem::take) else {
