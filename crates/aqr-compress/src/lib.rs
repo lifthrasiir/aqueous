@@ -3090,9 +3090,15 @@ impl Apart {
 /// applications, or aqr-ppmd's, which only cuts the header off the data, so that the data is
 /// stored once where another file starts with it, or aqr-mkv's, which holds frames seen
 /// before once, or a gzip or zlib stream's below level 4, which cuts its DEFLATE stream off for
-/// files made of it ([`inflated::is`]).
+/// files made of it ([`inflated::is`]), or a PE image's, which cuts its resources apart for the
+/// same ones of other images to be stored once ([`exe::resources_apart`]).
 fn takes_place(f: &Formula) -> bool {
-    !f.applies().is_empty() || aqr_ppmd::formula::is(f) || aqr_mkv::formula::is(f) || aqueous::is(f) || inflated::is(f)
+    !f.applies().is_empty()
+        || aqr_ppmd::formula::is(f)
+        || aqr_mkv::formula::is(f)
+        || aqueous::is(f)
+        || inflated::is(f)
+        || exe::resources_apart(f)
 }
 
 /// Contents, each its slice and its formula where it has one ([`nested`]).

@@ -543,6 +543,59 @@ fn raw_kin_together() {
     assert!(c.len() < a.len() * 3 / 2, "{} bytes of {} each", c.len(), a.len());
 }
 
+/// A PE32+ image of no code, of resources alone (a DLL of a language's resources): one section,
+/// `.rsrc`, whose one resource (type 10, id 1, language 1033) is `res`, after `before` bytes of
+/// the section's own.
+fn pe_resources(before: &[u8], res: &[u8]) -> Vec<u8> {
+    let put = |d: &mut Vec<u8>, at: usize, v: &[u8]| d[at..at + v.len()].copy_from_slice(v);
+    let mut d = vec![0u8; 0x400];
+    put(&mut d, 0, b"MZ");
+    d[0x3c] = 0x40;
+    put(&mut d, 0x40, b"PE\0\0");
+    put(&mut d, 0x44, &0x8664u16.to_le_bytes());
+    d[0x46] = 1; // sections
+    put(&mut d, 0x54, &0xf0u16.to_le_bytes()); // optional header size
+    let opt = 0x58;
+    put(&mut d, opt, &0x20bu16.to_le_bytes());
+    put(&mut d, opt + 0x18, &0x1_8000_0000u64.to_le_bytes());
+    put(&mut d, opt + 0x6c, &16u32.to_le_bytes()); // data directories
+    let (rva, off) = (0x1000u32, 0x400usize);
+    let at = 0x58 + before.len();
+    let len = (at + res.len()) as u32;
+    put(&mut d, opt + 0x70 + 2 * 8, &rva.to_le_bytes());
+    put(&mut d, opt + 0x70 + 2 * 8 + 4, &len.to_le_bytes());
+    let sec = opt + 0xf0;
+    put(&mut d, sec, b".rsrc");
+    for (k, v) in [(8, len), (12, rva), (16, len), (20, off as u32), (36, 0x4000_0040)] {
+        put(&mut d, sec + k, &v.to_le_bytes());
+    }
+    // the directories of type, name and language, each of one entry, and the data entry
+    let mut r = vec![0u8; 0x58];
+    for (dir, id, to) in [(0, 10, 0x8000_0018u32), (0x18, 1, 0x8000_0030), (0x30, 1033, 0x48)] {
+        r[dir + 14] = 1;
+        r[dir + 16..dir + 20].copy_from_slice(&(id as u32).to_le_bytes());
+        r[dir + 20..dir + 24].copy_from_slice(&to.to_le_bytes());
+    }
+    r[0x48..0x4c].copy_from_slice(&(rva + at as u32).to_le_bytes());
+    r[0x4c..0x50].copy_from_slice(&(res.len() as u32).to_le_bytes());
+    d.extend_from_slice(&r);
+    d.extend_from_slice(before);
+    d.extend_from_slice(res);
+    d
+}
+
+/// Two PE images of the same resource amid bytes of their own (a program's resources, and those
+/// of its language's DLL): the resource is stored once, though no file starts as the other does
+/// and the blocks are too small for Zstandard to find it again.
+#[test]
+fn pe_resource_held_once() {
+    let res = noise(1 << 20, 7);
+    let a = pe_resources(&noise(200 << 10, 5), &res);
+    let b = pe_resources(&noise(300 << 10, 6), &res);
+    let (c, _) = archived(&[("a.dll", a), ("b.dll", b)], &Options { block: 256 << 10, ..Options::default() });
+    assert!(c.len() < (1500 << 10) + (64 << 10), "{} bytes", c.len());
+}
+
 /// A PPMd var. J file of `data` as file `name` of time `time` (order 10, 256 MB, restore
 /// method 1), its data as it is.
 fn ppmd(name: &str, time: u32, data: &[u8]) -> Vec<u8> {

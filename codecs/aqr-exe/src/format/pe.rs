@@ -156,14 +156,20 @@ pub enum TableKind {
     Rising { width: usize, fields: usize },
 }
 
-/// The tables of the PE image `d` that [`Table`] describes, those in its stored data: the base
-/// relocations; the export address table, the name pointers and the ordinals; the import
-/// lookup and address tables (those that touch in the file as one); the runtime functions
-/// (data directory 3) of x86-64 and ARM64. Empty where `d` is no PE image. In no order; they may
-/// overlap each other or the code.
-pub fn tables(d: &[u8]) -> Vec<Table> {
-    let mut t = Vec::new();
-    let _ = (|| -> Option<()> {
+/// The headers of a PE image read from its bytes, for [`tables`] and [`resources`].
+struct Layout<'a> {
+    d: &'a [u8],
+    machine: u16,
+    is64: bool,
+    /// `(RVA, size)` of each data directory, `None` where empty.
+    dirs: Vec<Option<(u32, u32)>>,
+    /// `(RVA, file offset, stored size)` of each section.
+    headers: Vec<(u32, u32, u32)>,
+}
+
+impl<'a> Layout<'a> {
+    /// The headers of `d`, `None` where it is no PE image.
+    fn of(d: &'a [u8]) -> Option<Self> {
         let get = |at: usize, n: usize| d.get(at..at.checked_add(n)?);
         let u16_at = |at: usize| get(at, 2).map(to_u16);
         let u32_at = |at: usize| get(at, 4).map(to_u32);
@@ -181,60 +187,81 @@ pub fn tables(d: &[u8]) -> Vec<Table> {
             _ => return None,
         };
         let num_dirs = (u32_at(opt + num_dirs_at)? as usize).min(16).min(opt_size.saturating_sub(num_dirs_at + 4) / 8);
-        let dir = |i: usize| -> Option<(u32, u32)> {
-            (i < num_dirs).then_some(())?;
-            let at = opt + num_dirs_at + 4 + 8 * i;
-            Some((u32_at(at)?, u32_at(at + 4)?)).filter(|&(rva, size)| rva != 0 && size != 0)
-        };
-        // (RVA, file offset, stored size) of each section
-        let headers: Vec<(u32, u32, u32)> = (0..num_sections)
+        let dirs = (0..num_dirs)
+            .map(|i| {
+                let at = opt + num_dirs_at + 4 + 8 * i;
+                Some((u32_at(at)?, u32_at(at + 4)?)).filter(|&(rva, size)| rva != 0 && size != 0)
+            })
+            .collect();
+        let headers = (0..num_sections)
             .map_while(|i| {
                 let h = get(opt + opt_size + 40 * i, 40)?;
                 Some((to_u32(&h[12..16]), to_u32(&h[20..24]), to_u32(&h[16..20])))
             })
             .collect();
-        // the file offset of `size` bytes at `rva`, where whole within a section's stored data
-        // and within `d`
-        let at = |rva: u32, size: usize| -> Option<usize> {
-            let &(s_rva, s_off, _) = headers.iter().find(|&&(s_rva, _, s_size)| {
-                rva.checked_sub(s_rva)
-                    .is_some_and(|o| (o as usize).checked_add(size).is_some_and(|e| e <= s_size as usize))
-            })?;
-            let off = s_off as usize + (rva - s_rva) as usize;
-            get(off, size).map(|_| off)
-        };
+        Some(Layout { d, machine, is64, dirs, headers })
+    }
+
+    fn u32_at(&self, at: usize) -> Option<u32> {
+        self.d.get(at..at.checked_add(4)?).map(to_u32)
+    }
+
+    fn dir(&self, i: usize) -> Option<(u32, u32)> {
+        self.dirs.get(i).copied().flatten()
+    }
+
+    /// The file offset of `size` bytes at `rva`, where whole within a section's stored data
+    /// and within the file.
+    fn at(&self, rva: u32, size: usize) -> Option<usize> {
+        let &(s_rva, s_off, _) = self.headers.iter().find(|&&(s_rva, _, s_size)| {
+            rva.checked_sub(s_rva).is_some_and(|o| (o as usize).checked_add(size).is_some_and(|e| e <= s_size as usize))
+        })?;
+        let off = s_off as usize + (rva - s_rva) as usize;
+        self.d.get(off..off.checked_add(size)?).map(|_| off)
+    }
+}
+
+/// The tables of the PE image `d` that [`Table`] describes, those in its stored data: the base
+/// relocations; the export address table, the name pointers and the ordinals; the import
+/// lookup and address tables (those that touch in the file as one); the runtime functions
+/// (data directory 3) of x86-64 and ARM64. Empty where `d` is no PE image. In no order; they may
+/// overlap each other or the code.
+pub fn tables(d: &[u8]) -> Vec<Table> {
+    let mut t = Vec::new();
+    let _ = (|| -> Option<()> {
+        let l = Layout::of(d)?;
         let mut push = |off: Option<usize>, len: usize, kind: TableKind| {
             if let Some(off) = off.filter(|_| len > 0) {
                 t.push(Table { off, len, kind });
             }
         };
 
-        if let Some((rva, size)) = dir(5) {
-            push(at(rva, size as usize), size as usize, TableKind::Reloc);
+        if let Some((rva, size)) = l.dir(5) {
+            push(l.at(rva, size as usize), size as usize, TableKind::Reloc);
         }
-        if let Some((rva, _)) = dir(0) {
-            if let Some(e) = at(rva, 40) {
-                let (functions, names) = (u32_at(e + 20)? as usize, u32_at(e + 24)? as usize);
+        if let Some((rva, _)) = l.dir(0) {
+            if let Some(e) = l.at(rva, 40) {
+                let (functions, names) = (l.u32_at(e + 20)? as usize, l.u32_at(e + 24)? as usize);
                 let rising = |width| TableKind::Rising { width, fields: 1 };
-                push(at(u32_at(e + 28)?, functions * 4), functions * 4, rising(4));
-                push(at(u32_at(e + 32)?, names * 4), names * 4, rising(4));
-                push(at(u32_at(e + 36)?, names * 2), names * 2, rising(2));
+                push(l.at(l.u32_at(e + 28)?, functions * 4), functions * 4, rising(4));
+                push(l.at(l.u32_at(e + 32)?, names * 4), names * 4, rising(4));
+                push(l.at(l.u32_at(e + 36)?, names * 2), names * 2, rising(2));
             }
         }
-        if let Some((rva, _)) = dir(1) {
-            let w = if is64 { 8 } else { 4 };
+        if let Some((rva, _)) = l.dir(1) {
+            let w = if l.is64 { 8 } else { 4 };
             let mut thunks: Vec<(usize, usize)> = Vec::new();
             for k in 0.. {
-                let Some(i) = at(rva.wrapping_add(20 * k), 20) else { break };
-                let (lookup, address) = (u32_at(i)?, u32_at(i + 16)?);
+                let Some(i) = l.at(rva.wrapping_add(20 * k), 20) else { break };
+                let (lookup, address) = (l.u32_at(i)?, l.u32_at(i + 16)?);
                 if lookup == 0 && address == 0 {
                     break;
                 }
                 // each array of thunks up to its zero, with it
                 for rva in [lookup, address].into_iter().filter(|&r| r != 0) {
-                    let Some(start) = at(rva, w) else { continue };
+                    let Some(start) = l.at(rva, w) else { continue };
                     let n = d[start..].chunks_exact(w).position(|c| c.iter().all(|&b| b == 0));
-                    if let Some(n) = n.filter(|&n| at(rva, (n + 1) * w).is_some()) {
+                    if let Some(n) = n.filter(|&n| l.at(rva, (n + 1) * w).is_some()) {
                         thunks.push((start, start + (n + 1) * w));
                     }
                 }
@@ -252,20 +279,76 @@ pub fn tables(d: &[u8]) -> Vec<Table> {
                 push(Some(s), e - s, TableKind::Rising { width: w, fields: 1 });
             }
         }
-        if let Some((rva, size)) = dir(3) {
-            let k = match machine {
+        if let Some((rva, size)) = l.dir(3) {
+            let k = match l.machine {
                 0x8664 => 12,
                 0xaa64 => 8,
                 _ => 0,
             };
             if let Some(n) = (size as usize).checked_div(k) {
                 let len = n * k;
-                push(at(rva, len), len, TableKind::Rising { width: 4, fields: k / 4 });
+                push(l.at(rva, len), len, TableKind::Rising { width: 4, fields: k / 4 });
             }
         }
         Some(())
     })();
     t
+}
+
+/// The most entries of a resource directory that [`resources`] takes.
+const MOST_RESOURCES: usize = 1 << 16;
+
+/// The data of the resources of the PE image `d` (data directory 2): where each data entry's
+/// bytes are in the file, those whole within a section's stored data, in file order, none
+/// overlapping another (of two that overlap, the first is taken; the same data told by several
+/// entries is taken once). Empty where `d` is no PE image or has no resources. The directory is
+/// walked three levels deep (type, name, language), as Windows reads it, a directory reached
+/// twice walked once; at most [`MOST_RESOURCES`] entries.
+pub fn resources(d: &[u8]) -> Vec<core::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let _ = (|| -> Option<()> {
+        let l = Layout::of(d)?;
+        let (rva, size) = l.dir(2)?;
+        let base = l.at(rva, size as usize).or_else(|| l.at(rva, 16))?;
+        let u16_at = |at: usize| d.get(at..at.checked_add(2)?).map(to_u16);
+        // (directories by their offset from the base, with their depth)
+        let (mut todo, mut seen, mut entries) = (vec![(0usize, 0u8)], alloc::collections::BTreeSet::new(), 0usize);
+        while let Some((dir, depth)) = todo.pop() {
+            if !seen.insert(dir) {
+                continue;
+            }
+            let at = base.checked_add(dir)?;
+            let n = u16_at(at + 12)? as usize + u16_at(at + 14)? as usize;
+            for k in 0..n {
+                entries += 1;
+                if entries > MOST_RESOURCES {
+                    return None;
+                }
+                let Some(to) = l.u32_at(at + 16 + 8 * k + 4) else { break };
+                let off = (to & 0x7fff_ffff) as usize;
+                match to & 0x8000_0000 != 0 {
+                    true if depth < 2 => todo.push((off, depth + 1)),
+                    true => {}
+                    false => {
+                        let Some(e) = base.checked_add(off) else { continue };
+                        let (Some(rva), Some(len)) = (l.u32_at(e), l.u32_at(e + 4)) else { continue };
+                        if let Some(start) = l.at(rva, len as usize).filter(|_| len > 0) {
+                            out.push(start..start + len as usize);
+                        }
+                    }
+                }
+            }
+        }
+        Some(())
+    })();
+    out.sort_by_key(|r| (r.start, core::cmp::Reverse(r.end)));
+    let mut end = 0;
+    out.retain(|r| {
+        let keep = r.start >= end;
+        end = end.max(r.end);
+        keep
+    });
+    out
 }
 
 /// A PE image being read, its sections' `(RVA, file offset, stored size)` known.
@@ -332,7 +415,7 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
     /// a section.
     fn ready_to_run_code(&mut self, clr: &[u8]) -> Option<Vec<(u32, u64, usize)>> {
         let (_, funcs_rva, funcs_size) = self.ready_to_run(clr)?.into_iter().find(|s| s.0 == 102)?; // READYTORUN_SECTION_RUNTIME_FUNCTIONS
-                                                                                                    // RUNTIME_FUNCTION of x86-64: begin, end, unwind data
+        // RUNTIME_FUNCTION of x86-64: begin, end, unwind data
         let funcs = self.read(funcs_rva, funcs_size / 12 * 12)?;
         let mut funcs: Vec<(u32, u32)> =
             funcs.as_chunks::<12>().0.iter().map(|f| (to_u32(&f[0..4]), to_u32(&f[4..8]))).collect();
@@ -462,5 +545,64 @@ mod tests {
         let functions = [(0x1400, 0x1480), (0x1f00, 0x2100)];
         let code = locate_code(&mut std::io::Cursor::new(image(Some(&functions)))).unwrap();
         assert_eq!(code.sections, [(0x1_8000_1000, 0x200, 0x1000)]);
+    }
+
+    /// A PE32+ image of one section, `.rsrc` (RVA 0x1000, at 0x400, 0x1000 bytes), holding the
+    /// resource directory `dir` at its start (data directory 2), the rest of it of 0x5a.
+    fn resource_image(dir: &[u8]) -> Vec<u8> {
+        let mut d = vec![0u8; 0x1400];
+        put(&mut d, 0, b"MZ");
+        put(&mut d, 0x3c, &0x40u32.to_le_bytes());
+        put(&mut d, 0x40, b"PE\0\0");
+        put(&mut d, 0x44, &0x8664u16.to_le_bytes());
+        put(&mut d, 0x46, &1u16.to_le_bytes());
+        put(&mut d, 0x54, &0xf0u16.to_le_bytes());
+        let opt = 0x58;
+        put(&mut d, opt, &0x20bu16.to_le_bytes());
+        put(&mut d, opt + 0x6c, &16u32.to_le_bytes());
+        put(&mut d, opt + 0x70 + 16, &[0x1000u32, 0x1000].map(u32::to_le_bytes).concat());
+        let sec = opt + 0xf0;
+        put(&mut d, sec, b".rsrc");
+        put(&mut d, sec + 8, &[0x1000u32, 0x1000, 0x1000, 0x400].map(u32::to_le_bytes).concat());
+        d[0x400..].fill(0x5a);
+        put(&mut d, 0x400, dir);
+        d
+    }
+
+    /// A resource directory of `entries` `(name, offset)` at its start.
+    fn directory(entries: &[(u32, u32)]) -> Vec<u8> {
+        let mut d = vec![0u8; 16];
+        put(&mut d, 14, &(entries.len() as u16).to_le_bytes());
+        entries.iter().for_each(|&(n, to)| d.extend([n, to].map(u32::to_le_bytes).concat()));
+        d
+    }
+
+    #[test]
+    fn resources_in_file_order() {
+        // types 3 and 10 (subdirectories at 0x100 and 0x200); type 3's names 1 (its languages
+        // at 0x300) and 2 (a data entry at the depth of names, taken still), type 10's one name
+        // whose languages point to the same data twice and to data past the section; a
+        // directory pointing back to the root
+        let mut dir = vec![0u8; 0x400];
+        let at = |dir: &mut Vec<u8>, off: usize, v: &[u8]| dir[off..off + v.len()].copy_from_slice(v);
+        at(&mut dir, 0, &directory(&[(3, 0x8000_0100), (10, 0x8000_0200)]));
+        at(&mut dir, 0x100, &directory(&[(1, 0x8000_0300), (2, 0x3a0)]));
+        at(&mut dir, 0x200, &directory(&[(1, 0x8000_0340)]));
+        at(&mut dir, 0x300, &directory(&[(1033, 0x380), (1038, 0x8000_0000)]));
+        at(&mut dir, 0x340, &directory(&[(1033, 0x390), (1038, 0x390), (1040, 0x3b0)]));
+        // (data entries: RVA and size)
+        at(&mut dir, 0x380, &[0x1800u32, 0x100].map(u32::to_le_bytes).concat());
+        at(&mut dir, 0x390, &[0x1500u32, 0x80].map(u32::to_le_bytes).concat());
+        at(&mut dir, 0x3a0, &[0x1600u32, 0x40].map(u32::to_le_bytes).concat());
+        at(&mut dir, 0x3b0, &[0x1f80u32, 0x100].map(u32::to_le_bytes).concat());
+        let d = resource_image(&dir);
+        assert_eq!(resources(&d), [0x900..0x980, 0xa00..0xa40, 0xc00..0xd00]);
+        // overlapping data: the first, the longest of those starting alike
+        at(&mut dir, 0x3a0, &[0x1520u32, 0x100].map(u32::to_le_bytes).concat());
+        assert_eq!(resources(&resource_image(&dir)), [0x900..0x980, 0xc00..0xd00]);
+        // no resources, and no PE image
+        assert_eq!(resources(&resource_image(&directory(&[]))), []);
+        assert_eq!(resources(&d[..0x200]), []);
+        assert_eq!(resources(b"MZ"), []);
     }
 }

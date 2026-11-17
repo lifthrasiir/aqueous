@@ -6,7 +6,9 @@
 //! and what the CIL filter keeps as it is, are contents (`Stream::content`): scanned in turn,
 //! e.g. for the images among the resources. Of a PE image, its tables of known layouts outside
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
-//! imports and runtime functions by `recs-fields`, their numbers as deltas; of an NSIS
+//! imports and runtime functions by `recs-fields`, their numbers as deltas; the data of each of
+//! its resources, a content of its own (so that the same resource of another image is stored
+//! once, a language's DLL of resources and its program's, say); of an NSIS
 //! installer, the files its data stores, each a content of its format ([`crate::nsis`]); of an Inno
 //! Setup installer, the LZMA streams of its file data rebuilt from their data, and 4.0's zlib
 //! streams recompressed in turn ([`aqr_inno`]). Of a 64-bit Mach-O
@@ -33,7 +35,7 @@ use std::sync::{Arc, OnceLock};
 
 use aqr_decompress::{ARM64, ARM64_DELTA, ARM64_REMAP, CIL, MACHO_CODESIGN, MACHO_SYMTAB, PE_RELOC, X86, X86_REMAP};
 use aqr_exe::arch::{arm64, cil, x86};
-use aqr_exe::format::pe::{TableKind, locate_code, tables};
+use aqr_exe::format::pe::{TableKind, locate_code, resources, tables};
 use aqr_exe::format::{elf, macho};
 use aqr_exe::{reloc, symtab};
 use aqr_formula::{Apply, Bytes, Formula, Kind, Node, Resource};
@@ -72,6 +74,10 @@ enum Arch {
     /// is in a stream of its own: in the rest, it would have the rest's compressible bytes stored
     /// as they are along with it.
     Kept,
+    /// The data of a resource of a PE image: a content of its own, so that the same resource in
+    /// another image is the same content, stored once ([`Formula::share_slices`]), rather than
+    /// bytes amid the rest cut elsewhere in each.
+    Resource,
     /// A Mach-O image's code signature, left out (for `exe-recons/macho-codesign` to put back).
     Signature,
     /// A section of data of a Mach-O image coded against its tree's root's, or the root's
@@ -99,6 +105,11 @@ aqr_common::zopt! {
     /// batch's trial (`choose`) turns them down again (WinUHA 2.0's Beta and RC1), the time spent
     /// (0.31 -> 0.49 s), though all taken they come to less (-Z no-smaller: 4.02 MB, not 4.18).
     static INNO_DEFER: Opt<bool> = Opt::flag("exe:inno-defer", false, "keep a split the probe turns down beside its stream, for the batch to choose");
+    /// The data of PE resources shorter than this is left with the rest ([`Arch::Resource`]);
+    static MIN_RESOURCE: Opt<usize> =
+        Opt::size("exe:min-resource", 1 << 10, "PE resources' data shorter than this is left with the rest");
+    /// Whether the data of a PE image's resources is taken apart ([`Arch::Resource`]).
+    static RESOURCES: Opt<bool> = Opt::flag("exe:resources", true, "take a PE image's resources apart, each a content");
     /// Tables shorter than this are left with the rest.
     static MIN_TABLE: Opt<usize> = Opt::size("exe:min-table", 64, "tables shorter than this are left with the rest");
     /// Symbol tables shorter than this, with their string tables, are left with the rest: the
@@ -168,6 +179,17 @@ pub(crate) fn pe(d: &[u8], opt: &crate::Options, depth: u32, cx: &crate::Cx) -> 
             .filter(|t| t.len >= min_table && !code.iter().any(|c| t.off < c.end && c.start < t.off + t.len))
             .map(|t| (0, t.off, t.len, Arch::Table(t.kind))),
     );
+    // the data of its resources, each a content of its own
+    if RESOURCES.get() {
+        let min = MIN_RESOURCE.get();
+        let taken: Vec<_> = sections.iter().map(|s| s.1..s.1 + s.2).collect();
+        sections.extend(
+            resources(d)
+                .into_iter()
+                .filter(|r| r.len() >= min && !taken.iter().any(|t| r.start < t.end && t.start < r.end))
+                .map(|r| (0, r.start, r.len(), Arch::Resource)),
+        );
+    }
     // the files stored in an installer's data
     for b in crate::nsis::in_pe(d).unwrap_or_default().into_iter().filter(|b| b.len() >= crate::nsis::MIN_BLOCK.get()) {
         if let Some(format) = crate::nsis::format(&d[b.clone()]) {
@@ -422,6 +444,16 @@ const POINTERS: [&[u8]; 3] = [b"__DATA_CONST,__const", b"__DATA,__const", b"__AU
 
 /// The class of the pieces of a root's sections of data ([`POINTERS`]), apart.
 const DATA: &str = "macho/data";
+
+/// The class of the data of a PE image's resources ([`Arch::Resource`]).
+const RESOURCE: &str = "pe/rsrc";
+
+/// Whether formula `f` cuts the resources of a PE image apart ([`Arch::Resource`]): it takes the
+/// image's place though it applies nothing, as a resource is then stored once with the same one
+/// of other images (`takes_place`).
+pub(crate) fn resources_apart(f: &Formula) -> bool {
+    f.streams.iter().any(|s| s.class == RESOURCE)
+}
 
 /// The class of the copy of the root's code stream or section of data in a formula of an image
 /// coded against it, which [`resolve`] makes the root's own.
@@ -753,6 +785,7 @@ fn filtered(
             }
             Arch::InnoZlib => f.push_content("inno", Kind::Format(crate::Format::Zlib.name()), section.to_vec()),
             Arch::Kept => f.push("pe/kept", section.to_vec()),
+            Arch::Resource => f.push_content(RESOURCE, Kind::Unknown, section.to_vec()),
             Arch::Data => match data.and_then(|data| data.get(&off)) {
                 Some(d) => against(&mut f, section, d, DATA, "macho-delta"),
                 None => f.push(DATA, section.to_vec()),
@@ -1147,6 +1180,7 @@ fn code_apply(
         | Arch::Inno(_)
         | Arch::InnoZlib
         | Arch::Kept
+        | Arch::Resource
         | Arch::Signature
         | Arch::Data => {
             return None;
