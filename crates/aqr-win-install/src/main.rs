@@ -44,7 +44,12 @@ fn main() -> std::process::ExitCode {
         ui::message(ui::Icon::Error, l::failed(), l::no_local_app_data());
         return ExitCode::FAILURE;
     };
-    if !quiet && !ui::confirm(&l::ask(env!("AQR_VERSION")), &l::what(dir.display())) {
+    // (where it is uninstalled from: Settings' Apps of Windows 10 on, else Control Panel's)
+    let what = match aqr_l10n::windows_10_on() {
+        true => l::what(dir.display()),
+        false => l::what_control_panel(dir.display()),
+    };
+    if !quiet && !ui::confirm(&l::ask(env!("AQR_VERSION")), &what) {
         return ExitCode::SUCCESS;
     }
     match install(&dir) {
@@ -57,6 +62,15 @@ fn main() -> std::process::ExitCode {
                     shell::name_version(),
                     shell::extract_version(),
                 );
+                let done = match aqr_l10n::windows_11_on() {
+                    true => format!(
+                        "{done}
+
+{}",
+                        aqr_l10n::win::more_options()
+                    ),
+                    false => done,
+                };
                 ui::message(ui::Icon::Information, l::installed(), &done);
             }
             ExitCode::SUCCESS

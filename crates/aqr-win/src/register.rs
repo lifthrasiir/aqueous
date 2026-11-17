@@ -109,7 +109,7 @@ fn more() -> Vec<(String, Msg, String)> {
 pub fn told() -> String {
     let menu: Vec<String> = more().into_iter().map(|(_, text, _)| win::quoted(text.text())).collect();
     let formats: Vec<String> = FORMATS.iter().map(|(ext, ..)| format!(".{ext}")).collect();
-    win::told(
+    let told = win::told(
         shell::compress(),
         menu.join(", "),
         shell::extract(),
@@ -117,7 +117,16 @@ pub fn told() -> String {
         shell::name_version(),
         shell::extract_version(),
         formats.join(" "),
-    )
+    );
+    match aqr_l10n::windows_11_on() {
+        true => format!(
+            "{told}
+
+{}",
+            win::more_options()
+        ),
+        false => told,
+    }
 }
 
 pub fn register() -> Result<(), String> {

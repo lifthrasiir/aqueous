@@ -107,6 +107,47 @@ pub fn system_languages() -> Vec<String> {
     v
 }
 
+/// Windows' version as it is, major and build (`RtlGetVersion`: no manifest's compatibility in
+/// the way); `(0, 0)` elsewhere. What the frontends tell differs by it: Settings' Apps of Windows
+/// 10 on, Explorer's "Show more options" of Windows 11 on.
+pub fn windows_version() -> (u32, u32) {
+    #[cfg(windows)]
+    {
+        /// `OSVERSIONINFOW`
+        #[repr(C)]
+        struct Info {
+            size: u32,
+            major: u32,
+            minor: u32,
+            build: u32,
+            platform: u32,
+            service_pack: [u16; 128],
+        }
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn RtlGetVersion(info: *mut Info) -> i32;
+        }
+        let mut v =
+            Info { size: size_of::<Info>() as u32, major: 0, minor: 0, build: 0, platform: 0, service_pack: [0; 128] };
+        // SAFETY: into the structure above, of its size
+        if unsafe { RtlGetVersion(&mut v) } == 0 {
+            return (v.major, v.build);
+        }
+    }
+    (0, 0)
+}
+
+/// Windows 10 on.
+pub fn windows_10_on() -> bool {
+    windows_version().0 >= 10
+}
+
+/// Windows 11 on (the build number of Windows 10's major version 10).
+pub fn windows_11_on() -> bool {
+    let (major, build) = windows_version();
+    major > 10 || major == 10 && build >= 22000
+}
+
 #[cfg(windows)]
 fn windows_languages() -> Vec<String> {
     #[link(name = "kernel32")]
@@ -267,6 +308,15 @@ fn fill(template: &str, args: &[(&str, &dyn Display)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows' version is read (of Windows 7 on, whatever the manifest), and 11 is 10 too.
+    #[cfg(windows)]
+    #[test]
+    fn windows_version_read() {
+        let (major, build) = windows_version();
+        assert!(major >= 6 && build >= 7600, "{major}.{build}");
+        assert!(!windows_11_on() || windows_10_on());
+    }
 
     fn ko() -> usize {
         LANGS.iter().position(|&t| t == "ko").unwrap()
