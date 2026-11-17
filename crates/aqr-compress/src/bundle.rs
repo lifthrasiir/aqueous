@@ -74,11 +74,12 @@ pub(crate) fn files_apart(f: &Formula) -> bool {
 
 /// Whether the contents of formula `f` are made apart, each on a thread of its own: files
 /// ([`files_apart`]), the entries of a ZIP archive (an APK's DEX files, libraries and
-/// resources one after another took most of its time), and the members of a data file of an
-/// unknown archive format (The Crew's took 5 s on a thread or two).
+/// resources one after another took most of its time) and the files of a CAB file (an
+/// installer's `Data1.cab` of 267 files, 121 MB: 10.3 s on 1.7 threads), and the members of a
+/// data file of an unknown archive format (The Crew's took 5 s on a thread or two).
 pub(crate) fn contents_apart(f: &Formula) -> bool {
     files_apart(f)
-        || f.applies().iter().any(|a| a.module == aqr_decompress::ZIP)
+        || f.applies().iter().any(|a| a.module == aqr_decompress::ZIP || a.module == aqr_decompress::MSZIP)
         || f.streams.first().is_some_and(|s| s.class == aqr_lzo::formula::MEMBERS)
 }
 

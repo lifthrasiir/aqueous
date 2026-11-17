@@ -17,7 +17,10 @@ use crate::mszip::{self, BitW};
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("mszip-recons", 2).with_plan(memory);
+/// Its input 1 (the stored folders' data, and the LZX folders' streams rebuilt) is data as it is:
+/// the files' contents.
+pub const MODULE: aqr_formula::Module =
+    aqr_formula::Module::new("mszip-recons", 2).with_plan(memory).with_contents(&[1]);
 
 /// The memory of the module, a part module: its initial memory, and its plan
 /// ([`crate::module::plan`]), whatever the lengths.

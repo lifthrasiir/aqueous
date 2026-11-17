@@ -4258,6 +4258,41 @@ mod tests {
         assert!(f.eval(&Native::default()).unwrap() == d);
     }
 
+    /// A CAB file's stored folder is its files' contents as they are, recompressed in turn: a
+    /// JPEG file in it by aqr-jpeg (installers' `Data1.cab` are often of stored folders).
+    #[test]
+    fn stored_cab_folders_taken_apart() {
+        let jpeg =
+            std::fs::read(format!("{}/../../codecs/aqr-jpeg/tests/data/gradient.jpg", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let name = b"photo.jpg\0";
+        // the header, a folder of one stored block (at `data`), the file, the block
+        let data = 36 + 8 + 16 + name.len();
+        let len = data + 8 + jpeg.len();
+        let mut d = Vec::with_capacity(len);
+        d.extend_from_slice(b"MSCF\0\0\0\0");
+        d.extend_from_slice(&(len as u32).to_le_bytes());
+        d.extend_from_slice(&[0; 4]);
+        d.extend_from_slice(&44u32.to_le_bytes()); // the first file's entry
+        d.extend_from_slice(&[0; 4]);
+        d.extend_from_slice(&[3, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0]); // 1.3, a folder, a file
+        d.extend_from_slice(&(data as u32).to_le_bytes());
+        d.extend_from_slice(&[1, 0, 0, 0]); // a block, stored
+        d.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
+        d.extend_from_slice(&[0; 6]); // at 0, of folder 0
+        d.extend_from_slice(&[0x21, 0x5a, 0, 0, 0x20, 0]); // a date, a time, attributes
+        d.extend_from_slice(name);
+        d.extend_from_slice(&[0; 4]); // no checksum
+        d.extend_from_slice(&(jpeg.len() as u16).to_le_bytes());
+        d.extend_from_slice(&(jpeg.len() as u16).to_le_bytes());
+        d.extend_from_slice(&jpeg);
+        assert_eq!(detect(&d), Some(Format::Cab));
+        let f = recompress(&d, &Options { shared_modules: true, ..Options::default() });
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::MSZIP));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(f.eval(&Native::default()).unwrap() == d);
+    }
+
     /// LZX streams (CAB's folders, CHM's sections) are taken from level 9 only.
     #[test]
     fn lzx_from_level_9() {
