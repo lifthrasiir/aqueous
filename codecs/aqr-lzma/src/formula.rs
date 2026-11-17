@@ -9,12 +9,31 @@ use aqr_bcj::formula::{self as bcj, Filter};
 
 use crate::{alone, lzma2, recons, xz};
 
-pub use crate::module::{decode, decode2, index};
+pub use crate::module::{decode, decode_alone, decode2, index};
 
 pub const MODULE: Module = Module::new("lzma-recons", 4).with_plan(plan).with_contents(&[0]);
 
 /// The module rebuilding the segments of LZMA2 streams, one after another.
 pub const LZMA2: Module = Module::new("lzma2-recons", 3).with_plan(plan2).with_contents(&[0]);
+
+/// The module decoding a `.lzma` file to its data ([`crate::module::decode_alone`]): data
+/// compressed by LZMA in place of the archive's zstd, stored as it is (aqr-compress's `-Z lzma`).
+pub const DECODE: Module = Module::new("lzma-decode", 1).with_plan(plan_decode);
+
+/// The memory of [`DECODE`], a whole module ([`crate::module::decode_alone`]), laid out as a
+/// stack: its input copied, then its output reserved whole, and the literal probabilities.
+fn plan_decode(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    use aqr_api::stack::{block, whole};
+    let (&[input], &[len]) = (u.inputs, u.outputs) else { return None };
+    let h = alone::parse(u.content(0)?)?;
+    let lit = 2 * crate::lzma::lit_len(h.props) as u64;
+    Some(u.initial() + whole(u.params.len() as u64, &[], &[input]) + block(len) + block(lit))
+}
+
+/// The application of [`DECODE`] to `file`, a `.lzma` file of `len` bytes of data.
+pub fn decoded(file: Node, len: u64) -> Node {
+    Node::apply(DECODE, Vec::new(), vec![file], len)
+}
 
 /// The memory of [`MODULE`]: its plan ([`crate::plan::decode`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {

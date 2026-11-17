@@ -96,6 +96,8 @@ aqr-7z = { path = "../../codecs/aqr-7z" }
 aqr-exe = { path = "../../codecs/aqr-exe" }
 aqr-prores = { path = "../../codecs/aqr-prores", features = ["synth"] }
 wat = "1"
+# (`.lzma` files for lzma-decode, as aqr-compress's `-Z lzma` makes them)
+liblzma = { version = "0.4", default-features = false, features = ["static", "parallel"] }
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
 # directory.

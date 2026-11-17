@@ -399,6 +399,24 @@ of the file around them as it is: its headers, the blocks' padding and checks, t
 the footer. A block of filters before LZMA2 has its data under aqr-bcj's modules of them (the
 first filter innermost), where encoding gives back what LZMA2 decodes to.
 
+## The module lzma-decode
+
+The module `lzma-decode`, version 1 (`formula::DECODE`, `module::decode_alone`), decodes a
+`.lzma` file: its output is the file's data. It is for data that the archive stores compressed
+by LZMA rather than by its own Zstandard (aqr-compress's `-Z lzma`, an experiment): the `.lzma`
+file is stored as it is.
+
+- **Params**: none (empty).
+- **Resources**: none.
+- **Inputs**: exactly one, the `.lzma` file (LZMA-alone): the properties byte (below 225), the
+  dictionary size (le32, not used: the whole output is at hand), the data size (le64; all
+  ones: unknown), then an [LZMA stream](#lzma-streams) of those properties, which ends at the
+  end of the input: with an end marker where the size is unknown, else either way.
+- **Output**: the stream's data, which must be exactly the `len` the application declares (and
+  the size the header gives, where it gives one). Any other input is corrupt.
+- **Memory**: a whole module, its plan the input copied, the output and the literal
+  probabilities (`formula::plan_decode`).
+
 ## Encoder choices (informative)
 
 - `split` decodes the stream, codes its packets as above, and checks that encoding the packets

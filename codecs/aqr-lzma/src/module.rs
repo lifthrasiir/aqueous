@@ -20,6 +20,26 @@ pub fn decode2(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Res
     decode_with(params, inputs, len, threads, |d, r, _, out| lzma2::join_onto(d, r, out))
 }
 
+/// The module `lzma-decode`: the data, of `len` bytes, of the `.lzma` file (LZMA-alone: its
+/// header, then the stream) that is its one input. No parameters. For data compressed by LZMA
+/// in place of the archive's zstd (aqr-compress's `-Z lzma`).
+pub fn decode_alone(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (&[], &[file]) = (params, inputs) else { return Err(Error("one input and no parameters wanted")) };
+    let h = crate::alone::parse(file).ok_or_else(corrupt)?;
+    let len = usize::try_from(len).map_err(|_| corrupt())?;
+    if h.size.is_some_and(|s| s != len as u64) {
+        return Err(Error("output of another length"));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| corrupt())?;
+    let used = crate::lzma::decode_data(&file[crate::alone::HEADER..], h.props, h.size, len, &mut out)
+        .map_err(|_| corrupt())?;
+    if out.len() != len || crate::alone::HEADER + used != file.len() {
+        return Err(Error("output of another length"));
+    }
+    Ok(out)
+}
+
 /// What rebuilds a stream from its data and its record (and the threads for its parts), onto
 /// the end of a vector.
 type Join = fn(&[u8], &[u8], usize, &mut Vec<u8>) -> Option<()>;

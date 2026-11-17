@@ -185,6 +185,10 @@ pub const LZMA: Module = aqr_lzma::formula::MODULE;
 /// the segments'.
 pub const LZMA2: Module = aqr_lzma::formula::LZMA2;
 
+/// aqr-lzma decoding of a `.lzma` file stored as it is: data compressed by LZMA in place of
+/// the archive's zstd (aqr-compress's `-Z lzma`).
+pub const LZMA_DECODE: Module = aqr_lzma::formula::DECODE;
+
 /// The filters of xz and 7z (aqr-bcj): a branch converter's encoding of the data (x86, PowerPC,
 /// IA-64, ARM, ARM Thumb, SPARC, ARM64, RISC-V; parameters: the start address, le32 or none),
 /// Delta's (parameters: the distance less one), BCJ2's main, call and jump streams (inputs:
@@ -474,6 +478,7 @@ const NATIVE: &[Known] = &[
     entry(LZ4),
     entry(LZMA),
     entry(LZMA2),
+    entry(LZMA_DECODE),
     entry(BCJ_X86),
     entry(BCJ_POWERPC),
     entry(BCJ_IA64),

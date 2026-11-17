@@ -376,6 +376,12 @@ pub static KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/lz4-recons.block"),
     },
     Known {
+        name: "lzma-decode",
+        version: 1,
+        sha512_256: hex("0a4aae3de201085372643b1d52ffc77cdfb377a7d5613d08223ff0989f5e86b4"),
+        block: include_bytes!("../wasm/lzma-decode.block"),
+    },
+    Known {
         name: "lzma-recons",
         version: 4,
         sha512_256: hex("3e8fc43baf255f73b9cb90c512eb5795634d2d31560c07ae03e0cebec61ba8f0"),

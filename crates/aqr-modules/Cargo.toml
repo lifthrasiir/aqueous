@@ -91,6 +91,11 @@ path = "src/bin/lzma2-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "lzma-decode"
+path = "src/bin/lzma-decode.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "prores-recons"
 path = "src/bin/prores-recons.rs"
 required-features = ["wasm"]

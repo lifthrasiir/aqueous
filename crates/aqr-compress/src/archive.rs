@@ -2016,6 +2016,7 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     f.streams.iter_mut().for_each(|s| s.content = false);
     let counts: Vec<usize> = leaves.iter().map(|l| l.outputs.len()).collect();
     f.root = Node::Concat(leaves.iter_mut().flat_map(|l| std::mem::take(&mut l.outputs)).collect());
+    crate::lzma::apply(&mut f, Some(&counts), opt.threads);
     // (at level 0 each file a leaf block of its own, uncompressed: no formula block, which
     // would be Zstandard)
     if opt.level != Level::STORED {

@@ -139,6 +139,7 @@ mod formats;
 mod git;
 mod hdf5;
 mod inflated;
+mod lzma;
 pub mod mapped;
 mod memory;
 pub use memory::{DEFAULT_BOUND, Fallback, bound_text, fallbacks};
@@ -1038,6 +1039,7 @@ fn finish(
         true => mirroring.insert(aqr::Mirroring::new(out, opt.size_hint)),
         false => out,
     };
+    lzma::apply(&mut f, None, opt.threads);
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     memory::note_kept(&f, opt.application_bound, d.len() as u64);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not

@@ -377,6 +377,51 @@ pub fn decode(input: &[u8], props: Props, size: Option<u64>, limit: usize) -> Re
     Ok(Decoded { data, packets, marker, used: c.pos })
 }
 
+/// Decodes a stream of `size` bytes (None: up to the end marker) into `out` (empty), its data
+/// alone (no packets kept), up to `limit` bytes; the bytes of the stream read.
+pub fn decode_data(
+    input: &[u8],
+    props: Props,
+    size: Option<u64>,
+    limit: usize,
+    out: &mut Vec<u8>,
+) -> Result<usize, Error> {
+    let mut c = Decoder::new(input).ok_or(Error::Corrupt)?;
+    let mut m = Model::new(props);
+    out.clear();
+    let end = size.map_or(limit, |s| usize::try_from(s).unwrap_or(usize::MAX).min(limit));
+    loop {
+        let pos = out.len();
+        if size == Some(pos as u64) && c.finished() {
+            break;
+        }
+        let pk = m.code(&mut c, out, pos, Packet::LIT);
+        if c.overrun > 4 {
+            return Err(Error::Corrupt);
+        }
+        match pk.kind {
+            Kind::Lit => out.push(pk.dist as u8),
+            _ if pk.dist == END => break,
+            _ => {
+                let src = pos.checked_sub(pk.dist as usize + 1).ok_or(Error::Corrupt)?;
+                if pos + pk.len as usize > end {
+                    return Err(Error::Corrupt);
+                }
+                for j in 0..pk.len as usize {
+                    out.push(out[src + j]);
+                }
+            }
+        }
+        if out.len() > end {
+            return Err(Error::Corrupt);
+        }
+    }
+    if !c.finished() || c.overrun > 0 {
+        return Err(Error::Corrupt);
+    }
+    Ok(c.pos)
+}
+
 /// Whether `input` starts like a stream: it decodes to `n` bytes (or as far as it goes, or to
 /// an end marker) without a distance reaching back past the data's start, as other data soon
 /// does.

@@ -324,6 +324,7 @@ dependencies = [
  "aqr-zstd",
  "flate2",
  "libc",
+ "liblzma",
  "memmap2",
  "xxhash-rust",
  "zstd",
@@ -398,6 +399,7 @@ dependencies = [
  "aqr-xsv",
  "aqr-zip",
  "aqr-zstd",
+ "liblzma",
  "sha2",
  "wat",
 ]

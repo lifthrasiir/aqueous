@@ -9,6 +9,8 @@ publish = false
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-decompress = { path = "../aqr-decompress" }
+# XZ Utils' liblzma (0BSD), as aqr-pack builds it: `-Z lzma`'s streams (`src/lzma.rs`)
+liblzma = { version = "0.4", default-features = false, features = ["static", "parallel"] }
 aqr-7z = { path = "../../codecs/aqr-7z" }
 aqr-mszip = { path = "../../codecs/aqr-mszip" }
 aqr-alz = { path = "../../codecs/aqr-alz" }

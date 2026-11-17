@@ -233,6 +233,7 @@ pub const NATIVE: &[Native] = &[
     ),
     threaded("lzma-recons", |p, _, i, n, t| aqr_lzma::module::decode(p, i, n, t).map_err(err)),
     threaded("lzma2-recons", |p, _, i, n, t| aqr_lzma::module::decode2(p, i, n, t).map_err(err)),
+    bare("lzma-decode", |p, _, i, n, _| aqr_lzma::module::decode_alone(p, i, n).map_err(err)),
     bra!("bcj-x86", X86),
     bra!("bcj-powerpc", PowerPc),
     bra!("bcj-ia64", Ia64),

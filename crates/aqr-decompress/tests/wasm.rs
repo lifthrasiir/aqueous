@@ -787,6 +787,73 @@ fn inflate_same_as_wasm() {
     }
 }
 
+/// `data` as a `.lzma` file by liblzma (an end marker, the size unknown) of properties
+/// `lc`, `lp`, `pb`, at preset 6.
+fn lzma_file(data: &[u8], lc: u32, lp: u32, pb: u32) -> Vec<u8> {
+    use liblzma::stream::{Action, LzmaOptions, Status, Stream};
+    let mut opts = LzmaOptions::new_preset(6).unwrap();
+    opts.literal_context_bits(lc).literal_position_bits(lp).position_bits(pb).dict_size(1 << 20);
+    let mut s = Stream::new_lzma_encoder(&opts).unwrap();
+    let mut out = Vec::with_capacity(data.len() + 4096);
+    while s.process_vec(&data[s.total_in() as usize..], &mut out, Action::Finish).unwrap() != Status::StreamEnd {
+        out.reserve(out.capacity());
+    }
+    out
+}
+
+/// `.lzma` files decoded (lzma-decode) natively and as WebAssembly alike, its plan holding to
+/// the page (small and of several MB, of every literal context the encoder takes), and damaged
+/// in turn failing alike (or giving the same).
+#[test]
+fn lzma_decode_plans_hold() {
+    let mut data: Vec<u8> = (0..200_000)
+        .flat_map(|i| {
+            format!(
+                "line {} of {}
+",
+                i % 211,
+                i * 7 % 1013
+            )
+            .into_bytes()
+        })
+        .collect();
+    let mut x = 7u32;
+    for _ in 0..300_000 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        data.push((x >> 24) as u8);
+    }
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for (n, (lc, lp, pb)) in [
+        (0, (3, 0, 2)),
+        (1, (3, 0, 2)),
+        (1000, (0, 4, 0)),
+        (data.len(), (3, 0, 2)),
+        (data.len(), (4, 0, 4)),
+        (data.len(), (1, 3, 1)),
+    ] {
+        let d = &data[..n];
+        let file = lzma_file(d, lc, lp, pb);
+        let mut f = Formula::default();
+        let s = f.push("lzma", file.clone());
+        f.root = aqr_lzma::formula::decoded(s, n as u64);
+        plan_holds(&format!("lzma-decode {n} {lc}/{lp}/{pb}"), f.clone(), d);
+        if n < 1000 {
+            continue;
+        }
+        for at in [1, 2, 3] {
+            let mut bad = f.clone();
+            let i = file.len() * at / 4;
+            bad.streams[0].data.to_mut()[i] ^= 0x10;
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            assert_eq!(n.is_ok(), w.is_ok(), "at {i}: {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "at {i}");
+            }
+        }
+    }
+}
+
 /// The CRC-32 of `d`.
 fn crc_of(d: &[u8]) -> u32 {
     let mut t = Vec::new();
