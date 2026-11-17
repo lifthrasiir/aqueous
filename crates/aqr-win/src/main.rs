@@ -36,6 +36,8 @@
 #[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
+mod dpi;
+#[cfg(windows)]
 mod gather;
 #[cfg(windows)]
 mod install;

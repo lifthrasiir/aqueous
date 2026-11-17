@@ -33,7 +33,7 @@ fn interpreter() -> Decoded<&'static Interpreter> {
     i.as_ref().map_err(|e| Failure::Resource(format!("modules not run as WebAssembly: {e}")))
 }
 
-#[cfg(all(windows, target_arch = "x86_64", not(target_vendor = "win7")))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn place(bytes: &[u8]) -> Result<Interpreter, String> {
     let image = aqr_blob::load(&[bytes])?;
     let b = &image.blobs[0];
@@ -47,9 +47,9 @@ fn place(bytes: &[u8]) -> Result<Interpreter, String> {
     Ok(i)
 }
 
-#[cfg(not(all(windows, target_arch = "x86_64", not(target_vendor = "win7"))))]
+#[cfg(not(all(windows, target_arch = "x86_64")))]
 fn place(_: &[u8]) -> Result<Interpreter, String> {
-    Err("the interpreter blob runs on Windows 10 on, x86-64, alone".into())
+    Err("the interpreter blob runs on Windows x86-64 alone".into())
 }
 
 /// `wasm`, of SHA-512/256 `hash`, checked against the profile and compiled (once a process).

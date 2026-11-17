@@ -1,7 +1,9 @@
-//! Packs `aqr.exe` and `aqr-win.exe` of `target/dist` (or of the directory `AQR_WIN_INSTALL_FROM`
-//! names) into the payload (`src/payload.rs`), checked by unpacking it; and embeds the manifest and
-//! the icon. Where the two are not there, the payload is empty and the installer says so: building
-//! them is up to whoever builds the installer (`cargo build --profile dist -p aqr -p aqr-win`).
+//! Packs `aqr.exe` and `aqr-win.exe` of the same target's `dist` (`target/dist`, or
+//! `target/x86_64-win7-windows-msvc/dist` of `cargo win7`; or of the directory
+//! `AQR_WIN_INSTALL_FROM` names) into the payload (`src/payload.rs`), checked by unpacking it; and
+//! embeds the manifest and the icon. Where the two are not there, the payload is empty and the
+//! installer says so: building them is up to whoever builds the installer (`cargo +NIGHTLY win7
+//! -p aqr -p aqr-win`, as the release does, or `cargo build --profile dist -p aqr -p aqr-win`).
 //! The version (aqr-version) goes in the resources and is `env!("AQR_VERSION")`.
 
 #[path = "src/payload.rs"]
@@ -46,7 +48,7 @@ fn main() {
         FILES.iter().map(|&name| Some((name, std::fs::read(from.join(name)).ok()?))).collect();
     let Some(files) = files else {
         println!(
-            "cargo:warning=no {} in {}: the installer is built without them (cargo build --profile dist -p aqr -p aqr-win)",
+            "cargo:warning=no {} in {}: the installer is built without them (cargo +NIGHTLY win7 -p aqr -p aqr-win)",
             FILES.join(" and "),
             from.display()
         );
@@ -68,19 +70,16 @@ fn main() {
     std::fs::write(&out, packed).unwrap();
 }
 
-/// `AQR_WIN_INSTALL_FROM` (relative to the workspace's root), else `dist` in the target
-/// directory (`OUT_DIR` being `TARGET/PROFILE/build/CRATE-HASH/out`, or
-/// `TARGET/TRIPLE/PROFILE/...`).
+/// `AQR_WIN_INSTALL_FROM` (relative to the workspace's root), else `dist` of the same target
+/// (`OUT_DIR` being `TARGET/PROFILE/build/CRATE-HASH/out`: `TARGET/dist`, or
+/// `TARGET/TRIPLE/PROFILE/...`: `TARGET/TRIPLE/dist`, as `cargo win7` builds them).
 fn source() -> PathBuf {
     if let Some(d) = std::env::var_os("AQR_WIN_INSTALL_FROM") {
         return Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..").join(d);
     }
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let profile = out.ancestors().nth(3).unwrap();
-    let up = profile.parent().unwrap();
-    let triple = std::env::var("TARGET").unwrap();
-    let target = if up.file_name().is_some_and(|n| n == triple.as_str()) { up.parent().unwrap() } else { up };
-    target.join("dist")
+    profile.parent().unwrap().join("dist")
 }
 
 fn pack(files: &[(&str, Vec<u8>)]) -> Vec<u8> {

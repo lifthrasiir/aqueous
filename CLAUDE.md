@@ -24,10 +24,12 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     for the hash it was packed for, so `cargo aqr` runs pack.py again where the pack's modules
     are not those of known.rs (where there is a pack), or its `sfx.pack` is not of this form.
     The release workflow runs pack.py before building aqr.exe (without the pack, aqr.exe runs
-    no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX; its win7 job too
-    (that aqr links Wasmtime, so only bundles the interpreter blob).
-    The stub and the blobs are of the target of Windows 7 on (pack.py: the stub for
-    `x86_64-win7-windows-msvc`), so an SFX made by either aqr runs on Windows 7 on.
+    no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX. Every Windows
+    binary of a release (aqr, aqr-win, the installer, the stub, the blobs) is of the target of
+    Windows 7 on (`cargo +NIGHTLY win7`, `.cargo/config.toml`; pack.py's stub for
+    `x86_64-win7-windows-msvc`): what newer systems add is looked up as it runs (the sandbox's
+    mitigations, aqr-wasmrt's placeholders), and std's SRW locks were no slower (10gb at -5).
+    Development builds (`cargo aqr`, the tests) stay of `x86_64-pc-windows-msvc`.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
@@ -74,7 +76,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
     blob. `Sandboxed` (native where known, else a worker) stays in aqr-decompress, which has the
     native modules. Wasmtime is linked only with the feature `wasmtime` (`wasm/engine.rs`; always
-    but on Windows x86-64 — the win7 target links it too, its C runtime all static —
+    but on Windows x86-64 —
     aqr-decompress enabling it there, and in the tests' dev-dependencies);
     else `wasm/interp.rs` runs the modules by the interpreter blob the program gives
     (`wasm::set_interpreter`, aqr: its pack's), placed at run time (`aqr_blob::load`), a worker
@@ -84,8 +86,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     time (Windows x86-64: relocated, imports between them and from system libraries bound,
     exception tables registered), and (feature `runner`) the interpreter blob's client: its
     `Vtable`, `Interpreter` (a `Runner`), failures crossing the C ABI with their kinds.
-    Windows binaries link the Visual C++ runtime statically and the UCRT as Windows 10's DLL
-    (`.cargo/config.toml`; the win7 target and the SFX stub both static), so no redistributable
+    Windows binaries link the Visual C++ runtime statically (`.cargo/config.toml`: the release's,
+    of the win7 target, and the SFX stub the UCRT too; development builds the UCRT as Windows
+    10's DLL), so no redistributable
     is needed; the blobs still import vcruntime140.dll and the UCRT's DLLs (a static copy would
     go uninitialised: no DllMain runs), and `load` and `aqr-ld merge` bind those imports to the
     program's own (`CRT_TABLE`, `CRT_NAMES`: `aqr-ld blob(s)` fail on a function not there), with a
@@ -135,7 +138,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     no API of Windows 8 on: one set of blobs and one stub for every Windows), which `aqr-ld
     merge` can take;
     `merge-test.sh ARCHIVE...` is the end-to-end test (needs nightly and build-std). The nightly of
-    these builds (and of the release's win7 job) is pinned by the root file `nightly-toolchain`
+    these builds (and of the release's Windows binaries) is pinned by the root file `nightly-toolchain`
     (`AQR_NIGHTLY` overrides it), as the custom target's JSON is unstable.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).

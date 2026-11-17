@@ -84,7 +84,11 @@ On macOS, `Aqueous.app` (`crates/aqr-mac/bundle.sh`, into `target/dist`) adds Fi
 and opens `.aqr` files, its progress shown on the files in Finder: [crates/aqr-mac](crates/aqr-mac/README.md).
 
 For binaries to distribute, build with `cargo build --profile dist -p aqr` (into `target/dist`):
-fat LTO, a few minutes for 0.3–0.7% fewer instructions than `-r`.
+fat LTO, a few minutes for 0.3–0.7% fewer instructions than `-r`. The release's Windows binaries
+are built with `cargo +NIGHTLY win7 -p aqr -p aqr-win` (NIGHTLY the toolchain of the file
+`nightly-toolchain`, with `rust-src`) into `target/x86_64-win7-windows-msvc/dist`: the tier-3
+`x86_64-win7-windows-msvc`, std built with it and the C runtime linked statically, so that they
+run on Windows 7 on (what newer systems add is looked up as they run).
 
 On Windows x86-64, `aqr.exe` links no WebAssembly runtime: it runs the modules that it has no
 native code for (those of earlier releases' archives, `-Z wasm`) by an interpreter it carries,
@@ -99,10 +103,6 @@ release-test`: optimised and incremental). The tests of aqr-flate, aqr-png and a
 with [flate-zoo](https://crates.io/crates/flate-zoo)'s encoders, which want a C/C++ compiler; with
 MSVC, the backends that do not work with it (zlib-ng, zlib-chromium, Go's and a few others) are
 left out.
-
-Rust's `x86_64-pc-windows-msvc` targets Windows 10 on; for Windows 7 and 8, build with
-`cargo +nightly win7 -p aqr` (the tier-3 `x86_64-win7-windows-msvc`, std built with it and the C
-runtime linked statically) into `target/x86_64-win7-windows-msvc/dist`.
 
 ## Disclaimer
 

@@ -457,9 +457,10 @@ footer a { color: var(--ink-2); }
   const REPO = 'lifthrasiir/aqueous';
   // The release workflow's asset names (.github/workflows/release.yml), most specific first.
   const KINDS = [
-    { re: /-win-install\.exe$/, os: 'windows', name: 'Windows installer', desc: 'aqr and Explorer integration, Windows 10 on' },
+    { re: /-win-install\.exe$/, os: 'windows', name: 'Windows installer', desc: 'aqr and Explorer integration, Windows 7 on' },
+    // (releases before 2026-11-17 had a build of their own for Windows 7 and 8)
     { re: /-win7\.exe$/, os: 'windows', name: 'Windows 7 and 8', desc: 'aqr.exe, command line' },
-    { re: /\.exe$/, os: 'windows', name: 'Windows', desc: 'aqr.exe, command line, Windows 10 on' },
+    { re: /\.exe$/, os: 'windows', name: 'Windows', desc: 'aqr.exe, command line, Windows 7 on' },
     { re: /-mac\.zip$/, os: 'mac', name: 'macOS', desc: 'Aqueous.app, universal, with Finder services' },
     { re: /-linux-x86_64\.tar\.xz$/, os: 'linux', name: 'Linux x86_64', desc: 'aqr, glibc of Ubuntu 22.04 on' },
     { re: /-linux-aarch64\.tar\.xz$/, os: 'linux', name: 'Linux aarch64', desc: 'aqr, glibc of Ubuntu 22.04 on' },

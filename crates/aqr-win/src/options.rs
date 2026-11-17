@@ -25,7 +25,6 @@ use windows_sys::Win32::UI::Controls::{
     SetScrollInfo, TBM_SETPAGESIZE, TBM_SETPOS, TBM_SETRANGE, TBM_SETTICFREQ, TBS_AUTOTICKS, TBS_HORZ, TTDT_AUTOPOP,
     TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTTOOLINFOW,
 };
-use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, SetFocus, VK_SHIFT, VK_TAB,
 };
@@ -701,13 +700,12 @@ pub fn open(job: Option<Arc<Job>>, paths: Vec<PathBuf>) -> Option<Vec<String>> {
             inst,
             null(),
         );
-        let dpi = GetDpiForWindow(main).max(96) as i32;
+        let dpi = crate::dpi::for_window(main) as i32;
         let mut lf: LOGFONTW = std::mem::zeroed();
-        SystemParametersInfoForDpi(
+        crate::dpi::parameters(
             SPI_GETICONTITLELOGFONT,
             size_of::<LOGFONTW>() as u32,
             (&mut lf as *mut LOGFONTW).cast(),
-            0,
             dpi as u32,
         );
         let font = CreateFontIndirectW(&lf);
@@ -819,16 +817,8 @@ type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 fn frame(a: &App, open: bool) -> (i32, i32) {
     let w = a.cx.s(MAIN_W + if open { PANE_W } else { 0 });
     let mut r = RECT { left: 0, top: 0, right: w, bottom: a.cx.s(H) };
-    // SAFETY: a rectangle of ours, the style the window was made with
-    unsafe {
-        AdjustWindowRectExForDpi(
-            &mut r,
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-            0,
-            0,
-            a.cx.dpi as u32,
-        );
-    }
+    // (the style the window was made with)
+    crate::dpi::adjust(&mut r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, 0, a.cx.dpi as u32);
     (r.right - r.left, r.bottom - r.top)
 }
 
