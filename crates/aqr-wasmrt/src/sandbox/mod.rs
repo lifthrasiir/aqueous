@@ -59,6 +59,12 @@ pub const SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "
 /// Serves the decoder that started this process as its worker, then exits: the whole of the
 /// worker program, or the part of the host's that its arguments for workers lead to.
 pub fn worker_main() -> ! {
+    // std's keys of HashMap taken on this thread, which impersonates a token that opens the
+    // system's libraries: on the win7 target they are advapi32's SystemFunction036, which aqr
+    // looks up as it runs (crates/aqr/src/random.rs) and which loads cryptbase.dll; a thread of
+    // the pool would take them later of the locked-down token, which opens no file.
+    #[cfg(windows)]
+    let _ = std::collections::hash_map::RandomState::new();
     // (with no Wasmtime linked, the interpreter blob's worker serves: its engine's)
     #[cfg(not(feature = "wasmtime"))]
     crate::wasm::worker_main();

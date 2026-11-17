@@ -220,8 +220,13 @@ jobs:
           cp codecs/aqr-jpeg/tests/data/gradient.jpg README.md smoke/
           aqr=target/x86_64-win7-windows-msvc/dist/aqr.exe
           $aqr -c -q -o smoke.aqr smoke
-          $aqr -d -q -Z wasm -o smoke-wasm smoke.aqr
-          diff -r smoke smoke-wasm
+          # (ten times, each starting a sandbox worker: its start failed at times, one in three,
+          # where the loader's threads had a library to open, crates/aqr/build.rs)
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+              rm -rf smoke-wasm
+              $aqr -d -q -Z wasm -o smoke-wasm smoke.aqr
+              diff -r smoke smoke-wasm
+          done
           $aqr -c -q --format sfx -o smoke.exe smoke
           ./smoke.exe smoke-out
           diff -r smoke smoke-out

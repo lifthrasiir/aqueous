@@ -276,6 +276,8 @@ mod list;
 mod meta;
 mod names;
 mod pass;
+#[cfg(all(windows, target_vendor = "win7"))]
+mod random;
 mod session;
 mod sfx;
 mod sparse;
