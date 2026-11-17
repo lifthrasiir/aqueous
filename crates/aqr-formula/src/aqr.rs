@@ -371,6 +371,11 @@ pub struct Encoder {
     /// Whether the streams compressed are kept in [`Encoder::streams`] (not while
     /// [`Encoder::encode_pieces`] writes).
     keep: std::cell::Cell<bool>,
+    /// Whether archives are being sized ([`Encoder::len_of`]): their slices are of blocks all of
+    /// them, no literals ([`literals`]). A formula sized is sized alone, where its small
+    /// streams would be literals; archived with others (embedded, or in a batch), they are
+    /// merged with those of their class, which they compress better with.
+    sizing: std::cell::Cell<bool>,
     /// Compressed resources by their [`StreamKey`].
     resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
     /// The archived lengths ([`Encoder::raw_len`]) of streams forgotten compressed
@@ -601,6 +606,7 @@ impl Encoder {
             threads: threads.max(1),
             streams: RefCell::default(),
             keep: std::cell::Cell::new(true),
+            sizing: std::cell::Cell::new(false),
             resources: RefCell::default(),
             raw_lens: RefCell::default(),
             trials: RefCell::default(),
@@ -808,7 +814,10 @@ impl Encoder {
     /// The length of the archive of `f` that `write` writes, as [`Encoder::len`] counts it.
     fn len_of(&self, f: &Formula, write: impl FnOnce(&mut Count) -> Result<()>) -> Result<usize> {
         let mut n = Count(0);
-        write(&mut n)?;
+        let sizing = self.sizing.replace(true);
+        let written = write(&mut n);
+        self.sizing.set(sizing);
+        written?;
         let held = self.held.borrow();
         let modules = if self.shared_modules { self.modules_len(f)? } else { self.module_bytes_len(f)? };
         let resources = match self.shared {
@@ -981,9 +990,12 @@ impl Encoder {
             // the non-leaf blocks sliced, of each stream in order, by their ordinals
             let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| s.inputs()).collect();
             nodes.push(&f.root);
-            let used = sliced(f.streams.len(), |s| len_of(s).unwrap_or(0), nodes);
+            let lit = literals(f.streams.len(), |s| s < own && !self.sizing.get(), nodes.iter().copied());
+            let mut used = sliced(f.streams.len(), |s| len_of(s).unwrap_or(0), nodes);
+            used.iter_mut().zip(&lit).filter(|(_, l)| **l).for_each(|(u, _)| u.clear());
             let (ordinals, next) = listed(&used, 0..f.streams.len());
-            let (data, modules, resources) = self.formula_data(f, &ordinals, next, checksum)?;
+            let lit: Vec<Option<&[&[u8]]>> = lit.iter().enumerate().map(|(s, &l)| l.then(|| streams[s])).collect();
+            let (data, modules, resources) = self.formula_data(f, &ordinals, &lit, next, checksum)?;
 
             // (the blocks compressed at once beforehand, kept or not: where kept, as a formula is
             // compared with its data, those compressed already are skipped)
@@ -1029,6 +1041,7 @@ impl Encoder {
         &self,
         f: &'f Formula,
         ordinals: &[Vec<Option<u64>>],
+        literals: &[Option<&[&[u8]]>],
         next: u64,
         checksum: Option<u64>,
     ) -> Result<(Vec<u8>, Vec<Module>, Vec<&'f Resource>)> {
@@ -1056,6 +1069,7 @@ impl Encoder {
         let classes = self.classes_of(&modules);
         let mut e = Emit {
             ordinals,
+            literals,
             modules: &modules,
             classes: &classes,
             resources: &resources,
@@ -1116,7 +1130,7 @@ impl Encoder {
         if all.iter().enumerate().any(|(i, &o)| o != i as u64) {
             return Err(Error::new("the sink's blocks not all of the formula's"));
         }
-        let (data, modules, resources) = self.formula_data(f, &ordinals, next, checksum)?;
+        let (data, modules, resources) = self.formula_data(f, &ordinals, &[], next, checksum)?;
         let mut out = Vec::new();
         let level = self.base_level();
         for &m in &modules {
@@ -1166,6 +1180,9 @@ fn how_of(level: Level, class: &str, kind: Kind) -> How {
 struct Emit<'a> {
     /// The index of each block of each stream in the formula block's list ([`listed`]).
     ordinals: &'a [Vec<Option<u64>>],
+    /// The bytes of each stream whose slices are literals ([`literals`]), in pieces; `None` (or
+    /// past the end) for those sliced.
+    literals: &'a [Option<&'a [&'a [u8]]>],
     modules: &'a [Module],
     /// The classes of tasks of each module (by index; those past the end have none): a
     /// application declaring fewer task limits is written with [`crate::NO_LIMIT`] for the rest.
@@ -1184,6 +1201,13 @@ impl Emit<'_> {
             Node::Slice { len: 0, .. } => {
                 self.out.push(CONCAT);
                 varint::put(self.out, 0);
+                self.stack.push(None);
+            }
+            &Node::Slice { stream, start, len } if self.literals.get(stream).is_some_and(Option::is_some) => {
+                let data = self.literals[stream].unwrap();
+                self.out.push(LITERAL);
+                varint::put(self.out, len);
+                cut(data, start as usize, len as usize).into_iter().for_each(|p| self.out.extend_from_slice(p));
                 self.stack.push(None);
             }
             &Node::Slice { stream, start, len } => {
@@ -1397,13 +1421,20 @@ pub fn description_bound(n: &Node) -> usize {
         Node::Patch(p) => description_bound(&p.source) + description_bound(&p.patch) + 1 + varint::len(p.len),
         // (whichever is chosen)
         Node::Either(e) => description_bound(&e.kept).max(description_bound(&e.made)),
-        &Node::Slice { start, len, .. } => match slice_blocks(start, len)[..] {
-            [(_, at, n)] => 1 + 3 + varint::len(at) + varint::len(n),
-            ref pieces => {
-                let each = 1 + 3 + 2 * varint::len(BLOCK as u64);
-                pieces.len() * each + 1 + varint::len(pieces.len() as u64)
+        &Node::Slice { start, len, .. } => {
+            let sliced = match slice_blocks(start, len)[..] {
+                [(_, at, n)] => 1 + 3 + varint::len(at) + varint::len(n),
+                ref pieces => {
+                    let each = 1 + 3 + 2 * varint::len(BLOCK as u64);
+                    pieces.len() * each + 1 + varint::len(pieces.len() as u64)
+                }
+            };
+            // (or a literal: [`literals`])
+            match len <= LITERAL_MAX.get() as u64 {
+                true => sliced.max(1 + varint::len(len) + len as usize),
+                false => sliced,
             }
-        },
+        }
         Node::Concat(ns) | Node::Pack(ns) => {
             ns.iter().map(description_bound).sum::<usize>() + 1 + varint::len(ns.len() as u64)
         }
@@ -2251,6 +2282,41 @@ fn sliced<'a>(
         });
     }
     used
+}
+
+aqr_common::zopt! {
+    /// The most bytes that the slices of a stream take, all of them, for the stream to be no
+    /// block: its slices are Literal instructions of the formula then ([`literals`]). A small
+    /// block costs its header and a Zstandard frame of its own, which compresses little; the
+    /// formula block compresses the literals with the rest. Of 1,024 bytes: an installer of a
+    /// CAB (Adobe Reader 9.4) 7.9 KB smaller, the CHM, ALZ and EGG samples and 61 small files
+    /// 0.9 KB in all; from 4 KiB on the EGG samples grew (streams that compress better at the
+    /// levels picked for them than in the formula block).
+    static LITERAL_MAX: Opt<usize> =
+        Opt::size("formula:literal-max", LITERAL_MAX_DEFAULT, "most bytes of a stream's slices written as literals of the formula, not a block");
+}
+
+/// [`LITERAL_MAX`] by default; none in this crate's tests, which look at the blocks of small
+/// streams (those of literals set it).
+#[cfg(not(test))]
+const LITERAL_MAX_DEFAULT: usize = 1 << 10;
+#[cfg(test)]
+const LITERAL_MAX_DEFAULT: usize = 0;
+
+/// Of each of `streams` streams, whether the slices below `nodes` are literals, not slices of
+/// its blocks: where they take [`LITERAL_MAX`] bytes at most, all of them (as many times as
+/// they are emitted), and `can` takes the stream.
+fn literals<'a>(streams: usize, can: impl Fn(usize) -> bool, nodes: impl IntoIterator<Item = &'a Node>) -> Vec<bool> {
+    let max = LITERAL_MAX.get() as u64;
+    let mut taken = vec![0u64; streams];
+    for n in nodes {
+        n.visit(&mut |n| {
+            if let &Node::Slice { stream, len, .. } = n {
+                taken[stream] = taken[stream].saturating_add(len);
+            }
+        });
+    }
+    (0..streams).map(|s| taken[s] > 0 && taken[s] <= max && can(s)).collect()
 }
 
 /// The index in a formula block's list of each block `used` ([`sliced`]), those of the streams
@@ -5653,14 +5719,44 @@ mod tests {
             description_bound(&f.root) >= {
                 let ordinals = ordinals_of(&f);
                 let mut out = Vec::new();
-                Emit { ordinals: &ordinals, modules: &[], classes: &[], resources: &[], out: &mut out, stack: vec![] }
-                    .node(&f.root);
+                Emit {
+                    ordinals: &ordinals,
+                    literals: &[],
+                    modules: &[],
+                    classes: &[],
+                    resources: &[],
+                    out: &mut out,
+                    stack: vec![],
+                }
+                .node(&f.root);
                 out.len()
             }
         );
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
         assert!(decode(&c, &natives()).unwrap() == want);
         assert_eq!(open(&c, &natives()).unwrap().parsed().unwrap().non_leaf.len(), 3);
+    }
+
+    /// The slices of streams of few bytes are Literal instructions where `formula:literal-max`
+    /// allows (those streams no blocks), of the others slices of their blocks; the output the
+    /// same either way.
+    #[test]
+    fn small_streams_as_literals() {
+        let mut f = Formula::default();
+        let big: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        f.push("a", b"tiny header".to_vec());
+        f.push("b", big);
+        f.push("c", b"xy".to_vec());
+        let rev = Node::apply(REV, vec![1, 2, 3], vec![Node::slice(0, 4, 7), Node::slice(2, 0, 2)], 9);
+        f.root = Node::concat([Node::slice(0, 0, 4), Node::slice(1, 0, 5000), rev, Node::slice(0, 0, 4)]);
+        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        // (stream 0 sliced for 15 bytes, stream 2 for 2)
+        for (max, blocks) in [(0, 3), (14, 2), (15, 1), (1 << 20, 0)] {
+            let _max = LITERAL_MAX.set_here(max);
+            let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+            assert_eq!(decode(&c, &natives()).unwrap(), want, "at {max}");
+            assert_eq!(open(&c, &natives()).unwrap().parsed().unwrap().non_leaf.len(), blocks, "at {max}");
+        }
     }
 
     /// A file whose formula is a concatenation (of slices, applications and a concatenation in
@@ -6142,8 +6238,15 @@ mod tests {
         };
         let ordinals = ordinals_of(&f);
         let mut out = Vec::new();
-        let mut e =
-            Emit { ordinals: &ordinals, modules: &[REV], classes: &[], resources: &[], out: &mut out, stack: vec![] };
+        let mut e = Emit {
+            ordinals: &ordinals,
+            literals: &[],
+            modules: &[REV],
+            classes: &[],
+            resources: &[],
+            out: &mut out,
+            stack: vec![],
+        };
         for (i, s) in f.shared.iter().enumerate() {
             e.shared(i, s);
         }
@@ -7430,8 +7533,16 @@ mod tests {
             }));
             let ordinals = ordinals_of(&f);
             let mut out = Vec::new();
-            Emit { ordinals: &ordinals, modules: &[REV], classes: &[2], resources: &[], out: &mut out, stack: vec![] }
-                .node(&f.root);
+            Emit {
+                ordinals: &ordinals,
+                literals: &[],
+                modules: &[REV],
+                classes: &[2],
+                resources: &[],
+                out: &mut out,
+                stack: vec![],
+            }
+            .node(&f.root);
             let bound = description_bound(&f.root);
             assert!(bound >= out.len(), "{bound} < {}", out.len());
         }
@@ -7445,6 +7556,7 @@ mod tests {
             let mut out = Vec::new();
             Emit {
                 ordinals: &ordinals,
+                literals: &[],
                 modules: &[REV],
                 classes: &[],
                 resources: &resources,

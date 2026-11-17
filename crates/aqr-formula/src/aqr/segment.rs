@@ -486,22 +486,12 @@ impl SegmentWriter {
             return Err(e);
         }
 
-        let uses: Vec<Uses> = leaves.iter().map(|l| uses(f, l)).collect();
-        // leaves of a stream of their own, all of it (or of nothing)
-        let mut slicers = vec![0usize; f.streams.len()];
-        uses.iter().for_each(|u| u.streams.iter().for_each(|&st| slicers[st] += 1));
-        let data_leaf = |i: usize| -> Option<Option<usize>> {
-            let l = &leaves[i];
-            match (&l.outputs[..], uses[i].shared.is_empty()) {
-                ([n], true) if n.is_empty() => Some(None),
-                ([Node::Slice { stream, start: 0, len }], true)
-                    if slicers[*stream] == 1 && *len == f.streams[*stream].data.len() as u64 =>
-                {
-                    Some(Some(*stream))
-                }
-                _ => None,
-            }
-        };
+        let (uses, data_leaves, literal) = planned(f, leaves);
+        let data_leaf = |i: usize| data_leaves[i];
+        // (the streams of literals as pieces: [`Emit::literals`])
+        let one: Vec<[&[u8]; 1]> =
+            f.streams.iter().zip(&literal).map(|(s, &l)| [if l { &s.data[..] } else { &[][..] }]).collect();
+        let lit: Vec<Option<&[&[u8]]>> = one.iter().zip(&literal).map(|(o, &l)| l.then_some(&o[..])).collect();
 
         // the groups of leaves slicing a stream together, by their first leaf
         let mut group: Vec<usize> = (0..leaves.len()).collect();
@@ -647,7 +637,8 @@ impl SegmentWriter {
                         b.layout.push((Placed::Data(i), out.len() - at));
                     }
                     None => {
-                        let data = enc.leaf_formula(f, &leaves[i], &uses[i], non_leaf, &ordinals, &modules, &refs);
+                        let data =
+                            enc.leaf_formula(f, &leaves[i], &uses[i], non_leaf, &ordinals, &lit, &modules, &refs);
                         let n = leaves[i].outputs.len() as u64;
                         formula_block(out, n, &always_compressed(&mut enc.cctx(), &[&data], level, enc.threads)?);
                         b.layout.push((Placed::Formula(i), out.len() - at));
@@ -864,6 +855,7 @@ impl Encoder {
         u: &Uses,
         first: u64,
         ordinals: &[Option<u64>],
+        literals: &[Option<&[&[u8]]>],
         modules: &[Module],
         resources: &[&Resource],
     ) -> Vec<u8> {
@@ -896,6 +888,7 @@ impl Encoder {
         let classes = self.classes_of(&u.modules);
         let mut e = Emit {
             ordinals: &local,
+            literals,
             modules: &u.modules,
             classes: &classes,
             resources: &own_resources,
@@ -957,9 +950,40 @@ fn written(f: &Formula, uses: &[Uses]) -> Vec<bool> {
 /// Compresses the streams of `f` that [`SegmentWriter::batch`] writes of `leaves`, as it does
 /// ([`Encoder::precompress`]), beforehand: a batch made ready while another is written.
 pub fn precompress_leaves(enc: &Encoder, f: &Formula, leaves: &[Leaf]) -> Result<()> {
-    let uses: Vec<Uses> = leaves.iter().map(|l| uses(f, l)).collect();
+    let (uses, _, _) = planned(f, leaves);
     let written = written(f, &uses);
     enc.precompress(&(0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect::<Vec<_>>())
+}
+
+/// What each of `leaves` takes of `f` ([`uses`]), but the streams whose slices are literals; of
+/// each leaf, whether it is a data block (`Some`), of a stream of its own, all of it (or of
+/// nothing); and of each stream, whether its slices are literals ([`super::literals`]: not of
+/// the stream of a data block, nor of one written to a sink).
+fn planned(f: &Formula, leaves: &[Leaf]) -> (Vec<Uses>, Vec<Option<Option<usize>>>, Vec<bool>) {
+    let mut uses: Vec<Uses> = leaves.iter().map(|l| uses(f, l)).collect();
+    let mut slicers = vec![0usize; f.streams.len()];
+    uses.iter().for_each(|u| u.streams.iter().for_each(|&st| slicers[st] += 1));
+    let data_leaves: Vec<Option<Option<usize>>> = (0..leaves.len())
+        .map(|i| match (&leaves[i].outputs[..], uses[i].shared.is_empty()) {
+            ([n], true) if n.is_empty() => Some(None),
+            ([Node::Slice { stream, start: 0, len }], true)
+                if slicers[*stream] == 1 && *len == f.streams[*stream].data.len() as u64 =>
+            {
+                Some(Some(*stream))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut of_data = vec![false; f.streams.len()];
+    data_leaves.iter().for_each(|d| d.flatten().into_iter().for_each(|st| of_data[st] = true));
+    // (each leaf's nodes, as its formula block emits them)
+    let nodes = (0..leaves.len()).filter(|&i| data_leaves[i].is_none()).flat_map(|i| {
+        let shared = uses[i].shared.iter().flat_map(|&s| f.shared[s].inputs());
+        shared.chain(&leaves[i].outputs)
+    });
+    let literal = super::literals(f.streams.len(), |st| !of_data[st] && f.streams[st].data.sunk_in().is_none(), nodes);
+    uses.iter_mut().for_each(|u| u.streams.retain(|&st| !literal[st]));
+    (uses, data_leaves, literal)
 }
 
 fn uses(f: &Formula, leaf: &Leaf) -> Uses {
@@ -1033,6 +1057,43 @@ mod tests {
 
     fn entry(parent: Option<usize>, name: &str, node: EntryNode) -> Entry {
         Entry { parent, name: name.as_bytes().to_vec(), node, extra: Extra::default() }
+    }
+
+    /// A batch's streams of few bytes are literals of each leaf's formula that slices them (no
+    /// block of them), where `formula:literal-max` allows: counted over all the leaves.
+    #[test]
+    fn small_streams_as_literals() {
+        let mut f = Formula::default();
+        let a = f.push("a", b"hello".to_vec());
+        let big: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        let b = f.push("b", big.clone());
+        let enc = Encoder::new(Level::Zstd(3));
+        let rev = |inputs| Node::apply(REV, vec![1, 2, 3], inputs, 3005);
+        let leaves = [
+            Leaf { outputs: vec![rev(vec![a.clone(), b.clone()])], sums: vec![None] },
+            Leaf { outputs: vec![Node::concat([a.clone(), b])], sums: vec![None] },
+        ];
+        let first: Vec<u8> = [&b"hello"[..], &big].concat().into_iter().rev().collect();
+        let second = [&b"hello"[..], &big].concat();
+        // (stream 0 taken for 10 bytes: by both leaves)
+        for (max, non_leaf) in [(9, 2), (10, 1)] {
+            let _max = super::super::LITERAL_MAX.set_here(max);
+            let mut w = SegmentWriter::new();
+            let mut out = SegmentWriter::header().to_vec();
+            let mut batch = w.batch(&enc, &f, &leaves).unwrap();
+            assert_eq!(batch.layout.iter().filter(|p| matches!(p.0, Placed::NonLeaf(_))).count(), non_leaf);
+            w.commit(&batch);
+            let (d, r) = batch.take_blocks();
+            out.extend_from_slice(&d[r]);
+            let mut t = Tree::default();
+            t.entries.push(entry(None, "x", EntryNode::File(0)));
+            t.entries.push(entry(None, "y", EntryNode::File(1)));
+            let contents: Vec<ContentAt> =
+                batch.leaf_at.iter().map(|&leaf| ContentAt { leaf, output: 0, size: 3005 }).collect();
+            out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+            let Ok(Value::Tree(_, files)) = decode_value(&out, &natives()) else { panic!("at {max}") };
+            assert_eq!(files, [first.clone(), second.clone()], "at {max}");
+        }
     }
 
     /// A segment of two batches, each checked alone first: the second takes the modules the

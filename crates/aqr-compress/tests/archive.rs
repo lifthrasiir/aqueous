@@ -256,8 +256,10 @@ fn batches() {
     assert_eq!(r.files[1].same_as, Some(3));
     let (threaded, _) = archived(&files, &Options { batch: 30_000, threads: 4, ..Options::default() });
     assert!(threaded == c, "{} bytes on 4 threads, {} on one", threaded.len(), c.len());
-    // (the text files no longer solid all together)
-    assert!(c.len() > one.len() && r.solid.iter().all(|s| s.len <= 2 * 30_000), "{} {}", c.len(), one.len());
+    // (the text files no longer solid all together; larger by little, if at all, as the
+    // batches' small streams are literals of their formulas)
+    assert!(r.solid.iter().all(|s| s.len <= 2 * 30_000), "{:?}", r.solid.iter().map(|s| s.len).collect::<Vec<_>>());
+    assert!(c.len() < one.len() + one.len() / 100, "{} {}", c.len(), one.len());
     let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
     assert!((attributed + r.overhead as f64 - c.len() as f64).abs() < 1.0);
 }
