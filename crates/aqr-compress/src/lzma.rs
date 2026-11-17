@@ -1,12 +1,14 @@
-//! `-Z lzma`: streams of a batch compressed by LZMA (XZ Utils' liblzma) in place of the
-//! archive's zstd, an experiment on what LZMA would save. Each stream taken is stored as it is,
-//! a `.lzma` file, and every slice of it becomes an application of aqr-lzma's `lzma-decode`
-//! to it. Only streams that are sliced whole (every slice of them all of them) are taken, as
-//! an application's output is not sliced; and only those long enough, as each is compressed
-//! alone (the shorter ones are left to the archive, which compresses them together); and none
-//! that a sink has written already (`aqr::sink`).
+//! `-Z lzma`: the streams of a batch compressed by LZMA (XZ Utils' liblzma) in place of the
+//! archive's zstd, an experiment on what LZMA would save. The slices of the streams taken are
+//! put one after another (of a class together, each stream's in order), the bytes of each slice
+//! once for each time it is taken, and compressed together, in groups of `lzma:group` bytes at
+//! most, each a `.lzma` file stored as it is: an application of aqr-lzma's `lzma-decode`, its
+//! output split into the slices. The formula takes each output once, so that what several
+//! files share (the slices of `Formula::share_slices`) is in the group as often as it is
+//! taken, which LZMA's window codes as matches (as NOSSO does, with no dedup of its own). The
+//! streams left: those of [`Kind::Compressed`], those not made yet or that a sink has written
+//! already (`aqr::sink`), and those that a slice goes past the end of.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use aqr_formula::{Formula, Kind, Node};
@@ -14,27 +16,26 @@ use aqr_formula::{Formula, Kind, Node};
 aqr_common::zopt! {
     /// Whether the streams are compressed by LZMA rather than zstd ([`apply`]).
     pub(crate) static LZMA: Opt<bool> = Opt::flag("lzma", false, "streams compressed by LZMA (liblzma, lzma-decode) rather than zstd");
-    /// The shortest stream compressed by LZMA.
-    static MIN: Opt<usize> = Opt::size("lzma:store-min", 64 << 10, "shortest stream that -Z lzma compresses by LZMA");
+    /// The most bytes of a group, compressed as one `.lzma` file.
+    static GROUP: Opt<usize> = Opt::size("lzma:group", 128 << 20, "most bytes of -Z lzma's groups, each compressed as one .lzma file");
+    /// The largest dictionary.
+    static DICT: Opt<usize> = Opt::size("lzma:store-dict", 128 << 20, "largest dictionary of -Z lzma's .lzma files (the encoder takes about 11 times it)");
     /// The preset of liblzma.
     static PRESET: Opt<u32> = Opt::value("lzma:store-preset", 9, "liblzma's preset (0-9) of -Z lzma's streams");
     /// Whether the preset is extreme.
     static EXTREME: Opt<bool> = Opt::flag("lzma:store-extreme", false, "liblzma's extreme preset of -Z lzma's streams");
 }
 
-/// Bytes of the streams taken and of their `.lzma` files, of the whole run.
+/// Bytes of the groups and of their `.lzma` files, and the groups, of the whole run.
 static TAKEN: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 /// `data` as a `.lzma` file (LZMA-alone: an end marker, the size unknown), of a dictionary
-/// no larger than the data needs.
+/// no larger than the data needs (nor `lzma:store-dict`).
 fn compress(data: &[u8]) -> Vec<u8> {
     use liblzma::stream::{Action, LzmaOptions, PRESET_EXTREME, Status, Stream};
     let preset = PRESET.get() | if EXTREME.get() { PRESET_EXTREME } else { 0 };
     let mut opts = LzmaOptions::new_preset(preset).expect("a preset of liblzma");
-    // (the dictionary of the preset, but no larger than the data: the decoder's memory)
-    let preset_dict = [256 << 10, 1 << 20, 2 << 20, 4 << 20, 4 << 20, 8 << 20, 8 << 20, 16 << 20, 32 << 20, 64 << 20]
-        [PRESET.get().min(9) as usize];
-    opts.dict_size((data.len().next_power_of_two() as u32).clamp(4096, preset_dict));
+    opts.dict_size(data.len().next_power_of_two().min(DICT.get()).clamp(4096, 1 << 30) as u32);
     let mut s = Stream::new_lzma_encoder(&opts).expect("liblzma's encoder");
     let mut out = Vec::with_capacity(data.len() / 3 + 4096);
     loop {
@@ -48,139 +49,139 @@ fn compress(data: &[u8]) -> Vec<u8> {
     }
 }
 
-/// How the slices of a stream take it: all of it each, or in pieces one after another, each
-/// once (of one leaf, where that matters), or otherwise.
-#[derive(Clone, PartialEq)]
-enum Taken {
-    None,
-    Whole,
-    Pieces(Vec<(u64, u64)>, Option<usize>),
-    Other,
-}
-
-/// Takes the streams of `f` to compress by LZMA where `-Z lzma` is given: its root a file's
-/// (`leaves` None), or the outputs of a batch's leaves, `leaves` of them each, one after another.
-/// A stream sliced whole is an application of `lzma-decode` wherever it is sliced; one sliced in
-/// pieces one after another, each once, its output split into them (of a single leaf, not in an
-/// application of several outputs: each is taken in the leaf it is made in). Where the `.lzma`
-/// file saves less than 1/32, the stream is left as it is.
-pub(crate) fn apply(f: &mut Formula, leaves: Option<&[usize]>, threads: usize) {
+/// Takes the slices of the streams of `f` into groups compressed by LZMA where `-Z lzma` is
+/// given ([the module's](self)), each an application of several outputs, whose outputs the
+/// slices become. Returns whether any is made: the formula's parts taking them must then be of
+/// one leaf, as each output is taken in the leaf it is made in. A group whose `.lzma` file saves
+/// less than 1/32 is left as it was.
+pub(crate) fn apply(f: &mut Formula, threads: usize) -> bool {
     if !LZMA.get() {
-        return;
+        return false;
     }
     let _s = aqr_common::trace::span("lzma");
-    let mut taken = vec![Taken::None; f.streams.len()];
+    let n = f.streams.len();
     let lens: Vec<u64> = f.streams.iter().map(|s| s.data.len() as u64).collect();
-    // (`leaf` None: in an application of several outputs)
-    let mut look = |n: &Node, leaf: Option<usize>| {
-        n.visit(&mut |n| {
-            let &Node::Slice { stream, start, len } = n else { return };
-            let t = &mut taken[stream];
-            let whole = start == 0 && len == lens[stream];
-            let placed = leaves.is_none() || leaf.is_some();
-            *t = match std::mem::replace(t, Taken::None) {
-                Taken::None | Taken::Whole if whole => Taken::Whole,
-                Taken::None if placed => Taken::Pieces(vec![(start, len)], leaf),
-                Taken::Pieces(mut p, l) if !whole && placed && l == leaf => {
-                    p.push((start, len));
-                    Taken::Pieces(p, l)
-                }
-                _ => Taken::Other,
-            };
-        })
-    };
-    f.shared.iter().flat_map(|s| s.inputs()).for_each(|n| look(n, None));
-    match (&f.root, leaves) {
-        (Node::Concat(ns), Some(counts)) => {
-            let mut at = 0;
-            for (l, &k) in counts.iter().enumerate() {
-                ns[at..at + k].iter().for_each(|n| look(n, Some(l)));
-                at += k;
-            }
+    // (every slice where the formula takes it, in the order that `map_slices` visits them)
+    let mut slices: Vec<(usize, u64, u64)> = Vec::new();
+    let mut past = vec![false; n];
+    f.map_slices(&mut |stream, start, len| {
+        if stream < n {
+            past[stream] |= start.checked_add(len).is_none_or(|e| e > lens[stream]);
         }
-        (root, _) => look(root, Some(0)),
-    }
-    for (s, t) in taken.iter_mut().enumerate() {
-        if let Taken::Pieces(p, _) = t {
-            p.sort_unstable();
-            let mut end = 0;
-            let tiles = p.iter().all(|&(a, n)| std::mem::replace(&mut end, a + n) == a && n > 0);
-            if !tiles || end != lens[s] {
-                *t = Taken::Other;
-            }
-        }
-    }
-    let min = MIN.get();
-    let chosen: Vec<usize> = (0..f.streams.len())
-        .filter(|&s| {
+        slices.push((stream, start, len));
+        Node::Slice { stream, start, len }
+    });
+    let taken: Vec<bool> = (0..n)
+        .map(|s| {
             let st = &f.streams[s];
-            matches!(taken[s], Taken::Whole | Taken::Pieces(..))
-                && st.kind != Kind::Compressed
-                && st.data.len() >= min
-                && !st.data.is_lazy()
-                && st.data.sunk_in().is_none()
+            !past[s] && st.kind != Kind::Compressed && !st.data.is_lazy() && st.data.sunk_in().is_none()
         })
         .collect();
-    let made = aqr_common::pool::par_map(chosen.len(), threads, |i| {
-        let d = &f.streams[chosen[i]].data;
-        let c = compress(d);
+    // (the order of the bytes: the classes in the order of their first streams, each stream's
+    // slices by where they start, the longest first)
+    let mut rank: Vec<usize> = vec![0; n];
+    {
+        let mut classes: Vec<(&str, Kind)> = Vec::new();
+        for (s, st) in f.streams.iter().enumerate() {
+            let c = (&*st.class, st.kind);
+            rank[s] = classes.iter().position(|&k| k == c).unwrap_or_else(|| {
+                classes.push(c);
+                classes.len() - 1
+            });
+        }
+    }
+    let mut order: Vec<usize> =
+        (0..slices.len()).filter(|&k| slices[k].0 < n && taken[slices[k].0] && slices[k].2 > 0).collect();
+    order.sort_by_key(|&k| {
+        let (s, a, l) = slices[k];
+        (rank[s], s, a, std::cmp::Reverse(l))
+    });
+    if order.is_empty() {
+        return false;
+    }
+    // (the groups, of consecutive slices in `order`)
+    let solid = GROUP.get().max(1) as u64;
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut bytes = 0;
+    for (i, &k) in order.iter().enumerate() {
+        let l = slices[k].2;
+        match groups.last_mut() {
+            Some(g) if bytes + l <= solid => {
+                g.end = i + 1;
+                bytes += l;
+            }
+            _ => {
+                groups.push(i..i + 1);
+                bytes = l;
+            }
+        }
+    }
+    let made = aqr_common::pool::par_map(groups.len(), threads.min(groups.len()), |g| {
+        let ks = &order[groups[g].clone()];
+        let total: u64 = ks.iter().map(|&k| slices[k].2).sum();
+        let mut d = Vec::with_capacity(total as usize);
+        for &k in ks {
+            let (s, a, l) = slices[k];
+            d.extend_from_slice(&f.streams[s].data[a as usize..(a + l) as usize]);
+        }
+        let c = compress(&d);
         (c.len() < d.len() - d.len() / 32).then_some(c)
     });
-    // (of each stream taken: the node of all of it, or the outputs of its pieces, by start)
-    let mut whole = vec![None; f.streams.len()];
-    let mut pieces: HashMap<(usize, u64), Node> = HashMap::new();
-    // (the applications split, pushed once the old slices are replaced: their outputs are
-    // known before, of the indices they will have)
+    // (of each slice taken, its group's application, as it is to be pushed, and its output)
+    let mut to: Vec<Option<(usize, usize)>> = vec![None; slices.len()];
+    let base = f.shared.len();
     let mut splits = Vec::new();
-    for (&s, c) in chosen.iter().zip(made) {
+    for (g, c) in groups.iter().zip(made) {
         let Some(c) = c else { continue };
-        let len = lens[s];
+        let ks = &order[g.clone()];
+        let sizes: Vec<u64> = ks.iter().map(|&k| slices[k].2).collect();
+        let len: u64 = sizes.iter().sum();
         TAKEN[0].fetch_add(len, Relaxed);
         TAKEN[1].fetch_add(c.len() as u64, Relaxed);
         TAKEN[2].fetch_add(1, Relaxed);
-        let Node::Apply(mut a) = aqr_lzma::formula::decoded(Node::slice(s, 0, c.len() as u64), len) else {
-            unreachable!()
+        let clen = c.len() as u64;
+        let limit;
+        let file = {
+            let probe = aqr_lzma::formula::decoded(Node::slice(0, 0, clen), len);
+            let Node::Apply(p) = &probe else { unreachable!() };
+            limit = crate::memory::limit(p, &[clen], &[len], &vec![&c[..]]);
+            f.push_as("lzma", Kind::Compressed, c)
         };
-        let limit = crate::memory::limit(&a, &[c.len() as u64], &[len], &vec![&c[..]]);
+        let Node::Apply(mut a) = aqr_lzma::formula::decoded(file, len) else { unreachable!() };
         (a.memory_limit, a.task_limits) = (limit.instance, limit.tasks);
-        let st = &mut f.streams[s];
-        st.data = c.into();
-        st.kind = Kind::Compressed;
-        match &taken[s] {
-            Taken::Pieces(p, _) => {
-                let shared = f.shared.len() + splits.len();
-                for (index, &(start, len)) in p.iter().enumerate() {
-                    pieces.insert((s, start), Node::Output { shared, index, len });
-                }
-                splits.push((*a, p.iter().map(|x| x.1).collect::<Vec<u64>>()));
-            }
-            _ => whole[s] = Some(Node::Apply(a)),
+        for (index, &k) in ks.iter().enumerate() {
+            to[k] = Some((base + splits.len(), index));
         }
+        splits.push((*a, sizes));
     }
-    if TAKEN[2].load(Relaxed) > 0 {
+    if splits.is_empty() {
+        return false;
+    }
+    {
         let [a, b, n] = [0, 1, 2].map(|k| TAKEN[k].load(Relaxed));
-        eprintln!("aqr-compress: -Z lzma: {n} streams so far, {a} -> {b} bytes");
+        eprintln!("aqr-compress: -Z lzma: {n} groups so far, {a} -> {b} bytes");
     }
+    // (the slices of no bytes of the streams taken: nothing, so that nothing takes them)
+    let mut k = 0;
     f.map_slices(&mut |stream, start, len| {
-        if let Some(w) = &whole[stream] {
-            return w.clone();
-        }
-        match pieces.remove(&(stream, start)) {
-            Some(o) => o,
+        let t = to[k].take();
+        k += 1;
+        match t {
+            Some((shared, index)) => Node::Output { shared, index, len },
+            None if len == 0 && stream < n && taken[stream] => Node::Concat(Vec::new()),
             None => Node::Slice { stream, start, len },
         }
     });
-    debug_assert!(pieces.is_empty());
-    let before = f.shared.len();
     for (a, sizes) in splits {
         f.split(a, sizes);
     }
     // (the applications made first: those before may take their outputs)
     let made = f.shared.len();
-    if made > before {
-        let order: Vec<usize> = (before..made).chain(0..before).collect();
-        f.reorder_shared(&order);
-    }
+    let order: Vec<usize> = (base..made).chain(0..base).collect();
+    f.reorder_shared(&order);
+    // (the streams taken let go: no slice takes them any more)
+    f.compact();
+    true
 }
 
 #[cfg(test)]

@@ -2016,15 +2016,34 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     f.streams.iter_mut().for_each(|s| s.content = false);
     let counts: Vec<usize> = leaves.iter().map(|l| l.outputs.len()).collect();
     f.root = Node::Concat(leaves.iter_mut().flat_map(|l| std::mem::take(&mut l.outputs)).collect());
-    crate::lzma::apply(&mut f, Some(&counts), opt.threads);
     // (at level 0 each file a leaf block of its own, uncompressed: no formula block, which
     // would be Zstandard)
     if opt.level != Level::STORED {
         f.merge_classes_within(opt.block as u64);
     }
+    // (with -Z lzma, the streams in groups of several outputs, taken by all the leaves: one
+    // leaf of them all, each output taken in the leaf it is made in)
+    let solid = crate::lzma::apply(&mut f, opt.threads);
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
+    if solid && leaves.len() > 1 {
+        let starts: Vec<usize> = leaves
+            .iter()
+            .scan(0, |at, l| {
+                let s = *at;
+                *at += l.outputs.len();
+                Some(s)
+            })
+            .collect();
+        at.iter_mut().for_each(|(l, k)| (*l, *k) = (0, starts[*l] + *k));
+        let mut one = Leaf { outputs: Vec::new(), sums: Vec::new() };
+        for l in leaves.drain(..) {
+            one.outputs.extend(l.outputs);
+            one.sums.extend(l.sums);
+        }
+        leaves.push(one);
+    }
     Analyzed { f, leaves, at, enc, memo, alternatives: (0, 0, 0) }
 }
 
