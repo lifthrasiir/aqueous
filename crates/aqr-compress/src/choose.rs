@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use aqr_formula::aqr::Encoder;
-use aqr_formula::{Either, Formula, Node};
+use aqr_formula::{Apply, Either, Formula, Module, Node, Of, Resource};
 
 aqr_common::zopt! {
     /// How the alternatives are chosen: by trial, or all made or all kept (to measure).
@@ -51,6 +51,218 @@ pub(crate) fn choose(f: &mut Formula, enc: &Encoder) -> Chosen {
     let count = made.iter().filter(|&&m| m).count();
     f.resolve_parts(&made);
     Chosen { alternatives: n, made: count, bytes }
+}
+
+/// A block that an archive holds once however many applications take it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Block {
+    Module(Module),
+    Resource(Resource),
+}
+
+/// Of a file archived alone ([`crate::recompress_at`]), chooses the alternatives of `f`, those
+/// that lost to their data only by the module and resource blocks they take among them
+/// ([`crate::Verdict::Close`], sized without those), and resolves them ([`Formula::resolve`]):
+/// made where the blocks they take are paid for, by what all the alternatives made that take a
+/// block gain (each gain shared among the blocks it takes by their bytes); one taking a block
+/// that is not paid for is kept, and so is any other taking it. The blocks the rest of the formula
+/// takes are paid for already. An alternative of a scan whose files were all kept beside their
+/// data (sized `(0, len)`, [`crate::scanned`]) gains nothing itself: it is made where one within
+/// it is.
+pub(crate) fn by_blocks(f: &mut Formula, enc: &Encoder) -> Chosen {
+    let eithers = f.eithers();
+    let n = eithers.len();
+    if n == 0 {
+        return Chosen::default();
+    }
+    let index: HashMap<*const Either, usize> = eithers.iter().enumerate().map(|(i, e)| (e.1 as *const _, i)).collect();
+    let parent = parents(f, &index);
+    let mut cost: HashMap<Block, usize> = HashMap::new();
+    let mut paid: Vec<Block> = Vec::new();
+    blocks_of(f, &f.root, &mut paid);
+    let own: Vec<Vec<Block>> = eithers
+        .iter()
+        .map(|(_, e)| {
+            let mut own = Vec::new();
+            blocks_of(f, &e.made, &mut own);
+            own.retain(|b| !paid.contains(b));
+            for b in &own {
+                if !cost.contains_key(b) {
+                    let c = match b {
+                        Block::Module(m) => enc.module_once_len(*m),
+                        Block::Resource(r) => enc.resource_once_len(r),
+                    };
+                    cost.insert(b.clone(), c.expect("modules and resources of the formula"));
+                }
+            }
+            own.retain(|b| cost[b] > 0);
+            own
+        })
+        .collect();
+    let scans: Vec<bool> = eithers.iter().map(|(_, e)| e.sizes.0 == 0 && e.sizes.1 as u64 == e.len).collect();
+    let gain: Vec<f64> = eithers.iter().map(|(_, e)| e.sizes.1 as f64 - e.sizes.0 as f64).collect();
+    let mut made: Vec<bool> = (0..n).map(|i| !scans[i] && gain[i] > 0.0).collect();
+    let mut unpaid: Vec<Block> = Vec::new();
+    loop {
+        // (an alternative counts where what holds it is chosen: parents after their children)
+        let mut live = vec![false; n];
+        for i in (0..n).rev() {
+            live[i] = match parent[i] {
+                None => true,
+                Some((p, true)) => live[p] && (made[p] || scans[p]),
+                Some((p, false)) => live[p] && !made[p],
+            };
+        }
+        let mut paying: HashMap<&Block, f64> = HashMap::new();
+        for i in (0..n).filter(|&i| live[i] && made[i]) {
+            let total: usize = own[i].iter().map(|b| cost[b]).sum();
+            for b in &own[i] {
+                *paying.entry(b).or_default() += gain[i] * cost[b] as f64 / total as f64;
+            }
+        }
+        let short: Vec<Block> =
+            paying.into_iter().filter(|&(b, p)| p < cost[b] as f64).map(|(b, _)| b.clone()).collect();
+        if short.is_empty() {
+            break;
+        }
+        unpaid.extend(short);
+        for i in 0..n {
+            made[i] &= !own[i].iter().any(|b| unpaid.contains(b));
+        }
+    }
+    // (a scan's alternative made where one within it is: those within come first)
+    for i in 0..n {
+        if made[i]
+            && let Some((p, true)) = parent[i]
+            && scans[p]
+        {
+            made[p] = true;
+        }
+    }
+    // together, as the archive has them: what each gained apart may be what the data kept
+    // shares with the rest of it (copies of a file), which none alone tells
+    if made.iter().any(|&m| m) && !pays_together(f, &index, &parent, &made, &own, &cost, enc) {
+        made.fill(false);
+    }
+    let chosen = Chosen {
+        alternatives: n,
+        made: made.iter().filter(|&&m| m).count(),
+        bytes: eithers.iter().map(|e| e.1.sizes.0).sum(),
+    };
+    f.resolve(&made);
+    chosen
+}
+
+/// Whether the alternatives of `f` that `made` tells of ([`by_blocks`]: of the blocks they take,
+/// `own`, of bytes `cost`) archive in less made than kept, all together: the outermost of those
+/// chosen, each side's bytes of a class one after another, and the blocks.
+fn pays_together(
+    f: &Formula,
+    index: &HashMap<*const Either, usize>,
+    parent: &[Option<(usize, bool)>],
+    made: &[bool],
+    own: &[Vec<Block>],
+    cost: &HashMap<Block, usize>,
+    enc: &Encoder,
+) -> bool {
+    let eithers = f.eithers();
+    let n = eithers.len();
+    // (those in what is chosen: parents after their children)
+    let mut live = vec![false; n];
+    for i in (0..n).rev() {
+        live[i] = parent[i].is_none_or(|(p, made_side)| live[p] && made[p] == made_side);
+    }
+    let (kept, mut sides): (Vec<bool>, HashMap<&str, Sides>) = (vec![false; n], HashMap::new());
+    let mut blocks: Vec<&Block> = Vec::new();
+    for i in (0..n).filter(|&i| live[i] && made[i]) {
+        own[i].iter().for_each(|b| {
+            if !blocks.contains(&b) {
+                blocks.push(b)
+            }
+        });
+        // (the outermost: those within it are of its sides)
+        if parent[i].is_some_and(|(p, _)| made[p]) {
+            continue;
+        }
+        let e = eithers[i].1;
+        for (side, (node, of)) in [(&e.kept, &kept[..]), (&e.made, made)].into_iter().enumerate() {
+            let mut pieces = ByClass::new();
+            pieces_of(f, node, index, of, &mut pieces);
+            for (class, pieces) in pieces {
+                sides.entry(class).or_default()[side].extend(pieces);
+            }
+        }
+    }
+    let mut sides: Vec<_> = sides.into_iter().collect();
+    sides.sort_unstable_by_key(|s| s.0);
+    let lens = enc
+        .len_after_each(sides.len(), |j| (sides[j].1.iter().map(|p| p.concat()).collect(), Vec::new()))
+        .expect("zstd");
+    let (kept, made) = lens.iter().fold((0, 0), |(k, m), l| (k + l[0], m + l[1]));
+    made + blocks.iter().map(|b| cost[*b]).sum::<usize>() < kept
+}
+
+/// Of each alternative of `f` (by its index in `index`), the one it is within, if any, and
+/// whether on the side of the formula made.
+fn parents(f: &Formula, index: &HashMap<*const Either, usize>) -> Vec<Option<(usize, bool)>> {
+    fn walk(
+        n: &Node,
+        at: Option<(usize, bool)>,
+        index: &HashMap<*const Either, usize>,
+        out: &mut [Option<(usize, bool)>],
+    ) {
+        match n {
+            Node::Either(e) => {
+                let i = index[&(&**e as *const Either)];
+                out[i] = at;
+                walk(&e.kept, Some((i, false)), index, out);
+                walk(&e.made, Some((i, true)), index, out);
+            }
+            Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| walk(n, at, index, out)),
+            Node::Apply(a) => a.inputs.iter().for_each(|n| walk(n, at, index, out)),
+            Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| walk(n, at, index, out)),
+            Node::Slice { .. } | Node::Output { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        }
+    }
+    let mut out = vec![None; index.len()];
+    f.shared.iter().flat_map(|s| s.inputs()).chain([&f.root]).for_each(|n| walk(n, None, index, &mut out));
+    out
+}
+
+/// The blocks that node `n` of `f` takes, with the applications of several outputs it takes
+/// outputs of, into `out` (each once): of the alternatives within it, those of the data kept.
+fn blocks_of(f: &Formula, n: &Node, out: &mut Vec<Block>) {
+    fn walk(f: &Formula, n: &Node, seen: &mut [bool], out: &mut Vec<Block>) {
+        let apply = |a: &Apply, out: &mut Vec<Block>| {
+            let blocks = [Block::Module(a.module)].into_iter().chain(a.resources.iter().cloned().map(Block::Resource));
+            for b in blocks {
+                if !out.contains(&b) {
+                    out.push(b);
+                }
+            }
+        };
+        match n {
+            Node::Apply(a) => {
+                apply(a, out);
+                a.inputs.iter().for_each(|n| walk(f, n, seen, out));
+            }
+            &Node::Output { shared, .. } => {
+                if let Some(s) = f.shared.get(shared)
+                    && !std::mem::replace(&mut seen[shared], true)
+                {
+                    if let Of::Apply(a) = &s.of {
+                        apply(a, out);
+                    }
+                    s.inputs().iter().for_each(|n| walk(f, n, seen, out));
+                }
+            }
+            Node::Either(e) => walk(f, &e.kept, seen, out),
+            Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| walk(f, n, seen, out)),
+            Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| walk(f, n, seen, out)),
+            Node::Slice { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => {}
+        }
+    }
+    walk(f, n, &mut vec![false; f.shared.len()], out);
 }
 
 /// Bytes of a stream, by class: the pieces of each.
@@ -269,5 +481,59 @@ mod tests {
             n => panic!("{n:?}"),
         };
         assert_eq!([class(&parts[0]), class(&parts[1])], ["x", "raw"]);
+    }
+
+    /// Of a file alone, alternatives that each gain less than the module block they take are
+    /// made where together they pay for it, or where the rest of the formula takes it already;
+    /// one alone is kept. One of a scan's (sized `(0, len)`) is made where one within it is.
+    #[test]
+    fn made_where_their_module_is_paid_for() {
+        let enc = crate::encoder(&crate::Options::default());
+        let module = aqr_flate::formula::MODULE;
+        let block = enc.module_once_len(module).expect("its Wasm module");
+        assert!(block > 1000, "{block}");
+        // (an alternative of the data kept, noise, or an application of the module, gaining
+        // `gain`)
+        let seed = std::cell::Cell::new(0);
+        let either = |f: &mut Formula, gain: usize| {
+            seed.set(seed.get() + 1);
+            let len = 50 + gain;
+            let kept = f.push("raw", aqr_common::rng::Rng::new(seed.get()).bytes(len));
+            let made = Node::apply(module, Vec::new(), vec![f.push("x", vec![2; 50])], len as u64);
+            Node::Either(Box::new(Either { kept, made, len: len as u64, sizes: (50, len) }))
+        };
+        let made = |n: usize, gain: usize, paid: bool| {
+            let mut f = Formula::default();
+            let mut parts: Vec<Node> = (0..n).map(|_| either(&mut f, gain)).collect();
+            if paid {
+                parts.push(Node::apply(module, Vec::new(), vec![f.push("x", vec![3; 50])], 100));
+            }
+            f.root = Node::Concat(parts);
+            let chosen = by_blocks(&mut f, &enc);
+            assert!(f.eithers().is_empty());
+            chosen.made
+        };
+        let part = block * 6 / 10;
+        assert_eq!(made(1, part, false), 0);
+        assert_eq!(made(2, part, false), 2);
+        assert_eq!(made(1, part, true), 1);
+        // (one losing even without the block is kept)
+        assert_eq!(made(1, 0, true), 0);
+        // (nor where what they gained apart is what their data kept has in common: copies)
+        let mut f = Formula::default();
+        let copies: Vec<Node> = (0..2).map(|_| either(&mut f, part)).collect();
+        f.streams[2].data = f.streams[0].data.clone();
+        f.root = Node::Concat(copies);
+        assert_eq!(by_blocks(&mut f, &enc).made, 0);
+
+        // a scan's alternative, its files' alternatives within the formula made
+        let mut f = Formula::default();
+        let inner: Vec<Node> = (0..2).map(|_| either(&mut f, part)).collect();
+        let len = 2 * (50 + part);
+        let kept = f.push("raw", aqr_common::rng::Rng::new(99).bytes(len));
+        let scan = Either { kept, made: Node::Concat(inner), len: len as u64, sizes: (0, len) };
+        f.root = Node::Either(Box::new(scan));
+        assert_eq!(by_blocks(&mut f, &enc).made, 3);
+        assert_eq!(f.applies().len(), 2);
     }
 }

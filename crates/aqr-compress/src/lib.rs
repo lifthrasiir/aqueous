@@ -1331,7 +1331,12 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx:
         Kind::Format(_) => Some(opt.file),
         kind => opt.file.of(kind),
     };
-    how.and_then(|how| made(d, opt, depth, how, cx)).map_or_else(
+    // (of a file alone, formulas within it that lose only by the blocks they take kept beside
+    // their data, to be chosen together; not the file's own, which is kept as it is compared,
+    // but a scan's whose files were all kept beside theirs: `(0, len)`, [`scanned`])
+    let alone = !cx.enc.shares_modules() && DEFER_MODULES.get();
+    let made = |how| made_as(d, opt, depth, how, cx, alone).filter(|m| m.close.is_none_or(|c| c == (0, d.len())));
+    how.and_then(made).map_or_else(
         || {
             let text = how == Some(Nest::As(Format::Text))
                 || matches!(kind, Kind::Unknown | Kind::Format(_)) && is_text(detect(d));
@@ -1341,8 +1346,12 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx:
         },
         |m| {
             let mut f = m.cut(d);
-            // (nothing chooses here: the data kept, as it was compared)
-            keep_eithers(&mut f, false);
+            // (of a file alone, those that pay for the blocks they take together made; else
+            // nothing chooses here: the data kept, as it was compared)
+            match alone {
+                true => _ = choose::by_blocks(&mut f, &cx.enc),
+                false => _ = keep_eithers(&mut f, false),
+            }
             f
         },
     )
@@ -2196,6 +2205,14 @@ aqr_common::zopt! {
     /// beside it, where that may be ([`Verdict::Close`]); `-Z defer:no-slack`: none is.
     static DEFER_SLACK: Opt<Option<f64>> =
         Opt::value("defer:slack", Some(0.25), "keep a formula beside its data where it is up to this share larger").off(None);
+    /// Whether, of a file archived alone, a formula that loses to its data only by the module and
+    /// resource blocks it takes is kept beside it ([`Verdict::Close`]), the blocks paid for by
+    /// all that take them ([`choose::by_blocks`]).
+    static DEFER_MODULES: Opt<bool> = Opt::flag(
+        "defer:modules",
+        true,
+        "of a file alone, keep a formula beside its data where it loses only by its module blocks",
+    );
     /// Data shorter than this is not kept beside its formula ([`Verdict::Close`]).
     static DEFER_MIN: Opt<usize> = Opt::size("defer:min", 16 << 10, "data shorter is not kept beside its formula");
     /// The bytes of formulas kept beside their data, of a context, at most this many times its
@@ -2270,11 +2287,19 @@ fn verdict_as(
             // (not of streams sealed already, nor of data not made yet: kept apart as they are made)
             let apart = f.streams.iter().any(|s| s.data.sunk_in().is_some() || s.data.is_lazy());
             let slack = DEFER_SLACK.get().filter(|_| defer && !apart && d.len() >= DEFER_MIN.get());
-            if n >= raw && slack.is_some_and(|slack| n as f64 <= raw as f64 * (1.0 + slack)) {
+            // (of a file archived alone, the formula sized without the blocks the archive holds
+            // once, which the alternatives taking them pay for together: [`choose::by_blocks`])
+            let alone = n >= raw && defer && !apart && !cx.enc.shares_modules() && DEFER_MODULES.get();
+            let n_once = match alone {
+                true => n.saturating_sub(cx.enc.once_len(f).expect("modules and resources of the formula")),
+                false => n,
+            };
+            let close = slack.is_some_and(|slack| n as f64 <= raw as f64 * (1.0 + slack)) || alone && n_once < raw;
+            if n >= raw && close {
                 let bytes = kept_bytes(given);
                 if cx.kept_beside.get() + bytes <= cx.defer_budget {
                     cx.kept_beside.set(cx.kept_beside.get() + bytes);
-                    return Verdict::Close((n, raw));
+                    return Verdict::Close((n_once, raw));
                 }
             }
             n < raw
@@ -4781,6 +4806,29 @@ mod tests {
     /// stream (of the class its parent gave it) as the data: not the data between the files a scan
     /// of it found, of the scan's class (10gb/progs: a PNG file in a ZIP file, whose ZIP file's
     /// formula was then taken, alike to raw files that compress better along with it).
+    #[test]
+    fn streams_of_a_file_alone_pay_for_their_module_together() {
+        // zlib streams in noise, each of text that repeats past DEFLATE's window: each gains
+        // less than flate-set's module block, the four more
+        let mut rng = aqr_common::rng::Rng::new(11);
+        let mut hex = |n| rng.bytes(n).iter().map(|b| format!("{b:02x}")).collect::<String>().into_bytes();
+        let mut d = hex(2000);
+        for _ in 0..4 {
+            let (r, gaps) = (hex(10_000), [hex(20_000), hex(20_000)]);
+            let data = [&r[..], &gaps[0], &r, &gaps[1], &r].concat();
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            z.write_all(&data).unwrap();
+            d.extend(z.finish().unwrap());
+            d.extend(hex(2000));
+        }
+        let flate = |f: &Formula| f.applies().iter().filter(|a| a.module == aqr_decompress::FLATE).count();
+        let f = recompress(&d, &Options::default());
+        assert!(f.eval(&Native::default()).unwrap() == d);
+        assert!(flate(&f) >= 4, "{f}");
+        let _off = DEFER_MODULES.set_here(false);
+        assert_eq!(flate(&recompress(&d, &Options::default())), 0);
+    }
+
     #[test]
     fn content_kept_beside_in_its_stream() {
         let (_slack, _min) = (DEFER_SLACK.set_here(Some(100.0)), DEFER_MIN.set_here(1 << 10));

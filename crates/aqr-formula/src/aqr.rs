@@ -714,6 +714,43 @@ impl Encoder {
         Ok(n.0)
     }
 
+    /// The bytes of the blocks that [`Encoder::len`] counts of `f` that an archive holds once
+    /// however many formulas take them: its module blocks (unless [`Encoder::share_modules`])
+    /// and its resource blocks (unless [`Encoder::share_resources`], nor those stored or held).
+    /// Of a formula of a file archived alone, what its parts would share were they apart.
+    pub fn once_len(&self, f: &Formula) -> Result<usize> {
+        let modules = match self.shared_modules {
+            true => 0,
+            false => self.modules_len(f)? - self.module_bytes_len(f)?,
+        };
+        let held = self.held.borrow();
+        let resources = match self.shared {
+            true => 0,
+            false => self.resources_len_of(f, |r| r.stored_data().is_none() && !held.contains(&key(&[&r[..]])))?,
+        };
+        Ok(modules + resources)
+    }
+
+    /// The bytes that [`Encoder::once_len`] counts of module `m`'s block alone.
+    pub fn module_once_len(&self, m: Module) -> Result<usize> {
+        if self.shared_modules {
+            return Ok(0);
+        }
+        let mut n = Count(0);
+        self.write_module(&mut n, m, self.base_level())?;
+        Ok(n.0)
+    }
+
+    /// The bytes that [`Encoder::once_len`] counts of resource `r`'s block alone.
+    pub fn resource_once_len(&self, r: &Resource) -> Result<usize> {
+        if self.shared || r.stored_data().is_some() || self.held.borrow().contains(&key(&[&r[..]])) {
+            return Ok(0);
+        }
+        let mut n = Count(0);
+        self.resource_block(&mut n, r)?;
+        Ok(n.0)
+    }
+
     /// Sizes formulas without resource `r`, as if the archive held it already: where the
     /// formulas of the files archived together share it (a dictionary made of them all), whose
     /// cost is then no one file's. The archives are the same.
