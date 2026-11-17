@@ -5,7 +5,7 @@
 //! code through the disfilter), then the stub (packed by UPX already) and the lists as they are.
 //!
 //! ```text
-//! pack = "AQRSFXP1" le64:n bundle[n] le64:n bundle[n] file*
+//! pack = "AQRSFXP2" le64:n bundle[n] le64:n bundle[n] file*
 //! file = le32:n name[n] le32:n byte[n]
 //! ```
 //!
@@ -17,7 +17,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 /// The magic of the pack (crates/aqr/build.rs and aqr-bincache check it).
-const MAGIC: &[u8; 8] = b"AQRSFXP1";
+const MAGIC: &[u8; 8] = b"AQRSFXP2";
 
 fn main() -> ExitCode {
     let Some(dir) = std::env::args_os().nth(1) else {

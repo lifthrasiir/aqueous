@@ -245,14 +245,14 @@ pub static KNOWN: &[Known] = &[
     },
     Known {
         name: "exe-recons/x86-remap",
-        version: 1,
-        sha512_256: hex("7e11d75eff6ea35e5eed13ac5a0f080e5a4ed44923adac59bdd7623863fbb939"),
+        version: 2,
+        sha512_256: hex("f771e05528d0c2c7a2f86a25576eb6d29dff14b4745e06dc66b1fc31fac60e88"),
         block: include_bytes!("../wasm/exe-recons-x86-remap.block"),
     },
     Known {
         name: "exe-recons/x86",
-        version: 4,
-        sha512_256: hex("dc46cb09845725096eda022eaff56d615ba34fd1483372f042201d86c4648a79"),
+        version: 5,
+        sha512_256: hex("7094f8a49e6e8439737ca0ea5056e4c9ccf28a7ca4656202027fc0034ebb6fe3"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
     },
     Known {

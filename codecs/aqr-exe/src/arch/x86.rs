@@ -408,7 +408,19 @@ define_streams! {
     ST_IMM32 32,
     ST_ADDR 0,
     ST_CALL 0,
+    ST_JUMPN 8,
 }
+
+/// A jump's count (§5.6 of FORMAT.md): the steps from the one after the jump to its target's,
+/// from `-MAX_COUNT` to `MAX_COUNT`; [`COUNT_ESC`] where the jump is written otherwise.
+const MAX_COUNT: i64 = 127;
+const COUNT_ESC: u8 = 0x80;
+/// Bytes after a jump's field that the target of a forward count may be at most.
+pub(crate) const COUNT_REACH: usize = 4096;
+/// Steps that a decoder remembers the addresses of, for backward counts; and the jumps it may
+/// have waiting for their targets (fewer than this: one a step, each within `MAX_COUNT` steps).
+const COUNT_STEPS: usize = 128;
+const COUNT_WAITING: usize = 256;
 
 // The fields kept with others: in `OP` those that the opcodes around them tell best (REX bits
 // above all) or that are rare, and the 32- and 64-bit forms of a field together (a section
@@ -852,19 +864,188 @@ pub enum Ref {
     Address,
 }
 
+/// A jump whose count waits for its target to be reached ([`Counts`]).
+#[cfg(feature = "encode")]
+struct Waiting {
+    /// `JUMP8` or `JUMPN`, and where its count is in it.
+    st: usize,
+    at: usize,
+    /// The index of the step after the jump's, and the jump's among the jumps.
+    next: usize,
+    seq: usize,
+    /// Of `JUMP8`, the offset as it is; of `JUMPN`, where its field is, its target, and where in
+    /// `JUMP` it goes if escaped.
+    rel8: u8,
+    field: u64,
+    target: u64,
+    jump_at: usize,
+}
+
+/// The jumps written as counts (§5.6 of FORMAT.md) as the encoder goes: the steps' addresses,
+/// the jumps waiting for their targets, and what the escaped ones put in the streams after.
+#[cfg(feature = "encode")]
+struct Counts {
+    /// Steps begun, and the addresses of the last [`COUNT_STEPS`] (by index modulo).
+    n: usize,
+    at: [u64; COUNT_STEPS],
+    /// By target, then in order (the index into `jumps`).
+    waiting: alloc::collections::BinaryHeap<core::cmp::Reverse<(u64, usize)>>,
+    jumps: Vec<Waiting>,
+    /// Jumps so far.
+    seq: usize,
+    /// Bytes put into `JUMP8`, and the targets into `JUMP`, once the streams are done: where,
+    /// the jump's order, and what (of a target, where its field is).
+    into_jump8: Vec<(usize, usize, u8)>,
+    into_jump: Vec<(usize, usize, u64, u64)>,
+}
+
+#[cfg(feature = "encode")]
+impl Counts {
+    fn new() -> Self {
+        Counts {
+            n: 0,
+            at: [0; COUNT_STEPS],
+            waiting: Default::default(),
+            jumps: Vec::new(),
+            seq: 0,
+            into_jump8: Vec::new(),
+            into_jump: Vec::new(),
+        }
+    }
+
+    /// A step (an item, not a padding record) starts at `addr`: the jumps waiting for it, or
+    /// past it, are written.
+    #[inline]
+    fn step(&mut self, st: &mut EncodedStreams, addr: u64) {
+        let k = self.n;
+        self.at[k % COUNT_STEPS] = addr;
+        self.n += 1;
+        while let Some(&core::cmp::Reverse((target, j))) = self.waiting.peek() {
+            if target > addr {
+                break;
+            }
+            self.waiting.pop();
+            let w = &self.jumps[j];
+            if target == addr && (k - w.next) as i64 <= MAX_COUNT {
+                st.streams[w.st][w.at] = (k - w.next) as u8;
+            } else {
+                self.escape(j);
+            }
+        }
+    }
+
+    fn escape(&mut self, j: usize) {
+        let w = &self.jumps[j];
+        if w.st == ST_JUMP8 {
+            self.into_jump8.push((w.at + 1, w.seq, w.rel8));
+        } else {
+            self.into_jump.push((w.jump_at, w.seq, w.field, w.target));
+        }
+    }
+
+    /// The count of a jump to `target` of stream `stream` (its offset `rel8` in `JUMP8`, its
+    /// field at `field`), the next step at `next`: of a step behind, now; [`COUNT_ESC`] while
+    /// waiting for one ahead; `None` where it is not one (`JUMP8`'s byte then for the caller to
+    /// write, `JUMP`'s target put in its place).
+    fn jump(&mut self, st: &EncodedStreams, stream: usize, rel8: u8, field: u64, target: u64, next: u64) -> Option<u8> {
+        let (k, seq) = (self.n, self.seq);
+        self.seq += 1;
+        let jump_at = st.streams[ST_JUMP].len();
+        let c = if target < next {
+            // the steps of the last `MAX_COUNT`, ascending
+            let lo = k.saturating_sub(MAX_COUNT as usize);
+            let (mut a, mut b) = (lo, k);
+            while a < b {
+                let m = (a + b) / 2;
+                if self.at[m % COUNT_STEPS] < target {
+                    a = m + 1;
+                } else {
+                    b = m;
+                }
+            }
+            (a < k && self.at[a % COUNT_STEPS] == target).then(|| ((k - a) as u8).wrapping_neg())
+        } else if target - next <= COUNT_REACH as u64 {
+            let at = st.streams[stream].len();
+            self.waiting.push(core::cmp::Reverse((target, self.jumps.len())));
+            self.jumps.push(Waiting { st: stream, at, next: k, seq, rel8, field, target, jump_at });
+            Some(COUNT_ESC)
+        } else {
+            None
+        };
+        if c.is_none() && stream == ST_JUMPN {
+            self.into_jump.push((jump_at, seq, field, target));
+        }
+        c
+    }
+
+    /// Puts the escaped jumps' bytes into the streams, those still waiting escaped, the targets
+    /// as `hook` gives them (told of them in order).
+    fn finish(mut self, st: &mut EncodedStreams, is64: bool, hook: &mut dyn FnMut(Ref, u64, u64) -> u64) {
+        while let Some(core::cmp::Reverse((_, j))) = self.waiting.pop() {
+            self.escape(j);
+        }
+        fn splice<const N: usize>(s: &mut Vec<u8>, mut ins: Vec<(usize, usize, [u8; N])>, n: usize) {
+            if ins.is_empty() {
+                return;
+            }
+            let mut out = Vec::with_capacity(s.len() + ins.len() * n);
+            let mut from = 0;
+            for (at, _, b) in ins.drain(..) {
+                out.extend_from_slice(&s[from..at]);
+                out.extend_from_slice(&b[..n]);
+                from = at;
+            }
+            out.extend_from_slice(&s[from..]);
+            *s = out;
+        }
+        let mut j8: Vec<_> = self.into_jump8.into_iter().map(|(at, j, b)| (at, j, [b])).collect();
+        j8.sort_unstable_by_key(|x| (x.0, x.1));
+        splice(&mut st.streams[ST_JUMP8], j8, 1);
+        self.into_jump.sort_unstable_by_key(|x| (x.0, x.1));
+        let j = self.into_jump.into_iter().map(|(at, j, field, t)| (at, j, hook(Ref::Jump, field, t).to_le_bytes()));
+        splice(&mut st.streams[ST_JUMP], j.collect(), if is64 { 8 } else { 4 });
+    }
+}
+
 #[cfg(feature = "encode")]
 pub fn encode(input: &[u8], origin: u64, is64: bool) -> Option<EncodedStreams> {
     encode_with(input, origin, is64, &mut |_, _, v| v)
 }
 
 /// [`encode`], each reference of [`Ref`] written as `hook` gives it: of its kind, the address
-/// of its field and its absolute value (of which an address of x86-32 is the low 32 bits).
+/// of its field and its absolute value (of which an address of x86-32 is the low 32 bits). The
+/// jumps written as counts are none (§5.6 of FORMAT.md), and `hook` is told of the others once
+/// the code is done, in order (of the calls and the addresses as they come).
+#[cfg(feature = "encode")]
+pub fn encode_with(
+    input: &[u8],
+    origin: u64,
+    is64: bool,
+    hook: &mut dyn FnMut(Ref, u64, u64) -> u64,
+) -> Option<EncodedStreams> {
+    encode_core(input, origin, is64, Some(Counts::new()), hook)
+}
+
+/// [`encode_with`] with no jump as a count, `hook` told of every reference as it comes: the
+/// references of the code (for `remap`'s matching), not streams any module takes.
+#[cfg(feature = "encode")]
+pub(crate) fn encode_refs(
+    input: &[u8],
+    origin: u64,
+    is64: bool,
+    hook: &mut dyn FnMut(Ref, u64, u64) -> u64,
+) -> Option<EncodedStreams> {
+    encode_core(input, origin, is64, None, hook)
+}
+
+/// [`encode_with`] with `counts`, else [`encode_refs`].
 #[cfg(feature = "encode")]
 #[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
-pub fn encode_with(
+fn encode_core(
     input: &[u8],
     mut origin: u64,
     is64: bool,
+    mut counts: Option<Counts>,
     hook: &mut dyn FnMut(Ref, u64, u64) -> u64,
 ) -> Option<EncodedStreams> {
     let opcodes = &Opcodes::BUILTIN;
@@ -888,6 +1069,9 @@ pub fn encode_with(
     // the code; returns the bytes left.
     let mut run = |mut code: &[u8], slack: usize| -> usize {
         while code.len() > SENTINEL {
+            if let Some(c) = counts.as_mut().filter(|_| !pad) {
+                c.step(&mut st, origin);
+            }
             if_trace_encode! {
                 println!();
                 print!("{origin:06X}: ");
@@ -939,6 +1123,10 @@ pub fn encode_with(
                 }
                 if i >= MIN_JUMPTAB * 4 {
                     for range in range_chunks(i / 4, 0x100) {
+                        // (each table a step, as the decoder reads them)
+                        if let Some(c) = counts.as_mut().filter(|_| range.start > 0) {
+                            c.step(&mut st, origin + (range.start * 4) as u64);
+                        }
                         st.jumptab((range.len() - 1) as u8);
                         for j in range {
                             let addr = to_u32(&code[j * 4..j * 4 + 4]);
@@ -965,6 +1153,10 @@ pub fn encode_with(
                 }
                 if i >= MIN_JUMPTAB * 8 {
                     for range in range_chunks(i / 8, 0x100) {
+                        // (each table a step, as the decoder reads them)
+                        if let Some(c) = counts.as_mut().filter(|_| range.start > 0) {
+                            c.step(&mut st, origin + (range.start * 8) as u64);
+                        }
                         st.jumptab((range.len() - 1) as u8);
                         for j in range {
                             st.put64(ST_JUMPTAB64, to_u64(&code[j * 8..j * 8 + 8]));
@@ -1195,6 +1387,12 @@ pub fn encode_with(
 
             match flags {
                 J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_JUMP16),
+                J4 if op != OP_CALLN && counts.is_some() => {
+                    let (field, next) = (origin + i.get() as u64, origin + (i.get() + 4) as u64);
+                    let target = rel_to_abs(fetch32(), 0);
+                    let c = counts.as_mut().unwrap().jump(&st, ST_JUMPN, 0, field, target, next);
+                    st.put8(ST_JUMPN, c.unwrap_or(COUNT_ESC));
+                }
                 J4 => {
                     let at = origin + i.get() as u64;
                     let target = rel_to_abs(fetch32(), 0);
@@ -1223,6 +1421,18 @@ pub fn encode_with(
 
                 JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_AJUMP16),
                 JA => copy(32 / 8, &mut st, ST_AJUMP32),
+                J1 if counts.is_some() => {
+                    let rel = fetch8();
+                    let next = origin + i.get() as u64;
+                    let target = next.wrapping_add(rel as i8 as u64);
+                    match counts.as_mut().unwrap().jump(&st, ST_JUMP8, rel, next - 1, target, next) {
+                        Some(c) => st.put8(ST_JUMP8, c),
+                        None => {
+                            st.put8(ST_JUMP8, COUNT_ESC);
+                            st.put8(ST_JUMP8, rel);
+                        }
+                    }
+                }
                 J1 => copy(8 / 8, &mut st, ST_JUMP8),
                 N_ => {}
 
@@ -1257,6 +1467,9 @@ pub fn encode_with(
     // even when the input ends right there.
     if pad {
         st.put8(ST_PAD, PAD_NONE);
+    }
+    if let Some(c) = counts {
+        c.finish(&mut st, is64, hook);
     }
 
     st.sentinel_size = (SENTINEL - left) as u8;
@@ -1302,11 +1515,10 @@ pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, 
     decode_hooked(streams, is64, opcodes, capacity, |_, _, _| Some(()))
 }
 
-/// [`decode_with`], telling `hook` of each reference of [`Ref`] as it is written: its kind,
-/// its value in the streams, and where its field is in the output (before the sentinel is cut
-/// off). Decoding fails where it fails.
+/// [`decode_with`], telling `hook` of each reference of [`Ref`] as it is written: its kind, its
+/// value in the streams, and where its field is in the output (before the sentinel is cut off);
+/// of the jumps, those not written as counts. Decoding fails where it fails.
 #[cfg(feature = "decode")]
-#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
 pub(crate) fn decode_hooked(
     streams: &DecodedStreams<'_>,
     is64: bool,
@@ -1337,11 +1549,18 @@ pub trait Src {
     fn copy<K: Sink>(&mut self, n: usize, st: usize, out: &mut K) -> Option<()>;
 }
 
-/// The section being built ([`decode_core`]): bytes appended, none read back.
+/// The section being built ([`decode_core`]): bytes appended, none read back, some written over
+/// (the fields of jumps as counts, §5.6 of FORMAT.md).
 #[cfg(feature = "decode")]
 pub trait Sink {
     fn push(&mut self, b: u8);
     fn extend_from_slice(&mut self, d: &[u8]);
+    /// Writes `d` over the bytes from `at` on, kept by [`Sink::hold`].
+    fn patch(&mut self, at: usize, d: &[u8]);
+    /// Keeps the bytes from `at` on (none where `None`), to be written over: at most
+    /// [`COUNT_REACH`] and a field of 4 bytes of them while the streams are valid (a sink may
+    /// fail past that).
+    fn hold(&mut self, at: Option<usize>);
     /// Appends `n` bytes `b`.
     fn fill(&mut self, n: usize, b: u8);
     /// Bytes appended so far.
@@ -1363,6 +1582,12 @@ impl Sink for Vec<u8> {
     fn extend_from_slice(&mut self, d: &[u8]) {
         Vec::extend_from_slice(self, d)
     }
+
+    fn patch(&mut self, at: usize, d: &[u8]) {
+        self[at..at + d.len()].copy_from_slice(d)
+    }
+
+    fn hold(&mut self, _: Option<usize>) {}
 
     fn fill(&mut self, n: usize, b: u8) {
         self.resize(self.len() + n, b)
@@ -1458,6 +1683,131 @@ fn read_call<S: Src>(src: &mut S, cache: &mut CallCache, is64: bool) -> Option<u
     Some(target)
 }
 
+/// The decoder's steps, for the jumps as counts (§5.6 of FORMAT.md): where the last
+/// [`COUNT_STEPS`] began, and the jumps waiting for steps ahead, in order in a ring of
+/// [`COUNT_WAITING`] (a step makes one at most, and each waits for [`MAX_COUNT`] steps at most).
+#[cfg(feature = "decode")]
+struct Steps {
+    /// Steps begun, and where the last [`COUNT_STEPS`] did (by index modulo).
+    n: usize,
+    at: [usize; COUNT_STEPS],
+    /// Of each jump waiting: where its field is, its size (0 once written) and its target step.
+    field: [usize; COUNT_WAITING],
+    size: [u8; COUNT_WAITING],
+    target: [usize; COUNT_WAITING],
+    /// Jumps made to wait, the first of them that may still wait, and the nearest target of
+    /// those waiting (`usize::MAX` where none is).
+    made: usize,
+    oldest: usize,
+    soonest: usize,
+}
+
+#[cfg(feature = "decode")]
+impl Steps {
+    fn new() -> Self {
+        Steps {
+            n: 0,
+            at: [0; COUNT_STEPS],
+            field: [0; COUNT_WAITING],
+            size: [0; COUNT_WAITING],
+            target: [0; COUNT_WAITING],
+            made: 0,
+            oldest: 0,
+            soonest: usize::MAX,
+        }
+    }
+
+    /// Whether a jump still waits.
+    fn waiting(&self) -> bool {
+        self.soonest != usize::MAX
+    }
+
+    /// A step (an item, not a padding record) begins where the output is: the jumps waiting for
+    /// it are written.
+    #[inline(always)]
+    fn begin<K: Sink>(&mut self, code: &mut K) -> Option<()> {
+        let a = code.len();
+        let k = self.n;
+        self.at[k % COUNT_STEPS] = a;
+        self.n += 1;
+        if k == self.soonest {
+            self.arrive(code, k, a)?;
+        }
+        Some(())
+    }
+
+    /// Step `k` begins at `a`, which jumps wait for.
+    #[inline(always)]
+    fn arrive<K: Sink>(&mut self, code: &mut K, k: usize, a: usize) -> Option<()> {
+        let mut soonest = usize::MAX;
+        for j in self.oldest..self.made {
+            let e = j % COUNT_WAITING;
+            let size = self.size[e] as usize;
+            if size == 0 {
+                continue;
+            }
+            if self.target[e] != k {
+                soonest = soonest.min(self.target[e]);
+                continue;
+            }
+            let rel = a - (self.field[e] + size);
+            if rel > COUNT_REACH || (size == 1 && rel > 0x7f) {
+                return None;
+            }
+            code.patch(self.field[e], &(rel as u32).to_le_bytes()[..size]);
+            self.size[e] = 0;
+        }
+        self.soonest = soonest;
+        let was = self.oldest;
+        while self.oldest < self.made && self.size[self.oldest % COUNT_WAITING] == 0 {
+            self.oldest += 1;
+        }
+        if self.oldest != was {
+            code.hold((self.oldest < self.made).then(|| self.field[self.oldest % COUNT_WAITING]));
+        }
+        Some(())
+    }
+
+    /// A jump's count read from `st` (`JUMP8` for a field of 1 byte, `JUMPN` of 4), and its
+    /// field appended (true), unless it is [`COUNT_ESC`] (false).
+    #[inline(always)]
+    fn read<S: Src, K: Sink>(&mut self, src: &mut S, code: &mut K, st: usize) -> Option<bool> {
+        let c = src.read8(st)?;
+        if c == COUNT_ESC {
+            return Some(false);
+        }
+        self.jump(code, c, if st == ST_JUMP8 { 1 } else { 4 })?;
+        Some(true)
+    }
+
+    /// A jump's field of `size` bytes (1 or 4) appended, of count `c` (not [`COUNT_ESC`]).
+    #[inline(always)]
+    fn jump<K: Sink>(&mut self, code: &mut K, c: u8, size: usize) -> Option<()> {
+        let (field, c) = (code.len(), c as i8 as isize);
+        let t = (self.n as isize).checked_add(c).filter(|&t| t >= 0)? as usize;
+        if c < 0 {
+            let rel = self.at[t % COUNT_STEPS].wrapping_sub(field + size) as isize;
+            if size == 1 && rel < -0x80 {
+                return None;
+            }
+            code.extend_from_slice(&(rel as u32).to_le_bytes()[..size]);
+            return Some(());
+        }
+        let e = self.made % COUNT_WAITING;
+        if self.made - self.oldest >= COUNT_WAITING {
+            return None;
+        }
+        (self.field[e], self.size[e], self.target[e]) = (field, size as u8, t);
+        if self.oldest == self.made {
+            code.hold(Some(field));
+        }
+        self.made += 1;
+        self.soonest = self.soonest.min(t);
+        code.fill(size, 0);
+        Some(())
+    }
+}
+
 /// The filter's decoder: the section of `origin` on, built onto `code` from `src` (less
 /// `sentinel_size` bytes at its end), telling `hook` of each reference as `decode_hooked` says.
 /// `None` where the streams do not make one.
@@ -1473,6 +1823,7 @@ pub fn decode_core<S: Src, K: Sink>(
     mut hook: impl FnMut(Ref, u64, usize) -> Option<()>,
 ) -> Option<()> {
     let mut call_cache = CallCache::new();
+    let mut steps = Steps::new();
 
     macro_rules! fatal {
         ($fmt:tt) => {
@@ -1484,6 +1835,9 @@ pub fn decode_core<S: Src, K: Sink>(
     let mut pad = false;
 
     while pad || !src.is_empty(ST_OP) {
+        if !pad {
+            steps.begin(code)?;
+        }
         if_trace_decode! {
             println!();
             print!("{:06X}: ", origin + code.len() as u64);
@@ -1680,6 +2034,19 @@ pub fn decode_core<S: Src, K: Sink>(
             }
         }
 
+        // a jump as a count, else (escaped) as below
+        // (one place that the sink is handed to, inlined, so that it stays in locals)
+        let counted = match flags {
+            J1 => Some(ST_JUMP8),
+            J4 if op != OP_CALLN && !has_jump16(prefixes, is64) => Some(ST_JUMPN),
+            _ => None,
+        };
+        if let Some(st) = counted {
+            if steps.read(src, code, st)? {
+                continue;
+            }
+        }
+
         match flags {
             J4 if has_jump16(prefixes, is64) => src.copy(16 / 8, ST_JUMP16, code)?,
             J4 => {
@@ -1719,6 +2086,9 @@ pub fn decode_core<S: Src, K: Sink>(
         }
     }
 
+    if steps.waiting() {
+        return None;
+    }
     code.finish(sentinel_size as usize)
 }
 
@@ -2440,6 +2810,7 @@ mod tests {
                 "IMM32",
                 "ADDR",
                 "CALL",
+                "JUMPN",
             ]
         );
     }
@@ -2506,5 +2877,136 @@ mod tests {
         expected.extend([0xcc; 15]);
         expected.extend([0xc3, 0xcc, 0xc3, 0x66, 0x90, 0xc3]);
         assert_eq!(out, expected);
+    }
+    /// x86-32 code of jumps of 8 and 32 bits, forward and backward, to steps and not, and the
+    /// counts the encoder makes of them (§5.6 of FORMAT.md).
+    fn jumps_code() -> Vec<u8> {
+        let mut c = vec![0x90]; // 0 nop (step 0)
+        c.extend([0x74, 0x03]); // 1 jz 6 (step 1): count 3
+        c.push(0x90); // 3 nop (2)
+        c.extend([0x66, 0x90]); // 4 the prefix (3), 5 nop (4)
+        c.extend([0x31, 0xc0]); // 6 xor eax, eax (5)
+        c.extend([0x75, 0xf6]); // 8 jnz 0 (6): count -7
+        c.extend([0x0f, 0x84, 0x07, 0, 0, 0]); // 10 jz 23 (7): count 2
+        c.extend([0xeb, 0x01]); // 16 jmp 19 (8), into the next instruction: escaped
+        c.extend([0xb8, 0xc3, 0xc3, 0xc3, 0xc3]); // 18 mov eax, imm32 (9), after no padding
+        c.push(0xe9); // 23 jmp 1 (10): count -10
+        c.extend((1i32 - 28).to_le_bytes());
+        c.push(0xe9); // 28 jmp 33 + 0x2000 (11), out of reach: escaped
+        c.extend(0x2000i32.to_le_bytes());
+        c.extend([0x31, 0xc0, 0x90]); // 33 (12), 35 (13)
+        c
+    }
+
+    #[test]
+    fn test_jump_counts() {
+        let code = jumps_code();
+        let st = encode(&code, 0x1000, false).unwrap();
+        assert_eq!(st.streams()[ST_JUMP8], [3, 0xf9, 0x80, 0x01]);
+        assert_eq!(st.streams()[ST_JUMPN], [2, 0xf6, 0x80]);
+        assert_eq!(st.streams()[ST_JUMP], (0x1000u32 + 33 + 0x2000).to_le_bytes());
+        roundtrip_test(&code, 0x1000, false).unwrap();
+        roundtrip_test(&code, 0x1000, true).unwrap();
+
+        // the hook told of the jumps escaped alone, where their fields are; the decoder alike
+        let mut told = Vec::new();
+        let again = encode_with(&code, 0x1000, false, &mut |r, at, v| {
+            told.push((r, at, v));
+            v
+        });
+        assert_eq!(again.unwrap().streams(), st.streams());
+        assert_eq!(told, [(Ref::Jump, 0x1000 + 29, 0x1000 + 33 + 0x2000)]);
+        let mut told = Vec::new();
+        let back = decode_hooked(&(&st).into(), false, &Opcodes::BUILTIN, 0, |r, v, at| {
+            told.push((r, at, v));
+            Some(())
+        });
+        assert_eq!(back.as_deref(), Some(&code[..]));
+        assert_eq!(told, [(Ref::Jump, 29, 0x1000 + 33 + 0x2000)]);
+
+        // escaped where waiting at the end: a jump past it, and one to its end
+        for tail in [&[0xeb, 0x05][..], &[0xeb, 0x00], &[0x0f, 0x85, 0, 0, 0, 0]] {
+            let mut c = code.clone();
+            c.extend(tail);
+            let st = encode(&c, 0x1000, false).unwrap();
+            let s = if tail[0] == 0xeb { ST_JUMP8 } else { ST_JUMPN };
+            assert_eq!(st.streams()[s][st.streams()[s].len() - 1 - (s == ST_JUMP8) as usize], 0x80, "{tail:02x?}");
+            roundtrip_test(&c, 0x1000, false).unwrap();
+        }
+
+        // jumps past 127 steps either way, and of 8 bits over more than 127 bytes of fewer steps
+        let mut c = vec![0x0f, 0x84];
+        c.extend((2 + 130 * 5i32).to_le_bytes());
+        c.extend([0x74, 0x7f]);
+        for _ in 0..130 {
+            c.extend([0xb8, 1, 2, 3, 4]);
+        }
+        c.push(0xe9);
+        c.extend((-(c.len() as i32 + 4)).to_le_bytes());
+        let st = encode(&c, 0x1000, false).unwrap();
+        assert_eq!(st.streams()[ST_JUMP8], [0x80, 0x7f]);
+        assert_eq!(st.streams()[ST_JUMPN], [0x80, 0x80]);
+        roundtrip_test(&c, 0x1000, false).unwrap();
+    }
+
+    /// A jump over a run of jump table entries longer than a table (256): each table is a step
+    /// of its own, as the decoder reads them.
+    #[test]
+    fn test_jump_counts_over_tables() {
+        for n in [255usize, 256, 257, 600] {
+            let origin = 0x40_1000u64;
+            let mut c = vec![0xe9];
+            c.extend(((4 * n) as i32).to_le_bytes());
+            for k in 0..n {
+                c.extend((origin as u32 + 0x111 + k as u32).to_le_bytes());
+            }
+            c.extend([0x31, 0xc0, 0xc3]);
+            let st = encode(&c, origin, false).unwrap();
+            assert_eq!(st.streams()[ST_JUMPN], [n.div_ceil(256) as u8], "{n} entries");
+            roundtrip_test(&c, origin, false).unwrap_or_else(|e| panic!("{n} entries: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_jump_counts_corrupt() {
+        let code = jumps_code();
+        let st = encode(&code, 0x1000, false).unwrap();
+        let with = |s: usize, f: &dyn Fn(&mut Vec<u8>)| {
+            let mut v: [Vec<u8>; NUM_STREAMS] = st.streams().clone();
+            f(&mut v[s]);
+            let d = DecodedStreams::new(0x1000, st.sentinel_size(), v.each_ref().map(|s| &s[..]));
+            decode(&d, false)
+        };
+        assert_eq!(with(ST_JUMP8, &|_| ()).as_deref(), Some(&code[..]));
+        // a target past the end, or before the start
+        assert_eq!(with(ST_JUMP8, &|s| s[0] = 0x7f), None);
+        assert_eq!(with(ST_JUMPN, &|s| s[0] = 0x7f), None);
+        assert_eq!(with(ST_JUMP8, &|s| s[1] = 0x81), None);
+        assert_eq!(with(ST_JUMPN, &|s| s[1] = 0x81), None);
+        // other steps decode, to other code
+        let other = with(ST_JUMP8, &|s| s[0] = 4).unwrap();
+        assert_eq!(other.len(), code.len());
+        assert_eq!(other[2], 0x05);
+        // a count where the stream has none left
+        assert_eq!(with(ST_JUMPN, &|s| s.truncate(2)), None);
+
+        // of 8 bits, more than 127 bytes ahead or 128 behind
+        let mut c = vec![0x74, 0x00];
+        for _ in 0..30 {
+            c.extend([0xb8, 1, 2, 3, 4]);
+        }
+        c.extend([0xeb, 0xfe]);
+        let st = encode(&c, 0x1000, false).unwrap();
+        assert_eq!(st.streams()[ST_JUMP8], [0, 0xff]);
+        let run = |j8: &[u8]| {
+            let mut v: [&[u8]; NUM_STREAMS] = st.streams().each_ref().map(|s| &s[..]);
+            v[ST_JUMP8] = j8;
+            decode(&DecodedStreams::new(0x1000, st.sentinel_size(), v), false)
+        };
+        assert_eq!(run(&[0, 0xff]).as_deref(), Some(&c[..]));
+        assert_eq!(run(&[25, 0xff]).map(|d| d[1]), Some(125));
+        assert_eq!(run(&[26, 0xff]), None);
+        assert_eq!(run(&[0, 0xe6]).map(|d| d[d.len() - 1]), Some(0x81));
+        assert_eq!(run(&[0, 0xe5]), None);
     }
 }

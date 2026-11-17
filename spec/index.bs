@@ -6345,13 +6345,13 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-pe-reloc.wasm" title="crates/aqr-modules/wasm/exe-recons-pe-reloc.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
-      <td><code>7e11d75eff6ea35e5eed13ac5a0f080e5a4ed44923adac59bdd7623863fbb939</code>
-      <td>exe-recons/x86-remap@1
+      <td><code>f771e05528d0c2c7a2f86a25576eb6d29dff14b4745e06dc66b1fc31fac60e88</code>
+      <td>exe-recons/x86-remap@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-x86-remap.wasm" title="crates/aqr-modules/wasm/exe-recons-x86-remap.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
-      <td><code>dc46cb09845725096eda022eaff56d615ba34fd1483372f042201d86c4648a79</code>
-      <td>exe-recons/x86@4
+      <td><code>7094f8a49e6e8439737ca0ea5056e4c9ccf28a7ca4656202027fc0034ebb6fe3</code>
+      <td>exe-recons/x86@5
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-x86.wasm" title="crates/aqr-modules/wasm/exe-recons-x86.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>

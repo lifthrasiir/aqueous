@@ -8,17 +8,17 @@
 //! of its own. The stub ([`unpack`]) places them in memory at run time (`aqr_blob::load`).
 //!
 //! With the feature `xz`, the same bundle can be made with its frames of raw LZMA2 instead
-//! ([`pack_xz`], of the magic `AQRSFXX1`; preset 9, a dictionary no larger than the frame nor than
+//! ([`pack_xz`], of the magic `AQRSFXX2`; preset 9, a dictionary no larger than the frame nor than
 //! 8 MiB): the pack that aqr carries (`sfx.pack`, `src/bin/aqr-sfx-pack.rs`), which aqr alone reads.
 //! A self-extracting program's bundle is of zstd: its stub links no liblzma.
 //!
 //! ```text
-//! bundle = "AQRSFXB2" le64:len frame:meta frame:x86[13] frame:rest
-//! frame  = le32:raw le32:n zstd[n]                            (AQRSFXX1: lzma2[n])
+//! bundle = "AQRSFXB3" le64:len frame:meta frame:x86[14] frame:rest
+//! frame  = le32:raw le32:n zstd[n]                            (AQRSFXX2: lzma2[n])
 //! meta   = count blob*                                         (varints)
 //! blob   = str:entry str:name apply_rva info_rva pdata_rva pdata_count import_dir_rva first
 //!          image_base count str:lib* count (slot lib rva)* count reloc-delta*
-//!          count (rva len flags)* image_len code_len sentinel x86-len[13]
+//!          count (rva len flags)* image_len code_len sentinel x86-len[14]
 //! str    = len byte[len]
 //! ```
 //!
@@ -32,10 +32,10 @@ use aqr_blob::{Bind, Blob, Section};
 use aqr_common::varint;
 use aqr_exe::arch::x86;
 
-pub const MAGIC: &[u8; 8] = b"AQRSFXB2";
+pub const MAGIC: &[u8; 8] = b"AQRSFXB3";
 
 /// The magic of a bundle of raw LZMA2 frames ([`pack_xz`]).
-pub const MAGIC_XZ: &[u8; 8] = b"AQRSFXX1";
+pub const MAGIC_XZ: &[u8; 8] = b"AQRSFXX2";
 
 /// What a bundle's frames are compressed by.
 #[derive(Clone, Copy)]

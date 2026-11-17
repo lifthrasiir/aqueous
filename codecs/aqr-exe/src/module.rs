@@ -214,9 +214,12 @@ const PIECE: usize = 8 << 10;
 /// (the sentinel cut off the end is up to 15).
 const SPOOL: usize = 64 << 10;
 const HOLD: usize = 16;
-/// Bytes one step of the decoder appends at most (a padding record of 255 bytes, a jump table of
-/// 256 entries of 8): the room besides [`SPOOL`].
+/// Bytes the decoder appends at a time at most (a padding chunk of 255 bytes): the room besides
+/// [`SPOOL`] and [`KEPT`].
 const STEP: usize = 2048;
+/// Bytes held for the jumps waiting (`x86::Sink::hold`) besides [`SPOOL`]: their reach and a
+/// field. Streams that would hold more are not valid.
+const KEPT: usize = x86::COUNT_REACH + 4;
 
 /// The memory plan of [`x86_part`] ([`aqr_api::stack`]): what it takes beyond its initial memory
 /// (`initial` bytes) at most, whatever the lengths: a piece of each stream and the section held.
@@ -225,7 +228,7 @@ pub fn x86_part_plan(initial: u64) -> u64 {
     for _ in 0..x86::NUM_STREAMS {
         m.take(PIECE as u64);
     }
-    m.take((SPOOL + HOLD + STEP) as u64);
+    m.take((SPOOL + HOLD + STEP + KEPT) as u64);
     m.plan()
 }
 
@@ -239,7 +242,7 @@ macro_rules! pull_ins {
     };
 }
 
-/// The 13 streams of [`x86`], each read in order in pieces, with a byte of look-ahead.
+/// The 14 streams of [`x86`], each read in order in pieces, with a byte of look-ahead.
 struct Readers<'a> {
     r: [aqr_api::stream::Reader<'a>; x86::NUM_STREAMS],
     peeked: [Option<u8>; x86::NUM_STREAMS],
@@ -294,13 +297,16 @@ impl x86::Src for Readers<'_> {
 }
 
 /// The section put out as it is built, but for its last [`HOLD`] bytes (the sentinel is cut off
-/// them): once [`SPOOL`] bytes are held, those before them go to `sink`.
+/// them) and those held for the jumps waiting: once [`SPOOL`] bytes are kept, those before them
+/// go to `sink`.
 struct Spool<'a> {
     buf: Vec<u8>,
     sink: &'a mut dyn aqr_api::stream::Put,
     failed: bool,
     /// Bytes put out.
     flushed: usize,
+    /// Where the bytes held begin, if any are.
+    held: Option<usize>,
 }
 
 impl Spool<'_> {
@@ -315,26 +321,57 @@ impl Spool<'_> {
     #[inline]
     fn spill(&mut self) {
         if self.buf.len() >= SPOOL {
-            self.put(self.buf.len() - HOLD);
+            self.flush();
         }
+    }
+
+    /// Puts out the bytes before the last [`HOLD`] and those held.
+    #[inline]
+    fn flush(&mut self) {
+        let mut n = self.buf.len() - HOLD;
+        if let Some(h) = self.held {
+            // (more than the jumps may hold: the streams are not valid)
+            if self.flushed + self.buf.len() - h > KEPT {
+                self.failed = true;
+                self.held = None;
+            } else {
+                n = n.min(h - self.flushed);
+            }
+        }
+        self.put(n);
     }
 }
 
 impl x86::Sink for Spool<'_> {
-    #[inline]
+    #[inline(always)]
     fn push(&mut self, b: u8) {
         self.buf.push(b);
         self.spill();
     }
 
-    #[inline]
+    #[inline(always)]
     fn extend_from_slice(&mut self, d: &[u8]) {
         self.buf.extend_from_slice(d);
         self.spill();
     }
 
+    #[inline(always)]
     fn fill(&mut self, n: usize, b: u8) {
         self.buf.resize(self.buf.len() + n, b);
+        self.spill();
+    }
+
+    fn patch(&mut self, at: usize, d: &[u8]) {
+        // (bytes put out are not held only where the streams are not valid)
+        if let Some(f) = at.checked_sub(self.flushed).and_then(|i| self.buf.get_mut(i..i + d.len())) {
+            f.copy_from_slice(d);
+        } else {
+            self.failed = true;
+        }
+    }
+
+    fn hold(&mut self, at: Option<usize>) {
+        self.held = at;
         self.spill();
     }
 
@@ -365,7 +402,7 @@ fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], si
     let (mut p, mut table) = ([0u8; X86Params::LEN], [0u8; x86::Opcodes::LEN]);
     aqr_api::Params::read(0, &mut p);
     Resource::<0>::read(0, &mut table);
-    pull_ins!(lens => ins, srcs: x86::NUM_STREAMS; 0 1 2 3 4 5 6 7 8 9 10 11 12);
+    pull_ins!(lens => ins, srcs: x86::NUM_STREAMS; 0 1 2 3 4 5 6 7 8 9 10 11 12 13);
     let mut out = Written::new(size);
     x86_run(&X86Params::new(&p), &table, srcs, &mut out)?;
     (out.total() == size).then_some(()).ok_or("output of another length")
@@ -397,7 +434,8 @@ fn x86_run(
     let opcodes = x86::Opcodes::from_resource(table).ok_or("bad resources")?;
     let r = srcs.map(|s| aqr_api::stream::Reader::new(s, PIECE));
     let mut src = Readers { r, peeked: [None; x86::NUM_STREAMS] };
-    let mut out = Spool { buf: Vec::with_capacity(SPOOL + HOLD + STEP), sink, failed: false, flushed: 0 };
+    let buf = Vec::with_capacity(SPOOL + HOLD + STEP + KEPT);
+    let mut out = Spool { buf, sink, failed: false, flushed: 0, held: None };
     x86::decode_core(&mut src, &mut out, p.origin, p.sentinel, p.is64, &opcodes, |_, _, _| Some(())).ok_or("corrupt")
 }
 

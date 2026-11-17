@@ -792,9 +792,8 @@ fn code_apply(
         Arch::X86(is64, k) if let Some(Remap::X86(r)) = remaps.get(k).and_then(Option::as_deref) => {
             let st = x86::remap::encode(section, va, is64, r)?;
             let params = x86_params(st.base.origin(), st.base.sentinel_size(), is64);
-            let streams = st.base.streams().iter().chain(st.extra());
-            let inputs = std::iter::zip(streams, x86::remap::STREAM_NAMES)
-                .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))
+            let inputs = std::iter::zip(st.inputs(), x86::remap::STREAM_NAMES)
+                .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.to_vec()))
                 .collect();
             Node::apply_with(X86_REMAP, vec![x86_resource()], params, inputs, size)
         }

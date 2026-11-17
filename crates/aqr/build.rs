@@ -56,7 +56,7 @@ fn sfx_pack() {
     // (the magic of src/bin/aqr-sfx-pack.rs's pack, which src/sfx.rs reads; a pack of another
     // form is of an earlier pack.py)
     assert!(
-        packed.starts_with(b"AQRSFXP1"),
+        packed.starts_with(b"AQRSFXP2"),
         "{}: not a pack of this aqr (run crates/aqr-sfx/pack.py again)",
         path.display()
     );

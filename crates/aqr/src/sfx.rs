@@ -61,7 +61,7 @@ fn parts() -> Result<[&'static [u8]; 3], String> {
             .into());
     }
     let cut = || "the self-extracting pack is cut short".to_string();
-    let mut d = PACKED.strip_prefix(b"AQRSFXP1").ok_or("the self-extracting pack is not valid")?;
+    let mut d = PACKED.strip_prefix(b"AQRSFXP2").ok_or("the self-extracting pack is not valid")?;
     let mut bundle = || -> Result<&'static [u8], String> {
         let (n, r) = d.split_first_chunk::<8>().ok_or_else(cut)?;
         let (b, r) = r.split_at_checked(u64::from_le_bytes(*n) as usize).ok_or_else(cut)?;

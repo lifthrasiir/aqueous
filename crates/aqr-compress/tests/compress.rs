@@ -453,8 +453,13 @@ fn zlib_checksum() {
 
 /// x86-64 code: calls among a few functions, RIP-relative loads.
 fn x86_64_code() -> Vec<u8> {
+    x86_64_code_of(2000)
+}
+
+/// [`x86_64_code`] of `n` such pieces.
+fn x86_64_code_of(n: u32) -> Vec<u8> {
     let mut code = Vec::new();
-    for i in 0..2000u32 {
+    for i in 0..n {
         let at = code.len() as i32;
         // mov [rsp+8], rbx; call f(i % 5); mov rax, [rip+d]; add rsp, 0x28; ret; int3
         code.extend_from_slice(&[0x48, 0x89, 0x5c, 0x24, 0x08, 0xe8]);
@@ -543,7 +548,8 @@ fn pe_rest_scanned() {
 /// pointer at 0x30): [`pe`], then one LZMA chunk (of `alone`, a `.lzma` file), the setup program
 /// and the setup header (each a few bytes).
 fn inno_old(alone: &[u8]) -> Vec<u8> {
-    let (mut d, _) = pe();
+    // (code enough for its filtering to pay for the module, beside the stream kept as it is)
+    let (mut d, _) = pe_of(0x8664, &x86_64_code_of(6000));
     let data = d.len();
     d.extend_from_slice(b"zlb\x1a");
     d.extend_from_slice(&alone[..5]);

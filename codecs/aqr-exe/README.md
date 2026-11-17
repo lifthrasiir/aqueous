@@ -4,8 +4,9 @@ Machine code recompression, of the executable sections of PE images, Mach-O imag
 in a universal file) and ELF images, and of the metadata and IL of .NET images, each rebuilt
 bit for bit:
 
-- x86 and x86-64: a disfilter splits the code into 13 streams by instruction field, with
-  relative targets made absolute and the padding between functions coded.
+- x86 and x86-64: a disfilter splits the code into 14 streams by instruction field, with
+  relative targets made absolute, jumps to nearby instructions written as the numbers of
+  instructions between, and the padding between functions coded.
 - ARM64: the instructions stay in one stream of big-endian words, with the targets of `BL`
   and `ADRP` made absolute, and the offsets of local branches taken out of them to streams
   of their own.
@@ -90,7 +91,7 @@ Mach-O and ELF files archived together alike, of more than half a solid block of
 Every module lays its memory out as a stack (`aqr_api::stack`) and declares its plan as its
 limit (`module::plan`; `exe_x86_plans_hold`, `exe_arm64_plans_hold` and
 `exe_macho_codesign_plans_hold` in aqr-decompress's `tests/wasm.rs` check the part modules' to
-the page). `exe-recons/x86` (version 4), `exe-recons/arm64` (2) and
+the page). `exe-recons/x86` (version 5), `exe-recons/arm64` (2) and
 `exe-recons/macho-codesign` (2) are part modules: their streams are read in pieces and the
 output put out as it goes, so that the plan does not depend on the lengths (a PE of 357 MB
 needed 1241 MiB as a whole module, over the encoder's bound of 256 MiB per application; a
@@ -131,6 +132,17 @@ base register; padding records coded) were measured on 2026-10-28 on a Ryzen 7 9
 0.2901 → 0.2832 (−2.4%), 3 files larger by 0.3–1.3% (x86-32). Version 3 takes the opcode
 classes as its resource (1280 bytes), so that opcodes can be added without another version:
 582 B more for an archive of one file, 248 B of them the resource block.
+
+Version 5 writes the jumps of 8 and 32 bits other than calls as the numbers of steps (items:
+instructions, prefixes, escaped bytes, jump tables) from the one after the jump to its target,
+within 127 either way and 4096 bytes ahead (`JUMP8`, and `JUMPN` added for those of 32 bits),
+which stay the same where the instructions between change their lengths; the others as they
+were. Measured on 2026-11-17 on a Ryzen 7 9700X, `aqr -c` at the default level against version
+4: the 11 binaries of `large` 421,541,787 → 414,201,191 B (−1.74%; each file −0.7 to −3.8%),
+compressing 17.2 → 17.7–18.4 s and testing 1.51 → 1.64 s (16 threads); AcroRd32.dll of Adobe
+Reader 9.4.0 (x86-32, 8.1 MB of code) 7,677,763 → 7,620,425 B (−0.75%). The module grew by
+931 B as a block (6453 → 7384), which an archive of little code pays for (an image's code is
+then kept raw where it no longer pays).
 
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
 archiving no smaller: 27 .NET assemblies (24 satellite assemblies of resources alone;

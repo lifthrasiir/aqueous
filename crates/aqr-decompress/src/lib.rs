@@ -60,7 +60,7 @@ pub use wasm::{Applied, initial_pages, record_applications};
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
 /// (`x86::Opcodes`); inputs: the streams of `x86::STREAM_NAMES`.
-pub const X86: Module = Module::new("exe-recons/x86", 4).with_plan(x86);
+pub const X86: Module = Module::new("exe-recons/x86", 5).with_plan(x86);
 
 /// The memory of [`X86`], a part module: its plan (`aqr_exe::module::x86_part_plan`), whatever the
 /// lengths (`None` for parameters of under 10 bytes).
@@ -72,7 +72,7 @@ fn x86(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 /// aqr-exe's x86 disfilter on a code section, its references remapped to those of another
 /// image. Parameters and resources as [`X86`]'s; inputs: the streams of
 /// `x86::remap::STREAM_NAMES`.
-pub const X86_REMAP: Module = Module::new("exe-recons/x86-remap", 1).with_plan(x86_remap);
+pub const X86_REMAP: Module = Module::new("exe-recons/x86-remap", 2).with_plan(x86_remap);
 
 /// The memory of [`X86_REMAP`]: its initial memory, and its plan
 /// (`aqr_exe::module::x86_remap_plan`).

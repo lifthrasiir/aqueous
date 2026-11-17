@@ -168,8 +168,7 @@ fn x86_main(sa: &[(u64, &[u8])], sb: &[(u64, &[u8])]) {
         let t = Instant::now();
         let e = x86::remap::encode(c, va, true, &r).unwrap();
         t_enc += t.elapsed().as_secs_f64();
-        let st: [&[u8]; x86::remap::NUM_STREAMS] =
-            std::array::from_fn(|i| if i < n { &e.base.streams()[i][..] } else { &e.extra()[i - n][..] });
+        let st = e.inputs();
         let t = Instant::now();
         let back =
             x86::remap::decode(e.base.origin(), e.base.sentinel_size(), st, true, &x86::Opcodes::BUILTIN, c.len());

@@ -15,7 +15,9 @@ displacements, immediates, jump and call targets, addresses) go to streams by wh
 which compress better apart than interleaved; fields that the opcodes around them tell best
 (REX bits, 8-bit immediates) or that are rare stay with the opcodes. Relative targets become absolute, so that repeated
 calls and references to one place look alike; calls to recent targets become indices into a
-move-to-front cache; padding between functions and jump tables are recognised. The document is
+move-to-front cache; jumps to nearby instructions become the numbers of instructions between,
+which do not change with the lengths of those instructions; padding between functions and jump
+tables are recognised. The document is
 meant to be complete: an implementation of the module can be written from it alone. Sections
 marked *(encoder)* describe the choices this implementation makes when it builds formulas; the
 module does not depend on them.
@@ -49,7 +51,7 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `exe-recons/x86`, version 4.
+- **Module**: name `exe-recons/x86`, version 5.
 - **Params**: exactly 10 bytes.
 
   ```text
@@ -61,15 +63,21 @@ Contents:
 - **Resources**: exactly one, the opcode classes of §4: 1280 bytes, five tables of 256 class
   codes (§4), one byte for each opcode `00`–`FF` in order: map 0 in x86-32, maps 1, 4 and 7,
   and map 0 in x86-64.
-- **Inputs**: exactly 13, the streams of §3 in order. Each is of class `x86/NAME` (`x86/OP`,
+- **Inputs**: exactly 14, the streams of §3 in order. Each is of class `x86/NAME` (`x86/OP`,
   `x86/SIB`, ...).
 - **Output**: the code of §5. Its length must be the `len` the application declares.
 
-Version 4 is a part module (windows of a page for each input and for the output) of the same
-params, resource, inputs and output: the 13 streams are read in order in pieces, and the output
-is put out as it is built but for its last 16 bytes (the sentinel, which is 15 at most, is cut
-off them; a larger one is refused), so that nothing depends on the lengths. The output is version
-3's byte for byte (version 3 was a whole module that held its inputs twice and its output).
+The module is a part module (windows of a page for each input and for the output): the streams
+are read in order in pieces, and the output is put out as it is built but for its last 16 bytes
+(the sentinel, which is 15 at most, is cut off them; a larger one is refused) and for those from
+the field of the first jump still waiting for its target (§5.6), so that nothing depends on the
+lengths.
+
+Version 5 writes jumps of relative offsets other than calls as counts of steps (§5.6), in
+`JUMP8` and the stream `JUMPN` it adds. Version 4 was the same part module of 13 streams, its
+`JUMP8` the offsets as they are and `JUMP` the targets of every `J4` that is not a call; its
+output is version 3's byte for byte (version 3 was a whole module that held its inputs twice and
+its output).
 
 ## 3. Streams
 
@@ -83,13 +91,14 @@ off them; a larger one is refused), so that nothing depends on the lengths. The 
 | 5 | `DISP8` | other 8-bit displacements without an index |
 | 6 | `DISP8_IDX` | other 8-bit displacements with an index |
 | 7 | `DISP32` | 32-bit displacements |
-| 8 | `JUMP8` | 8-bit relative jumps, as they are |
-| 9 | `JUMP` | 32-bit jump targets, absolute: `le32` in x86-32, `le64` in x86-64; absolute far jump offsets (`le32`); entries of x86-64 jump tables, as they are (`le64`) |
+| 8 | `JUMP8` | 8-bit relative jumps: a count (§5.6), or `80` and the offset as it is |
+| 9 | `JUMP` | 32-bit jump targets not written as counts, absolute: `le32` in x86-32, `le64` in x86-64; absolute far jump offsets (`le32`); entries of x86-64 jump tables, as they are (`le64`) |
 | 10 | `IMM32` | 32-bit immediates |
 | 11 | `ADDR` | 32- and 64-bit absolute addresses; in x86-64, the targets of RIP-relative operands (`le64`) |
 | 12 | `CALL` | call targets missing from the cache: `le32` in x86-32, `le64` in x86-64 |
+| 13 | `JUMPN` | 32-bit relative jumps other than calls: a count (§5.6), or `80` for a target in `JUMP` |
 
-All 13 are always present, possibly empty. Bytes left in any stream when decoding ends are
+All 14 are always present, possibly empty. Bytes left in any stream when decoding ends are
 ignored. A field is read from the next bytes of its stream, whatever fields came before them:
 `OP` holds its fields in the order §5 reads them.
 
@@ -107,7 +116,7 @@ Each opcode has a class, which says what follows it:
 | `J1` | 5 | an 8-bit relative jump |
 | `J4` | 6 | a 32-bit relative jump, 16-bit with `66` in x86-32 |
 | `JA` | 7 | a 32-bit absolute jump offset, 16-bit with `66` in x86-32 |
-| `A_` | 8 | an absolute address (§5.6) |
+| `A_` | 8 | an absolute address (§5.3) |
 | `R1` | 9 | ModR/M, then an 8-bit immediate |
 | `XX` | 10 | invalid: never decoded |
 | `R4` | 11 | ModR/M, then as `N4` |
@@ -215,14 +224,14 @@ is what "with `66`" and the like refer to.
 
 ### 5.1 The loop
 
-State: `out` empty, the set `P` empty, the flag `pad` clear and the call cache of §5.4. Then,
-as long as `pad` is set or `OP` has bytes left:
+State: `out` empty, the set `P` empty, the flag `pad` clear, the call cache of §5.4 and the
+steps of §5.6. Then, as long as `pad` is set or `OP` has bytes left:
 
 1. If `pad` is set: read a padding record (§5.5), clear `pad`, and repeat.
-2. Otherwise read a byte `b` from `OP` and decode an item (§5.2).
+2. Otherwise a step begins (§5.6); read a byte `b` from `OP` and decode an item (§5.2).
 
-At the end, drop the last `sentinel` bytes of `out` (an error if it is shorter). `out` is the
-output.
+At the end, it is an error if a jump still waits (§5.6). Drop the last `sentinel` bytes of `out`
+(an error if it is shorter). `out` is the output.
 
 ### 5.2 Items
 
@@ -313,15 +322,18 @@ Then the opcode: if `b` is `40`–`4F`, the map is `m = b − 40` and the opcode
      (The bits that REX2 and EVEX add for registers 16 to 31 are not looked at.)
 5. **The operand**, by the class:
    - `J4`, in x86-32 with `66` in `P`: copy 2 bytes from `OP`.
-   - `J4` otherwise: the target `T` is, for `0:E8` (`CALL`), a call target (§5.4); for others
-     a `le64` from `JUMP` in x86-64 or a `le32` from `JUMP` in x86-32. Append the `le32`
-     of `T − (address + 4)`, truncated, `address` being that of its first byte.
+   - `J4` of `0:E8` (`CALL`): the target `T` is a call target (§5.4). Append the `le32` of
+     `T − (address + 4)`, truncated, `address` being that of its first byte.
+   - `J4` otherwise: read a byte `c` from `JUMPN`. If `c ≠ 80`, the field is of 4 bytes and
+     count `c` (§5.6). If `c = 80`, the target `T` is a `le64` from `JUMP` in x86-64 or a
+     `le32` from `JUMP` in x86-32, appended as for a call.
    - `A_`: `n` bytes copied from `OP` for `n` = 2, or from `ADDR` for `n` = 4 or 8. For
      `0:EA`, `n` is 2 with `66` in `P` and 4 without; for the others, `n` is 4 in x86-32 and
      8 in x86-64, halved with `67` in `P`.
    - `JA`: in x86-32 with `66` in `P`, 2 bytes copied from `OP`; otherwise 4 bytes copied
      from `JUMP`.
-   - `J1`: 1 byte copied from `JUMP8`.
+   - `J1`: read a byte `c` from `JUMP8`. If `c ≠ 80`, the field is of 1 byte and count `c`
+     (§5.6); if `c = 80`, 1 byte copied from `JUMP8`.
    - `N_`: nothing.
    - `N1`, `N2`, `N4`, `NZ`: `NZ` without REX.W is `N4`; then `N4` with `66` in `P` is `N2`.
      Copy 1, 2, 4 or 8 bytes (`N1`, `N2`, `N4`, `NZ`), from `IMM32` for 4 and from `OP`
@@ -351,6 +363,29 @@ A record is read from `OP`, `a` being the address of the next output byte. By it
 - anything else: an error.
 
 A record follows every instruction that sets `pad`, even the last one of the section.
+
+### 5.6 Jump counts
+
+A **step** begins at each item (§5.2: an escaped byte, a jump table, a prefix, an
+instruction), at the address of the next output byte then; padding records are no steps. Steps
+are numbered from 0 in order. The decoder remembers the addresses of the last 128 steps begun.
+
+A jump's field of `s` bytes (1 or 4) of **count** `c` (a byte other than `80`, taken as a
+signed `i8`, −127 to 127) has its **target**, the step numbered `n + c`, `n` being the number
+of steps begun (so the step after the jump's own is `n`, and `c = −1` is the jump's own step).
+With `end` the address after its field, its value is the `le` of `s` bytes of
+`target's address − end`, truncated:
+
+- `c < 0`: the target's step has begun. It is an error if `n + c < 0`. Append the value; with
+  `s = 1` it is an error if it is below −128.
+- `c ≥ 0`: append `s` bytes 0, and the jump **waits**. When the step numbered `n + c` begins,
+  each jump waiting for it is written: its field takes the value. It is an error if the value
+  is above 4096, or above 127 with `s = 1`.
+
+So a jump waits for at most 127 steps and 4096 bytes after its field; the decoder may put out the
+output before the field of the first jump waiting. Where its target is not a step (an
+instruction's bytes, a padding record, the end of the section), or too far, a jump is written
+as `80` and its target (§5.3).
 
 ## 6. Encoding *(encoder)*
 
@@ -389,6 +424,12 @@ position:
      `JUMP` and `ADDR` hold the 64-bit address in x86-64, `JUMP` the 32-bit one in x86-32. A call target
      already in the cache is written as its index; otherwise `FF` and the target, and the
      cache is updated as in §5.4 either way.
+   - A jump other than a call (`J1`, and `J4` but in x86-32 with `66`) is written as a count
+     where its target is the address of a step within 127 steps either way, and no more than
+     4096 bytes after its field when ahead (a jump of 8 bits always is); otherwise escaped
+     (§5.6). The steps ahead are those that the encoding goes on to make: a jump ahead waits
+     in the encoder too, the bytes of the escaped ones put into `JUMP8` and `JUMP` at their
+     places once the streams are made.
 4. When the original bytes are used up, an instruction may have run into the sentinel: the
    number of sentinel bytes left unread is subtracted from 15 to give `sentinel`. A record of
    padding is written if `pad` is still set.
@@ -406,11 +447,13 @@ image raw if the formula would not archive smaller.
 The module fails if:
 
 - the params are not 10 bytes long (this implementation ignores trailing bytes), there is not
-  exactly one resource, or not exactly 13 inputs;
+  exactly one resource, or not exactly 14 inputs;
 - the resource is not 1280 bytes long, holds a byte above `0F` (no class), or gives the class
   `BP` to an opcode other than a prefix of map 0 (§4);
 - a stream runs out where a byte is to be read or copied, or a padding record starts with a
   byte above `03`;
+- a jump's count is of a step before the first, gives a value out of bounds, or waits at the end
+  (§5.6);
 - an opcode is of class `XX`, a map is above 3 without a VEX or EVEX prefix, a REX or REX2
   marker appears in x86-32, or the bits of a prefix fail the checks of §5.3;
 - `out` is shorter than `sentinel` at the end, or the output is not `len` bytes long.
@@ -426,20 +469,24 @@ of each value so written to the reference's own rebuilds them. The map is over t
 the flagged references hold, so the other image is not an input. The conventions of §1 hold.
 
 ## N1. The module
-- **Module**: name `exe-recons/x86-remap`, version 1.
+- **Module**: name `exe-recons/x86-remap`, version 2.
 - **Params** and **Resources**: as for `exe-recons/x86` (§2).
-- **Inputs**: exactly 17, the streams of §3 (0–12, each of class `x86/NAME`), then those of §N2.
+- **Inputs**: exactly 18, the streams of §3 (0–13, each of class `x86/NAME`), then those of §N2.
 - **Output**: the code, `len` bytes long.
 
 ## N2. Streams
 
 | # | name | contents |
 |---|---|---|
-| 0–12 | | as in §3 |
-| 13 | `CALLF` | a flag per target of `0:E8` (`CALL`), in order, a bit each, the most significant of each byte first |
-| 14 | `JUMPF` | a flag per target of another `J4` read from `JUMP` (not with `66` in x86-32) |
-| 15 | `ADDRF` | a flag per operand of `mod = 0`, `rm = 5` read from `ADDR` (`[rip+disp32]` in x86-64, `[disp32]` in x86-32) |
-| 16 | `MAP` | the map of the values flagged (§N3) |
+| 0–13 | | as in §3 |
+| 14 | `CALLF` | a flag per target of `0:E8` (`CALL`), in order, a bit each, the most significant of each byte first |
+| 15 | `JUMPF` | a flag per target of another `J4` read from `JUMP` (not one of a count, nor with `66` in x86-32) |
+| 16 | `ADDRF` | a flag per operand of `mod = 0`, `rm = 5` read from `ADDR` (`[rip+disp32]` in x86-64, `[disp32]` in x86-32) |
+| 17 | `MAP` | the map of the values flagged (§N3) |
+
+Version 1 was of 17 inputs, those of version 4 of `exe-recons/x86` (no `JUMPN`, every jump's
+target in `JUMP`) and these four. A jump written as a count (§5.6) is no reference: it does not
+change as the code moves.
 
 ## N3. Decoding
 
@@ -463,16 +510,17 @@ So a flagged reference's own value is `(vᵢ + sᵢ) & W`, its field the one §5
 
 ## N4. Validation
 
-The module fails if `exe-recons/x86` would (§7), of streams 0–12, or if there are not exactly
-17 inputs; a flag stream runs out, or is longer than its flags, or its bits after them are not
+The module fails if `exe-recons/x86` would (§7), of streams 0–13, or if there are not exactly
+18 inputs; a flag stream runs out, or is longer than its flags, or its bits after them are not
 0; a LEB128 of `MAP` runs out, is longer than 10 bytes, or is not of 32 bits sign-extended in
 x86-32; `MAP` has bytes left; or a field noted is not within the output.
 
 ## N5. Encoding *(encoder)*
 
 `aqr_exe::arch::x86::remap::Remap::new` matches the functions of two images as §M5 does, by
-byte: the code with the fields of the references cleared, cut where calls go (and at the
-sections' starts), the references all of one space (addresses). `remap::encode` flags the
+byte: the code with the fields of the references cleared (of every jump of 32 bits, as a count
+or not), cut where calls go (and at the sections' starts), the references all of one space
+(addresses). `remap::encode` flags the
 references the map has whose fields are within the section (not those of the zeros the encoder
 reads past the end, §6) and writes them as the reference's values, the call cache (§5.4) going
 by the values so written. aqr-compress plans the x86 images of Mach-O files with the ARM64 ones

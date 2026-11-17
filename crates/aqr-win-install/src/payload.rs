@@ -4,10 +4,10 @@
 //! and each of their streams and the rest of the file is a zstd frame of its own.
 //!
 //! ```text
-//! payload  = "AQRWINS1" u8:count file*
+//! payload  = "AQRWINS2" u8:count file*
 //! file     = u8:n name[n] (UTF-8) le64:size u8:count region* frame:rest
 //! region   = u8:kind le64:offset le64:len params frame*
-//!            kind 1, x86: params le64:origin u8:sentinel u8:is64; 13 frames (x86::STREAM_NAMES)
+//!            kind 1, x86: params le64:origin u8:sentinel u8:is64; 14 frames (x86::STREAM_NAMES)
 //!            kind 2, base relocations: params u8:align; 2 frames (reloc::STREAM_NAMES)
 //! frame    = le32:raw le32:n zstd[n]
 //! ```
@@ -18,7 +18,7 @@
 use aqr_exe::arch::x86;
 use aqr_exe::reloc;
 
-pub const MAGIC: &[u8; 8] = b"AQRWINS1";
+pub const MAGIC: &[u8; 8] = b"AQRWINS2";
 
 pub const X86: u8 = 1;
 pub const RELOC: u8 = 2;

@@ -1,4 +1,4 @@
-//! `exe-recons/x86` as a part module ([`module::x86_streamed`]: the 13 streams pulled in pieces,
+//! `exe-recons/x86` as a part module ([`module::x86_streamed`]: the 14 streams pulled in pieces,
 //! the section put in pieces) against the whole decoding, on real x86-64 code (this test's own
 //! executable) and noise in both modes, with sentinels of every size, and on streams cut short,
 //! damaged, and left with bytes over.
@@ -207,5 +207,49 @@ fn sentinels_over_fifteen_are_refused() {
         let (whole, part) = (module::x86(&p, &[&res], &streams, len), module::x86_streamed(&p, &[&res], &streams, len));
         assert_eq!(whole.is_ok(), sentinel <= 15, "whole, sentinel {sentinel}");
         assert_eq!(part.is_ok(), sentinel <= 15, "part, sentinel {sentinel}");
+    }
+}
+
+/// Forward jumps waiting for their targets (FORMAT.md §5.6) while the part module puts out the
+/// section before them: their fields held across its 64 KiB, up to the reach of 4096 bytes.
+#[test]
+fn jumps_waiting_across_the_spool() {
+    for (lead, gap) in [(65_530usize, 4096usize), (65_536 - 3, 100), (130_000, 4000), (10, 4096)] {
+        for is64 in [true, false] {
+            // NOPs, then a JMP over padding (NOPs scanned as such) of `gap` bytes but its own
+            // field, and a JZ of 8 bits over a NOP
+            let mut d = vec![0x90; lead];
+            d.push(0xe9);
+            d.extend((gap as i32).to_le_bytes());
+            d.extend(vec![0x90; gap]);
+            d.extend([0x74, 0x01, 0x90, 0x31, 0xc0, 0xc3]);
+            let e = x86::encode(&d, 0x1000, is64).unwrap();
+            let jumpn = &e.streams()[x86::NUM_STREAMS - 1];
+            assert_eq!(jumpn[..], [0], "lead {lead}, gap {gap}");
+            same(&format!("lead {lead}, gap {gap}"), &d, 0x1000, is64);
+        }
+    }
+}
+
+/// A count whose target is more than 4096 bytes after its field is refused by both decodings,
+/// however far the section goes on.
+#[test]
+fn counts_out_of_reach_fail_alike() {
+    let res = Opcodes::BUILTIN.to_resource();
+    for gap in [4097usize, 70_000] {
+        let mut d = vec![0xe9];
+        d.extend((gap as i32).to_le_bytes());
+        d.extend(vec![0x90; gap]);
+        d.extend([0x31, 0xc0, 0xc3]);
+        let e = x86::encode(&d, 0x1000, true).unwrap();
+        let mut s: Vec<Vec<u8>> = e.streams().to_vec();
+        assert_eq!(s[x86::NUM_STREAMS - 1], [0x80], "escaped: out of reach");
+        same(&format!("gap {gap}"), &d, 0x1000, true);
+        // the count of the next step, the target left in JUMP
+        s[x86::NUM_STREAMS - 1] = vec![0];
+        let r: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
+        let p = params(0x1000, e.sentinel_size(), true);
+        assert!(module::x86(&p, &[&res], &r, d.len() as u64).is_err(), "whole, gap {gap}");
+        assert!(module::x86_streamed(&p, &[&res], &r, d.len() as u64).is_err(), "part, gap {gap}");
     }
 }

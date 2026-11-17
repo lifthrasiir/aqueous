@@ -7,7 +7,8 @@
 //! streams. It notes where each flagged reference is as it decodes, and adds its shift there
 //! once the map is known.
 //!
-//! The streams are those of [`super`] and four more (`exe-recons/x86-remap`, FORMAT.md §N).
+//! The streams are those of [`super`] and four more (`exe-recons/x86-remap`, FORMAT.md §N). The
+//! jumps written as counts are no references (they do not change as the code moves).
 
 use alloc::vec::Vec;
 
@@ -49,7 +50,7 @@ const fn width(is64: bool) -> u64 {
 
 #[cfg(feature = "encode")]
 mod encode {
-    use super::super::{encode_with, EncodedStreams as Base};
+    use super::super::{encode_refs, encode_with, EncodedStreams as Base};
     use super::*;
     use crate::arch::flags::Bits;
     use crate::arch::matching::{self, Code};
@@ -87,7 +88,7 @@ mod encode {
                 v
             };
             // (what a section that does not parse holds up to there is kept)
-            let _ = encode_with(c, va, is64, &mut hook);
+            let _ = encode_refs(c, va, is64, &mut hook);
         }
         cuts.push(units.len());
         refs.sort_unstable_by_key(|r| r.0);
@@ -190,6 +191,17 @@ mod encode {
         /// The streams from [`CALLF`] on.
         pub fn extra(&self) -> &[Vec<u8>; 4] {
             &self.streams
+        }
+
+        /// All the streams, named by [`STREAM_NAMES`]: the base's, then the extra.
+        pub fn inputs(&self) -> [&[u8]; NUM_STREAMS] {
+            core::array::from_fn(|i| {
+                if i < NUM_BASE {
+                    &self.base.streams()[i][..]
+                } else {
+                    &self.streams[i - NUM_BASE][..]
+                }
+            })
         }
 
         /// References of each kind (`CALL`, other jumps, addresses), and those of them flagged.
@@ -335,7 +347,7 @@ mod tests {
     use alloc::vec;
 
     fn streams(e: &EncodedStreams) -> [&[u8]; NUM_STREAMS] {
-        core::array::from_fn(|i| if i < NUM_BASE { &e.base.streams()[i][..] } else { &e.extra()[i - NUM_BASE][..] })
+        e.inputs()
     }
 
     fn roundtrip(code: &[u8], origin: u64, is64: bool, remap: &Remap) -> EncodedStreams {
@@ -388,15 +400,21 @@ mod tests {
         let [c, j, d] = e.flagged();
         // (the addresses of data that did not move too, to themselves)
         assert!([c, j, d].iter().all(|f| f.1 * 10 > f.0 * 8), "{c:?} {j:?} {d:?}");
-        // B's calls and jumps are A's
+        // B's calls are A's; its jumps (each to the next function) are A's counts but where the
+        // next one moved, escaped and A's target
         let ea = super::super::encode(&a, 0x1000, true).unwrap();
-        for st in [super::super::ST_CALL, super::super::ST_JUMP] {
-            let (sa, sb) = (&ea.streams()[st], &e.base.streams()[st]);
-            let mut wa: Vec<&[u8]> = sa.chunks(8).collect();
-            wa.sort_unstable();
-            let found = sb.chunks(8).filter(|w| wa.binary_search(w).is_ok()).count();
-            assert!(found * 10 >= sb.len() / 8 * 9, "{found} of {}", sb.len() / 8);
-        }
+        let st = super::super::ST_CALL;
+        let (sa, sb) = (&ea.streams()[st], &e.base.streams()[st]);
+        let mut wa: Vec<&[u8]> = sa.chunks(8).collect();
+        wa.sort_unstable();
+        let found = sb.chunks(8).filter(|w| wa.binary_search(w).is_ok()).count();
+        assert!(found * 10 >= sb.len() / 8 * 9, "{found} of {}", sb.len() / 8);
+        let jumpn = |e: &super::super::EncodedStreams| e.streams()[super::super::ST_JUMPN].clone();
+        // (of A, the last one's, back to the first)
+        assert_eq!(jumpn(&ea).iter().filter(|&&c| c == 0x80).count(), 1);
+        let escaped = jumpn(&e.base).iter().filter(|&&c| c == 0x80).count();
+        assert!((1..=6).contains(&escaped), "{escaped}");
+        assert_eq!(e.base.streams()[super::super::ST_JUMP].len(), 8 * escaped);
     }
 
     /// Maps built by hand, of some of the values the code holds; any references round-trip.
