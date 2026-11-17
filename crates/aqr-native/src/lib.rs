@@ -163,12 +163,13 @@ pub const NATIVE: &[Native] = &[
     part(
         "exe-recons/x86",
         true,
-        aqr_api::emu::Entry::part(&same::<15>(14, 1, aqr_exe::module::X86_WINDOW), 17, |a| {
+        aqr_api::emu::Entry::part(&same::<16>(14, 2, aqr_exe::module::X86_WINDOW), 18, |a| {
             aqr_exe::module::x86_part(
                 a[0],
                 a[1],
                 [a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]],
                 a[16],
+                a[17],
             )
         }),
         |p, r, i, n, _| aqr_exe::module::x86(p, r, i, n).map_err(err),

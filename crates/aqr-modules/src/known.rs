@@ -239,20 +239,20 @@ pub static KNOWN: &[Known] = &[
     },
     Known {
         name: "exe-recons/pe-reloc",
-        version: 1,
-        sha512_256: hex("f3c8415f73841639b0c49bd81c5b411f5c0e3145acbdc42045fbf1b66d00fff9"),
+        version: 2,
+        sha512_256: hex("26f7c061a60082fef0729bf145374e786a1e6317dc2552735f437ac2c49a24df"),
         block: include_bytes!("../wasm/exe-recons-pe-reloc.block"),
     },
     Known {
         name: "exe-recons/x86-remap",
         version: 2,
-        sha512_256: hex("f771e05528d0c2c7a2f86a25576eb6d29dff14b4745e06dc66b1fc31fac60e88"),
+        sha512_256: hex("a8d092a4eee443f92f6a14537ef0e1637300105516106fa860bdecbf51868aad"),
         block: include_bytes!("../wasm/exe-recons-x86-remap.block"),
     },
     Known {
         name: "exe-recons/x86",
-        version: 5,
-        sha512_256: hex("7094f8a49e6e8439737ca0ea5056e4c9ccf28a7ca4656202027fc0034ebb6fe3"),
+        version: 6,
+        sha512_256: hex("1ecc85b704093e11c8daa5024468bafb4d4496fc52e3ecf016cfd10af0c51581"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
     },
     Known {

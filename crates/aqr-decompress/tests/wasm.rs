@@ -539,7 +539,7 @@ fn bcj2_plans_hold() {
 }
 
 /// [`plan_holds`] of an application of several outputs, the first of the formula's (`f.shared[0]`),
-/// whose outputs the root takes: a module that takes no tasks.
+/// whose outputs the root takes: a module that takes no tasks, its inputs slices.
 fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     let pages = aqr_api::stack::pages;
     let a = f.shared[0].apply().unwrap().clone();
@@ -552,9 +552,10 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
         .collect();
     let contents: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
     let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+    let resources: Vec<u64> = a.resources.iter().map(|r| r.len() as u64).collect();
     let usage = aqr_formula::Usage {
         params: &a.params,
-        resources: &[],
+        resources: &resources,
         inputs: &lens,
         outputs: &sizes,
         contents: &contents,
@@ -564,10 +565,13 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     assert!(plan.tasks.is_empty(), "{what}: tasks");
     // (the same plan for a hundred bytes: it does not depend on the lengths)
     let none: Vec<&[u8]> = Vec::new();
-    let small = aqr_formula::Usage { inputs: &[100, 100], outputs: &[100, 0, 0], contents: &none, ..usage };
+    let (small_in, mut small_out) = (vec![100; lens.len()], vec![0; sizes.len()]);
+    small_out[0] = 100;
+    let small = aqr_formula::Usage { inputs: &small_in, outputs: &small_out, contents: &none, ..usage };
     assert!(sizes.iter().sum::<u64>() < 1000 || a.module.plan_for(&small).unwrap().instance == plan.instance, "{what}");
     assert!(plan.instance <= 4 << 20, "{what}: instance {}", plan.instance);
-    let imported = std::iter::once(a.params.len() as u64).chain(sizes.iter().copied()).chain(lens.iter().copied());
+    let imported = [a.params.len() as u64].into_iter().chain(resources.iter().copied());
+    let imported = imported.chain(sizes.iter().copied()).chain(lens.iter().copied());
     let limit = imported.map(pages).sum::<u64>() + plan.instance;
     f.shared[0].apply_mut().unwrap().memory_limit = limit;
     let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
@@ -4889,10 +4893,10 @@ fn exe_x86_plans_hold() {
     let resource = aqr_formula::Resource::new(x86::Opcodes::BUILTIN.to_resource());
     let plan_of = |n: u64| {
         let usage = aqr_formula::Usage {
-            params: &[0; 10],
+            params: &[0; 26],
             resources: &[1280],
-            inputs: &[n; 13],
-            outputs: &[n],
+            inputs: &[n; 14],
+            outputs: &[n, n / 4],
             contents: &vec![],
             initial_pages: aqr_decompress::initial_pages_of(m).unwrap(),
         };
@@ -4900,17 +4904,42 @@ fn exe_x86_plans_hold() {
     };
     assert_eq!(plan_of(10), plan_of(3 << 30));
     assert!(plan_of(10) < 2 << 20, "{}", plan_of(10));
-    for (n, is64) in [(0usize, true), (5, true), (999, false), (200_000, true), (3 << 20, true), (3 << 20, false)] {
+    // (of a side output too: in x86-32, of every field of 4 bytes)
+    let fields = x86::Fields { base: 0, lo: 0, hi: u32::MAX as u64 };
+    for (n, is64, side) in [
+        (0usize, true, false),
+        (5, true, false),
+        (999, false, true),
+        (200_000, true, false),
+        (3 << 20, true, true),
+        (3 << 20, false, true),
+    ] {
         let code = &exe[1000..(1000 + n).min(exe.len())];
-        let st = x86::encode(code, 0x1_4000_0000, is64).unwrap();
+        let st = x86::encode_fields(code, 0x1_4000_0000, is64, fields).unwrap();
         let mut f = Formula::default();
         let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)
             .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))
             .collect();
         let mut params = st.origin().to_le_bytes().to_vec();
         params.extend([st.sentinel_size(), is64 as u8]);
-        f.root = Node::apply_with(m, vec![resource.clone()], params, inputs, code.len() as u64);
-        plan_holds(&format!("x86 {n} {is64}"), f, code);
+        if side {
+            params.extend(fields.base.to_le_bytes());
+            params.extend([fields.lo as u32, fields.hi as u32].map(u32::to_le_bytes).concat());
+        }
+        let side = if side { st.side() } else { &[] };
+        assert!(n < 1000 || is64 || side.len() > n / 100, "x86 {n}: side output of {}", side.len());
+        let a = aqr_formula::Apply {
+            module: m,
+            resources: vec![resource.clone()],
+            params,
+            inputs,
+            len: 0,
+            memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: vec![],
+        };
+        let outs = f.share(a, vec![code.len() as u64, side.len() as u64]);
+        f.root = Node::concat(outs);
+        plan_holds_shared(&format!("x86 {n} {is64}"), f, &[code, side].concat());
     }
 }
 

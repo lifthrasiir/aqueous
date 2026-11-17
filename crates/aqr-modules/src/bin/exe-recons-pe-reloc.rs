@@ -3,4 +3,4 @@
 #![no_std]
 #![no_main]
 
-aqr_modules::whole!(inputs [rvas: 0, types: 1], |p, _, i, len| aqr_exe::module::reloc(p, i, len));
+aqr_modules::whole!(inputs [rvas: 0, types: 1, wrong: 2, pred: 3], |p, _, i, len| aqr_exe::module::reloc(p, i, len));

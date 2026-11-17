@@ -5,8 +5,8 @@ use aqr_common::rng::noise;
 use aqr_compress::{Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, DWARF_APPLE, DWARF_INFO, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, JSONL, LEVELDB,
-    LOG, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES, RECS_FIELDS,
-    SQLITE, WRT, WRT_HANGUL, X86, ZIP, decompress,
+    LOG, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PE_RELOC, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES,
+    RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -525,13 +525,110 @@ fn pe_sections() {
     assert_eq!(modules(&roundtrip(&d, &all())), [X86.name]);
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     assert_eq!(modules(&f), [X86.name]);
+    // (the code, its empty side output, the rest)
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
-    assert_eq!(parts.len(), 3);
+    assert_eq!(parts.len(), 4);
     assert_eq!(parts[0], Node::slice(0, 0, code.start as u64));
-    assert_eq!(parts[1].len(), code.len() as u64);
-    assert_eq!(parts[2], Node::slice(0, code.start as u64, (d.len() - code.end) as u64));
+    assert_eq!((parts[1].len(), parts[2].len()), (code.len() as u64, 0));
+    assert_eq!(parts[3], Node::slice(0, code.start as u64, (d.len() - code.end) as u64));
     let classes = aqr_compress::classes(&f);
     assert!(classes.iter().any(|&(c, n)| c == "x86/CALL_IDX" && n > 0), "{classes:?}");
+}
+
+/// A PE32 image of x86-32 code of `n` pieces, each of absolute addresses (a load, a push and an
+/// indirect call, relocated) and numbers (`mov ecx, 5`; every 10th a `cmp eax` of an address
+/// that is not relocated), and its base relocations, of these and of `extra` RVAs after the code;
+/// the relocations' RVAs too.
+fn pe32_relocated(n: u32, extra: &[u32]) -> (Vec<u8>, Vec<u32>) {
+    let base = 0x40_0000u32;
+    let (mut code, mut relocs) = (Vec::new(), Vec::new());
+    for i in 0..n {
+        let mut field = |code: &mut Vec<u8>, op: &[u8], v: u32, relocated: bool| {
+            code.extend_from_slice(op);
+            if relocated {
+                relocs.push(0x1000 + code.len() as u32);
+            }
+            code.extend_from_slice(&v.to_le_bytes());
+        };
+        field(&mut code, &[0xa1], base + 0x2000 + 4 * i, true); // mov eax, [a]
+        field(&mut code, &[0x68], base + 0x1000 + 16 * i, true); // push a
+        field(&mut code, &[0xb9], 5, false); // mov ecx, 5
+        if i % 10 == 0 {
+            field(&mut code, &[0x3d], base + 0x1000, false); // cmp eax, a (a number)
+        }
+        field(&mut code, &[0xff, 0x15], base + 0x3000 + 4 * (i % 7), true); // call [a]
+    }
+    relocs.extend_from_slice(extra);
+    // the blocks of a page each, padded to 4 bytes
+    let mut reloc = Vec::new();
+    let mut k = 0;
+    while k < relocs.len() {
+        let page = relocs[k] & !0xfff;
+        let start = reloc.len();
+        reloc.extend(page.to_le_bytes());
+        reloc.extend([0; 4]);
+        while k < relocs.len() && relocs[k] & !0xfff == page {
+            reloc.extend((0x3000 | (relocs[k] & 0xfff) as u16).to_le_bytes());
+            k += 1;
+        }
+        reloc.resize(reloc.len().next_multiple_of(4), 0);
+        let size = (reloc.len() - start) as u32;
+        reloc[start + 4..start + 8].copy_from_slice(&size.to_le_bytes());
+    }
+    let text_raw = 0x400usize;
+    let reloc_raw = (text_raw + code.len()).next_multiple_of(0x200);
+    let reloc_rva = (0x1000 + code.len() as u32).next_multiple_of(0x1000) + 0x1000;
+    let mut d = vec![0u8; text_raw];
+    d[..2].copy_from_slice(b"MZ");
+    d[0x3c] = 0x40;
+    d[0x40..0x44].copy_from_slice(b"PE\0\0");
+    d[0x44..0x46].copy_from_slice(&0x14cu16.to_le_bytes());
+    d[0x46] = 2; // sections
+    d[0x54] = 0xe0; // optional header size
+    let opt = 0x58;
+    let le32 = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    d[opt..opt + 2].copy_from_slice(&0x10bu16.to_le_bytes());
+    le32(&mut d, opt + 28, base);
+    le32(&mut d, opt + 56, reloc_rva + 0x1000); // SizeOfImage
+    le32(&mut d, opt + 0x5c, 16);
+    le32(&mut d, opt + 0x60 + 8 * 5, reloc_rva);
+    le32(&mut d, opt + 0x60 + 8 * 5 + 4, reloc.len() as u32);
+    for (k, (name, rva, size, raw, flags)) in [
+        (b".text\0\0\0", 0x1000, code.len(), text_raw, 0x6000_0020u32),
+        (b".reloc\0\0", reloc_rva, reloc.len(), reloc_raw, 0x4200_0040),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sec = opt + 0xe0 + 40 * k;
+        d[sec..sec + 8].copy_from_slice(name);
+        le32(&mut d, sec + 8, size as u32);
+        le32(&mut d, sec + 12, rva);
+        le32(&mut d, sec + 16, size as u32);
+        le32(&mut d, sec + 20, raw as u32);
+        le32(&mut d, sec + 36, flags);
+    }
+    d.extend_from_slice(&code);
+    d.resize(reloc_raw, 0);
+    d.extend_from_slice(&reloc);
+    (d, relocs)
+}
+
+/// The base relocations of a PE image predicted of its x86 code (`exe-recons/x86`'s side output,
+/// `exe-recons/pe-reloc` 2): of the fields of the code all predicted, those relocated not
+/// listed, the numbers in the image's range wrong; those after the code listed.
+#[test]
+fn pe_relocs_predicted() {
+    let (d, relocs) = pe32_relocated(3000, &[0x1_1000, 0x1_1010]);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    let a = f.applies().into_iter().find(|a| a.module == PE_RELOC).unwrap_or_else(|| panic!("{f}"));
+    let [rvas, types, wrong, pred] = &a.inputs[..] else { panic!("{f}") };
+    assert_eq!(a.params, [2, 3]);
+    // (predicted: the relocated and the numbers of 10, 0x400000 + 0x1000 as an immediate)
+    assert_eq!(pred.len() as usize, 4 * (relocs.len() - 2 + 300));
+    assert_eq!((types.len(), wrong.len()), (2, 300), "the two after the code; the numbers, a byte each");
+    assert!(rvas.len() <= 6);
+    assert!(modules(&f).contains(&X86.name));
 }
 
 /// The rest of a PE image coded is scanned: a zlib stream in it is found.
@@ -541,7 +638,7 @@ fn pe_rest_scanned() {
     d.extend_from_slice(&zlib(&text(20_000), 6));
     d.extend_from_slice(&text(500));
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
-    assert_eq!(modules(&f), [X86.name, FLATE.name], "{f}");
+    assert_eq!(modules(&f), [FLATE.name, X86.name], "{f}");
 }
 
 /// An Inno Setup installer of before 5.1.5 (the table of version 05 at its end, found by the
@@ -679,10 +776,11 @@ fn macho_sections() {
     assert_eq!(modules(&roundtrip(&d, &all())), [X86.name]);
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     assert_eq!(modules(&f), [X86.name]);
+    // (the code and its empty side output)
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
-    assert_eq!(parts.len(), 3);
+    assert_eq!(parts.len(), 4);
     assert_eq!(parts[0], Node::slice(0, 0, code.start as u64));
-    assert_eq!(parts[1].len(), code.len() as u64);
+    assert_eq!((parts[1].len(), parts[2].len()), (code.len() as u64, 0));
     assert_eq!(f.streams[0].class, "macho");
 }
 
@@ -837,13 +935,14 @@ fn macho_universal() {
     d.resize(at[1], 0);
     d.extend_from_slice(&arm);
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
-    assert_eq!(modules(&f), [X86.name, ARM64.name]);
+    // (x86's application shared: its code and its empty side output)
+    assert_eq!(modules(&f), [ARM64.name, X86.name]);
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts[0], Node::slice(0, 0, (at[0] + code.start) as u64));
     let mut wrapped = text(3000);
     wrapped.extend_from_slice(&d);
     wrapped.extend_from_slice(&text(3000));
-    assert_eq!(modules(&roundtrip(&wrapped, &all())), [X86.name, ARM64.name]);
+    assert_eq!(modules(&roundtrip(&wrapped, &all())), [ARM64.name, X86.name]);
     // a PowerPC image in place of the ARM64 one
     let mut ppc = d.clone();
     ppc[8 + 20..8 + 24].copy_from_slice(&18u32.to_be_bytes());
@@ -990,7 +1089,7 @@ fn elf_dwarf() {
     let sections = [(".debug_abbrev", &abbrev[..]), (".debug_info", &info[..]), (".debug_str", &strs[..])];
     let d = elf_with(&x86_64_code(), &sections);
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
-    assert_eq!(formats(&f), [X86.name, DWARF_INFO.name]);
+    assert_eq!(formats(&f), [DWARF_INFO.name, X86.name]);
     // compressed (SHF_COMPRESSED) sections are not taken as DWARF
     let mut compressed = d.clone();
     let shoff = u64::from_le_bytes(compressed[40..48].try_into().unwrap()) as usize;
@@ -1011,8 +1110,9 @@ fn elf_code() {
         let (d, at) = elf(wide, machine, fill, &code);
         let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
         assert_eq!(modules(&f), [module], "{machine}");
+        // (of x86, the code's empty side output after it)
         let Node::Concat(parts) = &f.root else { panic!("{f}") };
-        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.len(), 3 + (module == X86.name) as usize);
         assert_eq!(parts[0], Node::slice(0, 0, at.start as u64));
         assert_eq!(parts[1].len(), at.len() as u64);
         assert_eq!(f.streams[0].class, "elf");

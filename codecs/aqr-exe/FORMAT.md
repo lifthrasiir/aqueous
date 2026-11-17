@@ -51,13 +51,15 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `exe-recons/x86`, version 5.
-- **Params**: exactly 10 bytes.
+- **Module**: name `exe-recons/x86`, version 6.
+- **Params**: exactly 10 bytes, or 26 for a side output of absolute fields (§5.7).
 
   ```text
   le64    origin        the virtual address of the section's first byte
   u8      sentinel      bytes dropped from the end of the output, 0..15 (§5.1)
   u8      mode          0: x86-32, otherwise x86-64
+  le64    base          (26 bytes only) the base of the fields' values and places
+  le32    lo, hi        (26 bytes only) the range of the fields' values less base
   ```
 
 - **Resources**: exactly one, the opcode classes of §4: 1280 bytes, five tables of 256 class
@@ -65,15 +67,18 @@ Contents:
   and map 0 in x86-64.
 - **Inputs**: exactly 14, the streams of §3 in order. Each is of class `x86/NAME` (`x86/OP`,
   `x86/SIB`, ...).
-- **Output**: the code of §5. Its length must be the `len` the application declares.
+- **Outputs**: exactly 2: the code of §5, and the side output of §5.7 (empty with params of 10
+  bytes). Their lengths must be those the application declares.
 
-The module is a part module (windows of a page for each input and for the output): the streams
+The module is a part module (windows of a page for each input and for each output): the streams
 are read in order in pieces, and the output is put out as it is built but for its last 16 bytes
 (the sentinel, which is 15 at most, is cut off them; a larger one is refused) and for those from
 the field of the first jump still waiting for its target (§5.6), so that nothing depends on the
 lengths.
 
-Version 5 writes jumps of relative offsets other than calls as counts of steps (§5.6), in
+Version 6 adds the side output, for `exe-recons/pe-reloc` to predict base relocations of; its
+code is version 5's. Version 5 writes jumps of relative offsets other than calls as counts of
+steps (§5.6), in
 `JUMP8` and the stream `JUMPN` it adds. Version 4 was the same part module of 13 streams, its
 `JUMP8` the offsets as they are and `JUMP` the targets of every `J4` that is not a call; its
 output is version 3's byte for byte (version 3 was a whole module that held its inputs twice and
@@ -387,6 +392,27 @@ output before the field of the first jump waiting. Where its target is not a ste
 instruction's bytes, a padding record, the end of the section), or too far, a jump is written
 as `80` and its target (§5.3).
 
+### 5.7 The side output
+
+With params of 26 bytes, the decoder tells of the **absolute fields** as it appends them: in
+x86-32 the fields of 4 bytes, in x86-64 those of 8, of these alone:
+
+- the addresses of `mod = 0`, `rm = 5` in x86-32 (`[disp32]`, from `ADDR`);
+- the displacements of 32 bits (from `DISP32`);
+- the addresses of `A_` (from `ADDR`), and the offsets of `JA` (from `JUMP`);
+- the immediates of `N4` and `NZ` (from `IMM32` and `OP`);
+- the entries of x86-32 jump tables (§5.2).
+
+(Not the RIP-relative targets of x86-64, nor jumps and calls, which are relative in the code.)
+A field at `address` holding `v` (its bytes as `le32` or `le64`) is put to the side output, as
+`le32 (address − base)` truncated, where `(v − base) mod 2^64` is from `lo` to `hi` and all
+its bytes are within the code (before the sentinel dropped: `address + size ≤ origin + len₀`,
+`len₀` the code's declared length). The side output is these in order. With params of 10
+bytes, it is empty.
+
+These are where the image's base relocations are likely to be: `exe-recons/pe-reloc` takes
+them as its predictions (§R).
+
 ## 6. Encoding *(encoder)*
 
 `aqr_exe::arch::x86::encode` takes the code, its origin and the mode, and never fails. The code
@@ -446,8 +472,8 @@ image raw if the formula would not archive smaller.
 
 The module fails if:
 
-- the params are not 10 bytes long (this implementation ignores trailing bytes), there is not
-  exactly one resource, or not exactly 14 inputs;
+- the params are not 10 or 26 bytes long, there is not exactly one resource, or not exactly 14
+  inputs;
 - the resource is not 1280 bytes long, holds a byte above `0F` (no class), or gives the class
   `BP` to an opcode other than a prefix of map 0 (§4);
 - a stream runs out where a byte is to be read or copied, or a padding record starts with a
@@ -456,7 +482,7 @@ The module fails if:
   (§5.6);
 - an opcode is of class `XX`, a map is above 3 without a VEX or EVEX prefix, a REX or REX2
   marker appears in x86-32, or the bits of a prefix fail the checks of §5.3;
-- `out` is shorter than `sentinel` at the end, or the output is not `len` bytes long.
+- `out` is shorter than `sentinel` at the end, or either output is not of its declared length.
 
 # The `exe-recons/x86-remap` module
 
@@ -1056,32 +1082,48 @@ Section"). They are blocks, one for each 4 KiB page that has relocations: the pa
 the block's size (`le32` each), then entries of `le16`, a type in the high 4 bits and an offset
 in the page in the low 12, padded with zero entries to a multiple of 4 bytes. The module keeps
 only the entries, as the RVAs they point at, each the difference from the one before; the
-headers and the padding follow from them. The conventions of §1 hold.
+headers and the padding follow from them. Entries may be predicted: RVAs that are an input (the
+side outputs of `exe-recons/x86`, §5.7, where the code's absolute addresses are), so that only
+the wrong predictions and the entries not predicted are kept. The conventions of §1 hold.
 
 ## R1. The module
 
-- **Module**: name `exe-recons/pe-reloc`, version 1.
-- **Params**: exactly 1 byte, `a`, from 2 to 12: the blocks' sizes are multiples of `2^a`.
+- **Module**: name `exe-recons/pe-reloc`, version 2.
+- **Params**: exactly 2 bytes: `a`, from 2 to 12: the blocks' sizes are multiples of `2^a`;
+  then `t`, below 16: the type of the entries predicted.
 - **Resources**: none.
-- **Inputs**: exactly 2, the streams of §R2 in order, of classes `pe-reloc/RVAS` and
-  `pe-reloc/TYPES`.
+- **Inputs**: exactly 4, those of §R2 in order, the first three of classes `pe-reloc/RVAS`,
+  `pe-reloc/TYPES` and `pe-reloc/WRONG`.
 - **Output**: the relocations of §R3, `len` bytes long.
+
+Version 1 was of 1 byte of params (`a`) and 2 inputs (`RVAS`, `TYPES`): version 2 with `WRONG`
+and `PRED` empty.
 
 ## R2. Streams
 
 | # | name | contents |
 |---|---|---|
-| 0 | `RVAS` | for each entry, a `varint` (unsigned LEB128, at most 5 bytes, below 2^32): its RVA less the RVA of the entry before (of 0 before the first), wrapping in 32 bits |
-| 1 | `TYPES` | for each entry, its type, one byte below 16 |
+| 0 | `RVAS` | for each entry **listed** (not predicted), a `varint` (unsigned LEB128, at most 5 bytes, below 2^32): its RVA less the RVA of the entry listed before (of 0 before the first), wrapping in 32 bits |
+| 1 | `TYPES` | for each entry listed, its type, one byte below 16 |
+| 2 | `WRONG` | the indices of the predictions that are not entries: `varint`s, each the index less the one after the index before (less 0 for the first) |
+| 3 | `PRED` | the predictions: `le32` RVAs |
 
 ## R3. Decoding
 
-`r = 0`. For each byte `t` of `TYPES`, in order: read a `varint` `v` from `RVAS`, and
-`r ← (r + v) mod 2^32`. With `p = r & FFFFF000`, if there is no block yet or the open one is of
-another page than `p`, close the open one (below) and open one of page `p`: append `le32 p` and
-4 bytes for its size. Append the entry, `le16 (t << 12) | (r & FFF)`.
+The **listed** entries are, for each byte `y` of `TYPES` in order: with `r = 0` at first, read
+a `varint` `v` from `RVAS` and `r ← (r + v) mod 2^32`; the entry is of RVA `r` and type `y`.
+The **predicted** entries are those of `PRED`, `le32` each, in order, but those at the indices
+of `WRONG` (counted from 0), each of type `t`. The entries are both merged: while either has
+entries left, the next is the next listed one if the predicted ones are used up or its RVA is
+below the next predicted one's; the next predicted one if the listed ones are used up or its RVA
+is below the next listed one's (two of one RVA are an error). (With `PRED` empty, the entries are
+the listed ones in order.)
 
-Once the types are used up, close the open block, if any. To close a block: append zero bytes
+For each entry of RVA `r` and type `y`, in order: with `p = r & FFFFF000`, if there is no block
+yet or the open one is of another page than `p`, close the open one (below) and open one of
+page `p`: append `le32 p` and 4 bytes for its size. Append the entry, `le16 (y << 12) | (r & FFF)`.
+
+Once the entries are used up, close the open block, if any. To close a block: append zero bytes
 until the length of `out` is a multiple of `2^a`, then write the block's size (from its page's
 `le32` to the end of `out`) as its `le32` after the page.
 
@@ -1089,9 +1131,13 @@ until the length of `out` is a multiple of `2^a`, then write the block's size (f
 
 The module fails if:
 
-- the params are not 1 byte from 2 to 12, or there are resources, or not exactly 2 inputs;
-- `RVAS` runs out, a `varint` is longer than 5 bytes or not below 2^32, or a type is 16 or more;
-- `RVAS` has bytes left once the types are used up;
+- the params are not 2 bytes, `a` from 2 to 12 and `t` below 16, or there are resources, or not
+  exactly 4 inputs;
+- `RVAS` or `WRONG` runs out, a `varint` is longer than 5 bytes or not below 2^32, or a type is
+  16 or more;
+- `RVAS` has bytes left once the types are used up, `WRONG` has an index of no prediction, or
+  `PRED`'s length is not a multiple of 4;
+- a listed and a predicted entry are of one RVA;
 - the output is not `len` bytes long.
 
 ## R5. Encoding *(encoder)*
@@ -1102,9 +1148,18 @@ as above, and fails where decoding does not give the relocations back: blocks of
 row, an empty block, a page not at a multiple of 4 KiB, or bytes after the last block. A
 nonzero entry in the padding, or more padding than `a` asks, is kept as entries of type 0.
 
+`aqr_exe::reloc::encode_predicted` takes the predictions too (ascending), and fails where the
+entries are not in ascending order of their RVAs: a prediction that is not an entry of type `t`
+is wrong, and the entries that are not predicted are listed.
+
 aqr-compress takes the relocations where `aqr_exe::format::pe::tables` finds them in the stored
 data of a section and outside the code, trying `a` = 3, then 2 (blocks padded to 8 bytes are
-also valid padded to 4, with more entries). It also takes the image's other tables there by
+also valid padded to 4, with more entries). Of an image of x86 code (with no CIL section, its sections not
+overlapping), it predicts them: the code sections go through `exe-recons/x86` with a side
+output (§5.7) of `base` the image base, `lo` = `1000` and `hi` = `SizeOfImage − 4`, and `PRED`
+is those side outputs one after another, by the sections' addresses, `t` 3 (`HIGHLOW`) in x86-32
+and 10 (`DIR64`) in x86-64. Where that fails or predicts nothing, there are no predictions (`t`
+0), and the code sections have params of 10 bytes, each empty side output after its code. It also takes the image's other tables there by
 `recs-fields` (aqr-infer-recs' FORMAT.md), each number a field of delta coding: the export
 address table, the name pointers and the ordinals; the import lookup and address tables (those
 that touch in the file as one); the runtime functions of x86-64 (12 bytes, 3 fields) and ARM64

@@ -6340,18 +6340,18 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-macho-symtab.wasm" title="crates/aqr-modules/wasm/exe-recons-macho-symtab.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
-      <td><code>f3c8415f73841639b0c49bd81c5b411f5c0e3145acbdc42045fbf1b66d00fff9</code>
-      <td>exe-recons/pe-reloc@1
+      <td><code>26f7c061a60082fef0729bf145374e786a1e6317dc2552735f437ac2c49a24df</code>
+      <td>exe-recons/pe-reloc@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-pe-reloc.wasm" title="crates/aqr-modules/wasm/exe-recons-pe-reloc.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
-      <td><code>f771e05528d0c2c7a2f86a25576eb6d29dff14b4745e06dc66b1fc31fac60e88</code>
+      <td><code>a8d092a4eee443f92f6a14537ef0e1637300105516106fa860bdecbf51868aad</code>
       <td>exe-recons/x86-remap@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-x86-remap.wasm" title="crates/aqr-modules/wasm/exe-recons-x86-remap.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
-      <td><code>7094f8a49e6e8439737ca0ea5056e4c9ccf28a7ca4656202027fc0034ebb6fe3</code>
-      <td>exe-recons/x86@5
+      <td><code>1ecc85b704093e11c8daa5024468bafb4d4496fc52e3ecf016cfd10af0c51581</code>
+      <td>exe-recons/x86@6
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-x86.wasm" title="crates/aqr-modules/wasm/exe-recons-x86.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>

@@ -104,6 +104,8 @@ aqr_common::zopt! {
     /// Symbol tables shorter than this, with their string tables, are left with the rest: the
     /// module would cost more.
     static MIN_SYMBOLS: Opt<usize> = Opt::size("exe:min-symbols", 16 << 10, "symbol tables with their strings shorter than this are left alone");
+    /// Whether a PE image's base relocations are predicted of its x86 code ([`predict_relocs`]).
+    static RELOC_PREDICT: Opt<bool> = Opt::flag("exe:reloc-predict", true, "predict a PE image's base relocations of its x86 code");
     /// Whether the code of Mach-O and ELF images is remapped against those of their tree's root.
     static REMAP: Opt<bool> = Opt::flag("exe:remap", true, "remap the code of images against those of the same tree");
     /// Whether a Mach-O image's code signature is left out, for the module to put it back.
@@ -709,6 +711,9 @@ fn filtered(
     let mut f = Formula::default();
     f.push_content(class, Kind::Unknown, Vec::new());
     let mut outputs = symbols(&mut f, d, &mut sections);
+    if class == "pe" && RELOC_PREDICT.get() {
+        predict_relocs(&mut f, d, &mut sections, &mut outputs);
+    }
     let placed = crate::dwarf::place(&mut f, d, debug);
     if !placed.is_empty() {
         for (off, size, node) in placed {
@@ -777,6 +782,99 @@ fn filtered(
     Some(f)
 }
 
+/// The base relocations of PE image `d` (its section `Arch::Table(TableKind::Reloc)` among
+/// `sections`, in file order) predicted of its x86 code (`exe-recons/pe-reloc` 2, FORMAT.md
+/// §R): each code section through `exe-recons/x86` of a side output, the fields of absolute
+/// addresses within the image (from 0x1000 to its end), those outputs the relocations'
+/// predictions. The sections so applied, and the relocations, become `Arch::Output`s of
+/// `outputs`. Nothing where the image has no relocations or code to predict them of, its
+/// sections overlap or a CIL section holds code (whose sections its filter places), or the
+/// relocations are not in order (then made as before, of no predictions).
+fn predict_relocs(
+    f: &mut Formula,
+    d: &[u8],
+    sections: &mut [(u64, usize, usize, Arch)],
+    outputs: &mut Vec<Option<Node>>,
+) {
+    if sections.iter().any(|s| matches!(s.3, Arch::Cil(_))) || sections.windows(2).any(|w| w[0].1 + w[0].2 > w[1].1) {
+        return;
+    }
+    let Some(r) = sections.iter().position(|s| s.3 == Arch::Table(TableKind::Reloc)) else { return };
+    let Some(is64) = sections.iter().find_map(|s| if let Arch::X86(is64, _) = s.3 { Some(is64) } else { None }) else {
+        return;
+    };
+    let Some((base, size)) = pe_image(d, is64) else { return };
+    let Some(hi) = (size as u64).checked_sub(4).filter(|&hi| hi >= 0x1000) else { return };
+    let fields = x86::Fields { base, lo: 0x1000, hi };
+    // (each section's streams, as the code's are in any case; their side outputs by address)
+    let mut code: Vec<(usize, x86::EncodedStreams)> = sections
+        .iter()
+        .enumerate()
+        .filter(|s| matches!(s.1.3, Arch::X86(..)))
+        .filter_map(|(i, s)| Some((i, x86::encode_fields(&d[s.1..s.1 + s.2], s.0, is64, fields)?)))
+        .collect();
+    code.sort_by_key(|c| sections[c.0].0);
+    let pred: Vec<u32> =
+        code.iter().flat_map(|c| c.1.side().as_chunks::<4>().0.iter().map(|r| u32::from_le_bytes(*r))).collect();
+    let (reloc, t) = (&d[sections[r].1..][..sections[r].2], if is64 { 10 } else { 3 });
+    let Some((align, streams)) = [3, 2]
+        .into_iter()
+        .find_map(|a| Some((a, reloc::encode_predicted(reloc, a, &pred, t)?)))
+        .filter(|_| !pred.is_empty())
+    else {
+        return;
+    };
+    let mut sides = Vec::new();
+    for (i, st) in code {
+        let size = sections[i].2 as u64;
+        let mut params = x86_params(st.origin(), st.sentinel_size(), is64);
+        params.extend(base.to_le_bytes());
+        params.extend((fields.lo as u32).to_le_bytes());
+        params.extend((fields.hi as u32).to_le_bytes());
+        let [code, side] = x86_shared(f, &st, params, size);
+        outputs.push(Some(code));
+        sections[i].3 = Arch::Output(outputs.len() - 1);
+        sides.push(side);
+    }
+    let names = reloc::STREAM_NAMES.into_iter().chain([reloc::WRONG]);
+    let mut inputs: Vec<Node> =
+        streams.into_iter().zip(names).map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
+    inputs.push(Node::concat(sides));
+    outputs.push(Some(Node::apply(PE_RELOC, vec![align, t], inputs, reloc.len() as u64)));
+    sections[r].3 = Arch::Output(outputs.len() - 1);
+}
+
+/// The image base and `SizeOfImage` of PE image `d`, PE32+ where `is64`.
+fn pe_image(d: &[u8], is64: bool) -> Option<(u64, u32)> {
+    let le32 = |at: usize| Some(u32::from_le_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?));
+    let opt = (le32(0x3c)? as usize).checked_add(24)?;
+    let base = match is64 {
+        true => u64::from_le_bytes(d.get(opt + 24..opt + 32)?.try_into().ok()?),
+        false => le32(opt + 28)? as u64,
+    };
+    Some((base, le32(opt + 56)?))
+}
+
+/// The application of `exe-recons/x86` to the streams `st` of a section of `size` bytes, of
+/// `params` (of a side output or not), in `f`: its outputs, the section and the side output.
+fn x86_shared(f: &mut Formula, st: &x86::EncodedStreams, params: Vec<u8>, size: u64) -> [Node; 2] {
+    let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)
+        .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))
+        .collect();
+    let side = if params.len() > 10 { st.side().len() as u64 } else { 0 };
+    let a = Apply {
+        module: X86,
+        resources: vec![x86_resource()],
+        params,
+        inputs,
+        len: 0,
+        memory_limit: aqr_formula::NO_LIMIT,
+        task_limits: Vec::new(),
+    };
+    let Ok([code, side]) = <[Node; 2]>::try_from(f.share(a, vec![size, side])) else { unreachable!("two outputs") };
+    [code, side]
+}
+
 /// `section` at `va` through the filter of `arch`, x86 or ARM64 (remapped as `remaps` tells),
 /// its streams added to `f`.
 fn code_apply(
@@ -800,10 +898,8 @@ fn code_apply(
         Arch::X86(is64, _) => {
             let st = x86::encode(section, va, is64)?;
             let params = x86_params(st.origin(), st.sentinel_size(), is64);
-            let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)
-                .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))
-                .collect();
-            Node::apply_with(X86, vec![x86_resource()], params, inputs, size)
+            // (no side output: its nothing, after the section)
+            Node::concat(x86_shared(f, &st, params, size))
         }
         Arch::Arm64(k) if let Some(Remap::Arm64(r)) = remaps.get(k).and_then(Option::as_deref) => {
             let st = arm64::remap::encode(section, va, r);
@@ -833,8 +929,10 @@ fn code_apply(
             // (8 first: blocks padded to 8 bytes are valid padded to 4, with more entries)
             let (align, [rvas, types]) = [3, 2].into_iter().find_map(|a| Some((a, reloc::encode(section, a)?)))?;
             let inputs = [rvas, types].into_iter().zip(reloc::STREAM_NAMES);
-            let inputs = inputs.map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
-            Node::apply(PE_RELOC, vec![align], inputs, size)
+            let mut inputs: Vec<Node> = inputs.map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
+            // (no predictions, no wrong ones)
+            inputs.extend([f.push(format!("pe-reloc/{}", reloc::WRONG), Vec::new()), Node::concat(Vec::new())]);
+            Node::apply(PE_RELOC, vec![align, 0], inputs, size)
         }
         Arch::Table(TableKind::Rising { width, fields }) => {
             let k = width * fields;

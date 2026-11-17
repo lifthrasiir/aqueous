@@ -480,6 +480,28 @@ const fn disp8_stream(rm: u8, sib: u8, rex: u8, addr16: bool) -> usize {
     }
 }
 
+/// The absolute fields that the decoder tells of (§5.7 of FORMAT.md, the base relocations'
+/// predictions): of 4 bytes in x86-32 and of 8 in x86-64, those whose values `v` are such that
+/// `v - base` (wrapping) is from `lo` to `hi`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fields {
+    pub base: u64,
+    pub lo: u64,
+    pub hi: u64,
+}
+
+impl Fields {
+    /// Of a field at `at` of `size` bytes holding `value`, its address less `base` (of 32 bits),
+    /// where it is one of them and ends by `end`.
+    #[inline]
+    pub fn take(&self, at: u64, value: u64, size: usize, is64: bool, end: u64) -> Option<u32> {
+        let ok = size == if is64 { 8 } else { 4 }
+            && at.checked_add(size as u64).is_some_and(|e| e <= end)
+            && (self.lo..=self.hi).contains(&value.wrapping_sub(self.base));
+        ok.then(|| at.wrapping_sub(self.base) as u32)
+    }
+}
+
 /// Padding records (§5.5 of FORMAT.md): none, `CC` up to the next multiple of 16 of the
 /// address (16 bytes from one), a single `CC`, or the bytes in chunks of their lengths.
 const PAD_NONE: u8 = 0;
@@ -498,12 +520,13 @@ pub struct EncodedStreams {
     origin: u64,
     sentinel_size: u8,
     streams: [Vec<u8>; NUM_STREAMS],
+    side: Vec<u8>,
 }
 
 #[cfg(feature = "encode")]
 impl EncodedStreams {
     fn new(origin: u64) -> Self {
-        Self { origin, sentinel_size: 0, streams: array::from_fn(|_| Vec::new()) }
+        Self { origin, sentinel_size: 0, streams: array::from_fn(|_| Vec::new()), side: Vec::new() }
     }
 
     fn check(&self, st: usize, size: usize) {
@@ -634,6 +657,12 @@ impl EncodedStreams {
     /// The streams, named by [`STREAM_NAMES`].
     pub fn streams(&self) -> &[Vec<u8>; NUM_STREAMS] {
         &self.streams
+    }
+
+    /// The side output the decoder makes of the [`Fields`] given ([`encode_fields`]): the
+    /// fields' addresses less the base, as `le32`, in order; empty for none.
+    pub fn side(&self) -> &[u8] {
+        &self.side
     }
 
     pub fn write_to(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
@@ -1012,6 +1041,12 @@ pub fn encode(input: &[u8], origin: u64, is64: bool) -> Option<EncodedStreams> {
     encode_with(input, origin, is64, &mut |_, _, v| v)
 }
 
+/// [`encode`], the side output of `fields` made too ([`EncodedStreams::side`]).
+#[cfg(feature = "encode")]
+pub fn encode_fields(input: &[u8], origin: u64, is64: bool, fields: Fields) -> Option<EncodedStreams> {
+    encode_core(input, origin, is64, Some(Counts::new()), Some(fields), &mut |_, _, v| v)
+}
+
 /// [`encode`], each reference of [`Ref`] written as `hook` gives it: of its kind, the address
 /// of its field and its absolute value (of which an address of x86-32 is the low 32 bits). The
 /// jumps written as counts are none (§5.6 of FORMAT.md), and `hook` is told of the others once
@@ -1023,7 +1058,7 @@ pub fn encode_with(
     is64: bool,
     hook: &mut dyn FnMut(Ref, u64, u64) -> u64,
 ) -> Option<EncodedStreams> {
-    encode_core(input, origin, is64, Some(Counts::new()), hook)
+    encode_core(input, origin, is64, Some(Counts::new()), None, hook)
 }
 
 /// [`encode_with`] with no jump as a count, `hook` told of every reference as it comes: the
@@ -1035,10 +1070,10 @@ pub(crate) fn encode_refs(
     is64: bool,
     hook: &mut dyn FnMut(Ref, u64, u64) -> u64,
 ) -> Option<EncodedStreams> {
-    encode_core(input, origin, is64, None, hook)
+    encode_core(input, origin, is64, None, None, hook)
 }
 
-/// [`encode_with`] with `counts`, else [`encode_refs`].
+/// [`encode_with`] with `counts`, else [`encode_refs`]; the side output of `fields`, if given.
 #[cfg(feature = "encode")]
 #[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
 fn encode_core(
@@ -1046,6 +1081,7 @@ fn encode_core(
     mut origin: u64,
     is64: bool,
     mut counts: Option<Counts>,
+    fields: Option<Fields>,
     hook: &mut dyn FnMut(Ref, u64, u64) -> u64,
 ) -> Option<EncodedStreams> {
     let opcodes = &Opcodes::BUILTIN;
@@ -1061,6 +1097,12 @@ fn encode_core(
     let code_len = input.len();
     let code_start = origin;
     let code_end = origin + code_len as u64;
+    // (a field told of, at `at` of `n` bytes)
+    let field = |st: &mut EncodedStreams, at: u64, v: u64, n: usize| {
+        if let Some(r) = fields.as_ref().and_then(|f| f.take(at, v, n, is64, code_end)) {
+            st.side.extend_from_slice(&r.to_le_bytes());
+        }
+    };
 
     let mut prefixes = 0;
     let mut pad = false;
@@ -1130,6 +1172,7 @@ fn encode_core(
                         st.jumptab((range.len() - 1) as u8);
                         for j in range {
                             let addr = to_u32(&code[j * 4..j * 4 + 4]);
+                            field(&mut st, origin + (j * 4) as u64, addr as u64, 4);
                             st.call32(call_idx(addr as u64), addr);
                         }
                     }
@@ -1253,6 +1296,13 @@ fn encode_core(
                 streams.copy(st, &code[i.get()..i.get() + n]);
                 i.set(i.get() + n);
             };
+            // (of an absolute field, told of)
+            let copy_abs = |n: usize, streams: &mut EncodedStreams, st: usize| {
+                let mut b = [0u8; 8];
+                b[..n].copy_from_slice(&code[i.get()..i.get() + n]);
+                field(streams, origin + i.get() as u64, u64::from_le_bytes(b), n);
+                copy(n, streams, st);
+            };
 
             let rel_to_abs =
                 |addr: u32, delta: usize| (origin + (i.get() + delta) as u64).wrapping_add(addr as i32 as u64);
@@ -1372,15 +1422,16 @@ fn encode_core(
                             let delta = modrm_imm_size(flags, prefixes);
                             st.put64(ST_ADDR64, hook(Ref::Address, at, rel_to_abs(addr, delta)));
                         } else {
+                            field(&mut st, at, addr as u64, 4);
                             st.put32(ST_ADDR32, hook(Ref::Address, at, addr as u64) as u32);
                             // [disp32]
                         }
                     }
-                    0 if sib & 7 == 5 => copy(32 / 8, &mut st, ST_DISP32), // [reg*scale+disp32]
+                    0 if sib & 7 == 5 => copy_abs(32 / 8, &mut st, ST_DISP32), // [reg*scale+disp32]
                     // [reg+disp8] or [reg*scale+disp8]
                     1 => copy(8 / 8, &mut st, disp8_stream(base, sib, rex, addr16)),
                     2 if addr16 => copy(16 / 8, &mut st, ST_DISP16), // [regs+disp16]
-                    2 => copy(32 / 8, &mut st, ST_DISP32),           // [reg+disp32]
+                    2 => copy_abs(32 / 8, &mut st, ST_DISP32),       // [reg+disp32]
                     _ => {}
                 }
             }
@@ -1416,11 +1467,11 @@ fn encode_core(
 
                 A_ => {
                     let lgn = addr_lgn(op, prefixes, is64);
-                    copy(1 << lgn, &mut st, addr_stream(lgn));
+                    copy_abs(1 << lgn, &mut st, addr_stream(lgn));
                 }
 
                 JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_AJUMP16),
-                JA => copy(32 / 8, &mut st, ST_AJUMP32),
+                JA => copy_abs(32 / 8, &mut st, ST_AJUMP32),
                 J1 if counts.is_some() => {
                     let rel = fetch8();
                     let next = origin + i.get() as u64;
@@ -1445,7 +1496,7 @@ fn encode_core(
                         flags = N2;
                     }
                     let lgn = (flags - N1) as usize;
-                    copy(1 << lgn, &mut st, imm_stream(lgn));
+                    copy_abs(1 << lgn, &mut st, imm_stream(lgn));
                 }
             }
 
@@ -1515,6 +1566,14 @@ pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, 
     decode_hooked(streams, is64, opcodes, capacity, |_, _, _| Some(()))
 }
 
+/// The section of `streams` built onto `code`, which is told of the absolute fields
+/// ([`Sink::field`]); `None` where the streams do not make one.
+#[cfg(feature = "decode")]
+pub fn decode_into<K: Sink>(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, code: &mut K) -> Option<()> {
+    let mut src = Slices(streams.streams.each_ref().map(|s| &s[..]));
+    decode_core(&mut src, code, streams.origin, streams.sentinel_size, is64, opcodes, |_, _, _| Some(()))
+}
+
 /// [`decode_with`], telling `hook` of each reference of [`Ref`] as it is written: its kind, its
 /// value in the streams, and where its field is in the output (before the sentinel is cut off);
 /// of the jumps, those not written as counts. Decoding fails where it fails.
@@ -1557,6 +1616,10 @@ pub trait Sink {
     fn extend_from_slice(&mut self, d: &[u8]);
     /// Writes `d` over the bytes from `at` on, kept by [`Sink::hold`].
     fn patch(&mut self, at: usize, d: &[u8]);
+    /// Of an absolute field about to be appended at `at`, of `size` bytes holding `value`
+    /// (§5.7 of FORMAT.md): nothing but where the side output is made.
+    #[inline(always)]
+    fn field(&mut self, _at: usize, _value: u64, _size: usize) {}
     /// Keeps the bytes from `at` on (none where `None`), to be written over: at most
     /// [`COUNT_REACH`] and a field of 4 bytes of them while the streams are valid (a sink may
     /// fail past that).
@@ -1665,6 +1728,20 @@ impl Src for Slices<'_> {
         self.0[st] = tail;
         Some(())
     }
+}
+
+/// `n` bytes (2, 4 or 8) of stream `st` appended, an absolute field told of (§5.7).
+#[cfg(feature = "decode")]
+#[inline(always)]
+fn copy_abs<S: Src, K: Sink>(src: &mut S, n: usize, st: usize, code: &mut K) -> Option<()> {
+    let v = match n {
+        4 => src.read32(st)? as u64,
+        8 => src.read64(st)?,
+        _ => return src.copy(n, st, code),
+    };
+    code.field(code.len(), v, n);
+    code.extend_from_slice(&v.to_le_bytes()[..n]);
+    Some(())
 }
 
 /// A call target read from the cache, or from `CALL` where it is not there (§5.4).
@@ -1879,7 +1956,9 @@ pub fn decode_core<S: Src, K: Sink>(
                 }
             } else {
                 for _ in 0..count {
-                    code.extend_from_slice(&(read_call(src, &mut call_cache, is64)? as u32).to_le_bytes());
+                    let t = read_call(src, &mut call_cache, is64)? as u32;
+                    code.field(code.len(), t as u64, 4);
+                    code.extend_from_slice(&t.to_le_bytes());
                 }
             }
             continue;
@@ -2020,16 +2099,17 @@ pub fn decode_core<S: Src, K: Sink>(
                     } else {
                         let v = src.read32(ST_ADDR32)?; // [disp32]
                         hook(Ref::Address, v as u64, code.len())?;
+                        code.field(code.len(), v as u64, 4);
                         v
                     };
                     code.extend_from_slice(&addr.to_le_bytes());
                 }
                 // [reg*scale+disp32]
-                0 if sib & 7 == 5 => src.copy(32 / 8, ST_DISP32, code)?,
+                0 if sib & 7 == 5 => copy_abs(src, 32 / 8, ST_DISP32, code)?,
                 // [reg+disp8] or [reg*scale+disp8]
                 1 => src.copy(8 / 8, disp8_stream(base, sib, rex, addr16), code)?,
                 2 if addr16 => src.copy(16 / 8, ST_DISP16, code)?, // [regs+disp16]
-                2 => src.copy(32 / 8, ST_DISP32, code)?,           // [reg+disp32]
+                2 => copy_abs(src, 32 / 8, ST_DISP32, code)?,      // [reg+disp32]
                 _ => {}
             }
         }
@@ -2064,11 +2144,11 @@ pub fn decode_core<S: Src, K: Sink>(
 
             A_ => {
                 let lgn = addr_lgn(op, prefixes, is64);
-                src.copy(1 << lgn, addr_stream(lgn), code)?;
+                copy_abs(src, 1 << lgn, addr_stream(lgn), code)?;
             }
 
             JA if has_jump16(prefixes, is64) => src.copy(16 / 8, ST_AJUMP16, code)?,
-            JA => src.copy(32 / 8, ST_AJUMP32, code)?,
+            JA => copy_abs(src, 32 / 8, ST_AJUMP32, code)?,
             J1 => src.copy(8 / 8, ST_JUMP8, code)?,
             N_ => {}
 
@@ -2081,7 +2161,7 @@ pub fn decode_core<S: Src, K: Sink>(
                     flags = N2;
                 }
                 let lgn = (flags - N1) as usize;
-                src.copy(1 << lgn, imm_stream(lgn), code)?;
+                copy_abs(src, 1 << lgn, imm_stream(lgn), code)?;
             }
         }
     }

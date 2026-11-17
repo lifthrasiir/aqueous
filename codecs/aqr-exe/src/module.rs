@@ -59,23 +59,109 @@ pub fn macho_symtab_plan(params: u64, inputs: &[u64], types: &[u8], names: &[u8]
 }
 
 /// The parameters of the x86 modules: the origin (u64, little endian), the sentinel size (u8) and
-/// 1 for x86-64 or 0 for x86-32 (what follows is ignored).
+/// 1 for x86-64 or 0 for x86-32; of `exe-recons/x86`, then the [`x86::Fields`] of its side output
+/// if any (the base as u64, then `lo` and `hi` as u32: 26 bytes in all), else nothing (10 bytes).
+/// (`exe-recons/x86-remap` ignores what follows the first 10.)
 struct X86Params {
     origin: u64,
     sentinel: u8,
     is64: bool,
+    fields: Option<x86::Fields>,
 }
 
 impl X86Params {
-    /// Bytes of the parameters read.
+    /// Bytes of the parameters read, and of those with the fields.
     const LEN: usize = 10;
+    const FIELDS: usize = 26;
 
-    fn new(p: &[u8; Self::LEN]) -> X86Params {
-        X86Params { origin: u64::from_le_bytes(*p.first_chunk().unwrap()), sentinel: p[8], is64: p[9] != 0 }
+    fn new(p: &[u8]) -> X86Params {
+        let u32_at = |i: usize| u32::from_le_bytes(p[i..i + 4].try_into().unwrap()) as u64;
+        let fields = (p.len() == Self::FIELDS).then(|| x86::Fields {
+            base: u64::from_le_bytes(p[10..18].try_into().unwrap()),
+            lo: u32_at(18),
+            hi: u32_at(22),
+        });
+        X86Params { origin: u64::from_le_bytes(*p.first_chunk().unwrap()), sentinel: p[8], is64: p[9] != 0, fields }
     }
 
+    /// Of `exe-recons/x86-remap`: the first 10 bytes.
     fn parse(params: &[u8]) -> Option<X86Params> {
-        params.first_chunk().map(X86Params::new)
+        params.get(..Self::LEN).map(X86Params::new)
+    }
+
+    /// Of `exe-recons/x86`: 10 bytes, or 26.
+    fn parse_x86(params: &[u8]) -> Option<X86Params> {
+        [Self::LEN, Self::FIELDS].contains(&params.len()).then(|| X86Params::new(params))
+    }
+}
+
+/// The side output of the x86 decoder: the fields' places of [`x86::Fields`] (§5.7 of FORMAT.md)
+/// within the code of `end` bytes at `origin`, put to `sink`, `left` bytes at most (or failing).
+struct Side<'a> {
+    fields: Option<x86::Fields>,
+    origin: u64,
+    end: u64,
+    is64: bool,
+    sink: &'a mut dyn aqr_api::stream::Put,
+    left: u64,
+    failed: bool,
+}
+
+impl Side<'_> {
+    #[inline(always)]
+    fn field(&mut self, at: usize, value: u64, size: usize) {
+        if let Some(f) = self.fields {
+            self.put(&f, at, value, size);
+        }
+    }
+
+    #[inline(never)]
+    fn put(&mut self, f: &x86::Fields, at: usize, value: u64, size: usize) {
+        if let Some(r) = f.take(self.origin.wrapping_add(at as u64), value, size, self.is64, self.origin + self.end) {
+            match self.left.checked_sub(4) {
+                Some(left) if self.sink.put(&r.to_le_bytes()).is_some() => self.left = left,
+                _ => self.failed = true,
+            }
+        }
+    }
+}
+
+/// The code decoded whole, and its side output.
+struct Whole<'a> {
+    code: Vec<u8>,
+    side: Side<'a>,
+}
+
+impl x86::Sink for Whole<'_> {
+    fn push(&mut self, b: u8) {
+        self.code.push(b)
+    }
+
+    fn extend_from_slice(&mut self, d: &[u8]) {
+        self.code.extend_from_slice(d)
+    }
+
+    fn patch(&mut self, at: usize, d: &[u8]) {
+        self.code[at..at + d.len()].copy_from_slice(d)
+    }
+
+    fn field(&mut self, at: usize, value: u64, size: usize) {
+        self.side.field(at, value, size)
+    }
+
+    fn hold(&mut self, _: Option<usize>) {}
+
+    fn fill(&mut self, n: usize, b: u8) {
+        self.code.resize(self.code.len() + n, b)
+    }
+
+    fn len(&self) -> usize {
+        self.code.len()
+    }
+
+    fn finish(&mut self, sentinel: usize) -> Option<()> {
+        self.code.truncate(self.code.len().checked_sub(sentinel).filter(|_| sentinel <= x86::SENTINEL)?);
+        (!self.side.failed).then_some(())
     }
 }
 
@@ -84,11 +170,11 @@ fn x86_room(len: u64, sentinel: u8) -> usize {
     usize::try_from(len).ok().and_then(|n| n.checked_add(sentinel as usize)).unwrap_or(usize::MAX)
 }
 
-/// The x86 disfilter on a code section. Parameters: the origin (u64, little endian), the
-/// sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
-/// ([`x86::Opcodes`]); inputs: the streams of [`x86::STREAM_NAMES`].
+/// The x86 disfilter on a code section, and its side output after it: `len` bytes in all.
+/// Parameters: as [`X86Params`]; resources: the opcode classes ([`x86::Opcodes`]); inputs: the
+/// streams of [`x86::STREAM_NAMES`].
 pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-    let (Some(p), Ok(streams)) = (X86Params::parse(params), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs)) else {
+    let (Some(p), Ok(streams)) = (X86Params::parse_x86(params), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs)) else {
         return Err("bad parameters or inputs");
     };
     let Some(opcodes) = (match resources {
@@ -97,8 +183,26 @@ pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Re
     }) else {
         return Err("bad resources");
     };
-    let cap = x86_room(len, p.sentinel);
-    of_len(x86::decode_with(&x86::DecodedStreams::new(p.origin, p.sentinel, streams), p.is64, &opcodes, cap), len)
+    let code = crate::util::room(x86_room(len, p.sentinel)).ok_or("corrupt")?;
+    let mut side = Vec::new();
+    let st = x86::DecodedStreams::new(p.origin, p.sentinel, streams);
+    // (the fields' ends checked once the code's is known: those past it are the last)
+    let mut code = {
+        let (origin, is64) = (p.origin, p.is64);
+        let side = Side { fields: p.fields, origin, end: len, is64, sink: &mut side, left: len, failed: false };
+        let mut out = Whole { code, side };
+        x86::decode_into(&st, p.is64, &opcodes, &mut out).ok_or("corrupt")?;
+        out.code
+    };
+    if let Some(f) = p.fields {
+        let size = if p.is64 { 8 } else { 4 };
+        let end = p.origin + code.len() as u64;
+        while side.last_chunk::<4>().is_some_and(|r| f.base.wrapping_add(u32::from_le_bytes(*r) as u64) + size > end) {
+            side.truncate(side.len() - 4);
+        }
+    }
+    code.extend_from_slice(&side);
+    (code.len() as u64 == len).then_some(code).ok_or("output of another length")
 }
 
 /// The x86 disfilter on a code section, its references remapped to another image's.
@@ -179,12 +283,14 @@ pub fn cil(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
 }
 
 /// The base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
-/// multiples of (u8, 2 to 12); inputs: the streams of [`reloc::STREAM_NAMES`].
+/// multiples of (u8, 2 to 12), and the type of the entries predicted (u8, below 16); inputs: the
+/// streams of [`reloc::STREAM_NAMES`] and [`reloc::WRONG`], then the predictions (`le32` RVAs).
 pub fn reloc(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-    let (&[align @ 2..=12], &[rvas, types], Ok(n)) = (params, inputs, usize::try_from(len)) else {
+    let (&[align @ 2..=12, t @ 0..=15], &[rvas, types, wrong, pred], Ok(n)) = (params, inputs, usize::try_from(len))
+    else {
         return Err("bad parameters or inputs");
     };
-    of_len(reloc::decode(rvas, types, align, n), len)
+    of_len(reloc::decode_predicted([rvas, types, wrong], pred, t, align, n), len)
 }
 
 /// The symbol table of a 64-bit Mach-O image and its string table after it. Parameters: the
@@ -302,6 +408,7 @@ impl x86::Src for Readers<'_> {
 struct Spool<'a> {
     buf: Vec<u8>,
     sink: &'a mut dyn aqr_api::stream::Put,
+    side: Side<'a>,
     failed: bool,
     /// Bytes put out.
     flushed: usize,
@@ -375,6 +482,11 @@ impl x86::Sink for Spool<'_> {
         self.spill();
     }
 
+    #[inline(always)]
+    fn field(&mut self, at: usize, value: u64, size: usize) {
+        self.side.field(at, value, size)
+    }
+
     fn len(&self) -> usize {
         self.flushed + self.buf.len()
     }
@@ -382,60 +494,110 @@ impl x86::Sink for Spool<'_> {
     fn finish(&mut self, sentinel: usize) -> Option<()> {
         let n = self.buf.len().checked_sub(sentinel).filter(|_| sentinel <= x86::SENTINEL && !self.failed)?;
         self.put(n);
-        (!self.failed).then_some(())
+        (!self.failed && !self.side.failed).then_some(())
+    }
+}
+
+/// Output `J` of a part module, `size` bytes in all, written through its window (as
+/// `aqr_api::stream::Written` does output 0).
+struct Written<const J: u32> {
+    at: u64,
+    size: u64,
+}
+
+impl<const J: u32> Written<J>
+where
+    aqr_api::Output<J>: aqr_api::Memory + aqr_api::Writable,
+{
+    fn new(size: u64) -> Self {
+        Written { at: 0, size }
+    }
+
+    fn total(&self) -> u64 {
+        self.at
+    }
+}
+
+impl<const J: u32> aqr_api::stream::Put for Written<J>
+where
+    aqr_api::Output<J>: aqr_api::Memory + aqr_api::Writable,
+{
+    fn put(&mut self, mut d: &[u8]) -> Option<()> {
+        use aqr_api::{Memory, Output};
+        if d.len() as u64 > self.size - self.at {
+            return None;
+        }
+        let w = Output::<J>::size();
+        while !d.is_empty() {
+            let k = (d.len() as u64).min(w - self.at % w) as usize;
+            Output::<J>::write(self.at % w, &d[..k]);
+            self.at += k as u64;
+            Output::<J>::commit(self.at);
+            d = &d[k..];
+        }
+        Some(())
     }
 }
 
 /// [`fn@x86`] as a part module (its entry point, of `aqr_api::entry!`): its inputs taken and its
-/// output put in order through windows ([`X86_WINDOW`]) in pieces, whatever the lengths. A
-/// sentinel of more than 15 bytes is refused (FORMAT.md allows 0 to 15).
-pub fn x86_part(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], size: u64) {
-    aqr_api::finish(x86_part_run(params_len, res_len, lens, size));
+/// outputs, the code of `size0` bytes and the side output of `size1`, put in order through
+/// windows ([`X86_WINDOW`]) in pieces, whatever the lengths. A sentinel of more than 15 bytes is
+/// refused (FORMAT.md allows 0 to 15).
+pub fn x86_part(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], size0: u64, size1: u64) {
+    aqr_api::finish(x86_part_run(params_len, res_len, lens, [size0, size1]));
 }
 
-fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], size: u64) -> Result<()> {
-    use aqr_api::stream::Written;
+fn x86_part_run(params_len: u64, res_len: u64, lens: [u64; x86::NUM_STREAMS], sizes: [u64; 2]) -> Result<()> {
     use aqr_api::{Memory, Resource};
-    if params_len < X86Params::LEN as u64 || res_len != x86::Opcodes::LEN as u64 {
+    let n = params_len as usize;
+    if ![X86Params::LEN, X86Params::FIELDS].contains(&n) || res_len != x86::Opcodes::LEN as u64 {
         return Err("bad parameters or resources");
     }
-    let (mut p, mut table) = ([0u8; X86Params::LEN], [0u8; x86::Opcodes::LEN]);
-    aqr_api::Params::read(0, &mut p);
+    let (mut p, mut table) = ([0u8; X86Params::FIELDS], [0u8; x86::Opcodes::LEN]);
+    aqr_api::Params::read(0, &mut p[..n]);
     Resource::<0>::read(0, &mut table);
     pull_ins!(lens => ins, srcs: x86::NUM_STREAMS; 0 1 2 3 4 5 6 7 8 9 10 11 12 13);
-    let mut out = Written::new(size);
-    x86_run(&X86Params::new(&p), &table, srcs, &mut out)?;
-    (out.total() == size).then_some(()).ok_or("output of another length")
+    let (mut out, mut side) = (Written::<0>::new(sizes[0]), Written::<1>::new(sizes[1]));
+    x86_run(&X86Params::new(&p[..n]), &table, srcs, &mut out, &mut side, sizes)?;
+    (out.total() == sizes[0] && side.total() == sizes[1]).then_some(()).ok_or("output of another length")
 }
 
-/// [`x86_part`] on whole inputs, natively: what it gives.
-pub fn x86_streamed(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+/// [`x86_part`] on whole inputs, natively: what it gives (its outputs one after another).
+pub fn x86_streamed(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], sizes: [u64; 2]) -> Result<Vec<u8>> {
     use aqr_api::stream::{Pull, Slice};
     let (Some(p), Ok(streams), &[table]) =
-        (X86Params::parse(params), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs), resources)
+        (X86Params::parse_x86(params), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs), resources)
     else {
         return Err("bad parameters or inputs");
     };
     let mut slices = streams.map(Slice);
     let srcs: [&mut dyn Pull; x86::NUM_STREAMS] = slices.each_mut().map(|s| s as &mut dyn Pull);
-    let mut out = Vec::new();
-    x86_run(&p, table, srcs, &mut out)?;
-    (out.len() as u64 == len).then_some(out).ok_or("output of another length")
+    let (mut out, mut side) = (Vec::new(), Vec::new());
+    x86_run(&p, table, srcs, &mut out, &mut side, sizes)?;
+    if out.len() as u64 != sizes[0] || side.len() as u64 != sizes[1] {
+        return Err("output of another length");
+    }
+    out.extend_from_slice(&side);
+    Ok(out)
 }
 
-/// The decoding of [`x86`] on the streams `srcs`, put to `sink`; the length is for the caller to
-/// check.
+/// The decoding of [`x86`] on the streams `srcs`, put to `sink` and its side output to `side`,
+/// of `sizes[1]` bytes at most; the lengths are for the caller to check.
 fn x86_run(
     p: &X86Params,
     table: &[u8],
     srcs: [&mut dyn aqr_api::stream::Pull; x86::NUM_STREAMS],
     sink: &mut dyn aqr_api::stream::Put,
+    side: &mut dyn aqr_api::stream::Put,
+    sizes: [u64; 2],
 ) -> Result<()> {
     let opcodes = x86::Opcodes::from_resource(table).ok_or("bad resources")?;
     let r = srcs.map(|s| aqr_api::stream::Reader::new(s, PIECE));
     let mut src = Readers { r, peeked: [None; x86::NUM_STREAMS] };
     let buf = Vec::with_capacity(SPOOL + HOLD + STEP + KEPT);
-    let mut out = Spool { buf, sink, failed: false, flushed: 0, held: None };
+    let (origin, end, is64) = (p.origin, sizes[0], p.is64);
+    let side = Side { fields: p.fields, origin, end, is64, sink: side, left: sizes[1], failed: false };
+    let mut out = Spool { buf, sink, side, failed: false, flushed: 0, held: None };
     x86::decode_core(&mut src, &mut out, p.origin, p.sentinel, p.is64, &opcodes, |_, _, _| Some(())).ok_or("corrupt")
 }
 

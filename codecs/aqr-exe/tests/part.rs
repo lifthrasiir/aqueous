@@ -38,18 +38,18 @@ fn same(what: &str, d: &[u8], origin: u64, is64: bool) {
     let res = Opcodes::BUILTIN.to_resource();
     let whole = module::x86(&p, &[&res], &streams, d.len() as u64);
     assert!(whole.as_deref() == Ok(d), "{what}: whole");
-    let part = module::x86_streamed(&p, &[&res], &streams, d.len() as u64);
+    let part = module::x86_streamed(&p, &[&res], &streams, [d.len() as u64, 0]);
     assert!(part.as_deref() == Ok(d), "{what}: part");
     // an output of another length, one stream short, and one with a byte over (ignored)
-    assert!(module::x86_streamed(&p, &[&res], &streams, d.len() as u64 + 1).is_err(), "{what}: longer");
+    assert!(module::x86_streamed(&p, &[&res], &streams, [d.len() as u64 + 1, 0]).is_err(), "{what}: longer");
     assert!(
-        d.is_empty() || module::x86_streamed(&p, &[&res], &streams, d.len() as u64 - 1).is_err(),
+        d.is_empty() || module::x86_streamed(&p, &[&res], &streams, [d.len() as u64 - 1, 0]).is_err(),
         "{what}: shorter"
     );
     let mut over: Vec<Vec<u8>> = streams.iter().map(|s| s.to_vec()).collect();
     over[1].push(7);
     let over: Vec<&[u8]> = over.iter().map(|s| &s[..]).collect();
-    assert!(module::x86_streamed(&p, &[&res], &over, d.len() as u64).as_deref() == Ok(d), "{what}: a byte over");
+    assert!(module::x86_streamed(&p, &[&res], &over, [d.len() as u64, 0]).as_deref() == Ok(d), "{what}: a byte over");
     let _ = DecodedStreams::new(origin, 0, [&[]; x86::NUM_STREAMS]);
 }
 
@@ -91,7 +91,7 @@ fn damaged_streams_fail_alike() {
     let base: Vec<Vec<u8>> = e.streams().to_vec();
     let run = |s: &[Vec<u8>], p: &[u8], len: u64| {
         let r: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
-        (module::x86(p, &[&res], &r, len), module::x86_streamed(p, &[&res], &r, len))
+        (module::x86(p, &[&res], &r, len), module::x86_streamed(p, &[&res], &r, [len, 0]))
     };
     // each stream cut short, and each byte of a few damaged: the part module fails when the
     // whole one does, or gives the same
@@ -112,7 +112,7 @@ fn damaged_streams_fail_alike() {
     // a sentinel past 15 is refused by the part module, taken by the whole one
     let (a, b) = run(&base, &params(0x1000, 16, true), d.len() as u64 - 1);
     assert!(b.is_err() && (a.is_err() || a.is_ok()));
-    assert!(module::x86_streamed(&p[..9], &[&res], &base.iter().map(|v| &v[..]).collect::<Vec<_>>(), 0).is_err());
+    assert!(module::x86_streamed(&p[..9], &[&res], &base.iter().map(|v| &v[..]).collect::<Vec<_>>(), [0, 0]).is_err());
 }
 
 mod arm64 {
@@ -204,7 +204,8 @@ fn sentinels_over_fifteen_are_refused() {
         let p = params(0x1000, sentinel, true);
         // (the output as long as the decoding with this sentinel makes it)
         let len = (d.len() + e.sentinel_size() as usize - sentinel as usize) as u64;
-        let (whole, part) = (module::x86(&p, &[&res], &streams, len), module::x86_streamed(&p, &[&res], &streams, len));
+        let (whole, part) =
+            (module::x86(&p, &[&res], &streams, len), module::x86_streamed(&p, &[&res], &streams, [len, 0]));
         assert_eq!(whole.is_ok(), sentinel <= 15, "whole, sentinel {sentinel}");
         assert_eq!(part.is_ok(), sentinel <= 15, "part, sentinel {sentinel}");
     }
@@ -250,6 +251,72 @@ fn counts_out_of_reach_fail_alike() {
         let r: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
         let p = params(0x1000, e.sentinel_size(), true);
         assert!(module::x86(&p, &[&res], &r, d.len() as u64).is_err(), "whole, gap {gap}");
-        assert!(module::x86_streamed(&p, &[&res], &r, d.len() as u64).is_err(), "part, gap {gap}");
+        assert!(module::x86_streamed(&p, &[&res], &r, [d.len() as u64, 0]).is_err(), "part, gap {gap}");
     }
+}
+
+/// The params of a side output of `fields`.
+fn params_fields(origin: u64, sentinel: u8, is64: bool, f: x86::Fields) -> Vec<u8> {
+    let mut p = params(origin, sentinel, is64);
+    p.extend(f.base.to_le_bytes());
+    p.extend((f.lo as u32).to_le_bytes());
+    p.extend((f.hi as u32).to_le_bytes());
+    p
+}
+
+/// The side output (FORMAT.md §5.7) of the encoder, the whole decoding and the part module's
+/// alike: each the fields' places the others give.
+fn same_side(what: &str, d: &[u8], origin: u64, is64: bool, f: x86::Fields) -> usize {
+    let e = x86::encode_fields(d, origin, is64, f).unwrap();
+    let streams: Vec<&[u8]> = e.streams().iter().map(|s| &s[..]).collect();
+    let p = params_fields(origin, e.sentinel_size(), is64, f);
+    let res = Opcodes::BUILTIN.to_resource();
+    let (n, side) = (d.len() as u64, e.side().len() as u64);
+    let both = [d, e.side()].concat();
+    assert!(module::x86(&p, &[&res], &streams, n + side).as_deref() == Ok(&both[..]), "{what}: whole");
+    assert!(module::x86_streamed(&p, &[&res], &streams, [n, side]).as_deref() == Ok(&both[..]), "{what}: part");
+    // a side output of another length; none asked for
+    assert!(module::x86_streamed(&p, &[&res], &streams, [n, side + 4]).is_err(), "{what}: side longer");
+    if side > 0 {
+        assert!(module::x86_streamed(&p, &[&res], &streams, [n, side - 4]).is_err(), "{what}: side shorter");
+        assert!(module::x86(&p, &[&res], &streams, n + side - 4).is_err(), "{what}: whole shorter");
+    }
+    let p10 = params(origin, e.sentinel_size(), is64);
+    assert!(module::x86_streamed(&p10, &[&res], &streams, [n, 0]).as_deref() == Ok(d), "{what}: no side");
+    assert!(module::x86(&p[..20], &[&res], &streams, n + side).is_err(), "{what}: params of 20 bytes");
+    // each field's place within the code, its value in the range
+    let size = if is64 { 8 } else { 4 };
+    for r in e.side().chunks(4) {
+        let at = (f.base.wrapping_add(u32::from_le_bytes(r.try_into().unwrap()) as u64) - origin) as usize;
+        assert!(at + size <= d.len(), "{what}: a field past the end");
+        let mut v = [0u8; 8];
+        v[..size].copy_from_slice(&d[at..at + size]);
+        assert!((f.lo..=f.hi).contains(&u64::from_le_bytes(v).wrapping_sub(f.base)), "{what}: a value out of range");
+    }
+    e.side().len() / 4
+}
+
+#[test]
+fn side_output_alike() {
+    // (any 4-byte field of x86-32 code, of real code and noise; 8-byte of x86-64)
+    let all = |base| x86::Fields { base, lo: 0, hi: u32::MAX as u64 };
+    for (k, &(at, n)) in [(0usize, 0usize), (0, 15), (4096, 20_000), (100_000, 300_000)].iter().enumerate() {
+        let d = code(at, n);
+        let origin = 0x40_1000 + k as u64 * 16;
+        let found = same_side(&format!("code {n} at {at}"), &d, origin, false, all(0));
+        assert!(n < 1000 || found > n / 100, "code {n} at {at}: {found} fields");
+        same_side(&format!("code {n} at {at}, 64"), &d, 0x1_4000_1000, true, all(0x1_4000_0000));
+    }
+    for n in [0, 3, 4, 5, 17, 100, 1000, 70_000] {
+        let d = noise(n, n as u64 + 9);
+        same_side(&format!("noise {n}"), &d, 0x40_1000, false, all(0));
+        // the image's range alone: 0x400000 + 0x1000 to the end
+        let image = x86::Fields { base: 0x40_0000, lo: 0x1000, hi: 0x1000 + n as u64 };
+        same_side(&format!("noise {n}, the image"), &d, 0x40_1000, false, image);
+    }
+    // fields running into the sentinel's zeros are not told of: an immediate at the end
+    let d = [0x90, 0x68, 0x00, 0x10, 0x40];
+    assert_eq!(same_side("push imm32, cut", &d, 0x40_1000, false, all(0)), 0);
+    let d = [0x90, 0x68, 0x00, 0x10, 0x40, 0x00];
+    assert_eq!(same_side("push imm32", &d, 0x40_1000, false, all(0)), 1);
 }

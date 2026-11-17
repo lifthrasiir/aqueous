@@ -57,10 +57,12 @@ pub use wasm::set_interpreter;
 #[cfg(feature = "wasm")]
 pub use wasm::{Applied, initial_pages, record_applications};
 
-/// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
-/// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
-/// (`x86::Opcodes`); inputs: the streams of `x86::STREAM_NAMES`.
-pub const X86: Module = Module::new("exe-recons/x86", 5).with_plan(x86);
+/// aqr-exe's x86 disfilter on a code section, of two outputs: the code and its side output (the
+/// places of absolute fields, for `exe-recons/pe-reloc`'s predictions). Parameters: the origin
+/// (u64, little endian), the sentinel size (u8) and 1 for x86-64 or 0 for x86-32, then for a side
+/// output the image base (u64) and the range of its values (two u32); resources: the opcode
+/// classes (`x86::Opcodes`); inputs: the streams of `x86::STREAM_NAMES`.
+pub const X86: Module = Module::new("exe-recons/x86", 6).with_plan(x86);
 
 /// The memory of [`X86`], a part module: its plan (`aqr_exe::module::x86_part_plan`), whatever the
 /// lengths (`None` for parameters of under 10 bytes).
@@ -140,7 +142,7 @@ fn cil(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 
 /// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
 /// multiples of (u8); inputs: the streams of `reloc::STREAM_NAMES`.
-pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 1).with_plan(exe);
+pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 2).with_plan(exe);
 
 /// aqr-exe's symbol table of a 64-bit Mach-O image, and its string table after it. Parameters:
 /// the number of entries and the first external one (u32 each, little endian), then the string

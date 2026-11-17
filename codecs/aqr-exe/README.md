@@ -144,6 +144,15 @@ Reader 9.4.0 (x86-32, 8.1 MB of code) 7,677,763 → 7,620,425 B (−0.75%). The 
 931 B as a block (6453 → 7384), which an archive of little code pays for (an image's code is
 then kept raw where it no longer pays).
 
+Version 6 makes a side output of the code's absolute fields within the image (addresses,
+displacements and immediates of 32 bits in x86-32, of 64 in x86-64, the entries of jump tables)
+where the params ask for it, which `exe-recons/pe-reloc` 2 takes as its predictions of a PE
+image's base relocations, keeping the wrong ones and those it did not predict (those of the
+data). On 2026-11-17, `aqr -c` with and without (`-Z exe:reloc-predict=false`): AcroRd32.dll
+7,621,685 → 7,522,921 B (−1.30%); `large` 414,203,853 → 412,297,469 B (−0.46%; its two of
+x86-32 −2.46% and −0.84%, of x86-64 0 to −0.18%), compressing 17.9 → 18.6 s, testing 1.70 →
+1.76 s. The modules' blocks grew by 1187 B together (x86 7384 → 8008, pe-reloc 2581 → 3144).
+
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
 archiving no smaller: 27 .NET assemblies (24 satellite assemblies of resources alone;
 `System.Text.Encoding.CodePages.dll`, mostly tables of code
