@@ -711,9 +711,10 @@ fn filtered(
     let mut f = Formula::default();
     f.push_content(class, Kind::Unknown, Vec::new());
     let mut outputs = symbols(&mut f, d, &mut sections);
-    if class == "pe" && RELOC_PREDICT.get() {
-        predict_relocs(&mut f, d, &mut sections, &mut outputs);
-    }
+    let mut relocs = match class == "pe" && RELOC_PREDICT.get() {
+        true => predict_relocs(&mut f, d, &mut sections, &mut outputs),
+        false => None,
+    };
     let placed = crate::dwarf::place(&mut f, d, debug);
     if !placed.is_empty() {
         for (off, size, node) in placed {
@@ -723,16 +724,23 @@ fn filtered(
         sections.sort_by_key(|s| (s.1, !matches!(s.3, Arch::Cil(_))));
     }
     let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
+    // (where each part is in `d`; and where the relocations go in `parts`)
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut relocs_at = None;
     for (i, &(va, off, size, arch)) in sections.iter().enumerate() {
         if off < at {
             continue;
         }
         let section = &d[off..off + size];
         if arch == Arch::Signature {
+            spans.push(at..off);
             parts.push(Node::slice(0, rest.len() as u64, (off - at) as u64));
             rest.extend_from_slice(&d[at..off]);
             at = off + size;
             continue;
+        }
+        if relocs.as_ref().is_some_and(|p| arch == Arch::Output(p.k)) {
+            relocs_at = Some(parts.len() + 1);
         }
         let apply = match arch {
             Arch::Output(k) => outputs[k].take().expect("an output placed twice"),
@@ -767,6 +775,7 @@ fn filtered(
                 None => continue,
             },
         };
+        spans.extend([at..off, off..off + size]);
         parts.push(Node::slice(0, rest.len() as u64, (off - at) as u64));
         rest.extend_from_slice(&d[at..off]);
         parts.push(apply);
@@ -775,36 +784,39 @@ fn filtered(
     if parts.is_empty() {
         return None;
     }
+    spans.push(at..d.len());
     parts.push(Node::slice(0, rest.len() as u64, (d.len() - at) as u64));
     rest.extend_from_slice(&d[at..]);
+    if let (Some(p), Some(i)) = (relocs.take(), relocs_at) {
+        parts = p.finish(&mut f, d, parts, spans, i);
+    }
     f.streams[0].data = rest.into();
     f.root = Node::concat(parts);
     Some(f)
 }
 
 /// The base relocations of PE image `d` (its section `Arch::Table(TableKind::Reloc)` among
-/// `sections`, in file order) predicted of its x86 code (`exe-recons/pe-reloc` 2, FORMAT.md
-/// §R): each code section through `exe-recons/x86` of a side output, the fields of absolute
-/// addresses within the image (from 0x1000 to its end), those outputs the relocations'
-/// predictions. The sections so applied, and the relocations, become `Arch::Output`s of
-/// `outputs`. Nothing where the image has no relocations or code to predict them of, its
-/// sections overlap or a CIL section holds code (whose sections its filter places), or the
-/// relocations are not in order (then made as before, of no predictions).
+/// `sections`, in file order) predicted (`exe-recons/pe-reloc` 3, FORMAT.md §R): of its x86 code,
+/// each code section through `exe-recons/x86` of a side output, the fields of absolute addresses
+/// within the image (from 0x1000 to its end), those outputs the predictions; and of its data
+/// ([`Relocs::finish`]). The sections so applied, and the relocations, become `Arch::Output`s of
+/// `outputs` (the relocations' a placeholder for [`Relocs::finish`] to make). Nothing where the
+/// image has no relocations or code to predict them of, its sections overlap or a CIL section
+/// holds code (whose sections its filter places), or the relocations are not in order (then
+/// made as before, of no predictions).
 fn predict_relocs(
     f: &mut Formula,
     d: &[u8],
     sections: &mut [(u64, usize, usize, Arch)],
     outputs: &mut Vec<Option<Node>>,
-) {
+) -> Option<Relocs> {
     if sections.iter().any(|s| matches!(s.3, Arch::Cil(_))) || sections.windows(2).any(|w| w[0].1 + w[0].2 > w[1].1) {
-        return;
+        return None;
     }
-    let Some(r) = sections.iter().position(|s| s.3 == Arch::Table(TableKind::Reloc)) else { return };
-    let Some(is64) = sections.iter().find_map(|s| if let Arch::X86(is64, _) = s.3 { Some(is64) } else { None }) else {
-        return;
-    };
-    let Some((base, size)) = pe_image(d, is64) else { return };
-    let Some(hi) = (size as u64).checked_sub(4).filter(|&hi| hi >= 0x1000) else { return };
+    let r = sections.iter().position(|s| s.3 == Arch::Table(TableKind::Reloc))?;
+    let is64 = sections.iter().find_map(|s| if let Arch::X86(is64, _) = s.3 { Some(is64) } else { None })?;
+    let (base, size) = pe_image(d, is64)?;
+    let hi = (size as u64).checked_sub(if is64 { 8 } else { 4 }).filter(|&hi| hi >= 0x1000)?;
     let fields = x86::Fields { base, lo: 0x1000, hi };
     // (each section's streams, as the code's are in any case; their side outputs by address)
     let mut code: Vec<(usize, x86::EncodedStreams)> = sections
@@ -816,15 +828,14 @@ fn predict_relocs(
     code.sort_by_key(|c| sections[c.0].0);
     let pred: Vec<u32> =
         code.iter().flat_map(|c| c.1.side().as_chunks::<4>().0.iter().map(|r| u32::from_le_bytes(*r))).collect();
-    let (reloc, t) = (&d[sections[r].1..][..sections[r].2], if is64 { 10 } else { 3 });
-    let Some((align, streams)) = [3, 2]
+    let (off, len, t) = (sections[r].1, sections[r].2, if is64 { 10 } else { 3 });
+    let reloc = &d[off..off + len];
+    let (align, streams) = [3, 2]
         .into_iter()
         .find_map(|a| Some((a, reloc::encode_predicted(reloc, a, &pred, t)?)))
-        .filter(|_| !pred.is_empty())
-    else {
-        return;
-    };
+        .filter(|_| !pred.is_empty())?;
     let mut sides = Vec::new();
+    let mut code_at = Vec::new();
     for (i, st) in code {
         let size = sections[i].2 as u64;
         let mut params = x86_params(st.origin(), st.sentinel_size(), is64);
@@ -835,13 +846,195 @@ fn predict_relocs(
         outputs.push(Some(code));
         sections[i].3 = Arch::Output(outputs.len() - 1);
         sides.push(side);
+        code_at.push(sections[i].1..sections[i].1 + sections[i].2);
     }
-    let names = reloc::STREAM_NAMES.into_iter().chain([reloc::WRONG]);
-    let mut inputs: Vec<Node> =
-        streams.into_iter().zip(names).map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
-    inputs.push(Node::concat(sides));
-    outputs.push(Some(Node::apply(PE_RELOC, vec![align, t], inputs, reloc.len() as u64)));
-    sections[r].3 = Arch::Output(outputs.len() - 1);
+    outputs.push(Some(Node::concat(Vec::new())));
+    let k = outputs.len() - 1;
+    sections[r].3 = Arch::Output(k);
+    Some(Relocs { k, off, len, align, t, fields, pred, sides, streams, code: code_at })
+}
+
+/// Of [`predict_relocs`], what makes the relocations once the rest of the image is known.
+struct Relocs {
+    /// The output of their placeholder; where they are in the image.
+    k: usize,
+    off: usize,
+    len: usize,
+    align: u8,
+    t: u8,
+    fields: x86::Fields,
+    /// The code's predictions and their side outputs, the streams of those alone, and where the
+    /// code is in the image.
+    pred: Vec<u32>,
+    sides: Vec<Node>,
+    streams: [Vec<u8>; 3],
+    code: Vec<std::ops::Range<usize>>,
+}
+
+impl Relocs {
+    /// Sections of data predicting at most this many bytes, in all: `exe-recons/pe-reloc`, a whole
+    /// module, holds them four times (its input and its output imported, and its copies of them),
+    /// under the application bound of 256 MiB (a section of 76 MB was over it).
+    const MOST_DATA: usize = 48 << 20;
+
+    /// The parts of image `d` (each node of `parts` making the bytes of its span in `d`, in
+    /// order), the relocations among them at `at`: their placeholder made (into an application of
+    /// `exe-recons/pe-reloc`), predicted of the code, and of the sections of data that have
+    /// relocations, where that makes them; else of the code alone. The sections predicting go
+    /// through the application, as they are (its output the relocations, then them): their
+    /// parts its input, its outputs in their place, so that the parts are taken once, as before.
+    fn finish(
+        self,
+        f: &mut Formula,
+        d: &[u8],
+        parts: Vec<Node>,
+        spans: Vec<std::ops::Range<usize>>,
+        at: usize,
+    ) -> Vec<Node> {
+        let reloc = &d[self.off..self.off + self.len];
+        let size = if self.t == 10 { 8 } else { 4 };
+        let data = reloc::Data { base: self.fields.base, lo: self.fields.lo, hi: self.fields.hi, size };
+        let rvas = reloc::rvas(reloc, self.align).unwrap_or_default();
+        // the sections of data that have relocations, of parts that may be cut at their ends
+        // (slices of the rest), by RVA
+        let cut = |x: usize| {
+            spans.iter().zip(&parts).all(|(s, n)| !(s.start < x && x < s.end) || matches!(n, Node::Slice { .. }))
+        };
+        let mut chosen: Vec<(u32, std::ops::Range<usize>)> = pe_sections(d)
+            .into_iter()
+            .map(|(rva, off, n)| (rva, off..off + n))
+            .filter(|(rva, s)| {
+                let has = |r: &u32| r.wrapping_sub(*rva) < s.len() as u32;
+                !s.contains(&self.off)
+                    && !self.code.iter().any(|c| c.start < s.end && s.start < c.end)
+                    && rvas.iter().any(has)
+                    && cut(s.start)
+                    && cut(s.end)
+            })
+            .collect();
+        // (those of the most relocations first, while they fit)
+        let count =
+            |c: &(u32, std::ops::Range<usize>)| rvas.iter().filter(|r| r.wrapping_sub(c.0) < c.1.len() as u32).count();
+        chosen.sort_by_cached_key(|c| std::cmp::Reverse(count(c)));
+        let mut room = Self::MOST_DATA;
+        chosen.retain(|c| room.checked_sub(c.1.len()).map(|r| room = r).is_some());
+        chosen.sort_unstable_by_key(|c| c.0);
+        let ascending = chosen.windows(2).all(|w| w[0].0 as u64 + w[0].1.len() as u64 <= w[1].0 as u64);
+        let mut by_file: Vec<std::ops::Range<usize>> = chosen.iter().map(|c| c.1.clone()).collect();
+        by_file.sort_unstable_by_key(|r| r.start);
+        let apart = by_file.windows(2).all(|w| w[0].end <= w[1].start);
+        let records: Vec<[u8; 8]> = chosen
+            .iter()
+            .map(|(rva, s)| {
+                let mut r = [0u8; 8];
+                r[..4].copy_from_slice(&rva.to_le_bytes());
+                r[4..].copy_from_slice(&(s.len() as u32).to_le_bytes());
+                r
+            })
+            .collect();
+        let made = (!chosen.is_empty() && ascending && apart).then(|| {
+            let bytes: Vec<u8> = chosen.iter().flat_map(|c| &d[c.1.clone()]).copied().collect();
+            let mut next = reloc::merged(self.pred.iter().copied(), reloc::data_predictions(data, &records, &bytes));
+            let mut all = Vec::new();
+            while let Some(p) = next()? {
+                all.push(p);
+            }
+            reloc::encode_predicted(reloc, self.align, &all, self.t)
+        });
+        let names = reloc::STREAM_NAMES.into_iter().chain([reloc::WRONG]);
+        let mut parts = parts;
+        let Some(streams) = made.flatten() else {
+            let mut inputs: Vec<Node> =
+                self.streams.into_iter().zip(names).map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
+            inputs.extend([Node::concat(self.sides), Node::concat(Vec::new())]);
+            parts[at] = Node::apply(PE_RELOC, vec![self.align, self.t], inputs, self.len as u64);
+            return parts;
+        };
+        // the parts cut: those within the sections chosen to their inputs, in their places their
+        // outputs (none yet: by index), the relocations' too
+        let mut placed: Vec<Result<Node, usize>> = Vec::new();
+        let mut inputs_of: Vec<Vec<Node>> = vec![Vec::new(); chosen.len()];
+        let within = |x: usize| chosen.iter().position(|c| c.1.contains(&x));
+        let starts = |x: usize| chosen.iter().position(|c| c.1.start == x);
+        let mut marked = vec![false; chosen.len()];
+        for (k, (n, s)) in parts.into_iter().zip(spans).enumerate() {
+            if k == at {
+                placed.push(Err(usize::MAX));
+                continue;
+            }
+            // (the part in pieces at the sections' ends: of a slice, its slices)
+            let mut ends: Vec<usize> =
+                chosen.iter().flat_map(|c| [c.1.start, c.1.end]).filter(|&x| s.start < x && x < s.end).collect();
+            ends.sort_unstable();
+            ends.push(s.end);
+            let mut from = s.start;
+            for to in ends {
+                let piece = match &n {
+                    &Node::Slice { stream, start, .. } => {
+                        Node::slice(stream, start + (from - s.start) as u64, (to - from) as u64)
+                    }
+                    n => n.clone(),
+                };
+                if let Some(j) = starts(from).filter(|&j| !marked[j]) {
+                    marked[j] = true;
+                    placed.push(Err(j));
+                }
+                match within(from) {
+                    Some(j) => inputs_of[j].push(piece),
+                    None => placed.push(Ok(piece)),
+                }
+                from = to;
+            }
+        }
+        let mut params = vec![self.align, self.t];
+        params.extend(self.fields.base.to_le_bytes());
+        params.extend((self.fields.lo as u32).to_le_bytes());
+        params.extend((self.fields.hi as u32).to_le_bytes());
+        params.extend(records.concat());
+        let mut inputs: Vec<Node> =
+            streams.into_iter().zip(names).map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
+        inputs.extend([Node::concat(self.sides), Node::concat(inputs_of.into_iter().map(Node::concat))]);
+        let a = Apply {
+            module: PE_RELOC,
+            resources: Vec::new(),
+            params,
+            inputs,
+            len: 0,
+            memory_limit: aqr_formula::NO_LIMIT,
+            task_limits: Vec::new(),
+        };
+        let sizes = std::iter::once(self.len as u64).chain(chosen.iter().map(|c| c.1.len() as u64)).collect();
+        let mut outs: Vec<Option<Node>> = f.split(a, sizes).into_iter().map(Some).collect();
+        placed
+            .into_iter()
+            .map(|p| match p {
+                Ok(n) => n,
+                Err(usize::MAX) => outs[0].take().expect("the relocations placed once"),
+                Err(j) => outs[j + 1].take().expect("a section placed once"),
+            })
+            .collect()
+    }
+}
+
+/// The sections of PE image `d` with data stored in it: the RVA, the offset and the length of
+/// each (cut to `d`).
+fn pe_sections(d: &[u8]) -> Vec<(u32, usize, usize)> {
+    let le16 = |at: usize| Some(u16::from_le_bytes(d.get(at..at.checked_add(2)?)?.try_into().ok()?));
+    let le32 = |at: usize| Some(u32::from_le_bytes(d.get(at..at.checked_add(4)?)?.try_into().ok()?));
+    let headers = || -> Option<Vec<(u32, usize, usize)>> {
+        let pe = le32(0x3c)? as usize;
+        let (n, opt_size) = (le16(pe + 6)? as usize, le16(pe + 20)? as usize);
+        let first = pe.checked_add(24 + opt_size)?;
+        let mut out = Vec::new();
+        for h in (0..n).map(|i| first + 40 * i) {
+            let (rva, size, off) = (le32(h + 12)?, le32(h + 16)? as usize, le32(h + 20)? as usize);
+            if off < d.len() && size > 0 {
+                out.push((rva, off, size.min(d.len() - off)));
+            }
+        }
+        Some(out)
+    };
+    headers().unwrap_or_default()
 }
 
 /// The image base and `SizeOfImage` of PE image `d`, PE32+ where `is64`.
@@ -930,8 +1123,12 @@ fn code_apply(
             let (align, [rvas, types]) = [3, 2].into_iter().find_map(|a| Some((a, reloc::encode(section, a)?)))?;
             let inputs = [rvas, types].into_iter().zip(reloc::STREAM_NAMES);
             let mut inputs: Vec<Node> = inputs.map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
-            // (no predictions, no wrong ones)
-            inputs.extend([f.push(format!("pe-reloc/{}", reloc::WRONG), Vec::new()), Node::concat(Vec::new())]);
+            // (no predictions, no wrong ones, no data)
+            inputs.extend([
+                f.push(format!("pe-reloc/{}", reloc::WRONG), Vec::new()),
+                Node::concat(Vec::new()),
+                Node::concat(Vec::new()),
+            ]);
             Node::apply(PE_RELOC, vec![align, 0], inputs, size)
         }
         Arch::Table(TableKind::Rising { width, fields }) => {

@@ -537,9 +537,9 @@ fn pe_sections() {
 
 /// A PE32 image of x86-32 code of `n` pieces, each of absolute addresses (a load, a push and an
 /// indirect call, relocated) and numbers (`mov ecx, 5`; every 10th a `cmp eax` of an address
-/// that is not relocated), and its base relocations, of these and of `extra` RVAs after the code;
-/// the relocations' RVAs too.
-fn pe32_relocated(n: u32, extra: &[u32]) -> (Vec<u8>, Vec<u32>) {
+/// that is not relocated), a section of data of the words `data` (each relocated or not), if
+/// any, and its base relocations; the relocations' RVAs too.
+fn pe32_relocated(n: u32, data: &[(u32, bool)]) -> (Vec<u8>, Vec<u32>) {
     let base = 0x40_0000u32;
     let (mut code, mut relocs) = (Vec::new(), Vec::new());
     for i in 0..n {
@@ -558,7 +558,9 @@ fn pe32_relocated(n: u32, extra: &[u32]) -> (Vec<u8>, Vec<u32>) {
         }
         field(&mut code, &[0xff, 0x15], base + 0x3000 + 4 * (i % 7), true); // call [a]
     }
-    relocs.extend_from_slice(extra);
+    let data_rva = (0x1000 + code.len() as u32).next_multiple_of(0x1000);
+    let words: Vec<u8> = data.iter().flat_map(|w| w.0.to_le_bytes()).collect();
+    relocs.extend(data.iter().enumerate().filter(|w| w.1.1).map(|(j, _)| data_rva + 4 * j as u32));
     // the blocks of a page each, padded to 4 bytes
     let mut reloc = Vec::new();
     let mut k = 0;
@@ -576,14 +578,15 @@ fn pe32_relocated(n: u32, extra: &[u32]) -> (Vec<u8>, Vec<u32>) {
         reloc[start + 4..start + 8].copy_from_slice(&size.to_le_bytes());
     }
     let text_raw = 0x400usize;
-    let reloc_raw = (text_raw + code.len()).next_multiple_of(0x200);
-    let reloc_rva = (0x1000 + code.len() as u32).next_multiple_of(0x1000) + 0x1000;
+    let data_raw = (text_raw + code.len()).next_multiple_of(0x200);
+    let reloc_raw = (data_raw + words.len()).next_multiple_of(0x200);
+    let reloc_rva = (data_rva + words.len() as u32).next_multiple_of(0x1000) + 0x1000;
     let mut d = vec![0u8; text_raw];
     d[..2].copy_from_slice(b"MZ");
     d[0x3c] = 0x40;
     d[0x40..0x44].copy_from_slice(b"PE\0\0");
     d[0x44..0x46].copy_from_slice(&0x14cu16.to_le_bytes());
-    d[0x46] = 2; // sections
+    d[0x46] = 2 + !data.is_empty() as u8; // sections
     d[0x54] = 0xe0; // optional header size
     let opt = 0x58;
     let le32 = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
@@ -593,13 +596,13 @@ fn pe32_relocated(n: u32, extra: &[u32]) -> (Vec<u8>, Vec<u32>) {
     le32(&mut d, opt + 0x5c, 16);
     le32(&mut d, opt + 0x60 + 8 * 5, reloc_rva);
     le32(&mut d, opt + 0x60 + 8 * 5 + 4, reloc.len() as u32);
-    for (k, (name, rva, size, raw, flags)) in [
-        (b".text\0\0\0", 0x1000, code.len(), text_raw, 0x6000_0020u32),
-        (b".reloc\0\0", reloc_rva, reloc.len(), reloc_raw, 0x4200_0040),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let data_section = (b".data\0\0\0", data_rva, words.len(), data_raw, 0xc000_0040u32);
+    let sections = [
+        Some((b".text\0\0\0", 0x1000, code.len(), text_raw, 0x6000_0020u32)),
+        (!data.is_empty()).then_some(data_section),
+        Some((b".reloc\0\0", reloc_rva, reloc.len(), reloc_raw, 0x4200_0040)),
+    ];
+    for (k, (name, rva, size, raw, flags)) in sections.into_iter().flatten().enumerate() {
         let sec = opt + 0xe0 + 40 * k;
         d[sec..sec + 8].copy_from_slice(name);
         le32(&mut d, sec + 8, size as u32);
@@ -609,26 +612,61 @@ fn pe32_relocated(n: u32, extra: &[u32]) -> (Vec<u8>, Vec<u32>) {
         le32(&mut d, sec + 36, flags);
     }
     d.extend_from_slice(&code);
+    d.resize(data_raw, 0);
+    d.extend_from_slice(&words);
     d.resize(reloc_raw, 0);
     d.extend_from_slice(&reloc);
     (d, relocs)
 }
 
 /// The base relocations of a PE image predicted of its x86 code (`exe-recons/x86`'s side output,
-/// `exe-recons/pe-reloc` 2): of the fields of the code all predicted, those relocated not
-/// listed, the numbers in the image's range wrong; those after the code listed.
+/// `exe-recons/pe-reloc` 3) and of its data: of the fields of the code all predicted, those
+/// relocated not listed, the numbers in the image's range wrong; of the data, the words in
+/// range, the one relocated out of range listed.
 #[test]
 fn pe_relocs_predicted() {
-    let (d, relocs) = pe32_relocated(3000, &[0x1_1000, 0x1_1010]);
+    let (d, relocs) = pe32_relocated(3000, &[]);
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     let a = f.applies().into_iter().find(|a| a.module == PE_RELOC).unwrap_or_else(|| panic!("{f}"));
-    let [rvas, types, wrong, pred] = &a.inputs[..] else { panic!("{f}") };
-    assert_eq!(a.params, [2, 3]);
+    let [rvas, types, wrong, pred, data] = &a.inputs[..] else { panic!("{f}") };
+    assert_eq!(a.params, [2, 3], "no data predicting");
     // (predicted: the relocated and the numbers of 10, 0x400000 + 0x1000 as an immediate)
-    assert_eq!(pred.len() as usize, 4 * (relocs.len() - 2 + 300));
-    assert_eq!((types.len(), wrong.len()), (2, 300), "the two after the code; the numbers, a byte each");
-    assert!(rvas.len() <= 6);
+    assert_eq!(pred.len() as usize, 4 * (relocs.len() + 300));
+    assert_eq!((types.len(), wrong.len(), rvas.len(), data.len()), (0, 300, 0, 0));
     assert!(modules(&f).contains(&X86.name));
+
+    // a section of data: pointers, numbers, a number that points (not relocated) and a
+    // relocated word that does not
+    let base = 0x40_0000;
+    let mut words: Vec<(u32, bool)> = (0..2000u32)
+        .map(|j| match j {
+            _ if j % 50 == 0 => (7, false),
+            _ if j % 100 == 1 => (base + 0x1000, false),
+            _ => (base + 0x2000 + 4 * j, true),
+        })
+        .collect();
+    words.push((0x10, true));
+    let (d, _) = pe32_relocated(3000, &words);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    let a = f.applies().into_iter().find(|a| a.module == PE_RELOC).unwrap_or_else(|| panic!("{f}"));
+    let [_, types, wrong, _, data] = &a.inputs[..] else { panic!("{f}") };
+    assert_eq!(a.params.len(), 2 + 16 + 8, "the data's one piece: {:?}", a.params);
+    assert_eq!(data.len() as usize, 4 * words.len());
+    assert_eq!((types.len(), wrong.len()), (1, 300 + 20));
+
+    // the relocations' first two blocks swapped: out of order, none predicted, all listed
+    let (mut d, relocs) = pe32_relocated(3000, &words);
+    let len = u32::from_le_bytes(d[0xe4..0xe8].try_into().unwrap()) as usize;
+    let at = d.len() - len;
+    let size = |d: &[u8], at: usize| u32::from_le_bytes(d[at + 4..at + 8].try_into().unwrap()) as usize;
+    let (a0, a1) = (size(&d, at), size(&d, at + size(&d, at)));
+    let swapped = [&d[at + a0..at + a0 + a1], &d[at..at + a0]].concat();
+    d[at..at + a0 + a1].copy_from_slice(&swapped);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    let a = f.applies().into_iter().find(|a| a.module == PE_RELOC).unwrap_or_else(|| panic!("{f}"));
+    let [_, types, wrong, pred, data] = &a.inputs[..] else { panic!("{f}") };
+    assert_eq!(a.params, [2, 0]);
+    assert_eq!((types.len(), wrong.len(), pred.len(), data.len()), (relocs.len() as u64, 0, 0, 0));
 }
 
 /// The rest of a PE image coded is scanned: a zlib stream in it is found.

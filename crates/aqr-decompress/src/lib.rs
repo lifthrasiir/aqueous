@@ -142,7 +142,7 @@ fn cil(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 
 /// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
 /// multiples of (u8); inputs: the streams of `reloc::STREAM_NAMES`.
-pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 2).with_plan(exe);
+pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 3).with_plan(exe);
 
 /// aqr-exe's symbol table of a 64-bit Mach-O image, and its string table after it. Parameters:
 /// the number of entries and the first external one (u32 each, little endian), then the string

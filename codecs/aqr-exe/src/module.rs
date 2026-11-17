@@ -283,14 +283,49 @@ pub fn cil(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
 }
 
 /// The base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
-/// multiples of (u8, 2 to 12), and the type of the entries predicted (u8, below 16); inputs: the
-/// streams of [`reloc::STREAM_NAMES`] and [`reloc::WRONG`], then the predictions (`le32` RVAs).
+/// multiples of (u8, 2 to 12), and the type of the entries predicted (u8, below 16); then, where
+/// the data predicts entries too, the image base (u64), the range of the values (two u32) and the
+/// data's pieces (their RVAs and lengths, u32 each). Inputs: the streams of
+/// [`reloc::STREAM_NAMES`] and [`reloc::WRONG`], the code's predictions (`le32` RVAs), and the
+/// data's pieces one after another. Output: the relocations, then the data as it is (`len`
+/// bytes in all).
 pub fn reloc(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-    let (&[align @ 2..=12, t @ 0..=15], &[rvas, types, wrong, pred], Ok(n)) = (params, inputs, usize::try_from(len))
+    let (&[align @ 2..=12, t @ 0..=15, ref rest @ ..], &[rvas, types, wrong, pred, data], Ok(n)) =
+        (params, inputs, usize::try_from(len))
     else {
         return Err("bad parameters or inputs");
     };
-    of_len(reloc::decode_predicted([rvas, types, wrong], pred, t, align, n), len)
+    if !pred.len().is_multiple_of(4) {
+        return Err("corrupt");
+    }
+    let code = pred.as_chunks::<4>().0.iter().map(|p| u32::from_le_bytes(*p));
+    let le32 = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap());
+    let (f, pieces): (_, &[[u8; 8]]) = match rest {
+        [] => (reloc::Data { base: 0, lo: 1, hi: 0, size: 4 }, &[]),
+        b if b.len() >= 16 && (b.len() - 16).is_multiple_of(8) => {
+            let size = match t {
+                3 => 4,
+                10 => 8,
+                _ => return Err("bad parameters"),
+            };
+            let f = reloc::Data {
+                base: u64::from_le_bytes(b[..8].try_into().unwrap()),
+                lo: le32(&b[8..12]) as u64,
+                hi: le32(&b[12..16]) as u64,
+                size,
+            };
+            (f, b[16..].as_chunks::<8>().0)
+        }
+        _ => return Err("bad parameters"),
+    };
+    if pieces.iter().map(|p| reloc::piece(p).1 as u64).sum::<u64>() != data.len() as u64 {
+        return Err("bad inputs");
+    }
+    let mut next = reloc::merged(code, reloc::data_predictions(f, pieces, data));
+    let n = n.checked_sub(data.len()).ok_or("output of another length")?;
+    let mut out = reloc::decode_merged([rvas, types, wrong], &mut next, t, align, n, data.len()).ok_or("corrupt")?;
+    out.extend_from_slice(data);
+    of_len(Some(out), len)
 }
 
 /// The symbol table of a 64-bit Mach-O image and its string table after it. Parameters: the

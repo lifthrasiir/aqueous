@@ -153,6 +153,15 @@ data). On 2026-11-17, `aqr -c` with and without (`-Z exe:reloc-predict=false`): 
 x86-32 −2.46% and −0.84%, of x86-64 0 to −0.18%), compressing 17.9 → 18.6 s, testing 1.70 →
 1.76 s. The modules' blocks grew by 1187 B together (x86 7384 → 8008, pe-reloc 2581 → 3144).
 
+`exe-recons/pe-reloc` 3 predicts of the sections of data too, which go through it (its input,
+put out after the relocations): the words that point into the image, at multiples of their size.
+Against the code's predictions alone, each file archived alone: AcroRd32.dll −23 KB (the
+relocations of its 8.1 MB of code and its data: 129 KB at zstd -3 as version 1 kept them, 3 KB),
+chrome.dll −84 KB (its 2 MB of relocations all predicted), libcef32 −89 KB, comgr32 −30 KB,
+ffmpeg −17 KB, amd_comgr +1 KB (of the block: pe-reloc 3144 → 4334 B). Sections of more than
+48 MiB in all are not taken (a whole module holds them four times): rustc_driver's `.rdata`
+(76 MB) is left.
+
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
 archiving no smaller: 27 .NET assemblies (24 satellite assemblies of resources alone;
 `System.Text.Encoding.CodePages.dll`, mostly tables of code

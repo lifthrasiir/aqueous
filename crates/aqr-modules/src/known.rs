@@ -239,8 +239,8 @@ pub static KNOWN: &[Known] = &[
     },
     Known {
         name: "exe-recons/pe-reloc",
-        version: 2,
-        sha512_256: hex("26f7c061a60082fef0729bf145374e786a1e6317dc2552735f437ac2c49a24df"),
+        version: 3,
+        sha512_256: hex("b3236ff145458aa4a53efe64fdbabf544e8d4b282aa94188c58cdfb41635bfcd"),
         block: include_bytes!("../wasm/exe-recons-pe-reloc.block"),
     },
     Known {

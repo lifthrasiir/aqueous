@@ -40,6 +40,12 @@ fn entries(d: &[u8], align: u8) -> Option<Vec<(u32, u8)>> {
     Some(out)
 }
 
+/// The RVAs of the entries of the relocations `d` (as [`encode`] takes them), in order.
+#[cfg(feature = "encode")]
+pub fn rvas(d: &[u8], align: u8) -> Option<Vec<u32>> {
+    Some(entries(d, align)?.into_iter().map(|e| e.0).collect())
+}
+
 /// The relocations `d` as the streams of [`STREAM_NAMES`], their blocks' sizes multiples of
 /// `1 << align`; `None` where they are not as [`decode`] makes them.
 #[cfg(feature = "encode")]
@@ -85,7 +91,8 @@ pub fn encode_predicted(d: &[u8], align: u8, pred: &[u32], t: u8) -> Option<[Vec
         }
         all[j..].iter().for_each(|&e| listed(e, &mut last));
     }
-    let back = decode_predicted([&rvas, &types, &wrong], pred_bytes(pred).as_slice(), t, align, d.len());
+    let mut it = pred.iter().copied();
+    let back = decode_merged([&rvas, &types, &wrong], &mut || Some(it.next()), t, align, d.len(), 0);
     (back.as_deref() == Some(d)).then_some([rvas, types, wrong])
 }
 
@@ -104,12 +111,74 @@ pub fn decode(rvas: &[u8], types: &[u8], align: u8, len: usize) -> Option<Vec<u8
 /// The relocations, `len` bytes, from the streams of [`STREAM_NAMES`] and [`WRONG`], the
 /// predictions `pred` (`le32` RVAs) of type `t`; `None` where they are not valid (FORMAT.md §R4).
 pub fn decode_predicted(streams: [&[u8]; 3], pred: &[u8], t: u8, align: u8, len: usize) -> Option<Vec<u8>> {
+    if !pred.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut it = pred.as_chunks::<4>().0.iter().map(|p| u32::from_le_bytes(*p));
+    decode_merged(streams, &mut || Some(it.next()), t, align, len, 0)
+}
+
+/// The fields of a section of data that are predictions (FORMAT.md §R3): those of `size` bytes
+/// (4 or 8) at RVAs that are multiples of `size`, whose values less `base` (wrapping) are from
+/// `lo` to `hi`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Data {
+    pub base: u64,
+    pub lo: u64,
+    pub hi: u64,
+    pub size: usize,
+}
+
+/// The predictions of `data` (as [`Data`]): the pieces' bytes one after another, of `pieces`
+/// (`le32` RVA and `le32` length each, their lengths `data`'s), in order.
+pub fn data_predictions<'a>(f: Data, pieces: &'a [[u8; 8]], data: &'a [u8]) -> impl Iterator<Item = u32> + 'a {
+    let mut at = 0usize;
+    pieces.iter().flat_map(move |p| {
+        let (rva, len) = piece(p);
+        let b = data.get(at..at + len as usize).unwrap_or(&[]);
+        at += len as usize;
+        let first = (f.size - rva as usize % f.size) % f.size;
+        (first..b.len().saturating_sub(f.size - 1)).step_by(f.size).filter_map(move |o| {
+            let mut v = [0u8; 8];
+            v[..f.size].copy_from_slice(&b[o..o + f.size]);
+            (f.lo..=f.hi).contains(&u64::from_le_bytes(v).wrapping_sub(f.base)).then_some(rva.wrapping_add(o as u32))
+        })
+    })
+}
+
+/// The RVA and the length of a piece of data ([`data_predictions`]).
+pub fn piece(p: &[u8; 8]) -> (u32, u32) {
+    (u32::from_le_bytes(p[..4].try_into().unwrap()), u32::from_le_bytes(p[4..].try_into().unwrap()))
+}
+
+/// The predictions `a` and `b` merged by RVA, ascending where each is: `Some(None)` once both are
+/// used up, `None` for one RVA in both.
+pub fn merged(a: impl Iterator<Item = u32>, b: impl Iterator<Item = u32>) -> impl FnMut() -> Option<Option<u32>> {
+    let (mut a, mut b) = (a.peekable(), b.peekable());
+    move || match (a.peek(), b.peek()) {
+        (Some(x), Some(y)) if x == y => None,
+        (Some(x), Some(y)) if x < y => Some(a.next()),
+        (Some(_), Some(_)) | (None, _) => Some(b.next()),
+        (Some(_), None) => Some(a.next()),
+    }
+}
+
+/// [`decode_predicted`] of the predictions `next_pred` gives (`Some(None)` at their end, `None`
+/// where they are not valid), with room for `more` bytes after them.
+pub fn decode_merged(
+    streams: [&[u8]; 3],
+    next_pred: &mut dyn FnMut() -> Option<Option<u32>>,
+    t: u8,
+    align: u8,
+    len: usize,
+    more: usize,
+) -> Option<Vec<u8>> {
     let [mut rvas, mut types, mut wrong] = streams;
-    if t > 15 || !pred.len().is_multiple_of(4) {
+    if t > 15 {
         return None;
     }
     let unit = 1usize << align;
-    let mut out = crate::util::room(len)?;
+    let mut out = crate::util::room(len.checked_add(more)?)?;
     let mut start = None::<(usize, u32)>;
     let close = |out: &mut Vec<u8>, start: usize| {
         out.resize((out.len()).next_multiple_of(unit), 0);
@@ -126,14 +195,16 @@ pub fn decode_predicted(streams: [&[u8]; 3], pred: &[u8], t: u8, align: u8, len:
         last = last.wrapping_add(v);
         (ty <= 15).then_some(Some((last, ty)))
     };
-    let mut preds = pred.as_chunks::<4>().0.iter().map(|p| u32::from_le_bytes(*p)).enumerate();
+    let mut i = 0usize;
     let mut next_wrong = match wrong.is_empty() {
         true => None,
         false => Some(take_varint(&mut wrong)?),
     };
     let mut next_pred = || -> Option<Option<u32>> {
         loop {
-            let Some((i, p)) = preds.next() else { return Some(None) };
+            let Some(p) = next_pred()? else { return Some(None) };
+            i += 1;
+            let i = i - 1;
             if next_wrong != Some(i as u64) {
                 return Some(Some(p));
             }
@@ -269,6 +340,42 @@ mod tests {
         assert!(encode_predicted(&mixed, 2, &[], 3).is_some());
         // a prediction the same as an entry listed is no valid input
         assert_eq!(decode_predicted([&[0x84, 0x20], &[3], &[]], &pred_bytes(&[0x1004]), 3, 2, 12), None);
+    }
+
+    #[test]
+    fn data_predicted() {
+        let f = Data { base: 0x40_0000, lo: 0x1000, hi: 0x8000, size: 4 };
+        // two pieces: at 0x2002 (its first aligned word at 0x2004) and at 0x3000
+        let mut data = vec![0u8; 2];
+        for v in [0x40_1000u32, 7, 0x40_9000, 0x40_8000] {
+            data.extend(v.to_le_bytes());
+        }
+        data.extend([0x00, 0x10, 0x40]); // a word cut by the end of the piece
+        let n0 = data.len() as u32;
+        for v in [0x40_2000u32, 0x3f_f000] {
+            data.extend(v.to_le_bytes());
+        }
+        let piece = |rva: u32, n: u32| {
+            let mut r = [0u8; 8];
+            r[..4].copy_from_slice(&rva.to_le_bytes());
+            r[4..].copy_from_slice(&n.to_le_bytes());
+            r
+        };
+        let pieces = [piece(0x2002, n0), piece(0x3000, data.len() as u32 - n0)];
+        let got: Vec<u32> = data_predictions(f, &pieces, &data).collect();
+        assert_eq!(got, [0x2002 + 2, 0x2002 + 14, 0x3000]);
+        // of 8 bytes, aligned to 8
+        let f8 = Data { size: 8, ..f };
+        let mut d8 = vec![0u8; 8];
+        d8.extend(0x40_1000u64.to_le_bytes());
+        let p8 = [piece(0x5000, d8.len() as u32)];
+        assert_eq!(data_predictions(f8, &p8, &d8).collect::<Vec<_>>(), [0x5008]);
+        // merged with others by RVA; one RVA in both is no valid input
+        let mut m = merged([0x1000u32, 0x200c].into_iter(), got.iter().copied());
+        let all: Vec<_> = std::iter::from_fn(|| m().unwrap()).collect();
+        assert_eq!(all, [0x1000, 0x2004, 0x200c, 0x2010, 0x3000]);
+        let mut m = merged([0x2004u32].into_iter(), got.iter().copied());
+        assert_eq!(m(), None);
     }
 
     #[test]

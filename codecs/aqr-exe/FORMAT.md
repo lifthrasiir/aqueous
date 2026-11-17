@@ -1083,21 +1083,31 @@ the block's size (`le32` each), then entries of `le16`, a type in the high 4 bit
 in the page in the low 12, padded with zero entries to a multiple of 4 bytes. The module keeps
 only the entries, as the RVAs they point at, each the difference from the one before; the
 headers and the padding follow from them. Entries may be predicted: RVAs that are an input (the
-side outputs of `exe-recons/x86`, §5.7, where the code's absolute addresses are), so that only
-the wrong predictions and the entries not predicted are kept. The conventions of §1 hold.
+side outputs of `exe-recons/x86`, §5.7, where the code's absolute addresses are), and the places
+of the words of sections of data that point into the image (those sections an input, put out
+after the relocations as they are), so that only the wrong predictions and the entries not
+predicted are kept. The conventions of §1 hold.
 
 ## R1. The module
 
-- **Module**: name `exe-recons/pe-reloc`, version 2.
-- **Params**: exactly 2 bytes: `a`, from 2 to 12: the blocks' sizes are multiples of `2^a`;
-  then `t`, below 16: the type of the entries predicted.
-- **Resources**: none.
-- **Inputs**: exactly 4, those of §R2 in order, the first three of classes `pe-reloc/RVAS`,
-  `pe-reloc/TYPES` and `pe-reloc/WRONG`.
-- **Output**: the relocations of §R3, `len` bytes long.
+- **Module**: name `exe-recons/pe-reloc`, version 3.
+- **Params**: 2 bytes, or 18 and more for predictions of data:
 
-Version 1 was of 1 byte of params (`a`) and 2 inputs (`RVAS`, `TYPES`): version 2 with `WRONG`
-and `PRED` empty.
+  ```text
+  u8      a             2..12: the blocks' sizes are multiples of 2^a
+  u8      t             below 16: the type of the entries predicted
+  le64    base          (data) the image base
+  le32    lo, hi        (data) the range of the words' values less base
+  (le32 rva, le32 n)*   (data) the pieces of DATA: their RVAs and lengths
+  ```
+
+- **Resources**: none.
+- **Inputs**: exactly 5, those of §R2 in order, the first three of classes `pe-reloc/RVAS`,
+  `pe-reloc/TYPES` and `pe-reloc/WRONG`.
+- **Output**: the relocations of §R3, then `DATA` as it is, `len` bytes in all.
+
+Version 2 was of 2 bytes of params and 4 inputs (no `DATA`); version 1 of 1 byte (`a`) and 2
+inputs (`RVAS`, `TYPES`): version 3 with `WRONG`, `PRED` and `DATA` empty.
 
 ## R2. Streams
 
@@ -1106,14 +1116,20 @@ and `PRED` empty.
 | 0 | `RVAS` | for each entry **listed** (not predicted), a `varint` (unsigned LEB128, at most 5 bytes, below 2^32): its RVA less the RVA of the entry listed before (of 0 before the first), wrapping in 32 bits |
 | 1 | `TYPES` | for each entry listed, its type, one byte below 16 |
 | 2 | `WRONG` | the indices of the predictions that are not entries: `varint`s, each the index less the one after the index before (less 0 for the first) |
-| 3 | `PRED` | the predictions: `le32` RVAs |
+| 3 | `PRED` | the predictions of the code: `le32` RVAs |
+| 4 | `DATA` | the pieces of the params' table one after another |
 
 ## R3. Decoding
 
 The **listed** entries are, for each byte `y` of `TYPES` in order: with `r = 0` at first, read
 a `varint` `v` from `RVAS` and `r ← (r + v) mod 2^32`; the entry is of RVA `r` and type `y`.
-The **predicted** entries are those of `PRED`, `le32` each, in order, but those at the indices
-of `WRONG` (counted from 0), each of type `t`. The entries are both merged: while either has
+The **predictions** are those of `PRED`, `le32` each, and those of `DATA`, merged: while
+either has some left, the next of the two that is the lower (two of one RVA are an error). Those
+of `DATA` are, of each piece in order (RVA `r`, `n` bytes), with `s` the size of a word (4 for
+`t` = 3, 8 for `t` = 10; data with another `t` is an error): the RVAs `r + o` that are multiples
+of `s`, `o + s ≤ n`, where the piece's `le` word of `s` bytes at `o`, less `base` (modulo 2^64), is
+from `lo` to `hi`. The **predicted** entries are the predictions but those at the indices of
+`WRONG` (counted from 0), each of type `t`. The entries are both merged: while either has
 entries left, the next is the next listed one if the predicted ones are used up or its RVA is
 below the next predicted one's; the next predicted one if the listed ones are used up or its RVA
 is below the next listed one's (two of one RVA are an error). (With `PRED` empty, the entries are
@@ -1125,19 +1141,20 @@ page `p`: append `le32 p` and 4 bytes for its size. Append the entry, `le16 (y <
 
 Once the entries are used up, close the open block, if any. To close a block: append zero bytes
 until the length of `out` is a multiple of `2^a`, then write the block's size (from its page's
-`le32` to the end of `out`) as its `le32` after the page.
+`le32` to the end of `out`) as its `le32` after the page. Then append `DATA`.
 
 ## R4. Validation
 
 The module fails if:
 
-- the params are not 2 bytes, `a` from 2 to 12 and `t` below 16, or there are resources, or not
-  exactly 4 inputs;
+- the params are not 2 bytes, nor 18 and a multiple of 8 more, `a` from 2 to 12 and `t` below
+  16 (3 or 10 with more than 2), or there are resources, or not exactly 5 inputs;
+- the pieces' lengths are not `DATA`'s;
 - `RVAS` or `WRONG` runs out, a `varint` is longer than 5 bytes or not below 2^32, or a type is
   16 or more;
 - `RVAS` has bytes left once the types are used up, `WRONG` has an index of no prediction, or
   `PRED`'s length is not a multiple of 4;
-- a listed and a predicted entry are of one RVA;
+- a listed and a predicted entry, or a prediction of `PRED` and one of `DATA`, are of one RVA;
 - the output is not `len` bytes long.
 
 ## R5. Encoding *(encoder)*
@@ -1156,10 +1173,16 @@ aqr-compress takes the relocations where `aqr_exe::format::pe::tables` finds the
 data of a section and outside the code, trying `a` = 3, then 2 (blocks padded to 8 bytes are
 also valid padded to 4, with more entries). Of an image of x86 code (with no CIL section, its sections not
 overlapping), it predicts them: the code sections go through `exe-recons/x86` with a side
-output (§5.7) of `base` the image base, `lo` = `1000` and `hi` = `SizeOfImage − 4`, and `PRED`
+output (§5.7) of `base` the image base, `lo` = `1000` and `hi` as below, and `PRED`
 is those side outputs one after another, by the sections' addresses, `t` 3 (`HIGHLOW`) in x86-32
 and 10 (`DIR64`) in x86-64. Where that fails or predicts nothing, there are no predictions (`t`
-0), and the code sections have params of 10 bytes, each empty side output after its code. It also takes the image's other tables there by
+0), and the code sections have params of 10 bytes, each empty side output after its code.
+`hi` is `SizeOfImage` less 4 (x86-32) or 8 (x86-64). The data predicting is that of the sections
+that relocations point into, other than code and the relocations' own, those of the most relocations first
+while they come to 48 MiB at most (the module holds them four times, under the application bound
+of 256 MiB), by RVA: their parts in the formula (slices of the rest, the tables taken out of
+them) the input `DATA`, and the outputs after the relocations in their places; where that
+does not predict the relocations, the code's alone. It also takes the image's other tables there by
 `recs-fields` (aqr-infer-recs' FORMAT.md), each number a field of delta coding: the export
 address table, the name pointers and the ordinals; the import lookup and address tables (those
 that touch in the file as one); the runtime functions of x86-64 (12 bytes, 3 fields) and ARM64
