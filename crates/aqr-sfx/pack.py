@@ -2,9 +2,10 @@
 into a self-extracting program) into target/aqr-sfx/, and packs it into sfx.pack, which aqr's
 build script includes:
 
-- aqr-sfx-shim.exe, the stub (release), packed by UPX (`upx -9`, as the release packs aqr.exe; the
-  one AQR_UPX names (not UPX: upx reads that as its options), else `upx` on the path; where there
-  is none, left as it is with a warning);
+- aqr-sfx-shim.exe, the stub (release, for x86_64-win7-windows-msvc, as the blobs are of Windows 7
+  on), packed by UPX (`upx -9`, as the release packs aqr.exe; the one AQR_UPX names (not UPX: upx
+  reads that as its options), else `upx` on the path; where there is none, left as it is with a
+  warning);
 - aqr-interp.blob, the interpreter blob (aqr-interp built for the no-TLS target, digested by
   `aqr-ld blob`), for the modules with no native blob;
 - modules/NAME.blob, each module of aqr-modules built as a native library for the no-TLS target
@@ -52,12 +53,16 @@ def main():
         fail("Windows only (the blobs are PE images)")
     modules = sys.argv[1:]
 
-    run("cargo", "build", "-q", "--release", "-p", "aqr-ld", "-p", "aqr-sfx-shim")
+    nightly = os.environ.get("AQR_NIGHTLY") or Path("nightly-toolchain").read_text().strip()
+    run("cargo", "build", "-q", "--release", "-p", "aqr-ld")
+    # (the stub for the target of Windows 7 on, std built for it and the C runtime static, as the
+    # blobs are of its no-TLS target: one self-extracting program for every Windows aqr runs on)
+    run("cargo", f"+{nightly}", "build", "-q", "--release", "-p", "aqr-sfx-shim", "--target",
+        "x86_64-win7-windows-msvc", "-Z", "build-std")
     ld = ROOT / "target/release/aqr-ld.exe"
     # (all of them, for build.py to cut the shared libraries to what they use)
     run(sys.executable, "-I", "crates/aqr-dll/build.py", *modules, env=dict(os.environ, NOTLS="1"))
     modules = modules or sorted(p.stem for p in Path("crates/aqr-modules/src/bin").glob("*.rs"))
-    nightly = os.environ.get("AQR_NIGHTLY") or Path("nightly-toolchain").read_text().strip()
     # (linked by aqr-ld as build.py links, so that the standard library built for the target is not
     # built again for a linker of its own)
     run("cargo", f"+{nightly}", "build", "-q", "--release", "-p", "aqr-interp", "--target",
@@ -68,7 +73,7 @@ def main():
     (OUT / "modules").mkdir(parents=True)
     (OUT / "libs").mkdir()
     stub = OUT / "aqr-sfx-shim.exe"
-    shutil.copyfile("target/release/aqr-sfx-shim.exe", stub)
+    shutil.copyfile("target/x86_64-win7-windows-msvc/release/aqr-sfx-shim.exe", stub)
     upx_name = os.environ.get("AQR_UPX") or "upx"
     upx = shutil.which(upx_name)
     if upx:

@@ -93,19 +93,31 @@ fn u64_at(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
-// ---- the Visual C++ runtime of blobs
+// ---- the C runtime of blobs
 
 /// The library of the Visual C++ runtime (lowercase), which blobs import from but no Windows
-/// carries (the redistributable installs it). The programs placing blobs link it statically
-/// (`.cargo/config.toml`: the C runtime static, the UCRT of Windows 10 on not), and bind the
-/// blobs' imports from it to their own copy ([`VCRUNTIME_TABLE`]), so none is loaded. A blob
-/// could not link it statically itself: its copy would be left uninitialised (no DllMain runs
-/// for a blob), and its exception handling, which panics go through, aborts so.
+/// carries (the redistributable installs it). A blob could not link it statically itself: its
+/// copy would be left uninitialised (no DllMain runs for a blob), and its exception handling,
+/// which panics go through, aborts so.
 pub const VCRUNTIME: &str = "vcruntime140.dll";
 
-/// The functions of [`VCRUNTIME`] that blobs import, in the order of [`VCRUNTIME_TABLE`]'s (where
-/// `_CxxThrowException` is one of its own for blobs).
-pub const VCRUNTIME_NAMES: [&str; 8] = [
+/// Whether library `lib` is the C runtime's: the Visual C++ runtime ([`VCRUNTIME`]) or the
+/// UCRT (`api-ms-win-crt-*.dll`, `ucrtbase.dll`). The programs placing blobs bind the blobs'
+/// imports from these to their own functions ([`CRT_TABLE`]), so that none of them is loaded:
+/// no Windows carries vcruntime140.dll, and Windows 7 and 8 carry the UCRT only by an update.
+/// A program links them statically or not (`.cargo/config.toml`: for Windows 10 the UCRT the
+/// system's DLL, for the target of Windows 7 on all static).
+pub fn is_crt(lib: &[u8]) -> bool {
+    let lib = lib.to_ascii_lowercase();
+    lib == VCRUNTIME.as_bytes() || lib == b"ucrtbase.dll" || lib.starts_with(b"api-ms-win-crt-")
+}
+
+/// The functions of the C runtime ([`is_crt`]) that blobs import, in the order of
+/// [`CRT_TABLE`]'s (where `_CxxThrowException` is one of its own for blobs). Those of the UCRT
+/// that only a DLL's startup calls (`_initterm` and the like) are bound too, though no DllMain
+/// runs for a blob. `aqr-ld blob` and `blobs` fail for a blob importing another.
+pub const CRT_NAMES: [&str; CRT_COUNT] = [
+    // the Visual C++ runtime's
     "memcpy",
     "memmove",
     "memset",
@@ -114,25 +126,54 @@ pub const VCRUNTIME_NAMES: [&str; 8] = [
     "__CxxFrameHandler3",
     "_CxxThrowException",
     "__std_type_info_destroy_list",
+    // the UCRT's
+    "strlen",
+    "malloc",
+    "free",
+    "abort",
+    "ceil",
+    "ceilf",
+    "cos",
+    "floor",
+    "floorf",
+    "fma",
+    "fmaf",
+    "fmod",
+    "fmodf",
+    "log2",
+    "pow",
+    "round",
+    "roundf",
+    "trunc",
+    "_cexit",
+    "_configure_narrow_argv",
+    "_execute_onexit_table",
+    "_initialize_narrow_environment",
+    "_initialize_onexit_table",
+    "_initterm",
+    "_initterm_e",
+    "_seh_filter_dll",
 ];
 
-/// The magic of [`VCRUNTIME_TABLE`], by which `aqr-ld merge` finds it in a stub's file.
-pub const VCRUNTIME_MAGIC: &[u8; 16] = b"\x89AQRVCRUNTIMEv1\x00";
+const CRT_COUNT: usize = 34;
 
-/// The program's own functions of [`VCRUNTIME_NAMES`], after [`VCRUNTIME_MAGIC`].
+/// The magic of [`CRT_TABLE`], by which `aqr-ld merge` finds it in a stub's file.
+pub const CRT_MAGIC: &[u8; 16] = b"\x89AQRCRTTABLEv2\x00\x00";
+
+/// The program's own functions of [`CRT_NAMES`], after [`CRT_MAGIC`].
 #[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
 #[repr(C)]
-pub struct VcruntimeTable {
+pub struct CrtTable {
     pub magic: [u8; 16],
-    pub functions: [unsafe extern "C" fn(); 8],
+    pub functions: [unsafe extern "C" fn(); CRT_COUNT],
 }
 
 #[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
-mod vcruntime {
+mod crt {
     use core::ffi::c_void;
 
-    // (only their addresses are taken: the signatures matter only to rustc, which checks the
-    // ones that std uses)
+    // (only their addresses are taken: the signatures matter only to rustc, which checks those
+    // that std declares too, given theirs; the others none)
     unsafe extern "C" {
         fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
         fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
@@ -142,6 +183,32 @@ mod vcruntime {
         fn __CxxFrameHandler3();
         fn _CxxThrowException(object: *mut c_void, info: *const c_void) -> !;
         fn __std_type_info_destroy_list();
+        fn strlen(s: *const core::ffi::c_char) -> usize;
+        fn malloc(n: usize) -> *mut c_void;
+        fn free(p: *mut c_void);
+        fn abort() -> !;
+        fn ceil();
+        fn ceilf();
+        fn cos();
+        fn floor();
+        fn floorf();
+        fn fma();
+        fn fmaf();
+        fn fmod();
+        fn fmodf();
+        fn log2();
+        fn pow();
+        fn round();
+        fn roundf();
+        fn trunc();
+        fn _cexit();
+        fn _configure_narrow_argv();
+        fn _execute_onexit_table();
+        fn _initialize_narrow_environment();
+        fn _initialize_onexit_table();
+        fn _initterm();
+        fn _initterm_e();
+        fn _seh_filter_dll();
     }
 
     #[link(name = "kernel32")]
@@ -178,13 +245,13 @@ mod vcruntime {
         unsafe { core::mem::transmute_copy(&f) }
     }
 
-    /// The program's functions of the Visual C++ runtime that blobs import, found by its magic
+    /// The program's functions of the C runtime that blobs import, found by its magic
     /// in a stub's file by `aqr-ld merge` and used by [`crate::load`]. A program into which blobs
-    /// are merged must reference it ([`keep_vcruntime`]), or the linker drops it.
+    /// are merged must reference it ([`keep_crt`]), or the linker drops it.
     #[used]
     #[unsafe(no_mangle)]
-    pub static VCRUNTIME_TABLE: super::VcruntimeTable = super::VcruntimeTable {
-        magic: *super::VCRUNTIME_MAGIC,
+    pub static CRT_TABLE: super::CrtTable = super::CrtTable {
+        magic: *super::CRT_MAGIC,
         functions: [
             erase::<Mem>(memcpy),
             erase::<Mem>(memmove),
@@ -194,16 +261,42 @@ mod vcruntime {
             __CxxFrameHandler3,
             erase::<unsafe extern "C" fn(*mut c_void, *const c_void) -> !>(throw_from_blob),
             __std_type_info_destroy_list,
+            erase::<unsafe extern "C" fn(*const core::ffi::c_char) -> usize>(strlen),
+            erase::<unsafe extern "C" fn(usize) -> *mut c_void>(malloc),
+            erase::<unsafe extern "C" fn(*mut c_void)>(free),
+            erase::<unsafe extern "C" fn() -> !>(abort),
+            ceil,
+            ceilf,
+            cos,
+            floor,
+            floorf,
+            fma,
+            fmaf,
+            fmod,
+            fmodf,
+            log2,
+            pow,
+            round,
+            roundf,
+            trunc,
+            _cexit,
+            _configure_narrow_argv,
+            _execute_onexit_table,
+            _initialize_narrow_environment,
+            _initialize_onexit_table,
+            _initterm,
+            _initterm_e,
+            _seh_filter_dll,
         ],
     };
 
-    /// Keeps [`VCRUNTIME_TABLE`] in the program (for `aqr-ld merge` to find).
-    pub fn keep_vcruntime() {
-        std::hint::black_box(&VCRUNTIME_TABLE);
+    /// Keeps [`CRT_TABLE`] in the program (for `aqr-ld merge` to find).
+    pub fn keep_crt() {
+        std::hint::black_box(&CRT_TABLE);
     }
 }
 #[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
-pub use vcruntime::{VCRUNTIME_TABLE, keep_vcruntime};
+pub use crt::{CRT_TABLE, keep_crt};
 
 /// The images of the blobs placed in this process: start, end, and the address of RVA 0 of each.
 /// Only added to (what is placed stays for the life of the process), and read without a lock:
@@ -246,11 +339,11 @@ mod images {
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub use images::{image_base_of, register_image};
 
-/// Takes the import descriptor of [`VCRUNTIME`] out of the import directory at `dir_rva` of image
-/// `img` (its bytes from RVA `first`), the others moved up, and gives the slots of its import
-/// address table with the index of each function in [`VCRUNTIME_NAMES`]: for whoever places the
-/// image to write the program's own functions there.
-pub fn take_vcruntime(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u32, usize)>> {
+/// Takes the import descriptors of the C runtime ([`is_crt`]) out of the import directory at
+/// `dir_rva` of image `img` (its bytes from RVA `first`), the others moved up, and gives the slots
+/// of their import address tables with the index of each function in [`CRT_NAMES`]: for whoever
+/// places the image to write the program's own functions there.
+pub fn take_crt(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u32, usize)>> {
     if dir_rva == 0 {
         return Ok(Vec::new());
     }
@@ -265,7 +358,8 @@ pub fn take_vcruntime(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u
     let mut d = start;
     while img[d..d + IMPORT_DESCRIPTOR_LEN].iter().any(|&b| b != 0) {
         let (oft, name, ft) = (u32_at(img, d), u32_at(img, d + 12), u32_at(img, d + 16));
-        if !cstr(img, name)?.eq_ignore_ascii_case(VCRUNTIME.as_bytes()) {
+        let lib = cstr(img, name)?;
+        if !is_crt(&lib) {
             kept.extend_from_slice(&img[d..d + IMPORT_DESCRIPTOR_LEN]);
             d += IMPORT_DESCRIPTOR_LEN;
             continue;
@@ -279,11 +373,11 @@ pub fn take_vcruntime(img: &mut [u8], first: u32, dir_rva: u32) -> Result<Vec<(u
             }
             let n = match v & IMPORT_BY_ORDINAL {
                 0 => cstr(img, v as u32 + 2)?,
-                _ => return Err(format!("{VCRUNTIME}: an import by ordinal")),
+                _ => return Err(format!("{}: an import by ordinal", String::from_utf8_lossy(&lib))),
             };
-            let i = VCRUNTIME_NAMES.iter().position(|f| f.as_bytes() == n).ok_or_else(|| {
+            let i = CRT_NAMES.iter().position(|f| f.as_bytes() == n).ok_or_else(|| {
                 let n = String::from_utf8_lossy(&n);
-                format!("{VCRUNTIME}: {n} is imported, which aqr_blob::VCRUNTIME_NAMES does not have")
+                format!("{}: {n} is imported, which aqr_blob::CRT_NAMES does not have", String::from_utf8_lossy(&lib))
             })?;
             slots.push((ft + k as u32 * 8, i));
         }
@@ -445,21 +539,19 @@ mod tests {
         assert!(Blob::from_bytes(&b.to_bytes()[..100]).is_err());
     }
 
-    /// An image (from RVA 0x1000) importing from kernel32.dll and VCRUNTIME140.dll.
-    fn image(vcrt: &[&str]) -> Vec<u8> {
+    /// An image (from RVA 0x1000) importing from kernel32.dll and `crt`.
+    fn image(crt: &str, crt_functions: &[&str]) -> Vec<u8> {
         let mut img = vec![0u8; 0x1000];
         let put = |img: &mut [u8], o: usize, v: u64, n: usize| img[o..o + n].copy_from_slice(&v.to_le_bytes()[..n]);
         let name = |img: &mut [u8], o: usize, s: &str| img[o..o + s.len()].copy_from_slice(s.as_bytes());
         // descriptors at 0x1000 (lookup table, name, address table), then the terminator
-        for (k, (lib, lookup, ft)) in
-            [("kernel32.dll", 0x1200, 0x1300), ("VCRUNTIME140.dll", 0x1400, 0x1500)].iter().enumerate()
-        {
+        for (k, (lib, lookup, ft)) in [("kernel32.dll", 0x1200, 0x1300), (crt, 0x1400, 0x1500)].iter().enumerate() {
             put(&mut img, k * 20, *lookup, 4);
             put(&mut img, k * 20 + 12, 0x1100 + k as u64 * 0x20, 4);
             put(&mut img, k * 20 + 16, *ft, 4);
             name(&mut img, 0x100 + k * 0x20, lib);
         }
-        let funcs: [&[&str]; 2] = [&["GetLastError"], vcrt];
+        let funcs: [&[&str]; 2] = [&["GetLastError"], crt_functions];
         for (k, fs) in funcs.iter().enumerate() {
             for (i, f) in fs.iter().enumerate() {
                 let hint = 0x600 + k * 0x200 + i * 0x40;
@@ -473,19 +565,26 @@ mod tests {
     }
 
     #[test]
-    fn vcruntime_taken() {
-        let mut img = image(&["memset", "__CxxFrameHandler3"]);
-        let slots = take_vcruntime(&mut img, 0x1000, 0x1000).unwrap();
+    fn crt_taken() {
+        let mut img = image("VCRUNTIME140.dll", &["memset", "__CxxFrameHandler3"]);
+        let slots = take_crt(&mut img, 0x1000, 0x1000).unwrap();
         assert_eq!(slots, [(0x1500, 2), (0x1508, 5)]);
         // kernel32.dll's descriptor is left alone, then the terminator
         assert_eq!(u32_at(&img, 12), 0x1100);
         assert!(img[20..40].iter().all(|&b| b == 0));
         // none left to take
-        assert_eq!(take_vcruntime(&mut img, 0x1000, 0x1000).unwrap(), []);
+        assert_eq!(take_crt(&mut img, 0x1000, 0x1000).unwrap(), []);
 
-        let mut img = image(&["memset", "strlen"]);
-        let e = take_vcruntime(&mut img, 0x1000, 0x1000).unwrap_err();
-        assert!(e.contains("strlen"), "{e}");
+        // the UCRT's too
+        let mut img = image("api-ms-win-crt-math-l1-1-0.dll", &["pow", "floor"]);
+        let slots = take_crt(&mut img, 0x1000, 0x1000).unwrap();
+        let at = |n| CRT_NAMES.iter().position(|&f| f == n).unwrap();
+        assert_eq!(slots, [(0x1500, at("pow")), (0x1508, at("floor"))]);
+        assert!(img[20..40].iter().all(|&b| b == 0));
+
+        let mut img = image("api-ms-win-crt-math-l1-1-0.dll", &["floor", "sinh"]);
+        let e = take_crt(&mut img, 0x1000, 0x1000).unwrap_err();
+        assert!(e.contains("sinh"), "{e}");
     }
 
     /// A blob placed as its sections are: its code executable and not writable, its data

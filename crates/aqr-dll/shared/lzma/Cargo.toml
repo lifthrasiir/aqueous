@@ -2,7 +2,7 @@
 name = "aqr-dll-lzma"
 version = "0.1.0"
 edition = "2024"
-description = "Made by layout.py: the crates that the same 4 modules use, as a dylib that their native libraries link against"
+description = "Made by layout.py: the crates that the same 5 modules use, as a dylib that their native libraries link against"
 publish = false
 
 [lib]

@@ -387,6 +387,9 @@ fn blob_of(pe: &Pe, apply_name: &str, info_name: &str, optional: bool, set: &[&E
         image[at..at + n].copy_from_slice(&pe.buf[s.raw_ptr as usize..s.raw_ptr as usize + n]);
     }
     let binds = bind_set(&mut image, first, pe.dir(DIR_IMPORT).0, set)?;
+    // (its imports from the C runtime all of those a program binds to its own: told here, as the
+    // blob is made, not where it is placed)
+    aqr_blob::take_crt(&mut image.clone(), first, pe.dir(DIR_IMPORT).0)?;
     // the dead directories' data, zeroed (the loader reads only the stub's)
     let zero = |image: &mut [u8], (rva, size): (u32, u32)| {
         if rva >= first && rva + size <= last {
@@ -499,7 +502,7 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
         blobs.push((name, va, va.wrapping_sub(b.first), b));
     }
     let placed: Vec<(String, u32)> = blobs.iter().map(|(_, _, c, b)| (b.name.clone(), *c)).collect();
-    let vcrt = vcruntime_table(&pe);
+    let crt = crt_table(&pe);
 
     for (name, va, c, b) in blobs {
         let mut img = b.image;
@@ -523,13 +526,13 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
         let names = crate::unwind::import_names(&img, b.first, b.import_dir_rva)?;
         let rebased = crate::unwind::rebase(&mut img, b.first, b.pdata_rva, b.pdata_count, c, &names);
         functions.extend(rebased.map_err(|e| format!("{name}: {e}"))?);
-        // the imports from the Visual C++ runtime: the stub's own copy, where it has its table
-        if let Some(vcrt) = &vcrt {
+        // the imports from the C runtime: the stub's own functions, where it has their table
+        if let Some(crt) = &crt {
             for (slot, i) in
-                aqr_blob::take_vcruntime(&mut img, b.first, b.import_dir_rva).map_err(|e| format!("{name}: {e}"))?
+                aqr_blob::take_crt(&mut img, b.first, b.import_dir_rva).map_err(|e| format!("{name}: {e}"))?
             {
                 let o = (slot - b.first) as usize;
-                img[o..o + 8].copy_from_slice(&vcrt[i].to_le_bytes());
+                img[o..o + 8].copy_from_slice(&crt[i].to_le_bytes());
                 new_relocs.push(c.wrapping_add(slot));
             }
         }
@@ -651,15 +654,15 @@ pub fn merge_bytes(stub: Vec<u8>, modules: &[(String, Vec<u8>)], apply_name: &st
     Ok(pe.buf)
 }
 
-/// The addresses (at the stub's image base) of the stub's functions of the Visual C++ runtime, as
-/// its `aqr_blob::VCRUNTIME_TABLE` has them, if it has one: the modules' imports from the runtime
-/// are bound to them, so that the merged program loads no `vcruntime140.dll` (which no Windows
-/// carries). A stub without the table (the stub of pemerge-test.sh, aqr-dll-shim) keeps them as
-/// imports.
-fn vcruntime_table(pe: &Pe) -> Option<Vec<u64>> {
+/// The addresses (at the stub's image base) of the stub's functions of the C runtime, as its
+/// `aqr_blob::CRT_TABLE` has them, if it has one: the modules' imports from the runtime are bound
+/// to them, so that the merged program loads no `vcruntime140.dll` (which no Windows carries) nor
+/// the UCRT's DLLs (which Windows 7 and 8 carry only by an update). A stub without the table (the
+/// stub of pemerge-test.sh, aqr-dll-shim) keeps them as imports.
+fn crt_table(pe: &Pe) -> Option<Vec<u64>> {
     let (base, size) = (pe.image_base(), pe.size_of_image() as u64);
-    let n = aqr_blob::VCRUNTIME_NAMES.len();
-    let magic = aqr_blob::VCRUNTIME_MAGIC;
+    let n = aqr_blob::CRT_NAMES.len();
+    let magic = aqr_blob::CRT_MAGIC;
     let mut from = 0;
     while let Some(k) = find(&pe.buf[from..], magic) {
         let at = from + k + magic.len();

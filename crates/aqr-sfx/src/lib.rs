@@ -88,9 +88,9 @@ impl Sfx {
             natives: Vec::new(),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
         };
-        // (the merged blobs' imports from the Visual C++ runtime are bound to this program's)
+        // (the merged blobs' imports from the C runtime are bound to this program's)
         #[cfg(target_env = "msvc")]
-        aqr_blob::keep_vcruntime();
+        aqr_blob::keep_crt();
         let base = &raw const __ImageBase as usize;
         let Some((rva, len)) = AQR_PEMERGE_ANCHOR.table() else { return sfx };
         let table = unsafe { std::slice::from_raw_parts((base + rva as usize) as *const u8, len as usize) };
@@ -113,7 +113,7 @@ impl Sfx {
     #[cfg(target_arch = "x86_64")]
     pub fn load(&mut self, bundle: &[u8]) -> Result<(), String> {
         #[cfg(target_env = "msvc")]
-        aqr_blob::keep_vcruntime();
+        aqr_blob::keep_crt();
         let blobs = bundle::unpack(bundle)?;
         let set: Vec<&[u8]> = blobs.iter().map(|(_, b)| &b[..]).collect();
         let image = aqr_blob::load(&set)?;

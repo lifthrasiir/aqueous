@@ -32,7 +32,7 @@ unsafe fn at(rva: u32, n: usize) -> &'static [u8] {
 /// The modules merged in, from the dispatch table (each image registered for its panics,
 /// `aqr_blob::register_image`).
 fn modules() -> Vec<Module> {
-    aqr_blob::keep_vcruntime();
+    aqr_blob::keep_crt();
     let Some((rva, len)) = AQR_PEMERGE_ANCHOR.table() else { return Vec::new() };
     let table = unsafe { at(rva, len as usize) };
     dispatch::entries(table)

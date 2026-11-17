@@ -2,7 +2,7 @@
 //! in[i], each byte given back by a panic caught (`catch_unwind`), and one more panic caught on a
 //! thread of its own. Built for aqr-dll's no-TLS target (std's thread-locals by TlsAlloc), as the
 //! modules' blobs are: their panics are C++ exceptions, thrown and caught through the program's
-//! Visual C++ runtime (aqr_blob::VCRUNTIME) with the exception data the merge moved into the
+//! Visual C++ runtime (aqr_blob::CRT_TABLE) with the exception data the merge moved into the
 //! stub's directory, or the tables `aqr_blob::load` registered.
 
 use std::panic::{catch_unwind, panic_any};

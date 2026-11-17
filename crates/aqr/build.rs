@@ -35,10 +35,9 @@ fn sfx_pack() {
     // dep-info: what tells `cargo aqr` (aqr-bincache) one pack from another)
     let none = out_dir.join("sfx.id");
     let list = std::fs::read_to_string(from.join("modules.txt"));
-    // (not for the target of Windows 7 and 8: the stub and the blobs are of Windows 10's)
-    let win7 = target("CARGO_CFG_TARGET_VENDOR") == "win7";
+    // (the target of Windows 7 and 8 too: the stub and the blobs are built for it)
     let os_arch = (&*target("CARGO_CFG_TARGET_OS"), &*target("CARGO_CFG_TARGET_ARCH"));
-    let (Ok(_), ("windows", "x86_64"), false) = (list, os_arch, win7) else {
+    let (Ok(_), ("windows", "x86_64")) = (list, os_arch) else {
         // (left as they are when they are already empty: build.rs runs on every build where pack.id
         // is missing, and the files would otherwise look changed during it to `cargo aqr`)
         write_new(&none, b"");

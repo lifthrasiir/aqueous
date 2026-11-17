@@ -24,7 +24,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     for the hash it was packed for, so `cargo aqr` runs pack.py again where the pack's modules
     are not those of known.rs (where there is a pack), or its `sfx.pack` is not of this form.
     The release workflow runs pack.py before building aqr.exe (without the pack, aqr.exe runs
-    no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX.
+    no module as WebAssembly), then a smoke test of `-Z wasm` and of an SFX; its win7 job too
+    (that aqr links Wasmtime, so only bundles the interpreter blob).
+    The stub and the blobs are of the target of Windows 7 on (pack.py: the stub for
+    `x86_64-win7-windows-msvc`), so an SFX made by either aqr runs on Windows 7 on.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
@@ -71,7 +74,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
     blob. `Sandboxed` (native where known, else a worker) stays in aqr-decompress, which has the
     native modules. Wasmtime is linked only with the feature `wasmtime` (`wasm/engine.rs`; always
-    but on Windows x86-64 — the win7 target links it too, the blob being of Windows 10's —
+    but on Windows x86-64 — the win7 target links it too, its C runtime all static —
     aqr-decompress enabling it there, and in the tests' dev-dependencies);
     else `wasm/interp.rs` runs the modules by the interpreter blob the program gives
     (`wasm::set_interpreter`, aqr: its pack's), placed at run time (`aqr_blob::load`), a worker
@@ -82,9 +85,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     exception tables registered), and (feature `runner`) the interpreter blob's client: its
     `Vtable`, `Interpreter` (a `Runner`), failures crossing the C ABI with their kinds.
     Windows binaries link the Visual C++ runtime statically and the UCRT as Windows 10's DLL
-    (`.cargo/config.toml`), so no redistributable is needed; the blobs still import
-    vcruntime140.dll (a static copy would go uninitialised: no DllMain runs), and `load` and
-    `aqr-ld merge` bind those imports to the program's own (`VCRUNTIME_TABLE`), with a
+    (`.cargo/config.toml`; the win7 target and the SFX stub both static), so no redistributable
+    is needed; the blobs still import vcruntime140.dll and the UCRT's DLLs (a static copy would
+    go uninitialised: no DllMain runs), and `load` and `aqr-ld merge` bind those imports to the
+    program's own (`CRT_TABLE`, `CRT_NAMES`: `aqr-ld blob(s)` fail on a function not there), with a
     `_CxxThrowException` of its own: a panic's type information is relative to its blob's
     RVA 0, which it takes from the images registered (`register_image`: `load`, and the stubs
     for the blobs merged into them). A merge moves the blobs' function entries into the stub's
@@ -127,7 +131,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     import (aqr-ld's `exports`): all modules and libraries 8 MB as blobs, not 25 MB;
     `aqr-dll-shim` records applications from archives and runs the libraries on them (its own, or
     the ones merged into it). `NOTLS=1 build.py` builds for `x86_64-aqr-windows-msvc.json` (native
-    thread-locals off, so std uses TlsAlloc, not a TLS directory), which `aqr-ld merge` can take;
+    thread-locals off, so std uses TlsAlloc, not a TLS directory; vendor `win7`, so that std uses
+    no API of Windows 8 on: one set of blobs and one stub for every Windows), which `aqr-ld
+    merge` can take;
     `merge-test.sh ARCHIVE...` is the end-to-end test (needs nightly and build-std). The nightly of
     these builds (and of the release's win7 job) is pinned by the root file `nightly-toolchain`
     (`AQR_NIGHTLY` overrides it), as the custom target's JSON is unstable.

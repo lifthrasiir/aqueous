@@ -149,6 +149,8 @@ jobs:
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "STEM=${s#v}" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
+      # (the toolchain of rust-toolchain.toml, for pack.py's tools)
+      - run: rustup toolchain install
       # (the nightly of nightly-toolchain, pinned: AQR_NIGHTLY for the scripts)
       - run: |
           echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
@@ -158,15 +160,29 @@ jobs:
         if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr
-      - run: |
-          mkdir out
-          cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-$STEM-win7.exe"
-      # (packed by UPX as in the job windows)
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.x'
+      # (UPX packs the self-extracting stub here, and aqr.exe last, as in the job windows)
       - run: |
           curl -sSfLo upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-win64.zip"
           echo "$UPX_SHA256 *upx.zip" | sha256sum -c -
           unzip -jq upx.zip "upx-$UPX_VERSION-win64/upx.exe"
+      # The pack as in the job windows (its stub and blobs are of the target of Windows 7 on): for
+      # `--format sfx`, and the interpreter blob, which this aqr (Wasmtime linked) only bundles.
+      - run: AQR_UPX=./upx.exe python crates/aqr-sfx/pack.py
+      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr
+      # (a build without the pack fails here)
+      - run: |
+          mkdir smoke
+          cp codecs/aqr-jpeg/tests/data/gradient.jpg README.md smoke/
+          aqr=target/x86_64-win7-windows-msvc/dist/aqr.exe
+          $aqr -c -q --format sfx -o smoke.exe smoke
+          ./smoke.exe smoke-out
+          diff -r smoke smoke-out
+      - run: |
+          mkdir out
+          cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-$STEM-win7.exe"
           ./upx.exe -9 -q out/*.exe
       # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
       - run: git diff --exit-code -- Cargo.lock

@@ -1,8 +1,8 @@
 //! Blobs placed in memory at run time (Windows x86-64): as `aqr-ld merge` places them in a stub,
 //! but into memory allocated for them, by the program that carries them as data. Each blob's
 //! relocations are applied for where it lands, its imports from the other blobs of the set
-//! written as their addresses, its imports from the Visual C++ runtime bound to this program's
-//! own ([`crate::VCRUNTIME`]), those from system libraries bound (`LoadLibraryExA` of
+//! written as their addresses, its imports from the C runtime bound to this program's own
+//! ([`crate::is_crt`]), those from system libraries bound (`LoadLibraryExA` of
 //! System32 alone, so that a library of the same name beside the program, as a self-extracting
 //! archive's in a folder of downloads, is not the one taken; `GetProcAddress`), its exception table registered for the unwinder, and its image for its
 //! panics ([`crate::register_image`]), and its pages protected as its sections are (code not
@@ -20,6 +20,7 @@ unsafe extern "system" {
     fn FlushInstructionCache(process: *mut c_void, addr: *const c_void, size: usize) -> i32;
     fn GetCurrentProcess() -> *mut c_void;
     fn LoadLibraryExA(name: *const u8, file: *mut c_void, flags: u32) -> *mut c_void;
+    fn GetSystemDirectoryA(buffer: *mut u8, size: u32) -> u32;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     fn RtlAddFunctionTable(table: *const c_void, count: u32, base: u64) -> i32;
 }
@@ -31,6 +32,28 @@ const PAGE_READWRITE: u32 = 0x04;
 const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+
+/// The system library `name` (NUL-terminated), from System32 alone. Windows 7 without KB2533623
+/// knows no `LOAD_LIBRARY_SEARCH_SYSTEM32` (ERROR_INVALID_PARAMETER): there the library is loaded
+/// by its full path in the system directory.
+fn load_system_library(name: &[u8]) -> *mut c_void {
+    // SAFETY: a NUL-terminated name
+    let h = unsafe { LoadLibraryExA(name.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+    if !h.is_null() || std::io::Error::last_os_error().raw_os_error() != Some(87) {
+        return h;
+    }
+    let mut dir = [0u8; 260];
+    // SAFETY: the buffer and its size
+    let n = unsafe { GetSystemDirectoryA(dir.as_mut_ptr(), dir.len() as u32) } as usize;
+    if n == 0 || n >= dir.len() {
+        return h;
+    }
+    let mut path = dir[..n].to_vec();
+    path.push(b'\\');
+    path.extend_from_slice(name);
+    // SAFETY: a NUL-terminated path
+    unsafe { LoadLibraryExA(path.as_ptr(), std::ptr::null_mut(), 0) }
+}
 
 /// A blob placed: its name as a library, and the address of its RVA 0 (an RVA `x` of it is at
 /// `base + x`), with its entries' RVAs.
@@ -92,12 +115,10 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
             let v = (bases[j] + bind.rva as usize) as u64;
             img[at(bind.slot)..at(bind.slot) + 8].copy_from_slice(&v.to_le_bytes());
         }
-        // the imports from the Visual C++ runtime: this program's own copy (crate::VCRUNTIME)
+        // the imports from the C runtime: this program's own functions (crate::CRT_TABLE)
         #[cfg(target_env = "msvc")]
-        for (slot, i) in
-            crate::take_vcruntime(img, b.first, b.import_dir_rva).map_err(|e| format!("{}: {e}", b.name))?
-        {
-            let v = crate::VCRUNTIME_TABLE.functions[i] as usize as u64;
+        for (slot, i) in crate::take_crt(img, b.first, b.import_dir_rva).map_err(|e| format!("{}: {e}", b.name))? {
+            let v = crate::CRT_TABLE.functions[i] as usize as u64;
             img[at(slot)..at(slot) + 8].copy_from_slice(&v.to_le_bytes());
         }
         // the imports from system libraries, as the loader binds them
@@ -113,8 +134,7 @@ pub fn load(set: &[&[u8]]) -> Result<Image> {
                     v
                 };
                 let lib = cstr(img, name);
-                // SAFETY: a NUL-terminated name
-                let h = unsafe { LoadLibraryExA(lib.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+                let h = load_system_library(&lib);
                 let shown = || String::from_utf8_lossy(&lib[..lib.len() - 1]).into_owned();
                 if h.is_null() {
                     return Err(format!("{}: {} not loaded: {}", b.name, shown(), std::io::Error::last_os_error()));

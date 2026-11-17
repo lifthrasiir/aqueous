@@ -81,7 +81,7 @@ impl Lib {
         static IMAGES: std::sync::Once = std::sync::Once::new();
         IMAGES.call_once(|| {
             #[cfg(target_env = "msvc")]
-            aqr_blob::keep_vcruntime();
+            aqr_blob::keep_crt();
             for e in aqr_blob::dispatch::entries(table) {
                 aqr_blob::register_image(base + e.image_rva as usize, e.image_len as usize, base + e.mod_base as usize);
             }

@@ -16,7 +16,6 @@
   "emit-debug-gdb-scripts": false,
   "env": "msvc",
   "exe-suffix": ".exe",
-  "features": "+cmpxchg16b,+sse3,+lahfsahf",
   "has-thread-local": false,
   "is-like-msvc": true,
   "is-like-windows": true,
@@ -24,7 +23,7 @@
   "linker-is-gnu": false,
   "lld-flavor": "link",
   "llvm-target": "x86_64-pc-windows-msvc",
-  "max-atomic-width": 128,
+  "max-atomic-width": 64,
   "no-default-libraries": false,
   "os": "windows",
   "plt-by-default": false,
@@ -50,9 +49,9 @@
     "windows"
   ],
   "target-pointer-width": 64,
-  "vendor": "pc",
+  "vendor": "win7",
   "metadata": {
-    "description": "x86_64-pc-windows-msvc without native thread-locals (aqr-dll)",
+    "description": "x86_64-win7-windows-msvc without native thread-locals (aqr-dll)",
     "std": true,
     "tier": 3,
     "host_tools": false
