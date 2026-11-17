@@ -3,10 +3,10 @@ puts into a self-extracting program) into target/aqr-sfx/, and packs it into sfx
 `aqr-sfx-pack --embed target/aqr-sfx AQR.EXE` writes into aqr once it is linked (aqr-bincache does
 for `cargo aqr`, the release workflow for its aqr.exe):
 
-- aqr-sfx-shim.exe, the stub (release, for x86_64-win7-windows-msvc, as the blobs are of Windows 7
-  on), packed by UPX (`upx -9`, as the release packs aqr.exe; the one AQR_UPX names (not UPX: upx
-  reads that as its options), else `upx` on the path; where there is none, left as it is with a
-  warning);
+- aqr-sfx-shim.exe, the stub (of the profile sfx, for x86_64-win7-windows-msvc, as the blobs are
+  of Windows 7 on), packed by UPX (`upx -9`, as the release packs aqr.exe; the one AQR_UPX names
+  (not UPX: upx reads that as its options), else `upx` on the path; where there is none, left as
+  it is with a warning);
 - aqr-interp.blob, the interpreter blob (aqr-interp built for the no-TLS target, digested by
   `aqr-ld blob`), for the modules with no native blob;
 - modules/NAME.blob, each module of aqr-modules built as a native library for the no-TLS target
@@ -82,7 +82,7 @@ def modules_part(nightly, modules):
     """The stub, the modules' and the shared libraries' blobs, modules.txt and libs.txt."""
     # (the stub for the target of Windows 7 on, std built for it and the C runtime static, as the
     # blobs are of its no-TLS target: one self-extracting program for every Windows aqr runs on)
-    run("cargo", f"+{nightly}", "build", "-q", "--release", "-p", "aqr-sfx-shim", "--target",
+    run("cargo", f"+{nightly}", "build", "-q", "--profile", "sfx", "-p", "aqr-sfx-shim", "--target",
         "x86_64-win7-windows-msvc", "-Z", "build-std")
     # (all of them, for build.py to cut the shared libraries to what they use)
     run(sys.executable, "-I", "crates/aqr-dll/build.py", *modules, env=dict(os.environ, NOTLS="1"))
@@ -93,7 +93,7 @@ def modules_part(nightly, modules):
     (OUT / "modules").mkdir()
     (OUT / "libs").mkdir()
     stub = OUT / "aqr-sfx-shim.exe"
-    shutil.copyfile("target/x86_64-win7-windows-msvc/release/aqr-sfx-shim.exe", stub)
+    shutil.copyfile("target/x86_64-win7-windows-msvc/sfx/aqr-sfx-shim.exe", stub)
     upx_name = os.environ.get("AQR_UPX") or "upx"
     upx = shutil.which(upx_name)
     if upx:

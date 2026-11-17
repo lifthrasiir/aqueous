@@ -98,6 +98,19 @@ encoding_rs.opt-level = "s"
 unicode-normalization.opt-level = "s"
 wasmparser.opt-level = "s"
 
+# The self-extracting stub (crates/aqr-sfx/pack.py): dist's, optimised for size but for
+# libzstd's decoder. Its work is the blobs' and the files' writing: extracting 509 MB of
+# 10gb/benchmarks (silesia, gimp.tar, kodak, wav, act-jpeg; 20 modules native) took the same
+# 2.4-2.6 s with the stub of release and of this. Release's 1,463,296 bytes -> 875,008 (UPX -9:
+# 510,976 -> 354,304); fat LTO also leaves libzstd's compressor out, which the encoding code of
+# aqr-formula, dead but linked, pulls in otherwise.
+[profile.sfx]
+inherits = "dist"
+opt-level = "s"
+
+[profile.sfx.package.zstd-sys]
+opt-level = 3
+
 # The Wasm modules (crates/aqr-modules/build.py): fat LTO and one codegen unit as in dist (not
 # inheriting it, so as not to take its crates optimised for size), for small modules and for
 # their bytes (hence hashes) to stay as they were.

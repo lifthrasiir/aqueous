@@ -136,11 +136,10 @@ impl Encoder {
         let size = (total / SHARE.get()).clamp(SIZE_MIN.get(), SIZE_MAX.get());
         let level = self.base_level();
         let Some(dict) = train(data, size, level) else { return Ok(None) };
-        let header = unsafe { zstd_sys::ZDICT_getDictHeaderSize(dict.as_ptr() as *const c_void, dict.len()) };
-        if unsafe { zstd_sys::ZDICT_isError(header) } != 0 || header > dict.len() {
-            return Ok(None);
-        }
-        let content = &dict[header..];
+        // (the tables' length as the decoder parses it)
+        let prefix = DICT_MAGIC.len() + 4;
+        let Some(header) = dict.get(prefix..).and_then(tables_len) else { return Ok(None) };
+        let content = &dict[prefix + header..];
 
         // the level and size of each block alone
         let alone: Vec<Option<(i32, usize)>> = {
@@ -277,26 +276,162 @@ impl Dictionary {
             }
             return Ok(Dictionary::Raw(d));
         }
-        let full = [&DICT_MAGIC[..], &DICT_ID.to_le_bytes(), &d].concat();
-        // (the entropy tables parsed, the repeat offsets checked against the content)
-        let header = unsafe { zstd_sys::ZDICT_getDictHeaderSize(full.as_ptr() as *const c_void, full.len()) };
-        if unsafe { zstd_sys::ZDICT_isError(header) } != 0 || header > full.len() {
-            return invalid("bad dictionary entropy tables");
-        }
-        let content = full.len() - header;
+        // (the entropy tables' length parsed, the repeat offsets checked against the content; the
+        // tables themselves are checked by libzstd as it loads them)
+        let Some(header) = tables_len(&d) else { return invalid("bad dictionary entropy tables") };
+        let content = d.len() - header;
         if content < 8 {
             return invalid("a dictionary of less than 8 bytes of content");
         }
-        let reps = &full[header - 12..header];
+        let reps = &d[header - 12..header];
         for r in reps.chunks(4) {
             let r = u32::from_le_bytes(r.try_into().unwrap()) as usize;
             if r == 0 || r > content {
                 return invalid("a dictionary repeat offset out of its content");
             }
         }
+        let full = [&DICT_MAGIC[..], &DICT_ID.to_le_bytes(), &d].concat();
         match DDict::try_create(&full) {
             Some(d) => Ok(Dictionary::Tables(d)),
             None => invalid("bad dictionary entropy tables"),
         }
+    }
+}
+
+/// The length of the entropy tables and repeat offsets at the start of `d` (RFC 8878 §5's
+/// `Entropy_Tables` and `Repeat_Offsets`), as their parse determines it; None where they do not
+/// parse or `d` ends within them. Only the lengths are parsed: whether the tables are of use is
+/// libzstd's to tell as it loads them.
+///
+/// (Not `ZDICT_getDictHeaderSize`, which loads the tables for compression: it links libzstd's
+/// compressor, about 260 KB of the self-extracting stub, into every program decoding archives.)
+fn tables_len(d: &[u8]) -> Option<usize> {
+    // Huffman_Tree_Description (§4.2.1): a header byte, then the weights, 4 bits each where it
+    // is 128 or more (the header less 127 of them), else FSE-compressed in as many bytes
+    let header = *d.first()? as usize;
+    let mut at = 1 + if header >= 128 { (header - 127).div_ceil(2) } else { header };
+    // the FSE_Table_Descriptions (§4.1.1) of offsets, match lengths and literals lengths, of at
+    // most so many symbols (libzstd's MaxOff, MaxML and MaxLL)
+    for max_symbol in [31, 52, 35] {
+        at += fse_table_len(d.get(at..)?, max_symbol)?;
+    }
+    at += 12;
+    (at <= d.len()).then_some(at)
+}
+
+/// The length in bytes of the FSE_Table_Description at the start of `d` (RFC 8878 §4.1.1), of
+/// symbols up to `max_symbol`; None where it does not parse or `d` ends within it.
+fn fse_table_len(d: &[u8], max_symbol: usize) -> Option<usize> {
+    let mut bit = 0usize;
+    // `n` bits from `bit` on, least significant first (zero past the end: the length is checked
+    // at the end)
+    let peek = |bit: usize, n: usize| -> u32 {
+        (0..n).fold(0, |v, i| {
+            let b = bit + i;
+            v | (d.get(b / 8).map_or(0, |&x| (x >> (b % 8)) as u32 & 1) << i)
+        })
+    };
+    let log = peek(0, 4) as usize + 5;
+    if log > 15 {
+        return None;
+    }
+    bit += 4;
+    let mut remaining = (1i32 << log) + 1;
+    let mut threshold = 1i32 << log;
+    let mut bits = log + 1;
+    let mut symbol = 0;
+    while remaining > 1 {
+        if symbol > max_symbol {
+            return None;
+        }
+        // a value of `bits` bits, or one bit fewer for the smallest
+        let max = 2 * threshold - 1 - remaining;
+        let low = peek(bit, bits - 1) as i32;
+        let value = if low < max {
+            bit += bits - 1;
+            low
+        } else {
+            let v = peek(bit, bits) as i32;
+            bit += bits;
+            if v >= threshold { v - max } else { v }
+        };
+        let probability = value - 1;
+        remaining -= probability.abs();
+        symbol += 1;
+        if probability == 0 {
+            // zeros repeated, by 2-bit flags as long as they are 3
+            loop {
+                let repeat = peek(bit, 2) as usize;
+                bit += 2;
+                symbol += repeat;
+                if repeat < 3 {
+                    break;
+                }
+            }
+        }
+        if remaining <= 1 {
+            break;
+        }
+        while remaining < threshold {
+            bits -= 1;
+            threshold >>= 1;
+        }
+    }
+    let len = bit.div_ceil(8);
+    (remaining == 1 && symbol <= max_symbol + 1 && len <= d.len()).then_some(len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Blocks of words alike, for dictionaries to be trained on.
+    fn blocks(n: usize, seed: u32) -> Vec<Vec<u8>> {
+        let words = ["archive", "dictionary", "entropy", "table", "offset", "repeat", "literal", "match", "zstd"];
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                let mut b = Vec::new();
+                while b.len() < 3000 {
+                    x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                    b.extend_from_slice(words[(x >> 16) as usize % words.len()].as_bytes());
+                    b.extend_from_slice(format!(" {} ", (x >> 8) % 1000).as_bytes());
+                }
+                b
+            })
+            .collect()
+    }
+
+    /// libzstd's length of a dictionary's header (its magic number, ID, entropy tables and
+    /// repeat offsets), where it takes it.
+    fn libzstd(dict: &[u8]) -> Option<usize> {
+        let n = unsafe { zstd_sys::ZDICT_getDictHeaderSize(dict.as_ptr() as *const c_void, dict.len()) };
+        (unsafe { zstd_sys::ZDICT_isError(n) } == 0).then_some(n)
+    }
+
+    #[test]
+    fn tables_len_is_libzstds() {
+        let mut checked = 0;
+        for (seed, level) in [(1, 1), (2, 3), (3, 9), (4, 19)] {
+            let data = blocks(200, seed);
+            let data: Vec<&[u8]> = data.iter().map(|b| &b[..]).collect();
+            let dict = train(&data, 16 << 10, level).unwrap();
+            assert_eq!(tables_len(&dict[8..]).map(|n| n + 8), libzstd(&dict), "level {level}");
+            // and of the tables changed byte by byte, wherever libzstd takes them
+            let end = libzstd(&dict).unwrap();
+            let mut x = seed;
+            for i in 8..end {
+                for _ in 0..4 {
+                    x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                    let mut d = dict[..end + 64].to_vec();
+                    d[i] ^= 1 << ((x >> 16) % 8);
+                    if let Some(n) = libzstd(&d) {
+                        assert_eq!(tables_len(&d[8..]).map(|m| m + 8), Some(n), "byte {i} of level {level}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "{checked}");
     }
 }
