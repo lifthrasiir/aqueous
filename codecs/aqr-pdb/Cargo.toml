@@ -17,7 +17,7 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }
-zstd = "0.13"
+zstd.workspace = true
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
 # directory.

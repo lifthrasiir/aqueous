@@ -17,4 +17,4 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # (file systems to read the containers' disks with)
 aqr-ext = { path = "../aqr-ext" }
 aqr-ntfs = { path = "../aqr-ntfs" }
-zstd = "0.13"
+zstd.workspace = true

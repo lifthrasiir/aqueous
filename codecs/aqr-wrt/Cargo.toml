@@ -14,7 +14,7 @@ encode = ["dep:aqr-formula", "dep:zstd"]
 aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-zstd = { version = "0.13", optional = true }
+zstd = { workspace = true, optional = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

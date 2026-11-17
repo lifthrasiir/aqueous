@@ -79,7 +79,7 @@ aqr-zip = { path = "../../codecs/aqr-zip" }
 aqr-zstd = { path = "../../codecs/aqr-zstd" }
 memmap2 = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
-zstd = "0.13"
+zstd.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

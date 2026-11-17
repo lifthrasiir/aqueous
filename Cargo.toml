@@ -26,6 +26,10 @@ flate-zoo = { version = "1.0.0", default-features = false, features = [
     "7zip", "advancecomp-7z", "apple", "rust", "js", "isa-l",
 ] }
 
+# zstd without its default features, so that no crate brings them back: `legacy` (the decoders of
+# the formats before 1.0, which Aqueous never reads) is off; `zdict_builder` is aqr-formula's.
+zstd = { version = "0.13", default-features = false }
+
 # Thin-local LTO and 16 codegen units (Cargo's defaults) rather than fat LTO and one unit: on an
 # M4 the build of `aqr` from scratch 148 -> 73 s, after touching aqr-flate 113 -> 20 s, after
 # touching aqr 98 -> 1.5 s; 10gb compressed +0.7% instructions retired, tested +0.3%, the same

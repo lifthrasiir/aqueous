@@ -18,7 +18,7 @@ aqr-flate = { path = "../aqr-flate", default-features = false }
 sha1 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
-zstd = "0.13"
+zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

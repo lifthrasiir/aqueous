@@ -17,7 +17,7 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 memchr = { version = "2", optional = true }
 
 [dev-dependencies]
-zstd = "0.13"
+zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

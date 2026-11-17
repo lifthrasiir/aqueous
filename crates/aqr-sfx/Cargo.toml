@@ -11,7 +11,7 @@ aqr-api = { path = "../aqr-api", default-features = false }
 aqr-blob = { path = "../aqr-blob", features = ["runner"] }
 aqr-formula = { path = "../aqr-formula" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
-zstd = { version = "0.13", default-features = false }
+zstd.workspace = true
 # (XZ Utils' liblzma, as aqr-pack builds it: the pack aqr carries, `xz`)
 liblzma = { version = "0.4", default-features = false, features = ["static"], optional = true }
 

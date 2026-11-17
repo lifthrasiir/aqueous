@@ -24,7 +24,7 @@ aqr-png = { path = "../aqr-png", default-features = false }
 aqr-raw = { path = "../aqr-raw", default-features = false }
 memchr = "2"
 sha2 = { version = "0.10", optional = true }
-zstd = { version = "0.13", optional = true }
+zstd = { workspace = true, optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rayon = { version = "1.12", optional = true }
 

@@ -17,7 +17,7 @@ registry = []
 rayon = ["dep:rayon"]
 
 [dependencies]
-zstd = { version = "0.13", optional = true }
+zstd = { workspace = true, optional = true }
 rayon = { version = "1.12", optional = true }
 
 # Tasks for `pool::par_map_apart` (in the modules of aqr-modules).
