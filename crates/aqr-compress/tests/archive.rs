@@ -203,6 +203,13 @@ fn files_given_back() {
         r.overhead,
         c.len()
     );
+    // each file's bytes by the classes of the streams holding them: all of them, the JPEG's in
+    // aqr-jpeg's streams
+    for f in &r.files {
+        let by_class: f64 = f.classes.iter().map(|c| c.archived).sum();
+        assert!((by_class - f.archived).abs() < 0.01, "{by_class} of {}: {:?}", f.archived, f.classes);
+    }
+    assert!(r.files[9].classes.iter().any(|c| c.class.starts_with("jpeg/")), "{:?}", r.files[9].classes);
 }
 
 /// The modules named by their hashes alone (shorthand module blocks, as a self-extracting

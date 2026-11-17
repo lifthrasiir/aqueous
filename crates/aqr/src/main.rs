@@ -1985,6 +1985,8 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
                     kind: detect(&d).map_or("-", |f| f.name()),
                     len: d.len() as u64,
                     archived: Some(n as f64),
+                    // (not told of a file archived alone)
+                    classes: Vec::new(),
                     same_as: None,
                     modules: f.applies().iter().map(|m| m.module.to_string()).collect(),
                 }],
@@ -2114,6 +2116,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
                 kind: f.format.unwrap_or("-"),
                 len: f.len,
                 archived: Some(f.archived),
+                classes: f.classes.clone(),
                 same_as: f.same_as,
                 modules: f.modules.iter().map(|m| m.to_string()).collect(),
             })

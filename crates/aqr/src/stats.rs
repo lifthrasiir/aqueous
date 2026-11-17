@@ -31,7 +31,10 @@
 //!   compressed), `budget` (bytes of `-M`, null for none);
 //! - `contents`, by content (the item of the samples): `path`, `kind` (the format it starts
 //!   like, `-` for none), `len`, and where compressed `archived` (bytes of the archive that are
-//!   its), `same_as` (the content it is the same as) and `modules`;
+//!   its), `classes` (`archived` by the class of the streams holding it, largest first: `class`
+//!   and `archived`, `(formula)` the formula block with the small streams in it; none of a file
+//!   archived alone, nor in JSON of aqr before it),
+//!   `same_as` (the content it is the same as) and `modules`;
 //! - `fallbacks` (compressing only): the recompressions not used or given up, and the applications
 //!   kept over the bound, each `module` (of a recompression given up for its heap or for a panic,
 //!   the format), `needed` and `bytes`, `kept`, `heap` and `panicked` (whether a recompression
@@ -300,6 +303,8 @@ pub struct Content {
     pub kind: &'static str,
     pub len: u64,
     pub archived: Option<f64>,
+    /// `archived` by the class of the streams holding it.
+    pub classes: Vec<aqr_compress::ClassBytes>,
     pub same_as: Option<usize>,
     pub modules: Vec<String>,
 }
@@ -780,6 +785,16 @@ fn json(run: &Run, partial: bool) -> String {
         if let Some(a) = c.archived {
             *o += ",\"archived\":";
             number(o, a);
+        }
+        if !c.classes.is_empty() {
+            *o += ",\"classes\":";
+            array(o, &c.classes, |o, b| {
+                *o += "{\"class\":";
+                string(o, &b.class);
+                *o += ",\"archived\":";
+                number(o, b.archived);
+                o.push('}');
+            });
         }
         if let Some(s) = c.same_as {
             _ = write!(o, ",\"same_as\":{s}");

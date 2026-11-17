@@ -294,10 +294,28 @@ pub struct FileReport {
     /// blocks it slices by the bytes it slices of them (and of a set, by the sizes of its
     /// outputs). None for a file of the same content as another.
     pub archived: f64,
+    /// `archived` by what holds the bytes, largest first ([`ClassBytes`]).
+    pub classes: Vec<ClassBytes>,
     /// The content it is the same as, stored once.
     pub same_as: Option<usize>,
     /// Bytes of the content.
     pub len: u64,
+}
+
+/// Bytes of the archive that are a file's ([`FileReport::archived`]) held by the streams of a
+/// class: the blocks of the streams it slices, and of its leaf data block, by the bytes it slices
+/// of them as [`FileReport::archived`] is; its formula block (the literals of the small streams
+/// in it with it) as the class [`ClassBytes::FORMULA`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassBytes {
+    /// The streams' [`aqr_formula::Stream::class`].
+    pub class: String,
+    pub archived: f64,
+}
+
+impl ClassBytes {
+    /// The class of a leaf's formula block.
+    pub const FORMULA: &str = "(formula)";
 }
 
 /// A non-leaf block that several files slice.
@@ -1072,6 +1090,7 @@ impl Writer {
             let f = &made.files[k];
             let c = file.c;
             (r.files[c].format, r.files[c].modules, r.files[c].archived) = (f.format, f.modules.clone(), f.archived);
+            r.files[c].classes = f.classes.clone();
         }
         let global = |ks: &[usize]| ks.iter().map(|&k| files[k].c).collect::<Vec<_>>();
         for s in made.solid {
@@ -2265,17 +2284,32 @@ fn report(
         s.keys().for_each(|&st| by_stream.entry(st).or_default().push(l));
     }
     let mut bytes = vec![0f64; leaves.len()];
+    // by leaf, its bytes by the stream holding them (none: its formula block)
+    let mut held: Vec<HashMap<Option<usize>, f64>> = vec![HashMap::new(); leaves.len()];
     let mut solid = Vec::new();
     // by leaf, its files
     let mut of_leaf: Vec<Vec<usize>> = vec![Vec::new(); leaves.len()];
     (0..files.len()).for_each(|k| of_leaf[at[k].0].push(k));
     for &(p, n) in layout {
         match p {
-            Placed::Formula(l) | Placed::Data(l) => bytes[l] += n as f64,
+            Placed::Formula(l) => {
+                bytes[l] += n as f64;
+                *held[l].entry(None).or_default() += n as f64;
+            }
+            Placed::Data(l) => {
+                bytes[l] += n as f64;
+                // (all of the one stream it slices, if any)
+                let st = (sliced[l].len() == 1).then(|| *sliced[l].keys().next().unwrap());
+                *held[l].entry(st).or_default() += n as f64;
+            }
             Placed::NonLeaf(st) => {
                 let ls = &by_stream[&st];
                 let total: u64 = ls.iter().map(|&l| sliced[l][&st]).sum();
-                ls.iter().for_each(|&l| bytes[l] += n as f64 * sliced[l][&st] as f64 / total.max(1) as f64);
+                for &l in ls {
+                    let b = n as f64 * sliced[l][&st] as f64 / total.max(1) as f64;
+                    bytes[l] += b;
+                    *held[l].entry(Some(st)).or_default() += b;
+                }
                 let mut ks: Vec<usize> = ls.iter().flat_map(|&l| of_leaf[l].iter().copied()).collect();
                 ks.sort_unstable();
                 if ks.len() > 1 {
@@ -2302,16 +2336,33 @@ fn report(
     }
     let out_len = |k: usize| leaves[at[k].0].outputs[at[k].1].len() as f64;
     let leaf_len: Vec<f64> = leaves.iter().map(|l| l.outputs.iter().map(|o| o.len() as f64).sum()).collect();
+    // by leaf, its bytes by class, largest first
+    let classes: Vec<Vec<ClassBytes>> = held
+        .iter()
+        .map(|h| {
+            let mut by: HashMap<&str, f64> = HashMap::new();
+            for (&st, &b) in h {
+                *by.entry(st.map_or(ClassBytes::FORMULA, |st| &f.streams[st].class)).or_default() += b;
+            }
+            let mut v: Vec<ClassBytes> =
+                by.into_iter().map(|(class, archived)| ClassBytes { class: class.to_string(), archived }).collect();
+            v.sort_by(|a, b| b.archived.total_cmp(&a.archived).then_with(|| a.class.cmp(&b.class)));
+            v
+        })
+        .collect();
     let reports = (0..files.len())
         .map(|k| {
             let l = at[k].0;
+            // (the file's share of its leaf)
+            let share = match leaf_len[l] {
+                n if n > 0.0 => out_len(k) / n,
+                _ => 1.0 / leaves[l].outputs.len() as f64,
+            };
             FileReport {
                 format: files[k].format,
                 modules: modules[l].clone(),
-                archived: match leaf_len[l] {
-                    n if n > 0.0 => bytes[l] * out_len(k) / n,
-                    _ => bytes[l] / leaves[l].outputs.len() as f64,
-                },
+                archived: bytes[l] * share,
+                classes: classes[l].iter().map(|c| ClassBytes { archived: c.archived * share, ..c.clone() }).collect(),
                 same_as: None,
                 len: files[k].len as u64,
             }
