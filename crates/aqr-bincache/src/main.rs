@@ -42,8 +42,8 @@ fn main() -> ExitCode {
     let result = match args.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix('+')) {
         Some("") if args.len() == 1 => list(),
         Some("") => Err("usage: cargo aqr +".into()),
-        Some(id) => find(id).and_then(|dir| run(&dir, &args[1..])),
-        None => current().and_then(|dir| run(&dir, &args)),
+        Some(id) => find(id).and_then(|dir| run(&dir.join(format!("aqr{EXE}")), &args[1..])),
+        None => current().and_then(|exe| run(&exe, &args)),
     };
     match result {
         Ok(code) => code,
@@ -68,7 +68,8 @@ fn target() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root().join("target"), PathBuf::from).join("release")
 }
 
-/// The kept binary of the working copy, built and kept first if there is none.
+/// The kept binary of the working copy, built and kept first if there is none (the one built,
+/// with the pack, where it is not kept).
 fn current() -> Result<PathBuf> {
     modules::refresh()?;
     let manifests = manifests()?;
@@ -77,12 +78,13 @@ fn current() -> Result<PathBuf> {
     for paths in manifests.values() {
         let dir = cache().join("bin").join(key(&env, paths, &blobs)?);
         if dir.join("info").exists() {
-            return Ok(dir);
+            return Ok(dir.join(format!("aqr{EXE}")));
         }
     }
     build(&env)
 }
 
+/// Builds aqr and keeps it, giving the binary to run.
 fn build(env: &str) -> Result<PathBuf> {
     let start = SystemTime::now();
     let cargo = std::env::var_os("CARGO").unwrap_or("cargo".into());
@@ -95,19 +97,25 @@ fn build(env: &str) -> Result<PathBuf> {
         return Err("cargo build failed".into());
     }
     let exe = target().join(format!("aqr{EXE}"));
+    // (the pack written into a copy in the target directory, the one run where the binary is not
+    // kept: a file just written in the cache, which a sync client such as Dropbox may be reading,
+    // is not opened for the update)
+    let packed = target().join(format!("aqr-packed{EXE}"));
+    fs::copy(&exe, &packed).map_err(|e| format!("{}: {e}", exe.display()))?;
+    modules::embed(&packed)?;
     let mut paths = dep_info(&target().join("aqr.d"))?;
     paths.extend(modules::pack_id());
     let built = target().parent().map_or_else(target, Path::to_path_buf);
     if let Some(path) = changed_since(&paths, &root(), &built, start) {
         eprintln!("aqr-bincache: {path} changed during the build; running the binary without keeping it");
-        return Ok(target());
+        return Ok(packed);
     }
     let blobs = blobs(&paths)?;
     let key = key(env, &paths, &blobs)?;
     let bin = cache().join("bin");
     let dir = bin.join(&key);
     if dir.join("info").exists() {
-        return Ok(dir);
+        return Ok(dir.join(format!("aqr{EXE}")));
     }
     let text: String = paths.iter().map(|p| format!("{p}\n")).collect();
     let manifest = hash(text.as_bytes())?;
@@ -121,20 +129,18 @@ fn build(env: &str) -> Result<PathBuf> {
         fs::write(tmp.join("manifest"), &text).map_err(|e| e.to_string())?;
         fs::rename(tmp.join("manifest"), &dest).map_err(|e| e.to_string())?;
     }
-    // (the pack written into a copy in the target directory first: a file just written in the
-    // cache, which a sync client such as Dropbox may be reading, is not opened for the update)
-    let packed = target().join(format!("aqr-packed{EXE}"));
-    fs::copy(&exe, &packed).map_err(|e| format!("{}: {e}", exe.display()))?;
-    modules::embed(&packed)?;
     fs::copy(&packed, tmp.join(format!("aqr{EXE}"))).map_err(|e| format!("{}: {e}", packed.display()))?;
     let info = format!("created={}\nmanifest={manifest}\n{}", now(), commit(&paths, &blobs)?);
     fs::write(tmp.join("info"), info).map_err(|e| e.to_string())?;
-    let kept = keep(&tmp, &dir, |from, to| fs::rename(from, to));
+    let kept = keep(&tmp, &dir, KEEP_WAITS, |from, to| fs::rename(from, to));
     evict()?;
-    Ok(kept.unwrap_or_else(|| {
-        eprintln!("aqr-bincache: {} not kept; running the binary without keeping it", dir.display());
-        target()
-    }))
+    Ok(match kept {
+        Ok(dir) => dir.join(format!("aqr{EXE}")),
+        Err(e) => {
+            eprintln!("aqr-bincache: {} not kept ({e}); running the binary without keeping it", dir.display());
+            packed
+        }
+    })
 }
 
 /// The first of `paths` (relative to `root`, or absolute) modified since `start`, but those under
@@ -148,23 +154,34 @@ fn changed_since<'a>(paths: &'a BTreeSet<String>, root: &Path, built: &Path, sta
         .find_map(|(p, path)| fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t >= start).then_some(p))
 }
 
-/// Moves the binary made in `tmp` to `dir` by `rename`, giving `dir`; tried again for a while
-/// where it fails (on Windows, something holding the directory open for a moment, such as
-/// Dropbox or an antivirus). Gives `dir` where another session kept the same key meanwhile
-/// (theirs is as good), and nothing where it is not there.
-fn keep(tmp: &Path, dir: &Path, rename: impl Fn(&Path, &Path) -> std::io::Result<()>) -> Option<PathBuf> {
+/// The waits (ms) before each try of [`keep`]: 12.75 s in all.
+const KEEP_WAITS: &[u64] = &[0, 50, 100, 200, 400, 800, 1600, 3200, 6400];
+
+/// Moves the binary made in `tmp` to `dir` by `rename`, giving `dir`; tried after each of
+/// `waits` where it fails (on Windows, a file in it held open for a moment by what reads a file
+/// just written, such as Dropbox or an antivirus: 0.4 s to over 1.25 s for aqr.exe in a Dropbox
+/// folder). Gives `dir` where another session kept the same key meanwhile (theirs is as good),
+/// and the last failure where it is not there.
+fn keep(
+    tmp: &Path,
+    dir: &Path,
+    waits: &[u64],
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
     let kept = || dir.join("info").exists();
-    for wait in [0, 50, 200, 1000] {
+    let mut failure = None;
+    for &wait in waits {
         std::thread::sleep(Duration::from_millis(wait));
-        if rename(tmp, dir).is_ok() {
-            return Some(dir.to_path_buf());
+        match rename(tmp, dir) {
+            Ok(()) => return Ok(dir.to_path_buf()),
+            Err(e) => failure = Some(e),
         }
         if kept() {
             break;
         }
     }
     let _ = fs::remove_dir_all(tmp);
-    kept().then(|| dir.to_path_buf())
+    if kept() { Ok(dir.to_path_buf()) } else { Err(failure.unwrap()) }
 }
 
 /// The paths (relative to the root where under it) in a dep-info file, with the manifests of
@@ -450,29 +467,30 @@ fn local_time(secs: u64) -> String {
     out.map_or_else(|| secs.to_string(), |o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-/// Runs the `aqr` in `dir` (a kept binary, or `target/release`) with `args`.
-fn run(dir: &Path, args: &[OsString]) -> Result<ExitCode> {
+/// Runs `exe` (a kept binary, marked used, or the one just built) with `args`.
+fn run(exe: &Path, args: &[OsString]) -> Result<ExitCode> {
+    let dir = exe.parent().unwrap_or(exe);
     if dir.join("info").exists() {
         let used = fs::File::options().create(true).append(true).open(dir.join("used"));
         let _ = used.and_then(|f| f.set_modified(SystemTime::now()));
     }
-    let mut cmd = Command::new(dir.join(format!("aqr{EXE}")));
+    let mut cmd = Command::new(exe);
     cmd.args(args);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        Err(format!("{}: {}", dir.display(), cmd.exec()))
+        Err(format!("{}: {}", exe.display(), cmd.exec()))
     }
     #[cfg(not(unix))]
     {
-        let status = cmd.status().map_err(|e| format!("{}: {e}", dir.display()))?;
+        let status = cmd.status().map_err(|e| format!("{}: {e}", exe.display()))?;
         Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{changed_since, deps, keep};
+    use super::{KEEP_WAITS, changed_since, deps, keep};
     use std::cell::Cell;
     use std::fs;
     use std::io;
@@ -513,14 +531,29 @@ mod tests {
     fn kept_only_where_moved() {
         let root = scratch("moved");
         let (tmp, dir) = (made(&root, "ours"), root.join("bin"));
-        assert_eq!(keep(&tmp, &dir, failing(2)), Some(dir.clone()));
+        assert_eq!(keep(&tmp, &dir, KEEP_WAITS, failing(2)).ok(), Some(dir.clone()));
         assert_eq!(fs::read_to_string(dir.join("info")).unwrap(), "ours");
         assert!(!tmp.exists());
 
         let root = scratch("not-moved");
         let (tmp, dir) = (made(&root, "ours"), root.join("bin"));
-        assert_eq!(keep(&tmp, &dir, failing(usize::MAX)), None);
+        assert!(keep(&tmp, &dir, &[0, 10], failing(usize::MAX)).is_err());
         assert!(!tmp.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A rename failing for a few seconds (a 30 MB binary just written, which Dropbox or an
+    /// antivirus is still reading) is tried again until it is moved.
+    #[test]
+    fn kept_after_seconds() {
+        let root = scratch("seconds");
+        let (tmp, dir) = (made(&root, "ours"), root.join("bin"));
+        let start = std::time::Instant::now();
+        let held = |from: &Path, to: &Path| match start.elapsed().as_millis() {
+            ..2000 => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            _ => fs::rename(from, to),
+        };
+        assert_eq!(keep(&tmp, &dir, KEEP_WAITS, held).ok(), Some(dir.clone()));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -532,7 +565,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("info"), "theirs").unwrap();
         let tmp = made(&root, "ours");
-        assert_eq!(keep(&tmp, &dir, |from, to| fs::rename(from, to)), Some(dir.clone()));
+        assert_eq!(keep(&tmp, &dir, KEEP_WAITS, |from, to| fs::rename(from, to)).ok(), Some(dir.clone()));
         assert_eq!(fs::read_to_string(dir.join("info")).unwrap(), "theirs");
         assert!(!tmp.exists());
         fs::remove_dir_all(&root).unwrap();
