@@ -3282,6 +3282,9 @@ Called by a [=task=], [=aqr_request=], [=aqr_release=] and [=aqr_commit=] signal
     Implementations MAY present the |len| bytes of the [=working memory=] from the offset |ptr| as a diagnostic message,
     which is untrusted data from the archive, but doing so MUST NOT affect the application,
     even when the range is out of bounds.
+    The bytes are a UTF-8 [[!RFC3629]] string, with no terminator: a module SHOULD write well-formed UTF-8,
+    and an implementation presenting them MUST read them as UTF-8, replacing each ill-formed subsequence with U+FFFD,
+    never as another encoding.
     It is the only diagnostic function; a module reports a failure by `aqr_log` followed by a trap.
 
 A violation of any MUST in host functions is signalled as an error to the module invocation.
