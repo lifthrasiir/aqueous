@@ -48,7 +48,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `Module` and its plan), with what they need to make them: the spill `store` of large
     buffers, `patch`es, the `probe` of whether recompressing pays (the archive encoder behind
     its `Archiver`). The codec crates depend on it alone; nothing of the archive is in it.
-  - `aqr-archive` — the archive structure: the archive encoder and decoder (`src/lib.rs`), the
+  - `aqr-archive` — the archive structure: the archive encoder (`src/encoder.rs`, `emit.rs`,
+    `compress.rs`) and decoder (`open.rs`, `parse.rs`, `program.rs`), the
     evaluation of formulas (`Evaluate`, `Modules`: by the decoder's evaluator of formula
     blocks, `src/eval.rs`), metadata trees, segments, envelopes, mirroring, released modules.
     Of the codecs' libraries only aqr-mkv (`description_bound`) and aqr-tensors (`BLOCK`) take
@@ -304,7 +305,7 @@ optimization picked by hash.
   footer after the old one, then makes the old one a spacer block by its first 2 bytes; a stop
   (first Ctrl-C) ends the archive as it is, telling what it left out (`segment-status`). Not
   with `-P` (nonces) nor `-A` (Mirroring owns the footer), which end as they are but do not commit.
-- aqr-archive's decoder (`defined()` in `src/lib.rs`) does not accept import blocks 58–5F,
+- aqr-archive's decoder (`defined()` in `src/parse.rs`) does not accept import blocks 58–5F,
   though the spec has them. Implement them together with import resolution and overlays when
   extraction work starts, not by just adding them to `defined()`.
 - Near-duplicate files (variant sets, from 差分 PNG sets): reference coding in aqr-png,
