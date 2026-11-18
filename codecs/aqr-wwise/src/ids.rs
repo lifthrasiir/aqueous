@@ -291,6 +291,15 @@ const IDS: &[(u16, u16)] = &[
     (583, 157),
 ];
 
+// (sorted by id, for `part`'s binary search; ids of 10 bits, as the headers store them)
+const _: () = {
+    let mut k = 0;
+    while k < IDS.len() {
+        assert!(IDS[k].0 < 1024 && (k == 0 || IDS[k - 1].0 < IDS[k].0));
+        k += 1;
+    }
+};
+
 /// The codebook part of id `id`, if it is known.
 pub fn part(id: u16) -> Option<u32> {
     IDS.binary_search_by_key(&id, |&(i, _)| i).ok().map(|k| IDS[k].1 as u32)
@@ -304,9 +313,8 @@ pub fn id(part: u32) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn ids_are_sorted_and_in_the_database() {
+    fn ids_are_in_the_database() {
         let db = aqr_vorbis::setups::database().unwrap();
-        assert!(super::IDS.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(super::IDS.iter().all(|&(id, p)| id < 1024 && (p as usize) < db.codebook_count()));
+        assert!(super::IDS.iter().all(|&(_, p)| (p as usize) < db.codebook_count()));
     }
 }

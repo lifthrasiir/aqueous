@@ -45,17 +45,30 @@ pub fn values(a0: u8, a1: u8) -> [i32; 8] {
 /// The level of each index of a colour block in four-colour mode: its place on the line from
 /// the first endpoint to the second.
 pub const COLOUR_LEVEL: [u8; 4] = [0, 3, 1, 2];
-pub const COLOUR_INDEX: [u8; 4] = [0, 2, 3, 1];
+/// The index of each level: [`COLOUR_LEVEL`] inverted.
+pub const COLOUR_INDEX: [u8; 4] = inverse(COLOUR_LEVEL);
 /// In three-colour mode, the levels of the line (0 to 2) and black (3).
 pub const COLOUR3_LEVEL: [u8; 4] = [0, 2, 1, 3];
-pub const COLOUR3_INDEX: [u8; 4] = [0, 2, 1, 3];
+pub const COLOUR3_INDEX: [u8; 4] = inverse(COLOUR3_LEVEL);
 
 /// The level of each index of a BC4 block in eight-value mode, as for colours.
 pub const VALUE_LEVEL: [u8; 8] = [0, 7, 1, 2, 3, 4, 5, 6];
-pub const VALUE_INDEX: [u8; 8] = [0, 2, 3, 4, 5, 6, 7, 1];
+pub const VALUE_INDEX: [u8; 8] = inverse(VALUE_LEVEL);
 /// In six-value mode, the levels of the line (0 to 5), then 0 (6) and 255 (7).
 pub const VALUE6_LEVEL: [u8; 8] = [0, 5, 1, 2, 3, 4, 6, 7];
-pub const VALUE6_INDEX: [u8; 8] = [0, 2, 3, 4, 5, 1, 6, 7];
+pub const VALUE6_INDEX: [u8; 8] = inverse(VALUE6_LEVEL);
+
+/// The inverse of permutation `p` (one that is not fails to build).
+const fn inverse<const N: usize>(p: [u8; N]) -> [u8; N] {
+    let mut q = [u8::MAX; N];
+    let mut k = 0;
+    while k < N {
+        assert!(q[p[k] as usize] == u8::MAX, "not a permutation");
+        q[p[k] as usize] = k as u8;
+        k += 1;
+    }
+    q
+}
 
 #[cfg(test)]
 mod tests {
@@ -63,16 +76,6 @@ mod tests {
 
     #[test]
     fn levels() {
-        for (l, i) in [(COLOUR_LEVEL, COLOUR_INDEX), (COLOUR3_LEVEL, COLOUR3_INDEX)] {
-            for k in 0..4 {
-                assert_eq!(i[l[k] as usize], k as u8);
-            }
-        }
-        for (l, i) in [(VALUE_LEVEL, VALUE_INDEX), (VALUE6_LEVEL, VALUE6_INDEX)] {
-            for k in 0..8 {
-                assert_eq!(i[l[k] as usize], k as u8);
-            }
-        }
         // the levels are in order of value
         let v = values(200, 10);
         assert!((0..7).all(|l| v[VALUE_INDEX[l] as usize] > v[VALUE_INDEX[l + 1] as usize]));

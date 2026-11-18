@@ -340,6 +340,24 @@ pub static SFB_MIXED: [[u8; 39]; 8] = [
     ],
 ];
 
+/// Whether every row of band widths covers the granule's 576 lines.
+const fn rows_of_576<const N: usize>(rows: &[[u8; N]; 8]) -> bool {
+    let mut r = 0;
+    while r < 8 {
+        let (mut i, mut sum) = (0, 0u32);
+        while i < N {
+            sum += rows[r][i] as u32;
+            i += 1;
+        }
+        if sum != 576 {
+            return false;
+        }
+        r += 1;
+    }
+    true
+}
+const _: () = assert!(rows_of_576(&SFB_LONG) && rows_of_576(&SFB_SHORT) && rows_of_576(&SFB_MIXED));
+
 /// Band widths (in coding order) of a granule, terminated by 0 or by the end of the slice.
 pub fn sfb_widths(h: Header, g: &Granule) -> &'static [u8] {
     let row = h.sfb_row();
@@ -435,10 +453,5 @@ mod tests {
         assert_eq!(h.sample_rate(), 44100);
         assert_eq!(h.frame_len(), 417);
         assert_eq!(h.sfb_row(), 5);
-        for row in 0..8 {
-            assert_eq!(SFB_LONG[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
-            assert_eq!(SFB_SHORT[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
-            assert_eq!(SFB_MIXED[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
-        }
     }
 }
