@@ -9,8 +9,8 @@
 //! The files are taken in batches of about [`Options::batch`] bytes, in their order (by
 //! extension, then by name; PE and ELF files by likeness, from where the first is, [`lay_alike`]):
 //! each batch read ([`Source`]), made, laid out, checked and written in their order, a batch
-//! made while the one before it still is ([`AHEAD`]), so that what is held at once is about
-//! two batches', whatever the files' (but for a batch larger than that, made alone). Files of
+//! made while the ones before it still are ([`AHEAD`], [`AHEAD_MID`]), so that what is held at
+//! once is a few batches', whatever the files' (but for a batch larger than that, made alone). Files of
 //! the same content as one before are stored once. Files that may hold each other (a file and
 //! a ZIP archive or gzip file of it, a file and the start of it) are put in one batch
 //! ([`together`]), where what their streams share is stored once ([`Formula::share_slices`]):
@@ -428,11 +428,11 @@ fn compress_tree_noting<S: Source + ?Sized>(
         bytes = bytes.saturating_add(size);
     }
 
-    // those made alone first: between others, one would wait for those before it to be
+    // the heavy first ([`FIRST`]): between others, one would wait for those before it to be
     // written, and those after it for it, the threads idle as the longest file of either is made
     let weight = |b: &Vec<usize>| b.iter().map(|&c| src.size(c)).sum::<u64>();
-    let ahead = AHEAD.get();
-    batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(ahead));
+    let first = FIRST.get();
+    batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(first));
 
     let w = match from {
         Some(a) if a.kill => SegmentWriter::appending(a.footer.clone(), a.metadata),
@@ -558,13 +558,24 @@ fn compress_tree_noting<S: Source + ?Sized>(
 }
 
 aqr_common::zopt! {
-    /// Bytes of the batches let in and not yet written, as so many batches' ([`Options::batch`]): a
-    /// batch is read and analyzed while the one before it is still analyzed (as its longest files
-    /// leave threads idle), encoded or verified. One longer than these is made alone (and first);
-    /// one longer than a batch (contents that hold each other, kept together) beside others as
-    /// these allow. (10gb: of about 1,550 core-seconds of compression, 815 were idle with a batch at
-    /// a time.)
-    static AHEAD: Opt<u64> = Opt::value("batch-ahead", 2, "batches let in at once, times the batch size");
+    /// Bytes of the batches let in and not yet written, as so many batches' ([`Options::batch`]),
+    /// below [`Level::MID`]: a batch is read and analyzed while the one before it is still
+    /// analyzed (as its longest files leave threads idle), encoded or verified. One longer than
+    /// these is made alone; one longer than a batch (contents that hold each other, kept
+    /// together) beside others as these allow. (10gb: of about 1,550 core-seconds of compression,
+    /// 815 were idle with a batch at a time. At level 2, 4 rather than 2: workers busy 62.2 ->
+    /// 64.8%, heap peak 1.80 -> 2.92 GB, footprint 2.16 -> 3.32 GB.)
+    static AHEAD: Opt<u64> = Opt::value("batch-ahead", 2, "batches let in at once, times the batch size, below level mid");
+    /// [`AHEAD`] from [`Level::MID`] on, where a batch takes longer for its bytes and the one
+    /// longest file of a batch held back the next ones longer. (10gb at mid, M4: workers busy
+    /// 62.6 -> 73.3% at 4, heap peak 2.18 -> 2.43 GB, footprint 2.78 -> 2.68 GB; at 9, 72.6 ->
+    /// 75.9%, heap peak 2.51 GB either way, footprint 3.19 -> 2.97 GB; the archives the same.)
+    static AHEAD_MID: Opt<u64> =
+        Opt::value("batch-ahead-mid", 4, "batches let in at once, times the batch size, from level mid on");
+    /// Batches heavier than this many batches' bytes are made first, in their order. Apart from
+    /// [`AHEAD`], so that how many are let in at once leaves the order of the archive as it is
+    /// (and the contents of each segment, which share what is the same in them).
+    static FIRST: Opt<u64> = Opt::value("batch-first", 2, "batches heavier, times the batch size, are made first");
 }
 
 aqr_common::zopt! {
@@ -574,6 +585,16 @@ aqr_common::zopt! {
     /// and a heap peak of 2.04 GB at 2, 18.3 s and 2.52 GB at 3, 17.8 s and 3.08 GB at 4.)
     static PLAIN_AHEAD: Opt<u64> =
         Opt::value("plain-ahead", 3, "batches let in at once below level 2, times the batch size");
+}
+
+/// Bytes of the batches let in and not yet written, as so many batches', at the level of `opt`:
+/// [`PLAIN_AHEAD`], [`AHEAD`] or [`AHEAD_MID`].
+fn ahead(opt: &Options) -> u64 {
+    match opt.level.scale() {
+        _ if !opt.recompresses() => PLAIN_AHEAD.get(),
+        n if n >= Level::MID.scale() => AHEAD_MID.get(),
+        _ => AHEAD.get(),
+    }
 }
 
 /// The helpers making batches below level 2 ([`Pipe::help`]): one for each 4 workers of the
@@ -648,18 +669,13 @@ struct State {
 
 impl State {
     /// Whether the next batch to let in has room: those let in and not yet written are none,
-    /// or with it of at most [`AHEAD`] batches' bytes, its bytes fitting in the budget of the
+    /// or with it of at most [`ahead`] batches' bytes, its bytes fitting in the budget of the
     /// process beside the heap in use ([`aqr_common::budget::global`]: what it holds, as its
     /// data is inflated, is about as many bytes again).
     fn room<S: ?Sized>(&self, cx: &Ctx<S>) -> bool {
         let w = cx.weights[self.claimed];
         self.held == 0
-            || (self.held.saturating_add(w)
-                <= (cx.opt.batch as u64).saturating_mul(if cx.opt.recompresses() {
-                    AHEAD.get()
-                } else {
-                    PLAIN_AHEAD.get()
-                })
+            || (self.held.saturating_add(w) <= (cx.opt.batch as u64).saturating_mul(ahead(cx.opt))
                 && aqr_common::budget::global().room().fits(w))
     }
 }
