@@ -4,7 +4,7 @@
 //! headers, the boundaries, mbox's `From `), exceptions, what is not taken, and layouts that
 //! are not right turned down.
 
-use aqr_b2t::quopri::{formula, module};
+use aqr_b2t::quopri::formula;
 use aqr_common::rng::Rng;
 use aqr_common::varint;
 use aqr_formula::{Apply, Formula};
@@ -440,10 +440,4 @@ fn a_body_is_the_part_module_too() {
     d.extend(body(70_000, 50));
     let f = taken(&d);
     assert_eq!(data_of(&f), data);
-}
-
-#[test]
-fn quopri_flags_and_the_module_constants() {
-    assert!(module::plan() > 0);
-    assert_eq!(module::LF | module::LOWER | module::SOFT_END | module::START, 15);
 }

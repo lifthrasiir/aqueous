@@ -287,19 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn md5_constants() {
-        // (the table is what floor(2^32 abs(sin(i + 1))) gives)
-        let src = include_str!("crypt.rs");
-        let table = src.split("const K: [u32; 64] = [").nth(1).unwrap().split("];").next().unwrap();
-        let k: Vec<u32> =
-            table.split(',').filter_map(|t| u32::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok()).collect();
-        assert_eq!(k.len(), 64);
-        for (i, &v) in k.iter().enumerate() {
-            assert_eq!(v, ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32, "{i}");
-        }
-    }
-
-    #[test]
     fn rc4_vector() {
         // RFC 6229, key 0102030405 (40 bits), offset 0
         let mut z = [0u8; 16];

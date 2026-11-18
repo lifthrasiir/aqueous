@@ -2247,393 +2247,227 @@ mod tests {
         test_shuffle(|i| Some(shuffle_evex(i)), unshuffle_evex, [5, 8].into_iter());
     }
 
-    // Helper function: test encode/decode roundtrip for byte array
+    // Test encode/decode roundtrip for byte array
     fn roundtrip_test(code: &[u8], origin: u64, is64: bool) -> Result<(), String> {
-        let input = code.to_vec();
-
-        let encoded = encode(&input, origin, is64).ok_or("encoding failed")?;
-
+        let encoded = encode(code, origin, is64).ok_or("encoding failed")?;
         let decoded = decode(&(&encoded).into(), is64).ok_or("decoding failed")?;
-
-        if input != decoded {
-            let mismatch =
-                input.iter().zip(&decoded).position(|(a, b)| a != b).unwrap_or(input.len().min(decoded.len()));
-
-            let input_end = (mismatch + 8).min(input.len());
-            let decoded_end = (mismatch + 8).min(decoded.len());
-
+        if code != decoded {
+            let at = code.iter().zip(&decoded).position(|(a, b)| a != b).unwrap_or(code.len().min(decoded.len()));
+            let around = |v: &[u8]| format!("{:02X?}", &v[at..(at + 8).min(v.len())]);
             return Err(format!(
-                "Length mismatch or content mismatch at offset {}: input_len={}, decoded_len={}, input[{}..{}]={:02X?}, decoded[{}..{}]={:02X?}",
-                mismatch,
-                input.len(),
+                "mismatch at offset {at}: input_len={}, decoded_len={}, input={}, decoded={}",
+                code.len(),
                 decoded.len(),
-                mismatch, input_end, &input[mismatch..input_end],
-                mismatch, decoded_end, &decoded[mismatch..decoded_end]
+                around(code),
+                around(&decoded)
             ));
         }
-
         Ok(())
     }
 
-    #[test]
-    fn test_rip_relative_addressing() {
-        // Test cases for RIP-relative addressing
-        let test_cases = vec![
-            // MOV EAX, [RIP+disp32] - various displacements
-            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [RIP+0]"),
-            (vec![0x8b, 0x05, 0x10, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [RIP+16]"),
-            (vec![0x8b, 0x05, 0xff, 0xff, 0xff, 0xff], 0x1000, "MOV EAX, [RIP-1]"),
-            // LEA with RIP-relative
-            (vec![0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00], 0x2000, "LEA RAX, [RIP+0]"),
-            (vec![0x48, 0x8d, 0x05, 0x20, 0x00, 0x00, 0x00], 0x2000, "LEA RAX, [RIP+32]"),
-            // CMP with RIP-relative and immediate
-            (vec![0x48, 0x83, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x42], 0x3000, "CMP QWORD PTR [RIP+0], 0x42"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
+    #[derive(Clone, Copy)]
+    enum Modes {
+        M64,
+        M32,
+        Both,
     }
+    use Modes::*;
+
+    #[rustfmt::skip]
+    const ROUNDTRIPS: &[(&[u8], u64, Modes, &str)] = &[
+        // RIP-relative addressing
+        (&[0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, M64, "MOV EAX, [RIP+0]"),
+        (&[0x8b, 0x05, 0x10, 0x00, 0x00, 0x00], 0x1000, M64, "MOV EAX, [RIP+16]"),
+        (&[0x8b, 0x05, 0xff, 0xff, 0xff, 0xff], 0x1000, M64, "MOV EAX, [RIP-1]"),
+        (&[0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00], 0x2000, M64, "LEA RAX, [RIP+0]"),
+        (&[0x48, 0x8d, 0x05, 0x20, 0x00, 0x00, 0x00], 0x2000, M64, "LEA RAX, [RIP+32]"),
+        (&[0x48, 0x83, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x42], 0x3000, M64, "CMP QWORD PTR [RIP+0], 0x42"),
+        // RIP-relative calculation at boundary addresses
+        (&[0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x10, M64, "Low address"),
+        (&[0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0xfffff000, M64, "High address"),
+        (&[0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, M64, "Page boundary"),
+        (&[0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x0ffe, M64, "Near page boundary"),
+        // ModR/M and SIB special cases (the RIP-relative one is 64-bit only)
+        (&[0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00], 0x1000, Both, "MOV EAX, [0]"),
+        (&[0x8b, 0x44, 0x25, 0x10], 0x1000, Both, "MOV EAX, [EBP+10h]"),
+        (&[0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, M64, "MOV EAX, [RIP+0] (32-bit: [disp32])"),
+        (&[0x8b, 0x04, 0x85, 0x00, 0x00, 0x00, 0x00], 0x1000, Both, "MOV EAX, [EAX*4+0]"),
+        (&[0x8b, 0x44, 0x85, 0x10], 0x1000, Both, "MOV EAX, [EBP+EAX*4+10h]"),
+        // REX bits
+        (&[0x48, 0x89, 0xc8], 0x1000, M64, "REX.W MOV RAX, RCX"),
+        (&[0x44, 0x89, 0xc0], 0x1000, M64, "REX.R MOV EAX, R8D"),
+        (&[0x42, 0x8b, 0x04, 0x00], 0x1000, M64, "REX.X MOV EAX, [RAX+R8*1]"),
+        (&[0x41, 0x89, 0xc0], 0x1000, M64, "REX.B MOV R8D, EAX"),
+        (&[0x4f, 0x89, 0x04, 0x08], 0x1000, M64, "REX.WRXB MOV [R8+R9*1], RAX"),
+        // Immediate sizes
+        (&[0x83, 0xc0, 0x10], 0x1000, M64, "ADD EAX, 10h"),
+        (&[0x66, 0x81, 0xc0, 0x00, 0x10], 0x1000, M64, "ADD AX, 1000h"),
+        (&[0x81, 0xc0, 0x00, 0x00, 0x00, 0x10], 0x1000, M64, "ADD EAX, 10000000h"),
+        (&[0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10], 0x1000, M64, "MOV RAX, 1000000000000000h"),
+        (&[0x66, 0xb8, 0x00, 0x10], 0x1000, M64, "MOV AX, 1000h"),
+        // Calls
+        (&[0xe8, 0x00, 0x00, 0x00, 0x00], 0x1000, M64, "CALL +0"),
+        (&[0xe8, 0x10, 0x00, 0x00, 0x00], 0x1000, M64, "CALL +10h"),
+        (&[0xe8, 0xf0, 0xff, 0xff, 0xff], 0x1000, M64, "CALL -10h"),
+        (&[0xff, 0xd0], 0x1000, M64, "CALL EAX"),
+        (&[0xff, 0x15, 0x00, 0x00, 0x00, 0x00], 0x1000, M64, "CALL [RIP+0]"),
+        // Jumps
+        (&[0xeb, 0x10], 0x1000, M64, "JMP SHORT +10h"),
+        (&[0xeb, 0xf0], 0x1000, M64, "JMP SHORT -10h"),
+        (&[0xe9, 0x00, 0x00, 0x00, 0x00], 0x1000, M64, "JMP +0"),
+        (&[0xe9, 0x00, 0x10, 0x00, 0x00], 0x1000, M64, "JMP +1000h"),
+        (&[0x0f, 0x84, 0x00, 0x00, 0x00, 0x00], 0x1000, M64, "JZ +0"),
+        (&[0x74, 0x10], 0x1000, M64, "JZ SHORT +10h"),
+        // VEX (64-bit only)
+        (&[0xc5, 0xf8, 0x58, 0xc1], 0x1000, M64, "VEX2 VADDPS XMM0, XMM1"),
+        (&[0xc4, 0xe1, 0xf8, 0x58, 0xc1], 0x1000, M64, "VEX3 VADDPS XMM0, XMM1"),
+        (&[0xc4, 0xe2, 0x79, 0x00, 0xc1], 0x1000, M64, "VEX3 VPSHUFB XMM0, XMM1"),
+        // Instructions read differently in 32-bit and 64-bit modes
+        (&[0x68, 0x00, 0x00, 0x00, 0x00], 0x1000, Both, "PUSH imm32"),
+        (&[0x89, 0xc0], 0x1000, Both, "MOV EAX, EAX"),
+        (&[0x67, 0x8b, 0x00], 0x1000, Both, "MOV EAX, [EAX] with addr32 prefix"),
+        // Prefixes in different orders
+        (&[0xf3, 0x66, 0xa5], 0x1000, M64, "REP MOVSW"),
+        (&[0x66, 0xf3, 0xa5], 0x1000, M64, "REP MOVSW (reversed order)"),
+        (&[0x2e, 0x67, 0x8b, 0x00], 0x1000, M64, "MOV EAX, CS:[EAX] (32-bit addr)"),
+        (&[0x67, 0x2e, 0x8b, 0x00], 0x1000, M64, "MOV EAX, CS:[EAX] (reversed order)"),
+        (&[0x26, 0x2e, 0x8b, 0x00], 0x1000, M64, "MOV EAX, CS:[EAX] (ES then CS)"),
+        // F6/F7 group 3, with and without immediates
+        (&[0xf6, 0xc0, 0x55], 0x1000, M64, "TEST AL, 55h"),
+        (&[0xf7, 0xc0, 0x55, 0x55, 0x55, 0x55], 0x1000, M64, "TEST EAX, 55555555h"),
+        (&[0xf6, 0xd0], 0x1000, M64, "NOT AL"),
+        (&[0xf7, 0xd0], 0x1000, M64, "NOT EAX"),
+        (&[0xf6, 0xd8], 0x1000, M64, "NEG AL"),
+        (&[0xf7, 0xd8], 0x1000, M64, "NEG EAX"),
+        // Special addressing modes
+        (&[0xa1, 0x00, 0x00, 0x40, 0x00], 0x1000, M32, "MOV EAX, [400000h]"),
+        (&[0x8b, 0x05, 0x00, 0x00, 0x10, 0x00], 0x1000, M64, "MOV EAX, [RIP+100000h]"),
+        (&[0x8b, 0x05, 0x00, 0x00, 0xf0, 0xff], 0x1000, M64, "MOV EAX, [RIP-100000h]"),
+        (&[0x8b, 0x84, 0x88, 0x00, 0x10, 0x00, 0x00], 0x1000, Both, "MOV EAX, [EAX+ECX*4+1000h]"),
+        // Escapes (F1 is the JUMPTAB marker, so not tested here)
+        (&[0xf4], 0x1000, M64, "HLT (should be escaped)"),
+        // Boundaries of the code
+        (&[0xe8, 0xfb, 0xff, 0xff, 0xff], 0x1000, M64, "CALL -5 (near boundary)"),
+        (&[0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00], 0x1000, M64, "Potential jump table data"),
+        (&[0x90, 0x00, 0x00, 0x00, 0x00, 0x90], 0x1000, M64, "NOP, data, NOP"),
+        // REX2
+        (&[0xd5, 0x00, 0x90], 0x1000, M64, "REX2 NOP"),
+        (&[0xd5, 0x48, 0x89, 0xc0], 0x1000, M64, "REX2.W MOV RAX, RAX"),
+        // Complex sequence: CALL, NOP padding, MOV RAX imm64, LEA RAX [RIP+0]
+        (
+            &[
+                0xe8, 0x10, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x10, 0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00,
+            ],
+            0x1000,
+            M64,
+            "complex sequence",
+        ),
+        // Repeated calls to the same target (the call cache)
+        (
+            &[
+                0xe8, 0x10, 0x00, 0x00, 0x00, 0x90, 0x90, // CALL +10h
+                0xe8, 0x10, 0x00, 0x00, 0x00, 0x90, 0x90, // the same target
+                0xe8, 0x20, 0x00, 0x00, 0x00, // a different one
+                0xe8, 0x10, 0x00, 0x00, 0x00, // the first again
+            ],
+            0x1000,
+            M64,
+            "call cache",
+        ),
+        // Function prologue and epilogue
+        (
+            &[
+                0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0x4d, 0x10, 0x48, 0x8b, 0x45, 0x10, 0x48,
+                0x83, 0xc4, 0x20, 0x5d, 0xc3,
+            ],
+            0x401000,
+            M64,
+            "function prologue",
+        ),
+        // An indirect jump, JMP [RAX*4+402000h], then padding
+        (&[0xff, 0x24, 0x85, 0x00, 0x20, 0x40, 0x00, 0x90, 0x90, 0x90], 0x401000, M64, "indirect jump pattern"),
+        // 32-bit lookalikes of VEX, EVEX and REX2
+        (&[0xc4, 0x00], 0x1000, M32, "LES EAX, [EAX]"),
+        (&[0xc5, 0x00], 0x1000, M32, "LDS EAX, [EAX]"),
+        (&[0x62, 0x00], 0x1000, M32, "BOUND EAX, [EAX]"),
+        (&[0xc4, 0xf0, 0x00, 0x00], 0x1000, M32, "C4 with mod=11 but VEX3 map bit 4 set"),
+        (&[0xd5, 0x0a], 0x1000, M32, "AAD 0Ah"),
+        // Jump table detection: five entries within the code
+        (
+            &[
+                0x00, 0x10, 0x00, 0x00, 0x20, 0x10, 0x00, 0x00, 0x40, 0x10, 0x00, 0x00, 0x60, 0x10, 0x00, 0x00, 0x80,
+                0x10, 0x00, 0x00,
+            ],
+            0x1000,
+            M32,
+            "32-bit obvious jump table",
+        ),
+        // not one: mixed valid and invalid addresses
+        (
+            &[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x10, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff],
+            0x1000,
+            M32,
+            "mixed data",
+        ),
+        // exactly MIN_JUMPTAB entries
+        (
+            &[0x00, 0x10, 0x00, 0x00, 0x20, 0x10, 0x00, 0x00, 0x40, 0x10, 0x00, 0x00],
+            0x1000,
+            M32,
+            "minimal jump table",
+        ),
+        // 64-bit, RIP-relative offsets 0, +32, +64, -32
+        (
+            &[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            ],
+            0x1000,
+            M64,
+            "64-bit jump table",
+        ),
+        // looks like a table but misaligned
+        (
+            &[0x90, 0x00, 0x10, 0x00, 0x00, 0x20, 0x10, 0x00, 0x00, 0x40, 0x10, 0x00, 0x00],
+            0x1000,
+            M32,
+            "misaligned data",
+        ),
+        // an instruction followed by too few entries
+        (
+            &[
+                0xff, 0x24, 0x85, 0x00, 0x20, 0x40, 0x00, 0x00, 0x10, 0x40, 0x00, 0x10, 0x10, 0x40, 0x00, 0x20, 0x10,
+                0x40, 0x00,
+            ],
+            0x401000,
+            M64,
+            "instruction+data pattern",
+        ),
+        // exactly at the code's boundaries
+        (
+            &[0x00, 0x10, 0x00, 0x00, 0xff, 0x1f, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00],
+            0x1000,
+            M32,
+            "boundary addresses",
+        ),
+    ];
 
     #[test]
-    fn test_modrm_edge_cases() {
-        let test_cases = vec![
-            // SIB with base=5 (EBP/RBP special case)
-            (vec![0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [0]"),
-            (vec![0x8b, 0x44, 0x25, 0x10], 0x1000, "MOV EAX, [EBP+10h]"),
-            // ModR/M mode=0, base=5 (special case)
-            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [RIP+0] (32-bit: [disp32])"),
-            // Complex SIB combinations
-            (vec![0x8b, 0x04, 0x85, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [EAX*4+0]"),
-            (vec![0x8b, 0x44, 0x85, 0x10], 0x1000, "MOV EAX, [EBP+EAX*4+10h]"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-
-            // Test in both 64-bit and 32-bit modes (excluding RIP-relative cases)
-            if !code.starts_with(&[0x8b, 0x05]) {
-                roundtrip_test(&code, origin, false).unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
+    fn instruction_roundtrips() {
+        for &(code, origin, modes, desc) in ROUNDTRIPS {
+            let (m64, m32) = match modes {
+                M64 => (true, false),
+                M32 => (false, true),
+                Both => (true, true),
+            };
+            if m64 {
+                roundtrip_test(code, origin, true).unwrap_or_else(|e| panic!("Failed {desc} (64-bit): {e}"));
+            }
+            if m32 {
+                roundtrip_test(code, origin, false).unwrap_or_else(|e| panic!("Failed {desc} (32-bit): {e}"));
             }
         }
-    }
-
-    #[test]
-    fn test_rex_prefix_combinations() {
-        let test_cases = vec![
-            // REX.W
-            (vec![0x48, 0x89, 0xc8], 0x1000, "REX.W MOV RAX, RCX"),
-            // REX.R (extends ModR/M reg field)
-            (vec![0x44, 0x89, 0xc0], 0x1000, "REX.R MOV EAX, R8D"),
-            // REX.X (extends SIB index field)
-            (vec![0x42, 0x8b, 0x04, 0x00], 0x1000, "REX.X MOV EAX, [RAX+R8*1]"),
-            // REX.B (extends ModR/M r/m field)
-            (vec![0x41, 0x89, 0xc0], 0x1000, "REX.B MOV R8D, EAX"),
-            // All REX bit combinations
-            (vec![0x4f, 0x89, 0x04, 0x08], 0x1000, "REX.WRXB MOV [R8+R9*1], RAX"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_immediate_size_variations() {
-        let test_cases = vec![
-            // 8-bit immediate
-            (vec![0x83, 0xc0, 0x10], 0x1000, "ADD EAX, 10h"),
-            // 16-bit immediate with 66 prefix
-            (vec![0x66, 0x81, 0xc0, 0x00, 0x10], 0x1000, "ADD AX, 1000h"),
-            // 32-bit immediate
-            (vec![0x81, 0xc0, 0x00, 0x00, 0x00, 0x10], 0x1000, "ADD EAX, 10000000h"),
-            // 64-bit immediate with REX.W
-            (vec![0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10], 0x1000, "MOV RAX, 1000000000000000h"),
-            // Operand size prefix effect test
-            (vec![0x66, 0xb8, 0x00, 0x10], 0x1000, "MOV AX, 1000h"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_call_instruction_variations() {
-        let test_cases = vec![
-            // Near call with 32-bit displacement
-            (vec![0xe8, 0x00, 0x00, 0x00, 0x00], 0x1000, "CALL +0"),
-            (vec![0xe8, 0x10, 0x00, 0x00, 0x00], 0x1000, "CALL +10h"),
-            (vec![0xe8, 0xf0, 0xff, 0xff, 0xff], 0x1000, "CALL -10h"),
-            // Indirect call
-            (vec![0xff, 0xd0], 0x1000, "CALL EAX"),
-            (vec![0xff, 0x15, 0x00, 0x00, 0x00, 0x00], 0x1000, "CALL [RIP+0]"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_jump_instruction_variations() {
-        let test_cases = vec![
-            // Short jump (8-bit)
-            (vec![0xeb, 0x10], 0x1000, "JMP SHORT +10h"),
-            (vec![0xeb, 0xf0], 0x1000, "JMP SHORT -10h"),
-            // Near jump (32-bit)
-            (vec![0xe9, 0x00, 0x00, 0x00, 0x00], 0x1000, "JMP +0"),
-            (vec![0xe9, 0x00, 0x10, 0x00, 0x00], 0x1000, "JMP +1000h"),
-            // Conditional jumps
-            (vec![0x0f, 0x84, 0x00, 0x00, 0x00, 0x00], 0x1000, "JZ +0"),
-            (vec![0x74, 0x10], 0x1000, "JZ SHORT +10h"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_vex_prefix_combinations() {
-        let test_cases = vec![
-            // VEX2 prefix
-            (vec![0xc5, 0xf8, 0x58, 0xc1], 0x1000, "VEX2 VADDPS XMM0, XMM1"),
-            // VEX3 prefix - map 1
-            (vec![0xc4, 0xe1, 0xf8, 0x58, 0xc1], 0x1000, "VEX3 VADDPS XMM0, XMM1"),
-            // VEX3 prefix - map 2
-            (vec![0xc4, 0xe2, 0x79, 0x00, 0xc1], 0x1000, "VEX3 VPSHUFB XMM0, XMM1"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            // VEX is only valid in 64-bit mode
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_edge_case_addresses() {
-        // Test RIP-relative calculation at boundary addresses
-        let test_cases = vec![
-            // Near zero address
-            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x10, "Low address"),
-            // High address
-            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0xfffff000, "High address"),
-            // Page boundary
-            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, "Page boundary"),
-            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x0ffe, "Near page boundary"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_instruction_boundary_detection() {
-        // Test correct boundary detection in complex instruction sequences
-        let complex_sequence = vec![
-            // CALL + padding pattern
-            0xe8, 0x10, 0x00, 0x00, 0x00, // CALL +10h
-            0x90, 0x90, 0x90, // NOP padding
-            // MOV with immediate
-            0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // MOV RAX, imm64
-            // RIP-relative LEA
-            0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, // LEA RAX, [RIP+0]
-        ];
-
-        roundtrip_test(&complex_sequence, 0x1000, true).unwrap_or_else(|e| panic!("Failed complex sequence: {}", e));
-    }
-
-    #[test]
-    fn test_32bit_vs_64bit_differences() {
-        // Instructions that are interpreted differently in 32-bit vs 64-bit modes
-        let test_cases = vec![
-            // PUSH/POP immediate - some only valid in 32-bit
-            (vec![0x68, 0x00, 0x00, 0x00, 0x00], "PUSH imm32"),
-            // General MOV
-            (vec![0x89, 0xc0], "MOV EAX, EAX"),
-            // Address size prefix effect
-            (vec![0x67, 0x8b, 0x00], "MOV EAX, [EAX] with addr32 prefix"),
-        ];
-
-        for (code, desc) in test_cases {
-            // Test in 64-bit mode
-            roundtrip_test(&code, 0x1000, true).unwrap_or_else(|e| panic!("Failed {} (64-bit): {}", desc, e));
-
-            // Test in 32-bit mode
-            roundtrip_test(&code, 0x1000, false).unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_call_cache_behavior() {
-        // Pattern with repeated calls to the same target
-        let repeated_calls = vec![
-            0xe8, 0x10, 0x00, 0x00, 0x00, // CALL +10h
-            0x90, 0x90, // padding
-            0xe8, 0x10, 0x00, 0x00, 0x00, // CALL +10h (same target)
-            0x90, 0x90, // padding
-            0xe8, 0x20, 0x00, 0x00, 0x00, // CALL +20h (different target)
-            0xe8, 0x10, 0x00, 0x00, 0x00, // CALL +10h (first target again)
-        ];
-
-        roundtrip_test(&repeated_calls, 0x1000, true).unwrap_or_else(|e| panic!("Failed call cache test: {}", e));
-    }
-
-    // Test accuracy of individual functions
-    #[test]
-    fn test_shuffle_functions_edge_cases() {
-        // VEX3 shuffle with boundary values
-        assert_eq!(shuffle_vex3([0x00, 0x00]), Some(([0x80, 0x07], 0)));
-        assert_eq!(shuffle_vex3([0x10, 0x00]), None); // bit 4 set should fail
-
-        // VEX2 boundary test
-        let (vex, map) = shuffle_vex2([0xff]);
-        assert_eq!(unshuffle_vex2(vex, map), Some([0xff]));
-
-        // EVEX with various combinations
-        let test_evex = [0x07, 0xfb, 0xd7]; // max valid values
-        let (evex_out, map) = shuffle_evex(test_evex);
-        assert_eq!(unshuffle_evex(evex_out, map), Some(test_evex));
-    }
-
-    #[test]
-    fn test_prefix_combinations() {
-        // Multiple prefixes in different orders
-        let test_cases = vec![
-            // REP + OSIZE
-            (vec![0xf3, 0x66, 0xa5], 0x1000, "REP MOVSW"),
-            (vec![0x66, 0xf3, 0xa5], 0x1000, "REP MOVSW (reversed order)"),
-            // Segment override + address size
-            (vec![0x2e, 0x67, 0x8b, 0x00], 0x1000, "MOV EAX, CS:[EAX] (32-bit addr)"),
-            (vec![0x67, 0x2e, 0x8b, 0x00], 0x1000, "MOV EAX, CS:[EAX] (reversed order)"),
-            // Multiple segment overrides (last one wins)
-            (vec![0x26, 0x2e, 0x8b, 0x00], 0x1000, "MOV EAX, CS:[EAX] (ES then CS)"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_grp3_immediate_variants() {
-        // Test F6/F7 group 3 instructions with and without immediates
-        let test_cases = vec![
-            // TEST with immediate (reg field 0-1)
-            (vec![0xf6, 0xc0, 0x55], 0x1000, "TEST AL, 55h"),
-            (vec![0xf7, 0xc0, 0x55, 0x55, 0x55, 0x55], 0x1000, "TEST EAX, 55555555h"),
-            // NOT without immediate (reg field 2)
-            (vec![0xf6, 0xd0], 0x1000, "NOT AL"),
-            (vec![0xf7, 0xd0], 0x1000, "NOT EAX"),
-            // NEG without immediate (reg field 3)
-            (vec![0xf6, 0xd8], 0x1000, "NEG AL"),
-            (vec![0xf7, 0xd8], 0x1000, "NEG EAX"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_special_addressing_modes() {
-        // Test various special addressing modes
-        let test_cases = vec![
-            // Direct addressing (32-bit only)
-            (vec![0xa1, 0x00, 0x00, 0x40, 0x00], 0x1000, "MOV EAX, [400000h]"),
-            // RIP-relative with large positive displacement
-            (vec![0x8b, 0x05, 0x00, 0x00, 0x10, 0x00], 0x1000, "MOV EAX, [RIP+100000h]"),
-            // RIP-relative with large negative displacement
-            (vec![0x8b, 0x05, 0x00, 0x00, 0xf0, 0xff], 0x1000, "MOV EAX, [RIP-100000h]"),
-            // Complex SIB: [base + index*scale + disp32]
-            (vec![0x8b, 0x84, 0x88, 0x00, 0x10, 0x00, 0x00], 0x1000, "MOV EAX, [EAX+ECX*4+1000h]"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            let is_64bit = !desc.contains("[400000h]"); // Direct addressing is 32-bit only
-            roundtrip_test(&code, origin, is_64bit).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-
-            // Also test in 32-bit mode where applicable
-            if !desc.contains("RIP") {
-                roundtrip_test(&code, origin, false).unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
-            }
-        }
-    }
-
-    #[test]
-    fn test_escape_sequences() {
-        // Test instructions that get escaped (invalid opcodes)
-        let test_cases = vec![
-            // Omit VEX/EVEX tests as they have complex validation rules
-
-            // Raw bytes that should be escaped
-            (vec![0xf4], 0x1000, "HLT (should be escaped)"),
-            // Note: F1 (INT1) might be used as JUMPTAB marker, so skip it
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_boundary_instructions() {
-        // Instructions at the boundary of code sections
-        let test_cases = vec![
-            // CALL near end of section
-            (vec![0xe8, 0xfb, 0xff, 0xff, 0xff], 0x1000, "CALL -5 (near boundary)"),
-            // Jump table detection edge case
-            (vec![0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00], 0x1000, "Potential jump table data"),
-            // Mixed code and data
-            (vec![0x90, 0x00, 0x00, 0x00, 0x00, 0x90], 0x1000, "NOP, data, NOP"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_rex2_prefix() {
-        // Test REX2 prefix handling (if supported)
-        let test_cases = vec![
-            // Basic REX2
-            (vec![0xd5, 0x00, 0x90], 0x1000, "REX2 NOP"),
-            // REX2 with various payloads
-            (vec![0xd5, 0x48, 0x89, 0xc0], 0x1000, "REX2.W MOV RAX, RAX"),
-        ];
-
-        for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_stress_patterns() {
-        // Stress test with complex real-world patterns
-        let prologue_pattern = vec![
-            0x55, // PUSH RBP
-            0x48, 0x89, 0xe5, // MOV RBP, RSP
-            0x48, 0x83, 0xec, 0x20, // SUB RSP, 20h
-            0x48, 0x89, 0x4d, 0x10, // MOV [RBP+10h], RCX
-            0x48, 0x8b, 0x45, 0x10, // MOV RAX, [RBP+10h]
-            0x48, 0x83, 0xc4, 0x20, // ADD RSP, 20h
-            0x5d, // POP RBP
-            0xc3, // RET
-        ];
-
-        // Simple indirect jump instead of jump table
-        let indirect_jump_pattern = vec![
-            0xff, 0x24, 0x85, 0x00, 0x20, 0x40, 0x00, // JMP [RAX*4+402000h]
-            0x90, 0x90, 0x90, // Some padding
-        ];
-
-        roundtrip_test(&prologue_pattern, 0x401000, true).unwrap_or_else(|e| panic!("Failed function prologue: {}", e));
-
-        roundtrip_test(&indirect_jump_pattern, 0x401000, true)
-            .unwrap_or_else(|e| panic!("Failed indirect jump pattern: {}", e));
     }
 
     #[test]
@@ -2700,140 +2534,6 @@ mod tests {
     }
 
     #[test]
-    fn test_32bit_vex_lookalikes() {
-        let test_cases = [
-            (&[0xc4, 0x00][..], "LES EAX, [EAX]"),
-            (&[0xc5, 0x00][..], "LDS EAX, [EAX]"),
-            (&[0x62, 0x00][..], "BOUND EAX, [EAX]"),
-            (&[0xc4, 0xf0, 0x00, 0x00][..], "C4 with mod=11 but VEX3 map bit 4 set"),
-            (&[0xd5, 0x0a][..], "AAD 0Ah"),
-        ];
-        for (code, desc) in test_cases {
-            roundtrip_test(code, 0x1000, false).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
-        }
-    }
-
-    #[test]
-    fn test_jump_table_detection() {
-        // Helper function for jump table tests
-        let roundtrip_test = |code: &[u8], origin: u64, is64: bool| -> Result<(), String> {
-            let input = code.to_vec();
-
-            let encoded = encode(&input, origin, is64).ok_or("encoding failed")?;
-
-            let decoded = decode(&(&encoded).into(), is64).ok_or("decoding failed")?;
-
-            if input != decoded {
-                let mismatch =
-                    input.iter().zip(&decoded).position(|(a, b)| a != b).unwrap_or(input.len().min(decoded.len()));
-
-                let input_end = (mismatch + 8).min(input.len());
-                let decoded_end = (mismatch + 8).min(decoded.len());
-
-                return Err(format!(
-                    "Length mismatch or content mismatch at offset {}: \
-                     input_len={}, decoded_len={}, input[{}..{}]={:02X?}, decoded[{}..{}]={:02X?}",
-                    mismatch,
-                    input.len(),
-                    decoded.len(),
-                    mismatch,
-                    input_end,
-                    &input[mismatch..input_end],
-                    mismatch,
-                    decoded_end,
-                    &decoded[mismatch..decoded_end]
-                ));
-            }
-
-            Ok(())
-        };
-
-        // Test case 1: Obvious jump table (should be detected)
-        let obvious_jump_table_32 = vec![
-            // 5 entries, all within code range
-            0x00, 0x10, 0x00, 0x00, // 0x1000
-            0x20, 0x10, 0x00, 0x00, // 0x1020
-            0x40, 0x10, 0x00, 0x00, // 0x1040
-            0x60, 0x10, 0x00, 0x00, // 0x1060
-            0x80, 0x10, 0x00, 0x00, // 0x1080
-        ];
-
-        // Test case 2: Not a jump table (mixed valid/invalid addresses)
-        let not_jump_table = vec![
-            0x00, 0x10, 0x00, 0x00, // 0x1000 (valid)
-            0x00, 0x00, 0x80, 0x00, // 0x800000 (out of range)
-            0x40, 0x10, 0x00, 0x00, // 0x1040 (valid)
-            0xFF, 0xFF, 0xFF, 0xFF, // -1 (invalid)
-        ];
-
-        // Test case 3: Barely enough entries (exactly MIN_JUMPTAB)
-        let minimal_jump_table_32 = vec![
-            0x00, 0x10, 0x00, 0x00, // 0x1000
-            0x20, 0x10, 0x00, 0x00, // 0x1020
-            0x40, 0x10, 0x00, 0x00, // 0x1040
-        ];
-
-        // Test case 4: 64-bit jump table (RIP-relative offsets)
-        let jump_table_64 = vec![
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0 offset
-            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // +32 offset
-            0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // +64 offset
-            0xE0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // -32 offset
-        ];
-
-        // Test case 5: Data that looks like jump table but shouldn't be (wrong alignment)
-        let misaligned_data = vec![
-            0x90, // NOP to break alignment
-            0x00, 0x10, 0x00, 0x00, // looks like address but misaligned
-            0x20, 0x10, 0x00, 0x00, 0x40, 0x10, 0x00, 0x00,
-        ];
-
-        // Test case 6: Instruction followed by jump table data
-        let instruction_then_data = vec![
-            0xff, 0x24, 0x85, 0x00, 0x20, 0x40, 0x00, // JMP [RAX*4+402000h]
-            // This should NOT be detected as jump table (too few entries, wrong context)
-            0x00, 0x10, 0x40, 0x00, // 0x401000
-            0x10, 0x10, 0x40, 0x00, // 0x401010
-            0x20, 0x10, 0x40, 0x00, // 0x401020
-        ];
-
-        println!("Testing 32-bit obvious jump table...");
-        roundtrip_test(&obvious_jump_table_32, 0x1000, false)
-            .unwrap_or_else(|e| panic!("Failed 32-bit obvious jump table: {}", e));
-
-        println!("Testing mixed data (should not be jump table)...");
-        roundtrip_test(&not_jump_table, 0x1000, false).unwrap_or_else(|e| panic!("Failed mixed data test: {}", e));
-
-        println!("Testing minimal jump table (exactly MIN_JUMPTAB entries)...");
-        roundtrip_test(&minimal_jump_table_32, 0x1000, false)
-            .unwrap_or_else(|e| panic!("Failed minimal jump table: {}", e));
-
-        println!("Testing 64-bit jump table...");
-        // Only test 64-bit jump table at 8-byte aligned address
-        roundtrip_test(&jump_table_64, 0x1000, true).unwrap_or_else(|e| panic!("Failed 64-bit jump table: {}", e));
-
-        println!("Testing misaligned data...");
-        roundtrip_test(&misaligned_data, 0x1000, false).unwrap_or_else(|e| panic!("Failed misaligned data: {}", e));
-
-        println!("Testing instruction followed by data...");
-        roundtrip_test(&instruction_then_data, 0x401000, true)
-            .unwrap_or_else(|e| panic!("Failed instruction+data pattern: {}", e));
-
-        // Additional edge case: exactly at code boundaries
-        let boundary_addresses = vec![
-            0x00, 0x10, 0x00, 0x00, // start of range
-            0xFF, 0x1F, 0x00, 0x00, // near end of range
-            0x00, 0x10, 0x00, 0x00, // back to start
-        ];
-
-        println!("Testing boundary addresses...");
-        roundtrip_test(&boundary_addresses, 0x1000, false)
-            .unwrap_or_else(|e| panic!("Failed boundary addresses: {}", e));
-
-        println!("All jump table tests passed!");
-    }
-
-    #[test]
     fn test_opcodes_resource() {
         let r = Opcodes::BUILTIN.to_resource();
         assert_eq!(r.len(), Opcodes::LEN);
@@ -2869,30 +2569,6 @@ mod tests {
     /// The index of the stream of this name (without `ST_`).
     fn stream_index(name: &str) -> usize {
         STREAM_NAMES.iter().position(|n| n.strip_prefix("ST_") == Some(name)).unwrap_or_else(|| panic!("no {name}"))
-    }
-
-    #[test]
-    fn test_stream_layout() {
-        let names: Vec<_> = STREAM_NAMES.iter().map(|n| n.strip_prefix("ST_").unwrap()).collect();
-        assert_eq!(
-            names,
-            [
-                "OP",
-                "SIB",
-                "CALL_IDX",
-                "DISP8_SP",
-                "DISP8_BP",
-                "DISP8",
-                "DISP8_IDX",
-                "DISP32",
-                "JUMP8",
-                "JUMP",
-                "IMM32",
-                "ADDR",
-                "CALL",
-                "JUMPN",
-            ]
-        );
     }
 
     #[test]

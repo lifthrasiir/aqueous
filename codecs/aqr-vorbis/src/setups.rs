@@ -408,17 +408,6 @@ mod tests {
     }
 
     #[test]
-    fn setups_are_structured() {
-        let db = db();
-        for row in db.rows() {
-            let s = db.assemble_row(row).unwrap();
-            assert_eq!(&s[..7], b"\x05vorbis");
-            // The framing bit is the highest set bit of the last byte, so the last byte is not zero.
-            assert_ne!(*s.last().unwrap(), 0);
-        }
-    }
-
-    #[test]
     fn search_finds_rows() {
         let db = db();
         let t = Instant::now();

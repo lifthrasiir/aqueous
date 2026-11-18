@@ -4461,23 +4461,6 @@ mod tests {
         }
     }
 
-    /// An ALZ archive is taken apart: its DEFLATE bodies by aqr-flate, its bzip2 bodies by
-    /// aqr-bz2's module of ALZip's streams; found in other data too.
-    #[test]
-    fn alz_debug() {
-        let dir = format!("{}/../../codecs/aqr-alz/tests/data", env!("CARGO_MANIFEST_DIR"));
-        let d = std::fs::read(format!("{dir}/normal.alz")).unwrap();
-        let opt = Options { shared_modules: true, ..Options::default() };
-        let cx = Cx::new(&d, &opt);
-        let f = alz(&d, &opt, 0, &cx);
-        eprintln!(
-            "alz: {:?}",
-            f.as_ref().map(|f| f.streams.iter().map(|s| (&s.class, s.data.len())).collect::<Vec<_>>())
-        );
-        let r = recompress_as(Format::Alz, &d, &opt, 0, &cx);
-        eprintln!("as: {}", r.is_some());
-    }
-
     #[test]
     fn installshield_cabinet_taken_apart() {
         // a data volume of chunks of zlib's DEFLATE, two files of text
@@ -4502,6 +4485,8 @@ mod tests {
         assert_ne!(detect([&b"some data before "[..], &d].concat().as_slice()), Some(Format::Isc));
     }
 
+    /// An ALZ archive is taken apart: its DEFLATE bodies by aqr-flate, its bzip2 bodies by
+    /// aqr-bz2's module of ALZip's streams; found in other data too.
     #[test]
     fn alz_taken_apart() {
         let dir = format!("{}/../../codecs/aqr-alz/tests/data", env!("CARGO_MANIFEST_DIR"));

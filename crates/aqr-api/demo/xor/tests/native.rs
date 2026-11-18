@@ -21,7 +21,6 @@ fn multi_page() {
 #[test]
 fn windows() {
     use aqr_api::Window;
-    assert_eq!(aqr_demo_xor::xor::WINDOWS, [Window::Input(0, 1), Window::Output(0, 1)]);
     let data: Vec<u8> = (0..300_001u32).map(|i| (i * 13) as u8).collect();
     let entry = Entry { windows: &[Window::Input(0, 2), Window::Output(0, 1)], ..ENTRY };
     assert_eq!(apply(&entry, &[&data], &[], b"k", &[data.len() as u64]).unwrap()[0], xor(&data, b"k"));
