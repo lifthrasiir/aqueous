@@ -1,6 +1,6 @@
 # 암호화된 자기 압축 해제 프로그램 (`--format sfx -P`)
 
-지금 `aqr --format sfx`는 `-P`를 받지 않는다 (`crates/aqr/src/main.rs`: "the program does not
+지금 `aqr --format sfx`는 `-P`를 받지 않는다 (`crates/aqr/src/args.rs`: "the program does not
 ask for one"). 자기 압축 해제 프로그램(이하 SFX)이 암호를 물을 방법이 없기 때문이다. 이 문서는
 SFX가 암호를 GUI(탐색기에서 실행했을 때)와 CLI(콘솔에서 실행했을 때) 양쪽에서 받는 방법을 정한다.
 암호화 자체는 스펙의 "Encrypted archives"를 따르고, 여기서는 되풀이하지 않는다.

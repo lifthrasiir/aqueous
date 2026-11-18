@@ -44,7 +44,7 @@ pub(crate) struct Spec {
     /// It only bundles files: an archive of aqr-bundle's or aqr-asar's, or an image of
     /// aqr-disk's ([`Format::is_bundle`]).
     pub(crate) bundle: bool,
-    /// It is text, of a recompressor of text ([`crate::is_text`]).
+    /// It is text, of a recompressor of text ([`crate::made::is_text`]).
     pub(crate) text: bool,
 }
 
@@ -974,7 +974,7 @@ formats! {
         text: true,
     }
     /// Lines of text as templates and fields in columns (aqr-log): logs and tables of numbers,
-    /// a whole file known by its text, never detected: [`crate::table`] takes it where its
+    /// a whole file known by its text, never detected: [`crate::made::table`] takes it where its
     /// sample is clearly smaller than the text's.
     Log = "log" {
         recompressor: Pure(aqr_log::formula::encode),
