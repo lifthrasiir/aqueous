@@ -2002,13 +2002,14 @@ pub(crate) fn eval_formula<M: crate::Modules + Sync>(
     })
 }
 
-/// What `limit` gives of each application of formula `f` in `order`, given its inputs made (by
-/// `m`) only as it asks for them: None where it gives none, or an input asked for cannot be made.
+/// What `limit` gives of each application of formula `f` in `order`, given its outputs' sizes as
+/// the decoder has them (one output of an application split) and its inputs made (by `m`) only as
+/// it asks for them: None where it gives none, or an input asked for cannot be made.
 pub(crate) fn limits_of<M: crate::Modules + Sync>(
     f: &crate::Formula,
     m: &M,
     order: &[&crate::Apply],
-    limit: &dyn Fn(&crate::Apply, &dyn crate::Contents) -> Option<crate::Plan>,
+    limit: &dyn Fn(&crate::Apply, &[u64], &dyn crate::Contents) -> Option<crate::Plan>,
 ) -> crate::Result<Vec<Option<crate::Plan>>> {
     with_formula(f, m, |ev| {
         let g = ev.g;
@@ -2028,10 +2029,10 @@ pub(crate) fn limits_of<M: crate::Modules + Sync>(
             .iter()
             .map(|&a| {
                 let n = *node_of.get(&(a as *const crate::Apply as usize))?;
-                let Op::Apply(_, ref inputs, _) = g.ops[n] else { unreachable!("an application") };
+                let Op::Apply(ap, ref inputs, _) = g.ops[n] else { unreachable!("an application") };
                 let made: Vec<std::cell::OnceCell<Option<Vec<u8>>>> =
                     inputs.iter().map(|_| Default::default()).collect();
-                limit(a, &Asked { at, inputs, made })
+                limit(a, ap.sizes(), &Asked { at, inputs, made })
             })
             .collect())
     })

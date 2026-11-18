@@ -2027,13 +2027,14 @@ impl Formula {
         aqr::eval::eval_formula(self, m, Some(part), threads).map(drop)
     }
 
-    /// What `limit` gives of each application ([`Formula::applies`]) and its inputs, which are
-    /// made (by `m`) only as `limit` reads them, without setting anything: None where it gives
-    /// none or an input asked for cannot be made.
+    /// What `limit` gives of each application ([`Formula::applies`]), its outputs' sizes as the
+    /// decoder has them (one output of an application split) and its inputs, which are made (by
+    /// `m`) only as `limit` reads them, without setting anything: None where it gives none or an
+    /// input asked for cannot be made.
     pub fn plans<M: Modules + Sync>(
         &self,
         m: &M,
-        limit: &dyn Fn(&Apply, &dyn Contents) -> Option<Plan>,
+        limit: &dyn Fn(&Apply, &[u64], &dyn Contents) -> Option<Plan>,
     ) -> Result<Vec<(&Apply, Option<Plan>)>> {
         let applies = self.applies();
         let limits = aqr::eval::limits_of(self, m, &applies, limit)?;
@@ -2041,12 +2042,13 @@ impl Formula {
     }
 
     /// Sets every application's memory limit ([`Apply::memory_limit`]) and task limits to what
-    /// `limit` gives of it and its inputs, which are made (by `m`) only as `limit` reads them. Fails where it gives
-    /// none, or an input asked for cannot be made.
+    /// `limit` gives of it, its outputs' sizes (as [`Formula::plans`]) and its inputs, which are
+    /// made (by `m`) only as `limit` reads them. Fails where it gives none, or an input asked for
+    /// cannot be made.
     pub fn declare_memory<M: Modules + Sync>(
         &mut self,
         m: &M,
-        limit: &dyn Fn(&Apply, &dyn Contents) -> Option<Plan>,
+        limit: &dyn Fn(&Apply, &[u64], &dyn Contents) -> Option<Plan>,
     ) -> Result<()> {
         fn visit<'f>(n: &'f Node, out: &mut Vec<&'f Apply>) {
             match n {

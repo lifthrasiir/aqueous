@@ -156,11 +156,11 @@ pub fn fallbacks() -> Vec<Fallback> {
 /// plans ask.
 pub(crate) fn exceeding(f: &Formula, m: &(impl Modules + Sync), bound: Option<u64>) -> Option<(Module, u64)> {
     let worst: Mutex<Option<(Module, u64)>> = Mutex::new(None);
-    let plans = f.plans(m, &|a, contents| {
+    let plans = f.plans(m, &|a, outputs, contents| {
         let p = match a.memory_limit {
             NO_LIMIT => {
                 let lens: Vec<u64> = a.inputs.iter().map(Node::len).collect();
-                limit(a, &lens, &[a.len], contents)
+                limit(a, &lens, outputs, contents)
             }
             _ => Plan { instance: a.memory_limit, tasks: a.task_limits.clone() },
         };
@@ -249,14 +249,14 @@ pub(crate) fn declare(f: &mut crate::choose::Settled, m: &(impl Modules + Sync),
     if !DECLARE.get() {
         return;
     }
-    let declared = f.declare_memory(m, &|a, contents| {
+    let declared = f.declare_memory(m, &|a, outputs, contents| {
         if a.memory_limit != aqr_formula::NO_LIMIT {
             return Some(Plan { instance: a.memory_limit, tasks: a.task_limits.clone() });
         }
         let lens: Vec<u64> = a.inputs.iter().map(Node::len).collect();
         Some(match known.0.get(&shape(a, &lens)) {
             Some(l) => l.clone(),
-            None => limit(a, &lens, &[a.len], contents),
+            None => limit(a, &lens, outputs, contents),
         })
     });
     declared.expect("a limit for each application");
@@ -283,5 +283,29 @@ mod tests {
         let small = limit(&a, &[1 << 20], &[4 << 20], &none);
         let large = limit(&a, &[1 << 32], &[1 << 34], &none);
         assert!(small == large && large.instance < 4 << 20, "{small:?} {large:?}");
+    }
+
+    /// An application of several outputs not run before is declared with each output's memory,
+    /// as the decoder counts them: `exe-recons/x86`'s two outputs, a window each (one window
+    /// short failed xliveredist.msi's decoding).
+    #[test]
+    fn shared_outputs() {
+        let mut f = Formula::raw("x", vec![0; 14]);
+        let inputs = (0..14).map(|k| Node::slice(0, k, 1)).collect();
+        let a = Apply {
+            module: aqr_decompress::X86,
+            resources: vec![aqr_formula::Resource::new(aqr_exe::arch::x86::Opcodes::BUILTIN.to_resource())],
+            params: vec![0; 26],
+            inputs,
+            len: 0,
+            memory_limit: NO_LIMIT,
+            task_limits: Vec::new(),
+        };
+        let sizes = vec![157696, 15024];
+        f.root = Node::concat(f.share(a.clone(), sizes.clone()));
+        crate::declare_memory(&mut f);
+        let declared = f.applies().iter().find(|a| a.module == aqr_decompress::X86).unwrap().memory_limit;
+        let none: Vec<&[u8]> = Vec::new();
+        assert_eq!(declared, limit(&a, &[1; 14], &sizes, &none).instance);
     }
 }
