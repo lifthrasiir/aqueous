@@ -4993,9 +4993,13 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 let res = (0..n).map(|_| r.index(resources.len())).collect::<Decoded<Vec<_>>>()?;
                 res.iter().for_each(|&i| r_used[i] = true);
                 let params = r.bytes()?;
-                let memory_limit = r.num()?;
+                let mut memory_limit = r.num()?;
                 let old = op == APPLY_OLD;
-                let task_limits = if old { Vec::new() } else { r.nums()? };
+                let mut task_limits = if old { Vec::new() } else { r.nums()? };
+                if !DECLARED_LIMIT.get() {
+                    memory_limit = crate::NO_LIMIT;
+                    task_limits.iter_mut().for_each(|l| *l = crate::NO_LIMIT);
+                }
                 let num_inputs = usize::try_from(r.num()?).unwrap_or(usize::MAX);
                 let output_sizes = r.nums()?;
                 if output_sizes.is_empty() {
@@ -5264,6 +5268,14 @@ fn tests_released(hex: &str) -> bool {
 #[cfg(not(test))]
 fn tests_released(_: &str) -> bool {
     false
+}
+
+aqr_common::zopt! {
+    /// Whether the decoder holds applications to the memory limits their instructions declare
+    /// (`no-declared-limit`: read as no limit, [`crate::NO_LIMIT`], the instance's and each task
+    /// class's alike), so that an archive declaring too little decodes still: for development.
+    static DECLARED_LIMIT: Opt<bool> =
+        Opt::flag("declared-limit", true, "hold applications to their declared memory limits (no-declared-limit: none)");
 }
 
 /// Fails (a resource failure) where the minimal bound of application `a` of module block
