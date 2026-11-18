@@ -102,6 +102,28 @@ static CLASS: [u8; 256] = classes();
 /// What `d` has of the alphabets: the bit of each ([`Alpha::bit`]) of which there is a line of
 /// [`MIN_LINE`] characters (for hexadecimal, of the characters of 2 bytes' worth each).
 fn worth_a_look(d: &[u8]) -> u8 {
+    if d.len() <= CHUNK {
+        return worth_a_look_in(d);
+    }
+    // (each chunk with the characters after it that a line starting in it may take; none
+    // looked at once all are found, as the serial loop stops)
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let found = AtomicU8::new(0);
+    let chunks = d.len().div_ceil(CHUNK);
+    aqr_common::pool::par_map(chunks, aqr_common::pool::size(), |i| {
+        if found.load(Ordering::Relaxed) != 15 {
+            let f = worth_a_look_in(&d[i * CHUNK..((i + 1) * CHUNK + MIN_LINE - 1).min(d.len())]);
+            found.fetch_or(f, Ordering::Relaxed);
+        }
+    });
+    found.into_inner()
+}
+
+/// The bytes of a piece of the file that [`worth_a_look`] and [`long_runs`] look at on a thread.
+const CHUNK: usize = 1 << 20;
+
+/// [`worth_a_look`] of `d` on this thread.
+fn worth_a_look_in(d: &[u8]) -> u8 {
     let mut n = [0usize; 4];
     let mut found = 0u8;
     for &c in d {
@@ -209,9 +231,66 @@ fn run_len(d: &[u8], at: usize, bit: u8) -> usize {
     d[at..].iter().take_while(|&&c| CLASS[c as usize] & bit != 0).count()
 }
 
+/// Of each alphabet (by [`Alpha`]'s index), where the runs of `d` of its characters that are of
+/// [`MIN_LINE`] at least start (each as long as it goes: after a character not of it, or the
+/// file's start), in order; found in one pass, a [`CHUNK`] at a time on the threads, each the
+/// runs that start in it.
+pub fn long_runs(d: &[u8]) -> [Vec<usize>; 4] {
+    let runs_in = |a: usize, b: usize| {
+        let mut runs: [Vec<usize>; 4] = Default::default();
+        // the start of each alphabet's run going on; none (`usize::MAX`) for a run started
+        // before `a`, which is not this chunk's
+        const NONE: usize = usize::MAX;
+        let mut start = [NONE; 4];
+        let before = if a > 0 { CLASS[d[a - 1] as usize] } else { 0 };
+        let mut mine = [0, 1, 2, 3].map(|i| before >> i & 1 == 0);
+        let mut p = a;
+        while p <= d.len() {
+            let k = if p < d.len() { CLASS[d[p] as usize] } else { 0 };
+            for i in 0..4 {
+                if k >> i & 1 != 0 {
+                    if start[i] == NONE && mine[i] && p < b {
+                        start[i] = p;
+                    }
+                } else {
+                    mine[i] = true;
+                    if start[i] != NONE {
+                        if p - start[i] >= MIN_LINE {
+                            runs[i].push(start[i]);
+                        }
+                        start[i] = NONE;
+                    }
+                }
+            }
+            p += 1;
+            // (past the chunk, the runs started in it followed to their ends)
+            if p >= b && start == [NONE; 4] {
+                break;
+            }
+        }
+        runs
+    };
+    if d.len() <= CHUNK {
+        return runs_in(0, d.len());
+    }
+    let chunks = d.len().div_ceil(CHUNK);
+    let all = aqr_common::pool::par_map(chunks, aqr_common::pool::size(), |i| {
+        runs_in(i * CHUNK, ((i + 1) * CHUNK).min(d.len()))
+    });
+    [0, 1, 2, 3].map(|a| all.iter().flat_map(|r| r[a].iter().copied()).collect())
+}
+
 /// The blocks of `d` of the alphabet `alpha`, in order.
 pub fn scan(d: &[u8], alpha: Alpha) -> Vec<Found> {
+    scan_from(d, alpha, &long_runs(d)[alpha as usize])
+}
+
+/// [`scan`] of `d`, of the runs of `alpha` that [`long_runs`] finds in it: where a block may
+/// start, but where the one before it leaves off (a character not of the alphabet is followed by
+/// a whole run, which is a block's start only if long enough).
+fn scan_from(d: &[u8], alpha: Alpha, runs: &[usize]) -> Vec<Found> {
     let bit = alpha.bit();
+    let mut next = 0;
     let (hex, url) = (alpha.is_hex(), alpha == Alpha::UrlSafe);
     let value = alpha.values();
     let min = MIN.get();
@@ -221,8 +300,13 @@ pub fn scan(d: &[u8], alpha: Alpha) -> Vec<Found> {
     let mut p = 0;
     while p < d.len() {
         if CLASS[d[p] as usize] & bit == 0 {
-            p += 1;
-            continue;
+            while runs.get(next).is_some_and(|&r| r < p) {
+                next += 1;
+            }
+            match runs.get(next) {
+                Some(&r) => p = r,
+                None => break,
+            }
         }
         let s0 = p;
         p += run_len(d, p, bit);
@@ -420,7 +504,8 @@ pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
     if d.len() < MIN.get() * 4 / 3 {
         return None;
     }
-    let seen = worth_a_look(d);
+    let runs = long_runs(d);
+    let seen = Alpha::ALL.iter().filter(|a| !runs[**a as usize].is_empty()).fold(0, |s, a| s | a.bit());
     if seen == 0 {
         return None;
     }
@@ -430,7 +515,7 @@ pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
     let mut runs: Vec<Found> = Alpha::ALL
         .iter()
         .filter(|a| seen & a.bit() != 0 && (!a.is_hex() || HEX.get()))
-        .flat_map(|&a| scan(d, a))
+        .flat_map(|&a| scan_from(d, a, &runs[a as usize]))
         .collect();
     runs.sort_by_key(|r| r.start);
     if runs.is_empty() {
@@ -522,4 +607,78 @@ pub(crate) fn apart_slices(stream: usize, lens: &[u64], apart: usize) -> Vec<Nod
         start += n;
     }
     blocks.into_iter().map(|(s, n)| Node::slice(stream, s, n)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Text of a few MiB, with runs of every length about [`MIN_LINE`] and base64 blocks of
+    /// lines across the edges of [`CHUNK`].
+    fn text() -> Vec<u8> {
+        let mut d = Vec::new();
+        let mut x = 1u32;
+        let mut block = |d: &mut Vec<u8>| {
+            for _ in 0..8 {
+                for _ in 0..76 {
+                    x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    d.push(STANDARD[(x >> 16) as usize % 64]);
+                }
+                d.push(b'\n');
+            }
+        };
+        let mut n = 0;
+        while d.len() < 3 * CHUNK + 5000 {
+            // (a block ending right after each edge, another starting right before it)
+            let edge = (d.len() / CHUNK + 1) * CHUNK;
+            if edge - d.len() < 1000 {
+                d.resize(edge - 300, b' ');
+                block(&mut d);
+                d.resize(edge + 2000 - 7 * 77, b' ');
+                block(&mut d);
+            }
+            d.extend(std::iter::repeat_n(b'a', 30 + n % 20));
+            d.extend_from_slice(b" some words, ");
+            n += 1;
+        }
+        d
+    }
+
+    #[test]
+    fn long_runs_by_chunks_are_those_of_one_pass() {
+        let d = text();
+        for a in Alpha::ALL {
+            let bit = a.bit();
+            let mut serial = Vec::new();
+            let mut p = 0;
+            while p < d.len() {
+                let l = run_len(&d, p, bit);
+                if l >= MIN_LINE {
+                    serial.push(p);
+                }
+                p += l.max(1);
+            }
+            assert_eq!(long_runs(&d)[a as usize], serial, "{a:?}");
+        }
+        let seen = (0..d.len()).fold(0u8, |s, i| {
+            s | Alpha::ALL
+                .iter()
+                .filter(|a| d[i..].len() >= MIN_LINE && run_len(&d[..i + MIN_LINE], i, a.bit()) >= MIN_LINE)
+                .fold(0, |s, a| s | a.bit())
+        });
+        assert_eq!(worth_a_look(&d), seen);
+    }
+
+    #[test]
+    fn blocks_across_chunks_are_found() {
+        let d = text();
+        let found = scan(&d, Alpha::Standard);
+        let starts: Vec<usize> = found.iter().map(|f| f.start).collect();
+        let edges: Vec<usize> = (1..=3).map(|i| i * CHUNK).collect();
+        for e in edges {
+            assert!(starts.contains(&(e - 300)), "the block before {e}: {starts:?}");
+            assert!(starts.contains(&(e + 2000 - 7 * 77)), "the block about {e}: {starts:?}");
+        }
+        assert_eq!(found.len(), 6);
+    }
 }
