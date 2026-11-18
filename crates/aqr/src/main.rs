@@ -2299,28 +2299,42 @@ fn viewed<T>(a: &Args, view: &view::View, work: impl FnOnce(&(dyn Fn(aqr_compres
 /// `work` done with `view`'s bar drawn again now and then (for the time a file takes) until it
 /// is done, and once more then (none, with -q).
 fn ticking<T>(a: &Args, view: &dyn view::Ticking, work: impl FnOnce() -> T) -> T {
-    let done = std::sync::atomic::AtomicBool::new(false);
     let bars = !a.quiet && view.shows();
+    let r = ticked(bars, &|| view.tick(), work);
+    if bars {
+        view.tick();
+    }
+    r
+}
+
+/// `work` done with `tick` called now and then (every 250 ms, where `on`) until it is done, or
+/// panics: the ticker stopped as it unwinds too, which the scope waits for before passing the
+/// panic up.
+pub(crate) fn ticked<T>(on: bool, tick: &(dyn Fn() + Sync), work: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Stop<'a>(&'a AtomicBool, Option<std::thread::Thread>);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            if let Some(t) = &self.1 {
+                t.unpark();
+            }
+        }
+    }
+    let done = AtomicBool::new(false);
     std::thread::scope(|s| {
-        let ticker = bars.then(|| {
+        let ticker = on.then(|| {
             s.spawn(|| {
-                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                while !done.load(Ordering::Relaxed) {
                     std::thread::park_timeout(std::time::Duration::from_millis(250));
-                    if !done.load(std::sync::atomic::Ordering::Relaxed) {
-                        view.tick();
+                    if !done.load(Ordering::Relaxed) {
+                        tick();
                     }
                 }
             })
         });
-        let r = work();
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(t) = &ticker {
-            t.thread().unpark();
-        }
-        if bars {
-            view.tick();
-        }
-        r
+        let _stop = Stop(&done, ticker.as_ref().map(|t| t.thread().clone()));
+        work()
     })
 }
 
@@ -4353,6 +4367,19 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panic of the work ends the ticking too, and is passed up: the bar drawn (or a frontend
+    /// told) as a file panicked had aqr wait for ever.
+    #[test]
+    fn ticked_panic_ends() {
+        let (told, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(|| ticked(true, &|| {}, || panic!("the work panics")));
+            told.send(r.is_err()).unwrap();
+        });
+        let panicked = heard.recv_timeout(std::time::Duration::from_secs(20)).expect("a wait for ever");
+        assert!(panicked);
+    }
 
     /// Every developer option of the crates linked: of a well-formed name, declared once, its help
     /// and its namespace's told.

@@ -26,10 +26,9 @@
 //! The pool of threads is of the size `aqr` had on start (`-T` of `begin` does not change it).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use aqr_ipc::{BEGIN, INVENTORY};
 use serde_json::{Value, json};
@@ -135,26 +134,14 @@ fn event(id: &AtomicU64, l: &view::Listing, done: bool) -> Value {
 /// Gathers `a`'s inputs as a compression would, telling how far it is; what is gathered is kept
 /// for [`cached`].
 fn inventory(key: Key, a: Args, id: &AtomicU64, l: &view::Listing, last: &Mutex<Option<Value>>) {
-    let finished = AtomicBool::new(false);
-    let r = std::thread::scope(|s| {
-        let ticker = s.spawn(|| {
-            while !finished.load(Ordering::Relaxed) {
-                std::thread::park_timeout(Duration::from_millis(250));
-                if !finished.load(Ordering::Relaxed) {
-                    ipc::tell(event(id, l, false));
-                }
-            }
-        });
-        let r = aqr_common::pool::run(|| -> Result<Gathered, String> {
+    let r = crate::ticked(true, &|| ipc::tell(event(id, l, false)), || {
+        aqr_common::pool::run(|| -> Result<Gathered, String> {
             let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
             let mut g = Gathered::new(mapper, a.preserve);
             g.gone = a.rm.then(Vec::new);
             gather(Inputs::of(&a), &mut g, l, &a)?;
             Ok(g)
-        });
-        finished.store(true, Ordering::Relaxed);
-        ticker.thread().unpark();
-        r
+        })
     });
     match r {
         Ok(g) => {
