@@ -3176,7 +3176,7 @@ pub fn open_upto<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, metadata: usize) -
 }
 
 /// The decrypted payload `c` of an encrypted archive opened, as [`open`] does, but for the
-/// constraints of a payload: a size hint block, and no spacer blocks.
+/// constraint of a payload: a size hint block first.
 pub fn open_payload<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 'n>> {
     open_as(c, runner, true)
 }
@@ -3390,7 +3390,7 @@ fn opened_with<'c>(
 ) -> Decoded<(Blocks<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>)> {
     let (fields_start, archive_end, size_hint, metadata) = footer_fields(Payload::Plain(c))?;
     // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
-    // hint block among them maybe)
+    // hint block among them maybe: not required then)
     let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], 0, size_hint, metadata != 0, sealed && !salvaging)?;
     if metadata != 0 {
         let at = usize::try_from(metadata).ok().and_then(|b| fields_start.checked_sub(b));
@@ -4294,7 +4294,6 @@ fn parse(d: &[u8], base: usize, size_hint: u64, metadata: bool, sealed: bool) ->
         let dicts = (first.dictionaries, b.dictionaries.len());
         let dictionary_of = |d, has| dictionary_of(d, has, dicts.0, dicts.1);
         match ty {
-            0x00..=0x03 if sealed => return invalid("a spacer block in an encrypted archive's payload"),
             // spacer blocks, of any space: only compressors have to zero it
             0x00..=0x03 => {}
             SIZE_HINT if base + start == 0 => {

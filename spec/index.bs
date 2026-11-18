@@ -3807,8 +3807,30 @@ either a [=standalone archive=] or an [=overlay archive=],
 with the following additional constraints:
 
 * [=archive/size_hint_block=] is no longer optional;
-* No spacer block ([[#spacer-block]]) is allowed, in order to discourage an in-place modification of the encrypted archive;
 * No trailing bytes are allowed after the archive.
+
+Conforming compressors MUST NOT encrypt two different plaintexts of an encrypted chunk
+with the same file key, [=envelope/payload_nonce=] and chunk number,
+because the age payload derives the nonce of each chunk from them and the flag of the last chunk alone,
+so that doing so reveals the difference of the two plaintexts and allows the chunk to be forged.
+In particular, an encrypted archive is not modified in place, e.g. appended to ([[#appending]]);
+an archive changed after its chunks are encrypted is encrypted again as a whole with a new [=envelope/payload_nonce=].
+
+<div class=note>
+  A compressor can satisfy the requirement without comparing the plaintexts
+  by encrypting each chunk at most once for a given [=envelope/payload_nonce=].
+  A chunk whose plaintext isn't final yet, such as the first chunk until the size hint is known
+  or the chunks of a room left for blocks written later,
+  is held unencrypted and encrypted once when all of it is known, which the chunks being of a fixed length allows in any order;
+  a chunk already encrypted that has to change, e.g. when the room left turns out to be too short,
+  leads to a new [=envelope/payload_nonce=] and every chunk encrypted again.
+</div>
+
+<div class=note>
+  Spacer blocks ([[#spacer-block]]) are allowed in the payload as in any other archive.
+  A compressor uses them to fill a room left for blocks written later,
+  and to keep a block and its mirror block an encrypted chunk apart ([[#mirror-block]]).
+</div>
 
 </div>
 
@@ -4255,13 +4277,6 @@ and that differ from an intact mirror block.
   the mirror block of the last metadata block is the nearest one when all the mirror blocks are placed after it,
   and the blocks held back before the metadata block are at least 4096 bytes long when its mirror block is placed before them.
 </div>
-
-Issue: In an encrypted archive, a compressor has nothing to place between a block and its mirror block
-to keep them a chunk apart when nothing else is there, because a spacer block is not allowed in the payload,
-so that a small encrypted archive can't be mirrored;
-nor can it fill the room left for the mirror block of the last metadata block placed before it,
-which then has to come out exact.
-Such a compressor places its mirror blocks as far from their target blocks as it can.
 
 <h3 id=recovery-sets>
 Recovery sets</h3>

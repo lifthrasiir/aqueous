@@ -443,7 +443,6 @@ impl<'c> Index<'c> {
                 _ if critical(ty) && !defined(ty) => {
                     return Err(Failure::Unsupported(format!("a block of an undefined critical type {ty:#x}")));
                 }
-                0x00..=0x03 if self.p.sealed() => return invalid("a spacer block in an encrypted archive's payload"),
                 // spacer, leaf and auxiliary blocks, mirror blocks and undefined non-critical blocks
                 0x00..=0x03 | 0x20..=0x37 | 0x50..=0x57 | 0x60..=0x67 | 0x70..=0x77 => {}
                 _ if !critical(ty) => {}

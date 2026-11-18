@@ -179,8 +179,8 @@ fn restores_damaged_blocks() {
     fs::remove_dir_all(&d).unwrap();
 }
 
-/// An archive of a single file made with `-A`, and an encrypted one: the payload has no spacer
-/// blocks, so that a small archive's mirror blocks are nearer than the spec asks (told).
+/// An archive of a single file made with `-A`, and an encrypted one: a small archive's mirror
+/// blocks kept a chunk away from their blocks by spacer blocks in the payload.
 #[test]
 fn single_and_encrypted() {
     let d = scratch("single");
@@ -204,9 +204,7 @@ fn single_and_encrypted() {
     let t = stderr(&o);
     assert!(o.status.success(), "{t}");
     assert!(
-        t.contains("archival profile: conforms")
-            && t.contains("mirrored archive: no")
-            && t.contains("only nearer than the spec asks"),
+        t.contains("archival profile: conforms") && t.contains("mirrored archive: yes") && !t.contains("nearer"),
         "{t}"
     );
     fs::remove_dir_all(&d).unwrap();

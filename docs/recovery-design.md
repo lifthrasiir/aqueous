@@ -200,7 +200,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 `aqr -A`는 mirror를 마지막 metadata 뒤에 원본 순서대로 모으되, 마지막 metadata의 mirror만은 마지막 4 MiB 이상의 batch를 붙잡아 두고 그 앞에 쓴다. 다중 segment에서는 segment k의 mirror를 segment k+1의 metadata 바로 앞에 쓴다(거리는 segment 하나만큼, 사본은 segment 두 개 분량까지만 든다).
 
-> 꼬리에만 모으면 truncation(E4)이 마지막 metadata와 그 mirror를 함께 지운다. 마지막 batch들을 붙잡아 두면, 붙잡아 둔 만큼보다 짧은 truncation에서는 metadata를 되살리고 footer를 다시 만들 수 있다. 다중 segment 없이 E4를 막는다는 점이 크다. 메모리는 batch가 이미 두 개 분량 메모리에 있으므로 한 batch 남짓 더 드는 정도이다. 암호화 payload에서는 spacer를 못 쓰므로 mirror 자리가 정확히 맞아야 하고, 안 맞으면 꼬리 배치로 물러난다.
+> 꼬리에만 모으면 truncation(E4)이 마지막 metadata와 그 mirror를 함께 지운다. 마지막 batch들을 붙잡아 두면, 붙잡아 둔 만큼보다 짧은 truncation에서는 metadata를 되살리고 footer를 다시 만들 수 있다. 다중 segment 없이 E4를 막는다는 점이 크다. 메모리는 batch가 이미 두 개 분량 메모리에 있으므로 한 batch 남짓 더 드는 정도이다.
 >
 > 나머지 mirror는 다른 mirror를 metadata와 그 사이에 두어 거리를 채우는 것이 가장 싸다. footer 앞의 바이트를 하나도 바꾸지 않으므로 출력 어댑터로 구현되고, 단일 파일 아카이브에도 그대로 쓰인다. 꼬리 하나에 몰린 mirror들은 꼬리 손상에 함께 잃지만, 그때 원본은 남으므로 단일 손상에는 문제가 없다.
 >
@@ -292,7 +292,6 @@ recovery block도 블록이므로 블록 경계에만 놓일 수 있고, data bl
 - 남는 한계:
   - 4 KiB 손상이 평문 64–128 KiB 손실로 커진다. 작은 파일이 많은 구간에서는 "손상된 바이트가 속한 parcel만 잃는다"는 E1 목표를 만족하지 못한다. age 청크 크기가 고정이라 안쪽에서는 해결할 수 없다.
   - 키 없이는 손상 감지도 복구도 할 수 없다(mirrored header 자체의 복원은 예외). 키 없는 scrub이 필요해지면 ciphertext 해시 인덱스나 parity를 non-critical 프레임으로 청크 사이에 넣는 확장을 검토한다. ciphertext의 해시는 ciphertext 이상의 정보를 드러내지 않는다.
-  - 작은 암호화 아카이브는 payload에 spacer를 둘 수 없어 mirror의 거리 조건을 못 지킨다(명세 §Mirrored archives의 Issue).
 
 ### 5.6 repair 절차 [확정]
 

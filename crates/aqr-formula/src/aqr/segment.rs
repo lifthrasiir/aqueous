@@ -728,10 +728,8 @@ impl SegmentWriter {
     /// block, then a spacer block where the room it was given is longer), and those to write
     /// after the blocks held back. The room is found as the metadata block, whose offsets to the
     /// blocks before `front` count it, is made again until its mirror block fits. None where the
-    /// mirror block would be nearer the metadata block than the spec asks; but in an encrypted
-    /// archive's payload (`chunked`), where the room has to come out exact (it may have no
-    /// spacer blocks), it is put there however near where the blocks held back are more than
-    /// the other blocks' mirror blocks after the metadata block would be.
+    /// mirror block would be nearer the metadata block than the spec asks (a whole chunk between
+    /// them in an encrypted archive's payload, where `chunked`).
     pub fn finish_mirrored(
         &self,
         enc: &Encoder,
@@ -748,15 +746,12 @@ impl SegmentWriter {
             let at = self.at + room;
             let mut mirror = super::mirror::mirror_of(&meta, at as u64, front as u64, false);
             let len = mirror.len();
-            if len > room || (chunked && len != room) {
+            if len > room {
                 // (a little more each time, where it does not settle)
                 room = len + if tries < 3 { 0 } else { 2 << tries };
                 continue;
             }
-            // (in an encrypted archive's payload, before the blocks however near, where that is
-            // further than after them all, the other mirror blocks alone between)
-            let near = super::mirror::least_start((front + len) as u64, chunked) > at as u64;
-            if near && (!chunked || self.at - front < self.mirrorable) {
+            if super::mirror::least_start((front + len) as u64, chunked) > at as u64 {
                 return Ok(None);
             }
             if room > len {

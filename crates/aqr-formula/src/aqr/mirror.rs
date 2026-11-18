@@ -16,7 +16,7 @@
 //! the blocks after it and the mirrors before its own: far for most, a block near the end as far
 //! as the mirrors of the blocks after it (the metadata block, as far as all the others). A mirror
 //! block nearer its block than the spec's least distance has a spacer block before it (4 KiB at
-//! most); in an encrypted archive's payload, which may have no spacer blocks, it is left nearer.
+//! most; in an encrypted archive's payload, up to the start of the chunk after the next).
 //! The archive of a segment holds the copies until its end: about as many bytes as its formula,
 //! module and metadata blocks. An archive of several segments has the mirror blocks of each
 //! segment written between blocks before the next one's metadata block ([`Mirroring::mirror_before`]),
@@ -188,8 +188,8 @@ impl<W: Write> Mirroring<W> {
     /// Writes now, between blocks, the mirror blocks of the blocks kept that end by `end` (those
     /// of segments closed, say: an archive of several segments has those of each segment after
     /// the next, rather than all of them at its end, holding the copies of about two segments'
-    /// blocks); with a spacer block before one nearer its block than the spec's least distance
-    /// but in an encrypted archive's payload. Returns the bytes written, which the blocks after
+    /// blocks); with a spacer block before one nearer its block than the spec's least distance.
+    /// Returns the bytes written, which the blocks after
     /// them are moved by ([`super::SegmentWriter::skip`]). Fails in a block, and where `out` does.
     pub fn mirror_before(&mut self, end: u64) -> io::Result<u64> {
         if !matches!(self.at, At::Head) || !self.held.is_empty() {
@@ -202,7 +202,7 @@ impl<W: Write> Mirroring<W> {
         for t in now.iter().filter(|t| !self.mirrored.contains(&t.start)) {
             let least = least_start(t.end, self.chunked);
             let at = self.written + tail.len() as u64;
-            if at < least && !self.chunked {
+            if at < least {
                 spacer(&mut tail, (least - at).next_multiple_of(2).max(2));
             }
             let at = self.written + tail.len() as u64;
@@ -293,7 +293,7 @@ impl<W: Write> Mirroring<W> {
         for t in self.targets.iter().filter(|t| !self.mirrored.contains(&t.start)) {
             let at = footer_at + tail.len() as u64;
             let least = least_start(t.end, self.chunked);
-            if at < least && !self.chunked {
+            if at < least {
                 spacer(&mut tail, (least - at).next_multiple_of(2).max(2));
             }
             let at = footer_at + tail.len() as u64;
@@ -1229,11 +1229,12 @@ mod tests {
             assert_eq!(c.mirrors.last().unwrap().target, c.targets.last().unwrap().0);
             assert_eq!(m[footer], 0x01);
         }
-        // (an encrypted archive's payload: no spacer blocks, the mirror blocks left near)
+        // (an encrypted archive's payload: a spacer block keeping the mirror blocks a chunk away)
         let m = mirrored(&a, 64, true);
         let c = check(&m);
-        assert_eq!((c.mirrors.len(), c.unmirrored(), c.near(true)), (5, 0, 5));
-        assert!(!c.mirrored(&m, true));
+        assert_eq!((c.mirrors.len(), c.unmirrored(), c.near(true)), (5, 0, 0));
+        assert!(c.mirrored(&m, true));
+        assert!(m.len() as u64 > 2 * CHUNK);
         assert_eq!(files(&m), files(&a));
     }
 
