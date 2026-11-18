@@ -788,18 +788,52 @@ pub trait Sink: Write {
     }
 }
 
-/// A file written at offsets ([`Sink::place`]).
-pub struct Placing(std::fs::File);
+/// An archive written at offsets ([`Sink::place`]): a file, or the payload of an encrypted
+/// archive, its chunks sealed as they are whole.
+pub enum Placing {
+    File(std::fs::File),
+    Sealed(Arc<aqr::envelope::Placed>),
+}
 
 impl Placing {
-    fn read_at(&self, at: u64, d: &mut [u8]) -> io::Result<()> {
-        aqr_common::fsio::read_exact_at(&self.0, d, at)
+    /// Moves bytes `from..end` written back by `by` bytes (the payload of an encrypted archive
+    /// sealed again under a new nonce, [`aqr::envelope::Placed::moved_back`]).
+    fn moved_back(&self, from: u64, end: u64, by: u64) -> io::Result<()> {
+        let f = match self {
+            Placing::File(f) => f,
+            Placing::Sealed(p) => return p.moved_back(from, end, by),
+        };
+        let mut buf = vec![0u8; 8 << 20];
+        let mut at = end;
+        while at > from {
+            let n = (at - from).min(buf.len() as u64);
+            at -= n;
+            aqr_common::fsio::read_exact_at(f, &mut buf[..n as usize], at)?;
+            aqr_common::fsio::write_all_at(f, &buf[..n as usize], at + by)?;
+        }
+        Ok(())
     }
 }
 
 impl aqr::sink::Place for Placing {
     fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
+        match self {
+            Placing::File(f) => aqr_common::fsio::write_all_at(f, d, at),
+            Placing::Sealed(p) => p.write_at(at, d),
+        }
+    }
+}
+
+/// The file an encrypted archive's chunks are written to at offsets ([`Placing::Sealed`]).
+struct SealedFile(std::fs::File);
+
+impl aqr::envelope::At for SealedFile {
+    fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
         aqr_common::fsio::write_all_at(&self.0, d, at)
+    }
+
+    fn read_at(&self, at: u64, d: &mut [u8]) -> io::Result<()> {
+        aqr_common::fsio::read_exact_at(&self.0, d, at)
     }
 }
 
@@ -833,7 +867,7 @@ impl Sink for std::fs::File {
 
     fn place(&mut self) -> Option<Arc<Placing>> {
         let empty = self.stream_position().ok()? == 0 && self.metadata().ok()?.len() == 0;
-        empty.then(|| self.try_clone().ok().map(|f| Arc::new(Placing(f)))).flatten()
+        empty.then(|| self.try_clone().ok().map(|f| Arc::new(Placing::File(f)))).flatten()
     }
 
     fn placed(&mut self, len: u64) -> io::Result<()> {
@@ -874,6 +908,18 @@ impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::env
 
     fn restart(&mut self) -> io::Result<()> {
         aqr::envelope::Sealer::restart(self, |f| std::borrow::Borrow::<std::fs::File>::borrow(f).set_len(0))
+    }
+
+    /// The payload written at offsets, each chunk sealed once it is whole (the first, and those
+    /// a room is left in, only once that is filled).
+    fn place(&mut self) -> Option<Arc<Placing>> {
+        let f = std::borrow::Borrow::<std::fs::File>::borrow(self.get_ref()).try_clone().ok()?;
+        let p = aqr::envelope::Sealer::place(self, Arc::new(SealedFile(f)))?;
+        Some(Arc::new(Placing::Sealed(p)))
+    }
+
+    fn placed(&mut self, len: u64) -> io::Result<()> {
+        aqr::envelope::Sealer::placed(self, len)
     }
 }
 
@@ -972,7 +1018,9 @@ fn direct_room(d: &[u8], kind: Kind, opt: &Options, enc: &aqr::Encoder) -> Optio
     // (the data compressed at most: Zstandard's raw blocks, its frame and the block's header)
     let formula = bound + bound / 128 + 64;
     let modules = enc.module_len(aqr_tensors::formula::MODULE).ok()?;
-    let room = formula + modules + 2;
+    // (and the size hint block to be filled in, of an encrypted archive's payload)
+    let hint = if opt.size_hint { aqr::SIZE_HINT_PLACEHOLDER.len() } else { 0 };
+    let room = hint + formula + modules + 2;
     #[cfg(test)]
     if let Some(n) = tests::DIRECT_ROOM.get() {
         return Some(n);
@@ -1176,33 +1224,23 @@ fn written_direct(
         true => (start + room, end),
         false => {
             let by = need - room;
-            moved_back(place, start + room, end, by)?;
+            place.moved_back(start + room, end, by)?;
             (start + need, end + by)
         }
     };
     let spacer = blocks_at - start - head.len() as u64;
     place.write_at(0, &aqr::HEADER_MAGIC)?;
     place.write_at(start, &head)?;
-    place.write_at(start + head.len() as u64, &aqr::kill(spacer as usize))?;
+    // (the spacer whole, its space zeroed too: an encrypted archive's chunks are sealed only
+    // once all of their bytes are written)
+    let mut kill = aqr::kill(spacer as usize);
+    kill.resize(spacer as usize, 0);
+    place.write_at(start + head.len() as u64, &kill)?;
     let footer = aqr::footer_bytes((end - start) as usize);
     place.write_at(end, &footer)?;
     let n = end + footer.len() as u64;
     out.placed(n)?;
     Ok(Ok(n as usize))
-}
-
-/// Moves bytes `from..end` written through `place` back by `by` bytes, from the end on.
-fn moved_back(place: &Placing, from: u64, end: u64, by: u64) -> io::Result<()> {
-    use aqr::sink::Place;
-    let mut buf = vec![0u8; 8 << 20];
-    let mut at = end;
-    while at > from {
-        let n = (at - from).min(buf.len() as u64);
-        at -= n;
-        place.read_at(at, &mut buf[..n as usize])?;
-        place.write_at(at + by, &buf[..n as usize])?;
-    }
-    Ok(())
 }
 
 /// What verifying compares a file with, as it was read through before the archive was written
@@ -5571,6 +5609,44 @@ mod tests {
         let (mut c, before) = (Vec::new(), DIRECTED.get());
         compress_with(&d, Kind::Unknown, &opt, false, None, &mut c).unwrap();
         assert!(DIRECTED.get() == before && c == held);
+        _ = std::fs::remove_file(&path);
+    }
+
+    /// [`gguf_direct`], of an encrypted archive: its payload written at offsets, each chunk
+    /// sealed once it is whole, the first after the room is filled; its blocks moved under a new
+    /// nonce where the room is too small. It decrypts to an archive giving the file back.
+    #[test]
+    fn gguf_direct_sealed() {
+        let d = aqr_tensors::synth::file(3, 8);
+        let path = std::env::temp_dir().join(format!("aqr-compress-direct-sealed-{}.aqr", std::process::id()));
+        let archived = |threads: usize, min: usize, room: Option<u64>| {
+            DIRECT_MIN.set(Some(min));
+            DIRECT_ROOM.set(room);
+            TENSORS_SEGMENT.set(Some(64 << 10));
+            let opt = Options { threads, size_hint: true, ..Options::default() };
+            let mut file =
+                std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+            let before = DIRECTED.get();
+            let mut s = aqr::envelope::Sealer::new(&mut file, b"p", 12, true).unwrap();
+            compress_with(&d, Kind::Unknown, &opt, false, None, &mut s).unwrap();
+            s.finish().unwrap();
+            drop(s);
+            drop(file);
+            let c = std::fs::read(&path).unwrap();
+            let payload = aqr::envelope::open(&c).unwrap().unlock(b"p").unwrap().decrypt(2).unwrap();
+            assert!(aqr_decompress::decompress(&payload, 1).unwrap() == d);
+            (payload, DIRECTED.get() - before)
+        };
+        let (one, directed) = archived(1, 0, None);
+        assert_eq!(directed, 1);
+        assert!(one.len() > 4 << 16, "of several chunks");
+        let (four, _) = archived(4, 0, None);
+        assert!(four == one, "the same whatever the threads");
+        let (moved, _) = archived(2, 0, Some(2));
+        assert!(moved.len() < one.len());
+        let (held, directed) = archived(2, usize::MAX, None);
+        assert_eq!(directed, 0);
+        assert!(moved.len() < held.len() + 64);
         _ = std::fs::remove_file(&path);
     }
 

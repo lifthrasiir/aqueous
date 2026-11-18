@@ -1099,8 +1099,9 @@ impl Encoder {
 
     /// The blocks that go before those a direct sink wrote ([`sink::Sink::direct`]) in the
     /// archive of `f`, all of whose streams are of the sink, stream `k` of `f` the sink's `k`
-    /// (`sunk`, of [`sink::Sink::close_direct`]): its module and resource blocks, then its formula
-    /// block. The blocks of the sink follow it, then the footer ([`footer_bytes`]). Fails where a
+    /// (`sunk`, of [`sink::Sink::close_direct`]): its size hint block to be filled in where there is
+    /// one ([`Encoder::with_size_hint`]), its module and resource blocks, then its formula block.
+    /// The blocks of the sink follow it, then the footer ([`footer_bytes`]). Fails where a
     /// stream of `f` is not the sink's, or a block written is taken by no slice (the spec has
     /// every non-leaf block taken).
     pub fn direct_head(&self, f: &Formula, sunk: &[sink::Sunk], checksum: Option<u64>) -> Result<Vec<u8>> {
@@ -1141,6 +1142,9 @@ impl Encoder {
         }
         let (data, modules, resources) = self.formula_data(f, &ordinals, &[], next, checksum)?;
         let mut out = Vec::new();
+        if self.size_hint {
+            out.extend_from_slice(&SIZE_HINT_PLACEHOLDER);
+        }
         let level = self.base_level();
         for &m in &modules {
             self.write_module(&mut out, m, level)?;

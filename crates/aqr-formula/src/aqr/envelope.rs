@@ -12,7 +12,9 @@
 //! and is sealed last, once the footer gives the size (the encoder writes the block with a
 //! placeholder, [`super::Encoder::with_size_hint`]).
 
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
@@ -62,17 +64,21 @@ fn mirror_before(m: u64) -> Option<u32> {
 }
 
 /// The mirrored headers preceding chunk `m` and those before it.
-#[cfg(test)]
 fn mirrors_to(m: u64) -> u64 {
     let n = m + 1;
     if n >= 64 { 5 + n / 64 } else { (63 - n.leading_zeros()) as u64 }
 }
 
 /// Where chunk `m` starts, in an archive `mirrored` or not.
-#[cfg(test)]
 fn chunk_at(m: u64, mirrored: bool) -> u64 {
     let mirrors = if mirrored { mirrors_to(m) * MIRROR as u64 } else { 0 };
     header_len(mirrored) as u64 + m * SEALED as u64 + mirrors
+}
+
+/// Where chunk `m` starts with the mirrored header before it, if any.
+fn chunk_with_mirror_at(m: u64, mirrored: bool) -> u64 {
+    let before = mirrored && mirror_before(m).is_some();
+    chunk_at(m, mirrored) - if before { MIRROR as u64 } else { 0 }
 }
 
 /// Base64 without padding (RFC 4648 §4), as age writes its header.
@@ -202,6 +208,8 @@ pub struct Sealer<W: Write + Seek> {
     /// The last bytes written (of the footer).
     tail: Vec<u8>,
     done: bool,
+    /// Where the payload is being written at offsets ([`Sealer::place`]).
+    placed: Option<Arc<Placed>>,
 }
 
 impl<W: Write + Seek> Sealer<W> {
@@ -233,6 +241,7 @@ impl<W: Write + Seek> Sealer<W> {
             m: 1,
             tail: Vec::new(),
             done: false,
+            placed: None,
         };
         s.begin()?;
         Ok(s)
@@ -257,7 +266,60 @@ impl<W: Write + Seek> Sealer<W> {
         self.m = 1;
         self.tail.clear();
         self.done = false;
+        self.placed = None;
         self.begin()
+    }
+
+    /// Where nothing is written yet: the payload to be written at offsets of the archive (its
+    /// plaintext) through what is returned, its chunks written to the file through `at`, until
+    /// [`Sealer::placed`]. None where something is written.
+    pub fn place(&mut self, at: Arc<dyn At>) -> Option<Arc<Placed>> {
+        if self.done || self.placed.is_some() || self.m != 1 || !self.first.is_empty() || !self.chunk.is_empty() {
+            return None;
+        }
+        let state = Placing::new(self.fields, self.cipher.clone());
+        let p = Arc::new(Placed { at, mirrored: self.mirrored, file_key: self.file_key, state: Mutex::new(state) });
+        self.placed = Some(p.clone());
+        Some(p)
+    }
+
+    /// Goes on after the `len` bytes written through [`Sealer::place`], all of them there: the
+    /// chunks sealed by it and the payload nonce it may have changed taken over, the first and
+    /// the last held as [`Write`] holds them.
+    pub fn placed(&mut self, len: u64) -> io::Result<()> {
+        let p = self.placed.take().ok_or_else(|| io::Error::other("a sealer not placed"))?;
+        let mut s = p.state.lock().unwrap();
+        let c = CHUNK as u64;
+        // (the chunk the bytes end in, but the first)
+        let last = if len > c { (len - 1) / c } else { 0 };
+        let filled = |s: &Placing, m: u64| s.open.get(&m).map_or(0, |o| o.1 as u64);
+        let whole = s.end == len
+            && s.sealed.len() as u64 == last.saturating_sub(1)
+            && filled(&s, 0) == len.min(c)
+            && (last == 0 || filled(&s, last) == len - last * c)
+            && s.open.len() == if last == 0 { (len > 0) as usize } else { 2 };
+        if !whole {
+            return Err(io::Error::other("a sealed archive placed with bytes missing"));
+        }
+        let mut take = |m: u64| s.open.remove(&m).map(|(b, n)| b[..n].to_vec()).unwrap_or_default();
+        self.first = take(0);
+        self.chunk = if last == 0 { Vec::new() } else { take(last) };
+        self.m = last.max(1);
+        // (the last bytes, of the footer: of the chunk before too where the last is short)
+        let before = match last {
+            0 => Vec::new(),
+            1 => self.first.clone(),
+            _ => s.tail.clone().filter(|t| t.0 == last - 1).map(|t| t.1).unwrap_or_default(),
+        };
+        let now = if last == 0 { &self.first } else { &self.chunk };
+        let mut tail = [&before[..], &now[..]].concat();
+        tail.drain(..tail.len().saturating_sub(32));
+        self.tail = tail;
+        self.fields = s.fields;
+        self.cipher = s.cipher.clone();
+        drop(s);
+        self.out.seek(SeekFrom::Start(chunk_with_mirror_at(self.m, self.mirrored)))?;
+        Ok(())
     }
 
     /// Chunk `m` of `d` sealed, the last or not.
@@ -287,6 +349,9 @@ impl<W: Write + Seek> Sealer<W> {
     pub fn finish(&mut self) -> io::Result<()> {
         if self.done {
             return Ok(());
+        }
+        if self.placed.is_some() {
+            return Err(io::Error::other("a sealer still placed"));
         }
         let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("not an archive to seal: {m}"));
         // the size hint, from the footer
@@ -350,6 +415,9 @@ impl<W: Write + Seek> Write for Sealer<W> {
         if self.done {
             return Err(io::Error::other("an archive sealed already"));
         }
+        if self.placed.is_some() {
+            return Err(io::Error::other("a sealer placed written from its start"));
+        }
         let n = d.len();
         if d.len() >= 32 {
             self.tail.clear();
@@ -376,6 +444,159 @@ impl<W: Write + Seek> Write for Sealer<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.out.flush()
+    }
+}
+
+/// Where the chunks of a sealed archive written at offsets are written ([`Sealer::place`]): the
+/// file, read back where they are moved ([`Placed::moved_back`]).
+pub trait At: Send + Sync {
+    fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()>;
+    fn read_at(&self, at: u64, d: &mut [u8]) -> io::Result<()>;
+}
+
+/// The payload of a [`Sealer`] written at offsets of the archive (its plaintext), as
+/// [`super::sink::Place`]: each chunk sealed and written once all of its bytes are there and some
+/// after it (the last chunk is flagged as such), but the first, held as the sealer holds it. A
+/// chunk is sealed at most once under a payload nonce (spec, "Encrypted archives"): a write into
+/// one sealed fails, and the bytes moved ([`Placed::moved_back`]) are sealed again under a new
+/// nonce. The bytes written are not to overlap (they are counted, not marked).
+pub struct Placed {
+    at: Arc<dyn At>,
+    mirrored: bool,
+    file_key: [u8; 16],
+    state: Mutex<Placing>,
+}
+
+/// What [`Placed`] holds.
+struct Placing {
+    fields: Fields,
+    cipher: ChaCha20Poly1305,
+    /// The chunks not sealed, and how many bytes are written into them so far.
+    open: HashMap<u64, (Box<[u8]>, usize)>,
+    /// The chunks sealed (written).
+    sealed: HashSet<u64>,
+    /// The chunks whole, but with no byte after them yet (but the first).
+    whole: BTreeSet<u64>,
+    /// The end of the bytes written.
+    end: u64,
+    /// The last bytes of the last chunk sealed, and its index.
+    tail: Option<(u64, Vec<u8>)>,
+}
+
+impl Placing {
+    fn new(fields: Fields, cipher: ChaCha20Poly1305) -> Placing {
+        let (open, sealed, whole) = (HashMap::new(), HashSet::new(), BTreeSet::new());
+        Placing { fields, cipher, open, sealed, whole, end: 0, tail: None }
+    }
+
+    /// Bytes `d` put at `at`: the chunks then to be sealed, by their index.
+    fn put(&mut self, mut at: u64, mut d: &[u8]) -> io::Result<Vec<(u64, Box<[u8]>)>> {
+        let c = CHUNK as u64;
+        self.end = self.end.max(at + d.len() as u64);
+        while !d.is_empty() {
+            let m = at / c;
+            if self.sealed.contains(&m) {
+                return Err(io::Error::other(format!("chunk {m} of a sealed archive written again once sealed")));
+            }
+            let o = (at % c) as usize;
+            let n = (CHUNK - o).min(d.len());
+            let (b, filled) = self.open.entry(m).or_insert_with(|| (vec![0; CHUNK].into_boxed_slice(), 0));
+            b[o..o + n].copy_from_slice(&d[..n]);
+            *filled += n;
+            if *filled > CHUNK {
+                return Err(io::Error::other(format!("bytes of chunk {m} of a sealed archive written twice")));
+            }
+            if *filled == CHUNK && m != 0 {
+                self.whole.insert(m);
+            }
+            at += n as u64;
+            d = &d[n..];
+        }
+        let mut ready = Vec::new();
+        while let Some(&m) = self.whole.first()
+            && (m + 1) * c < self.end
+        {
+            self.whole.pop_first();
+            let (b, _) = self.open.remove(&m).expect("a chunk whole is open");
+            self.sealed.insert(m);
+            if self.tail.as_ref().is_none_or(|t| t.0 < m) {
+                self.tail = Some((m, b[CHUNK - 32..].to_vec()));
+            }
+            ready.push((m, b));
+        }
+        Ok(ready)
+    }
+}
+
+impl Placed {
+    /// Chunk `m` (not the last) of plaintext `d` sealed under `fields` and `cipher`, and written
+    /// with the mirrored header before it.
+    fn write_sealed(&self, fields: &Fields, cipher: &ChaCha20Poly1305, m: u64, d: &[u8]) -> io::Result<()> {
+        let mut c = Vec::with_capacity(MIRROR + SEALED);
+        if self.mirrored
+            && let Some(k) = mirror_before(m)
+        {
+            c.extend_from_slice(&fields.mirror(k));
+        }
+        let from = c.len();
+        c.extend_from_slice(d);
+        let tag = cipher.encrypt_in_place_detached(&chunk_nonce(m, false), &[], &mut c[from..]).expect("a chunk");
+        c.extend_from_slice(&tag);
+        self.at.write_at(chunk_with_mirror_at(m, self.mirrored), &c)
+    }
+
+    /// Moves the bytes `from..end` written, all of them, back by `by` bytes: under a new payload
+    /// nonce (the header written again), every chunk sealed again as it is whole, from the end
+    /// on, those sealed read back (each before its place is written again). Fails where other
+    /// bytes are written, or bytes of the range are not.
+    pub fn moved_back(&self, from: u64, end: u64, by: u64) -> io::Result<()> {
+        let mut s = self.state.lock().unwrap();
+        let c = CHUNK as u64;
+        let written = s.sealed.len() as u64 * c + s.open.values().map(|o| o.1 as u64).sum::<u64>();
+        if from >= end || s.end != end || written != end - from {
+            return Err(io::Error::other("bytes of a sealed archive moved but those written"));
+        }
+        let mut fields = s.fields;
+        fields.0[81..97].copy_from_slice(&random::<16>()?);
+        let cipher = fields.payload(&self.file_key);
+        let old = std::mem::replace(&mut *s, Placing::new(fields, cipher));
+        s.end = end + by;
+        self.at.write_at(0, &fields.header(self.mirrored))?;
+        for m in (from / c..=(end - 1) / c).rev() {
+            let d: Box<[u8]> = match old.open.get(&m) {
+                Some((b, _)) => b.clone(),
+                None => {
+                    let mut b = vec![0; SEALED];
+                    self.at.read_at(chunk_at(m, self.mirrored), &mut b)?;
+                    let (d, tag) = b.split_at_mut(CHUNK);
+                    let tag = Tag::clone_from_slice(tag);
+                    old.cipher
+                        .decrypt_in_place_detached(&chunk_nonce(m, false), &[], d, &tag)
+                        .map_err(|_| io::Error::other(format!("chunk {m} of a sealed archive not read back")))?;
+                    b.truncate(CHUNK);
+                    b.into_boxed_slice()
+                }
+            };
+            let (lo, hi) = ((m * c).max(from), ((m + 1) * c).min(end));
+            for (k, b) in s.put(lo + by, &d[(lo - m * c) as usize..(hi - m * c) as usize])? {
+                self.write_sealed(&s.fields, &s.cipher, k, &b)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl super::sink::Place for Placed {
+    fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
+        let (ready, fields, cipher) = {
+            let mut s = self.state.lock().unwrap();
+            let ready = s.put(at, d)?;
+            (ready, s.fields, s.cipher.clone())
+        };
+        for (m, b) in ready {
+            self.write_sealed(&fields, &cipher, m, &b)?;
+        }
+        Ok(())
     }
 }
 
@@ -998,6 +1219,121 @@ mod tests {
         s.write_all(&a).unwrap();
         let c = s.into_inner().unwrap().into_inner();
         assert_eq!(opened(&c, b"p").unwrap().len(), a.len());
+    }
+
+    /// A file of bytes in memory, written from a position (a sealer's output) and at offsets
+    /// (its chunks placed), both at once.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>, u64);
+
+    impl Shared {
+        fn put(&self, at: u64, d: &[u8]) {
+            let mut v = self.0.lock().unwrap();
+            let (at, end) = (at as usize, at as usize + d.len());
+            if v.len() < end {
+                v.resize(end, 0);
+            }
+            v[at..end].copy_from_slice(d);
+        }
+    }
+
+    impl Write for Shared {
+        fn write(&mut self, d: &[u8]) -> io::Result<usize> {
+            self.put(self.1, d);
+            self.1 += d.len() as u64;
+            Ok(d.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for Shared {
+        fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
+            self.1 = match p {
+                SeekFrom::Start(n) => n,
+                SeekFrom::Current(n) => self.1.checked_add_signed(n).unwrap(),
+                SeekFrom::End(n) => (self.0.lock().unwrap().len() as u64).checked_add_signed(n).unwrap(),
+            };
+            Ok(self.1)
+        }
+    }
+
+    impl At for Shared {
+        fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
+            self.put(at, d);
+            Ok(())
+        }
+
+        fn read_at(&self, at: u64, d: &mut [u8]) -> io::Result<()> {
+            let v = self.0.lock().unwrap();
+            let s = v.get(at as usize..at as usize + d.len()).ok_or(io::ErrorKind::UnexpectedEof)?;
+            d.copy_from_slice(s);
+            Ok(())
+        }
+    }
+
+    /// An archive written at offsets ([`Sealer::place`]): the bytes after a room at its start in
+    /// pieces from the end on, maybe written nearer the start and moved back to their place
+    /// ([`Placed::moved_back`], under a new nonce), then the room, then the last bytes from the
+    /// start on ([`Sealer::placed`]). It opens to the archive as sealed from its start does, mirrored
+    /// or not; a chunk sealed is not written again.
+    #[test]
+    fn placed_at_offsets() {
+        use super::super::sink::Place;
+        for (n, mirrored) in [(100, false), (CHUNK - 30, true), (3 * CHUNK, false), (70 * CHUNK + 3, true)] {
+            let a = archive(n);
+            let room = a.len() / 3;
+            for (by, after) in [(0, 0), (0, 37), (room / 2, 0), (CHUNK + 9, 37)] {
+                if by >= room || after >= a.len() - room {
+                    continue;
+                }
+                let out = Shared::default();
+                let mut s = Sealer::new(out.clone(), b"p", 12, mirrored).unwrap();
+                let p = s.place(Arc::new(out.clone())).unwrap();
+                assert!(s.place(Arc::new(out.clone())).is_none());
+                let end = a.len() - after;
+                let mut at = end;
+                for k in (1..).map(|i| i * 7919 % 100_003) {
+                    let from = at.saturating_sub(k).max(room);
+                    p.write_at((from - by) as u64, &a[from..at]).unwrap();
+                    at = from;
+                    if at == room {
+                        break;
+                    }
+                }
+                if by > 0 {
+                    let old = s.fields.nonce().to_vec();
+                    p.moved_back((room - by) as u64, (end - by) as u64, by as u64).unwrap();
+                    assert!(p.state.lock().unwrap().fields.nonce() != old);
+                }
+                if n > 4 * CHUNK {
+                    let sealed = (room / CHUNK + 2) * CHUNK;
+                    assert!(p.write_at(sealed as u64 + 1, &[0]).is_err(), "a chunk sealed written again");
+                }
+                p.write_at(0, &a[..room]).unwrap();
+                s.placed(end as u64).unwrap();
+                s.write_all(&a[end..]).unwrap();
+                s.finish().unwrap();
+                let c = out.0.lock().unwrap().clone();
+                let want = opened(&sealed(&a, b"p", mirrored), b"p").unwrap();
+                assert!(opened(&c, b"p").unwrap() == want, "{n} bytes, {by} moved, {after} after");
+            }
+        }
+    }
+
+    /// Bytes missing as a sealer placed goes on fail.
+    #[test]
+    fn placed_whole() {
+        use super::super::sink::Place;
+        let a = archive(3 * CHUNK);
+        let out = Shared::default();
+        let mut s = Sealer::new(out.clone(), b"p", 12, true).unwrap();
+        let p = s.place(Arc::new(out.clone())).unwrap();
+        p.write_at(0, &a[..CHUNK]).unwrap();
+        p.write_at(CHUNK as u64 + 1, &a[CHUNK + 1..]).unwrap();
+        assert!(s.placed(a.len() as u64).is_err());
     }
 
     /// Writes archives for `scripts/age-interop.py` to check against age, into `AQR_AGE_DIR`:
