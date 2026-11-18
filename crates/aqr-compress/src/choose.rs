@@ -6,8 +6,12 @@
 //! comes to less after it than the data as it is does after the other's data. The others'
 //! formulas count as made (siblings take the same way), those within it as chosen already
 //! (innermost first).
+//!
+//! A formula whose alternatives are all chosen is [`Settled`], made only here: what is declared,
+//! sealed and archived takes one, so that no formula holding alternatives comes to them.
 
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
 use aqr_formula::aqr::Encoder;
 use aqr_formula::{Apply, Either, Formula, Module, Node, Of, Resource};
@@ -31,9 +35,61 @@ pub(crate) struct Chosen {
     pub bytes: usize,
 }
 
+/// A formula holding no alternatives ([`Node::Either`]): chosen ([`choose`], [`by_blocks`]), or
+/// their data kept ([`kept`]). Its memory is declared ([`crate::memory::declare`]) and it is
+/// sealed ([`crate::seal::Sink`]) and archived as this alone. What changes it (through
+/// [`DerefMut`]) puts no alternative in it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Settled(Formula);
+
+impl Settled {
+    pub fn into_inner(self) -> Formula {
+        self.0
+    }
+}
+
+impl Deref for Settled {
+    type Target = Formula;
+
+    fn deref(&self) -> &Formula {
+        &self.0
+    }
+}
+
+impl DerefMut for Settled {
+    fn deref_mut(&mut self) -> &mut Formula {
+        &mut self.0
+    }
+}
+
+/// `f` with the data of its alternatives kept, as they were compared: where nothing chooses
+/// (a content sealed as it is made, a formula of a file that is not alone).
+pub(crate) fn kept(mut f: Formula) -> Settled {
+    let n = f.eithers().len();
+    if n > 0 {
+        f.resolve(&vec![false; n]);
+    }
+    Settled(f)
+}
+
+/// What `go` gives of formula `f` [`kept`] in place: of a formula that a recompressor hands
+/// through `&mut` (aqr-tensors' parts).
+pub(crate) fn kept_in<R>(f: &mut Formula, go: impl FnOnce(&mut Settled) -> R) -> R {
+    let mut s = kept(std::mem::take(f));
+    let r = go(&mut s);
+    *f = s.0;
+    r
+}
+
 /// Chooses the alternatives of `f`, a batch's formula (its root's parts its files), and resolves
 /// them ([`Formula::resolve_parts`]).
-pub(crate) fn choose(f: &mut Formula, enc: &Encoder) -> Chosen {
+pub(crate) fn choose(mut f: Formula, enc: &Encoder) -> (Settled, Chosen) {
+    let chosen = choose_in(&mut f, enc);
+    (Settled(f), chosen)
+}
+
+/// [`choose`] in place.
+fn choose_in(f: &mut Formula, enc: &Encoder) -> Chosen {
     let eithers = f.eithers();
     let n = eithers.len();
     if n == 0 {
@@ -69,7 +125,13 @@ enum Block {
 /// takes are paid for already. An alternative of a scan whose files were all kept beside their
 /// data (sized `(0, len)`, [`crate::scanned`]) gains nothing itself: it is made where one within
 /// it is.
-pub(crate) fn by_blocks(f: &mut Formula, enc: &Encoder) -> Chosen {
+pub(crate) fn by_blocks(mut f: Formula, enc: &Encoder) -> (Settled, Chosen) {
+    let chosen = by_blocks_in(&mut f, enc);
+    (Settled(f), chosen)
+}
+
+/// [`by_blocks`] in place.
+fn by_blocks_in(f: &mut Formula, enc: &Encoder) -> Chosen {
     let eithers = f.eithers();
     let n = eithers.len();
     if n == 0 {
@@ -467,9 +529,9 @@ mod tests {
         {
             let _kept = CHOOSE.set_here("kept");
             let mut g = f.clone();
-            assert_eq!(choose(&mut g, &Encoder::new(Level::MID)).made, 0);
+            assert_eq!(choose_in(&mut g, &Encoder::new(Level::MID)).made, 0);
         }
-        let chosen = choose(&mut f, &Encoder::new(Level::MID));
+        let chosen = choose_in(&mut f, &Encoder::new(Level::MID));
         assert_eq!((chosen.alternatives, chosen.made), (2, 1));
         assert!(f.eithers().is_empty());
         // the root's parts stay its parts: the first file's formula, the second's data, the other
@@ -509,7 +571,7 @@ mod tests {
                 parts.push(Node::apply(module, Vec::new(), vec![f.push("x", vec![3; 50])], 100));
             }
             f.root = Node::Concat(parts);
-            let chosen = by_blocks(&mut f, &enc);
+            let chosen = by_blocks_in(&mut f, &enc);
             assert!(f.eithers().is_empty());
             chosen.made
         };
@@ -524,7 +586,7 @@ mod tests {
         let copies: Vec<Node> = (0..2).map(|_| either(&mut f, part)).collect();
         f.streams[2].data = f.streams[0].data.clone();
         f.root = Node::Concat(copies);
-        assert_eq!(by_blocks(&mut f, &enc).made, 0);
+        assert_eq!(by_blocks_in(&mut f, &enc).made, 0);
 
         // a scan's alternative, its files' alternatives within the formula made
         let mut f = Formula::default();
@@ -533,7 +595,7 @@ mod tests {
         let kept = f.push("raw", aqr_common::rng::Rng::new(99).bytes(len));
         let scan = Either { kept, made: Node::Concat(inner), len: len as u64, sizes: (0, len) };
         f.root = Node::Either(Box::new(scan));
-        assert_eq!(by_blocks(&mut f, &enc).made, 3);
+        assert_eq!(by_blocks_in(&mut f, &enc).made, 3);
         assert_eq!(f.applies().len(), 2);
     }
 }

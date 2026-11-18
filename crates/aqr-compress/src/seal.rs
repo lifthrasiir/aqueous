@@ -8,7 +8,46 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use aqr_formula::aqr::sink::Sink;
+use aqr_formula::Result;
+use aqr_formula::aqr::sink::{self, Ready, Sunk};
+
+use crate::choose::Settled;
+
+/// The sink formulas are sealed into ([`sink::Sink`]), of formulas [`Settled`] only: one holding
+/// alternatives is not to be archived.
+pub(crate) struct Sink(sink::Sink);
+
+impl Sink {
+    /// [`sink::Sink::seal`].
+    pub fn seal(&self, f: &mut Settled) -> Result<()> {
+        self.0.seal(f)
+    }
+
+    /// [`sink::Sink::ready`].
+    pub fn ready(&self, f: &Settled) -> Result<Ready> {
+        self.0.ready(f)
+    }
+
+    /// [`sink::Sink::seal_ready`].
+    pub fn seal_ready(&self, f: &mut Settled, ready: Ready) -> Result<()> {
+        self.0.seal_ready(f, ready)
+    }
+
+    /// [`sink::Sink::is_direct`].
+    pub fn is_direct(&self) -> bool {
+        self.0.is_direct()
+    }
+
+    /// [`sink::Sink::close`].
+    pub fn close(self) -> Result<Vec<Sunk>> {
+        self.0.close()
+    }
+
+    /// [`sink::Sink::close_direct`].
+    pub fn close_direct(self) -> Result<(Vec<Sunk>, u64)> {
+        self.0.close_direct()
+    }
+}
 
 /// A slot by its index; the root's is [`ROOT`].
 pub(crate) type Slot = usize;
@@ -43,10 +82,10 @@ struct SlotState {
 }
 
 impl Order {
-    pub fn new(sink: Sink) -> Order {
+    pub fn new(sink: sink::Sink) -> Order {
         let root = SlotState { open: true, ..SlotState::default() };
         Order {
-            sink,
+            sink: Sink(sink),
             state: Mutex::new(State { slots: vec![root], running: false, panicked: false }),
             changed: Condvar::new(),
         }
@@ -169,7 +208,7 @@ mod tests {
     #[test]
     fn panicking_job_wakes_waiters() {
         let enc = aqr_formula::aqr::Encoder::new(aqr_formula::aqr::Level::Zstd(1));
-        let order = Arc::new(Order::new(Sink::new(&enc, 1 << 10)));
+        let order = Arc::new(Order::new(sink::Sink::new(&enc, 1 << 10)));
         let slots = order.slots(ROOT, 2);
         let (told, heard) = std::sync::mpsc::channel();
         let waiter = {

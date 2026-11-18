@@ -1891,7 +1891,7 @@ fn analyze(
     }
     // (the formulas that lost by little, kept beside their data: chosen now, with the batch,
     // before anything evaluates the formula)
-    let chosen = crate::choose::choose(&mut f, &cx.enc);
+    let (mut f, chosen) = crate::choose::choose(f, &cx.enc);
     let alternatives = (chosen.alternatives, chosen.made, chosen.bytes);
     // (what the files hold of each other, by what they are taken for: a file and the same in
     // an archive, both kept as they are; files none of which is recompressed too)
@@ -1908,7 +1908,7 @@ fn analyze(
     crate::memory::note_kept(&f, opt.application_bound, u64::MAX);
     notes.send(Note::Analyzed(i));
     let Cx { enc, .. } = cx;
-    let mut a = laid(f, files, enc, memo, opt);
+    let mut a = laid(f.into_inner(), files, enc, memo, opt);
     a.alternatives = alternatives;
     // (its streams compressed now, on the workers free, rather than by the writer as it comes
     // to the batch: the writer verified a batch and only then compressed the next, which the

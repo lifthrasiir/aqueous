@@ -245,7 +245,7 @@ aqr_common::zopt! {
 /// Declares the memory limits of `f`'s applications: those declared already kept (of a formula
 /// sealed, whose inputs are no longer at hand), else those of `known` (worked out as the
 /// prevalidation ran them), else worked out, the inputs made by `m` as plans ask for them.
-pub(crate) fn declare(f: &mut Formula, m: &(impl Modules + Sync), known: &Limits) {
+pub(crate) fn declare(f: &mut crate::choose::Settled, m: &(impl Modules + Sync), known: &Limits) {
     if !DECLARE.get() {
         return;
     }

@@ -710,14 +710,14 @@ fn stream_key(d: &[u8]) -> (usize, u64) {
 
 /// `d` as a formula, with the recompressor for its format if any takes it.
 pub fn recompress(d: &[u8], opt: &Options) -> Formula {
-    recompress_at(d, opt, 0, Kind::Unknown, &Cx::new(d, opt))
+    recompress_at(d, opt, 0, Kind::Unknown, &Cx::new(d, opt)).into_inner()
 }
 
 /// Declares the memory limits of `f`'s applications as the compressor does without having run
 /// them (from their modules' plans): for tests of formulas made apart.
 #[doc(hidden)]
 pub fn declare_memory(f: &mut Formula) {
-    memory::declare(f, &Native { threads: 1 }, &memory::Limits::default());
+    choose::kept_in(f, |f| memory::declare(f, &Native { threads: 1 }, &memory::Limits::default()));
 }
 
 /// `d` as an archive, with the checksum of `d`.
@@ -1122,12 +1122,12 @@ pub(crate) fn spilling(opt: &Options) -> Option<aqr_formula::store::Guard> {
 /// where `out` does.
 #[allow(clippy::too_many_arguments)]
 fn finish(
-    mut f: Formula,
+    mut f: choose::Settled,
     d: &[u8],
     opt: &Options,
     cx: &Cx,
     memo: verify::Memo,
-    sink: Option<(aqr::sink::Sink, Option<Direct>)>,
+    sink: Option<(seal::Sink, Option<Direct>)>,
     kept: bool,
     notes: Option<&progress::Notes>,
     out: &mut dyn Sink,
@@ -1153,7 +1153,7 @@ fn finish(
     let n = match (sink, direct) {
         (Some(sink), Some((place, room))) => written_direct(&mut f, sink, &place, room, sum, &cx.enc, out)?,
         (sink, _) => {
-            let sunk = sink.map(aqr::sink::Sink::close).transpose().map_err(io::Error::other)?.unwrap_or_default();
+            let sunk = sink.map(seal::Sink::close).transpose().map_err(io::Error::other)?.unwrap_or_default();
             let (mut merged, groups) = f.merged();
             merged.streams.extend(sunk_streams(&sunk));
             let pieces: Vec<Vec<&[u8]>> = groups
@@ -1168,7 +1168,7 @@ fn finish(
     drop(encoding);
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
     cx.enc.clear();
-    let f = kept.then_some(f);
+    let f = kept.then(|| f.into_inner());
     // (read back from its file, its blocks let go of as they are decoded: not all of the archive
     // resident by the end; not where it is decrypted into memory of its own)
     let mapped = out.mapped();
@@ -1249,8 +1249,8 @@ fn sunk_streams(sunk: &[aqr::sink::Sunk]) -> impl Iterator<Item = Stream> + '_ {
 /// slice takes, as where a recompression gave up having sealed some of it) is given as such,
 /// for the archive of the file as it is to be written instead.
 fn written_direct(
-    f: &mut Formula,
-    sink: aqr::sink::Sink,
+    f: &mut choose::Settled,
+    sink: seal::Sink,
     place: &Placing,
     room: u64,
     sum: Option<u64>,
@@ -1420,7 +1420,7 @@ fn written<T>(out: &mut dyn Sink, write: impl FnOnce(&mut dyn Write) -> io::Resu
 /// as a scan finds the file the data starts with, and what is in it where that is turned down
 /// (which [`Nest::As`] does only by [`regions`]). Data kept raw is of the kind, or of
 /// [`Kind::Text`] where it is text (as [`made`] tells), so archived as text.
-pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx: &Cx) -> Formula {
+pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx: &Cx) -> choose::Settled {
     let how = match kind {
         Kind::Format(_) => Some(opt.file),
         kind => opt.file.of(kind),
@@ -1436,33 +1436,18 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx:
                 || matches!(kind, Kind::Unknown | Kind::Format(_)) && is_text(detect(d));
             let mut f = Formula::default();
             f.root = f.push_as("raw", if text { Kind::Text } else { kind }, d.to_vec());
-            f
+            choose::kept(f)
         },
         |m| {
-            let mut f = m.cut(d);
+            let f = m.cut(d);
             // (of a file alone, those that pay for the blocks they take together made; else
             // nothing chooses here: the data kept, as it was compared)
             match alone {
-                true => _ = choose::by_blocks(&mut f, &cx.enc),
-                false => _ = keep_eithers(&mut f, false),
+                true => choose::by_blocks(f, &cx.enc).0,
+                false => choose::kept(f),
             }
-            f
         },
     )
-}
-
-/// Resolves the alternatives of `f` ([`Node::Either`]) to the data kept, as they were compared
-/// ([`verdict_as`]); the root's parts staying its parts where `parts` (a batch's files). How
-/// many there were, and the bytes their formulas archived in alone.
-pub(crate) fn keep_eithers(f: &mut Formula, parts: bool) -> (usize, usize) {
-    let eithers = f.eithers();
-    let told = (eithers.len(), eithers.iter().map(|e| e.1.sizes.0).sum());
-    match (told.0 > 0, parts) {
-        (false, _) => {}
-        (true, true) => f.resolve_parts(&vec![false; told.0]),
-        (true, false) => f.resolve(&vec![false; told.0]),
-    }
-    told
 }
 
 /// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
@@ -2991,17 +2976,13 @@ fn make_later(
             let input = (d.as_ptr() as usize, d.len());
             // (what those within it that are not sealed kept beside their data, [`made_deferring`]:
             // nothing chooses once it is sealed, so the data kept, as it was compared)
-            let child = child.map(|c| {
-                let mut f = c.cut(d);
-                keep_eithers(&mut f, false);
-                Made::from(f)
-            });
-            let size = child.as_ref().map(|c| bound_of(&c.f).saturating_sub(description_bound(n)));
+            let child = child.map(|c| choose::kept(c.cut(d)));
+            let size = child.as_ref().map(|c| bound_of(c).saturating_sub(description_bound(n)));
             // (the bytes taken let go of now where they have a formula, made again of it in the
             // rare case it is turned down for the bound; but kept where formulas are sealed in
             // it, an image's files, whose streams are no longer at hand to make it)
             let class = owned[i].map(|s| (fr.streams[s].class.clone(), fr.streams[s].kind));
-            let sunk = child.as_ref().is_some_and(|c| c.f.streams.iter().any(|s| s.data.sunk_in().is_some()));
+            let sunk = child.as_ref().is_some_and(|c| c.streams.iter().any(|s| s.data.sunk_in().is_some()));
             let raw = mine.filter(|_| child.is_none() || sunk);
             let (budget, sealed, threads, limit) = (budget.clone(), sealed.clone(), opt.threads, opt.description);
             s.order.submit(
@@ -3015,7 +2996,7 @@ fn make_later(
                         // (of the bytes taken only: those of a slice stay in their stream)
                         _ => {
                             if let (None, Some(m), Some(_)) = (&raw, made.take(), &class) {
-                                raw = Some(m.f.eval(&Native { threads }).expect("the formula of a content").into());
+                                raw = Some(m.eval(&Native { threads }).expect("the formula of a content").into());
                             }
                         }
                     }
@@ -3025,13 +3006,13 @@ fn make_later(
                         raw.zip(class).map(|(d, (class, kind))| {
                             let mut f = Formula::default();
                             f.root = f.push_as(class, kind, d);
-                            Made::from(f)
+                            choose::kept(f)
                         })
                     });
                     if let Some(mut m) = made {
-                        memory::declare(&mut m.f, &Native { threads }, &memory::Limits::default());
-                        sink.seal(&mut m.f).expect("sealed");
-                        *sealed[i].lock().unwrap() = Some(m);
+                        memory::declare(&mut m, &Native { threads }, &memory::Limits::default());
+                        sink.seal(&mut m).expect("sealed");
+                        *sealed[i].lock().unwrap() = Some(Made::from(m.into_inner()));
                         aqr_formula::store::let_go_at(input.0, input.1);
                     }
                 }),
@@ -3450,12 +3431,14 @@ impl Pure<'_> {
     fn made(&self, part: &mut Formula, of: &[u8]) -> aqr::sink::Ready {
         let order = self.seal.expect("sealing");
         let _a = aqr_common::allowance::enter(aqr_common::allowance::Context::NONE);
-        memory::declare(part, &Native { threads: 1 }, &memory::Limits::default());
-        if let Some(pre) = self.pre {
-            part.streams.iter_mut().for_each(|s| s.data.share());
-            pre.submit(Arc::new(part.clone()), of);
-        }
-        order.sink().ready(part).expect("encoded")
+        choose::kept_in(part, |part| {
+            memory::declare(part, &Native { threads: 1 }, &memory::Limits::default());
+            if let Some(pre) = self.pre {
+                part.streams.iter_mut().for_each(|s| s.data.share());
+                pre.submit(Arc::new((**part).clone()), of);
+            }
+            order.sink().ready(part).expect("encoded")
+        })
     }
 }
 
@@ -3468,7 +3451,9 @@ fn tensors(d: &[u8], p: &Pure) -> Option<Formula> {
     match p.seal {
         Some(order) => {
             let made = |part: &mut Formula, of: &[u8]| p.made(part, of);
-            let mut seal = |part: &mut Formula, _: &[u8], ready| order.sink().seal_ready(part, ready).expect("sealed");
+            let mut seal = |part: &mut Formula, _: &[u8], ready| {
+                choose::kept_in(part, |part| order.sink().seal_ready(part, ready)).expect("sealed")
+            };
             aqr_tensors::formula::encode_sealing(d, p.opt.threads, segment, &made, &mut seal)
         }
         None => aqr_tensors::formula::encode_in(d, p.opt.threads, segment),
@@ -5343,7 +5328,7 @@ mod tests {
         assert!(fallbacks().is_empty());
         // (what fell back tells the exact minimal bound the application is declared with)
         let mut f = recompress(&gz, &Options { smaller: false, ..Options::default() });
-        memory::declare(&mut f, &Native { threads: 1 }, &memory::Limits::default());
+        declare_memory(&mut f);
         let declared = f.applies().iter().map(|a| aqr_formula::minimal_bound(a.memory_limit, &a.task_limits)).max();
         let _ = fallbacks();
         // (the plan of an application is more than a byte)
@@ -5621,7 +5606,7 @@ mod tests {
     /// [`finish`] into memory, of as many bytes as it tells.
     fn finished(f: Formula, d: &[u8], opt: &Options, cx: &Cx) -> Vec<u8> {
         let mut c = Vec::new();
-        let (n, _) = finish(f, d, opt, cx, Default::default(), None, false, None, &mut c).unwrap();
+        let (n, _) = finish(choose::kept(f), d, opt, cx, Default::default(), None, false, None, &mut c).unwrap();
         assert_eq!(n, c.len());
         c
     }
@@ -5723,7 +5708,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!("aqr-compress-written-again-{}.aqr", std::process::id()));
         let mut file =
             std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
-        let (n, _) = finish(f, &d, &opt, &Cx::new(&d, &opt), Default::default(), None, false, None, &mut file).unwrap();
+        let (n, _) =
+            finish(choose::kept(f), &d, &opt, &Cx::new(&d, &opt), Default::default(), None, false, None, &mut file)
+                .unwrap();
         drop(file);
         let c = std::fs::read(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
