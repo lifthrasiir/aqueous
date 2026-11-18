@@ -1,6 +1,7 @@
 This directory hosts various design documents produced and maintained during the development.
 Most of them are currently written in Korean, sorry.
 
+- `glossary.md` (English): words of the codebase not obvious at a glance, informally.
 - `10gb-todo.md`: what is left for the 10 GB benchmark.
 - `file-formats.md`: measurements by format, formats taken and not yet taken.
 - `xform-design.md`: formulas, modules and their execution.

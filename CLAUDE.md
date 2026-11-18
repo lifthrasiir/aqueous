@@ -11,7 +11,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 - `site/` — the project site, a single page deployed by the same workflow at the Pages root
   (with `droplet.svg`); its downloads are filled in from the latest GitHub release by script.
 - `docs/` — design documents, mostly in Korean: `10gb-todo.md` (what is left for the 10 GB
-  benchmark), `file-formats.md` (measurements by format), `*-design.md`.
+  benchmark), `file-formats.md` (measurements by format), `*-design.md`, and `glossary.md` (in English: the
+  words of the code and the spec not obvious at a glance).
 - `crates/` — the core crates
   - `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`); `--ipc` drives it from a frontend (`src/ipc.rs`); `--session` serves a
     compression dialog's questions before it begins (`src/session.rs`). `--format sfx` (`src/sfx.rs`,
