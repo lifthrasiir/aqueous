@@ -503,12 +503,15 @@ mod tests {
         let ra = w.finish();
         let (tx, rx) = std::sync::mpsc::channel();
         let s = spill.clone();
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             let mut w = s.writer(n).unwrap();
             assert!(w.write(&ra));
             tx.send((ra, w.finish())).unwrap();
         });
         let (ra, b) = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the write waits for good");
+        // (its spill, which may outlive the send, dropped: else the segment's file is still there
+        // as the directory is removed, open on Windows)
+        thread.join().unwrap();
         assert_eq!(b.as_ptr().addr(), ra.as_ptr().addr() + n.next_multiple_of(REGION_ALIGN));
         assert!(ra[..] == data[..] && b[..] == data[..]);
         drop((ra, b, spill));
