@@ -5,6 +5,7 @@
 
 use std::time::Instant;
 
+use aqr_archive::Evaluate;
 use aqr_formula::Node;
 
 fn main() {

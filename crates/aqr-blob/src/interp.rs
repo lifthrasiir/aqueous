@@ -8,8 +8,8 @@
 use core::ffi::c_void;
 
 use aqr_api::dll::{PartIn as PartInC, PartOut as PartOutC, Slice, SliceMut};
+use aqr_archive::{Decoded, Failure, Loaded, PartIn, PartOut, Runner};
 use aqr_formula::Resource;
-use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut, Runner};
 
 /// The interpreter blob's entry points, all through one export (`aqr_interp_vtable`).
 #[repr(C)]

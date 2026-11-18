@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use aqr_formula::aqr::Failure;
+use aqr_archive::Failure;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]

@@ -2,9 +2,9 @@
 
 use std::io::Write;
 
+use aqr_archive::{Entry, EntryNode, Extra, Tree, Value};
 use aqr_compress::{Input, Options, Report, compress_tree};
 use aqr_decompress::decompress_value;
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, Value};
 
 fn text(n: usize, seed: usize) -> Vec<u8> {
     let mut t = Vec::new();

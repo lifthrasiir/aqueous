@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::hex;
+use aqr_archive::Wasm;
 use aqr_formula::Module;
-use aqr_formula::aqr::{self, Wasm};
 
 /// The pack this program's executable carries, in place, and the digest of its files (`pack.id`);
 /// both empty where it carries none.
@@ -122,8 +122,9 @@ fn unpack() -> Result<Pack, String> {
         let Some((name, hash)) = line.split_once(' ') else { continue };
         let blob = file(&format!("modules/{name}.blob"))?;
         let Some(k) = aqr_modules::KNOWN.iter().find(|k| hex(&k.sha512_256) == hash) else { continue };
-        let wasm = aqr::module_of_block_data(k.block).ok_or_else(|| format!("{name}: a module block not valid"))?;
-        let slots = aqr::custom_section(&wasm, "aqr_task_slots").unwrap_or_default().to_vec();
+        let wasm =
+            aqr_archive::module_of_block_data(k.block).ok_or_else(|| format!("{name}: a module block not valid"))?;
+        let slots = aqr_archive::custom_section(&wasm, "aqr_task_slots").unwrap_or_default().to_vec();
         natives.insert(k.sha512_256, (blob, slots));
     }
     Ok(Pack { stub, natives, libs })
@@ -155,7 +156,7 @@ pub struct Made {
 /// module in full, of the interpreter blob (none where it has no module), and the archive.
 pub fn make(archive: &[u8]) -> Result<Made, String> {
     let pack = pack()?;
-    let ins = aqr::inspect::inspect(archive, false, &|_| None, None).map_err(|e| format!("{e:?}"))?;
+    let ins = aqr_archive::inspect::inspect(archive, false, &|_| None, None).map_err(|e| format!("{e:?}"))?;
     let (mut hashes, mut full) = (Vec::new(), false);
     for b in ins.blocks.iter().filter(|b| b.segment.is_some()) {
         match b.ty {

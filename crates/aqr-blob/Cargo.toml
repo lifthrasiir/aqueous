@@ -8,7 +8,8 @@ publish = false
 [dependencies]
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"], optional = true }
 aqr-formula = { path = "../aqr-formula", optional = true }
+aqr-archive = { path = "../aqr-archive", optional = true }
 
 [features]
 # The interpreter blob's client (`interp`): what runs modules through it.
-runner = ["dep:aqr-api", "dep:aqr-formula"]
+runner = ["dep:aqr-api", "dep:aqr-formula", "dep:aqr-archive"]

@@ -11,8 +11,8 @@
 
 #![cfg(feature = "wasm")]
 
+use aqr_archive::{Encoder, Level};
 use aqr_decompress::{Native, wasm_of};
-use aqr_formula::aqr::{self, Encoder, Level};
 
 fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -34,7 +34,7 @@ fn run(what: &str, archives: &[(Vec<u8>, Vec<u8>)], reps: usize, jobs: usize) {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some((c, d)) = work.get(i) else { break };
-                    assert!(aqr::decode(c, &Native::default()).unwrap() == *d);
+                    assert!(aqr_archive::decode(c, &Native::default()).unwrap() == *d);
                 }
             });
         }

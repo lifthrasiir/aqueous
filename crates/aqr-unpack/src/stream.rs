@@ -6,9 +6,9 @@
 
 use std::ops::Range;
 
+use aqr_archive::{Reached, Step};
 use aqr_bcj::formula::Filter as Bcj;
 use aqr_common::{crc32, pool, varint};
-use aqr_formula::aqr::{Reached, Step};
 use aqr_lzma::xz;
 
 use crate::Filter;

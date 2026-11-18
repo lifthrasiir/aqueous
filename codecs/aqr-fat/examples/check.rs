@@ -6,6 +6,7 @@
 //! cargo run --release -p aqr-fat --example aqr-fat-check -- [-v] IMAGE...
 //! ```
 
+use aqr_archive::Evaluate;
 use std::time::Instant;
 
 fn main() {

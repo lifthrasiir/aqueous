@@ -20,7 +20,7 @@ pub struct Known {
     pub version: u16,
     /// SHA-512/256 of the module ([`Known::read_wasm`]), as the spec hashes.
     pub sha512_256: [u8; 32],
-    /// The data of its module block, made by `aqr_formula::aqr::module_block_data`: all that
+    /// The data of its module block, made by `aqr_archive::module_block_data`: all that
     /// binaries hold of the module (the module itself would add 3 MB to them).
     pub block: &'static [u8],
 }

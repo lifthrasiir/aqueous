@@ -25,3 +25,6 @@ path = "examples/check.rs"
 [[example]]
 name = "aqr-div3-speed"
 path = "examples/speed.rs"
+
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }

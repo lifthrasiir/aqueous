@@ -3,8 +3,9 @@
 
 use std::ops::Range;
 
+use aqr_archive::Evaluate;
+use aqr_archive::Level;
 use aqr_bundle::packs::{self, Pack, vpk};
-use aqr_formula::aqr::Level;
 use aqr_formula::{Formula, Kind};
 
 fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
@@ -14,9 +15,9 @@ fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 /// `f` evaluated, and archived and decoded, both `d`.
 fn rebuilds(f: &Formula, d: &[u8]) {
     assert!(f.eval(&none).unwrap() == d, "evaluated");
-    let c = aqr_formula::aqr::encode(f, None, Level::LOW).unwrap();
-    let runner = aqr_formula::aqr::natives(&[], &none);
-    assert!(aqr_formula::aqr::decode(&c, &runner).unwrap() == d, "archived");
+    let c = aqr_archive::encode(f, None, Level::LOW).unwrap();
+    let runner = aqr_archive::natives(&[], &none);
+    assert!(aqr_archive::decode(&c, &runner).unwrap() == d, "archived");
 }
 
 /// The files of pack `d` of `pack` as names and extents.

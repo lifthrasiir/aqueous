@@ -8,6 +8,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_jpeg::formula::{self, MODULE};
 use aqr_jpeg::module;

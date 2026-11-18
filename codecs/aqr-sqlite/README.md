@@ -5,7 +5,7 @@ bit for bit. Meant as a component of a general-purpose compressor, so speed come
 the target is 100 MB/s single-threaded on an Apple M4, both ways.
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-sqlite   # target/release/examples/aqr-sqlite
 aqr-sqlite bench [-n ITERS] [-t N] [-m] [-v] [-x] [-Z OPTION] [-c|-d] FILE...  # round trip check, archive size, CPU-time throughput (wall time with -t > 1)
 aqr-sqlite fuzz [-n N] [-s SEED] FILE...                           # mutated databases and corrupted streams
 ```
@@ -140,7 +140,7 @@ columns of such a table: it decodes the table once for them, and again for its p
 
 ```sh
 cargo test --release
-../../target/release/aqr-sqlite fuzz -n 200 $(find corpus -type f -size -4M)
+../../target/release/examples/aqr-sqlite fuzz -n 200 $(find corpus -type f -size -4M)
 ```
 
 - `tests/roundtrip.rs`: databases built with the `sqlite3` tool (page sizes, indexes with

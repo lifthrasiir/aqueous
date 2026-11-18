@@ -20,11 +20,12 @@ aqr-common = { path = "../../crates/aqr-common", features = ["rayon"] }
 rayon = "1.12.0"
 
 [dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 # (the registry of `-Z`, for tests/regress.rs)
 aqr-common = { path = "../../crates/aqr-common", features = ["registry"] }
 
-# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
-# that names do not collide in the workspace's target directory.
+# Tools are named <crate>-<tool> (the crate's own one, examples/aqr-jpeg.rs, after the crate),
+# so that names do not collide in the workspace's target directory.
 
 [[bin]]
 name = "aqr-jpeg-decbench"

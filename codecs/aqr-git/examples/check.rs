@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use aqr_archive::Evaluate;
 use aqr_git::formula::{self, Options};
 
 fn walk(p: &Path, out: &mut Vec<PathBuf>) {

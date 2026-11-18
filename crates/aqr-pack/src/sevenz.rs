@@ -308,7 +308,7 @@ fn defined(h: &mut Vec<u8>, id: u8, v: &[Option<u64>], width: usize) {
 /// mode where known (a link's always).
 fn attributes(it: &Item, x: &Extra) -> Option<u32> {
     let (dir, link) = (matches!(it.kind, Kind::Dir), matches!(it.kind, Kind::Link(_)));
-    let mut a = x.win_attrs.unwrap_or(0) & aqr_formula::aqr::WIN_ATTRS_ALLOWED;
+    let mut a = x.win_attrs.unwrap_or(0) & aqr_archive::WIN_ATTRS_ALLOWED;
     if dir {
         a |= DOS_DIR;
     }

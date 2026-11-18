@@ -363,7 +363,7 @@ pub fn write_single(
             .push(format!("the extended attributes and forks of the file, not kept in {}", Format::Single(f).ext()));
     }
     let total = c.size(k);
-    let name = Some(aqr_formula::aqr::name_bytes(&e.name).0.to_vec());
+    let name = Some(aqr_archive::name_bytes(&e.name).0.to_vec());
     let mut named = Named { name, mtime: e.extra.mtime, size: None };
     let level = o.level_of(Format::Single(f));
     let mut counted = crate::Counted { w, n: 0 };

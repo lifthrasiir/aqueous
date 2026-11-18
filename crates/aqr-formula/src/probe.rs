@@ -5,16 +5,39 @@
 //!
 //! [`Probe::pays`] tells from estimates instead: the record's (the recompressor's own, on a
 //! sample say), and the fewest bytes the data may archive in at the level of the archive
-//! ([`Encoder::least`], by a sample), what it repeats from farther than the sample shows
+//! ([`Archiver::least`], by a sample), what it repeats from farther than the sample shows
 //! ([`repeated`]), what other data archived with it holds too ([`shared`]) and the files in it
 //! that would be recompressed in turn counted as nothing (what they come to is not told without
 //! recompressing them). What is turned down would not have paid; what is taken may
 //! still not, and is then dropped as before.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::Kind;
-use crate::aqr::{Encoder, Level};
+use crate::{Kind, Result};
+
+/// The archive encoder at the level data will be archived at, as a probe asks of it
+/// (aqr-archive's `Encoder`).
+pub trait Archiver {
+    /// About the fewest bytes `d` archives in, by a sample, at the levels the encoder may pick
+    /// for it: at most `enough` once one gives that few, the others then not tried. The encoder
+    /// keeps what it compressed of `d`, for archiving it.
+    fn least(&self, d: &[u8], enough: usize) -> Result<usize>;
+
+    /// Drops what it keeps of `d` compressed, where `d` will not be archived.
+    fn forget(&self, d: &[u8]);
+
+    /// Bytes of the sample [`Archiver::least`] takes of data, and of each of the chunks it is
+    /// cut in, spread over the data.
+    fn sample(&self) -> (usize, usize);
+
+    /// The window that data of `len` bytes is archived in where it is all of the data
+    /// (long-distance matching), else None (zstd's own window of the level).
+    fn long_window(&self, len: usize) -> Option<usize>;
+}
+
+/// [`Archiver`]s of a number of threads each: [`Probe::archiver`].
+pub type Archivers = Arc<dyn Fn(usize) -> Box<dyn Archiver> + Send + Sync>;
 
 /// How data of a kind is looked into for files that are recompressed in turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,11 +50,11 @@ pub enum Look {
     Scan,
 }
 
-/// What a probe needs of the archive around: its level, and how files are found in data.
-#[derive(Debug, Clone, Copy)]
+/// What a probe needs of the archive around: its encoder, and how files are found in data.
+#[derive(Clone)]
 pub struct Probe {
-    /// The level the data will be archived at.
-    pub level: Level,
+    /// The archive encoder at the level the data will be archived at, of a number of threads.
+    pub archiver: Archivers,
     /// How data of a kind is looked into ([`Look::No`] for all, where it is as deep as formats
     /// nest).
     pub look: fn(Kind) -> Look,
@@ -75,10 +98,16 @@ aqr_common::zopt! {
     static LIKENESS_COMMON: Opt<usize> = Opt::value("probe:likeness-common", 1024, "a likeness hash in more data than this is not counted");
 }
 
+impl std::fmt::Debug for Probe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Probe").finish_non_exhaustive()
+    }
+}
+
 impl Probe {
-    /// A probe at `level` that looks for no files.
-    pub fn flat(level: Level) -> Probe {
-        Probe { level, look: |_| Look::No, starts: |_| false, scan: |_| 0 }
+    /// A probe by `archiver` that looks for no files.
+    pub fn flat(archiver: Archivers) -> Probe {
+        Probe { archiver, look: |_| Look::No, starts: |_| false, scan: |_| 0 }
     }
 
     /// Whether recompressing a stream of `coded` bytes, which does not compress, into a record
@@ -86,12 +115,11 @@ impl Probe {
     /// `data` of `kind` may pay: whether they may archive in at least 1/32 less than the
     /// stream, what the data repeats from afar ([`repeated`]) and the fraction `shared()` of it
     /// held by other data archived with it as well ([`shared`]; asked only where needed)
-    /// counted as nothing, by `enc` (an encoder at
-    /// [`Probe::level`], which keeps what it compressed of the data for archiving it, and
-    /// drops it where it turns it down).
+    /// counted as nothing, by `enc` (an encoder as [`Probe::archiver`] makes, which keeps what
+    /// it compressed of the data for archiving it, and drops it where it turns it down).
     pub fn pays(
         &self,
-        enc: &Encoder,
+        enc: &dyn Archiver,
         coded: usize,
         record: impl FnOnce() -> Option<usize>,
         data: &[u8],
@@ -115,7 +143,7 @@ impl Probe {
         // (else what the data repeats from afar, what other data holds, and the files, asked
         // only where they would make the difference)
         let pays = pays(0.0) || {
-            let own = repeated(data);
+            let own = repeated(data, enc);
             own > 0.0 && pays(own) || {
                 let shared = 1.0 - (1.0 - own) * (1.0 - shared().clamp(0.0, 1.0));
                 let files = || first.unwrap_or_else(|| (self.scan)(data)) as f64 / data.len().max(1) as f64;
@@ -164,24 +192,24 @@ pub fn shared(datas: &[&[u8]]) -> Vec<f64> {
 }
 
 /// Bytes of the pieces [`repeated`] cuts data into: those of the chunks a sample of data is
-/// made of ([`Encoder::least`]).
-fn piece_len() -> usize {
-    crate::aqr::SAMPLE.get() / crate::aqr::SAMPLE_CHUNKS.get()
+/// made of ([`Archiver::least`]).
+fn piece_len(a: &dyn Archiver) -> usize {
+    let (sample, chunks) = a.sample();
+    sample / chunks
 }
 
 /// About the fraction of `d` that repeats what comes earlier in it, from farther than a sample
 /// of it shows but within the window it is archived in: by anchors as in [`shared`], those of
 /// each piece of `PIECE` bytes that an earlier piece has, counted where they first come in
 /// the piece (a repeat within a piece, the sample shows). Nothing for data that a sample is all
-/// of. A pass over the data, at about a byte per cycle.
-pub fn repeated(d: &[u8]) -> f64 {
-    if d.len() <= crate::aqr::SAMPLE.get() {
+/// of. A pass over the data, at about a byte per cycle; `a` tells the sample and the window.
+pub fn repeated(d: &[u8], a: &dyn Archiver) -> f64 {
+    if d.len() <= a.sample().0 {
         return 0.0;
     }
-    let (piece_len, mask) = (piece_len(), (1u64 << ANCHOR_BITS.get()) - 1);
+    let (piece_len, mask) = (piece_len(a), (1u64 << ANCHOR_BITS.get()) - 1);
     // (zstd's own at level 9 for data that is not long, else one of all of it)
-    let long = crate::aqr::LONG.get().is_some_and(|long| d.len() > long);
-    let window = if long { 1 << crate::aqr::WINDOW_LOG_MAX } else { REPEATED_WINDOW.get() };
+    let window = a.long_window(d.len()).unwrap_or_else(|| REPEATED_WINDOW.get());
     // each anchor with the last piece that has it
     let mut seen: HashMap<u64, usize> = HashMap::new();
     let (mut h, mut total, mut afar) = (0u64, 0usize, 0usize);
@@ -431,31 +459,6 @@ mod tests {
         let f = shared(&[&a, &b]);
         assert!(f[0] < 0.01 && f[1] < 0.01, "{f:?}");
         assert_eq!(shared(&[&a]), [0.0]);
-    }
-
-    /// Data repeating itself farther than a sample of it shows (a stream of files in several
-    /// versions, say) may pay: its repeats cost nothing, as they archive in a window of all of
-    /// it. Data that does not, does not.
-    #[test]
-    fn pays_for_repeats_afar() {
-        let noise = |seed: u64, n: usize| {
-            let mut x = seed;
-            (0..n)
-                .map(|_| {
-                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                    (x >> 56) as u8
-                })
-                .collect::<Vec<u8>>()
-        };
-        let probe = Probe::flat(Level::MID);
-        let enc = Encoder::new(Level::MID);
-        let pays = |d: &[u8]| probe.pays(&enc, 5 << 20, || Some(0), d, || 0.0, Kind::Unknown);
-        let a = noise(1, 3 << 20);
-        assert!(pays(&[&a[..], &a[..]].concat()));
-        assert!(!pays(&[&a[..], &noise(2, 3 << 20)[..]].concat()));
-        // (a piece repeating within itself, which a sample shows, is no more)
-        let runs: Vec<u8> = (0..128).flat_map(|i| noise(i, 2000).repeat(32)).collect();
-        assert!(repeated(&runs) < 0.05, "{}", repeated(&runs));
     }
 
     /// Data shifted by some bytes and edited has most pieces in common with the data; other

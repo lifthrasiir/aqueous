@@ -17,3 +17,6 @@ aqr-bz2 = { path = "../aqr-bz2" }
 [[example]]
 name = "aqr-alz-check"
 path = "examples/check.rs"
+
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }

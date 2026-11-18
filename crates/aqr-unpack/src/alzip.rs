@@ -15,9 +15,9 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use aqr_alz::alz;
+use aqr_archive::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED};
 use aqr_common::{crc32, pool};
 use aqr_egg::egg;
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED};
 
 use crate::build::{self, Builder, Named, Undeclared};
 use crate::{Done, Select, Sink, codec};

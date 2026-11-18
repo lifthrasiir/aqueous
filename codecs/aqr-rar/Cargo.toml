@@ -25,3 +25,6 @@ path = "examples/check.rs"
 [[example]]
 name = "aqr-rar-parse5"
 path = "examples/parse5.rs"
+
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }

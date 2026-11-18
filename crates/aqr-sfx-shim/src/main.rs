@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aqr_formula::aqr::{self, HEADER_MAGIC};
+use aqr_archive::HEADER_MAGIC;
 use aqr_sfx::{Sfx, extract};
 
 fn main() -> ExitCode {
@@ -41,12 +41,12 @@ fn run() -> Result<(), String> {
     // the appended archive runs to the end of the file, right after the image (and the bundle);
     // else find where it begins by its header magic, scanning from the end and taking the last
     // place a valid archive opens
-    let archive = match aqr::open(&bytes[at..], &runner) {
+    let archive = match aqr_archive::open(&bytes[at..], &runner) {
         Ok(a) => a,
         Err(_) => (0..=bytes.len().saturating_sub(HEADER_MAGIC.len()))
             .rev()
             .filter(|&x| bytes[x..].starts_with(&HEADER_MAGIC))
-            .find_map(|x| aqr::open(&bytes[x..], &runner).ok())
+            .find_map(|x| aqr_archive::open(&bytes[x..], &runner).ok())
             .ok_or("no Aqueous archive is appended to this stub")?,
     };
 

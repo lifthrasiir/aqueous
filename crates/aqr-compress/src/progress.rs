@@ -91,7 +91,7 @@ impl Notes {
     }
 
     /// What the encoder tells of the streams of batch `batch` it compresses, as notes.
-    pub fn encoding(&self, batch: usize) -> aqr_formula::aqr::Progress {
+    pub fn encoding(&self, batch: usize) -> aqr_archive::Progress {
         let notes = self.0.clone();
         Arc::new(move |done, total| _ = notes.send(Note::Encoded(batch, done, total)))
     }

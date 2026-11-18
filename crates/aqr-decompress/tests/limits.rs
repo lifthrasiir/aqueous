@@ -5,15 +5,15 @@
 
 #![cfg(feature = "wasm")]
 
+use aqr_archive::{Failure, Runner};
 use aqr_decompress::{Native, Wasm, built};
-use aqr_formula::aqr::{Failure, Runner};
 use aqr_formula::{Module, NO_LIMIT, PAGE};
 
 fn wasm_bytes(m: Module) -> Vec<u8> {
     built(m).expect("built").read_wasm().unwrap()
 }
 
-type Outputs = aqr_formula::aqr::Decoded<Vec<Vec<u8>>>;
+type Outputs = aqr_archive::Decoded<Vec<Vec<u8>>>;
 
 /// `Native` and `Wasm` apply `m` alike, whatever the limits.
 fn both(m: Module, params: &[u8], inputs: &[&[u8]], sizes: &[u64], limit: u64, tasks: &[u64]) -> (Outputs, Outputs) {
@@ -23,7 +23,7 @@ fn both(m: Module, params: &[u8], inputs: &[&[u8]], sizes: &[u64], limit: u64, t
     (n.apply(params, &[], inputs, sizes, limit, tasks), x.apply(params, &[], inputs, sizes, limit, tasks))
 }
 
-fn kind(r: &aqr_formula::aqr::Decoded<Vec<Vec<u8>>>) -> &'static str {
+fn kind(r: &aqr_archive::Decoded<Vec<Vec<u8>>>) -> &'static str {
     match r {
         Ok(_) => "ok",
         Err(Failure::Resource(_)) => "resource",
@@ -79,8 +79,8 @@ fn plan_needing_contents() {
 /// bytes; declaring less of the instance or of its tasks fails in both as a resource failure.
 #[test]
 fn archive_declaring_less_fails_alike() {
+    use aqr_archive::{Encoder, Level};
     use aqr_flate::formula::Derived;
-    use aqr_formula::aqr::{self, Encoder, Level};
     use aqr_formula::{Formula, Node};
     let text: Vec<u8> = (0..60_000).flat_map(|i| format!("line {} of {}\n", i % 211, i % 17).into_bytes()).collect();
     let raw = aqr_flate::zlib::compress(&text, aqr_flate::zlib::Params { level: 6, ..Default::default() }).unwrap();
@@ -109,7 +109,7 @@ fn archive_declaring_less_fails_alike() {
     let enc = Encoder::new(Level::Zstd(3)).with_modules(aqr_decompress::wasm_of);
     let decode = |limit: u64, task: u64| {
         let c = enc.encode(&archive(Some((limit, vec![task]))), None).unwrap();
-        (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm))
+        (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm))
     };
     let (n, w) = decode(plan.instance, plan.tasks[0]);
     assert!(n.as_ref().is_ok_and(|n| *n == raw) && n == w, "{:?} {:?}", n.err(), w.err());

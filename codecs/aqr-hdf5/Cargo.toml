@@ -18,6 +18,7 @@ aqr-flate = { path = "../aqr-flate", default-features = false }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-formula = { path = "../../crates/aqr-formula" }
 zstd.workspace = true
 

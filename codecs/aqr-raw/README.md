@@ -78,7 +78,7 @@ aqr-msadpcm's (`msadpcm-recons`) in the same way.
 ## Usage
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-raw   # target/release/examples/aqr-raw
 
 aqr-raw bench [-t THREADS] [-n ITERS] [-v] [-r LAYOUT] FILE...   # ratio and speed, the archive round trip checked
 aqr-raw info FILE...                                            # the container and where its samples are

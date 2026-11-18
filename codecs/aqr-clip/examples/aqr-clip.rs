@@ -29,6 +29,8 @@
 //! pixel), the SQLite database by aqr-sqlite, and everything else (block headers, tables,
 //! external data of other kinds) through the archive.
 
+use aqr_archive::Evaluate;
+use aqr_archive::Level;
 use aqr_clip::dynamic::{self, Escape, Model};
 use aqr_clip::tile::{self, AREA, Class, Layout, SIDE};
 use aqr_clip::zlib::inflate;
@@ -36,7 +38,6 @@ use aqr_clip::{clip, r#static};
 use aqr_common::arith::{ArithDecoder, ArithEncoder};
 use aqr_common::pool;
 use aqr_formula::Formula;
-use aqr_formula::aqr::{self, Level};
 use aqr_psd::model::{GroupCoder, Recorder};
 use aqr_raw::image::raster;
 use std::collections::BTreeMap;
@@ -160,7 +161,7 @@ fn generic(data: Vec<u8>) -> usize {
     if data.is_empty() {
         return 0;
     }
-    aqr::encode(&Formula::raw("raw", data), None, Level::MID).expect("archive").len()
+    aqr_archive::encode(&Formula::raw("raw", data), None, Level::MID).expect("archive").len()
 }
 
 #[derive(Default, Clone, Copy)]
@@ -373,7 +374,7 @@ fn bench(args: &[String]) {
             *all.entry((*l, *c)).or_default() += *s;
         }
         let sql = aqr_sqlite::formula::encode(p.sqlite, threads)
-            .map(|f| aqr::encode(&f, None, Level::MID).expect("archive").len())
+            .map(|f| aqr_archive::encode(&f, None, Level::MID).expect("archive").len())
             .unwrap_or_else(|| generic(p.sqlite.to_vec()));
         let other = generic(p.other.clone());
         println!(
@@ -625,7 +626,7 @@ fn formula(args: &[String]) {
         };
         let enc = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let archive = aqr::encode(&f, None, Level::MID).expect("archive").len();
+        let archive = aqr_archive::encode(&f, None, Level::MID).expect("archive").len();
         let arc = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let back = f.eval(&modules).expect("eval");

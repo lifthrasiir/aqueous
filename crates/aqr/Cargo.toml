@@ -11,6 +11,7 @@ aqr-compress = { path = "../aqr-compress" }
 aqr-decompress = { path = "../aqr-decompress" }
 aqr-foreign = { path = "../aqr-foreign" }
 aqr-formula = { path = "../aqr-formula" }
+aqr-archive = { path = "../aqr-archive" }
 aqr-ipc = { path = "../aqr-ipc" }
 aqr-l10n = { path = "../aqr-l10n" }
 aqr-ld = { path = "../aqr-ld" }

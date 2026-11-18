@@ -17,7 +17,7 @@ use zstd::zstd_safe::zstd_sys;
 use zstd::zstd_safe::{CCtx, CDict, DDict};
 
 use super::{Decoded, Encoder, How, StreamKey, external_with, invalid, key_how};
-use crate::{Error, Result};
+use aqr_formula::{Error, Result};
 
 aqr_common::zopt_namespace!("dict", "Zstandard dictionaries trained for blocks alike (aqr-formula)");
 
@@ -56,7 +56,7 @@ const DICT_ID: u32 = 1;
 /// A block that a batch writes, of a stream of the batch: its data and how it is compressed,
 /// alike with those of the same `class` (its stream's class and kind).
 pub struct Candidate<'a> {
-    pub class: (&'a str, crate::Kind),
+    pub class: (&'a str, aqr_formula::Kind),
     pub data: &'a [u8],
     pub how: How,
 }
@@ -188,7 +188,7 @@ impl Encoder {
 }
 
 /// What blocks are alike by: their stream's class and kind, and how they are compressed.
-type Class<'a> = (&'a str, crate::Kind, How);
+type Class<'a> = (&'a str, aqr_formula::Kind, How);
 
 /// A block's compressed size alone and its data compressed with a dictionary, where it was
 /// compressed alone.

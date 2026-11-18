@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use aqr_archive::Evaluate;
 use aqr_hdf5::formula::{self, Options};
 use aqr_hdf5::hdf5;
 

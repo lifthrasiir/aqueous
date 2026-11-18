@@ -1,6 +1,7 @@
 //! FSB5 banks made here: their layout, and the formula of their head and samples giving them
 //! back.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_fsb::formula;
 use aqr_fsb::fsb5::{Codec, Layout, extent, sample_sums, starts};

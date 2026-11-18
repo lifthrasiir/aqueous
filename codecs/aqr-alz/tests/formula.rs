@@ -1,4 +1,5 @@
 use aqr_alz::{alz, formula};
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Node};
 
 fn eval(f: &Formula) -> Vec<u8> {

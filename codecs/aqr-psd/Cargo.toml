@@ -8,7 +8,7 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`); without it, the code of the module alone (`module`). (And the
-# registry of `-Z`, for src/main.rs.)
+# registry of `-Z`, for examples/aqr-psd.rs.)
 encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-png/encode", "aqr-jpeg/encode", "aqr-common/registry"]
 
 [dependencies]
@@ -20,8 +20,11 @@ aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
-# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
-# that names do not collide in the workspace's target directory.
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
+
+# Tools are named <crate>-<tool> (the crate's own one, examples/aqr-psd.rs, after the crate),
+# so that names do not collide in the workspace's target directory.
 
 [[bin]]
 name = "aqr-psd-stat"

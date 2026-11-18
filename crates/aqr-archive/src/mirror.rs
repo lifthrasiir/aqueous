@@ -961,7 +961,7 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
     if headed {
         let b = v.as_deref().unwrap_or(a);
         let (blocks, ended) = blocks(b);
-        let last_meta = blocks.iter().rposition(|b| crate::aqr::locate::metadata(b.1));
+        let last_meta = blocks.iter().rposition(|b| crate::locate::metadata(b.1));
         // (a block cut short at the end, of a critical type but a spacer block's or the footer's:
         // a content block of a segment cut short)
         let cut = blocks.last().map_or(HEADER_MAGIC.len(), |l| l.2.end + (l.2.end - l.0) % 2);
@@ -1125,8 +1125,8 @@ mod tests {
     use super::super::tests::{REV, natives};
     use super::super::{ContentAt, Encoder, Leaf, Level, SegmentWriter, Tree, Value, decode_value};
     use super::*;
-    use crate::aqr::tree::{Entry, EntryNode, Extra};
-    use crate::{Formula, Node};
+    use crate::tree::{Entry, EntryNode, Extra};
+    use aqr_formula::{Formula, Node};
 
     const NAMES: [&str; 3] = ["hello", "xyz", "uvw"];
 
@@ -1180,7 +1180,7 @@ mod tests {
             None => out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0),
             Some(p) => {
                 let (mirror, end) = w
-                    .finish_mirrored(&enc, &t, &contents, p, false, crate::aqr::Status::Complete)
+                    .finish_mirrored(&enc, &t, &contents, p, false, crate::Status::Complete)
                     .unwrap()
                     .expect("far enough");
                 out.splice(p..p, mirror);
@@ -1392,16 +1392,16 @@ mod tests {
         out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
         let rev = |s: &str| s.bytes().rev().collect::<Vec<u8>>();
         assert_eq!(files(&out), [rev(NAMES[0]), rev(NAMES[1]), rev(NAMES[2])]);
-        let metas = blocks(&out).0.iter().filter(|b| crate::aqr::locate::metadata(b.1)).count();
+        let metas = blocks(&out).0.iter().filter(|b| crate::locate::metadata(b.1)).count();
         assert_eq!(metas, 2);
         let natives = natives();
-        assert_eq!(super::super::open(&out, &natives).unwrap().status(), Some(crate::aqr::Status::Complete));
+        assert_eq!(super::super::open(&out, &natives).unwrap().status(), Some(crate::Status::Complete));
         // (cut just after the first metadata block: repaired as an archive of the first segment,
         // which does not tell it was meant to be the last)
         let d = &out[..second];
         let r = repair(d, &check(d), false, &[]).unwrap();
         assert!(r.footer && r.lost.is_empty() && r.cut_off.is_none());
-        assert_eq!(super::super::open(&r.bytes, &natives).unwrap().status(), Some(crate::aqr::Status::None));
+        assert_eq!(super::super::open(&r.bytes, &natives).unwrap().status(), Some(crate::Status::None));
         for cut in [second + 1, out.len() - 20] {
             let d = &out[..cut];
             assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));

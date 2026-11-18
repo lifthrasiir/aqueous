@@ -9,11 +9,11 @@ use common::{build, eval};
 /// Encodes without the safety nets (panics surface, no verification), checks the round
 /// trip, and that there is a formula. Returns the archive's size.
 fn check(name: &str, db: &[u8]) -> usize {
-    use aqr_formula::aqr::{self, Level};
+    use aqr_archive::Level;
     let opt = Options { verify: false, ..Default::default() };
     let f = formula::encode_with(db, &opt).unwrap_or_else(|| panic!("{name}: no formula"));
     assert_eq!(eval(&f, 1).unwrap(), db, "{name}");
-    aqr::encode(&f, Some(aqr::checksum(db)), Level::Zstd(3)).unwrap().len()
+    aqr_archive::encode(&f, Some(aqr_archive::checksum(db)), Level::Zstd(3)).unwrap().len()
 }
 
 const SCHEMA: &str = "

@@ -4,7 +4,6 @@
 //! the examples: `cargo build --release --bins --examples`).
 
 use aqr_decompress::{Native, Wasm};
-use aqr_formula::aqr;
 use std::time::Instant;
 
 fn main() {
@@ -18,10 +17,10 @@ fn main() {
     for f in std::env::args().skip(1) {
         let c = std::fs::read(&f).unwrap_or_else(|e| panic!("{f}: {e}"));
         let t = Instant::now();
-        let wasm = aqr::decode(&c, &Wasm).unwrap_or_else(|e| panic!("{f}: as WebAssembly: {e:?}"));
+        let wasm = aqr_archive::decode(&c, &Wasm).unwrap_or_else(|e| panic!("{f}: as WebAssembly: {e:?}"));
         let tw = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let native = aqr::decode(&c, &Native { threads }).unwrap_or_else(|e| panic!("{f}: natively: {e:?}"));
+        let native = aqr_archive::decode(&c, &Native { threads }).unwrap_or_else(|e| panic!("{f}: natively: {e:?}"));
         let tn = t.elapsed().as_secs_f64();
         assert!(wasm == native, "{f}: WebAssembly and native differ");
         let mb = native.len() as f64 / 1e6;
@@ -31,7 +30,7 @@ fn main() {
             // a sandbox of its own, its worker started in the time
             let t = Instant::now();
             let sandbox = aqr_decompress::sandbox::Sandbox::new(&worker, [""; 0]);
-            let s = aqr::decode(&c, &sandbox).unwrap_or_else(|e| panic!("{f}: in the sandbox: {e:?}"));
+            let s = aqr_archive::decode(&c, &sandbox).unwrap_or_else(|e| panic!("{f}: in the sandbox: {e:?}"));
             let ts = t.elapsed().as_secs_f64();
             assert!(s == native, "{f}: the sandbox and native differ");
             print!(", in the sandbox {ts:.3} s ({:.0} MB/s)", mb / ts);

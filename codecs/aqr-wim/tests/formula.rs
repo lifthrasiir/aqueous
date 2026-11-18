@@ -1,6 +1,7 @@
 //! WIM files made here: a resource of LZX chunks (aqr-lzx's fixture, of its test encoder), one
 //! of no compression, the lookup table and XML data, taken apart and given back.
 
+use aqr_archive::Evaluate;
 use aqr_decompress::Native;
 use aqr_formula::Formula;
 use aqr_wim::formula;

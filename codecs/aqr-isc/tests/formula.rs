@@ -1,6 +1,7 @@
 //! Cabinets made of chunks that aqr-flate's zlib emulation writes (level 6, 9, as InstallShield's
 //! zlib does), taken apart, evaluated natively and compared with the cabinet.
 
+use aqr_archive::Evaluate;
 use aqr_common::rng::Rng;
 use aqr_decompress::Native;
 use aqr_flate::zlib::{Params, compress};

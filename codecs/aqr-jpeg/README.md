@@ -36,7 +36,7 @@ coefficients whole: a 1.4 MB one of that size takes 259 MB.
 ## Usage
 
 ```sh
-RUSTFLAGS="-C target-cpu=native" cargo build --release
+RUSTFLAGS="-C target-cpu=native" cargo build --release --example aqr-jpeg   # target/release/examples/aqr-jpeg
 
 aqr-jpeg bench [-n iters] file...         # roundtrip check (formula, .aqr archive) + ratio / throughput
 aqr-jpeg info file...                     # parse and decode, per-scan information

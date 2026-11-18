@@ -1,5 +1,6 @@
+use aqr_archive::Evaluate;
 use aqr_flac::formula;
-use aqr_formula::{Apply, Formula, aqr};
+use aqr_formula::{Apply, Formula};
 use aqr_raw::audio::pcm::Format;
 use aqr_raw::container::{self, Layout};
 use std::collections::BTreeMap;
@@ -125,7 +126,9 @@ fn bench(args: &[String]) {
         for _ in 0..iters {
             let t = Instant::now();
             let f = encode(&d, o.raw, threads);
-            let c = f.as_ref().map(|f| aqr::encode(f, Some(aqr::checksum(&d)), aqr::Level::MID).unwrap());
+            let c = f
+                .as_ref()
+                .map(|f| aqr_archive::encode(f, Some(aqr_archive::checksum(&d)), aqr_archive::Level::MID).unwrap());
             best_c = best_c.min(t.elapsed().as_secs_f64());
             coded = f.zip(c);
         }
@@ -143,7 +146,7 @@ fn bench(args: &[String]) {
         }
         for _ in 0..iters {
             let t = Instant::now();
-            let r = aqr::decode(&c, &aqr::natives(&MODULES, &m));
+            let r = aqr_archive::decode(&c, &aqr_archive::natives(&MODULES, &m));
             best_d = best_d.min(t.elapsed().as_secs_f64());
             match r {
                 Ok(r) if r == d => {}

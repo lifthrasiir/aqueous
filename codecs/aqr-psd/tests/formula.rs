@@ -3,6 +3,7 @@
 
 mod common;
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_psd::formula;
 use aqr_psd::packbits::{self, Encoder};

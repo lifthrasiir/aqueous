@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Mutex, RwLock};
 
-use aqr_formula::aqr::{EntryNode, Extra, Tree, name_bytes};
+use aqr_archive::{EntryNode, Extra, Tree, name_bytes};
 
 use crate::meta::{self, Kind};
 use crate::names::{self, Names};
@@ -1380,7 +1380,7 @@ fn symlink(target: &std::ffi::OsStr, at: &Path, dir: bool) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{ByName, Name, Names, Refused, by_name_add, made_short, resolve_link, short_valid};
-    use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
+    use aqr_archive::{Entry, EntryNode, Extra, Tree};
 
     /// Links `l0 -> l1 -> ... -> l{n-1} -> dir`, resolved from `l0` on a thread of a small stack.
     fn chain(n: usize) -> Result<Option<usize>, Refused> {

@@ -10,8 +10,8 @@
 //!
 //! - `-q`: the paths alone, nothing else: of the archive's metadata blocks alone (an encrypted
 //!   one's chunks of them decrypted), of paths given those back from the last as far as they
-//!   tell them ([`aqr::open_indexed_at`]). Of paths given without `-v`, those and the blocks of
-//!   their files alone are read too ([`aqr::Archive::sized`]); `-v` and the whole archive listed
+//!   tell them ([`aqr_archive::open_indexed_at`]). Of paths given without `-v`, those and the blocks of
+//!   their files alone are read too ([`aqr_archive::Archive::sized`]); `-v` and the whole archive listed
 //!   read all of its blocks, which a file's share of the blocks it takes is of.
 //! - By default: the size, the modification time, the flags (`x` executable, `r` read-only,
 //!   `h` hidden, `@` extended attributes, `+` forks, `=` a hard link) and the instructions of
@@ -20,22 +20,22 @@
 //!   (its formula block, modules, resources and dictionaries; blocks shared by several files
 //!   counted for each of them), its size, the ratio of its share of those blocks to its size (a
 //!   block taken by several files shared among them by their sizes, so that files taking the
-//!   same blocks have the same ratio: [`aqr::Listed::share`]), its segment (from 1), its
+//!   same blocks have the same ratio: [`aqr_archive::Listed::share`]), its segment (from 1), its
 //!   owner, permissions (`rwxr-xr-x`), Windows' attributes (`RHSATI`), macOS' flags (as
 //!   `chflags` names them), the flags `@+=`, its modification time, and the formula summarized
-//!   ([`aqr::Listed::formula`]); and the total of the archive's data blocks and the rest.
+//!   ([`aqr_archive::Listed::formula`]); and the total of the archive's data blocks and the rest.
 //!
 //! `--json`: each archive's listing as a line of JSON instead ([`json`]): its entries with all
 //! their metadata (what `-v` tells too, but `-q`), and the counts and totals.
 //!
-//! A time is told as it is recorded ([`aqr::Zone`]): `Z` of no time zone told, its offset where
+//! A time is told as it is recorded ([`aqr_archive::Zone`]): `Z` of no time zone told, its offset where
 //! one is, none of a local time in an unknown time zone; the digits of a quantization interval
 //! over a second `?` (`??:??:??` of a date).
 
 use std::io::Write;
 use std::path::Path;
 
-use aqr_formula::aqr::{self, EntryNode, Extra, Time, Zone, name_bytes};
+use aqr_archive::{EntryNode, Extra, Time, Zone, name_bytes};
 
 use crate::{Args, decrypt, plural, size};
 
@@ -44,7 +44,7 @@ struct Row {
     path: Vec<u8>,
     /// The size or the kind, as shown.
     size: String,
-    listed: Option<aqr::Listed>,
+    listed: Option<aqr_archive::Listed>,
     extra: Extra,
     is_dir: bool,
     /// A link's target, and whether it is a junction.
@@ -83,21 +83,21 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     // (of paths given, those back from the last as far as they tell them) and the blocks of
     // those files, an encrypted archive decrypted as it is read
     let indexed = a.quiet || a.select.is_some() && !a.verbose;
-    let decrypting = match indexed && aqr::envelope::is_encrypted(&c) {
+    let decrypting = match indexed && aqr_archive::envelope::is_encrypted(&c) {
         true => Some(crate::unlock(&c, input)?),
         false => None,
     };
     if indexed {
         let payload = match &decrypting {
-            Some(d) => aqr::Payload::Sealed(d),
-            None => aqr::Payload::Plain(crate::located(&c, input, a.quiet)),
+            Some(d) => aqr_archive::Payload::Sealed(d),
+            None => aqr_archive::Payload::Plain(crate::located(&c, input, a.quiet)),
         };
         let paths: Option<Vec<Vec<Vec<u8>>>> = a.select.as_ref().map(|s| s.paths.iter().map(|p| p.0.clone()).collect());
         let upto = match &a.at {
             Some(at) => Some(crate::journal::upto(input, crate::located(&c, input, a.quiet), at, a.quiet)?),
             None => None,
         };
-        let archive = crate::by_index(payload, &aqr::NoModules, a.opt.threads, paths.as_deref(), upto)
+        let archive = crate::by_index(payload, &aqr_archive::NoModules, a.opt.threads, paths.as_deref(), upto)
             .map_err(|e| err(&crate::exit::seen(e)))?;
         if a.quiet {
             return listed(a, input, &archive, Vec::new(), &err, None);
@@ -113,7 +113,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
         let listing = sized
             .into_iter()
             .map(|s| {
-                s.map(|(size, nodes)| aqr::Listed {
+                s.map(|(size, nodes)| aqr_archive::Listed {
                     size,
                     nodes,
                     data: 0,
@@ -126,7 +126,7 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
             .collect();
         return listed(a, input, &archive, listing, &err, None);
     }
-    let decrypted = match aqr::envelope::is_encrypted(&c) {
+    let decrypted = match aqr_archive::envelope::is_encrypted(&c) {
         // (not listed from chunks that do not authenticate, whose bytes are not to be trusted:
         // decompressing or testing repairs it)
         true => match decrypt(&c, input, a.opt.threads)? {
@@ -137,12 +137,16 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
     };
     // (no module is run)
     let archive = match &decrypted {
-        Some(d) => aqr::open_payload(d, &aqr::NoModules),
+        Some(d) => aqr_archive::open_payload(d, &aqr_archive::NoModules),
         None => {
             let bytes = crate::located(&c, input, a.quiet);
             match &a.at {
-                Some(at) => aqr::open_upto(bytes, &aqr::NoModules, crate::journal::upto(input, bytes, at, a.quiet)?),
-                None => aqr::open(bytes, &aqr::NoModules),
+                Some(at) => aqr_archive::open_upto(
+                    bytes,
+                    &aqr_archive::NoModules,
+                    crate::journal::upto(input, bytes, at, a.quiet)?,
+                ),
+                None => aqr_archive::open(bytes, &aqr_archive::NoModules),
             }
         }
     }
@@ -160,8 +164,8 @@ fn list(a: &Args, input: &Path) -> Result<String, String> {
 fn listed(
     a: &Args,
     input: &Path,
-    archive: &aqr::Archive,
-    mut listed: Vec<Option<aqr::Listed>>,
+    archive: &aqr_archive::Archive,
+    mut listed: Vec<Option<aqr_archive::Listed>>,
     err: &dyn Fn(&dyn std::fmt::Display) -> String,
     len: Option<u64>,
 ) -> Result<String, String> {
@@ -391,7 +395,7 @@ fn listed(
 fn json(
     a: &Args,
     input: &Path,
-    archive: &aqr::Archive,
+    archive: &aqr_archive::Archive,
     rows: &[Row],
     len: Option<u64>,
     err: &dyn Fn(&dyn std::fmt::Display) -> String,

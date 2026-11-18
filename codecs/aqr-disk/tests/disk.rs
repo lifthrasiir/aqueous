@@ -3,10 +3,11 @@
 
 use std::ops::Range;
 
+use aqr_archive::Evaluate;
+use aqr_archive::Level;
 use aqr_disk::formula::{self, Options, REST};
 use aqr_disk::partition::{self, Partition, Scheme};
 use aqr_disk::{File, FileSystem, Image, Piece, Plain};
-use aqr_formula::aqr::Level;
 use aqr_formula::{Formula, Kind, Node};
 
 /// Fixture `name` of tests/data (`scripts/gen-fixtures.sh`), decompressed.
@@ -78,9 +79,9 @@ fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 /// `f` evaluated, and archived and decoded, both `d`.
 fn rebuilds(f: &Formula, d: &[u8]) {
     assert!(f.eval(&none).unwrap() == d, "evaluated");
-    let c = aqr_formula::aqr::encode(f, None, Level::LOW).unwrap();
-    let runner = aqr_formula::aqr::natives(&[], &none);
-    assert!(aqr_formula::aqr::decode(&c, &runner).unwrap() == d, "archived");
+    let c = aqr_archive::encode(f, None, Level::LOW).unwrap();
+    let runner = aqr_archive::natives(&[], &none);
+    assert!(aqr_archive::decode(&c, &runner).unwrap() == d, "archived");
 }
 
 #[test]

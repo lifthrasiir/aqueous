@@ -24,6 +24,7 @@ mappings and modes are all there, so only the ids' codebooks are missing to rebu
 header or the extension `.wem` (format `wem`), the banks' media among them.
 
 ```sh
+cargo build --release --example aqr-wwise   # target/release/examples/aqr-wwise
 aqr-wwise ids [--db FILE] FILE...|@LIST   # setups grouped, the ids' codebooks found
 aqr-wwise recode FILE...|@LIST            # each medium through its formula and back; size, speed
 ```

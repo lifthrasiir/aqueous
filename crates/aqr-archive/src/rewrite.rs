@@ -32,7 +32,7 @@ use super::{
     ContentAt, Encoder, Failure, HEADER_MAGIC, LeafBlock, Level, Reader, SegmentWriter, always_compressed, critical,
     decoded_with, footer_of, formula_block, frame, inspect, opened, opened_with,
 };
-use crate::{Error, Result};
+use aqr_formula::{Error, Result};
 
 /// What [`rewrite`] wrote.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -639,7 +639,7 @@ mod tests {
     use super::super::tests::natives;
     use super::super::{Leaf, Segment, Value, checksum, decode_value, open};
     use super::*;
-    use crate::{Formula, Node};
+    use aqr_formula::{Formula, Node};
 
     fn text(seed: u64, n: usize) -> Vec<u8> {
         let mut x = seed;

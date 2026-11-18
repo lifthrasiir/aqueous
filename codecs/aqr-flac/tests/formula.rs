@@ -2,8 +2,9 @@
 //! over the files in tests/data (also with junk, cut, on threads), and nothing for what is not
 //! coded.
 
+use aqr_archive::Evaluate;
 use aqr_flac::formula::{self, MODULE};
-use aqr_formula::{Apply, Formula, aqr};
+use aqr_formula::{Apply, Formula};
 
 fn files() -> Vec<(String, Vec<u8>)> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
@@ -49,7 +50,7 @@ fn data_files() {
         // These should all be coded, and smaller than the input as archives; an archive
         // also holds the tables (2306 bytes compressed, once).
         let f = formula::encode(&d, 1).unwrap();
-        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::MID).unwrap().len();
+        let n = aqr_archive::encode(&f, Some(aqr_archive::checksum(&d)), aqr_archive::Level::MID).unwrap().len();
         assert!(n < d.len() + 2400, "{name}: {n} >= {} + 2400", d.len());
     }
 }

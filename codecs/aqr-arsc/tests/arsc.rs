@@ -4,6 +4,7 @@
 //! entries, lengths not in their shortest form, chunks of other types) kept as they are;
 //! streams corrupted, which never panic.
 
+use aqr_archive::Evaluate;
 use aqr_arsc::arsc::{self, s};
 use aqr_arsc::{encode, formula};
 use aqr_common::rng::Rng;

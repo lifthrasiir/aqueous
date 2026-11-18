@@ -60,6 +60,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "aqr"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-common",
  "aqr-compress",
  "aqr-decompress",
@@ -87,6 +88,7 @@ dependencies = [
 name = "aqr-7z"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-bcj",
  "aqr-common",
  "aqr-formula",
@@ -107,6 +109,7 @@ dependencies = [
 name = "aqr-alz"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-bz2",
  "aqr-common",
  "aqr-flate",
@@ -117,6 +120,7 @@ dependencies = [
 name = "aqr-apfs"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-disk",
  "aqr-formula",
  "zstd",
@@ -130,10 +134,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-archive"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "chacha20",
+ "chacha20poly1305",
+ "crc-fast",
+ "getrandom",
+ "hkdf",
+ "hmac",
+ "scrypt",
+ "sha2",
+ "xxhash-rust",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-arsc"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "zstd",
@@ -164,6 +187,7 @@ name = "aqr-b2t"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
 ]
@@ -185,6 +209,7 @@ name = "aqr-blob"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-formula",
 ]
 
@@ -193,6 +218,7 @@ name = "aqr-bundle"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-disk",
  "aqr-flate",
@@ -218,6 +244,7 @@ name = "aqr-bz2"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
 ]
@@ -227,6 +254,7 @@ name = "aqr-clip"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -255,6 +283,7 @@ dependencies = [
  "aqr-7z",
  "aqr-alz",
  "aqr-apfs",
+ "aqr-archive",
  "aqr-arsc",
  "aqr-asar",
  "aqr-b2t",
@@ -337,6 +366,7 @@ dependencies = [
  "aqr-7z",
  "aqr-ac3",
  "aqr-api",
+ "aqr-archive",
  "aqr-arsc",
  "aqr-asar",
  "aqr-azo",
@@ -430,6 +460,7 @@ name = "aqr-dex"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "sha1",
@@ -440,6 +471,7 @@ dependencies = [
 name = "aqr-disk"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-common",
  "aqr-ext",
  "aqr-formula",
@@ -457,6 +489,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-ac3",
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-mp3",
@@ -803,6 +836,7 @@ name = "aqr-dll-shim"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-blob",
  "aqr-decompress",
  "aqr-formula",
@@ -879,6 +913,7 @@ dependencies = [
 name = "aqr-egg"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-azo",
  "aqr-bz2",
  "aqr-common",
@@ -902,6 +937,7 @@ dependencies = [
 name = "aqr-ext"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-disk",
  "aqr-formula",
  "zstd",
@@ -922,6 +958,7 @@ dependencies = [
 name = "aqr-fat"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-disk",
  "aqr-formula",
  "zstd",
@@ -932,6 +969,7 @@ name = "aqr-fits"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "zstd",
@@ -942,6 +980,7 @@ name = "aqr-flac"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-raw",
@@ -964,7 +1003,7 @@ name = "aqr-foreign"
 version = "0.1.0"
 dependencies = [
  "aes",
- "aqr-formula",
+ "aqr-archive",
  "cbc",
  "ctr",
  "encoding_rs",
@@ -981,14 +1020,6 @@ name = "aqr-formula"
 version = "0.1.0"
 dependencies = [
  "aqr-common",
- "chacha20",
- "chacha20poly1305",
- "crc-fast",
- "getrandom",
- "hkdf",
- "hmac",
- "scrypt",
- "sha2",
  "xxhash-rust",
  "zstd",
 ]
@@ -997,6 +1028,7 @@ dependencies = [
 name = "aqr-fsb"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-ima",
@@ -1017,6 +1049,7 @@ name = "aqr-git"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -1029,6 +1062,7 @@ name = "aqr-gnu-gettext"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
 ]
@@ -1038,6 +1072,7 @@ name = "aqr-hdf5"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -1048,6 +1083,7 @@ dependencies = [
 name = "aqr-hfs"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-disk",
  "aqr-formula",
  "zstd",
@@ -1098,6 +1134,7 @@ name = "aqr-interp"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-blob",
  "aqr-formula",
  "aqr-wasmrt",
@@ -1116,6 +1153,7 @@ dependencies = [
 name = "aqr-isc"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-common",
  "aqr-decompress",
  "aqr-flate",
@@ -1126,6 +1164,7 @@ dependencies = [
 name = "aqr-iso"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-disk",
  "aqr-formula",
  "zstd",
@@ -1136,6 +1175,7 @@ name = "aqr-jpeg"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "memchr",
@@ -1175,6 +1215,7 @@ name = "aqr-lha"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
 ]
@@ -1196,6 +1237,7 @@ name = "aqr-lz4"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",
@@ -1207,6 +1249,7 @@ name = "aqr-lzma"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-bcj",
  "aqr-common",
  "aqr-formula",
@@ -1227,6 +1270,7 @@ name = "aqr-lzo"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
 ]
@@ -1274,6 +1318,7 @@ dependencies = [
 name = "aqr-mkv"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",
@@ -1349,6 +1394,7 @@ name = "aqr-mp3"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-raw",
@@ -1370,6 +1416,7 @@ name = "aqr-mszip"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-decompress",
  "aqr-flate",
@@ -1446,6 +1493,7 @@ dependencies = [
 name = "aqr-ntfs"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-decompress",
  "aqr-disk",
  "aqr-formula",
@@ -1464,6 +1512,7 @@ name = "aqr-obj"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-num",
@@ -1494,6 +1543,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-7z",
  "aqr-alz",
+ "aqr-archive",
  "aqr-bz2",
  "aqr-common",
  "aqr-egg",
@@ -1513,6 +1563,7 @@ name = "aqr-pdb"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "zstd",
@@ -1524,6 +1575,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -1563,6 +1615,7 @@ name = "aqr-png"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -1574,6 +1627,7 @@ dependencies = [
 name = "aqr-ppmd"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-formula",
 ]
 
@@ -1595,6 +1649,7 @@ name = "aqr-psd"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -1608,6 +1663,7 @@ name = "aqr-rar"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
 ]
@@ -1617,6 +1673,7 @@ name = "aqr-raw"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-ima",
@@ -1628,6 +1685,7 @@ name = "aqr-sfx"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-blob",
  "aqr-common",
  "aqr-exe",
@@ -1640,7 +1698,7 @@ dependencies = [
 name = "aqr-sfx-shim"
 version = "0.1.0"
 dependencies = [
- "aqr-formula",
+ "aqr-archive",
  "aqr-sfx",
 ]
 
@@ -1649,6 +1707,7 @@ name = "aqr-snappy"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "zstd",
@@ -1659,6 +1718,7 @@ name = "aqr-sqlite"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",
@@ -1669,6 +1729,7 @@ name = "aqr-tensors"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "memmap2",
@@ -1680,6 +1741,7 @@ name = "aqr-tex"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-raw",
@@ -1692,6 +1754,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-7z",
  "aqr-alz",
+ "aqr-archive",
  "aqr-azo",
  "aqr-bcj",
  "aqr-bz2",
@@ -1699,7 +1762,6 @@ dependencies = [
  "aqr-egg",
  "aqr-flate",
  "aqr-foreign",
- "aqr-formula",
  "aqr-lzma",
  "aqr-rar",
  "aqr-zip",
@@ -1734,6 +1796,7 @@ name = "aqr-wasm"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "zstd",
@@ -1744,6 +1807,7 @@ name = "aqr-wasmrt"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-blob",
  "aqr-common",
  "aqr-formula",
@@ -1758,6 +1822,7 @@ dependencies = [
 name = "aqr-wim"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-common",
  "aqr-decompress",
  "aqr-formula",
@@ -1803,6 +1868,7 @@ dependencies = [
 name = "aqr-wwise"
 version = "0.1.0"
 dependencies = [
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-vorbis",
@@ -1835,6 +1901,7 @@ name = "aqr-zip"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
@@ -1848,6 +1915,7 @@ name = "aqr-zstd"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-archive",
  "aqr-common",
  "aqr-formula",
  "aqr-sqlite",

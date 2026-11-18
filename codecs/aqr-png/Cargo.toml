@@ -18,6 +18,7 @@ aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-raw = { path = "../aqr-raw", default-features = false }
 
 [dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 flate-zoo.workspace = true
 
 # flate-zoo's backends that do not work with MSVC (the root Cargo.toml has why).
@@ -26,8 +27,8 @@ flate-zoo = { workspace = true, features = [
     "zlib-ng", "zlib-chromium", "zlib-cloudflare", "libslz", "cryptopp", "go", "gzip", "infozip", "ect",
 ] }
 
-# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
-# that names do not collide in the workspace's target directory.
+# Tools are named <crate>-<tool> (the crate's own one, examples/aqr-png.rs, after the crate),
+# so that names do not collide in the workspace's target directory.
 
 [[bin]]
 name = "aqr-png-probe"

@@ -7,6 +7,7 @@
 //! cargo run --release -p aqr-bundle --example aqr-bundle-packs -- FILE...
 //! ```
 
+use aqr_archive::Evaluate;
 use aqr_bundle::packs;
 
 fn main() {

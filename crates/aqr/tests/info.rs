@@ -36,7 +36,7 @@ fn segments_and_paths() {
         assert!(ok, "{err}");
     }
     let (a, b) = (fs::read(d.join("v1.aqr")).unwrap(), fs::read(d.join("v2.aqr")).unwrap());
-    fs::write(d.join("two.aqr"), aqr_formula::aqr::inspect::join_segments(&[&a, &b])).unwrap();
+    fs::write(d.join("two.aqr"), aqr_archive::inspect::join_segments(&[&a, &b])).unwrap();
 
     // the archive itself: its blocks and segments, the last current
     let (ok, out, err) = aqr_in(&d, &["-I", "two.aqr"]);

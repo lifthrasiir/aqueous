@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use aqr_archive::{Entry, EntryNode, Extra, Tree, name_bytes, name_from};
 use aqr_foreign::charset::{Charset, Choice, Decision, decide};
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, name_bytes, name_from};
 
 /// A path as an archive gives it: in an encoding it declares, as UTF-8, or in none, as it is
 /// (`docs/names-design.md`).

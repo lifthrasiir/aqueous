@@ -10,8 +10,8 @@
 use std::ffi::OsString;
 use std::sync::{Mutex, OnceLock};
 
+use aqr_archive::{EntryNode, Tree, name_bytes};
 use aqr_foreign::charset::{self, Charset, Choice, Decision};
-use aqr_formula::aqr::{EntryNode, Tree, name_bytes};
 use unicode_normalization::UnicodeNormalization;
 
 /// How Unicode names are normalized (`--normalize`).

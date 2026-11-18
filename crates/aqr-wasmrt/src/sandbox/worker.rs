@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
+use aqr_archive::Failure;
 use aqr_formula::Resource;
-use aqr_formula::aqr::Failure;
 
 use super::os;
 use super::proto::*;

@@ -1,5 +1,5 @@
-use aqr_formula::aqr::{self, Level};
-use aqr_formula::{Apply, Formula};
+use aqr_archive::{Evaluate, Level};
+use aqr_formula::Apply;
 use aqr_obj::block::NSTREAMS;
 use aqr_obj::codec::Options;
 use aqr_obj::formula::{self, MODULE};
@@ -89,7 +89,7 @@ fn bench(args: &[String]) {
                 coded = false;
                 break;
             };
-            c = aqr::encode(&fm, Some(aqr::checksum(&src)), Level::MID).expect("archive");
+            c = aqr_archive::encode(&fm, Some(aqr_archive::checksum(&src)), Level::MID).expect("archive");
             bc = bc.min(clock(opt.threads) - t);
         }
         if !coded {
@@ -100,7 +100,7 @@ fn bench(args: &[String]) {
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = clock(opt.threads);
-            let d = aqr::decode(&c, &aqr::natives(&[MODULE], &modules));
+            let d = aqr_archive::decode(&c, &aqr_archive::natives(&[MODULE], &modules));
             bd = bd.min(clock(opt.threads) - t);
             ok &= matches!(d, Ok(ref d) if *d == src);
         }
@@ -300,7 +300,7 @@ fn fuzz(args: &[String]) {
                 let threads = [2, 3, 4][i % 3];
                 let opt_t = Options { threads, verify: i % 4 == 0, ..opt };
                 let same = opt_t.verify || formula::encode_with(&m, &opt_t).as_ref() == Some(&fm);
-                let d = Formula::eval(&fm, &apply(threads));
+                let d = fm.eval(&apply(threads));
                 same && matches!(d, Ok(ref d) if *d == m)
             });
             match res {

@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_egg::{egg, formula};
 use aqr_formula::{Apply, Formula, Kind, Node};
 

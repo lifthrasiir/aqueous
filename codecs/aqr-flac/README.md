@@ -41,7 +41,7 @@ shape is nearly universal once scaled; 101 contexts × 72 tokens).
 ## Usage
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-flac   # target/release/examples/aqr-flac
 
 aqr-flac bench [-r FMT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...  # formula and .aqr round trip check, size, speed, stream sizes (-t default 1); WAV / AIFF through aqr-raw
 aqr-flac info FILE|DIR...

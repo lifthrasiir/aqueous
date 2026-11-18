@@ -223,7 +223,7 @@ pub fn inspect<'c>(
     let framed = frame(d)?;
 
     // the segments: each up to a metadata block (all of the blocks where there is none)
-    let is_metadata = crate::aqr::locate::metadata;
+    let is_metadata = crate::locate::metadata;
     let mut cuts: Vec<(usize, usize)> = Vec::new();
     let mut first = 0;
     for (i, &(_, ty, ..)) in framed.iter().enumerate() {
@@ -593,7 +593,7 @@ pub fn join_segments(archives: &[&[u8]]) -> Vec<u8> {
         let fields = u16::from_le_bytes([c[c.len() - 2], c[c.len() - 1]]) as usize;
         let d = &c[HEADER_MAGIC.len()..c.len() - 2 - fields - 8];
         let framed = frame(d).expect("an archive");
-        let &(start, ty, data, _) = framed.iter().rev().find(|b| crate::aqr::locate::metadata(b.1)).expect("metadata");
+        let &(start, ty, data, _) = framed.iter().rev().find(|b| crate::locate::metadata(b.1)).expect("metadata");
         out.extend_from_slice(&d[..start]);
         let meta = decoded(data, ty & 0x04 != 0, true).expect("a metadata block");
         let mut at = 0;
@@ -614,8 +614,8 @@ pub fn join_segments(archives: &[&[u8]]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Formula;
-    use crate::aqr::{ContentAt, Encoder, EntryNode, Leaf, Level, SegmentWriter, Time, Tree};
+    use crate::{ContentAt, Encoder, EntryNode, Leaf, Level, SegmentWriter, Time, Tree};
+    use aqr_formula::Formula;
 
     /// An archive of a segment of each of `segments`, of files (name, bytes, mtime) each.
     fn archive(segments: &[&[(&str, &[u8], i64)]]) -> Vec<u8> {
@@ -634,7 +634,7 @@ mod tests {
             let mut contents = Vec::new();
             for (i, (name, bytes, mtime)) in files.iter().enumerate() {
                 let extra = Extra { mtime: Some(Time::new(*mtime, 0)), ..Extra::default() };
-                t.entries.push(crate::aqr::Entry {
+                t.entries.push(crate::Entry {
                     parent: None,
                     name: name.as_bytes().to_vec(),
                     node: EntryNode::File(i),
@@ -656,7 +656,7 @@ mod tests {
         let a: &[(&str, &[u8], i64)] = &[("a", &[1; 300], 10), ("b", &[2; 300], 20)];
         let joined = archive(&[a, &[("b", &[3; 290], 30)]]);
         // (open merges them: the later "b" replaces the earlier)
-        let opened = crate::aqr::open(&joined, &crate::aqr::NoModules).unwrap();
+        let opened = crate::open(&joined, &crate::NoModules).unwrap();
         assert_eq!(opened.tree().unwrap().entries.len(), 2);
         let i = inspect(&joined, false, &|_| None, None).unwrap();
         assert_eq!(i.segments.len(), 2);
@@ -715,7 +715,7 @@ mod tests {
                     N::Link => (EntryNode::Link(b"t".to_vec()), None),
                 };
                 let extra = Extra { mode, ..Extra::default() };
-                t.entries.push(crate::aqr::Entry { parent: *parent, name: name.as_bytes().to_vec(), node, extra });
+                t.entries.push(crate::Entry { parent: *parent, name: name.as_bytes().to_vec(), node, extra });
             }
             let contents: Vec<ContentAt> = (files.iter().enumerate())
                 .map(|(j, bytes)| ContentAt { leaf: b.leaf_at[j], output: 0, size: bytes.len() as u64 })
@@ -750,7 +750,7 @@ mod tests {
         let i = inspect(&c, false, &|_| None, None).unwrap();
         let states = i.merged();
         // the tree open makes, and the current entries: path, kind and mode
-        let opened = crate::aqr::open(&c, &crate::aqr::NoModules).unwrap();
+        let opened = crate::open(&c, &crate::NoModules).unwrap();
         let t = opened.tree().unwrap();
         let path = |mut k: usize| {
             let mut p = t.entries[k].name.clone();
@@ -800,22 +800,22 @@ mod tests {
     /// outputs numbered and its inputs told once; the modules by their names.
     #[test]
     fn formula_dumped() {
-        use crate::aqr::tests::{CUT, REV};
-        use crate::aqr::{encode, stand_in_name};
+        use crate::tests::{CUT, REV};
+        use crate::{encode, stand_in_name};
         let mut f = Formula::default();
         let a = f.push("a", b"abcdefgh".to_vec());
-        let cut = crate::Apply {
+        let cut = aqr_formula::Apply {
             module: CUT,
             resources: vec![],
             params: vec![],
             inputs: vec![a],
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
-        let [o0, o1] = <[crate::Node; 2]>::try_from(f.share(cut, vec![3, 5])).unwrap();
-        let rev = crate::Node::apply(REV, vec![1, 2, 3], vec![o0], 1);
-        f.root = crate::Node::concat([o1, rev]);
+        let [o0, o1] = <[aqr_formula::Node; 2]>::try_from(f.share(cut, vec![3, 5])).unwrap();
+        let rev = aqr_formula::Node::apply(REV, vec![1, 2, 3], vec![o0], 1);
+        f.root = aqr_formula::Node::concat([o1, rev]);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         let i = inspect(&c, false, &|w| stand_in_name(w).map(String::from), None).unwrap();
         assert!(i.segments[0].metadata.is_none());

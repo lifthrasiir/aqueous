@@ -76,7 +76,7 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     nodes.push(Node::slice(0, data.len() as u64, (input.len() - p) as u64));
     data.extend_from_slice(&input[p..]);
     let root = Node::concat(nodes);
-    if repeated < taken_min(input.len()) + aqr_formula::aqr::description_bound(&root) {
+    if repeated < taken_min(input.len()) + aqr_archive::description_bound(&root) {
         return None;
     }
     let mut f = Formula::default();
@@ -101,6 +101,7 @@ pub fn is(f: &Formula) -> bool {
 mod tests {
     use super::*;
     use crate::tests::file;
+    use aqr_archive::Evaluate;
 
     /// The frames seen before are held once, the video's keyframes apart; the file given back.
     #[test]

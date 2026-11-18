@@ -28,6 +28,7 @@ pub fn is(f: &Formula) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aqr_archive::Evaluate;
 
     /// A file's formula gives it back, its header and its data apart.
     #[test]

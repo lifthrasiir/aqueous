@@ -9,7 +9,7 @@ let f = aqr_clip::formula::encode(&file, threads);      // None where it is not 
 ```
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-clip   # target/release/examples/aqr-clip
 aqr-clip formula [-t N] FILE...                # the formula, its archive at level mid, evaluated back
 aqr-clip stat FILE...                          # chunks, block data, tiles by layout and class
 aqr-clip bench [-t N] [-b TILES] [-c] FILE...  # tiles by every model; -c checks the dynamic models' round trip

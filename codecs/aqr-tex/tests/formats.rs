@@ -5,6 +5,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
+use aqr_archive::Evaluate;
 use aqr_tex::layout::{Format, Layout};
 use aqr_tex::texture::{self, Family};
 

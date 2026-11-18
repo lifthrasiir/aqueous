@@ -16,8 +16,11 @@ memchr = "2"
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 aqr-raw = { path = "../aqr-raw", default-features = false }
 
-# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
-# that names do not collide in the workspace's target directory.
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
+
+# Tools are named <crate>-<tool> (the crate's own one, examples/aqr-flac.rs, after the crate),
+# so that names do not collide in the workspace's target directory.
 
 [[bin]]
 name = "aqr-flac-train"

@@ -1,5 +1,5 @@
 //! The sink: streams of an archive written as they are made, each non-leaf block compressed as
-//! soon as it is full and held so (of the store where one is set, [`crate::store`]) rather than
+//! soon as it is full and held so (of the store where one is set, [`aqr_formula::store`]) rather than
 //! the stream's bytes (`docs/streaming-encoder-design.md`). A block is compressed as the encoder
 //! compresses it at the end (`Encoder::write`): by its bytes and how its stream is compressed
 //! alone, so that an archive of streams written to a sink is the same as of streams held whole.
@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::sync::MutexGuard;
 
 use super::*;
-use crate::Bytes;
+use aqr_formula::Bytes;
 
 /// Where a direct sink writes its blocks: a file, at offsets.
 pub trait Place: Send + Sync {
@@ -274,7 +274,7 @@ impl Sink {
         let within = |f: &Formula, (s, a, l): (usize, u64, u64)| {
             a.checked_add(l).is_some_and(|e| e <= f.streams[s].data.len() as u64)
         };
-        // streams of a slice past their end, and those kept apart ([`crate::Stream::apart`]), left
+        // streams of a slice past their end, and those kept apart ([`aqr_formula::Stream::apart`]), left
         // as they are
         // (but in a direct sink, whose streams kept apart have streams of their own: nothing is
         // to be written after it)
@@ -386,7 +386,7 @@ impl Sink {
             {
                 let parts = pieces.iter().map(|&(k, a, l)| {
                     let i = *of_sink.entry(k).or_insert_with(|| {
-                        streams.push(crate::Stream {
+                        streams.push(aqr_formula::Stream {
                             class: classes[k].0.clone(),
                             kind: classes[k].1,
                             content: false,
@@ -541,7 +541,7 @@ fn encoded(level: Level, threads: usize, d: &[u8], how: How, spill: bool) -> Res
     content_block(&mut out, false, &[d], c.as_deref());
     let mut b = Bytes::from(out);
     if spill {
-        crate::store::spill(&mut b);
+        aqr_formula::store::spill(&mut b);
     }
     Ok(b)
 }

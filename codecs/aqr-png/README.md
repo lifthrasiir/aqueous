@@ -7,7 +7,7 @@ Huffman header coding and writing come from [aqr-flate](../aqr-flate). The forma
 specified in [FORMAT.md](FORMAT.md).
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-png   # target/release/examples/aqr-png
 aqr-png bench [-t N] [-n ITERS] [-v] [-c | -d] FILE...   # round trip check through an archive, ratio, throughput (default 1 thread)
 ```
 
@@ -265,7 +265,7 @@ the tests (and `aqr-png bench` on the corpus) run through them on small images t
 | `src/codec.rs` | Skeleton, image records, rebuilding the file |
 | `src/formula.rs` | The formula module |
 | `src/part.rs`, `src/plan.rs` | png-recons as a part module; the modules' memory plans |
-| `src/main.rs` | Benchmark tool |
+| `examples/aqr-png.rs` | Benchmark tool |
 | `src/bin/probe.rs`, `src/bin/ransbench.rs` | Research tools: token statistics, rANS speed |
 | `bench/` | Comparison with other tools (`bench/fetch.sh` builds them into the workspace's `third_party/`) |
 

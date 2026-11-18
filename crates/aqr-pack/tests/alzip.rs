@@ -211,7 +211,7 @@ fn egg_posix() {
 /// time (not the civil time taken for UTC).
 #[test]
 fn egg_local_times() {
-    use aqr_formula::aqr::Zone;
+    use aqr_archive::Zone;
     let local = Time { secs: 1_700_000_000, nanos: 500_000_000, zone: Zone::Local, unit: 1 };
     let x = Extra { mtime: Some(local), mode: Some(0o644), ..Extra::default() };
     let tree = Tree { root: Extra::default(), entries: vec![entry(None, "a", EntryNode::File(0), x)] };

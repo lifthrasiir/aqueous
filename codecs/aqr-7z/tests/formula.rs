@@ -1,10 +1,11 @@
 use aqr_7z::formula::{self, Options};
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Kind, Node};
 
 /// The modules of the formulas; BCJ2, of three outputs, gives them one after another.
 struct Modules;
 
-impl aqr_formula::Modules for Modules {
+impl aqr_archive::Modules for Modules {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
         if let Some(r) = aqr_bcj::formula::decode(a.module, &a.params, inputs, a.len) {
             return r.map_err(|e| aqr_formula::Error::new(e.to_string()));

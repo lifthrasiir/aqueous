@@ -1,4 +1,5 @@
-use aqr_formula::aqr::{self, Level};
+use aqr_archive::Evaluate;
+use aqr_archive::Level;
 use aqr_formula::{Apply, Formula};
 use aqr_pdf::encode::{self, Options, Stats};
 use aqr_pdf::formula::{self, MODES, MODULE};
@@ -62,7 +63,7 @@ fn options(args: &[String]) -> (Options, usize, bool, u64, Vec<String>) {
             "-l" => o.level = val().parse().unwrap_or_else(|_| usage()),
             "-t" => o.threads = val().parse::<usize>().unwrap_or_else(|_| usage()).max(1),
             "-n" => iters = val().parse().unwrap_or_else(|_| usage()),
-            "-V" => o.verify = true,
+            "-V" => o.verify = Some(|f, m| aqr_archive::Evaluate::eval(f, &m)),
             "-T" => o.tok = false,
             "-F" => o.full = false,
             "-P" => o.png = false,
@@ -95,14 +96,14 @@ fn main() {
 
 /// The archive of `file`'s formula.
 fn archive(f: &Formula, file: &[u8]) -> Vec<u8> {
-    aqr::encode(f, Some(aqr::checksum(file)), Level::MID).expect("an archive")
+    aqr_archive::encode(f, Some(aqr_archive::checksum(file)), Level::MID).expect("an archive")
 }
 
 /// The file in archive `c`, with `threads` threads for this module.
-fn unarchive(c: &[u8], threads: usize) -> Result<Vec<u8>, aqr::Failure> {
+fn unarchive(c: &[u8], threads: usize) -> Result<Vec<u8>, aqr_archive::Failure> {
     let run = |a: &Apply, i: &[&[u8]]| formula::apply(a, i, threads);
     let modules = [MODULE, aqr_flate::formula::MODULE, aqr_png::formula::MODULE, aqr_jpeg::formula::MODULE];
-    aqr::decode(c, &aqr::natives(&modules, &run))
+    aqr_archive::decode(c, &aqr_archive::natives(&modules, &run))
 }
 
 /// Archives of the files, their sizes and times (files with no formula count as they are,

@@ -716,7 +716,7 @@ fn inno_pays(p: &aqr_inno::Piece, d: &[u8], opt: &crate::Options, depth: u32, cx
         probe.pays(&cx.enc, p.range.len(), || Some(p.record.len()), &p.data, held, Kind::Unknown)
     };
     let compresses = || cx.enc.least(&p.data, p.data.len() / 4 * 3).is_ok_and(|n| n <= p.data.len() / 4 * 3);
-    pays(aqr_formula::probe::Probe::flat(opt.level)) || compresses() && pays(probe)
+    pays(aqr_formula::probe::Probe::flat(aqr_archive::archivers(opt.level))) || compresses() && pays(probe)
 }
 
 /// `d` with each of `sections`, `(virtual address, offset, size, code)` within `d`, through

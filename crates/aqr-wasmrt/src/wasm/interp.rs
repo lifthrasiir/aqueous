@@ -6,8 +6,8 @@
 
 use std::sync::OnceLock;
 
+use aqr_archive::{Failure, Loaded};
 use aqr_blob::interp::{Interpreter, Vtable};
-use aqr_formula::aqr::{Failure, Loaded};
 
 use super::Decoded;
 

@@ -17,4 +17,5 @@ aqr-ima = { path = "../aqr-ima" }
 aqr-vorbis = { path = "../aqr-vorbis" }
 
 [dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-formula = { path = "../../crates/aqr-formula" }

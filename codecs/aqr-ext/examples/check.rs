@@ -6,6 +6,7 @@
 //! cargo run --release -p aqr-ext --example aqr-ext-check -- [-v] IMAGE...
 //! ```
 
+use aqr_archive::Evaluate;
 use std::time::Instant;
 
 fn main() {

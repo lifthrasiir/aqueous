@@ -10,7 +10,7 @@
 //!   contents of another (spec, "Content blocks") but by an import, which is not read yet. `TO`
 //!   there already, under the path moved, or under what is not a directory, is an error.
 //! - `--compact ARCHIVE` (alone, or with `--delete`, the paths then taken out of the tree): the
-//!   archive written again of what its tree holds ([`aqr::rewrite`]), every block it still needs
+//!   archive written again of what its tree holds ([`aqr_archive::rewrite`]), every block it still needs
 //!   copied as it is (a non-leaf block solid with what is gone made again of what is left, the
 //!   files made again evaluated to check them), segment by segment; what an append not committed, tombstones and entries
 //!   replaced left in the file taken out of it. It is written beside the archive
@@ -28,7 +28,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use aqr_formula::aqr::{self, Entry, EntryNode, Extra, SegmentWriter, Tree};
+use aqr_archive::{Entry, EntryNode, Extra, SegmentWriter, Tree};
 
 use crate::{Args, append, exit, plural, stop};
 
@@ -121,7 +121,7 @@ pub fn edit(a: &Args) -> Result<(), String> {
 
 /// Archive `path`, opened as `o`, written again of tree `t` (its own, edited) and put in its
 /// place ([module](self)): the bytes of the archive before, and what was written.
-fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, aqr::Rewritten), String> {
+fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, aqr_archive::Rewritten), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let io = |e: std::io::Error| err(&exit::seen(e));
     // (a link to the archive: the archive written again where it is)
@@ -139,7 +139,7 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
         let mut w = std::io::BufWriter::with_capacity(8 << 20, &file);
         w.write_all(lead).map_err(|e| perr(&e))?;
         let history = history_of(a, c).map_err(|e| err(&e))?;
-        let r = aqr::rewrite_as(c, t, a.opt.level, a.opt.threads, &mut w, history).map_err(|e| err(&e))?;
+        let r = aqr_archive::rewrite_as(c, t, a.opt.level, a.opt.threads, &mut w, history).map_err(|e| err(&e))?;
         w.flush().map_err(|e| perr(&e))?;
         drop(w);
         crate::sync_file(&file).map_err(|e| perr(&e))?;
@@ -165,16 +165,16 @@ fn compact(a: &Args, path: &Path, o: &append::Opened, t: &Tree) -> Result<(u64, 
 
 /// What becomes of the journal points of archive `c` written again: as `--keep-since` and
 /// `--drop-history` tell; an error where it has some and neither is given.
-fn history_of(a: &Args, c: &[u8]) -> Result<aqr::History, String> {
-    let archive = aqr::open(c, &aqr::NoModules).map_err(|e| e.to_string())?;
+fn history_of(a: &Args, c: &[u8]) -> Result<aqr_archive::History, String> {
+    let archive = aqr_archive::open(c, &aqr_archive::NoModules).map_err(|e| e.to_string())?;
     let points = archive.journal();
     match (&a.keep_since, a.drop_history) {
         (Some(at), _) => {
             let p = crate::journal::pick(points, at).map_err(|e| format!("--keep-since: {e}"))?;
-            Ok(aqr::History::Keep { from: p.metadata, since: p.time })
+            Ok(aqr_archive::History::Keep { from: p.metadata, since: p.time })
         }
-        (None, true) => Ok(aqr::History::Drop),
-        (None, false) if points.is_empty() => Ok(aqr::History::Refuse),
+        (None, true) => Ok(aqr_archive::History::Drop),
+        (None, false) if points.is_empty() => Ok(aqr_archive::History::Refuse),
         (None, false) => Err(format!(
             "it has {} journal point{}: --keep-since SPEC keeps those from one on, --drop-history drops them all",
             points.len(),
@@ -195,7 +195,7 @@ fn checked(a: &Args, part: &PathBuf, lead: usize, t: &Tree, sizes: &[u64], made:
         wasm: crate::WASM.get(),
         sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
     };
-    let archive = aqr::open(&c[lead..], &decoder).map_err(|e| e.to_string())?;
+    let archive = aqr_archive::open(&c[lead..], &decoder).map_err(|e| e.to_string())?;
     if !made.is_empty() {
         let mut only = vec![false; archive.leaves_len()];
         made.iter().for_each(|&l| only[l] = true);
@@ -356,7 +356,7 @@ fn commit_with(
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let io = |e: std::io::Error| err(&exit::seen(e));
     let file = &p.file;
-    let enc = aqr::Encoder::with_threads(a.opt.level, a.opt.threads);
+    let enc = aqr_archive::Encoder::with_threads(a.opt.level, a.opt.threads);
     let mut w = match p.kill {
         true => SegmentWriter::appending(p.footer.clone(), p.metadata),
         false => {
@@ -371,14 +371,14 @@ fn commit_with(
     if let Some(point) = point {
         w.set_journal(vec![point.clone()]).map_err(|e| err(&e))?;
     }
-    out.extend(w.close_as(&enc, t, &[], aqr::Status::Complete).map_err(|e| err(&e))?);
+    out.extend(w.close_as(&enc, t, &[], aqr_archive::Status::Complete).map_err(|e| err(&e))?);
     let (footer, before) = w.footer(p.at.start);
     out.extend(footer);
     let len = file.metadata().map_err(io)?.len();
     crate::write_at(file, len, &out).map_err(io)?;
     crate::sync_file(file).map_err(io)?;
     if let Some(f) = before {
-        let k = aqr::kill(f.len());
+        let k = aqr_archive::kill(f.len());
         crate::write_at(file, p.at.start + f.start as u64, &k).map_err(io)?;
         crate::sync_file(file).map_err(io)?;
         crate::write_at(file, p.at.start + (f.start + k.len()) as u64, &vec![0; f.len() - k.len()]).map_err(io)?;

@@ -5,6 +5,7 @@
 
 use aqr_api::emu::{self, Entry, Kind};
 use aqr_api::{Window, stream};
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 use aqr_raw::audio::pcm::Format;
 use aqr_raw::container::Layout;

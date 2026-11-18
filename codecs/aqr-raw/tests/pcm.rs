@@ -2,7 +2,8 @@
 //! through the modules on one thread and several (the same formula whatever the threads),
 //! with junk, cuts and corrupted inputs.
 
-use aqr_formula::{Apply, Formula, aqr};
+use aqr_archive::Evaluate;
+use aqr_formula::{Apply, Formula};
 use aqr_raw::audio::pcm::Format;
 use aqr_raw::container::{self, Layout};
 use aqr_raw::formula::{self, pcm};
@@ -59,7 +60,7 @@ fn data_files() {
         assert_eq!(a.len, c.len as u64);
         // Smaller than the input as archives; an archive also holds the tables (about 2.4 KB
         // compressed, once).
-        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::MID).unwrap().len();
+        let n = aqr_archive::encode(&f, Some(aqr_archive::checksum(&d)), aqr_archive::Level::MID).unwrap().len();
         assert!(n < d.len() + 2400, "{name}: {n} >= {} + 2400", d.len());
     }
 }

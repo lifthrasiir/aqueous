@@ -4,6 +4,7 @@
 
 mod common;
 
+use aqr_archive::Evaluate;
 use aqr_formula::Formula;
 use aqr_png::formula;
 use common::*;

@@ -23,7 +23,7 @@ use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Tree};
+use aqr_archive::{Entry, EntryNode, Extra, Tree};
 
 use crate::Gathered;
 
@@ -66,23 +66,23 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
         // SAFETY: the archive is locked against other writers; where it changes all the same, its
         // checksums tell
         let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
-        if aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c) {
+        if aqr_archive::envelope::is_encrypted(&c) || aqr_archive::envelope::is_damaged_encrypted(&c) {
             return Err(err(&"an encrypted archive is not appended to (its nonces would be used again)"));
         }
-        let at = aqr::locate(&c).ok_or_else(|| err(&"no archive found in it (aqr -K tells more)"))?;
+        let at = aqr_archive::locate(&c).ok_or_else(|| err(&"no archive found in it (aqr -K tells more)"))?;
         if at.end < c.len() {
             cut = Some(tail(&c, at.clone(), path)?);
         }
         let a = &c[at.clone()];
-        let (footer, metadata) = aqr::footer_of(a).ok_or_else(|| err(&"no footer"))?;
+        let (footer, metadata) = aqr_archive::footer_of(a).ok_or_else(|| err(&"no footer"))?;
         let metadata = metadata.ok_or_else(|| err(&"an archive of a single file, not of paths"))?;
-        if aqr::block_at(a, aqr::HEADER_MAGIC.len()).is_some_and(|(ty, _)| ty == 4) {
+        if aqr_archive::block_at(a, aqr_archive::HEADER_MAGIC.len()).is_some_and(|(ty, _)| ty == 4) {
             return Err(err(&"an archive of a size hint block is not appended to"));
         }
-        let archive = aqr::open(a, &aqr::NoModules).map_err(|e| err(&e))?;
+        let archive = aqr_archive::open(a, &aqr_archive::NoModules).map_err(|e| err(&e))?;
         let old = archive.tree().cloned().ok_or_else(|| err(&"an archive of a single file, not of paths"))?;
         let sizes: Vec<u64> = (0..archive.contents_len()).map(|c| archive.content_size(c).unwrap_or(0)).collect();
-        let kill = !aqr::crossing(at.start as u64 + footer.start as u64, aqr::kill(footer.len()).len());
+        let kill = !aqr_archive::crossing(at.start as u64 + footer.start as u64, aqr_archive::kill(footer.len()).len());
         ((at.start as u64)..(at.end as u64), footer, metadata, kill, old, sizes)
     };
     if let Some(n) = cut {
@@ -137,8 +137,8 @@ fn tail(c: &[u8], at: Range<usize>, path: &Path) -> Result<usize, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     // (blocks after the footer, and its padding byte, as an append writes them)
     let mut e = at.end + (at.end - at.start) % 2;
-    let ours = e >= c.len() || aqr::block_at(c, e).is_some() || c.len() - e < 16;
-    while let Some((_, end)) = aqr::block_at(c, e) {
+    let ours = e >= c.len() || aqr_archive::block_at(c, e).is_some() || c.len() - e < 16;
+    while let Some((_, end)) = aqr_archive::block_at(c, e) {
         e = end;
     }
     if !ours {

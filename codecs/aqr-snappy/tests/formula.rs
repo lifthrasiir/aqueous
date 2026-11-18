@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Node};
 use aqr_snappy::formula::{self, MODULE, TABLE_MODULE};
 use aqr_snappy::leveldb;

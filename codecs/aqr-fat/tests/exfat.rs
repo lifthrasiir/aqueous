@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Kind};
 
 fn fixture(name: &str) -> Vec<u8> {

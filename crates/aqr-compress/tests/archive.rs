@@ -3,9 +3,9 @@
 
 use std::io::Write;
 
+use aqr_archive::{Entry, EntryNode, Extra, Time, Tree, Value};
 use aqr_compress::{Input, Options, compress_tree};
 use aqr_decompress::decompress_value;
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree, Value};
 
 fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -217,10 +217,10 @@ fn files_given_back() {
 /// back as by default, by the same modules, and the archive has no module block in full.
 #[test]
 fn registered_modules() {
-    use aqr_formula::aqr::{self, Wasm};
+    use aqr_archive::Wasm;
     fn registered(m: aqr_formula::Module) -> Option<Wasm> {
         let k = aqr_decompress::built(m)?;
-        let classes = aqr::task_classes(&aqr::module_of_block_data(k.block)?);
+        let classes = aqr_archive::task_classes(&aqr_archive::module_of_block_data(k.block)?);
         Some(Wasm::Registered { hash: k.sha512_256, classes })
     }
     let files = sample();
@@ -229,7 +229,7 @@ fn registered_modules() {
     let modules = |r: &aqr_compress::Report| r.files.iter().map(|f| f.modules.clone()).collect::<Vec<_>>();
     assert_eq!(modules(&r), modules(&by_default));
     let types = |c: &[u8]| {
-        let i = aqr::inspect::inspect(c, false, &|_| None, None).unwrap();
+        let i = aqr_archive::inspect::inspect(c, false, &|_| None, None).unwrap();
         i.blocks.iter().map(|b| b.ty).filter(|t| (0x60..=0x63).contains(t)).collect::<Vec<_>>()
     };
     let (shorthand, full) = (types(&c), types(&d));
@@ -273,7 +273,7 @@ fn batches() {
 
 /// The metadata blocks of archive `c`, as its blocks are read.
 fn metadata_blocks(c: &[u8]) -> usize {
-    let check = aqr_formula::aqr::mirror::check(c);
+    let check = aqr_archive::mirror::check(c);
     assert!(check.walked);
     check.targets.iter().filter(|t| (0x10..=0x17).contains(&t.1)).count()
 }
@@ -299,7 +299,7 @@ fn segments() {
     assert!(threaded == c);
     let (m, r) = archived(&files, &Options { mirrors: true, ..opt });
     assert_eq!(r.len, m.len());
-    let check = aqr_formula::aqr::mirror::check(&m);
+    let check = aqr_archive::mirror::check(&m);
     assert!(check.walked && check.mirrored(&m, false), "{check:?}");
     assert_eq!(metadata_blocks(&m), metadata_blocks(&c));
 }
@@ -354,11 +354,11 @@ impl aqr_compress::Output for Logged {
 }
 
 /// The files of the archive in `file` (located), by name, and what its last segment tells.
-fn located(file: &[u8]) -> (Vec<Vec<u8>>, Option<aqr_formula::aqr::Status>) {
-    let at = aqr_formula::aqr::locate(file).expect("an archive located");
+fn located(file: &[u8]) -> (Vec<Vec<u8>>, Option<aqr_archive::Status>) {
+    let at = aqr_archive::locate(file).expect("an archive located");
     let a = &file[at];
     let Ok(Value::Tree(t, _)) = decompress_value(a, 1) else { panic!("not decoded") };
-    let status = aqr_formula::aqr::open(a, &aqr_formula::aqr::NoModules).unwrap().status();
+    let status = aqr_archive::open(a, &aqr_archive::NoModules).unwrap().status();
     let mut names: Vec<Vec<u8>> =
         t.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).map(|e| e.name.clone()).collect();
     names.sort();
@@ -370,7 +370,7 @@ fn located(file: &[u8]) -> (Vec<Vec<u8>>, Option<aqr_formula::aqr::Status>) {
 /// its last commit tells of the writing complete, the others of what is left.
 #[test]
 fn committed() {
-    use aqr_formula::aqr::Status;
+    use aqr_archive::Status;
     let files = sample();
     let (tree, contents) = tree_of(&files);
     let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
@@ -391,7 +391,7 @@ fn committed() {
             Op::Append(n) => {
                 for cut in [*n / 2, *n] {
                     let state = &file[..file.len() - cut];
-                    if aqr_formula::aqr::locate(state).is_none() {
+                    if aqr_archive::locate(state).is_none() {
                         // (nothing committed yet, nor before)
                         none = true;
                         continue;
@@ -508,7 +508,7 @@ fn inflated_below_level_4() {
     let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
     e.write_all(&data).unwrap();
     let zip = zip_of("words", &data, &e.finish().unwrap());
-    let opt = Options { level: aqr_formula::aqr::Level::LOW, ..Options::default() };
+    let opt = Options { level: aqr_archive::Level::LOW, ..Options::default() };
     for (name, container) in [("w/words.gz", gz), ("w/words.zlib", zlib), ("w/words.zip", zip)] {
         let (alone, _) = archived(&[(name, container.clone())], &opt);
         let (c, r) = archived(&[("w/words", data.clone()), (name, container)], &opt);
@@ -1450,7 +1450,7 @@ fn exe_remap_plans_hold() {
         let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
         let c = compress_tree(&tree, &inputs, &opt).archive;
         aqr_decompress::record_applications(true);
-        let out = aqr_formula::aqr::decode_value_with(&c, &aqr_decompress::Wasm, 1);
+        let out = aqr_archive::decode_value_with(&c, &aqr_decompress::Wasm, 1);
         let applied = aqr_decompress::record_applications(false);
         assert!(out.is_ok(), "{what}: {:?}", out.err());
         for a in &applied {
@@ -1616,7 +1616,7 @@ fn stopped_when(
 /// or not (with mirror blocks); stopped before anything, nothing kept.
 #[test]
 fn stopped() {
-    use aqr_formula::aqr::Status;
+    use aqr_archive::Status;
     let all = located(&archived(&sample(), &Options::default()).0).0;
     let opt = Options { batch: 30_000, segment: 1 << 20, ..Options::default() };
     for (mirrors, mut out) in [(false, Logged::default()), (true, Logged::default())] {
@@ -1637,7 +1637,7 @@ fn stopped() {
         assert!(!names.is_empty() && names.len() < all.len() && names.iter().all(|n| all.contains(n)), "{names:?}");
         assert_eq!(status, Some(Status::Incomplete { files: Some(s.files), bytes: Some(s.bytes) }));
         if mirrors {
-            let check = aqr_formula::aqr::mirror::check(&out.bytes);
+            let check = aqr_archive::mirror::check(&out.bytes);
             assert!(check.walked && check.mirrored(&out.bytes, false), "{check:?}");
         }
     }
@@ -1715,7 +1715,7 @@ fn committed_into(files: &[(&str, Vec<u8>)], opt: &Options, out: &mut Vec<u8>, f
 /// mirror blocks.
 #[test]
 fn appended() {
-    use aqr_formula::aqr::{Status, footer_of};
+    use aqr_archive::{Status, footer_of};
     let all = sample();
     let (first, second) = all.split_at(5);
     for (segment, kill) in [(0, true), (1, true), (1, false)] {
@@ -1732,7 +1732,7 @@ fn appended() {
         let mut more = second.to_vec();
         more.push(("a/t0.txt", text(5_000, 9)));
         committed_into(&more, &opt, &mut out, Some(&from));
-        assert_eq!(aqr_formula::aqr::locate(&out), Some(0..out.len()));
+        assert_eq!(aqr_archive::locate(&out), Some(0..out.len()));
         let Ok(Value::Tree(t, got)) = decompress_value(&out, 1) else { panic!("not decoded") };
         let path = |mut k: usize| {
             let mut p = t.entries[k].name.clone();
@@ -1765,7 +1765,7 @@ fn appended() {
         let t0 = want.iter().position(|w| w.0 == "a/t0.txt").unwrap();
         want[t0].1 = text(5_000, 9);
         assert_eq!(have, want, "segment {segment}");
-        let status = aqr_formula::aqr::open(&out, &aqr_formula::aqr::NoModules).unwrap().status();
+        let status = aqr_archive::open(&out, &aqr_archive::NoModules).unwrap().status();
         assert_eq!(status, Some(Status::Complete));
     }
     let opt = Options { mirrors: true, ..Options::default() };
@@ -1782,7 +1782,7 @@ fn appended() {
 /// stopped before it ends, the archive as it was; then the segments with it.
 #[test]
 fn appended_once() {
-    use aqr_formula::aqr::footer_of;
+    use aqr_archive::footer_of;
     let all = sample();
     let (first, second) = all.split_at(5);
     let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
@@ -1823,13 +1823,13 @@ fn plain_levels() {
     let mut files = sample();
     let longer = [&files[1].1[..], &text(10_000, 5)].concat();
     files.push(("a/longer.txt", longer));
-    for level in [aqr_formula::aqr::Level::Of(0), aqr_formula::aqr::Level::Of(1)] {
+    for level in [aqr_archive::Level::Of(0), aqr_archive::Level::Of(1)] {
         let opt = Options { level, ..Options::default() };
         let (c, r) = archived(&files, &opt);
         assert!(r.files.iter().all(|f| f.modules.is_empty()), "{level:?}: {r:?}");
         assert_eq!(r.files[1].same_as, Some(3), "{level:?}");
         let texts = r.solid.iter().any(|s| [0, 2, 3].iter().all(|c| s.contents.contains(c)));
-        assert_eq!(texts, level != aqr_formula::aqr::Level::STORED, "{level:?}: {:?}", r.solid);
+        assert_eq!(texts, level != aqr_archive::Level::STORED, "{level:?}: {:?}", r.solid);
         // (longer.txt of t1.txt's bytes and its own: 60 KB not stored again, even at level 0)
         let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
         let total: usize = files.iter().map(|f| f.1.len()).sum();
@@ -1844,7 +1844,7 @@ fn plain_levels() {
         assert!(threaded == s, "{level:?}: in segments, {} bytes on 4 threads, {} on one", threaded.len(), s.len());
         let (m, r) = archived(&files, &Options { mirrors: true, ..opt });
         assert_eq!(r.len, m.len());
-        let check = aqr_formula::aqr::mirror::check(&m);
+        let check = aqr_archive::mirror::check(&m);
         assert!(check.walked && check.mirrored(&m, false), "{level:?}: {check:?}");
     }
 }

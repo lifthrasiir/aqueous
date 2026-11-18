@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Kind, Node};
 use aqr_zstd::formula::take;
 
@@ -55,10 +56,10 @@ fn ranges_taken() {
         g.root = Node::Concat([whole].into_iter().chain(nodes.into_iter().rev()).collect());
         let mut want = file.clone();
         wanted.iter().rev().for_each(|r| want.extend_from_slice(&all[r.start as usize..r.end as usize]));
-        let c = aqr_formula::aqr::encode(&g, None, aqr_formula::aqr::Level::Zstd(3)).unwrap();
-        let natives = aqr_formula::aqr::natives(&[], &|_: &Apply, _: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> {
+        let c = aqr_archive::encode(&g, None, aqr_archive::Level::Zstd(3)).unwrap();
+        let natives = aqr_archive::natives(&[], &|_: &Apply, _: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> {
             unreachable!("no module")
         });
-        assert!(aqr_formula::aqr::decode(&c, &natives).unwrap() == want, "{wanted:?}");
+        assert!(aqr_archive::decode(&c, &natives).unwrap() == want, "{wanted:?}");
     }
 }

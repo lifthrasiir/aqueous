@@ -3,7 +3,7 @@
 //! `cache/memory/samples`, made by the script): ignored where they are not there.
 
 use aqr_decompress::{MODULES, Wasm};
-use aqr_formula::{Usage, aqr};
+use aqr_formula::Usage;
 
 #[test]
 #[ignore = "the samples of scripts/module-memory.sh"]
@@ -19,7 +19,7 @@ fn plans_hold_on_samples() {
     for path in archives {
         let c = std::fs::read(&path).unwrap();
         aqr_decompress::record_applications(true);
-        let r = aqr::decode_value(&c, &Wasm);
+        let r = aqr_archive::decode_value(&c, &Wasm);
         let applied = aqr_decompress::record_applications(false);
         assert!(r.is_ok(), "{}: {:?}", path.display(), r.err());
         for a in applied {

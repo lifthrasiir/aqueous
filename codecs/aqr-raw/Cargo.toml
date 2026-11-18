@@ -18,3 +18,6 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 # IMA ADPCM blocks of WAV files, in the formulas.
 aqr-ima = { path = "../aqr-ima", optional = true }
 aqr-msadpcm = { path = "../aqr-msadpcm", optional = true }
+
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }

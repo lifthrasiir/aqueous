@@ -4,6 +4,7 @@
 //! extended inputs.
 
 use aqr_api::stream::{Pull, Put, Slice};
+use aqr_archive::Evaluate;
 use aqr_common::rng::Rng;
 use aqr_formula::{Formula, Node};
 use aqr_git::index::{self, IDX_MAGIC, REV_MAGIC};

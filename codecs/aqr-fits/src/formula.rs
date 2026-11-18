@@ -219,6 +219,7 @@ fn bintable(f: &mut Formula, s: &Streams, d: &[u8], h: &Header) -> Option<Vec<No
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aqr_archive::Evaluate;
     use aqr_formula::Apply;
 
     fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {

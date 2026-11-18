@@ -105,7 +105,7 @@ fn tar_lists(archive: &[u8]) {
 /// read and written: a tar archive's mtime and a gzip header's, the same local date and time.
 #[test]
 fn local_times() {
-    use aqr_formula::aqr::Zone;
+    use aqr_archive::Zone;
     let local = Time { secs: 1_700_000_001, nanos: 250_000_000, zone: Zone::Local, unit: 1 };
     let here = aqr_foreign::time::instant(local).unwrap();
     let tree = Tree {

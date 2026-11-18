@@ -1,4 +1,5 @@
 //! Repeated decoding of one file (profiling without encoding in the profile).
+use aqr_archive::Evaluate;
 use aqr_flac::formula::{self, MODULE};
 use aqr_formula::Apply;
 

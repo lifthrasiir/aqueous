@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula" }
+# (`description_bound`, what a formula takes in an archive)
+aqr-archive = { path = "../../crates/aqr-archive" }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

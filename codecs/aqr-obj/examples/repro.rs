@@ -1,4 +1,5 @@
 //! Reproduces a fuzz mismatch: FILE BLOCK FORCE_WHOLE(hex); prints where the output differs.
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 use aqr_obj::codec::Options;
 use aqr_obj::formula;

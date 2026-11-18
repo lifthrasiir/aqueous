@@ -181,9 +181,9 @@ fn trimmed(a: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Formula;
-    use crate::aqr::tests::natives;
-    use crate::aqr::{ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Tree, open};
+    use crate::tests::natives;
+    use crate::{ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Tree, open};
+    use aqr_formula::Formula;
 
     /// An archive of a file of `data` alone.
     pub(crate) fn one(data: &[u8]) -> Vec<u8> {

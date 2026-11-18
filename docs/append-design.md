@@ -231,7 +231,7 @@ append인데, 그것도 commit되지 않았으니 잃는 것이 맞다.
   (처음 구현했던 `-a --delete`)은 sync라는 이름에서 기대하는 바와 달라서 없앴다.
 - **`-s`도 파일을 키운다.** 지워진 것은 tombstone으로 표시될 뿐이고 그 바이트는 남는다. 공간은
   `aqr --compact`가 되찾는다(segment 구조를 유지한 채 남은 블록만 복사해 다시 쓰고 rename한다;
-  `crates/aqr-formula/src/aqr/rewrite.rs`). segment를 합치는 것(`--merge-segments` 같은 것)은 필요해지면 따로.
+  `crates/aqr-archive/src/rewrite.rs`). segment를 합치는 것(`--merge-segments` 같은 것)은 필요해지면 따로.
 - **재개는 별도 기능이 아니다.** 멈춘 `-c`는 같은 입력으로 `aqr -a out.aqr …`를 돌리면 남은 파일이 "없는
   것"이라 들어간다. 결과는 중단 없이 만든 `-c`보다 조금 크다. 모듈이 segment마다 실리고, PNG set 같은
   묶음이 segment 경계에서 끊기기 때문이다.

@@ -3,6 +3,7 @@
 //! decoders. The DEFLATE streams come from flate2 (zlib-rs), as flate-zoo's sources are not
 //! always at hand.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Node, packed};
 use aqr_pdf::encode::Options;
 use aqr_pdf::formula::{self, MODULE};
@@ -128,7 +129,7 @@ fn options() -> Vec<(&'static str, Options)> {
         ("tok", Options { speed: f64::INFINITY, full: false, png: false, ..base.clone() }),
         ("full", Options { speed: f64::INFINITY, tok: false, png: false, ..base.clone() }),
         ("raw", Options { tok: false, full: false, png: false, ..base.clone() }),
-        ("verify", Options { speed: f64::INFINITY, verify: true, ..base }),
+        ("verify", Options { speed: f64::INFINITY, verify: Some(|f, m| aqr_archive::Evaluate::eval(f, &m)), ..base }),
     ]
 }
 

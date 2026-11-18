@@ -8,7 +8,7 @@ writing, Huffman header coding, its fast representation), images through
 [aqr-png](../aqr-png) and [aqr-jpeg](../aqr-jpeg).
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-pdf   # target/release/examples/aqr-pdf
 aqr-pdf bench [-t N] [-n ITERS] [-s MB/S] [-l LEVEL] [-p PROFILE] [-Z] [-V] [-T] [-F] [-P] [-v] FILE...   # formula and .aqr: ratio, CPU-time speed, per-mode sizes
 aqr-pdf fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files, formulas and archives
 ```
@@ -241,7 +241,7 @@ skeleton 4%.
 
 ```sh
 cargo test --release
-../../target/release/aqr-pdf fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
+../../target/release/examples/aqr-pdf fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
 ```
 
 - `tests/formula.rs`: synthetic PDF files through `formula::encode_with` and `Formula::eval`

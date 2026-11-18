@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_bz2::formula::{self, MODULE};
 use aqr_bz2::module::get_params;
 use aqr_bz2::{Framing, compress, stream};

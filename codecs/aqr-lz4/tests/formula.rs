@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Node};
 use aqr_lz4::block::{self, Compressor};
 use aqr_lz4::formula::{self, ACCELERATIONS, MODULE, MOZLZ4};

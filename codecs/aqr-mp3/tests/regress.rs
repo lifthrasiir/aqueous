@@ -1,6 +1,7 @@
 //! Round trips of the files in tests/data (small LAME encodings of a synthetic signal),
 //! through the coded path and the formula, also with junk around and cut short.
 
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 use aqr_mp3::{codec, formula};
 

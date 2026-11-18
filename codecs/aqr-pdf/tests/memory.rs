@@ -5,6 +5,7 @@
 
 use std::io::Write;
 
+use aqr_archive::Evaluate;
 use aqr_common::mem::{Counting, peak};
 use aqr_formula::Apply;
 use aqr_pdf::encode::Options;

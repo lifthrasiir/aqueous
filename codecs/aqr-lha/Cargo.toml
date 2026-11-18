@@ -21,3 +21,6 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 [[example]]
 name = "aqr-lha-check"
 path = "examples/check.rs"
+
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }

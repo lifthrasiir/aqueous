@@ -4,7 +4,7 @@ Lossless PSD/PSB recompression: a Photoshop file is coded as a formula (the modu
 `psd-recons` of aqr-formula) of a smaller representation, and restored bit for bit.
 
 ```sh
-cargo build --release
+cargo build --release --bins --example aqr-psd   # aqr-psd in target/release/examples
 aqr-psd bench [-n ITERS] [-t N] [-v] [-c|-d] FILE...  # .aqr round trip check, ratio, throughput (-t default 1)
 aqr-psd-stat [-v] FILE...                    # byte breakdown by section, summed over files
 aqr-psd-research check|predict|rle FILE...          # research tools: decoding, composite prediction, PackBits encoders
@@ -139,7 +139,7 @@ rows in turns (2-15% slower at every interleave step); forced inlining of the pi
 unchecked indexing in the pair coder and PGO (both cut instructions by 6-10% but not
 cycles); `target-cpu=native` (no change).
 
-How it was measured: `samply record --save-only`, then `dsymutil ../../target/release/aqr-psd` and
+How it was measured: `samply record --save-only`, then `dsymutil ../../target/release/examples/aqr-psd` and
 `llvm-symbolizer --inlining` on the sampled addresses (plus 0x100000000) for inlined source
 lines and annotated disassembly; A/B comparisons by the cycles and instructions of
 `/usr/bin/time -l`, since wall-clock times moved by ±5% with other load on the machine.

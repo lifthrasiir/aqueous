@@ -4,6 +4,7 @@
 //! headers, the boundaries, mbox's `From `), exceptions, what is not taken, and layouts that
 //! are not right turned down.
 
+use aqr_archive::Evaluate;
 use aqr_b2t::quopri::formula;
 use aqr_common::rng::Rng;
 use aqr_common::varint;

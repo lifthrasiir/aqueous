@@ -4,6 +4,8 @@
 // (an extent of one range is a list of one range, not a range of indices)
 #![allow(clippy::single_range_in_vec_init)]
 
+use aqr_archive::Evaluate;
+
 const CLUSTER: usize = 4096;
 const RECORD: usize = 1024;
 

@@ -6,8 +6,8 @@ mod common;
 use std::fs;
 use std::process::Command;
 
+use aqr_archive::{Entry, EntryNode, Extra, Tree};
 use aqr_compress::{Input, Options, compress_tree};
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
 
 #[test]
 fn names_escaped() {

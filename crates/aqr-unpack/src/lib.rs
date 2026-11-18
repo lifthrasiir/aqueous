@@ -16,9 +16,9 @@
 //! LZMA2 parts and EGG's pieces of none of them not at all); a tar archive is read through, as
 //! its listing is not known before, but the bodies of the members not selected are not kept.
 
+use aqr_archive::Step;
+pub use aqr_archive::{Entry, EntryNode, Extra, Time, Tree};
 pub use aqr_foreign::charset::Choice;
-use aqr_formula::aqr::Step;
-pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 pub use build::Select;
 
 mod alzip;

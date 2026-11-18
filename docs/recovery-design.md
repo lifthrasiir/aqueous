@@ -16,7 +16,7 @@ segment 주기(§5.1), mirror block(§5.2), 암호화 아카이브의 mirrored h
 관련 명세와 코드:
 
 - `spec/index.bs`의 §Integrity and recovery(§Checksums, §Archival profile, §Mirror block, §Mirrored archives, §Repair, §Salvage), §Encrypted archives(mirrored header), §segment-status, §Reserved block types(non-critical 타입), §Partial access.
-- `crates/aqr-formula/src/aqr/mirror.rs`: mirror block의 생성(`Mirroring`), 검사, repair와 salvage. `envelope.rs`: mirrored header와 손상된 암호화 아카이브의 복호.
+- `crates/aqr-archive/src/mirror.rs`: mirror block의 생성(`Mirroring`), 검사, repair와 salvage. `envelope.rs`: mirrored header와 손상된 암호화 아카이브의 복호.
 - `crates/aqr/tests/archival.rs`: `-A`로 만든 아카이브의 손상, truncation, 암호화 아카이브의 복원 시험.
 
 ---

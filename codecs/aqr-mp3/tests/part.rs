@@ -5,6 +5,7 @@
 
 use aqr_api::Window;
 use aqr_api::emu::{self, Entry, Kind};
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 use aqr_mp3::frame::Header;
 use aqr_mp3::{module, plan};

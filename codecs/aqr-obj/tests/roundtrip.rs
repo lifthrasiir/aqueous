@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_obj::codec::Options;
 use aqr_obj::formula::{self, MODULE};

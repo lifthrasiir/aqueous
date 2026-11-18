@@ -5,9 +5,9 @@
 //! is. The contents of uncompressed data blocks (as of an archive at level 0) are contents of
 //! their own; the rest of the archive is one stream as it is.
 
+use aqr_archive::{FOOTER_MAGIC, HEADER_MAGIC};
 use aqr_common::varint;
-use aqr_formula::aqr::{FOOTER_MAGIC, HEADER_MAGIC};
-use aqr_formula::{Formula, Kind, Node, Resource};
+use aqr_formula::{Formula, Kind, Node};
 
 /// Whether `d` starts as an unencrypted standalone archive does.
 pub fn starts(d: &[u8]) -> bool {
@@ -58,9 +58,10 @@ pub fn archive(d: &[u8]) -> Option<Formula> {
         let (part, end) = match ty {
             // modules in full (block 60 is a shorthand block)
             0x61..=0x63 => (module(&d[data.clone()]).map(Part::Node), data.end),
-            0x64..=0x67 => {
-                (Resource::stored(&d[data.clone()]).ok().map(|r| Part::Node(Node::ResourceBytes(r))), data.end)
-            }
+            0x64..=0x67 => (
+                aqr_archive::stored_resource(&d[data.clone()]).ok().map(|r| Part::Node(Node::ResourceBytes(r))),
+                data.end,
+            ),
             // uncompressed data blocks, `0010 0css` (leaf) and `0100 00ss` (non-leaf, checked):
             // the data before the checksum
             0x20..=0x27 | 0x40..=0x43 => {
@@ -108,11 +109,11 @@ pub fn archive(d: &[u8]) -> Option<Formula> {
 /// the module where it is the same, else a resource block of it; `None` where it is not
 /// checksummed Zstandard data.
 fn module(data: &[u8]) -> Option<Node> {
-    let own = aqr_formula::aqr::module_of_block_data(data)
+    let own = aqr_archive::module_of_block_data(data)
         .and_then(|w| aqr_decompress::known(&w))
         .filter(|&m| aqr_decompress::built(m).is_some_and(|k| k.block == data));
     match own {
         Some(m) => Some(Node::ModuleBytes(m, data.into())),
-        None => Resource::stored(data).ok().map(Node::ResourceBytes),
+        None => aqr_archive::stored_resource(data).ok().map(Node::ResourceBytes),
     }
 }

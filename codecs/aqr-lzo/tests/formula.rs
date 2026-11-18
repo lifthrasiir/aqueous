@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_lzo::formula::{self, MODULE};
 use aqr_lzo::{lzop, recons};

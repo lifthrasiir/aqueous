@@ -1,6 +1,7 @@
 //! Round trips through the formula: `formula::encode`, then `Formula::eval` with this crate's
 //! module.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, packed};
 use aqr_jpeg::formula::{self, MODULE};
 

@@ -35,7 +35,7 @@ pub(crate) struct Spec {
     /// About the thread-milliseconds that making a MB of it takes: of the files of each
     /// format of 10gb (`--stats`, an M4; rounded), 50 for the others ([`crate::cost`]).
     pub(crate) cost: u64,
-    /// The least [`Level::scale`](aqr_formula::aqr::Level::scale) that files of it are taken
+    /// The least [`Level::scale`](aqr_archive::Level::scale) that files of it are taken
     /// at ([`crate::format_on`]), as they are slow for their bytes; levels 0 and 1 take none.
     pub(crate) level: u8,
     /// The parts of a file of it that its recompressor turned down, to be looked into

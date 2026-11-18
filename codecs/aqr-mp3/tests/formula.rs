@@ -3,6 +3,7 @@
 //! The files of tests/data are repeated so that the inputs are large enough for the threaded
 //! paths (several thousand frames, so that the output is also assembled in pieces).
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Node};
 use aqr_mp3::codec::Model;
 use aqr_mp3::formula;

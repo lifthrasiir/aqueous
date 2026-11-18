@@ -394,7 +394,7 @@ Wasm threads도 쓰지 않는다. task 수와 분할은 데이터로 정하며 �
 #### 태스크의 메모리: 영역과 클래스 [구현]
 
 `aqr_spawn(class, count, records, arg, n)`, 클래스, 클래스마다의 한도를 싣는 Apply(opcode 16)는 명세 "Tasks", "Apply
-instruction"에 있다. 옛 `aqr_spawn(arg, n)`과 opcode 11은 릴리스된 모듈에만 받아들이고(`crates/aqr-formula/src/released.rs`)
+instruction"에 있다. 옛 `aqr_spawn(arg, n)`과 opcode 11은 릴리스된 모듈에만 받아들이고(`crates/aqr-archive/src/released.rs`)
 그 한도는 강제하지 않는다. 한도를 구하는 법은 측정이 아니라 모듈의 정적 계획이다(`docs/arena-design.md`, `aqr_api::stack::Sim`).
 
 > **근거: 왜 사본 전체가 아니라 영역인가.** 처음 규칙은 task가 spawn한 인스턴스의 작업 메모리 *전체*의 사본에서 시작하는

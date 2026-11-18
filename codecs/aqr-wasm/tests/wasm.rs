@@ -2,6 +2,7 @@
 //! modules of LEB128s not in the shortest form, unknown opcodes and sections of every kind, kept
 //! as they are where they cannot be split; streams corrupted, which never panic.
 
+use aqr_archive::Evaluate;
 use aqr_common::rng::Rng;
 use aqr_formula::{Apply, Formula};
 use aqr_wasm::formula;

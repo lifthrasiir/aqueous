@@ -3,6 +3,7 @@
 //! every mode, zlib wrapper variants, images with and without PNG predictors, JPEG,
 //! duplicates, encrypted and malformed files.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_pdf::encode::{Options, Stats};
 use aqr_pdf::formula;
@@ -113,7 +114,7 @@ fn options() -> Vec<(&'static str, Options)> {
         ("tok", Options { speed: f64::INFINITY, full: false, png: false, ..base.clone() }),
         ("full", Options { speed: f64::INFINITY, tok: false, png: false, ..base.clone() }),
         ("raw", Options { tok: false, full: false, png: false, ..base.clone() }),
-        ("verify", Options { speed: f64::INFINITY, verify: true, ..base }),
+        ("verify", Options { speed: f64::INFINITY, verify: Some(|f, m| aqr_archive::Evaluate::eval(f, &m)), ..base }),
     ]
 }
 

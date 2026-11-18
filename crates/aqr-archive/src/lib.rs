@@ -1,5 +1,8 @@
-//! A formula as an Aqueous archive (`spec/index.bs`) of a single file, without a metadata
-//! block.
+//! Aqueous archives (`spec/index.bs`) of entry formulas ([`aqr_formula`]): the encoder and the
+//! decoder, the evaluation of formulas ([`Evaluate`], by the decoder's evaluator of formula
+//! blocks), and the archive's metadata, segments, envelopes and mirroring.
+//!
+//! A formula as an Aqueous archive of a single file, without a metadata block:
 //!
 //! [`encode`] lays the formula out as blocks: a module block for each module, a resource block
 //! for each resource, the formula block, and the non-leaf blocks of each stream it slices, in
@@ -10,9 +13,9 @@
 //!
 //! A module block holds the Wasm module of a [`Module`], which the [`Encoder`] is given
 //! ([`Encoder::with_modules`]), and a [`Runner`] runs it in decoding: natively where it knows
-//! the module, say. Applications declare the memory limit of [`crate::Apply::memory_limit`]
-//! (set by [`crate::Formula::declare_memory`]). [`natives`] runs modules by
-//! [`crate::Modules`], on [`stand_in`]s by default, for tests and measurements.
+//! the module, say. Applications declare the memory limit of [`aqr_formula::Apply::memory_limit`]
+//! (set by [`Evaluate::declare_memory`]). [`natives`] runs modules by
+//! [`Modules`], on [`stand_in`]s by default, for tests and measurements.
 //!
 //! [`Encoder`] encodes several formulas, compressing each stream and resource once however
 //! many hold it, at the zstd level that its [`Level`] picks for it, a long one (8 MiB or more)
@@ -31,20 +34,24 @@
 //! its segments merged. The blocks alike of a batch of its
 //! leaves may take a dictionary trained for them (`dict`).
 
+pub mod chash;
 mod dict;
 pub mod envelope;
 pub(crate) mod eval;
+mod evaluate;
 mod index;
 pub mod inspect;
 mod listing;
 mod locate;
 pub mod mirror;
+pub mod released;
 mod rewrite;
 mod segment;
 pub mod sink;
 mod spool;
 mod tree;
 
+pub use evaluate::{Evaluate, Modules};
 pub use listing::{Applied, Listed};
 pub use locate::{block_at, footer_of, locate, trim};
 pub use mirror::Mirroring;
@@ -72,7 +79,7 @@ use xxhash_rust::xxh64::{Xxh64, xxh64};
 use zstd::zstd_safe::zstd_sys::ZSTD_EndDirective;
 use zstd::zstd_safe::{self, CCtx, CParameter, InBuffer, OutBuffer, ResetDirective};
 
-use crate::{Error, Formula, Kind, Module, Node, Resource, Result, packed};
+use aqr_formula::{Error, Formula, Kind, Module, Node, Resource, Result, packed};
 
 pub const HEADER_MAGIC: [u8; 6] = [0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe];
 pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
@@ -92,9 +99,9 @@ const ENCRYPTED_HEADER_TYPE: u64 = 0x155_04dc_a579;
 
 /// The name of the custom section naming the module of a [`stand_in`].
 const STAND_IN_SECTION: &str = "aqueous-stand-in";
-/// The largest memory limit, of an application declaring none ([`crate::NO_LIMIT`]): what the
+/// The largest memory limit, of an application declaring none ([`aqr_formula::NO_LIMIT`]): what the
 /// instruction bounds are made for.
-pub const MEMORY_LIMIT: u64 = crate::NO_LIMIT;
+pub const MEMORY_LIMIT: u64 = aqr_formula::NO_LIMIT;
 
 // Block types with a u8 size field, all with checksums; `+ 0..=3` widens the size field.
 const LEAF_RAW: u64 = 0x24;
@@ -376,7 +383,7 @@ pub struct Encoder {
     threads: usize,
     /// Compressed streams (as [`compressed`] gives) by their [`StreamKey`], of the store where one
     /// is set ([`kept`]).
-    streams: RefCell<HashMap<StreamKey, Option<crate::Bytes>>>,
+    streams: RefCell<HashMap<StreamKey, Option<aqr_formula::Bytes>>>,
     /// Whether the streams compressed are kept in [`Encoder::streams`] (not while
     /// [`Encoder::encode_pieces`] writes).
     keep: std::cell::Cell<bool>,
@@ -489,6 +496,40 @@ pub(crate) fn stored_decoded(d: &[u8]) -> Option<Vec<u8>> {
     decoded(d, true, true).ok()
 }
 
+/// The resource whose block has data `stored` as it is (checksummed Zstandard data, as of a
+/// resource or module block of another archive): [`Resource::with_stored`] of the data it
+/// decodes to. Fails where `stored` is no such data.
+pub fn stored_resource(stored: impl Into<Arc<[u8]>>) -> Result<Resource> {
+    let stored = stored.into();
+    let data = stored_decoded(&stored).ok_or_else(|| Error::new("no checksummed Zstandard data"))?;
+    Ok(Resource::with_stored(data, stored))
+}
+
+/// The encoder, as a probe asks of it.
+impl aqr_formula::probe::Archiver for Encoder {
+    fn least(&self, d: &[u8], enough: usize) -> Result<usize> {
+        Encoder::least(self, d, enough)
+    }
+
+    fn forget(&self, d: &[u8]) {
+        Encoder::forget(self, d)
+    }
+
+    fn sample(&self) -> (usize, usize) {
+        (SAMPLE.get(), SAMPLE_CHUNKS.get())
+    }
+
+    fn long_window(&self, len: usize) -> Option<usize> {
+        LONG.get().is_some_and(|long| len > long).then_some(1 << WINDOW_LOG_MAX)
+    }
+}
+
+/// Encoders at `level`, of the threads asked for, as a probe makes them
+/// ([`aqr_formula::probe::Probe::archiver`]).
+pub fn archivers(level: Level) -> aqr_formula::probe::Archivers {
+    Arc::new(move |threads| Box::new(Encoder::with_threads(level, threads)))
+}
+
 /// A stream's (or resource's) hash and length.
 type StreamKey = (u128, usize);
 
@@ -496,12 +537,12 @@ type StreamKey = (u128, usize);
 type Compressed = Option<Vec<u8>>;
 
 /// A compressed stream as [`Encoder::streams`] keeps it: moved to the store where one is set
-/// ([`crate::store`]), so that what is kept to be written later (all the streams of a file, as
+/// ([`aqr_formula::store`]), so that what is kept to be written later (all the streams of a file, as
 /// its formula is sized) is not held in memory.
-fn kept(c: Compressed) -> Option<crate::Bytes> {
+fn kept(c: Compressed) -> Option<aqr_formula::Bytes> {
     c.map(|c| {
-        let mut b = crate::Bytes::from(c);
-        crate::store::spill(&mut b);
+        let mut b = aqr_formula::Bytes::from(c);
+        aqr_formula::store::spill(&mut b);
         b
     })
 }
@@ -509,7 +550,7 @@ fn kept(c: Compressed) -> Option<crate::Bytes> {
 /// What an [`Encoder`] kept of the streams, resources and module blocks it compressed
 /// ([`Encoder::into_kept`]), without its Zstandard context.
 pub struct Kept {
-    streams: HashMap<StreamKey, Option<crate::Bytes>>,
+    streams: HashMap<StreamKey, Option<aqr_formula::Bytes>>,
     resources: HashMap<StreamKey, Vec<u8>>,
     raw_lens: HashMap<StreamKey, usize>,
     trials: HashMap<(StreamKey, i32), Compressed>,
@@ -837,7 +878,7 @@ impl Encoder {
     }
 
     /// The bytes of the module blocks of `f` whose bytes it takes ([`Node::ModuleBytes`]), which
-    /// [`Encoder::len`] does not count, as those of resources stored ([`Resource::stored`]): the
+    /// [`Encoder::len`] does not count, as those of resources stored ([`stored_resource`]): the
     /// archive holds them as they are either way, typically shared with the archive around them.
     fn module_bytes_len(&self, f: &Formula) -> Result<usize> {
         let mut modules: Vec<Module> = Vec::new();
@@ -879,7 +920,7 @@ impl Encoder {
     /// How stream `s` is compressed: light if of [`Kind::Compressed`]; dense where the level
     /// has a dense level ([`Pick`]), if PE code (an x86 or ARM64 filter's streams, or the rest
     /// of a PE file) or text, or of [`TOGETHER`].
-    fn how(&self, s: &crate::Stream) -> How {
+    fn how(&self, s: &aqr_formula::Stream) -> How {
         how_of(self.level, &s.class, s.kind)
     }
 
@@ -893,7 +934,7 @@ impl Encoder {
 
     /// [`Encoder::encode`] of `f` whose streams' bytes are those of `pieces` (each the
     /// concatenation of its pieces; the bytes of `f`'s own streams not read), as
-    /// [`crate::Formula::merged`] gives them. The blocks are compressed as they are written and
+    /// [`aqr_formula::Formula::merged`] gives them. The blocks are compressed as they are written and
     /// not kept, but those compressed already (which are let go).
     pub fn encode_pieces(&self, f: &Formula, pieces: &[Vec<&[u8]>], checksum: Option<u64>) -> Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -1200,7 +1241,7 @@ struct Emit<'a> {
     literals: &'a [Option<&'a [&'a [u8]]>],
     modules: &'a [Module],
     /// The classes of tasks of each module (by index; those past the end have none): a
-    /// application declaring fewer task limits is written with [`crate::NO_LIMIT`] for the rest.
+    /// application declaring fewer task limits is written with [`aqr_formula::NO_LIMIT`] for the rest.
     classes: &'a [usize],
     resources: &'a [&'a Resource],
     out: &'a mut Vec<u8>,
@@ -1351,9 +1392,9 @@ impl Emit<'_> {
     }
 
     /// The instructions pushing the outputs of `s`, the `i`-th application of several outputs.
-    fn shared(&mut self, i: usize, s: &crate::Shared) {
+    fn shared(&mut self, i: usize, s: &aqr_formula::Shared) {
         s.inputs().iter().for_each(|n| self.node(n));
-        if let crate::Of::Patch { len, .. } = s.of {
+        if let aqr_formula::Of::Patch { len, .. } = s.of {
             self.out.push(PATCH);
             varint::put(self.out, len);
             self.stack.truncate(self.stack.len() - 2);
@@ -1376,7 +1417,7 @@ impl Emit<'_> {
     }
 
     /// The Apply instruction of `a` (its inputs pushed), of outputs of `sizes`.
-    fn apply(&mut self, a: &crate::Apply, sizes: &[u64]) {
+    fn apply(&mut self, a: &aqr_formula::Apply, sizes: &[u64]) {
         let at = self.modules.iter().position(|&m| m == a.module).unwrap();
         let out = &mut *self.out;
         out.push(APPLY);
@@ -1394,7 +1435,7 @@ impl Emit<'_> {
         debug_assert!(own <= TASK_CLASSES, "{own} classes of tasks, past the description bound's");
         let classes = own.max(a.task_limits.len());
         varint::put(out, classes as u64);
-        let limits = a.task_limits.iter().copied().chain(std::iter::repeat(crate::NO_LIMIT));
+        let limits = a.task_limits.iter().copied().chain(std::iter::repeat(aqr_formula::NO_LIMIT));
         limits.take(classes).for_each(|n| varint::put(out, n));
         varint::put(out, a.inputs.len() as u64);
         varint::put(out, sizes.len() as u64);
@@ -1701,7 +1742,7 @@ impl Encoder {
                 None => {
                     drop(streams);
                     let c = self.plan(key(data), data, how)?.carry_out(&mut self.cctx(), data, self.threads)?.0;
-                    c.map(crate::Bytes::from)
+                    c.map(aqr_formula::Bytes::from)
                 }
             };
             content_block(out, leaf, data, c.as_deref());
@@ -1903,7 +1944,7 @@ impl Encoder {
     /// threads, the calling one and workers of [`aqr_common::pool`]), but those of more than
     /// two of Zstandard's jobs, each on up to `LARGE_THREADS` beforehand: for the blocks of
     /// them written next, the same bytes as one after another.
-    pub fn precompress(&self, streams: &[&crate::Stream]) -> Result<()> {
+    pub fn precompress(&self, streams: &[&aqr_formula::Stream]) -> Result<()> {
         let blocks =
             streams.iter().flat_map(|s| block_ranges(s.data.len()).map(move |r| (vec![&s.data[r]], self.how(s))));
         self.precompress_blocks(blocks.collect(), false)
@@ -1912,7 +1953,7 @@ impl Encoder {
     /// [`Encoder::precompress`], but each block of more than one of Zstandard's jobs on as many
     /// workers as are free for its jobs, the largest first (as each block written alone is):
     /// for streams that are all there is to compress, nothing else made meanwhile.
-    pub fn precompress_wide(&self, streams: &[&crate::Stream]) -> Result<()> {
+    pub fn precompress_wide(&self, streams: &[&aqr_formula::Stream]) -> Result<()> {
         let blocks =
             streams.iter().flat_map(|s| block_ranges(s.data.len()).map(move |r| (vec![&s.data[r]], self.how(s))));
         self.precompress_blocks(blocks.collect(), true)
@@ -1939,23 +1980,24 @@ impl Encoder {
         let total = todo.iter().map(|t| self::total(&t.0) as u64).sum();
         let (done, progress) = (std::sync::atomic::AtomicU64::new(0), self.progress.as_deref());
         // (each kept as it is made: the store taking it then, not once all of a batch's are)
-        let one = |(d, how): &(Vec<&[u8]>, How), threads: usize| -> Result<(StreamKey, Option<crate::Bytes>, i32)> {
-            let (d, how) = (&d[..], *how);
-            let made = THREAD_CCTX.with(|c| {
-                let c = &mut c.borrow_mut();
-                let plan = plan_by(level, how, d, &mut |sample, l| match sample {
-                    Some(sample) => compressed(c, &[sample], l, 1),
-                    None => compressed(c, d, l, 1),
-                })?;
-                let (c, l) = plan.carry_out(c, d, threads)?;
-                Ok((key_how(d, how), self::kept(c), l))
-            });
-            let n = self::total(d) as u64;
-            if let Some(p) = progress {
-                p(done.fetch_add(n, std::sync::atomic::Ordering::Relaxed) + n, total);
-            }
-            made
-        };
+        let one =
+            |(d, how): &(Vec<&[u8]>, How), threads: usize| -> Result<(StreamKey, Option<aqr_formula::Bytes>, i32)> {
+                let (d, how) = (&d[..], *how);
+                let made = THREAD_CCTX.with(|c| {
+                    let c = &mut c.borrow_mut();
+                    let plan = plan_by(level, how, d, &mut |sample, l| match sample {
+                        Some(sample) => compressed(c, &[sample], l, 1),
+                        None => compressed(c, d, l, 1),
+                    })?;
+                    let (c, l) = plan.carry_out(c, d, threads)?;
+                    Ok((key_how(d, how), self::kept(c), l))
+                });
+                let n = self::total(d) as u64;
+                if let Some(p) = progress {
+                    p(done.fetch_add(n, std::sync::atomic::Ordering::Relaxed) + n, total);
+                }
+                made
+            };
         let jobs = if wide { 1 } else { 2 };
         let (mut large, small): (Vec<_>, Vec<_>) = todo.iter().partition(|t| self::total(&t.0) > jobs * ZSTD_JOB.get());
         let mut made: Vec<_> = match wide {
@@ -2965,7 +3007,7 @@ pub fn natives<'a, M: crate::Modules + Sync>(modules: &[Module], m: &'a M) -> Na
 }
 
 /// Modules run by [`crate::Modules`], as archives apply them: [`crate::Modules::apply`] for one
-/// output, else [`crate::Modules::apply_shared`]. The [`crate::Apply`] that `m` is given has no
+/// output, else [`crate::Modules::apply_shared`]. The [`aqr_formula::Apply`] that `m` is given has no
 /// inputs of its own (they are the evaluated ones). A module block is that of one of them where
 /// its Wasm module is identified as it, by its [`stand_in`] unless [`Natives::identified_by`].
 /// A shorthand module block's module is reconstructed by [`Natives::registered_by`], if given.
@@ -3012,7 +3054,7 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
                 memory_limit: u64,
                 task_limits: &[u64],
             ) -> Decoded<Vec<Vec<u8>>> {
-                let a = crate::Apply {
+                let a = aqr_formula::Apply {
                     module: self.module,
                     resources: resources.to_vec(),
                     params: params.to_vec(),
@@ -3024,7 +3066,7 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
                 match sizes {
                     [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
                     _ => self.m.apply_shared(
-                        &crate::Shared { of: crate::Of::Apply(a), sizes: sizes.to_vec(), split: false },
+                        &aqr_formula::Shared { of: aqr_formula::Of::Apply(a), sizes: sizes.to_vec(), split: false },
                         inputs,
                     ),
                 }
@@ -4762,10 +4804,10 @@ impl Program<'_> {
         for insn in &self.insns {
             let limit = match insn {
                 // (the instance's share: of all of the application's where there are no task limits)
-                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT && a.task_limits.is_empty() => {
+                Insn::Apply(a) if a.memory_limit != aqr_formula::NO_LIMIT && a.task_limits.is_empty() => {
                     a.memory_limit / (1 + slots[self.modules[a.module]])
                 }
-                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT => a.memory_limit,
+                Insn::Apply(a) if a.memory_limit != aqr_formula::NO_LIMIT => a.memory_limit,
                 _ => 0,
             };
             let (ins, outs): (u64, Vec<u64>) = match insn {
@@ -4997,8 +5039,8 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env<'a, '_>, non_leaf: usize, used:
                 let old = op == APPLY_OLD;
                 let mut task_limits = if old { Vec::new() } else { r.nums()? };
                 if !DECLARED_LIMIT.get() {
-                    memory_limit = crate::NO_LIMIT;
-                    task_limits.iter_mut().for_each(|l| *l = crate::NO_LIMIT);
+                    memory_limit = aqr_formula::NO_LIMIT;
+                    task_limits.iter_mut().for_each(|l| *l = aqr_formula::NO_LIMIT);
                 }
                 let num_inputs = usize::try_from(r.num()?).unwrap_or(usize::MAX);
                 let output_sizes = r.nums()?;
@@ -5272,20 +5314,21 @@ fn tests_released(_: &str) -> bool {
 
 aqr_common::zopt! {
     /// Whether the decoder holds applications to the memory limits their instructions declare
-    /// (`no-declared-limit`: read as no limit, [`crate::NO_LIMIT`], the instance's and each task
+    /// (`no-declared-limit`: read as no limit, [`aqr_formula::NO_LIMIT`], the instance's and each task
     /// class's alike), so that an archive declaring too little decodes still: for development.
     static DECLARED_LIMIT: Opt<bool> =
         Opt::flag("declared-limit", true, "hold applications to their declared memory limits (no-declared-limit: none)");
 }
 
 /// Fails (a resource failure) where the minimal bound of application `a` of module block
-/// `module` is over the limit of the process ([`crate::set_application_limit`], 512 MiB by
+/// `module` is over the limit of the process ([`aqr_formula::set_application_limit`], 512 MiB by
 /// default), before its module is applied. Not for the earlier Apply, whose limit was an estimate.
 fn within_limit(a: &Apply, module: usize) -> Decoded<()> {
     if a.old {
         return Ok(());
     }
-    let (needed, limit) = (crate::minimal_bound(a.memory_limit, &a.task_limits), crate::application_limit());
+    let (needed, limit) =
+        (aqr_formula::minimal_bound(a.memory_limit, &a.task_limits), aqr_formula::application_limit());
     if needed > limit {
         let mib = needed.div_ceil(1 << 20);
         return Err(Failure::Resource(format!(
@@ -5307,7 +5350,7 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Res
         if !released(wasm) {
             return invalid(format!("module block {module}: the reserved Apply instruction of a module not released"));
         }
-        let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, crate::NO_LIMIT, &[])?;
+        let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, aqr_formula::NO_LIMIT, &[])?;
         return checked_outputs(outputs, a, module);
     }
     if a.task_limits.len() != classes {
@@ -5336,6 +5379,32 @@ mod tests {
     /// An archive of a single file, `quine.aqr`, that is the archive itself
     /// (`scripts/make-quine.py`): its formula takes the stored bytes of a resource block twice
     /// (ResourceBytes), splits one of them and swaps the pieces around the other.
+    /// Data repeating itself farther than a sample of it shows (a stream of files in several
+    /// versions, say) may pay: its repeats cost nothing, as they archive in a window of all of
+    /// it. Data that does not, does not.
+    #[test]
+    fn pays_for_repeats_afar() {
+        let noise = |seed: u64, n: usize| {
+            let mut x = seed;
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (x >> 56) as u8
+                })
+                .collect::<Vec<u8>>()
+        };
+        let probe = aqr_formula::probe::Probe::flat(archivers(Level::MID));
+        let enc = Encoder::new(Level::MID);
+        let pays = |d: &[u8]| probe.pays(&enc, 5 << 20, || Some(0), d, || 0.0, Kind::Unknown);
+        let a = noise(1, 3 << 20);
+        assert!(pays(&[&a[..], &a[..]].concat()));
+        assert!(!pays(&[&a[..], &noise(2, 3 << 20)[..]].concat()));
+        // (a piece repeating within itself, which a sample shows, is no more)
+        let runs: Vec<u8> = (0..128).flat_map(|i| noise(i, 2000).repeat(32)).collect();
+        let repeated = aqr_formula::probe::repeated(&runs, &enc);
+        assert!(repeated < 0.05, "{repeated}");
+    }
+
     #[test]
     fn quine_holds_itself() {
         let c = include_bytes!("../testdata/quine.aqr");
@@ -5364,7 +5433,7 @@ mod tests {
             }
         }
     }
-    use crate::Stream;
+    use aqr_formula::Stream;
 
     thread_local! {
         /// The streams compressed ([`compressed_to`]), counted.
@@ -5380,12 +5449,12 @@ mod tests {
     struct RevCut;
 
     impl crate::Modules for RevCut {
-        fn apply(&self, a: &crate::Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
+        fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
             assert_eq!((a.module, &a.params[..], a.resources.len()), (REV, &[1, 2, 3][..], 0));
             Ok(inputs.concat().into_iter().rev().collect())
         }
 
-        fn apply_shared(&self, s: &crate::Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        fn apply_shared(&self, s: &aqr_formula::Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
             if s.apply().is_none_or(|a| a.module != CUT) {
                 return Err(Error::new("not cut"));
             }
@@ -5462,14 +5531,14 @@ mod tests {
         target[100..200].fill(1);
         let mut f = Formula::default();
         let a = f.push("a", noise.clone());
-        let d = f.push_as("d", Kind::Compressed, crate::patch::make(&noise[..6000], &target, 3).unwrap());
-        let cut = crate::Apply {
+        let d = f.push_as("d", Kind::Compressed, aqr_formula::patch::make(&noise[..6000], &target, 3).unwrap());
+        let cut = aqr_formula::Apply {
             module: CUT,
             resources: vec![],
             params: vec![],
             inputs: vec![a],
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         let [o0, o1] = <[Node; 2]>::try_from(f.share(cut, vec![6000, 4000])).unwrap();
@@ -5493,13 +5562,13 @@ mod tests {
     fn shared_outputs() {
         let mut f = Formula::default();
         let a = f.push("a", b"abcdefgh".to_vec());
-        let cut = |inputs| crate::Apply {
+        let cut = |inputs| aqr_formula::Apply {
             module: CUT,
             resources: vec![],
             params: vec![],
             inputs,
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![a]), vec![3, 5])).unwrap();
@@ -5517,21 +5586,21 @@ mod tests {
         assert!(encode(&twice, None, Level::Zstd(3)).is_err());
     }
 
-    /// A patch's output split ([`crate::Of::Patch`]): Zstandard blocks decompressed (of an empty
+    /// A patch's output split ([`aqr_formula::Of::Patch`]): Zstandard blocks decompressed (of an empty
     /// source), their pieces taken in another order, one dropped (the source of a patch of an
     /// empty raw block). The archive gives what the formula does.
     #[test]
     fn patch_outputs() {
         let data: Vec<u8> = (0..300_000u32).map(|i| (i / 7 % 251) as u8).collect();
         let mut f = Formula::default();
-        let blocks = f.push_as("zstd", Kind::Compressed, crate::patch::make(b"", &data, 3).unwrap());
+        let blocks = f.push_as("zstd", Kind::Compressed, aqr_formula::patch::make(b"", &data, 3).unwrap());
         let drop = f.push("drop", vec![1, 0, 0]);
         let empty = Node::concat([]);
         let [o0, o1, o2] = <[Node; 3]>::try_from(f.split_patch(empty, blocks, vec![10, 200_000, 99_990])).unwrap();
-        let drop = Node::Patch(Box::new(crate::Patch { source: o1, patch: drop, len: 0 }));
+        let drop = Node::Patch(Box::new(aqr_formula::Patch { source: o1, patch: drop, len: 0 }));
         f.root = Node::concat([o2, drop, Node::slice(0, 0, 4), o0]);
         let want = [&data[200_010..], &f.streams[0].data[..4], &data[..10]].concat();
-        let none = |_: &crate::Apply, _: &[&[u8]]| -> crate::Result<Vec<u8>> { unreachable!("no module") };
+        let none = |_: &aqr_formula::Apply, _: &[&[u8]]| -> aqr_formula::Result<Vec<u8>> { unreachable!("no module") };
         assert!(f.eval(&none).unwrap() == want);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert!(decode(&c, &natives()).unwrap() == want);
@@ -5545,7 +5614,7 @@ mod tests {
         assert!(f.check_outputs().is_err());
     }
 
-    /// A node's bytes split ([`crate::Of::Node`]): a stream's, then an application's, the pieces
+    /// A node's bytes split ([`aqr_formula::Of::Node`]): a stream's, then an application's, the pieces
     /// taken in another order between other bytes, as a file's are in an image. The archive
     /// gives what the formula does.
     #[test]
@@ -5559,7 +5628,7 @@ mod tests {
         let [r0, r1] = <[Node; 2]>::try_from(f.split_node(rev, vec![4, 6])).unwrap();
         f.root = Node::concat([o2, Node::slice(1, 0, 3), r1, o0, r0, o1]);
         let want = [&data[200_010..], b"012", b"543210", &data[..10], b"9876", &data[10..200_010]].concat();
-        let rev = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect());
+        let rev = |_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect());
         assert!(f.eval(&rev).unwrap() == want);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert!(decode(&c, &natives()).unwrap() == want);
@@ -5567,8 +5636,8 @@ mod tests {
         assert!(f.check_outputs().is_err());
     }
 
-    /// Streams merged by class without moving their bytes ([`crate::Formula::merged`]) archive
-    /// as those merged ([`crate::Formula::merge_classes`]), byte for byte, the merged stream
+    /// Streams merged by class without moving their bytes ([`aqr_formula::Formula::merged`]) archive
+    /// as those merged ([`aqr_formula::Formula::merge_classes`]), byte for byte, the merged stream
     /// over several blocks too; and the encoder keeps none of the blocks it wrote.
     #[test]
     fn merged_in_pieces() {
@@ -5580,7 +5649,7 @@ mod tests {
         let a3 = f.push("a", b"third".to_vec());
         let rev = Node::apply(REV, vec![1, 2, 3], vec![Node::slice(2, 10, 100)], 100);
         f.root = Node::concat([a, Node::slice(2, 5, BLOCK as u64 / 2 - 5), b, rev, a3, a2]);
-        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        let want = f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
         let sum = Some(checksum(&want));
         let mut whole = f.clone();
         whole.merge_classes();
@@ -5614,7 +5683,7 @@ mod tests {
         let mut second = Formula::default();
         second.push("a", [&b"own "[..], &same, &same, b" and more"].concat());
         second.root = Node::concat([Node::slice(0, 4, 64), Node::slice(0, 0, 4), Node::slice(0, 68, 73)]);
-        let id = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat());
+        let id = |_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat());
         let want = [first.eval(&id).unwrap(), second.eval(&id).unwrap(), b"top".to_vec()].concat();
         let enc = Encoder::new(Level::Zstd(1));
         let sink = sink::Sink::new(&enc, 16);
@@ -5630,12 +5699,12 @@ mod tests {
         let lens: Vec<(&str, u64)> = sunk.iter().map(|s| (&s.class[..], s.len)).collect();
         assert_eq!(lens, [("a", 64 + 4 + 9), ("b", 12), ("c", 10)]);
         let (mut merged, groups) = top.merged();
-        merged.streams.extend(sunk.iter().map(|s| crate::Stream {
+        merged.streams.extend(sunk.iter().map(|s| aqr_formula::Stream {
             class: s.class.clone(),
             kind: s.kind,
             content: false,
             apart: false,
-            data: crate::Bytes::sunk(0, s.len as usize),
+            data: aqr_formula::Bytes::sunk(0, s.len as usize),
         }));
         let pieces: Vec<Vec<&[u8]>> = groups
             .iter()
@@ -5681,7 +5750,7 @@ mod tests {
                 f
             })
             .collect();
-        let id = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat());
+        let id = |_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat());
         let want: Vec<u8> = parts.iter().flat_map(|f| f.eval(&id).unwrap()).chain(*b"top").collect();
         let room = 8192u64;
         let archive = |threads: usize| {
@@ -5705,12 +5774,12 @@ mod tests {
             let (sunk, end) = sink.close_direct().unwrap();
             let (mut merged, groups) = top.merged();
             assert!(groups.is_empty());
-            merged.streams.extend(sunk.iter().enumerate().map(|(k, s)| crate::Stream {
+            merged.streams.extend(sunk.iter().enumerate().map(|(k, s)| aqr_formula::Stream {
                 class: s.class.clone(),
                 kind: s.kind,
                 content: false,
                 apart: false,
-                data: crate::Bytes::sunk(k, s.len as usize),
+                data: aqr_formula::Bytes::sunk(k, s.len as usize),
             }));
             let head = enc.direct_head(&merged, &sunk, Some(checksum(&want))).unwrap();
             assert!(head.len() as u64 + 2 <= room);
@@ -5738,7 +5807,7 @@ mod tests {
         let b = f.push_as("b", Kind::Text, text.clone());
         let c = f.push("c", b"short".to_vec());
         f.root = Node::concat([b, Node::slice(0, BLOCK as u64 - 7, 20), c, a]);
-        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat())).unwrap();
+        let want = f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat())).unwrap();
         let sum = Some(checksum(&want));
         for level in [Level::Zstd(1), Level::MID] {
             let enc = Encoder::new(level);
@@ -5831,7 +5900,7 @@ mod tests {
         f.push("c", b"xy".to_vec());
         let rev = Node::apply(REV, vec![1, 2, 3], vec![Node::slice(0, 4, 7), Node::slice(2, 0, 2)], 9);
         f.root = Node::concat([Node::slice(0, 0, 4), Node::slice(1, 0, 5000), rev, Node::slice(0, 0, 4)]);
-        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        let want = f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
         // (stream 0 sliced for 15 bytes, stream 2 for 2)
         for (max, blocks) in [(0, 3), (14, 2), (15, 1), (1 << 20, 0)] {
             let _max = LITERAL_MAX.set_here(max);
@@ -5852,7 +5921,7 @@ mod tests {
         let rev = |start, len| Node::apply(REV, vec![1, 2, 3], vec![Node::slice(0, start, len)], len);
         let inner = Node::concat([Node::slice(0, 5, 100), rev(BLOCK as u64 - 10, 20), Node::slice(0, 0, 3)]);
         f.root = Node::concat([Node::slice(0, 2 * BLOCK as u64, BLOCK as u64 + 77), inner, rev(7, 1000)]);
-        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        let want = f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
         let runner = natives();
         let a = open(&c, &runner).unwrap();
@@ -5880,13 +5949,13 @@ mod tests {
         let d: Vec<u8> = (0..2 * BLOCK as u32 + 99).map(|i| (i * 7 % 251) as u8).collect();
         let a = f.push("a", d.clone());
         let rev = |inputs: Vec<Node>, len| Node::apply(REV, vec![1, 2, 3], inputs, len);
-        let split = crate::Apply {
+        let split = aqr_formula::Apply {
             module: REV,
             resources: vec![],
             params: vec![1, 2, 3],
             inputs: vec![a],
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         let [o0, o1] = <[Node; 2]>::try_from(f.split(split, vec![40, d.len() as u64 - 40])).unwrap();
@@ -5902,7 +5971,7 @@ mod tests {
         }
         parts.push(o0);
         f.root = Node::concat(parts);
-        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        let want = f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
         let runner = natives();
         let a = open(&c, &runner).unwrap();
@@ -5924,13 +5993,13 @@ mod tests {
     fn split_outputs() {
         let mut f = Formula::default();
         let a = f.push("a", b"abcdefgh".to_vec());
-        let rev = crate::Apply {
+        let rev = aqr_formula::Apply {
             module: REV,
             resources: vec![],
             params: vec![1, 2, 3],
             inputs: vec![a],
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         let [o0, o1, o2] = <[Node; 3]>::try_from(f.split(rev, vec![3, 0, 5])).unwrap();
@@ -5949,17 +6018,17 @@ mod tests {
         let d: Vec<u8> = (0..BLOCK as u32 + 5000).map(|i| (i * 13 % 247) as u8).collect();
         let n = d.len() as u64;
         let a = f.push("a", d.clone());
-        let rev = |inputs| crate::Apply {
+        let rev = |inputs| aqr_formula::Apply {
             module: REV,
             resources: vec![],
             params: vec![1, 2, 3],
             inputs,
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         let [o0, o1, o2] = <[Node; 3]>::try_from(f.split(rev(vec![a]), vec![100, n - 300, 200])).unwrap();
-        let cut = crate::Apply { module: CUT, params: vec![], ..rev(vec![Node::slice(0, 7, 3000)]) };
+        let cut = aqr_formula::Apply { module: CUT, params: vec![], ..rev(vec![Node::slice(0, 7, 3000)]) };
         let [s0, s1] = <[Node; 2]>::try_from(f.share(cut, vec![1000, 2000])).unwrap();
         f.root = Node::concat([o2, Node::pack([s1, o0, Node::slice(0, 1, 9)]), o1, s0]);
         let r: Vec<u8> = d.iter().rev().copied().collect();
@@ -6099,7 +6168,7 @@ mod tests {
         let d: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
         f.push("a", d.clone());
         let rev = |task_limits: Vec<u64>| {
-            Node::Apply(Box::new(crate::Apply {
+            Node::Apply(Box::new(aqr_formula::Apply {
                 module: REV,
                 resources: vec![],
                 params: vec![],
@@ -6142,7 +6211,7 @@ mod tests {
     #[test]
     fn minimal_bound_limit() {
         let _alone = PART_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(crate::application_limit(), 512 << 20);
+        assert_eq!(aqr_formula::application_limit(), 512 << 20);
         let d: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
         // (a module of two classes of tasks)
         fn two_classes(m: Module) -> Option<Wasm> {
@@ -6156,7 +6225,7 @@ mod tests {
         let at = |memory_limit: u64, task_limits: Vec<u64>| {
             let mut f = Formula::default();
             f.push("a", d.clone());
-            f.root = Node::Apply(Box::new(crate::Apply {
+            f.root = Node::Apply(Box::new(aqr_formula::Apply {
                 module: REV,
                 resources: vec![],
                 params: vec![],
@@ -6188,13 +6257,13 @@ mod tests {
         let n = (24 << 20) + 77u64;
         let d: Vec<u8> = (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
         let a = f.push("a", d.clone());
-        let cut = |inputs, params| crate::Apply {
+        let cut = |inputs, params| aqr_formula::Apply {
             module: CUT,
             resources: vec![],
             params,
             inputs,
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         let inner = f.share(cut(vec![a.clone()], vec![]), vec![n]).pop().unwrap();
@@ -6236,13 +6305,13 @@ mod tests {
         let _alone = PART_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut f = Formula::default();
         let a = f.push("a", vec![7; 1000]);
-        let cut = crate::Apply {
+        let cut = aqr_formula::Apply {
             module: CUT,
             resources: vec![],
             params: vec![0xee],
             inputs: vec![a],
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         f.root = Node::concat(f.split(cut, vec![400, 600]));
@@ -6288,13 +6357,13 @@ mod tests {
         let mut parts = vec![Node::slice(0, 0, 3)];
         let mut inner = Vec::new();
         for k in 0..3 {
-            let rev = crate::Apply {
+            let rev = aqr_formula::Apply {
                 module: REV,
                 resources: vec![],
                 params: vec![1, 2, 3],
                 inputs: vec![Node::slice(0, k * 2000, 2000)],
                 len: 0,
-                memory_limit: crate::NO_LIMIT,
+                memory_limit: aqr_formula::NO_LIMIT,
                 task_limits: Vec::new(),
             };
             for (i, o) in f.split(rev, vec![2; 1000]).into_iter().enumerate() {
@@ -6402,13 +6471,13 @@ mod tests {
     fn block_bytes() {
         let module: std::sync::Arc<[u8]> =
             always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap().into();
-        let r = Resource::stored(always_compressed(&mut CCtx::create(), &[&b"resource".repeat(40)], 3, 1).unwrap())
-            .unwrap();
+        let r =
+            stored_resource(always_compressed(&mut CCtx::create(), &[&b"resource".repeat(40)], 3, 1).unwrap()).unwrap();
         assert_eq!(&r[..], b"resource".repeat(40));
         let mut f = sample();
         f.root = Node::concat([f.root, Node::ModuleBytes(REV, module.clone()), Node::ResourceBytes(r.clone())]);
         let want = [SAMPLE, &module, r.stored_data().unwrap()].concat();
-        let rev = |_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect());
+        let rev = |_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect());
         assert_eq!(f.eval(&rev).unwrap(), want);
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [MODULE + 1, RESOURCE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
@@ -6424,7 +6493,7 @@ mod tests {
         assert!(encode(&g, None, Level::Zstd(3)).is_err_and(|e| e.to_string().contains("not its own")));
         g.root = Node::concat([Node::slice(0, 0, 2), Node::ResourceBytes(Resource::new(b"x".to_vec()))]);
         assert!(encode(&g, None, Level::Zstd(3)).is_err_and(|e| e.to_string().contains("not stored")));
-        assert!(Resource::stored(b"not zstd".to_vec()).is_err());
+        assert!(stored_resource(b"not zstd".to_vec()).is_err());
     }
 
     /// Level 0 compresses nothing: streams in uncompressed blocks, formula and module blocks of
@@ -6486,7 +6555,7 @@ mod tests {
     fn roundtrip() {
         let f = sample();
         assert_eq!(
-            f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap(),
+            f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap(),
             SAMPLE
         );
         for sum in [None, Some(checksum(SAMPLE))] {
@@ -6525,7 +6594,7 @@ mod tests {
     fn resources() {
         const PRE: Module = Module::new("pre", 1);
         // `pre` puts its resources before its inputs.
-        let pre = |a: &crate::Apply, i: &[&[u8]]| {
+        let pre = |a: &aqr_formula::Apply, i: &[&[u8]]| {
             assert_eq!(a.module, PRE);
             Ok([a.resources.iter().map(|r| &r[..]).collect::<Vec<_>>().concat(), i.concat()].concat())
         };
@@ -7232,7 +7301,10 @@ mod tests {
             .rev()
             .collect::<Vec<_>>();
         assert_eq!((packed.len(), want.len()), (40 + 14, 71));
-        assert_eq!(f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap(), want);
+        assert_eq!(
+            f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap(),
+            want
+        );
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(3)).unwrap();
         assert_eq!(decode(&c, &natives()).unwrap(), want);
     }
@@ -7456,7 +7528,7 @@ mod tests {
     struct WaitsForLast(Arc<(Mutex<bool>, std::sync::Condvar)>);
 
     impl crate::Modules for WaitsForLast {
-        fn apply(&self, a: &crate::Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
+        fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
             if a.params == [9] {
                 let (started, changed) = &*self.0;
                 let s = started.lock().unwrap();
@@ -7608,13 +7680,13 @@ mod tests {
     fn bound_counts_task_limits() {
         let mut f = Formula::raw("a", vec![0; 100]);
         for limits in [vec![], vec![1 << 28, 1 << 28]] {
-            f.root = Node::Apply(Box::new(crate::Apply {
+            f.root = Node::Apply(Box::new(aqr_formula::Apply {
                 module: REV,
                 resources: vec![],
                 params: vec![],
                 inputs: vec![Node::slice(0, 0, 100)],
                 len: 100,
-                memory_limit: crate::NO_LIMIT,
+                memory_limit: aqr_formula::NO_LIMIT,
                 task_limits: limits,
             }));
             let ordinals = ordinals_of(&f);

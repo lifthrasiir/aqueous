@@ -40,7 +40,7 @@ PACKMP3 WORKDIR DIR...`.
 ## Usage
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-mp3   # target/release/examples/aqr-mp3
 
 aqr-mp3 bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, .aqr ratio, throughput, per-stream sizes
 aqr-mp3 info FILE|DIR...                # frames, junk, tail / raw / gap bits, symbol counts

@@ -22,8 +22,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use aqr_archive::{Reached, Step};
 use aqr_compress::{Event, Report};
-use aqr_formula::aqr::{Reached, Step};
 
 use serde_json::{Value, json};
 

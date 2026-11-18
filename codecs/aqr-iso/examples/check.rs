@@ -6,6 +6,7 @@
 //! cargo run --release -p aqr-iso --example aqr-iso-check -- [-v] [-z] IMAGE...
 //! ```
 
+use aqr_archive::Evaluate;
 use std::time::Instant;
 
 fn main() {

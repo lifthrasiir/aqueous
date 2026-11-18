@@ -2,6 +2,7 @@
 
 mod common;
 
+use aqr_archive::Evaluate;
 use aqr_clip::formula;
 use aqr_clip::tile::Layout;
 use aqr_formula::{Apply, Formula, Node};

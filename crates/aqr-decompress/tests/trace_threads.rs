@@ -4,9 +4,9 @@
 
 #![cfg(feature = "wasm")]
 
+use aqr_archive::{Encoder, Level};
 use aqr_common::trace;
 use aqr_decompress::{Native, wasm_of};
-use aqr_formula::aqr::{self, Encoder, Level};
 
 /// Synthetic ProRes frames of 720x480.
 fn prores_big(frames: usize) -> Vec<u8> {
@@ -32,9 +32,9 @@ fn gang_threads_work_for_the_item() {
         // (until the sampler has seen them at work)
         while start.elapsed().as_secs() < 20 {
             let native = Native::default();
-            let mut a = aqr::open(&c, &native).unwrap();
+            let mut a = aqr_archive::open(&c, &native).unwrap();
             a.set_items(vec![Some(0); a.leaves_len()]);
-            assert!(matches!(a.value(1).unwrap(), aqr::Value::File(v) if v == d));
+            assert!(matches!(a.value(1).unwrap(), aqr_archive::Value::File(v) if v == d));
             let t = rec.watch().trace();
             if attributed(&t) >= 2 {
                 break;

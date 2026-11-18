@@ -2,6 +2,7 @@
 //! progressive test oracle (`-Z jpeg:verify-progressive`: a scan judged reproducible must re-encode
 //! identically), which `formula::encode` would otherwise report as not coded.
 
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 use aqr_jpeg::formula::{self, MODULE};
 

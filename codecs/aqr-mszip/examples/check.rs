@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 use aqr_mszip::{cab, formula};
 

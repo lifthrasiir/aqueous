@@ -25,3 +25,6 @@ path = "examples/check.rs"
 [[example]]
 name = "aqr-bz2-bwt-model"
 path = "examples/bwt-model.rs"
+
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }

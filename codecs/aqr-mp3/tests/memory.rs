@@ -3,6 +3,7 @@
 //! tables, so memory follows the file only by a few times its size. (A test binary of its own:
 //! the allocator counts every thread.)
 
+use aqr_archive::Evaluate;
 use aqr_common::mem::{self, Counting};
 use aqr_formula::Apply;
 use aqr_mp3::formula::{self, MODULE};

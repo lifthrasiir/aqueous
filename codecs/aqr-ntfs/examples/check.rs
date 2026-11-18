@@ -8,6 +8,7 @@
 //! cargo run --release -p aqr-ntfs --example aqr-ntfs-check -- [-v] [-x DIR] IMAGE...
 //! ```
 
+use aqr_archive::Evaluate;
 use std::time::Instant;
 
 fn main() {

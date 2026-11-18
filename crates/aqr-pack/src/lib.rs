@@ -11,8 +11,8 @@
 
 use std::io;
 
+pub use aqr_archive::{Entry, EntryNode, Extra, Time, Tree};
 pub use aqr_formula::Bytes;
-pub use aqr_formula::aqr::{Entry, EntryNode, Extra, Time, Tree};
 
 pub mod alzip;
 pub mod filter;
@@ -204,7 +204,7 @@ pub fn write(
 }
 
 /// The path of entry `i` of `t`, `/` between the names (as their bytes are), and whether every
-/// name was UTF-8 ([`aqr_formula::aqr::name_bytes`]).
+/// name was UTF-8 ([`aqr_archive::name_bytes`]).
 pub(crate) fn path_of(t: &Tree, i: usize) -> (Vec<u8>, bool) {
     let mut names = Vec::new();
     let mut at = Some(i);
@@ -214,7 +214,7 @@ pub(crate) fn path_of(t: &Tree, i: usize) -> (Vec<u8>, bool) {
     }
     let (mut path, mut utf8) = (Vec::new(), true);
     for (n, name) in names.iter().rev().enumerate() {
-        let (b, raw) = aqr_formula::aqr::name_bytes(name);
+        let (b, raw) = aqr_archive::name_bytes(name);
         utf8 &= !raw && std::str::from_utf8(b).is_ok();
         if n > 0 {
             path.push(b'/');
@@ -282,7 +282,7 @@ pub(crate) fn items(t: &Tree, name: &str, k: Keeps, notes: &mut Vec<String>) -> 
                 notes.push(format!("{}: a symbolic link, not kept in {name}", lossy()));
                 continue;
             }
-            EntryNode::Link(to) => Kind::Link(aqr_formula::aqr::name_bytes(to).0.to_vec()),
+            EntryNode::Link(to) => Kind::Link(aqr_archive::name_bytes(to).0.to_vec()),
             EntryNode::Fifo if k.special => Kind::Fifo,
             &EntryNode::Device { block, major, minor } if k.special => Kind::Device { block, major, minor },
             EntryNode::Fifo | EntryNode::Device { .. } => {

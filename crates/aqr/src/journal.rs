@@ -4,8 +4,8 @@
 
 use std::path::Path;
 
+use aqr_archive::JournalPoint;
 use aqr_foreign::time::{Civil, local_civil, local_secs};
-use aqr_formula::aqr::{self, JournalPoint};
 
 aqr_common::zopt! {
     /// For tests: the clock of a run, in milliseconds since the epoch.
@@ -200,14 +200,14 @@ pub fn at_of(spec: &str) -> Result<At, String> {
 }
 
 /// Where archive `bytes` (of `input`, not encrypted) is to end for `at`: the metadata block of
-/// the segment of the point it picks ([`aqr::open_upto`]), with what is shown of the archive
+/// the segment of the point it picks ([`aqr_archive::open_upto`]), with what is shown of the archive
 /// told unless `quiet`.
 pub fn upto(input: &Path, bytes: &[u8], at: &At, quiet: bool) -> Result<usize, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    if aqr::envelope::is_encrypted(bytes) {
+    if aqr_archive::envelope::is_encrypted(bytes) {
         return Err(err(&"--at: an encrypted archive has no journal (it is not appended to)"));
     }
-    let archive = aqr::open(bytes, &aqr::NoModules).map_err(|e| err(&e))?;
+    let archive = aqr_archive::open(bytes, &aqr_archive::NoModules).map_err(|e| err(&e))?;
     let points = archive.journal();
     let picked = pick(points, at).map_err(|e| err(&format!("--at: {e}")))?;
     if !quiet {
@@ -269,24 +269,27 @@ pub fn history_all(a: &crate::Args) -> Result<(), String> {
 
 /// An entry of a state as `--diff` tells states apart: what it is (a file by its size) with its
 /// metadata but for what is numbered by the archive (forks, link groups).
-type Seen = (aqr::EntryNode, aqr::Extra);
+type Seen = (aqr_archive::EntryNode, aqr_archive::Extra);
 
 /// The entries of a state, by path.
 type Seens = std::collections::BTreeMap<Vec<Vec<u8>>, Seen>;
 
 /// The entries of `archive` (a directory by its path alone), by path.
-fn seen(archive: &aqr::Archive) -> Seens {
+fn seen(archive: &aqr_archive::Archive) -> Seens {
     let Some(t) = archive.tree() else { return Default::default() };
     let mut out = std::collections::BTreeMap::new();
     for (e, path) in t.entries.iter().zip(crate::append::paths(t)) {
         let (node, extra) = match e.node {
-            aqr::EntryNode::Dir => (aqr::EntryNode::Dir, aqr::Extra::default()),
+            aqr_archive::EntryNode::Dir => (aqr_archive::EntryNode::Dir, aqr_archive::Extra::default()),
             // (a file by its size: the number of its content is the archive's)
-            aqr::EntryNode::File(c) => {
+            aqr_archive::EntryNode::File(c) => {
                 let size = archive.content_size(c).unwrap_or(u64::MAX) as usize;
-                (aqr::EntryNode::File(size), aqr::Extra { forks: Vec::new(), link_group: None, ..e.extra.clone() })
+                (
+                    aqr_archive::EntryNode::File(size),
+                    aqr_archive::Extra { forks: Vec::new(), link_group: None, ..e.extra.clone() },
+                )
             }
-            ref other => (other.clone(), aqr::Extra { forks: Vec::new(), link_group: None, ..e.extra.clone() }),
+            ref other => (other.clone(), aqr_archive::Extra { forks: Vec::new(), link_group: None, ..e.extra.clone() }),
         };
         out.insert(path, (node, extra));
     }
@@ -295,22 +298,24 @@ fn seen(archive: &aqr::Archive) -> Seens {
 
 /// The entries of `archive` as a quick check tells them apart (`-a`'s: a file by its size and
 /// modification time, other entries by what they are), by path.
-fn quick(archive: &aqr::Archive) -> Seens {
+fn quick(archive: &aqr_archive::Archive) -> Seens {
     let Some(t) = archive.tree() else { return Default::default() };
-    let sized = |e: &aqr::Entry| match e.node {
-        aqr::EntryNode::File(c) => aqr::EntryNode::File(archive.content_size(c).unwrap_or(u64::MAX) as usize),
+    let sized = |e: &aqr_archive::Entry| match e.node {
+        aqr_archive::EntryNode::File(c) => {
+            aqr_archive::EntryNode::File(archive.content_size(c).unwrap_or(u64::MAX) as usize)
+        }
         ref other => other.clone(),
     };
     keyed(t, &sized)
 }
 
 /// The entries of `t` as a quick check tells them apart, a file's content told by `node`.
-fn keyed(t: &aqr::Tree, node: &dyn Fn(&aqr::Entry) -> aqr::EntryNode) -> Seens {
+fn keyed(t: &aqr_archive::Tree, node: &dyn Fn(&aqr_archive::Entry) -> aqr_archive::EntryNode) -> Seens {
     let mut out = std::collections::BTreeMap::new();
     for (e, path) in t.entries.iter().zip(crate::append::paths(t)) {
         let node = node(e);
-        let mtime = matches!(node, aqr::EntryNode::File(_)).then_some(e.extra.mtime).flatten();
-        out.insert(path, (node, aqr::Extra { mtime, ..aqr::Extra::default() }));
+        let mtime = matches!(node, aqr_archive::EntryNode::File(_)).then_some(e.extra.mtime).flatten();
+        out.insert(path, (node, aqr_archive::Extra { mtime, ..aqr_archive::Extra::default() }));
     }
     out
 }
@@ -319,7 +324,7 @@ fn keyed(t: &aqr::Tree, node: &dyn Fn(&aqr::Entry) -> aqr::EntryNode) -> Seens {
 /// and tells how many of each.
 fn changes(before: &Seens, after: &Seens) -> Vec<(char, String)> {
     let shown = |path: &[Vec<u8>], dir: bool| crate::names::shown_path(path) + if dir { "/" } else { "" };
-    let is_dir = |e: &Seen| e.0 == aqr::EntryNode::Dir;
+    let is_dir = |e: &Seen| e.0 == aqr_archive::EntryNode::Dir;
     let mut out = Vec::new();
     for (path, now) in after {
         let mark = match before.get(path) {
@@ -383,17 +388,19 @@ pub fn diff_all(a: &crate::Args) -> Result<(), String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     let c = crate::map_archive(input, &input.display())?;
     let bytes = crate::located(&c, input, a.quiet);
-    if aqr::envelope::is_encrypted(bytes) {
+    if aqr_archive::envelope::is_encrypted(bytes) {
         return Err(err(&"an encrypted archive has no journal (it is not appended to)"));
     }
-    let whole = aqr::open(bytes, &aqr::NoModules).map_err(|e| err(&e))?;
+    let whole = aqr_archive::open(bytes, &aqr_archive::NoModules).map_err(|e| err(&e))?;
     let points = whole.journal();
     let find = |at: &At| pick(points, at).map_err(|e| err(&e));
     let index = |p: &JournalPoint| points.iter().position(|q| q.metadata == p.metadata && q.time == p.time);
     let named = |p: &JournalPoint| format!("#{} {:?}", index(p).map_or(0, |i| i + 1), p.label);
     let state = |p: Option<&JournalPoint>| -> Result<Seens, String> {
         match p {
-            Some(p) => aqr::open_upto(bytes, &aqr::NoModules, p.metadata).map(|x| seen(&x)).map_err(|e| err(&e)),
+            Some(p) => aqr_archive::open_upto(bytes, &aqr_archive::NoModules, p.metadata)
+                .map(|x| seen(&x))
+                .map_err(|e| err(&e)),
             None => Ok(Default::default()),
         }
     };
@@ -426,7 +433,12 @@ pub fn diff_all(a: &crate::Args) -> Result<(), String> {
 /// `--diff ARCHIVE PATH...`: the archive (as `--at` picks it, else as it is) against the paths
 /// as `-a` would take them, told by a quick check (size and modification time): `+` what they
 /// have that it does not, `-` what it has that they do not, `~` what differs.
-fn compare(a: &crate::Args, whole: &aqr::Archive, bytes: &[u8], out: &mut dyn std::io::Write) -> Result<(), String> {
+fn compare(
+    a: &crate::Args,
+    whole: &aqr_archive::Archive,
+    bytes: &[u8],
+    out: &mut dyn std::io::Write,
+) -> Result<(), String> {
     let input = &a.inputs[0];
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     if a.from.is_some() {
@@ -439,7 +451,7 @@ fn compare(a: &crate::Args, whole: &aqr::Archive, bytes: &[u8], out: &mut dyn st
         Some(at) => {
             let p = pick(whole.journal(), at).map_err(|e| err(&e))?;
             let n = whole.journal().iter().position(|q| q.metadata == p.metadata && q.time == p.time).unwrap_or(0);
-            let archive = aqr::open_upto(bytes, &aqr::NoModules, p.metadata).map_err(|e| err(&e))?;
+            let archive = aqr_archive::open_upto(bytes, &aqr_archive::NoModules, p.metadata).map_err(|e| err(&e))?;
             (quick(&archive), format!("#{} {:?}", n + 1, p.label))
         }
         None => (quick(whole), "the archive now".to_string()),
@@ -452,7 +464,7 @@ fn compare(a: &crate::Args, whole: &aqr::Archive, bytes: &[u8], out: &mut dyn st
         g.warnings.iter().for_each(|w| eprintln!("{w}"));
     }
     let here = keyed(&g.tree, &|e| match e.node {
-        aqr::EntryNode::File(c) => aqr::EntryNode::File(g.contents[c].2 as usize),
+        aqr_archive::EntryNode::File(c) => aqr_archive::EntryNode::File(g.contents[c].2 as usize),
         ref other => other.clone(),
     });
     let to = a.inputs[1..].iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" ");
@@ -469,10 +481,10 @@ fn compare(a: &crate::Args, whole: &aqr::Archive, bytes: &[u8], out: &mut dyn st
 /// The points of archive `bytes` (of `input`) listed, one on a line: its number, time and label.
 pub fn history(input: &Path, bytes: &[u8], json: bool) -> Result<String, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    if aqr::envelope::is_encrypted(bytes) {
+    if aqr_archive::envelope::is_encrypted(bytes) {
         return Err(err(&"an encrypted archive has no journal (it is not appended to)"));
     }
-    let archive = aqr::open(bytes, &aqr::NoModules).map_err(|e| err(&e))?;
+    let archive = aqr_archive::open(bytes, &aqr_archive::NoModules).map_err(|e| err(&e))?;
     if json {
         // (a line: the archive and its points, none maybe)
         let points: Vec<serde_json::Value> = (archive.journal().iter().enumerate())

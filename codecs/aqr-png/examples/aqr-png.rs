@@ -1,7 +1,7 @@
 //! Compression ratio and speed of the formula module on PNG files (research tool): each
 //! file's formula as an archive, and the archive evaluated back.
+use aqr_archive::Level;
 use aqr_formula::Apply;
-use aqr_formula::aqr::{self, Level};
 use aqr_png::formula::{self, MODULE};
 use std::time::Instant;
 
@@ -47,7 +47,7 @@ fn main() {
         for _ in 0..if only == 'd' { 1 } else { iters } {
             let t = Instant::now();
             c = formula::encode(&src, threads)
-                .map(|g| aqr::encode(&g, Some(aqr::checksum(&src)), Level::MID).expect("archive"));
+                .map(|g| aqr_archive::encode(&g, Some(aqr_archive::checksum(&src)), Level::MID).expect("archive"));
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let Some(c) = c else {
@@ -57,12 +57,12 @@ fn main() {
             }
             continue;
         };
-        let natives = aqr::natives(&[MODULE], &apply);
+        let natives = aqr_archive::natives(&[MODULE], &apply);
         let mut bd = f64::MAX;
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = Instant::now();
-            let d = aqr::decode(&c, &natives);
+            let d = aqr_archive::decode(&c, &natives);
             bd = bd.min(t.elapsed().as_secs_f64());
             ok &= d.as_deref().ok() == Some(&src[..]);
         }

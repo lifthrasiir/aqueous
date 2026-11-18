@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::sync::{PoisonError, RwLock};
 
+use aqr_archive::Evaluate;
 use aqr_common::rng::noise;
 use aqr_compress::{Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
@@ -8,7 +9,6 @@ use aqr_decompress::{
     LOG, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PE_RELOC, PNG, PNG_SET, PRORES, RASTER, RECS_ENTRIES,
     RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, ZIP, decompress,
 };
-use aqr_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -32,8 +32,8 @@ fn formats(f: &Formula) -> Vec<&'static str> {
 static WASM: RwLock<()> = RwLock::new(());
 
 /// An encoder of the modules aqr-decompress knows.
-fn encoder() -> aqr::Encoder {
-    aqr::Encoder::new(aqr::Level::MID).with_modules(aqr_decompress::wasm_of)
+fn encoder() -> aqr_archive::Encoder {
+    aqr_archive::Encoder::new(aqr_archive::Level::MID).with_modules(aqr_decompress::wasm_of)
 }
 
 /// Recompresses `d`, checking that the formula evaluates back to it, also through the
@@ -49,11 +49,11 @@ fn roundtrip(d: &[u8], opt: &Options) -> Formula {
 fn check(d: &[u8], f: &Formula) {
     assert_eq!(f.len(), d.len() as u64);
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
-    let c = encoder().encode(f, Some(aqr::checksum(d))).unwrap();
+    let c = encoder().encode(f, Some(aqr_archive::checksum(d))).unwrap();
     assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
     let w = {
         let _shared = WASM.read().unwrap_or_else(PoisonError::into_inner);
-        aqr::decode(&c, &aqr_decompress::Wasm)
+        aqr_archive::decode(&c, &aqr_decompress::Wasm)
     };
     assert!(w.as_ref().is_ok_and(|w| w == d), "archive does not decompress as WebAssembly: {:?}\n{f}", w.err());
 }
@@ -160,15 +160,15 @@ fn archive_files() {
     let opt = Options::default();
     let mut d = gzip(&text(10_000));
     let c = compress(&d, &opt);
-    assert_eq!(c[..6], aqr::HEADER_MAGIC);
+    assert_eq!(c[..6], aqr_archive::HEADER_MAGIC);
     assert_eq!(decompress(&c, 1).unwrap(), d);
     d.clear();
     assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
     let (d, _) = pe();
     assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
     // The output checksum is verified.
-    let c = encoder().encode(&recompress(&d, &all()), Some(aqr::checksum(&d) ^ 1)).unwrap();
-    assert_eq!(decompress(&c, 1), Err(aqr::Failure::Invalid("output checksum mismatch".into())));
+    let c = encoder().encode(&recompress(&d, &all()), Some(aqr_archive::checksum(&d) ^ 1)).unwrap();
+    assert_eq!(decompress(&c, 1), Err(aqr_archive::Failure::Invalid("output checksum mismatch".into())));
 }
 
 /// A gzip member's trailer is derived by aqr-flate's module where it is right, and kept as it
@@ -381,7 +381,7 @@ fn lzop_files() {
 
 /// [`all`] at level 9, the only one at which streams of LZFSE and LZVN blocks are taken.
 fn all9() -> Options {
-    Options { level: aqr::Level::Of(9), ..all() }
+    Options { level: aqr_archive::Level::Of(9), ..all() }
 }
 
 #[test]
@@ -391,7 +391,10 @@ fn bvx_streams() {
         // (the data recompressed in turn where it is text)
         assert_eq!(modules(&roundtrip(&d, &all9()))[0], BVX.name, "{t}");
         // below level 9, kept as they are
-        assert!(!modules(&roundtrip(&d, &Options { level: aqr::Level::HIGH, ..all() })).contains(&BVX.name), "{t}");
+        assert!(
+            !modules(&roundtrip(&d, &Options { level: aqr_archive::Level::HIGH, ..all() })).contains(&BVX.name),
+            "{t}"
+        );
     }
     // found in data, as in an asset catalog
     let d = [noise(3000), fixture("codecs/aqr-bvx/tests/data/icon.lzfse"), noise(3000)].concat();
@@ -729,7 +732,7 @@ fn pe_inno_old() {
     // at level 9, where nothing probes the stream beforehand, it is split but put back as it
     // is, nothing being made of its data: not the data left in the formula, larger than the
     // stream (for which the installer would be kept whole as it is, where it is compared)
-    let f = roundtrip(&d, &Options { level: aqr::Level::Of(9), ..all() });
+    let f = roundtrip(&d, &Options { level: aqr_archive::Level::Of(9), ..all() });
     assert!(!modules(&f).contains(&aqr_decompress::LZMA.name), "{f}");
     assert!(modules(&f).contains(&X86.name), "{f}");
 }
@@ -1327,7 +1330,7 @@ fn description_limit() {
     let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
     let flac = fixture("codecs/aqr-flac/tests/data/s16_f5.flac");
     let d = [jpeg.repeat(20), flac.clone(), jpeg.repeat(20)].concat();
-    let bound = |f: &Formula| aqr::description_bound(&f.root);
+    let bound = |f: &Formula| aqr_archive::description_bound(&f.root);
     let f = roundtrip(&d, &all());
     assert_eq!(f.applies().len(), 41);
     let limit = bound(&f) / 4;
@@ -1518,7 +1521,7 @@ fn zip_png_set() {
     // not kept as they are (as verification failing would)
     let c = compress(&d, &all());
     assert!(decompress(&c, 1).unwrap() == d);
-    let raw = aqr::encode(&Formula::raw("raw", d.clone()), None, aqr::Level::MID).unwrap().len();
+    let raw = aqr_archive::encode(&Formula::raw("raw", d.clone()), None, aqr_archive::Level::MID).unwrap().len();
     // (without the module blocks, which an archive of more files has once)
     let mut ms: Vec<_> = f.applies().iter().map(|a| a.module).collect();
     ms.dedup();
@@ -2238,7 +2241,7 @@ fn memory_declared() {
             let c = compress(d, &Options { verify, ..all() });
             let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
             aqr_decompress::record_applications(true);
-            let out = aqr::decode(&c, &aqr_decompress::Wasm);
+            let out = aqr_archive::decode(&c, &aqr_decompress::Wasm);
             let applied = aqr_decompress::record_applications(false);
             drop(alone);
             assert!(out.as_ref().is_ok_and(|o| o == d), "{:?}", out.err());
@@ -2269,7 +2272,7 @@ fn lz4_plan_holds() {
         let c = compress(&d, &Options { smaller: false, ..all() });
         let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
         aqr_decompress::record_applications(true);
-        let out = aqr::decode(&c, &aqr_decompress::Wasm);
+        let out = aqr_archive::decode(&c, &aqr_decompress::Wasm);
         let applied = aqr_decompress::record_applications(false);
         drop(alone);
         assert!(out.as_ref().is_ok_and(|o| o == &d), "{path:?}: {:?}", out.err());
@@ -2372,7 +2375,7 @@ fn within_plans(what: &str, d: &[u8], modules: &[[u8; 32]], exact: bool) -> usiz
         let c = compress(d, &Options { smaller: false, ..all() });
         let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
         aqr_decompress::record_applications(true);
-        let out = aqr::decode(&c, &aqr_decompress::Wasm);
+        let out = aqr_archive::decode(&c, &aqr_decompress::Wasm);
         let applied = aqr_decompress::record_applications(false);
         drop(alone);
         let path = what;
@@ -2425,7 +2428,7 @@ fn zip_again_checked() {
     let c = encoder().encode(&f, None).unwrap();
     let w = {
         let _shared = WASM.read().unwrap_or_else(PoisonError::into_inner);
-        aqr::decode(&c, &aqr_decompress::Wasm)
+        aqr_archive::decode(&c, &aqr_decompress::Wasm)
     };
     assert!(w.is_err(), "decoded as WebAssembly");
 }
@@ -2495,7 +2498,7 @@ fn formula_plans_hold(
     let c = encoder().encode(&f, None).unwrap();
     let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
     aqr_decompress::record_applications(true);
-    let out = aqr::decode(&c, &aqr_decompress::Wasm);
+    let out = aqr_archive::decode(&c, &aqr_decompress::Wasm);
     let applied = aqr_decompress::record_applications(false);
     drop(alone);
     assert!(out.as_ref().is_ok_and(|o| o == d), "{what}: {:?}", out.err());

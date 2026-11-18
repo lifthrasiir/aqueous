@@ -13,7 +13,6 @@
 //! (a task's own, and with the copy of the instance it starts from).
 
 use aqr_decompress::Wasm;
-use aqr_formula::aqr;
 
 // (the allocator that tells aqr-common's meter of the blocks: the native measurement)
 #[global_allocator]
@@ -37,10 +36,10 @@ fn main() {
         // the native measurement first ([`aqr_decompress::record_native`]), by the applications'
         // shapes (module, parameters, lengths)
         aqr_decompress::record_native(true);
-        let _ = aqr::decode_value(&c, &aqr_decompress::Native { threads });
+        let _ = aqr_archive::decode_value(&c, &aqr_decompress::Native { threads });
         let mut native = aqr_decompress::record_native(false);
         aqr_decompress::record_applications(true);
-        let r = aqr::decode_value(&c, &Wasm);
+        let r = aqr_archive::decode_value(&c, &Wasm);
         let applied = aqr_decompress::record_applications(false);
         match r {
             Ok(_) => println!("{f}"),

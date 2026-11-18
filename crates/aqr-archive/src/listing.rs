@@ -44,7 +44,7 @@ pub struct Listed {
 pub struct Applied {
     /// Its module block (by index among all).
     pub module: usize,
-    /// The memory limit of its instance ([`crate::NO_LIMIT`]: none declared) and the task limits.
+    /// The memory limit of its instance ([`aqr_formula::NO_LIMIT`]: none declared) and the task limits.
     pub instance: u64,
     pub tasks: Vec<u64>,
     /// The bytes of its outputs.
@@ -56,12 +56,13 @@ pub struct Applied {
 impl Applied {
     /// The least memory it needs: its instance and a unit of each class (none where undeclared).
     pub fn minimal(&self) -> Option<u64> {
-        (self.instance != crate::NO_LIMIT).then(|| self.tasks.iter().fold(self.instance, |a, &t| a.saturating_add(t)))
+        (self.instance != aqr_formula::NO_LIMIT)
+            .then(|| self.tasks.iter().fold(self.instance, |a, &t| a.saturating_add(t)))
     }
 
     /// The most memory it needs: its instance and every slot of each class (`slots`) a unit.
     pub fn full(&self, slots: &[u64]) -> Option<u64> {
-        (self.instance != crate::NO_LIMIT).then(|| {
+        (self.instance != aqr_formula::NO_LIMIT).then(|| {
             let units = self.tasks.iter().zip(slots).map(|(&t, &n)| t.saturating_mul(n));
             units.fold(self.instance, u64::saturating_add)
         })
@@ -204,7 +205,7 @@ impl Graph<'_> {
                 if *params_len > 0 {
                     let _ = write!(out, ", params {params_len} B {}", hex(params, *params_len));
                 }
-                if *memory_limit != crate::NO_LIMIT {
+                if *memory_limit != aqr_formula::NO_LIMIT {
                     let _ = write!(out, ", memory limit {memory_limit} B");
                     if !task_limits.is_empty() {
                         let t: Vec<String> = task_limits.iter().map(|t| format!("{t}")).collect();
@@ -536,7 +537,7 @@ pub(super) fn graph<'f>(blocks: &Blocks, name: &'f dyn Fn(usize) -> String) -> D
                         }
                         &Insn::Pack(n) => {
                             let kids = pop(n);
-                            let size = crate::packed::header_len(n) + sum(&g, &kids);
+                            let size = aqr_formula::packed::header_len(n) + sum(&g, &kids);
                             st.push(g.add(Shape::Pack, kids, at, size));
                         }
                         Insn::Split(sizes) => {

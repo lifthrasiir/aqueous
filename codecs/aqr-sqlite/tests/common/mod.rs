@@ -1,6 +1,7 @@
 //! What the round-trip tests share: databases built with the sqlite3 command-line tool, and the
 //! evaluation of formulas by this crate's module.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Error, Formula};
 use aqr_sqlite::formula::{self, MODULE};
 use std::path::PathBuf;

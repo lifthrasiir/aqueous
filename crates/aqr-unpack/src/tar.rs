@@ -13,8 +13,8 @@
 
 use std::sync::Mutex;
 
+use aqr_archive::{EntryNode, Extra, Step, Time};
 use aqr_common::pool;
-use aqr_formula::aqr::{EntryNode, Extra, Step, Time};
 
 use crate::build::{self, Builder};
 use crate::stream;
@@ -484,7 +484,7 @@ impl Parser<'_> {
                     self.note(build::dangling(&shown));
                     return Ok(());
                 }
-                EntryNode::Link(aqr_formula::aqr::name_from(&h.link))
+                EntryNode::Link(aqr_archive::name_from(&h.link))
             }
             b'1' => return self.hard_link(&names, &h),
             b'3' | b'4' => EntryNode::Device { block: h.kind == b'4', major: h.major, minor: h.minor },

@@ -2,7 +2,8 @@
 //! `msadpcm-recons`, the header and a partial block at the end kept as they are. The files of
 //! `tests/msadpcm` were written by ffmpeg 4.2 (`adpcm_ms`) from `tests/data/s16.wav`.
 
-use aqr_formula::{Apply, Formula, aqr};
+use aqr_archive::Evaluate;
+use aqr_formula::{Apply, Formula};
 use aqr_raw::container::{self, Layout, MsAdpcm};
 use aqr_raw::formula;
 
@@ -45,7 +46,7 @@ fn files_coded() {
         let f = check(&name, &d).expect(&name);
         let [a] = f.applies()[..] else { panic!("{name}") };
         assert_eq!(a.len, c.len as u64, "{name}");
-        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::MID).unwrap().len();
+        let n = aqr_archive::encode(&f, Some(aqr_archive::checksum(&d)), aqr_archive::Level::MID).unwrap().len();
         assert!(n * 10 < d.len() * 9, "{name}: {n} of {}", d.len());
     }
 }

@@ -5,7 +5,7 @@
 //! (`-B`) still bounds what is together, and the memory that takes. With `-Z lzma`, LZMA's
 //! groups first ([`crate::lzma`]).
 
-use aqr_formula::aqr::TOGETHER;
+use aqr_archive::TOGETHER;
 use aqr_formula::{Formula, Kind, Node};
 
 aqr_common::zopt! {
@@ -62,7 +62,7 @@ pub(crate) fn apply(f: &mut Formula) {
     let (_, taken, rank) = survey(f);
     let mut order: Vec<usize> = (0..n).filter(|&s| taken[s] && !f.streams[s].data.is_empty()).collect();
     order.sort_by_key(|&s| (rank[s], s));
-    let max = 1u64 << aqr_formula::aqr::WINDOW_LOG_MAX;
+    let max = 1u64 << aqr_archive::WINDOW_LOG_MAX;
     // (of each stream taken, the stream it goes to, as it is to be pushed, and where in it)
     let mut to: Vec<Option<(usize, u64)>> = vec![None; n];
     let mut groups: Vec<Vec<usize>> = Vec::new();

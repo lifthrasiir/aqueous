@@ -16,8 +16,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use aqr_archive::{Entry, EntryNode, Extra, Tree};
 use aqr_compress::{Input, Options, compress_tree};
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
 use unicode_normalization::UnicodeNormalization;
 
 /// The directories to test in.

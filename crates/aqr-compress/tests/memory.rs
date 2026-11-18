@@ -4,9 +4,9 @@
 
 use std::io::Write;
 
+use aqr_archive::{Entry, EntryNode, Extra, Tree};
 use aqr_common::mem::{Counting, peak};
 use aqr_compress::{Input, Options, compress_tree_to};
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree};
 
 #[global_allocator]
 static A: Counting = Counting;

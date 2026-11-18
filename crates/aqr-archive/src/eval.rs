@@ -31,13 +31,13 @@ struct Val {
 }
 
 /// An application of a graph: an Apply instruction of a formula block, or an application of a
-/// [`crate::Formula`] (of a single output, or of several of its `shared`, as a Split of an
+/// [`aqr_formula::Formula`] (of a single output, or of several of its `shared`, as a Split of an
 /// application of one where its outputs are split).
 #[derive(Clone, Copy)]
 enum Ap<'p, 'a> {
     Block(&'p Apply<'a>),
-    One(&'p crate::Apply),
-    Shared(&'p crate::Shared),
+    One(&'p aqr_formula::Apply),
+    Shared(&'p aqr_formula::Shared),
 }
 
 /// The Apply instruction of application `a` of a formula block.
@@ -448,7 +448,7 @@ impl<'a> Source<'a> for Made {
             Op::Apply(a, ref inputs, _) => applied(at, a, inputs)?.pop().expect("an output"),
             Op::Patch(source, patch, len) => {
                 let (source, patch) = (whole(at, source)?, whole(at, patch)?);
-                crate::patch::apply(&source, &patch, len).map_err(|e| Failure::Invalid(e.0))?
+                aqr_formula::patch::apply(&source, &patch, len).map_err(|e| Failure::Invalid(e.0))?
             }
             _ => unreachable!("an application or a patch"),
         };
@@ -1823,32 +1823,32 @@ impl<'f> Graph<'f, 'f> {
     /// The graph of formula `f` (its outputs checked to be taken once): its slices literals of the
     /// bytes of its streams; each application of several outputs a node before what takes them,
     /// one of a single output split as a formula block has it (a Split instruction).
-    fn of_formula(f: &'f crate::Formula) -> crate::Result<Self> {
+    fn of_formula(f: &'f aqr_formula::Formula) -> aqr_formula::Result<Self> {
         f.check_outputs()?;
         let mut g = Graph { ops: Vec::new(), lens: Vec::new(), fans: 0, sums: HashMap::new(), roots: Vec::new() };
         let mut outputs: Vec<Vec<Val>> = Vec::with_capacity(f.shared.len());
         for s in &f.shared {
-            let inputs = s.inputs().iter().map(|n| g.node(f, n, &outputs)).collect::<crate::Result<Vec<_>>>()?;
+            let inputs = s.inputs().iter().map(|n| g.node(f, n, &outputs)).collect::<aqr_formula::Result<Vec<_>>>()?;
             let n = s.sizes.len();
             let vals = match (s.split, &s.of) {
-                (_, crate::Of::Patch { len, .. }) => {
+                (_, aqr_formula::Of::Patch { len, .. }) => {
                     let p = g.push(Op::Patch(inputs[0], inputs[1], *len), *len);
                     let (node, fan) = (g.ops.len(), g.fan());
                     g.push(Op::Split(p, &s.sizes, fan), 0);
                     (0..n).map(|out| Val { node, out }).collect()
                 }
-                (_, crate::Of::Node(_)) => {
+                (_, aqr_formula::Of::Node(_)) => {
                     let (node, fan) = (g.ops.len(), g.fan());
                     g.push(Op::Split(inputs[0], &s.sizes, fan), 0);
                     (0..n).map(|out| Val { node, out }).collect()
                 }
-                (true, crate::Of::Apply(a)) => {
+                (true, aqr_formula::Of::Apply(a)) => {
                     let a = g.push(Op::Apply(Ap::Shared(s), inputs, None), a.len);
                     let (node, fan) = (g.ops.len(), g.fan());
                     g.push(Op::Split(a, &s.sizes, fan), 0);
                     (0..n).map(|out| Val { node, out }).collect()
                 }
-                (false, crate::Of::Apply(_)) => {
+                (false, aqr_formula::Of::Apply(_)) => {
                     let (node, fan) = (g.ops.len(), g.fan());
                     g.push(Op::Apply(Ap::Shared(s), inputs, Some(fan)), 0);
                     (0..n).map(|out| Val { node, out }).collect()
@@ -1862,8 +1862,13 @@ impl<'f> Graph<'f, 'f> {
     }
 
     /// The value of node `n` of formula `f`, of the `outputs` of its applications of several.
-    fn node(&mut self, f: &'f crate::Formula, n: &'f crate::Node, outputs: &[Vec<Val>]) -> crate::Result<Val> {
-        use crate::{Error, Node};
+    fn node(
+        &mut self,
+        f: &'f aqr_formula::Formula,
+        n: &'f aqr_formula::Node,
+        outputs: &[Vec<Val>],
+    ) -> aqr_formula::Result<Val> {
+        use aqr_formula::{Error, Node};
         Ok(match n {
             &Node::Slice { stream, start, len } => {
                 let s = f.streams.get(stream).ok_or_else(|| Error::new(format!("no stream #{stream}")))?;
@@ -1878,17 +1883,18 @@ impl<'f> Graph<'f, 'f> {
                 self.push(Op::Literal(d), len)
             }
             Node::Concat(ns) => {
-                let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<crate::Result<Vec<_>>>()?;
+                let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<aqr_formula::Result<Vec<_>>>()?;
                 let len = items.iter().map(|&v| self.len(v)).sum();
                 self.push(Op::Concat(items), len)
             }
             Node::Pack(ns) => {
-                let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<crate::Result<Vec<_>>>()?;
+                let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<aqr_formula::Result<Vec<_>>>()?;
                 let len = packed::header_len(items.len()) + items.iter().map(|&v| self.len(v)).sum::<u64>();
                 self.push(Op::Pack(items), len)
             }
             Node::Apply(a) => {
-                let inputs = a.inputs.iter().map(|n| self.node(f, n, outputs)).collect::<crate::Result<Vec<_>>>()?;
+                let inputs =
+                    a.inputs.iter().map(|n| self.node(f, n, outputs)).collect::<aqr_formula::Result<Vec<_>>>()?;
                 self.push(Op::Apply(Ap::One(a), inputs, None), a.len)
             }
             &Node::Output { shared, index, .. } => outputs[shared][index],
@@ -1901,14 +1907,14 @@ impl<'f> Graph<'f, 'f> {
                 let (source, patch) = (self.node(f, &p.source, outputs)?, self.node(f, &p.patch, outputs)?);
                 self.push(Op::Patch(source, patch, p.len), p.len)
             }
-            // (chosen before the formula is evaluated: [`crate::Formula::resolve`])
+            // (chosen before the formula is evaluated: [`aqr_formula::Formula::resolve`])
             Node::Either(_) => return Err(Error::new("an alternative not resolved")),
         })
     }
 }
 
 /// What takes the output of a formula as it is evaluated ([`eval_formula`]).
-pub(crate) type FormulaSink<'s> = dyn FnMut(&[u8]) -> crate::Result<()> + 's;
+pub(crate) type FormulaSink<'s> = dyn FnMut(&[u8]) -> aqr_formula::Result<()> + 's;
 
 /// No blocks: a formula's graph slices none.
 struct NoBlocks;
@@ -1927,11 +1933,11 @@ impl Blocks for NoBlocks {
 /// application of several outputs split, by [`crate::Modules::apply_shared`], its pieces put
 /// together, so that what records them has their pieces), its threads joined after.
 fn with_formula<M: crate::Modules + Sync, R>(
-    f: &crate::Formula,
+    f: &aqr_formula::Formula,
     m: &M,
-    go: impl FnOnce(&Eval) -> crate::Result<R>,
-) -> crate::Result<R> {
-    use crate::Error;
+    go: impl FnOnce(&Eval) -> aqr_formula::Result<R>,
+) -> aqr_formula::Result<R> {
+    use aqr_formula::Error;
     let g = Graph::of_formula(f)?;
     let failed = |e: Error| Failure::Invalid(e.0);
     let apply = |a: Ap<'_, '_>, inputs: &[&[u8]]| -> Decoded<Vec<Vec<u8>>> {
@@ -1972,10 +1978,10 @@ fn with_formula<M: crate::Modules + Sync, R>(
 }
 
 /// A failure of the evaluation as a formula's.
-fn formula_error(f: Failure) -> crate::Error {
+fn formula_error(f: Failure) -> aqr_formula::Error {
     match f {
-        Failure::Invalid(m) | Failure::Resource(m) | Failure::Decryption(m) => crate::Error::new(m),
-        f => crate::Error::new(format!("{f:?}")),
+        Failure::Invalid(m) | Failure::Resource(m) | Failure::Decryption(m) => aqr_formula::Error::new(m),
+        f => aqr_formula::Error::new(format!("{f:?}")),
     }
 }
 
@@ -1983,16 +1989,16 @@ fn formula_error(f: Failure) -> crate::Error {
 /// pieces as it is pulled where given (and none returned), its applications among what its
 /// output concatenates made ahead on up to `threads` threads.
 pub(crate) fn eval_formula<M: crate::Modules + Sync>(
-    f: &crate::Formula,
+    f: &aqr_formula::Formula,
     m: &M,
     part: Option<&mut FormulaSink<'_>>,
     threads: usize,
-) -> crate::Result<Vec<u8>> {
+) -> aqr_formula::Result<Vec<u8>> {
     with_formula(f, m, |ev| match part {
         None => emit(ev.g, ev, None, None, threads).map_err(formula_error).map(|mut o| o.pop().unwrap_or_default()),
         Some(part) => {
             // (the callback's failure told apart from the evaluation's)
-            let mut given: Option<crate::Error> = None;
+            let mut given: Option<aqr_formula::Error> = None;
             let mut take = |d: &[u8]| part(d).map_err(|e| Failure::Invalid(given.insert(e).0.clone()));
             match emit(ev.g, ev, None, Some(&mut take), threads) {
                 Ok(_) => Ok(Vec::new()),
@@ -2006,20 +2012,20 @@ pub(crate) fn eval_formula<M: crate::Modules + Sync>(
 /// the decoder has them (one output of an application split) and its inputs made (by `m`) only as
 /// it asks for them: None where it gives none, or an input asked for cannot be made.
 pub(crate) fn limits_of<M: crate::Modules + Sync>(
-    f: &crate::Formula,
+    f: &aqr_formula::Formula,
     m: &M,
-    order: &[&crate::Apply],
-    limit: &dyn Fn(&crate::Apply, &[u64], &dyn crate::Contents) -> Option<crate::Plan>,
-) -> crate::Result<Vec<Option<crate::Plan>>> {
+    order: &[&aqr_formula::Apply],
+    limit: &dyn Fn(&aqr_formula::Apply, &[u64], &dyn aqr_formula::Contents) -> Option<aqr_formula::Plan>,
+) -> aqr_formula::Result<Vec<Option<aqr_formula::Plan>>> {
     with_formula(f, m, |ev| {
         let g = ev.g;
         // (the node of each application, by its address)
         let mut node_of: HashMap<usize, usize> = HashMap::new();
         for (n, op) in g.ops.iter().enumerate() {
             match *op {
-                Op::Apply(Ap::One(a), ..) => _ = node_of.insert(a as *const crate::Apply as usize, n),
+                Op::Apply(Ap::One(a), ..) => _ = node_of.insert(a as *const aqr_formula::Apply as usize, n),
                 Op::Apply(Ap::Shared(s), ..) => {
-                    _ = node_of.insert(s.apply().map_or(0, |a| a as *const crate::Apply as usize), n)
+                    _ = node_of.insert(s.apply().map_or(0, |a| a as *const aqr_formula::Apply as usize), n)
                 }
                 _ => {}
             }
@@ -2028,7 +2034,7 @@ pub(crate) fn limits_of<M: crate::Modules + Sync>(
         Ok(order
             .iter()
             .map(|&a| {
-                let n = *node_of.get(&(a as *const crate::Apply as usize))?;
+                let n = *node_of.get(&(a as *const aqr_formula::Apply as usize))?;
                 let Op::Apply(ap, ref inputs, _) = g.ops[n] else { unreachable!("an application") };
                 let made: Vec<std::cell::OnceCell<Option<Vec<u8>>>> =
                     inputs.iter().map(|_| Default::default()).collect();
@@ -2045,7 +2051,7 @@ struct Asked<'r, 'e, 'a> {
     made: Vec<std::cell::OnceCell<Option<Vec<u8>>>>,
 }
 
-impl crate::Contents for Asked<'_, '_, '_> {
+impl aqr_formula::Contents for Asked<'_, '_, '_> {
     fn input(&self, k: usize) -> Option<&[u8]> {
         let v = *self.inputs.get(k)?;
         self.made[k].get_or_init(|| whole(self.at, v).ok().map(Whole::into_vec)).as_deref()

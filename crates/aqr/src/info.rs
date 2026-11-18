@@ -1,5 +1,5 @@
 //! `aqr -I` (`--info`): all that an Aqueous archive records, for debugging and forensics
-//! ([`aqr::inspect`]), on standard output. Nothing is decoded but the formula and metadata
+//! ([`aqr_archive::inspect`]), on standard output. Nothing is decoded but the formula and metadata
 //! blocks.
 //!
 //! - `-I ARCHIVE`: the archive itself: its encryption (where it is encrypted), its kind and
@@ -28,8 +28,8 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
-use aqr_formula::aqr::inspect::{self, Content, Entry, Fate, Inspection, Node, Origin, State};
-use aqr_formula::aqr::{self, Extra, Member, Time, Zone, entry_key_name, name_bytes, name_from};
+use aqr_archive::inspect::{self, Content, Entry, Fate, Inspection, Node, Origin, State};
+use aqr_archive::{Extra, Member, Time, Zone, entry_key_name, name_bytes, name_from};
 
 use crate::{Args, hex, plural};
 
@@ -54,13 +54,13 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
         let _ = writeln!(s, "{}", input.display());
         let _ = writeln!(s, "  file: {} B", c.len());
     }
-    let encrypted = aqr::envelope::is_encrypted(&c) || aqr::envelope::is_damaged_encrypted(&c);
+    let encrypted = aqr_archive::envelope::is_encrypted(&c) || aqr_archive::envelope::is_damaged_encrypted(&c);
     let decrypted = match encrypted {
         true => {
             if paths.is_empty() {
-                let (e, opened) = aqr::envelope::open_damaged(&c).map_err(|e| err(&crate::exit::seen(e)))?;
+                let (e, opened) = aqr_archive::envelope::open_damaged(&c).map_err(|e| err(&crate::exit::seen(e)))?;
                 let (salt, nonce) = e.salt_and_nonce();
-                let mirrored = c.starts_with(&aqr::envelope::ENCRYPTED_MIRRORED_HEADER_MAGIC);
+                let mirrored = c.starts_with(&aqr_archive::envelope::ENCRYPTED_MIRRORED_HEADER_MAGIC);
                 let _ = writeln!(
                     s,
                     "  encrypted: scrypt of work factor {}, salt {}; {} chunk{}, nonce {}{}",
@@ -89,7 +89,7 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
     let payload: &[u8] = match decrypted.as_deref() {
         Some(d) => d,
         None => {
-            let at = aqr::locate(&c).unwrap_or(0..c.len());
+            let at = aqr_archive::locate(&c).unwrap_or(0..c.len());
             if paths.is_empty() && at != (0..c.len()) {
                 let _ = writeln!(s, "  located: bytes {} to {} of the file", at.start, at.end);
             }
@@ -120,7 +120,7 @@ fn info_of(a: &Args, input: &Path) -> Result<String, String> {
 }
 
 /// The archive itself, of `-I ARCHIVE`.
-fn archive(s: &mut String, i: &Inspection, verbose: bool) -> aqr::Decoded<()> {
+fn archive(s: &mut String, i: &Inspection, verbose: bool) -> aqr_archive::Decoded<()> {
     let _ = writeln!(s, "  kind: {} archive", if i.overlay { "overlay" } else { "standalone" });
     let last = i.segments.last().and_then(|g| g.metadata.as_ref());
     let _ =
@@ -254,7 +254,7 @@ fn archive(s: &mut String, i: &Inspection, verbose: bool) -> aqr::Decoded<()> {
 /// class), the most (every slot a unit), the sum of the minimal bounds of the chain of part
 /// applications feeding it and itself, and the bytes it outputs; then the largest of the minimal
 /// bounds and of the chains, which the archive needs of the host.
-fn applications(s: &mut String, i: &Inspection, k: usize) -> aqr::Decoded<()> {
+fn applications(s: &mut String, i: &Inspection, k: usize) -> aqr_archive::Decoded<()> {
     let apps = i.applications(k, &aqr_decompress::is_part)?;
     let _ = writeln!(s, "  applications: {}", apps.len());
     for a in &apps {
@@ -337,7 +337,7 @@ fn shown(names: &[Vec<u8>]) -> String {
 }
 
 /// Entry `e` of segment `k`: what it is, its content, its extra, its forks and the formulas.
-fn entry_of(s: &mut String, i: &Inspection, k: usize, e: &Entry) -> aqr::Decoded<()> {
+fn entry_of(s: &mut String, i: &Inspection, k: usize, e: &Entry) -> aqr_archive::Decoded<()> {
     let g = &i.segments[k];
     let what = match &e.node {
         Node::Root => "the root directory".into(),
@@ -509,7 +509,7 @@ fn member(m: &Member, x: &Extra) -> Vec<String> {
 
 /// A member of the top-level map of the optional metadata.
 fn archive_member(m: &Member) -> String {
-    match (m.key.and_then(aqr::archive_key_name), &m.text) {
+    match (m.key.and_then(aqr_archive::archive_key_name), &m.text) {
         (Some(name), Some(t)) if name == "archive-comment" => format!("{name}: {}", quoted(t)),
         (Some(name), _) => format!("{name}: {} (not read)", m.value),
         (None, _) => format!("{} (not known): {}", m.key_text, m.value),

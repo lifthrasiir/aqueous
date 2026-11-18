@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use aqr_archive::Evaluate;
 use aqr_common::rng::{Rng, noise};
 use aqr_formula::{Formula, Node};
 use aqr_zip::formula::{self, Options};
@@ -493,10 +494,10 @@ fn probed() {
         entry("small", rng.bytes(100_000)),
     ];
     let d = archive(es).bytes();
-    let probe = aqr_formula::probe::Probe::flat(aqr_formula::aqr::Level::MID);
+    let probe = aqr_formula::probe::Probe::flat(aqr_archive::archivers(aqr_archive::Level::MID));
     let bodies = |probe| roundtrip_with(&d, &Options { probe, ..Options::default() }).1;
     assert_eq!(bodies(None), [Body::Deflated; 3]);
-    assert_eq!(bodies(Some(probe)), [Body::Kept, Body::Deflated, Body::Deflated]);
+    assert_eq!(bodies(Some(probe.clone())), [Body::Kept, Body::Deflated, Body::Deflated]);
     // noise held twice (a few bytes apart) gains as much as one copy costs: both are rebuilt
     let mut again = noise(400_000);
     again[1000..1100].fill(0);

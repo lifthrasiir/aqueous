@@ -10,8 +10,8 @@
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
+use aqr_archive::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_common::{crc32, pool};
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_rar::{lz3, lz5, rar4, rar5};
 
 use crate::build::{self, Builder, Named, Undeclared};

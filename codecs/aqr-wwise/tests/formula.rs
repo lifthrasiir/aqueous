@@ -2,6 +2,7 @@
 //! again, and their formulas (the setup found by the table of ids or by a skeleton) giving them
 //! back through aqr-vorbis's module.
 
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 use aqr_vorbis::setup::{Ident, Setup};
 use aqr_vorbis::setups;

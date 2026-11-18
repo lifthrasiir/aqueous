@@ -4,12 +4,12 @@
 //! slots (what the decoder reads of a module's bytes) and the hash, which [`Runner::load`] then
 //! takes to the native blob.
 //!
-//! [`Runner::registered`]: aqr_formula::aqr::Runner::registered
-//! [`Runner::load`]: aqr_formula::aqr::Runner::load
+//! [`Runner::registered`]: aqr_archive::Runner::registered
+//! [`Runner::load`]: aqr_archive::Runner::load
 
 use aqr_api::dll::{ApplyFn, ApplyPartFn, DecodeFn, Slice, SliceMut, StreamedFn};
+use aqr_archive::{Decoded, Failure, Loaded, PartIn, PartOut};
 use aqr_formula::Resource;
-use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut};
 
 /// The name in the dispatch table of the native blob of the module of SHA-512/256 `hash` and
 /// task slots `slots` (the bytes of its custom section `aqr_task_slots`): both in hex,
@@ -311,7 +311,7 @@ mod tests {
             assert_eq!(parse_native_name(native_name(&hash, slots).as_bytes()), Some((hash, slots.to_vec())));
             let w = stand_in(&hash, slots);
             assert_eq!(stand_in_hash(&w), Some(hash));
-            assert_eq!(aqr_formula::aqr::class_slots(&w).len(), slots.len());
+            assert_eq!(aqr_archive::class_slots(&w).len(), slots.len());
         }
         assert_eq!(parse_native_name(b"aqr-interp"), None);
         assert_eq!(stand_in_hash(b"\0asm\x01\0\0\0\x01\x01\x00"), None);

@@ -18,16 +18,12 @@ aqr-num = { path = "../../crates/aqr-num" }
 memchr = "2"
 
 [dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-formula = { path = "../../crates/aqr-formula" }
 zstd.workspace = true
 
-# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
-# that names do not collide in the workspace's target directory.
-
-[[bin]]
-name = "aqr-obj"
-path = "src/main.rs"
-required-features = ["encode"]
+# Tools are named <crate>-<tool> (the crate's own one, examples/aqr-obj.rs, after the crate),
+# so that names do not collide in the workspace's target directory.
 
 [[example]]
 name = "aqr-obj-dups"
@@ -64,3 +60,8 @@ path = "examples/vpred2.rs"
 [[example]]
 name = "aqr-obj-vpred-hist"
 path = "examples/vpred_hist.rs"
+
+[[example]]
+name = "aqr-obj"
+path = "examples/aqr-obj.rs"
+required-features = ["encode"]

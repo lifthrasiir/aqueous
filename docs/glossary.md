@@ -59,7 +59,7 @@ module whose number of things varies (an executable's sections). The other direc
 **Split** of one output. "No variable arity" in CLAUDE.md means using these and separate
 modules instead.
 
-**released modules** (`crates/aqr-formula/src/released.rs`) — Hashes of modules shipped in past
+**released modules** (`crates/aqr-archive/src/released.rs`) — Hashes of modules shipped in past
 releases. Only these may use the old Apply (opcode 0x11), and their memory limits are not
 enforced.
 
@@ -112,7 +112,7 @@ data kept raw?*
   `crates/aqr-compress/src/lib.rs` lists them and why.
 - The answer is a **Verdict**: `Take`, `Reject`, or `Close` (lost by little).
 
-**sink** (`crates/aqr-formula/src/aqr/sink.rs`) — Streams written block by block, each block
+**sink** (`crates/aqr-archive/src/sink.rs`) — Streams written block by block, each block
 compressed as soon as it is full. No whole stream is held, yet the archive is byte for byte
 what whole streams would give. A **direct sink** writes the blocks straight into the output
 file, and the formula block goes into room left before them.

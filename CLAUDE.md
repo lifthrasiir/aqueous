@@ -44,8 +44,15 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     what the systems read of them: Windows' string table, the bundle's `.lproj/*.strings`.
   - `aqr-mac` — Finder's services, `.aqr` files opened and their progress in Finder over
     `aqr --ipc` (macOS); `bundle.sh` makes `target/dist/Aqueous.app` and its zip.
-  - `aqr-formula` — entry formulas (stack-machine programs) and the archive structure
-    (`src/aqr.rs`: the archive encoder and decoder).
+  - `aqr-formula` — entry formulas as recompressors declare them (`Formula`, `Node`, `Apply`,
+    `Module` and its plan), with what they need to make them: the spill `store` of large
+    buffers, `patch`es, the `probe` of whether recompressing pays (the archive encoder behind
+    its `Archiver`). The codec crates depend on it alone; nothing of the archive is in it.
+  - `aqr-archive` — the archive structure: the archive encoder and decoder (`src/lib.rs`), the
+    evaluation of formulas (`Evaluate`, `Modules`: by the decoder's evaluator of formula
+    blocks, `src/eval.rs`), metadata trees, segments, envelopes, mirroring, released modules.
+    Of the codecs' libraries only aqr-mkv (`description_bound`) and aqr-tensors (`BLOCK`) take
+    it; their tests and tools (`examples/aqr-NAME.rs`) take it as a dev-dependency.
   - `aqr-compress` — picks a recompressor by magic bytes, makes the formula, stores the archive.
   - `aqr-decompress` — runs the formulas' modules natively and extracts archives.
   - `aqr-native` — how each module runs natively (`NATIVE`, by module name: its native decoding
@@ -119,7 +126,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     stub and aqr. `pack.py` gathers what aqr embeds (the stub, packed by UPX `-9` where `AQR_UPX` or
     `upx` is found, the blobs of the modules and of the shared libraries) and packs it
     (`aqr-sfx-pack`: `sfx.pack`).
-  - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-formula + aqr-sfx, no codecs or Wasmtime,
+  - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-archive + aqr-sfx, no codecs or Wasmtime,
     0.67 MB, 0.30 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
     of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle and
     the archive from right after its image (else it scans itself from the end for the archive's
@@ -173,7 +180,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   optimised and incremental). Codec tests in debug builds are very slow (a debug
   `cargo test --workspace` once ran over 12 minutes). Timings (`--ignored` tests) still want
   `-r`. Test the crates you changed rather than the whole workspace; for the archive encoder
-  and decoder that is aqr-formula, aqr-compress and aqr-decompress. Stream long output with
+  and decoder that is aqr-archive, aqr-compress and aqr-decompress. Stream long output with
   `rg --line-buffered` rather than through `sort`, which hides progress.
 - **Build and run the release `aqr` only through `cargo aqr <args>…`** (crates/aqr-bincache),
   never `cargo build -p aqr`, `cargo run -p aqr` or `target/release/aqr` directly: it builds
@@ -226,7 +233,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 Archives carry real Wasm modules built from the recompressors' code; native decoding is an
 optimization picked by hash.
 
-- Codec crates: feature `encode` (default) brings in `formula`, aqr-formula, zstd and rayon;
+- Codec crates: feature `encode` (default) brings in `formula`, aqr-formula, zstd and rayon
+  (never aqr-archive: their tests and tools take it as a dev-dependency);
   `module.rs` is the decoding code without aqr-formula. Natively they stay plain libraries.
 - aqr-modules: one `[[bin]]` per module (never one module doing several things). `build.py`
   builds them through aqr-ld and writes `wasm/*.wasm`, `*.block` (the module blocks' data),
@@ -277,7 +285,7 @@ optimization picked by hash.
   (`plans_hold_on_samples` in `tests/samples.rs`, ignored, does on `scripts/module-memory.sh`'s
   samples). Tasks spawn only classes above their own.
 - Released modules: the earlier Apply (opcode 11, reserved) is accepted only for the modules of
-  the releases (`crates/aqr-formula/src/released.rs`, the hashes that `known.rs` no longer has),
+  the releases (`crates/aqr-archive/src/released.rs`, the hashes that `known.rs` no longer has),
   and its memory limit is not enforced. At each release add the tag to the revisions of
   `scripts/released-modules.sh`, run it and commit the result.
 - Size: aqr-ld trims modules itself (prefer automating in aqr-ld over toolchain flags);
@@ -296,7 +304,7 @@ optimization picked by hash.
   footer after the old one, then makes the old one a spacer block by its first 2 bytes; a stop
   (first Ctrl-C) ends the archive as it is, telling what it left out (`segment-status`). Not
   with `-P` (nonces) nor `-A` (Mirroring owns the footer), which end as they are but do not commit.
-- aqr-formula's decoder (`defined()` in `src/aqr.rs`) does not accept import blocks 58–5F,
+- aqr-archive's decoder (`defined()` in `src/lib.rs`) does not accept import blocks 58–5F,
   though the spec has them. Implement them together with import resolution and overlays when
   extraction work starts, not by just adding them to `defined()`.
 - Near-duplicate files (variant sets, from 差分 PNG sets): reference coding in aqr-png,

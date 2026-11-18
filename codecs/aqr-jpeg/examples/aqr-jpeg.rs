@@ -8,8 +8,8 @@
 //!   aqr-jpeg mutenc [-n rounds] [-s seed] file...   re-encode inputs with valid non-canonical
 //!                                    choices; roundtrip must stay exact
 
+use aqr_archive::Level;
 use aqr_formula::Apply;
-use aqr_formula::aqr::{self, Level};
 use aqr_jpeg::formula::{self, MODULE};
 use std::time::Instant;
 
@@ -20,11 +20,11 @@ fn module(a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 /// `d` as an archive of its formula; None if it is not coded.
 fn pack(d: &[u8]) -> Option<Vec<u8>> {
     let f = formula::encode(d, 0)?;
-    Some(aqr::encode(&f, Some(aqr::checksum(d)), Level::MID).expect("archive encoding failed"))
+    Some(aqr_archive::encode(&f, Some(aqr_archive::checksum(d)), Level::MID).expect("archive encoding failed"))
 }
 
 fn unpack(c: &[u8]) -> Result<Vec<u8>, String> {
-    aqr::decode(c, &aqr::natives(&[MODULE], &module)).map_err(|e| e.to_string())
+    aqr_archive::decode(c, &aqr_archive::natives(&[MODULE], &module)).map_err(|e| e.to_string())
 }
 
 fn bench(files: &[String], iters: usize) {
@@ -297,9 +297,11 @@ fn main() {
                 };
                 let te = t.elapsed().as_secs_f64();
                 let plan = aqr_jpeg::lpart::plan(0, &f.streams[0].data, &f.streams[1].data, &f.streams[2].data);
-                let c = aqr::encode(&f, Some(aqr::checksum(&d)), Level::MID).expect("archive encoding failed");
+                let c = aqr_archive::encode(&f, Some(aqr_archive::checksum(&d)), Level::MID)
+                    .expect("archive encoding failed");
                 let t = Instant::now();
-                let back = aqr::decode(&c, &aqr::natives(&[lformula::MODULE], &module)).map_err(|e| e.to_string());
+                let back = aqr_archive::decode(&c, &aqr_archive::natives(&[lformula::MODULE], &module))
+                    .map_err(|e| e.to_string());
                 let td = t.elapsed().as_secs_f64();
                 let ok = back.as_ref().is_ok_and(|b| *b == d);
                 println!(

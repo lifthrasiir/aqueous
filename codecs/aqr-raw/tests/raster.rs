@@ -2,6 +2,7 @@
 //! and 16-bit samples after a header telling their size, evaluated back through the modules,
 //! with trailers, cuts and corrupted inputs.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Node};
 use aqr_raw::container::{self, Layout};
 use aqr_raw::formula::{self, raster, raster16};

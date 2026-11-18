@@ -8,7 +8,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aqr_formula::aqr::Failure;
+use aqr_archive::Failure;
 use wasmparser as wp;
 
 #[cfg(feature = "wasmtime")]

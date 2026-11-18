@@ -1,6 +1,7 @@
 //! `.mo` files through the formula and the module: as msgfmt lays them out, in either byte
 //! order, with and without a hash table, with plural forms; those laid out otherwise not taken.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_gnu_gettext::{formula, mo};
 

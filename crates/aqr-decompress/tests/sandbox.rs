@@ -3,8 +3,8 @@
 
 #![cfg(feature = "sandbox")]
 
+use aqr_archive::{Failure, Runner};
 use aqr_decompress::sandbox::Sandbox;
-use aqr_formula::aqr::{Failure, Runner};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_aqr-decompress-worker");
 

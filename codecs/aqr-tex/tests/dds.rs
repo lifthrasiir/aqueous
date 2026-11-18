@@ -2,6 +2,7 @@
 //! arrays, sides not of whole blocks), uncompressed pixels, trailers, files not taken, and
 //! corrupted coded blocks.
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula};
 use aqr_tex::layout::{Format, Layout};
 use aqr_tex::{dds, formula, module, texture};

@@ -3,7 +3,7 @@
 //! of their own while the file is still recompressed: each formula a recompressor makes is
 //! evaluated as it is made ([`Prevalidator`]), and where it gives what it stands for, each of its
 //! applications is recorded by its module, parameters and the content hashes of its resources
-//! and inputs ([`aqr_formula::chash`]), with the hashes of its output's pieces ([`Memo`]); no
+//! and inputs ([`aqr_archive::chash`]), with the hashes of its output's pieces ([`Memo`]); no
 //! output is kept. The archive is then verified by its hashes: of its data by their bytes, and of
 //! each application by the record of the hashes of its inputs, without running a module, the
 //! whole the file's hash (`aqr::Archive::hashed`). As content hashes compose over
@@ -17,10 +17,12 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use crate::memory::{self, Limits};
+use aqr_archive::Evaluate;
+use aqr_archive::Modules;
+use aqr_archive::chash::{Ch, Records, record_key, split_key};
+use aqr_archive::{PartIn, PartOut};
 use aqr_decompress::Native;
-use aqr_formula::aqr::{PartIn, PartOut};
-use aqr_formula::chash::{Ch, Records, record_key, split_key};
-use aqr_formula::{Apply, Formula, Modules, Node, Of, Result, Shared};
+use aqr_formula::{Apply, Formula, Node, Of, Result, Shared};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is ([`record_key`]).
@@ -169,7 +171,7 @@ struct InTee<'a> {
 }
 
 impl InTee<'_> {
-    fn take(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr_formula::aqr::Decoded<()> {
+    fn take(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr_archive::Decoded<()> {
         let (ch, held) = (&mut self.ch, &mut self.held);
         self.inner.pull(hi, &mut |b| {
             *ch = ch.then(b);
@@ -183,7 +185,7 @@ impl InTee<'_> {
     }
 
     /// Hashes what was not pulled.
-    fn finish(&mut self) -> aqr_formula::aqr::Decoded<()> {
+    fn finish(&mut self) -> aqr_archive::Decoded<()> {
         match self.done < self.inner.len() {
             true => self.take(self.inner.len(), &mut |_| {}),
             false => Ok(()),
@@ -196,7 +198,7 @@ impl PartIn for InTee<'_> {
         self.inner.len()
     }
 
-    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr_formula::aqr::Decoded<()> {
+    fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr_archive::Decoded<()> {
         self.take(hi, put)
     }
 }
@@ -208,7 +210,7 @@ struct OutTee<'a> {
 }
 
 impl PartOut for OutTee<'_> {
-    fn push(&mut self, d: &[u8]) -> aqr_formula::aqr::Decoded<()> {
+    fn push(&mut self, d: &[u8]) -> aqr_archive::Decoded<()> {
         self.ch = self.ch.then(d);
         self.inner.push(d)
     }

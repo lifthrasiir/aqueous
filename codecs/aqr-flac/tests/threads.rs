@@ -2,6 +2,7 @@
 //! back to the input on any. Over the files in tests/data, with junk and cuts, and over
 //! inputs large enough to fill the pipelines (many batches).
 
+use aqr_archive::Evaluate;
 use aqr_flac::formula::{self, MODULE};
 use aqr_formula::{Apply, Formula};
 

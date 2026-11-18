@@ -14,10 +14,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Condvar, Mutex};
 
 use aqr_7z::header::{self, File, Folder, Streams, Top};
+use aqr_archive::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_bcj::bcj2;
 use aqr_bcj::formula::Filter;
 use aqr_common::{crc32, pool};
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Tree, WIN_ATTRS_ALLOWED, name_from};
 
 use crate::build::{self, Builder};
 use crate::codec::Raw;

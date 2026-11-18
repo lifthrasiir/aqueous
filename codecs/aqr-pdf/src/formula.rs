@@ -41,9 +41,9 @@ pub fn encode_stats(input: &[u8], opts: &Options, st: &mut Stats) -> Option<Form
         (f, s)
     };
     let (mut res, mut s) = attempt(opts);
-    if opts.verify
+    if let Some(eval) = opts.verify
         && let Some(f) = &res
-        && f.eval(&|a: &Apply, i: &[&[u8]]| apply(a, i, opts.threads)).as_deref() != Ok(input)
+        && eval(f, &|a: &Apply, i: &[&[u8]]| apply(a, i, opts.threads)).as_deref() != Ok(input)
     {
         let o = Options { tok: false, full: false, png: false, ..opts.clone() };
         (res, s) = attempt(&o);

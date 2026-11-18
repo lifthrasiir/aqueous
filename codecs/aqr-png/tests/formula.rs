@@ -3,6 +3,7 @@
 
 mod common;
 
+use aqr_archive::Evaluate;
 use aqr_formula::{Formula, Node};
 use aqr_png::formula;
 use common::*;
@@ -305,7 +306,7 @@ fn reference_inputs_fail_cleanly() {
 /// aqr-png's modules, sets included, on `threads` threads.
 struct Set(usize);
 
-impl aqr_formula::Modules for Set {
+impl aqr_archive::Modules for Set {
     fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
         let r = match a.module {
             m if m == formula::MODULE => formula::decode(&a.params, inputs, a.len, self.0),
@@ -348,9 +349,9 @@ fn set_of_variants() {
     let Node::Concat(outputs) = &mut g.root else { panic!() };
     outputs.reverse();
     let want: Vec<u8> = files.iter().rev().flatten().copied().collect();
-    let c = aqr_formula::aqr::encode(&g, None, aqr_formula::aqr::Level::Zstd(3)).unwrap();
-    let natives = aqr_formula::aqr::natives(&[formula::MODULE, formula::AGAINST_MODULE, formula::SET_MODULE], &Set(1));
-    assert!(aqr_formula::aqr::decode(&c, &natives).unwrap() == want);
+    let c = aqr_archive::encode(&g, None, aqr_archive::Level::Zstd(3)).unwrap();
+    let natives = aqr_archive::natives(&[formula::MODULE, formula::AGAINST_MODULE, formula::SET_MODULE], &Set(1));
+    assert!(aqr_archive::decode(&c, &natives).unwrap() == want);
     // a file that is not a PNG file gives no set
     assert!(formula::encode_set(&[&files[0], b"not a png"], &[None, Some(0)], &[], 1).is_none());
 }

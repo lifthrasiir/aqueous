@@ -309,7 +309,7 @@ asar)인 사슬 안에서, 내용물 하나하나를 만들어지는 대로 **�
 
 ### 싱크: 1, 2단계 (2026-11-03)
 
-위 구체 설계대로 구현했다(`aqr_formula::aqr::sink`, `aqr-compress`의 `seal`). 바뀐 것과 덧붙인 것:
+위 구체 설계대로 구현했다(`aqr_archive::sink`, `aqr-compress`의 `seal`). 바뀐 것과 덧붙인 것:
 
 - 봉인된 스트림은 `Bytes::sunk`(싱크의 스트림과 길이; 바이트를 읽으면 버그로 패닉)이다. `compact`는 통째로
   두고, `share_slices`와 `merged`는 건너뛰며(`merged`는 싱크의 스트림 `k`를 그룹들 뒤 `groups.len() + k`로
@@ -1178,7 +1178,7 @@ I + 출력 L + 모델 2 MiB + 초기 1.1 MiB = 2(I+L) + 3.1 MiB. 무작위 염�
 
 ### 진행: aqr-tensors, 파일 하나 (2026-11-12)
 
-- `aqr_formula::aqr::sink`: `Sink::direct`(`Place`에 채워진 차례대로 쓰고, 대기 블록은 스레드 수까지), `close_direct`(블록의
+- `aqr_archive::sink`: `Sink::direct`(`Place`에 채워진 차례대로 쓰고, 대기 블록은 스레드 수까지), `close_direct`(블록의
   ordinal과 끝), `Sink::ready`/`seal_ready`(제 스트림을 가질 스트림의 블록을 아무 스레드에서 미리 압축; 이전 슬라이스와의
   중복은 찾지 않는다), 봉인 끝에 제 스트림의 마지막 블록을 닫기. `Encoder::direct_head`(모듈·리소스·formula 블록; 싱크의 블록이
   모두 참조되는지 확인), `footer_bytes`, `module_len`.

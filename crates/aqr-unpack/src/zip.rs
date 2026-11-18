@@ -11,8 +11,8 @@
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
+use aqr_archive::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_common::{crc32, pool};
-use aqr_formula::aqr::{EntryNode, Extra, Reached, Step, Time, Tree, WIN_ATTRS_ALLOWED, name_from};
 use aqr_zip::zip::{self as z, u16_at, u32_at, u64_at};
 
 use crate::build::{self, Builder, Named, Undeclared};
@@ -549,7 +549,7 @@ mod tests {
     pub(crate) fn paths(t: &Tree) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for e in &t.entries {
-            let (b, raw) = aqr_formula::aqr::name_bytes(&e.name);
+            let (b, raw) = aqr_archive::name_bytes(&e.name);
             let name = if raw {
                 format!("<{}>", b.iter().map(|c| format!("{c:02x}")).collect::<String>())
             } else {

@@ -4,6 +4,7 @@
 //! not in the shortest form, wrong checksums and sections the module does not know, kept as
 //! they are where they cannot be taken; streams corrupted, which never panic.
 
+use aqr_archive::Evaluate;
 use aqr_common::rng::Rng;
 use aqr_dex::dex::{self, mode, s};
 use aqr_dex::{encode, formula};

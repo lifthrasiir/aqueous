@@ -10,7 +10,6 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use aqr_flate::formula::Derived;
 use aqr_flate::{Hints, Parsed, zlib};
-use aqr_formula::aqr::Encoder;
 use aqr_formula::probe::{Held, Probe};
 use aqr_formula::{Formula, Kind, Module, Node};
 
@@ -233,7 +232,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let profile = if exact.load(Relaxed) { aqr_flate::ADAPTIVE } else { opt.profile };
     // (made apart from the others: a few)
     if let Some(probe) = &opt.probe {
-        let enc = Encoder::with_threads(probe.level, opt.threads);
+        let enc = (probe.archiver)(opt.threads);
         let large = LARGE.get();
         for j in (0..jobs.len()).filter(|&j| probed(j)) {
             let threads = if size(&jobs[j]) >= large { opt.threads } else { 1 };
@@ -241,7 +240,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             let e = &entries[jobs[j].0];
             let held = || opt.held.as_ref().is_some_and(|(h, except)| h.holds(p.data(), *except)) as u8 as f64;
             let record = || p.estimate(fopt(threads)).ok();
-            if probe.pays(&enc, e.deflate.len(), record, p.data(), held, kind(e.t)) {
+            if probe.pays(&*enc, e.deflate.len(), record, p.data(), held, kind(e.t)) {
                 early.insert(j, make(j, p, threads, None));
             }
         }

@@ -14,6 +14,7 @@ aqr-egg = { path = "../../codecs/aqr-egg" }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
 aqr-foreign = { path = "../aqr-foreign" }
 aqr-formula = { path = "../aqr-formula" }
+aqr-archive = { path = "../aqr-archive" }
 aqr-zip = { path = "../../codecs/aqr-zip" }
 encoding_rs = "0.8"
 getrandom = "0.4"

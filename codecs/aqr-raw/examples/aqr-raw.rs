@@ -1,6 +1,6 @@
 //! Compression ratio and speed of the modules on containers or headerless samples (research
 //! tool): each file's formula as an archive, and the archive evaluated back.
-use aqr_formula::aqr::{self, Level};
+use aqr_archive::Level;
 use aqr_formula::{Apply, Formula};
 use aqr_raw::audio::pcm;
 use aqr_raw::container::{self, Layout};
@@ -68,7 +68,7 @@ fn bench(args: &[String]) {
         aqr_ima::formula::MODULE,
         aqr_msadpcm::formula::MODULE,
     ];
-    let natives = aqr::natives(&modules, &apply);
+    let natives = aqr_archive::natives(&modules, &apply);
     let encode = |d: &[u8]| -> Option<Formula> {
         match raw {
             Some(l) => formula::encode_samples(d, l, threads),
@@ -85,7 +85,7 @@ fn bench(args: &[String]) {
             let t = Instant::now();
             let g = encode(&src);
             bf = bf.min(t.elapsed().as_secs_f64());
-            c = g.map(|g| aqr::encode(&g, Some(aqr::checksum(&src)), Level::MID).expect("archive"));
+            c = g.map(|g| aqr_archive::encode(&g, Some(aqr_archive::checksum(&src)), Level::MID).expect("archive"));
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let Some(c) = c else {
@@ -98,7 +98,7 @@ fn bench(args: &[String]) {
         let (mut bd, mut ok) = (f64::MAX, true);
         for _ in 0..iters {
             let t = Instant::now();
-            let d = aqr::decode(&c, &natives);
+            let d = aqr_archive::decode(&c, &natives);
             bd = bd.min(t.elapsed().as_secs_f64());
             ok &= d.as_deref().ok() == Some(&src[..]);
         }

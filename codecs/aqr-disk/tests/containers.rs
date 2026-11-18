@@ -2,6 +2,7 @@
 //! qemu-img converts it): the virtual disk as the disk is, its files found where the container
 //! holds them, the container rebuilt.
 
+use aqr_archive::Evaluate;
 use aqr_disk::container::{self, Kind};
 use aqr_disk::formula::{self, Options};
 use aqr_disk::{Image, Plain};

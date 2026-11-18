@@ -15,7 +15,6 @@ use std::time::Instant;
 
 use aqr_compress::{Nest, Options, classes, compress_formula_as, detect, kind_by_name};
 use aqr_decompress::decompress;
-use aqr_formula::aqr;
 
 #[global_allocator]
 static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
@@ -48,7 +47,7 @@ fn main() {
 /// Shows each of `files` as the module docs tell; returns whether all went well.
 fn show(files: &[String], opt: &Options, tree: bool) -> bool {
     // the modules and resources compressed once for all files
-    let enc = aqr::Encoder::with_threads(opt.level, opt.threads)
+    let enc = aqr_archive::Encoder::with_threads(opt.level, opt.threads)
         .with_modules(aqr_decompress::wasm_of)
         .with_dictionaries(opt.dictionaries);
     let mut failed = false;

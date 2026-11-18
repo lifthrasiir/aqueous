@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_bundle::packs::xact_xwb::{files, starts};
 
 struct Wave {

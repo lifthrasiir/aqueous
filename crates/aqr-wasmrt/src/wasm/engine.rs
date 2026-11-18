@@ -23,8 +23,8 @@ use std::task::{Poll, Waker};
 
 use crate::exec::{Exec, Stopped};
 
+use aqr_archive::{Failure, Loaded, PartIn, PartOut};
 use aqr_formula::Resource;
-use aqr_formula::aqr::{Failure, Loaded, PartIn, PartOut};
 use wasmparser::{
     Validator, WasmFeatures, {self as wp},
 };
@@ -166,7 +166,7 @@ pub(crate) fn compiled(wasm: &[u8], hash: [u8; 32]) -> Decoded<Shared> {
     if let Some(c) = COMPILED.lock().unwrap().get(&hash) {
         return Ok(c.clone());
     }
-    let released = aqr_formula::aqr::is_released(&hash);
+    let released = aqr_archive::is_released(&hash);
     let c = Shared(Arc::new(compile(wasm, released, hash)?), None);
     COMPILED.lock().unwrap().insert(hash, c.clone());
     Ok(c)

@@ -19,7 +19,7 @@
 //! - `{"event":"progress",...}`: how far it is, now and then (every quarter of a second or so,
 //!   and as each batch is written). Compressing, `probe`, `analysis` and `compression`, each
 //!   `[done, total]` (files for the probe, bytes otherwise: [`aqr_compress::Event`]);
-//!   decoding, `decompressed` and `evaluated` (bytes: [`aqr_formula::aqr::Reached`]). Both
+//!   decoding, `decompressed` and `evaluated` (bytes: [`aqr_archive::Reached`]). Both
 //!   with `file`, where one is being worked on: the one the longest, `{"path", "seconds"}`
 //!   (with `len` and `done`, its bytes reached, where its recompressors tell). Compressing,
 //!   while the files are listed (before any of the others), `listed` instead: `[files, bytes]`

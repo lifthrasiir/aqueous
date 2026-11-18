@@ -11,7 +11,7 @@ fn main() {
     }
     for f in files {
         let wasm = std::fs::read(&f).unwrap_or_else(|e| panic!("{f}: {e}"));
-        let block = aqr_formula::aqr::module_block_data(&wasm).expect("zstd");
+        let block = aqr_archive::module_block_data(&wasm).expect("zstd");
         let out = std::path::Path::new(&f).with_extension("block");
         std::fs::write(&out, block).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
     }

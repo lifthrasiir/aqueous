@@ -3,6 +3,7 @@
 //! identifiers, blocks written otherwise than the module writes them); layouts that are not
 //! right turned down.
 
+use aqr_archive::Evaluate;
 use aqr_b2t::{formula, module};
 use aqr_common::rng::Rng;
 use aqr_formula::{Apply, Formula};

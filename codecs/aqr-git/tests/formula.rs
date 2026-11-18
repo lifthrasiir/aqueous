@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use aqr_archive::Evaluate;
 use aqr_formula::Formula;
 use aqr_git::formula::{self, Options};
 use aqr_git::layout::{self, HEADER_KEPT, REBUILT};

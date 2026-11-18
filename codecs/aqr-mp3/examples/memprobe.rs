@@ -1,6 +1,7 @@
 //! Peak heap of `formula::encode` and of evaluating the formula, per file, and the process's
 //! peak resident set. `LOG=MB` logs the allocations of at least that many MB; `T=N` threads.
 
+use aqr_archive::Evaluate;
 use aqr_common::mem::{self, Counting};
 
 #[global_allocator]

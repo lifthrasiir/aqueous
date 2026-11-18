@@ -18,8 +18,8 @@
 use core::ffi::c_void;
 
 use aqr_api::dll::{Slice, SliceMut};
+use aqr_archive::{Decoded, Failure, Loaded, PartIn, PartOut};
 use aqr_formula::Resource;
-use aqr_formula::aqr::{Decoded, Failure, Loaded, PartIn, PartOut};
 
 /// A module loaded, behind the handle (`Box<dyn Loaded>` is a fat pointer, so it is boxed again
 /// to pass one thin pointer).

@@ -10,7 +10,6 @@
 //! Each DIR is a set (searched recursively for *.png). `-n` takes the first FILES files of
 //! each set (in name order). Results are cached per tool and file in `../cache/bench.tsv`.
 
-use aqr_formula::aqr;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -97,14 +96,15 @@ fn measure_once(tool: &str, file: &Path) -> Res {
                 aqr_png::formula::decode(&a.params, inputs, a.len, 1)
                     .map_err(|e| aqr_formula::Error::new(e.to_string()))
             };
-            let natives = aqr::natives(&[aqr_png::formula::MODULE], &apply);
+            let natives = aqr_archive::natives(&[aqr_png::formula::MODULE], &apply);
             let t0 = thread_cpu();
             let Some(f) = aqr_png::formula::encode(&src, 1) else {
                 return Res { out: src.len(), c: thread_cpu() - t0, d: 0.0, ok: true };
             };
-            let c = aqr::encode(&f, Some(aqr::checksum(&src)), aqr::Level::MID).expect("archive");
+            let c =
+                aqr_archive::encode(&f, Some(aqr_archive::checksum(&src)), aqr_archive::Level::MID).expect("archive");
             let t1 = thread_cpu();
-            let d = aqr::decode(&c, &natives);
+            let d = aqr_archive::decode(&c, &natives);
             let t2 = thread_cpu();
             Res { out: c.len(), c: t1 - t0, d: t2 - t1, ok: d.ok().as_deref() == Some(&src[..]) }
         }

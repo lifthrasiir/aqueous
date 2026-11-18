@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use aqr_flate::formula::Derived;
 use aqr_flate::{Hints, Parsed};
-use aqr_formula::aqr::Encoder;
 use aqr_formula::probe::{self, Held, Probe};
 use aqr_formula::{ByKind, Bytes, Formula, Kind, Module, Node};
 
@@ -215,7 +214,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         let mut parsed: Vec<Option<(Parsed, Option<usize>, aqr_flate::Options)>> =
             parsed.into_iter().collect::<Option<_>>()?;
         if let Some(probe) = &opt.probe {
-            let enc = Encoder::with_threads(probe.level, opt.threads);
+            let enc = (probe.archiver)(opt.threads);
             let kinds: Vec<Kind> = jobs.iter().map(|&(i, _)| (opt.kind)(&input[locals[i].name.clone()])).collect();
             // what each holds of the others of its kind, for each kind once where asked
             let shares: RefCell<Vec<Option<f64>>> = RefCell::new(vec![None; jobs.len()]);
@@ -241,7 +240,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                 let (i, Some((p, record, _))) = (jobs[j].0, p) else { continue };
                 if probed(i)
                     && !probe.pays(
-                        &enc,
+                        &*enc,
                         locals[i].body.len(),
                         || *record,
                         p.data(),

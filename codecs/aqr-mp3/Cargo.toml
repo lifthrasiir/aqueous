@@ -16,8 +16,11 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 memchr = "2"
 aqr-raw = { path = "../aqr-raw", default-features = false }
 
-# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
-# that names do not collide in the workspace's target directory.
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
+
+# Tools are named <crate>-<tool> (the crate's own one, examples/aqr-mp3.rs, after the crate),
+# so that names do not collide in the workspace's target directory.
 
 [[bin]]
 name = "aqr-mp3-train"

@@ -102,7 +102,7 @@
 //! where all would not fit.
 //!
 //! [`compress`] stores the formula as an Aqueous archive of the file alone
-//! ([`aqr_formula::aqr`]), with the modules of [`aqr_decompress::MODULES`], which
+//! ([`aqr_archive`]), with the modules of [`aqr_decompress::MODULES`], which
 //! [`aqr_decompress::decompress`] decompresses. [`compress_tree`] archives several files, a
 //! tree of them, each recompressed as the entries of a ZIP archive are.
 //!
@@ -119,6 +119,7 @@
 //!
 //! ```no_run
 //! # let file: Vec<u8> = vec![];
+//! use aqr_archive::Evaluate;
 //! let opt = aqr_compress::Options::default();
 //! let formula = aqr_compress::recompress(&file, &opt);
 //! assert_eq!(formula.eval(&aqr_decompress::Native::default())?, file);
@@ -171,8 +172,9 @@ pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 pub use progress::Event;
 
+use aqr_archive::Evaluate;
+use aqr_archive::{Encoder, Level, description_bound};
 use aqr_decompress::Native;
-use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
 use aqr_formula::{Bytes, Stream};
 
@@ -192,46 +194,46 @@ pub struct Options {
     pub verify: bool,
     /// How the file itself is recompressed.
     pub file: Nest,
-    /// The most bytes of description a formula may take ([`aqr::description_bound`]): where
+    /// The most bytes of description a formula may take ([`aqr_archive::description_bound`]): where
     /// the files found in data, or the contents of a file, would take more, those with the
     /// fewest bytes per byte of their description are kept raw. By default no limit.
     pub description: usize,
-    /// The level of the archive of [`compress`] ([`aqr::Encoder`]), and of the formulas sized
+    /// The level of the archive of [`compress`] ([`aqr_archive::Encoder`]), and of the formulas sized
     /// for [`Options::smaller`]; and, by its [`Level::scale`], how hard data is recompressed:
     /// at 0 and 1 not at all (whatever [`Options::depth`]: at 0 every block uncompressed, at 1
     /// zstd alone), from 7 on DEFLATE as [`Options::flate`] tells and with no `probe`.
     pub level: Level,
     /// Keep a file raw, or the data where files are found, unless its formula archives
-    /// smaller than it does raw ([`aqr::Encoder::smaller`]).
+    /// smaller than it does raw ([`aqr_archive::Encoder::smaller`]).
     pub smaller: bool,
     /// The most bytes of data that DEFLATE streams (of gzip, zlib and ZIP) and streams of LZFSE
     /// and LZVN blocks inflate to, at every depth together, as a multiple of the file, on top of
     /// [`EXPANSION_SLACK`]: the streams past it are kept as they are.
     pub expansion: u64,
-    /// Size formulas without their resources ([`aqr::Encoder::share_resources`]), as for an
+    /// Size formulas without their resources ([`aqr_archive::Encoder::share_resources`]), as for an
     /// archive of many files sharing them: for measuring what they come to in the limit.
     pub shared_resources: bool,
-    /// Size formulas without their module blocks ([`aqr::Encoder::share_modules`]), as an
+    /// Size formulas without their module blocks ([`aqr_archive::Encoder::share_modules`]), as an
     /// archive of several files does ([`compress_tree`]), whose modules are written once.
     pub shared_modules: bool,
-    /// How each module is written into the archive ([`aqr::Encoder::with_modules`]): by default
+    /// How each module is written into the archive ([`aqr_archive::Encoder::with_modules`]): by default
     /// its Wasm module, as aqr-modules built it ([`aqr_decompress::wasm_of`]); a self-extracting
-    /// archive names those its program carries by their hashes alone ([`aqr::Wasm::Registered`]).
-    pub modules: aqr::WasmOf,
+    /// archive names those its program carries by their hashes alone ([`aqr_archive::Wasm::Registered`]).
+    pub modules: aqr_archive::WasmOf,
     /// Of an archive of several files ([`compress_tree`]): the most bytes of a non-leaf block
     /// that files share (one stream longer is a block of its own), which a file read alone
     /// may have to decompress.
     pub block: usize,
     /// Of an archive of several files: compress the blocks alike of a batch (many of a class
     /// and kind of stream, small ones) with a dictionary trained for them where it pays
-    /// ([`aqr::Encoder::with_dictionaries`]). Off by default; it matters only with blocks of a
+    /// ([`aqr_archive::Encoder::with_dictionaries`]). Off by default; it matters only with blocks of a
     /// few MiB or less ([`Options::block`]).
     pub dictionaries: bool,
     /// Begin the archive with a size hint block to be filled in, as the payload of an
-    /// encrypted archive has to ([`aqr::envelope::Sealer`], which fills it in).
+    /// encrypted archive has to ([`aqr_archive::envelope::Sealer`], which fills it in).
     pub size_hint: bool,
     /// Give the archive a mirror block of each block whose damage would lose more than a file
-    /// (spec, "Mirror block"; [`aqr::Mirroring`]), for it to be repaired: as far from it as an
+    /// (spec, "Mirror block"; [`aqr_archive::Mirroring`]), for it to be repaired: as far from it as an
     /// encrypted archive's payload asks where [`Options::size_hint`] (which it has to have).
     pub mirrors: bool,
     /// Of an archive of several files: the most bytes of the files of a set coded against each
@@ -769,7 +771,7 @@ pub trait Sink: Write {
     fn restart(&mut self) -> io::Result<()>;
 
     /// Whether the bytes [`Sink::written`] gives are a mapping, read only, of a file: whose
-    /// pages may be let go of as they are read ([`aqr::Archive::let_go_read`]).
+    /// pages may be let go of as they are read ([`aqr_archive::Archive::let_go_read`]).
     fn mapped(&self) -> bool {
         false
     }
@@ -788,7 +790,7 @@ pub trait Sink: Write {
     }
 
     /// Where the archive written so far is an encrypted one: what reads it back, decrypting its
-    /// payload as it is read ([`aqr::open_decrypting`]) rather than all of it ([`Sink::written`]).
+    /// payload as it is read ([`aqr_archive::open_decrypting`]) rather than all of it ([`Sink::written`]).
     fn sealed_back(&mut self) -> io::Result<Option<SealedBack>> {
         Ok(None)
     }
@@ -797,7 +799,7 @@ pub trait Sink: Write {
 /// An encrypted archive written ([`Sink::sealed_back`]): its file mapped, and what unseals it.
 pub struct SealedBack {
     map: memmap2::Mmap,
-    opener: aqr::envelope::Opener,
+    opener: aqr_archive::envelope::Opener,
 }
 
 /// An archive written, read back to be verified: its bytes (a file mapped, read only, where
@@ -805,22 +807,22 @@ pub struct SealedBack {
 #[derive(Clone, Copy)]
 enum Back<'a> {
     Plain(&'a [u8], bool),
-    Sealed(&'a aqr::envelope::Decrypting<'a>),
+    Sealed(&'a aqr_archive::envelope::Decrypting<'a>),
 }
 
 impl<'a> Back<'a> {
     /// The archive opened, its pages (or chunks decrypted) let go of as its blocks are read.
-    fn open<'n>(self, runner: &'n dyn aqr::Runner) -> aqr::Decoded<aqr::Archive<'a, 'n>> {
+    fn open<'n>(self, runner: &'n dyn aqr_archive::Runner) -> aqr_archive::Decoded<aqr_archive::Archive<'a, 'n>> {
         match self {
             Back::Plain(c, mapped) => {
-                let mut a = aqr::open(c, runner)?;
+                let mut a = aqr_archive::open(c, runner)?;
                 if mapped {
                     // SAFETY: the archive's file mapped read only ([`Sink::mapped`])
                     unsafe { a.let_go_read() };
                 }
                 Ok(a)
             }
-            Back::Sealed(d) => aqr::open_decrypting(d, runner),
+            Back::Sealed(d) => aqr_archive::open_decrypting(d, runner),
         }
     }
 }
@@ -829,12 +831,12 @@ impl<'a> Back<'a> {
 /// archive, its chunks sealed as they are whole.
 pub enum Placing {
     File(std::fs::File),
-    Sealed(Arc<aqr::envelope::Placed>),
+    Sealed(Arc<aqr_archive::envelope::Placed>),
 }
 
 impl Placing {
     /// Moves bytes `from..end` written back by `by` bytes (the payload of an encrypted archive
-    /// sealed again under a new nonce, [`aqr::envelope::Placed::moved_back`]).
+    /// sealed again under a new nonce, [`aqr_archive::envelope::Placed::moved_back`]).
     fn moved_back(&self, from: u64, end: u64, by: u64) -> io::Result<()> {
         let f = match self {
             Placing::File(f) => f,
@@ -852,7 +854,7 @@ impl Placing {
     }
 }
 
-impl aqr::sink::Place for Placing {
+impl aqr_archive::sink::Place for Placing {
     fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
         match self {
             Placing::File(f) => aqr_common::fsio::write_all_at(f, d, at),
@@ -864,7 +866,7 @@ impl aqr::sink::Place for Placing {
 /// The file an encrypted archive's chunks are written to at offsets ([`Placing::Sealed`]).
 struct SealedFile(std::fs::File);
 
-impl aqr::envelope::At for SealedFile {
+impl aqr_archive::envelope::At for SealedFile {
     fn write_at(&self, at: u64, d: &[u8]) -> io::Result<()> {
         aqr_common::fsio::write_all_at(&self.0, d, at)
     }
@@ -914,13 +916,13 @@ impl Sink for std::fs::File {
 }
 
 /// An archive given mirror blocks as it is written to a sink.
-impl<S: Sink + ?Sized> Sink for aqr::Mirroring<&mut S> {
+impl<S: Sink + ?Sized> Sink for aqr_archive::Mirroring<&mut S> {
     fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>> {
         self.get_mut().written()
     }
 
     fn restart(&mut self) -> io::Result<()> {
-        aqr::Mirroring::restart(self);
+        aqr_archive::Mirroring::restart(self);
         self.get_mut().restart()
     }
 
@@ -936,7 +938,7 @@ impl<S: Sink + ?Sized> Sink for aqr::Mirroring<&mut S> {
 /// An encrypted archive being written to a file, read back decrypted (into memory not backed
 /// by a file, so that nothing decrypted is written out), the pages of the file let go of as
 /// they are decrypted.
-impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::envelope::Sealer<F> {
+impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr_archive::envelope::Sealer<F> {
     fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>> {
         self.finish()?;
         // SAFETY: as of a file above
@@ -951,19 +953,19 @@ impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::env
     }
 
     fn restart(&mut self) -> io::Result<()> {
-        aqr::envelope::Sealer::restart(self, |f| std::borrow::Borrow::<std::fs::File>::borrow(f).set_len(0))
+        aqr_archive::envelope::Sealer::restart(self, |f| std::borrow::Borrow::<std::fs::File>::borrow(f).set_len(0))
     }
 
     /// The payload written at offsets, each chunk sealed once it is whole (the first, and those
     /// a room is left in, only once that is filled).
     fn place(&mut self) -> Option<Arc<Placing>> {
         let f = std::borrow::Borrow::<std::fs::File>::borrow(self.get_ref()).try_clone().ok()?;
-        let p = aqr::envelope::Sealer::place(self, Arc::new(SealedFile(f)))?;
+        let p = aqr_archive::envelope::Sealer::place(self, Arc::new(SealedFile(f)))?;
         Some(Arc::new(Placing::Sealed(p)))
     }
 
     fn placed(&mut self, len: u64) -> io::Result<()> {
-        aqr::envelope::Sealer::placed(self, len)
+        aqr_archive::envelope::Sealer::placed(self, len)
     }
 
     fn sealed_back(&mut self) -> io::Result<Option<SealedBack>> {
@@ -1004,10 +1006,10 @@ fn compress_with(
     let direct = direct_room(d, kind, opt, &cx.enc).and_then(|room| Some((out.place()?, room)));
     let sink = match &direct {
         Some((place, room)) => {
-            let at = (aqr::HEADER_MAGIC.len() as u64) + room;
-            aqr::sink::Sink::direct(&cx.enc, archive::SLICE_MIN.get(), place.clone(), at, opt.threads.max(2))
+            let at = (aqr_archive::HEADER_MAGIC.len() as u64) + room;
+            aqr_archive::sink::Sink::direct(&cx.enc, archive::SLICE_MIN.get(), place.clone(), at, opt.threads.max(2))
         }
-        None => aqr::sink::Sink::new(&cx.enc, archive::SLICE_MIN.get()),
+        None => aqr_archive::sink::Sink::new(&cx.enc, archive::SLICE_MIN.get()),
     };
     let order = Arc::new(seal::Order::new(sink));
     *cx.sealing.get_mut() = Some(seal::Sealing { order: order.clone(), slot: seal::ROOT });
@@ -1057,7 +1059,7 @@ fn direct_min() -> usize {
 /// (`docs/streaming-encoder-design.md`, "출력에 바로 쓰기"); what the formula leaves of the room is
 /// a spacer block after it. Not where the archive is mirrored (the mirror blocks' places are
 /// not planned with the room).
-fn direct_room(d: &[u8], kind: Kind, opt: &Options, enc: &aqr::Encoder) -> Option<u64> {
+fn direct_room(d: &[u8], kind: Kind, opt: &Options, enc: &aqr_archive::Encoder) -> Option<u64> {
     let tensors = [Format::Gguf, Format::Pth, Format::Safetensors];
     let taken = detect(d)
         .filter(|f| tensors.contains(f))
@@ -1070,7 +1072,7 @@ fn direct_room(d: &[u8], kind: Kind, opt: &Options, enc: &aqr::Encoder) -> Optio
     let formula = bound + bound / 128 + 64;
     let modules = enc.module_len(aqr_tensors::formula::MODULE).ok()?;
     // (and the size hint block to be filled in, of an encrypted archive's payload)
-    let hint = if opt.size_hint { aqr::SIZE_HINT_PLACEHOLDER.len() } else { 0 };
+    let hint = if opt.size_hint { aqr_archive::SIZE_HINT_PLACEHOLDER.len() } else { 0 };
     let room = hint + formula + modules + 2;
     #[cfg(test)]
     if let Some(n) = tests::DIRECT_ROOM.get() {
@@ -1136,7 +1138,7 @@ fn finish(
     use progress::Note;
     let mut mirroring = None;
     let out: &mut dyn Sink = match opt.mirrors {
-        true => mirroring.insert(aqr::Mirroring::new(out, opt.size_hint)),
+        true => mirroring.insert(aqr_archive::Mirroring::new(out, opt.size_hint)),
         false => out,
     };
     lzma::apply(&mut f, opt.threads);
@@ -1178,7 +1180,7 @@ fn finish(
         let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
         let m = verify::Cached::new(Native { threads: opt.threads }, std::mem::take(&mut *memo.borrow_mut()), &files);
         // (compared as it is written out, not held whole: a file of parts streams, see
-        // `aqr::Archive::write_file`)
+        // `aqr_archive::Archive::write_file`)
         let runner = aqr_decompress::natives(&m);
         // (the bytes compared let go of as it goes, [`LET_GO`] at a time, where `d` is a file mapped)
         let (mut at, mut gone) = (0, 0);
@@ -1191,7 +1193,7 @@ fn finish(
                     aqr_formula::store::let_go(&d[gone..at]);
                     gone = at;
                 }
-                if same { Ok(()) } else { Err(aqr::Failure::Invalid("not the file".into())) }
+                if same { Ok(()) } else { Err(aqr_archive::Failure::Invalid("not the file".into())) }
             });
             written.is_ok_and(|n| n == d.len() as u64)
         });
@@ -1231,7 +1233,7 @@ fn finish(
 
 /// The streams of formula of a sink's streams `sunk`, after those of the formula's own: as
 /// [`Formula::merged`] has them.
-fn sunk_streams(sunk: &[aqr::sink::Sunk]) -> impl Iterator<Item = Stream> + '_ {
+fn sunk_streams(sunk: &[aqr_archive::sink::Sunk]) -> impl Iterator<Item = Stream> + '_ {
     sunk.iter().enumerate().map(|(k, s)| Stream {
         class: s.class.clone(),
         kind: s.kind,
@@ -1254,11 +1256,11 @@ fn written_direct(
     place: &Placing,
     room: u64,
     sum: Option<u64>,
-    enc: &aqr::Encoder,
+    enc: &aqr_archive::Encoder,
     out: &mut dyn Sink,
 ) -> io::Result<aqr_formula::Result<usize>> {
-    use aqr::sink::Place;
-    let start = aqr::HEADER_MAGIC.len() as u64;
+    use aqr_archive::sink::Place;
+    let start = aqr_archive::HEADER_MAGIC.len() as u64;
     #[cfg(test)]
     tests::DIRECTED.with(|n| n.set(n.get() + 1));
     let sealed = sink.seal(f);
@@ -1286,14 +1288,14 @@ fn written_direct(
         }
     };
     let spacer = blocks_at - start - head.len() as u64;
-    place.write_at(0, &aqr::HEADER_MAGIC)?;
+    place.write_at(0, &aqr_archive::HEADER_MAGIC)?;
     place.write_at(start, &head)?;
     // (the spacer whole, its space zeroed too: an encrypted archive's chunks are sealed only
     // once all of their bytes are written)
-    let mut kill = aqr::kill(spacer as usize);
+    let mut kill = aqr_archive::kill(spacer as usize);
     kill.resize(spacer as usize, 0);
     place.write_at(start + head.len() as u64, &kill)?;
-    let footer = aqr::footer_bytes((end - start) as usize);
+    let footer = aqr_archive::footer_bytes((end - start) as usize);
     place.write_at(end, &footer)?;
     let n = end + footer.len() as u64;
     out.placed(n)?;
@@ -1301,10 +1303,10 @@ fn written_direct(
 }
 
 /// What verifying compares a file with, as it was read through before the archive was written
-/// ([`through`]): its checksum ([`aqr::checksum`]) and its content hash.
+/// ([`through`]): its checksum ([`aqr_archive::checksum`]) and its content hash.
 struct Through {
     sum: u64,
-    ch: aqr_formula::chash::Ch,
+    ch: aqr_archive::chash::Ch,
 }
 
 /// [`Through`] of `d`, read once, its pages let go of as they are read ([`LET_GO`] at a time,
@@ -1312,7 +1314,7 @@ struct Through {
 /// threads (as many pages read in at once), on a worker of its own where one is free, while the
 /// checksum is taken of the stretch before.
 fn through(d: &[u8], threads: usize) -> Through {
-    use aqr_formula::chash::Ch;
+    use aqr_archive::chash::Ch;
     let hashes = |part: &[u8]| -> Vec<Ch> {
         let pieces: Vec<&[u8]> = part.chunks(LET_GO.get()).collect();
         aqr_common::pool::par_map(pieces.len(), threads.max(1), |k| Ch::of(pieces[k]))
@@ -1349,7 +1351,7 @@ fn through_len() -> usize {
 }
 
 /// Whether archive `c` of file `d` gives it back by its content hashes, worked out without
-/// running a module by what `memo` recorded (`aqr::Archive::hashed`): its outputs' hashes those
+/// running a module by what `memo` recorded (`aqr_archive::Archive::hashed`): its outputs' hashes those
 /// of the parts of `d` they are, which their checksums are of. Where the archive has an output
 /// of all of `d`, it is compared with `read` of it, if given, and `d` is not read again. None
 /// where any application is not recorded.
@@ -1360,7 +1362,7 @@ fn hashed(
     memo: &std::cell::RefCell<verify::Memo>,
     opt: &Options,
 ) -> Option<bool> {
-    use aqr_formula::chash::Ch;
+    use aqr_archive::chash::Ch;
     let _s = aqr_common::trace::span("verify");
     let native = Native { threads: opt.threads };
     let runner = aqr_decompress::natives(&native);
@@ -1387,7 +1389,7 @@ fn hashed(
             of_d = of_d.cat(Ch::of(piece));
             aqr_formula::store::let_go(piece);
         }
-        // (the checksums of the archive's, [`aqr::checksum`])
+        // (the checksums of the archive's, [`aqr_archive::checksum`])
         if sums.iter().any(|&s| s != sum.digest()) {
             return Some(false);
         }
@@ -2019,7 +2021,7 @@ fn undo(
 /// aqr-formula's flat probe tells (what other data of `within`'s batch holds counting as nothing).
 fn undoes(coded: usize, record: usize, data: &[u8], within: &[u8], opt: &Options, cx: &Cx) -> bool {
     let held = || cx.held_by_others(data, within) as u8 as f64;
-    !Probe::flat(opt.level).pays(&cx.enc, coded, || Some(record), data, held, Kind::Unknown)
+    !Probe::flat(aqr_archive::archivers(opt.level)).pays(&cx.enc, coded, || Some(record), data, held, Kind::Unknown)
 }
 
 /// Puts the application below `n` that takes a slice of `stream` among its inputs beside `kept`
@@ -2188,8 +2190,8 @@ pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
         Some(_) => Look::Scan,
     };
     let starts = |d: &[u8]| detect(d).is_some();
-    let probe = Probe { level: opt.level, look, starts, scan: files_len };
-    opt.smaller.then_some(if depth + 1 < opt.depth { probe } else { Probe::flat(opt.level) })
+    let probe = Probe { archiver: aqr_archive::archivers(opt.level), look, starts, scan: files_len };
+    opt.smaller.then_some(if depth + 1 < opt.depth { probe } else { Probe::flat(probe.archiver) })
 }
 
 /// Bytes of the files of formats that recompressors take in `d`, as a scan would find them:
@@ -2445,7 +2447,7 @@ fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: 
     let (found, close) = find(d, first, opt, depth, slack, cx)?;
     // each file with the data before it, and the data after the last and the whole
     // (a slice of all of it anywhere: at the last byte of a block, over the most blocks)
-    let around = description_bound(&Node::slice(0, aqr_formula::aqr::BLOCK as u64 - 1, d.len() as u64));
+    let around = description_bound(&Node::slice(0, aqr_archive::BLOCK as u64 - 1, d.len() as u64));
     let sizes: Vec<_> = found.iter().map(|(_, n, child)| (*n, bound_of(child).saturating_add(around))).collect();
     let keep = fit(around + 11, &sizes, opt.description);
 
@@ -2636,7 +2638,7 @@ struct Early {
     notes: HashSet<(usize, u64)>,
     inflated: u64,
     /// What the encoder it was sized with kept of the streams it compressed (without its context).
-    enc: aqr::Kept,
+    enc: aqr_archive::Kept,
 }
 
 impl Early {
@@ -3427,8 +3429,8 @@ pub(crate) struct Pure<'a> {
 impl Pure<'_> {
     /// What part `part` of the formula, of bytes `of`, makes ready to be sealed into the sink of
     /// [`Pure::seal`], on any thread: its memory declared, evaluated beforehand, and its blocks
-    /// of its own encoded ([`aqr::sink::Sink::ready`]).
-    fn made(&self, part: &mut Formula, of: &[u8]) -> aqr::sink::Ready {
+    /// of its own encoded ([`aqr_archive::sink::Sink::ready`]).
+    fn made(&self, part: &mut Formula, of: &[u8]) -> aqr_archive::sink::Ready {
         let order = self.seal.expect("sealing");
         let _a = aqr_common::allowance::enter(aqr_common::allowance::Context::NONE);
         choose::kept_in(part, |part| {
@@ -3562,7 +3564,7 @@ fn bz2_pays<'a>(
 ) -> impl FnMut(usize, &[u8], bool) -> bool + 'a {
     let probe = probe(opt, depth);
     // (an encoder of its own, as formulas of pure formats are made on several threads)
-    let enc = aqr::Encoder::new(opt.level);
+    let enc = aqr_archive::Encoder::new(opt.level);
     move |coded, data, whole| {
         if !whole && detect(data).is_some_and(|f| f != Format::Text) {
             return true;
@@ -3704,7 +3706,8 @@ fn pdf_options(opt: &Options) -> aqr_pdf::encode::Options {
     let profile = opt.flate_profile();
     let default = aqr_pdf::encode::Options::default();
     let speed = if opt.level.scale() >= 7 { f64::INFINITY } else { default.speed };
-    aqr_pdf::encode::Options { speed, profile, zlib: aqr_flate::ZLIB.get(), threads: opt.threads, ..default }
+    let verify = aqr_pdf::encode::VERIFY.get().then_some::<aqr_pdf::encode::Eval>(|f, m| f.eval(&m));
+    aqr_pdf::encode::Options { speed, profile, zlib: aqr_flate::ZLIB.get(), threads: opt.threads, verify, ..default }
 }
 
 /// Whether `format` is one of [`pure`].
@@ -4184,7 +4187,7 @@ mod tests {
         assert!(rss(&mapped) < d.len() / 8);
         // and as it is checksummed (as the archive is encoded: of all of it)
         touch(&mapped);
-        assert_eq!(through(&mapped, 2).sum, aqr::checksum(&d));
+        assert_eq!(through(&mapped, 2).sum, aqr_archive::checksum(&d));
         assert!(rss(&mapped) < d.len() / 8);
     }
 
@@ -4223,7 +4226,7 @@ mod tests {
     }
 
     /// An archive mapped from its file, decoded with its blocks let go of as they are read
-    /// ([`aqr::Archive::let_go_read`]): its pages not resident once its file is written, the file
+    /// ([`aqr_archive::Archive::let_go_read`]): its pages not resident once its file is written, the file
     /// the same.
     #[cfg(target_os = "linux")]
     #[test]
@@ -4237,11 +4240,11 @@ mod tests {
         let whole = [a.clone(), b.clone()].concat();
         let raw = Formula::raw("raw", whole.clone());
         for f in [f, raw] {
-            let c = aqr::encode(&f, None, aqr::Level::MID).unwrap();
+            let c = aqr_archive::encode(&f, None, aqr_archive::Level::MID).unwrap();
             let (mapped, rss) = mapped(&c);
             let native = Native { threads: 2 };
             let runner = aqr_decompress::natives(&native);
-            let mut archive = aqr::open(&mapped, &runner).unwrap();
+            let mut archive = aqr_archive::open(&mapped, &runner).unwrap();
             // SAFETY: a file mapped read only
             unsafe { archive.let_go_read() };
             let mut out = Vec::new();
@@ -4722,14 +4725,14 @@ mod tests {
         }
         t.truncate(1_000_003);
         let zip = stored_zip(&[("t.txt", &t)]);
-        let tree = aqr::Tree {
+        let tree = aqr_archive::Tree {
             entries: ["t.txt", "t.zip"]
                 .iter()
                 .enumerate()
-                .map(|(c, name)| aqr::Entry {
+                .map(|(c, name)| aqr_archive::Entry {
                     parent: None,
                     name: name.as_bytes().to_vec(),
-                    node: aqr::EntryNode::File(c),
+                    node: aqr_archive::EntryNode::File(c),
                     extra: Default::default(),
                 })
                 .collect(),
@@ -4753,7 +4756,7 @@ mod tests {
         // (recompressed however small: a module block and a formula block)
         let opt = Options { threads: 2, mirrors: true, smaller: false, ..Options::default() };
         let checked = |c: &[u8]| {
-            let m = aqr::mirror::check(c);
+            let m = aqr_archive::mirror::check(c);
             assert!(m.walked && m.broken == 0 && m.near(false) == 0, "{m:?}");
             assert!(m.targets.len() >= 2 && m.unmirrored() == 0);
             assert_eq!(m.differing(c).count(), 0);
@@ -4765,14 +4768,14 @@ mod tests {
         assert_eq!(aqr_decompress::decompress(&single, 2).unwrap(), gz);
 
         let text = unruled(50_000);
-        let tree = aqr::Tree {
+        let tree = aqr_archive::Tree {
             entries: ["a.gz", "b.txt"]
                 .iter()
                 .enumerate()
-                .map(|(c, name)| aqr::Entry {
+                .map(|(c, name)| aqr_archive::Entry {
                     parent: None,
                     name: name.as_bytes().to_vec(),
-                    node: aqr::EntryNode::File(c),
+                    node: aqr_archive::EntryNode::File(c),
                     extra: Default::default(),
                 })
                 .collect(),
@@ -4784,21 +4787,21 @@ mod tests {
         assert!(a.report.mirrors > 0);
         let m = checked(&a.archive);
         let files = |c: &[u8]| match aqr_decompress::decompress_value(c, 2).unwrap() {
-            aqr::Value::Tree(_, files) => files,
-            aqr::Value::File(_) => panic!("a tree"),
+            aqr_archive::Value::Tree(_, files) => files,
+            aqr_archive::Value::File(_) => panic!("a tree"),
         };
         assert_eq!(files(&a.archive), [gz.clone(), text.clone()]);
         let mut d = a.archive.clone();
         let meta = m.mirrors.last().unwrap();
         d[meta.target_end() - 1] ^= 0x10;
         assert!(aqr_decompress::decompress_value(&d, 2).is_err());
-        let cd = aqr::mirror::check(&d);
-        assert_eq!(aqr::mirror::repair(&d, &cd, false, &[]).unwrap().bytes, a.archive);
+        let cd = aqr_archive::mirror::check(&d);
+        assert_eq!(aqr_archive::mirror::repair(&d, &cd, false, &[]).unwrap().bytes, a.archive);
         // the metadata block's mirror block before the files (the archive is small: all of them)
         let meta = m.targets.last().unwrap().0;
         assert!(m.mirrors.iter().any(|f| f.target == meta && f.at < meta && f.far(false)));
         let d = &a.archive[..meta + 1];
-        let r = aqr::mirror::repair(d, &aqr::mirror::check(d), false, &[]).unwrap();
+        let r = aqr_archive::mirror::repair(d, &aqr_archive::mirror::check(d), false, &[]).unwrap();
         assert!(r.restored == 1 && r.footer && r.bytes.len() < a.archive.len());
         assert_eq!(files(&r.bytes), [gz.clone(), text.clone()]);
     }
@@ -5098,11 +5101,12 @@ mod tests {
             cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&d])));
             let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
             let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
-            let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
-            let roots = aqr::open(&c, &aqr::NoModules).unwrap().hashed(&memo, &aqr_decompress::identify, 2);
+            let c = cx.enc.encode(&f, Some(aqr_archive::checksum(&d))).unwrap();
+            let roots =
+                aqr_archive::open(&c, &aqr_archive::NoModules).unwrap().hashed(&memo, &aqr_decompress::identify, 2);
             let roots = roots.map_err(|e| e.to_string()).unwrap().expect("told");
-            let whole = roots.iter().fold(aqr_formula::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
-            assert!(whole == aqr_formula::chash::Ch::of(&d), "{name}");
+            let whole = roots.iter().fold(aqr_archive::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
+            assert!(whole == aqr_archive::chash::Ch::of(&d), "{name}");
         }
     }
 
@@ -5136,12 +5140,12 @@ mod tests {
         let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
         let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
-        let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
-        let a = aqr::open(&c, &aqr::NoModules).unwrap();
+        let c = cx.enc.encode(&f, Some(aqr_archive::checksum(&d))).unwrap();
+        let a = aqr_archive::open(&c, &aqr_archive::NoModules).unwrap();
         let roots = a.hashed(&memo, &aqr_decompress::identify, 2).map_err(|e| e.to_string());
         let roots = roots.unwrap().expect("told");
-        let whole = roots.iter().fold(aqr_formula::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
-        assert!(whole == aqr_formula::chash::Ch::of(&d));
+        let whole = roots.iter().fold(aqr_archive::chash::Ch::EMPTY, |w, (h, _)| w.cat(*h));
+        assert!(whole == aqr_archive::chash::Ch::of(&d));
     }
 
     /// A UDIF image of zlib's chunks whose block tables are changed (chunks of other runs of the
@@ -5521,7 +5525,7 @@ mod tests {
             let (c, f) = compress_formula_as(short, kind_by_name(name), &opt);
             assert_eq!(f.streams[0].kind, kind, "{}", String::from_utf8_lossy(name));
             assert_eq!(
-                aqr::decode(&c, &aqr_decompress::natives(&aqr_decompress::Native { threads: 1 })).unwrap(),
+                aqr_archive::decode(&c, &aqr_decompress::natives(&aqr_decompress::Native { threads: 1 })).unwrap(),
                 short
             );
         }
@@ -5655,13 +5659,13 @@ mod tests {
             let mut file =
                 std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
             let before = DIRECTED.get();
-            let mut s = aqr::envelope::Sealer::new(&mut file, b"p", 12, true).unwrap();
+            let mut s = aqr_archive::envelope::Sealer::new(&mut file, b"p", 12, true).unwrap();
             compress_with(&d, Kind::Unknown, &opt, false, None, &mut s).unwrap();
             s.finish().unwrap();
             drop(s);
             drop(file);
             let c = std::fs::read(&path).unwrap();
-            let payload = aqr::envelope::open(&c).unwrap().unlock(b"p").unwrap().decrypt(2).unwrap();
+            let payload = aqr_archive::envelope::open(&c).unwrap().unlock(b"p").unwrap().decrypt(2).unwrap();
             assert!(aqr_decompress::decompress(&payload, 1).unwrap() == d);
             (payload, DIRECTED.get() - before)
         };
@@ -5712,8 +5716,8 @@ mod tests {
             (0..through_len() * 2 + 12345).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[3]).collect();
         for threads in [1, 3] {
             let t = through(&d, threads);
-            assert_eq!(t.sum, aqr::checksum(&d));
-            assert!(t.ch == aqr_formula::chash::Ch::of(&d));
+            assert_eq!(t.sum, aqr_archive::checksum(&d));
+            assert!(t.ch == aqr_archive::chash::Ch::of(&d));
         }
     }
 
@@ -5734,7 +5738,7 @@ mod tests {
         let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
         let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
         assert!(!f.applies().is_empty());
-        let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        let c = cx.enc.encode(&f, Some(aqr_archive::checksum(&d))).unwrap();
         let memo = std::cell::RefCell::new(memo);
         assert_eq!(hashed(Back::Plain(&c, false), &d, None, &memo, &opt), Some(true));
         let mut other = d.clone();
@@ -5749,7 +5753,7 @@ mod tests {
         let decode = |c: &[u8], memo: verify::Memo| {
             let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
             let m = verify::Cached::new(Native { threads: 1 }, memo, &files);
-            let out = aqr::decode(c, &aqr_decompress::natives(&m));
+            let out = aqr_archive::decode(c, &aqr_decompress::natives(&m));
             (out, m.hits.into_inner().unwrap())
         };
         let other = compress(&d[..d.len() - 1], &Options { verify: false, ..opt.clone() });
@@ -5757,7 +5761,7 @@ mod tests {
         let (memo, hits) = {
             let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
             let m = verify::Cached::new(Native { threads: 1 }, memo, &files);
-            aqr::decode(&other, &aqr_decompress::natives(&m)).unwrap();
+            aqr_archive::decode(&other, &aqr_decompress::natives(&m)).unwrap();
             (m.memo.into_inner().unwrap(), m.hits.into_inner().unwrap())
         };
         assert_eq!(hits, 0);
@@ -5816,7 +5820,7 @@ mod tests {
         .unwrap();
         f.root = Node::concat([Node::Apply(Box::new(a)), outer[1].clone()]);
         assert!(f.eval(&Native::default()).unwrap() == d);
-        let c = Cx::new(&d, &opt).enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        let c = Cx::new(&d, &opt).enc.encode(&f, Some(aqr_archive::checksum(&d))).unwrap();
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
         for threads in [1, 4] {
             assert_eq!(
@@ -5853,7 +5857,7 @@ mod tests {
         let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
         drop(verify::Prevalidator::finish_shared(cx.pre.take().unwrap()));
         assert!(!f.applies().is_empty());
-        let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        let c = cx.enc.encode(&f, Some(aqr_archive::checksum(&d))).unwrap();
         // (the memo of the batch it was evaluated in gone)
         assert_eq!(hashed(Back::Plain(&c, false), &d, None, &Default::default(), &opt), Some(true));
     }
@@ -5882,7 +5886,7 @@ mod tests {
             };
             let mut m = verify::Cached::new(Native { threads: 1 }, Default::default(), &files);
             m.whole.insert(file.len(), vec![(0, xxhash_rust::xxh3::xxh3_128(&file))]);
-            assert!(aqr::decode(&c, &aqr_decompress::natives(&m)).unwrap() == [&d[..], &d[..]].concat());
+            assert!(aqr_archive::decode(&c, &aqr_decompress::natives(&m)).unwrap() == [&d[..], &d[..]].concat());
             assert_eq!(reads.into_inner(), read);
         }
     }
@@ -5957,7 +5961,8 @@ mod tests {
         let cx = Cx::new(&d, &opt);
         let mut wrong = Formula::raw("raw", d.clone());
         wrong.streams[0].data[7] ^= 1;
-        let raw = aqr::encode(&Formula::raw("raw", d.clone()), Some(aqr::checksum(&d)), opt.level).unwrap();
+        let raw =
+            aqr_archive::encode(&Formula::raw("raw", d.clone()), Some(aqr_archive::checksum(&d)), opt.level).unwrap();
         // a leaf, whose checksum is not the output's, is not encoded at all
         assert_eq!(finished(wrong.clone(), &d, &Options { verify: false, ..opt.clone() }, &cx), raw);
         // two slices: the archive has the output's checksum
@@ -5980,7 +5985,7 @@ mod tests {
         let opt = Options { verify: false, ..opt };
         assert_eq!(
             aqr_decompress::decompress(&finished(wrong, &d, &opt, &cx), 1),
-            Err(aqr::Failure::Invalid("output checksum mismatch".into()))
+            Err(aqr_archive::Failure::Invalid("output checksum mismatch".into()))
         );
     }
 

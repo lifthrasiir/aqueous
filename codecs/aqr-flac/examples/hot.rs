@@ -1,4 +1,5 @@
 //! Repeated encoding (`c`) or decoding (`d`) of files to formulas, for profiling.
+use aqr_archive::Evaluate;
 use aqr_flac::formula::{self, MODULE};
 use aqr_formula::Apply;
 

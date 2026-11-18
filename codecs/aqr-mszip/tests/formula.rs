@@ -1,6 +1,7 @@
 //! CAB files of `scripts/gen-fixtures.py` (MSZIP folders by Python's zlib, stored folders,
 //! reserved fields) and of aqr-lzx's CAB stream fixture taken apart and given back.
 
+use aqr_archive::Evaluate;
 use aqr_decompress::Native;
 use aqr_formula::{Formula, Node};
 use aqr_mszip::{cab, formula};

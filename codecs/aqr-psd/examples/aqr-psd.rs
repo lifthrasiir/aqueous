@@ -1,6 +1,6 @@
 //! `aqr-psd bench`: the formula of each file, as an archive, and back.
 
-use aqr_formula::aqr::{self, Level};
+use aqr_archive::Level;
 use aqr_psd::formula::{self, MODULE};
 use std::time::Instant;
 
@@ -50,7 +50,7 @@ fn bench(args: &[String]) {
     let mut skipped = 0;
     let mut fails = 0;
     let apply = |a: &aqr_formula::Apply, inputs: &[&[u8]]| formula::apply(a, inputs, threads);
-    let natives = aqr::natives(&[MODULE, aqr_png::formula::MODULE, aqr_jpeg::formula::MODULE], &apply);
+    let natives = aqr_archive::natives(&[MODULE, aqr_png::formula::MODULE, aqr_jpeg::formula::MODULE], &apply);
     for f in &files {
         let src = std::fs::read(f).expect("read");
         let mut c = None;
@@ -58,7 +58,7 @@ fn bench(args: &[String]) {
         for _ in 0..if only == 'd' { 1 } else { iters } {
             let t = Instant::now();
             c = formula::encode(&src, threads)
-                .map(|fm| aqr::encode(&fm, Some(aqr::checksum(&src)), Level::MID).expect("archive"));
+                .map(|fm| aqr_archive::encode(&fm, Some(aqr_archive::checksum(&src)), Level::MID).expect("archive"));
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let Some(c) = c else {
@@ -72,7 +72,7 @@ fn bench(args: &[String]) {
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = Instant::now();
-            let d = aqr::decode(&c, &natives);
+            let d = aqr_archive::decode(&c, &natives);
             bd = bd.min(t.elapsed().as_secs_f64());
             if let Err(e) = &d {
                 eprintln!("{f}: {e}");

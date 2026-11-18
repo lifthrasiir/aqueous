@@ -19,9 +19,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use aqr_api::dll::{ApplyFn, Info, InfoFn, Slice, SliceMut, VERSION};
+use aqr_archive::{Decoded, Loaded, PartIn, PartOut, Runner};
 use aqr_decompress::Native;
 use aqr_formula::Resource;
-use aqr_formula::aqr::{self, Decoded, Loaded, PartIn, PartOut, Runner};
 use sha2::{Digest, Sha512_256};
 
 type Result<T> = std::result::Result<T, String>;
@@ -449,7 +449,7 @@ fn record(args: &[String]) -> Result<()> {
     };
     for a in archives {
         let c = std::fs::read(a).map_err(|e| format!("{a}: {e}"))?;
-        aqr::decode_value_with(&c, &rec, threads).map_err(|e| format!("{a}: {e:?}"))?;
+        aqr_archive::decode_value_with(&c, &rec, threads).map_err(|e| format!("{a}: {e:?}"))?;
         if let Some(e) = rec.failed.lock().unwrap().take() {
             return Err(e);
         }

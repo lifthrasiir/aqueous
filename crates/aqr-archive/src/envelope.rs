@@ -1090,7 +1090,7 @@ impl<'c> Decrypting<'c> {
 mod tests {
     use super::super::{Encoder, Level, NoModules, decode, open_payload};
     use super::*;
-    use crate::Formula;
+    use aqr_formula::Formula;
 
     /// An archive (with its size hint to be filled in) of `n` bytes of a file of its own.
     fn archive(n: usize) -> Vec<u8> {
@@ -1185,7 +1185,7 @@ mod tests {
     fn opened_decrypting() {
         use super::super::open_decrypting;
         use super::super::tests::{REV, natives};
-        use crate::Node;
+        use aqr_formula::Node;
         let parts: Vec<Vec<u8>> = (0..12).map(|k| aqr_common::rng::noise((1 << 20) + k)).collect();
         let mut f = Formula::default();
         let mut nodes = Vec::new();
@@ -1227,7 +1227,7 @@ mod tests {
     fn decrypted_as_read() {
         use super::super::tests::{REV, natives};
         use super::super::{ContentAt, Entry, EntryNode, Extra, Leaf, Payload, SegmentWriter, Tree, open_indexed};
-        use crate::Node;
+        use aqr_formula::Node;
         const N: usize = 24;
         const LEN: usize = 150_000;
         let data: Vec<Vec<u8>> = (0..N).map(|k| aqr_common::rng::noise(LEN + k)).collect();

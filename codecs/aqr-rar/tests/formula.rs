@@ -1,3 +1,4 @@
+use aqr_archive::Evaluate;
 use aqr_formula::{Apply, Formula, Node};
 use aqr_rar::{formula, rar4, rar5};
 

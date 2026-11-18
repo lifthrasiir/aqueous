@@ -1,7 +1,7 @@
 //! Times as other formats keep them, both ways: Windows' FILETIME, and MS-DOS's local date and
 //! time (taken as local time here: a local time of an unknown time zone as it is).
 
-use aqr_formula::aqr::Time;
+use aqr_archive::Time;
 
 /// Seconds from 1601-01-01 to 1970-01-01.
 const FILETIME_EPOCH: i64 = 11_644_473_600;

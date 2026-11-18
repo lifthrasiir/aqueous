@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-use aqr_formula::aqr::Encoder;
+use aqr_archive::Encoder;
 use aqr_formula::{Apply, Either, Formula, Module, Node, Of, Resource};
 
 aqr_common::zopt! {
@@ -507,7 +507,7 @@ fn prefix(streams: &[(&str, &[u8])], of: &[usize], used: &HashMap<usize, Vec<(us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aqr_formula::aqr::Level;
+    use aqr_archive::Level;
 
     /// An alternative whose formula is like another file's formula is made; one whose formula is
     /// like nothing, and larger than its data, is kept.

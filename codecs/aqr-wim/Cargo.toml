@@ -11,6 +11,7 @@ aqr-formula = { path = "../../crates/aqr-formula" }
 aqr-lzx = { path = "../aqr-lzx" }
 
 [dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-decompress = { path = "../../crates/aqr-decompress" }
 memmap2 = "0.9"
 

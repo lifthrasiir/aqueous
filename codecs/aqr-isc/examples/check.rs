@@ -3,6 +3,7 @@
 
 use std::time::Instant;
 
+use aqr_archive::Evaluate;
 use aqr_decompress::Native;
 
 fn main() {

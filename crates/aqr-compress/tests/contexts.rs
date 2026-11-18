@@ -5,8 +5,8 @@
 
 use std::io::Write;
 
+use aqr_archive::{Entry, EntryNode, Extra, Tree, contexts, reset_contexts_peak};
 use aqr_compress::{Input, Options, compress_tree_to};
-use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, contexts, reset_contexts_peak};
 
 fn gzip(seed: usize) -> Vec<u8> {
     let mut t = Vec::new();

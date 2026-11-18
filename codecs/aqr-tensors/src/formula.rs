@@ -641,7 +641,7 @@ pub fn formula_bound(input: &[u8]) -> Option<usize> {
     // (an application: opcode, module, length of the parameters, the output's length, the memory
     // limit and a task limit; its inputs)
     const APPLY: usize = 1 + 4 * NUM + 2 * NUM + 2 * SLICE + (2 * SLICE + 1 + NUM);
-    let block = aqr_formula::aqr::BLOCK;
+    let block = aqr_archive::BLOCK;
     let over = |len: usize| len / block + 2;
     let mut n = 1024 + over(g.data) * SLICE + ITEM + over(input.len()) * 4;
     for p in pieces(input.len(), &g, SEGMENT_BYTES.get()) {

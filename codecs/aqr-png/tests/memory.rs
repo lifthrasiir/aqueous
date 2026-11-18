@@ -5,6 +5,7 @@
 
 mod common;
 
+use aqr_archive::Evaluate;
 use aqr_common::mem::{Counting, peak};
 use common::*;
 

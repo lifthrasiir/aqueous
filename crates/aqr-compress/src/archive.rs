@@ -20,9 +20,9 @@
 //! takes at most [`Options::set_bytes`] bytes of them (as it is decoded whole for any of them),
 //! and the streams of a class and kind of the files of a batch are put one after another,
 //! solid, in non-leaf blocks of at most [`Options::block`] bytes, but those that do not compress
-//! ([`aqr::Encoder::compresses`]).
+//! ([`aqr_archive::Encoder::compresses`]).
 //!
-//! With [`Options::verify`], each batch is decoded alone ([`aqr::Batch::standalone`],
+//! With [`Options::verify`], each batch is decoded alone ([`aqr_archive::Batch::standalone`],
 //! the applications' outputs taken from those evaluated beforehand, as [`crate::compress`]
 //! does) and its files compared with the input: those not given back (all of the batch's where
 //! it does not decode) are made again kept raw.
@@ -39,8 +39,8 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Condvar, Mutex};
 
+use aqr_archive::{Batch, ContentAt, Entry, EntryNode, Extra, Leaf, Level, Placed, SegmentWriter, Tree};
 use aqr_decompress::Native;
-use aqr_formula::aqr::{self, Batch, ContentAt, Entry, EntryNode, Extra, Leaf, Level, Placed, SegmentWriter, Tree};
 use aqr_formula::probe::{self, Held};
 use aqr_formula::{Bytes, Formula, Kind, Module, Node};
 
@@ -126,7 +126,7 @@ impl Source for [Input<'_>] {
 /// Where an archive of several files is written ([`compress_tree_into`]).
 pub trait Output: Write {
     /// Where the archive starts in the file written (its header magic): where its footers are
-    /// placed by ([`aqr::crossing`]).
+    /// placed by ([`aqr_archive::crossing`]).
     fn base(&self) -> u64 {
         0
     }
@@ -228,11 +228,11 @@ pub struct Report {
 
 /// An archive to append to ([`compress_tree_into`]; spec, "Appending to an archive"), as written
 /// to the output already: where its footer is and its last metadata block (from its header
-/// magic: [`aqr::footer_of`]), and the least archive-wide link group it takes (negative; 0 where
+/// magic: [`aqr_archive::footer_of`]), and the least archive-wide link group it takes (negative; 0 where
 /// none), the groups of the segments appended taken below it. Its footer is made a spacer block
 /// by the first commit where `kill`; else the segments are written over it (from where it
 /// starts: the output cut there already), as where it crosses a sector of the file
-/// ([`aqr::crossing`]).
+/// ([`aqr_archive::crossing`]).
 #[derive(Debug, Clone)]
 pub struct Appending {
     pub footer: Range<usize>,
@@ -332,7 +332,7 @@ pub struct Solid {
 /// The archive of `tree`, whose files are of `contents` (by [`EntryNode::File`]), with what
 /// became of them. Panics on a tree that is not one the spec allows.
 ///
-/// [`EntryNode::File`]: aqr::EntryNode::File
+/// [`EntryNode::File`]: aqr_archive::EntryNode::File
 pub fn compress_tree(tree: &Tree, contents: &[Input], opt: &Options) -> Archived {
     let mut archive = Vec::new();
     let report = compress_tree_to(tree, contents, opt, &mut archive, &|_| {}).expect("no failure but of the tree");
@@ -401,7 +401,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
     }
     let mut out = match opt.mirrors {
-        true => Out::Mirrored(aqr::Mirroring::new(out, opt.size_hint)),
+        true => Out::Mirrored(aqr_archive::Mirroring::new(out, opt.size_hint)),
         false => Out::Plain(out),
     };
     let n = src.len();
@@ -517,8 +517,8 @@ fn compress_tree_noting<S: Source + ?Sized>(
         wr.w.set_journal(vec![point.clone()]).map_err(bad_tree)?;
     }
     if wr.commit.is_some() {
-        let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(opt.modules);
-        let meta = wr.w.close_as(&enc, tree, &contents, aqr::Status::Complete).map_err(bad_tree)?;
+        let enc = aqr_archive::Encoder::with_threads(opt.level, opt.threads).with_modules(opt.modules);
+        let meta = wr.w.close_as(&enc, tree, &contents, aqr_archive::Status::Complete).map_err(bad_tree)?;
         wr.commit(&mut out, &meta)?;
         let len = wr.w.len() - wr.w.pad().len();
         out.output().end()?;
@@ -530,13 +530,15 @@ fn compress_tree_noting<S: Source + ?Sized>(
     }
     let Writer { w, mut r, held, held_len, inserted, .. } = wr;
     // (an encoder of the metadata block only)
-    let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(opt.modules);
+    let enc = aqr_archive::Encoder::with_threads(opt.level, opt.threads).with_modules(opt.modules);
     let bad = |e: aqr_formula::Error| io::Error::new(io::ErrorKind::InvalidInput, e.0);
     // with mirror blocks, the metadata block's before the batches held back, where it can be
-    // far enough from it; else after it, as the others are ([`aqr::Mirroring`])
+    // far enough from it; else after it, as the others are ([`aqr_archive::Mirroring`])
     let front = w.len() - held_len;
     let mirrored = match opt.mirrors {
-        true => w.finish_mirrored(&enc, tree, &contents, front, opt.size_hint, aqr::Status::Complete).map_err(bad)?,
+        true => w
+            .finish_mirrored(&enc, tree, &contents, front, opt.size_hint, aqr_archive::Status::Complete)
+            .map_err(bad)?,
         false => None,
     };
     let (mirror, end) = match mirrored {
@@ -816,7 +818,7 @@ struct Writer {
     r: Report,
     /// The batch to write next.
     next: usize,
-    /// Whether the last batches are held back, at least [`aqr::mirror::FAR`] bytes of them, for
+    /// Whether the last batches are held back, at least [`aqr_archive::mirror::FAR`] bytes of them, for
     /// the metadata block's mirror block to be written before them ([`Options::mirrors`]).
     hold: bool,
     held: std::collections::VecDeque<HeldBack>,
@@ -864,7 +866,7 @@ fn bad_tree(e: aqr_formula::Error) -> io::Error {
 /// Where the archive is written: as it is, or with mirror blocks ([`Options::mirrors`]).
 enum Out<'a> {
     Plain(&'a mut dyn Output),
-    Mirrored(aqr::Mirroring<&'a mut dyn Output>),
+    Mirrored(aqr_archive::Mirroring<&'a mut dyn Output>),
 }
 
 impl Out<'_> {
@@ -1090,7 +1092,7 @@ impl Writer {
                     self.held_len += r.len();
                     self.held.push_back(HeldBack(d, r));
                     while let Some(b) = self.held.front()
-                        && (self.held_len - b.len()) as u64 >= aqr::mirror::FAR
+                        && (self.held_len - b.len()) as u64 >= aqr_archive::mirror::FAR
                     {
                         out.write_all(b)?;
                         self.held_len -= b.len();
@@ -1134,9 +1136,9 @@ impl Writer {
             self.inserted += n;
         }
         let (t, contents) = self.segment_tree(cx.tree);
-        let enc = aqr::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(cx.opt.modules);
+        let enc = aqr_archive::Encoder::with_threads(cx.opt.level, cx.opt.threads).with_modules(cx.opt.modules);
         let commits = self.commit.is_some() && !self.once;
-        let status = if commits { self.left(cx) } else { aqr::Status::None };
+        let status = if commits { self.left(cx) } else { aqr_archive::Status::None };
         let meta = self.w.close_as(&enc, &t, &contents, status).map_err(bad_tree)?;
         if commits {
             self.commit(out, &meta)?;
@@ -1153,14 +1155,14 @@ impl Writer {
 
     /// What is left to write, as a commit tells it (`segment-status`): the files and bytes of the
     /// contents not written.
-    fn left<S: Source + ?Sized>(&self, cx: &Ctx<S>) -> aqr::Status {
+    fn left<S: Source + ?Sized>(&self, cx: &Ctx<S>) -> aqr_archive::Status {
         let at = |c: usize| self.at[c].or_else(|| self.at[self.r.files[c].same_as?]);
         let (mut files, mut bytes) = (0, 0);
         for c in (0..self.at.len()).filter(|&c| at(c).is_none()) {
             files += self.files_of[c];
             bytes += cx.src.size(c);
         }
-        aqr::Status::Incomplete { files: Some(files), bytes: Some(bytes) }
+        aqr_archive::Status::Incomplete { files: Some(files), bytes: Some(bytes) }
     }
 
     /// `work` done on a thread of its own while this one looks for a stop ([`Ctx::stop`]): where
@@ -1209,7 +1211,7 @@ impl Writer {
     fn end_stopped<S: Source + ?Sized>(&self, cx: &Ctx<S>, out: &mut Out) -> io::Result<Report> {
         let (t, contents) = self.segment_tree(cx.tree);
         let status = self.left(cx);
-        let aqr::Status::Incomplete { files: Some(files), bytes: Some(bytes) } = status else { unreachable!() };
+        let aqr_archive::Status::Incomplete { files: Some(files), bytes: Some(bytes) } = status else { unreachable!() };
         let mut r = Report { stopped: Some(Stopped { files, bytes, kept: false }), ..self.r.clone() };
         // (no file of the segment: the commit before stands, where there is one; where there is
         // none, nothing to keep, the directories alone not; nor where segments closed are not
@@ -1222,7 +1224,7 @@ impl Writer {
             return Ok(r);
         }
         // (on a thread of no worker: the workers busy with the batch let go)
-        let enc = aqr::Encoder::with_threads(cx.opt.level, 1).with_modules(cx.opt.modules);
+        let enc = aqr_archive::Encoder::with_threads(cx.opt.level, 1).with_modules(cx.opt.modules);
         if let Some(base) = self.commit {
             let (end, before) = self.w.end(&enc, &t, &contents, status, base).map_err(bad_tree)?;
             if self.w.pad_due() {
@@ -1232,7 +1234,7 @@ impl Writer {
             let o = out.output();
             o.sync()?;
             if let Some(f) = before {
-                let k = aqr::kill(f.len());
+                let k = aqr_archive::kill(f.len());
                 o.patch(f.start as u64, &k)?;
                 o.sync()?;
                 o.patch((f.start + k.len()) as u64, &vec![0; f.len() - k.len()])?;
@@ -1278,7 +1280,7 @@ impl Writer {
         let o = out.output();
         o.sync()?;
         if let Some(f) = before {
-            let k = aqr::kill(f.len());
+            let k = aqr_archive::kill(f.len());
             o.patch(f.start as u64, &k)?;
             o.sync()?;
             o.patch((f.start + k.len()) as u64, &vec![0; f.len() - k.len()])?;
@@ -1752,9 +1754,9 @@ struct File {
     /// Whether it is found as an entry or member of another ([`together`]).
     entry: bool,
     len: usize,
-    /// Its XXH3-128 ([`check`]), its content hash and its checksum ([`aqr::checksum`]).
+    /// Its XXH3-128 ([`check`]), its content hash and its checksum ([`aqr_archive::checksum`]).
     hash: u128,
-    ch: aqr_formula::chash::Ch,
+    ch: aqr_archive::chash::Ch,
     sum: u64,
     /// The format it starts like ([`detect`]).
     format: Option<&'static str>,
@@ -1762,8 +1764,17 @@ struct File {
 
 impl File {
     fn of(c: usize, d: &[u8], hash: u128, kind: Kind, entry: bool) -> File {
-        let ch = aqr_formula::chash::Ch::of(d);
-        File { c, kind, entry, len: d.len(), hash, ch, sum: aqr::checksum(d), format: detect(d).map(|f| f.name()) }
+        let ch = aqr_archive::chash::Ch::of(d);
+        File {
+            c,
+            kind,
+            entry,
+            len: d.len(),
+            hash,
+            ch,
+            sum: aqr_archive::checksum(d),
+            format: detect(d).map(|f| f.name()),
+        }
     }
 
     /// Whether `d` is the file's data.
@@ -1827,7 +1838,7 @@ struct Analyzed {
     f: Formula,
     leaves: Vec<Leaf>,
     at: Vec<(usize, usize)>,
-    enc: aqr::Encoder,
+    enc: aqr_archive::Encoder,
     memo: verify::Memo,
     /// [`Report::alternatives`] of the batch.
     alternatives: (usize, usize, usize),
@@ -1931,7 +1942,7 @@ fn analyze(
     // workers waited for; The Crew's 766 MB in two batches, 6 of 12.6 s)
     let _s = aqr_common::trace::span("encode");
     a.enc.on_precompress(Some(notes.encoding(i)));
-    aqr::precompress_leaves(&a.enc, &a.f, &a.leaves).expect("zstd");
+    aqr_archive::precompress_leaves(&a.enc, &a.f, &a.leaves).expect("zstd");
     a
 }
 
@@ -1959,7 +1970,7 @@ fn analyze_plain(i: usize, files: &[File], data: Vec<Bytes>, opt: &Options, note
 
 /// Formula `f` of `files` (each a part of its root), laid out in leaves: one for each file, or for
 /// each set of them; its streams of a class together.
-fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, opt: &Options) -> Analyzed {
+fn laid(mut f: Formula, files: &[File], enc: aqr_archive::Encoder, memo: verify::Memo, opt: &Options) -> Analyzed {
     // a leaf for each file, or for each set of them
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut leaves: Vec<Leaf> = Vec::new();
@@ -2085,14 +2096,19 @@ fn laid(mut f: Formula, files: &[File], enc: aqr::Encoder, memo: verify::Memo, o
     Analyzed { f, leaves, at, enc, memo, alternatives: (0, 0, 0) }
 }
 
-/// Of streams `ds` and whether each compresses alone (`alone`, [`aqr::Encoder::compresses_each`]),
+/// Of streams `ds` and whether each compresses alone (`alone`, [`aqr_archive::Encoder::compresses_each`]),
 /// whether each is compressed: those that do not alone, where they compress after the others of
 /// their class and kind (`of`), their kin, those nearest in `ds` first
-/// ([`aqr::Encoder::compresses_after_each`]): as where the archive puts them one after another.
+/// ([`aqr_archive::Encoder::compresses_after_each`]): as where the archive puts them one after another.
 /// Of WinUHA 2.0's installers, the code streams of the packed programs of their versions
 /// (PECompact's sections through the x86 filter), 3 to 5% smaller together, which no anchors
 /// shared tell (0.5% of them at 64 bytes, 3% of 8-byte pieces).
-fn kin<'a>(enc: &aqr::Encoder, ds: &[&[u8]], alone: Vec<bool>, of: impl Fn(usize) -> (&'a str, Kind)) -> Vec<bool> {
+fn kin<'a>(
+    enc: &aqr_archive::Encoder,
+    ds: &[&[u8]],
+    alone: Vec<bool>,
+    of: impl Fn(usize) -> (&'a str, Kind),
+) -> Vec<bool> {
     if !KIN_TRIAL.get() {
         return alone;
     }
@@ -2207,7 +2223,7 @@ fn check_in(
     at.iter().enumerate().for_each(|(k, &(l, o))| of_leaf[l].push((o, k)));
     let bad = Mutex::new(Vec::new());
     let all = || (0..files.len()).collect();
-    let Ok(mut a) = aqr::open(c, &natives) else { return all() };
+    let Ok(mut a) = aqr_archive::open(c, &natives) else { return all() };
     // by the hashes recorded, without running a module, where they tell a leaf's outputs; the
     // other leaves decoded
     // (the memo taken out meanwhile: what is evaluated runs the modules by `m`, which takes it)

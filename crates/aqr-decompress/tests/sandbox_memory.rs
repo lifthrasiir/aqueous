@@ -3,8 +3,8 @@
 
 #![cfg(all(feature = "sandbox", feature = "wasm"))]
 
+use aqr_archive::Runner;
 use aqr_decompress::sandbox::Sandbox;
-use aqr_formula::aqr::Runner;
 
 /// A part module's application whose inputs and outputs are far beyond its memory (so that they
 /// are in the messages, not an arena) holds both in the worker: the outputs too are let in, not

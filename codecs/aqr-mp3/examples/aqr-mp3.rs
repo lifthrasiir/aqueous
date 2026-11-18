@@ -1,4 +1,5 @@
-use aqr_formula::aqr::{self, Level};
+use aqr_archive::Evaluate;
+use aqr_archive::Level;
 use aqr_formula::{Apply, Formula};
 use aqr_mp3::codec::STREAM_NAMES;
 use aqr_mp3::formula::{self, MODULE};
@@ -85,7 +86,7 @@ fn bench(args: &[String]) {
         for _ in 0..iters {
             let t = Instant::now();
             let f = formula::encode(&d, threads);
-            let c = f.as_ref().map(|f| aqr::encode(f, Some(aqr::checksum(&d)), Level::MID).unwrap());
+            let c = f.as_ref().map(|f| aqr_archive::encode(f, Some(aqr_archive::checksum(&d)), Level::MID).unwrap());
             best_c = best_c.min(t.elapsed().as_secs_f64());
             coded = f.zip(c);
         }
@@ -103,10 +104,10 @@ fn bench(args: &[String]) {
             continue;
         };
         let run = |a: &Apply, inputs: &[&[u8]]| apply(a, inputs, threads);
-        let modules = aqr::natives(&[MODULE], &run);
+        let modules = aqr_archive::natives(&[MODULE], &run);
         for _ in 0..iters {
             let t = Instant::now();
-            let r = aqr::decode(&c, &modules);
+            let r = aqr_archive::decode(&c, &modules);
             best_d = best_d.min(t.elapsed().as_secs_f64());
             match r {
                 Ok(r) if r == d => {}

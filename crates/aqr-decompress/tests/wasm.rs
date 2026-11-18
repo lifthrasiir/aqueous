@@ -4,8 +4,9 @@
 
 #![cfg(feature = "wasm")]
 
+use aqr_archive::Evaluate;
+use aqr_archive::{Encoder, Failure, Level, Loaded, Runner};
 use aqr_decompress::{MODULES, Native, Wasm, known, wasm_of};
-use aqr_formula::aqr::{self, Encoder, Failure, Level, Loaded, Runner};
 use aqr_formula::{Formula, Module, Node};
 
 /// The workers every module of these tests runs in too.
@@ -15,11 +16,11 @@ static SANDBOX: std::sync::LazyLock<aqr_decompress::sandbox::Sandbox> = std::syn
 });
 
 /// Archive `c` decoded as WebAssembly ([`Wasm`]), and the same in the sandbox.
-fn decode_wasm(c: &[u8]) -> aqr::Decoded<Vec<u8>> {
-    let w = aqr::decode(c, &Wasm);
+fn decode_wasm(c: &[u8]) -> aqr_archive::Decoded<Vec<u8>> {
+    let w = aqr_archive::decode(c, &Wasm);
     #[cfg(feature = "sandbox")]
     {
-        let s = aqr::decode(c, &*SANDBOX);
+        let s = aqr_archive::decode(c, &*SANDBOX);
         assert!(s == w, "in the sandbox: {:?}, in this process: {:?}", s.err(), w.as_ref().err());
     }
     w
@@ -33,7 +34,7 @@ fn fixture(path: &str) -> Vec<u8> {
 /// (`scripts/released-modules.sh`) are not the current ones (regenerated at a release).
 #[test]
 fn released_modules_not_current() {
-    for h in aqr_formula::released::RELEASED {
+    for h in aqr_archive::released::RELEASED {
         let current = aqr_modules::KNOWN
             .iter()
             .find(|k| k.sha512_256.iter().map(|b| format!("{b:02x}")).collect::<String>() == *h);
@@ -53,8 +54,12 @@ fn built_modules_known() {
         assert_eq!(m.map(|m| m.version), Some(k.version), "{}: run crates/aqr-modules/build.py", k.name);
         let wasm = k.read_wasm().unwrap();
         assert_eq!(known(&wasm), m.copied());
-        assert_eq!(wasm_of(*m.unwrap()), Some(aqr::Wasm::Block(k.block.into())));
-        assert!(aqr::module_block_data(&wasm).unwrap() == k.block, "{}: run crates/aqr-modules/build.py", k.name);
+        assert_eq!(wasm_of(*m.unwrap()), Some(aqr_archive::Wasm::Block(k.block.into())));
+        assert!(
+            aqr_archive::module_block_data(&wasm).unwrap() == k.block,
+            "{}: run crates/aqr-modules/build.py",
+            k.name
+        );
     }
     assert_eq!(known(b"\0asm\x01\0\0\0"), None);
 }
@@ -107,7 +112,7 @@ fn pipelines_fail_alike() {
                 let i = s.len() * at / 4;
                 s[i] ^= 0x10;
                 let c = enc.encode(&bad, None).unwrap();
-                let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+                let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
                 assert_eq!(n.is_ok(), w.is_ok(), "{name} stream {k} at {i}: {n:?} {w:?}");
                 if let (Ok(n), Ok(w)) = (n, w) {
                     assert!(n == w, "{name} stream {k} at {i}");
@@ -131,7 +136,7 @@ fn clip_as_wasm() {
     for (k, file) in [clip::sample(0), clip::sample(150)].iter().enumerate() {
         let f = aqr_clip::formula::encode(file, 1).expect("a formula");
         let c = archive.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == *file, "{k}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == *file, "{k}");
         let w = decode_wasm(&c);
         assert!(w.as_ref().is_ok_and(|w| w == file), "{k}: {:?}", w.err());
     }
@@ -183,7 +188,7 @@ fn psd_as_wasm() {
     for (k, file) in files.iter().enumerate() {
         let f = aqr_psd::formula::encode(file, 1).expect("a formula");
         let c = archive.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == *file, "{k}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == *file, "{k}");
         let w = decode_wasm(&c);
         assert!(w.as_ref().is_ok_and(|w| w == file), "{k}: {:?}", w.err());
     }
@@ -309,7 +314,7 @@ fn same_as_wasm() {
     let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
     for (name, f, d) in formulas {
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{name}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{name}");
         assert!(decode_wasm(&c).unwrap() == d, "{name}");
         // damaged inputs fail alike (or give the same)
         let Node::Apply(a) = &f.root else { continue };
@@ -319,7 +324,7 @@ fn same_as_wasm() {
             let n = s.len() / 2;
             s[n] ^= 1;
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "{name} ({}): {n:?} {w:?}", a.module);
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{name}");
@@ -337,8 +342,8 @@ fn lzma_same_as_wasm() {
         let d = fixture(&format!("codecs/aqr-lzma/tests/data/{t}.lzma"));
         let f = aqr_lzma::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
         let r = f.streams.iter().position(|s| s.class == "lzma/record").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();
@@ -351,7 +356,7 @@ fn lzma_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
             assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{t} ({k})");
@@ -369,8 +374,8 @@ fn xz_same_as_wasm() {
         let d = fixture(&format!("codecs/aqr-lzma/tests/data/{t}.xz"));
         let f = aqr_lzma::formula::encode_xz(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
         let r = f.streams.iter().position(|s| s.class == "lzma2/record").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();
@@ -382,7 +387,7 @@ fn xz_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
             assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{t} ({k})");
@@ -407,8 +412,8 @@ fn filters_same_as_wasm() {
     }
     for (t, f, d) in formulas {
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
     }
 }
 
@@ -426,9 +431,9 @@ fn delta_streamed() {
     let wasm = fixture("crates/aqr-modules/wasm/bcj-delta.wasm");
     for runner in [&Native::default() as &dyn Runner, &Wasm] {
         assert!(runner.load(&wasm).unwrap().is_part());
-        assert!(aqr::decode(&c, runner).unwrap() == want);
+        assert!(aqr_archive::decode(&c, runner).unwrap() == want);
         let mut out = Vec::new();
-        aqr::open(&c, runner)
+        aqr_archive::open(&c, runner)
             .unwrap()
             .write_file(2, &mut |p: &[u8]| {
                 out.extend_from_slice(p);
@@ -577,7 +582,7 @@ fn plan_holds_shared(what: &str, mut f: Formula, want: &[u8]) {
     let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
     let recording = RECORDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     aqr_decompress::record_applications(true);
-    let out = aqr::decode(&c, &Wasm);
+    let out = aqr_archive::decode(&c, &Wasm);
     let applied = aqr_decompress::record_applications(false);
     drop(recording);
     assert!(out.as_ref().is_ok_and(|o| o == want), "{what}: {:?}", out.err());
@@ -688,7 +693,7 @@ fn mszip_plans_hold() {
         assert_eq!(plan(&[10, 10, 10, 10], 40), plan(&[1 << 30, 1 << 20, 1 << 20, 1 << 20], 1 << 30));
         assert!(plan(&[10, 10, 10, 10], 40) <= 4 << 20);
         assert_eq!(
-            aqr::decode(
+            aqr_archive::decode(
                 &Encoder::new(Level::Zstd(1)).with_modules(wasm_of).encode(&f, None).unwrap(),
                 &Native::default()
             )
@@ -771,14 +776,14 @@ fn inflate_same_as_wasm() {
         let s = f.push("flate/deflated", raw.clone());
         f.root = aqr_flate::formula::inflated(s, text.len() as u64);
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == text, "{level}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == text, "{level}");
         assert!(decode_wasm(&c).unwrap() == text, "{level}");
         for at in [1, 2, 3] {
             let mut bad = f.clone();
             let i = raw.len() * at / 4;
             bad.streams[0].data.to_mut()[i] ^= 0x10;
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "{level} at {i}: {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{level} at {i}");
@@ -845,7 +850,7 @@ fn lzma_decode_plans_hold() {
             let i = file.len() * at / 4;
             bad.streams[0].data.to_mut()[i] ^= 0x10;
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "at {i}: {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "at {i}");
@@ -897,7 +902,7 @@ fn flate_set_same_as_wasm() {
             let a = aqr_flate::formula::apply(aqr_flate::DEFAULT_PROFILE, data, records, index, len, derived).unwrap();
             f.root = Node::Apply(Box::new(a));
             let c = enc.encode(&f, None).unwrap();
-            let n = aqr::decode(&c, &Native::default()).unwrap();
+            let n = aqr_archive::decode(&c, &Native::default()).unwrap();
             let w = decode_wasm(&c);
             assert!(w.as_ref().is_ok_and(|w| *w == n), "{set:?} {derived:?}: {:?}", w.err());
         }
@@ -1262,8 +1267,8 @@ fn lzo_same_as_wasm() {
         let d = fixture(&format!("codecs/aqr-lzo/tests/data/{t}.lzo"));
         let f = aqr_lzo::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
         let r = f.streams.iter().position(|s| s.class == "lzo/record").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();
@@ -1275,7 +1280,7 @@ fn lzo_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
             assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{t} ({k})");
@@ -1293,8 +1298,8 @@ fn rar_same_as_wasm() {
         let d = fixture(&format!("codecs/aqr-rar/tests/data/{t}.rar"));
         let f = aqr_rar::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
         let r = f.streams.iter().position(|s| s.class == "rar/record").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();
@@ -1306,7 +1311,7 @@ fn rar_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
             assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{t} ({k})");
@@ -1340,8 +1345,8 @@ fn lha_same_as_wasm() {
     let index = f.push("lha/index", aqr_lha::formula::index(&lens));
     f.root = Node::Apply(Box::new(aqr_lha::formula::apply_recons(data, record, index, whole.len() as u64)));
     let c = enc.encode(&f, None).unwrap();
-    assert!(aqr::decode(&c, &Native::default()).unwrap() == whole);
-    assert!(aqr::decode(&c, &Wasm).unwrap() == whole);
+    assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == whole);
+    assert!(aqr_archive::decode(&c, &Wasm).unwrap() == whole);
     for k in 0..8 {
         let mut bad = f.clone();
         let r = &mut bad.streams[1].data;
@@ -1352,7 +1357,7 @@ fn lha_same_as_wasm() {
             r[at] ^= 1 << k;
         }
         let c = enc.encode(&bad, None).unwrap();
-        let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+        let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
         assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
         if let (Ok(n), Ok(w)) = (n, w) {
             assert!(n == w, "{k}");
@@ -1377,8 +1382,8 @@ fn azo_same_as_wasm() {
     let index = f.push("azo/index", Vec::new());
     f.root = Node::Apply(Box::new(aqr_azo::formula::apply(data, record, index, s.len() as u64)));
     let c = enc.encode(&f, None).unwrap();
-    assert!(aqr::decode(&c, &Native::default()).unwrap() == s);
-    assert!(aqr::decode(&c, &Wasm).unwrap() == s);
+    assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == s);
+    assert!(aqr_archive::decode(&c, &Wasm).unwrap() == s);
     for k in 0..8 {
         let mut bad = f.clone();
         let r = &mut bad.streams[1].data;
@@ -1389,7 +1394,7 @@ fn azo_same_as_wasm() {
             r[at] ^= 1 << k;
         }
         let c = enc.encode(&bad, None).unwrap();
-        let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+        let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
         assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
         if let (Ok(n), Ok(w)) = (n, w) {
             assert!(n == w, "{k}");
@@ -1406,8 +1411,8 @@ fn bvx_same_as_wasm() {
         let d = fixture(&format!("codecs/aqr-bvx/tests/data/{t}.lzfse"));
         let f = aqr_bvx::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
         let r = f.streams.iter().position(|s| s.class == "bvx/record").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();
@@ -1419,7 +1424,7 @@ fn bvx_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
             assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{t} ({k})");
@@ -1441,8 +1446,8 @@ fn prores_same_as_wasm() {
         };
         let f = aqr_prores::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
         let r = f.streams.iter().position(|s| s.class == "prores/coded").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();
@@ -1454,7 +1459,7 @@ fn prores_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
             assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{t} ({k})");
@@ -1488,8 +1493,8 @@ fn prores_big_frames_same_as_wasm() {
     for k in [Some(1), Some(3), Some(16), None] {
         let f = aqr_prores::formula::encode_with(&d, 2, aqr_prores::formula::CHUNK, k).unwrap();
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{k:?}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{k:?}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{k:?}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{k:?}");
         let queued = |u: &aqr_formula::Usage| aqr_prores::module::plan(u.params, u.initial()).unwrap().1;
         assert!(applications_hold(&format!("prores big {k:?}"), &f, &d, queued) > 0);
     }
@@ -1504,8 +1509,8 @@ fn gif_same_as_wasm() {
         let d = fixture(&format!("codecs/aqr-gif/tests/data/{t}.gif"));
         let f = aqr_gif::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr_archive::decode(&c, &Wasm).unwrap() == d, "{t}");
         let r = f.streams.iter().position(|s| s.class == "gif/record").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();
@@ -1517,7 +1522,7 @@ fn gif_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
             assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{t} ({k})");
@@ -1563,7 +1568,7 @@ fn lzx_same_as_wasm() {
         f.root = aqr_lzx::formula::apply(&mut f, parts, Node::slice(1, 17, 7), want.len() as u64);
         let whole = &want;
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == *whole);
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == *whole);
         assert!(decode_wasm(&c).unwrap() == *whole);
         let r = f.streams.iter().position(|s| s.class == "lzx/record").unwrap();
         for k in 0..8 {
@@ -1576,7 +1581,7 @@ fn lzx_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{k}");
@@ -1642,7 +1647,7 @@ fn xpress_same_as_wasm() {
     ] {
         let (f, want) = xpress_formula(&streams);
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == want);
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == want);
         assert!(decode_wasm(&c).unwrap() == want);
         let r = f.streams.iter().position(|s| s.class == "xpress/record").unwrap();
         for k in 0..8 {
@@ -1655,7 +1660,7 @@ fn xpress_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{k}");
@@ -1721,7 +1726,7 @@ fn lznt1_same_as_wasm() {
     for streams in lznt1_streams() {
         let (f, want) = lznt1_formula(&streams);
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == want);
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == want);
         assert!(decode_wasm(&c).unwrap() == want);
         let r = f.streams.iter().position(|s| s.class == "lznt1/record").unwrap();
         for k in 0..8 {
@@ -1734,7 +1739,7 @@ fn lznt1_same_as_wasm() {
                 s[at] ^= 1 << k;
             }
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{k}");
@@ -1768,7 +1773,7 @@ fn lzx_cab_same_as_wasm() {
     let a = aqr_lzx::formula::apply_as(&mut f, v, vec![stream], Node::Concat(Vec::new()), src.len() as u64);
     f.root = Node::Apply(Box::new(a));
     let c = enc.encode(&f, None).unwrap();
-    assert!(aqr::decode(&c, &Native::default()).unwrap() == src);
+    assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == src);
     assert!(decode_wasm(&c).unwrap() == src);
     let r = f.streams.iter().position(|s| s.class == "lzx/record").unwrap();
     for k in 0..8 {
@@ -1777,7 +1782,7 @@ fn lzx_cab_same_as_wasm() {
         let at = s.len() * k / 8;
         s[at] ^= 1 << k;
         let c = enc.encode(&bad, None).unwrap();
-        let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+        let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
         assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
         if let (Ok(n), Ok(w)) = (n, w) {
             assert!(n == w, "{k}");
@@ -1794,7 +1799,7 @@ fn mszip_same_as_wasm() {
         let d = fixture(&format!("codecs/aqr-mszip/tests/data/{name}.cab"));
         let f = aqr_mszip::formula::encode(&d, 1).unwrap();
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{name}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{name}");
         assert!(decode_wasm(&c).unwrap() == d, "{name}");
         let i = f.streams.iter().position(|s| s.class == "mszip/index").unwrap();
         for k in 0..8 {
@@ -1803,7 +1808,7 @@ fn mszip_same_as_wasm() {
             let at = s.len() * k / 8;
             s[at] ^= 1 << k;
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            let (n, w) = (aqr_archive::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "{name} {k}: {n:?} {w:?}");
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{name} {k}");
@@ -1818,7 +1823,7 @@ fn module(wat: &str) -> Vec<u8> {
 }
 
 /// `wat` loaded ([`Wasm`]), and loaded alike in the sandbox.
-fn load(wat: &str) -> aqr::Decoded<Box<dyn Loaded>> {
+fn load(wat: &str) -> aqr_archive::Decoded<Box<dyn Loaded>> {
     let m = module(wat);
     let l = Wasm.load(&m);
     #[cfg(feature = "sandbox")]
@@ -1827,12 +1832,18 @@ fn load(wat: &str) -> aqr::Decoded<Box<dyn Loaded>> {
 }
 
 /// `wat` applied ([`Wasm`]), and applied alike in the sandbox.
-fn apply(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr::Decoded<Vec<Vec<u8>>> {
+fn apply(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr_archive::Decoded<Vec<Vec<u8>>> {
     apply_v2(wat, inputs, sizes, limit, &[])
 }
 
 /// [`apply`] with task limits.
-fn apply_v2(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64, tasks: &[u64]) -> aqr::Decoded<Vec<Vec<u8>>> {
+fn apply_v2(
+    wat: &str,
+    inputs: &[&[u8]],
+    sizes: &[u64],
+    limit: u64,
+    tasks: &[u64],
+) -> aqr_archive::Decoded<Vec<Vec<u8>>> {
     let r = load(wat)?.apply(b"pp", &[], inputs, sizes, limit, tasks);
     #[cfg(feature = "sandbox")]
     {
@@ -1843,12 +1854,12 @@ fn apply_v2(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64, tasks: &[u64
 }
 
 /// [`apply`] of a module as one of a release is, with no task limits and the earlier `aqr_spawn`.
-fn apply_earlier(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr::Decoded<Vec<Vec<u8>>> {
+fn apply_earlier(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr_archive::Decoded<Vec<Vec<u8>>> {
     load_earlier(wat)?.apply(b"pp", &[], inputs, sizes, limit, &[])
 }
 
 /// [`load`] of a module as one of a release.
-fn load_earlier(wat: &str) -> aqr::Decoded<Box<dyn Loaded>> {
+fn load_earlier(wat: &str) -> aqr_archive::Decoded<Box<dyn Loaded>> {
     aqr_decompress::load_released(&module(wat))
 }
 
@@ -1859,7 +1870,7 @@ const MEMORIES: &str = r#"
     (import "aqr" "aqr_output0" (memory i64 0))
 "#;
 
-fn invalid<T>(r: aqr::Decoded<T>, what: &str) {
+fn invalid<T>(r: aqr_archive::Decoded<T>, what: &str) {
     match r {
         Err(Failure::Invalid(m)) => assert!(m.contains(what), "{m}"),
         Err(f) => panic!("{f:?}"),
@@ -1967,11 +1978,11 @@ fn part() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     struct Feed<'a>(&'a [u8], Arc<AtomicU64>, Option<Failure>);
-    impl aqr::PartIn for Feed<'_> {
+    impl aqr_archive::PartIn for Feed<'_> {
         fn len(&self) -> u64 {
             self.0.len() as u64
         }
-        fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr::Decoded<()> {
+        fn pull(&mut self, hi: u64, put: &mut dyn FnMut(&[u8])) -> aqr_archive::Decoded<()> {
             if let Some(f) = &self.2 {
                 return Err(f.clone());
             }
@@ -1982,8 +1993,8 @@ fn part() {
     }
     // (the bytes pushed, and how much of the input was pulled as the first were)
     struct Drain(Vec<u8>, Arc<AtomicU64>, Option<u64>);
-    impl aqr::PartOut for Drain {
-        fn push(&mut self, d: &[u8]) -> aqr::Decoded<()> {
+    impl aqr_archive::PartOut for Drain {
+        fn push(&mut self, d: &[u8]) -> aqr_archive::Decoded<()> {
             self.2.get_or_insert(self.1.load(Relaxed));
             self.0.extend_from_slice(d);
             Ok(())
@@ -2091,14 +2102,14 @@ fn unknown_module_runs() {
     let mut f = Formula::default();
     let a = f.push("a", b"hello".to_vec());
     f.root = Node::apply(REV, b"pp".to_vec(), vec![a], 5);
-    let enc =
-        Encoder::new(Level::Zstd(3)).with_modules(|m| (m == REV).then(|| aqr::Wasm::Bytes(WASM.get().unwrap().into())));
+    let enc = Encoder::new(Level::Zstd(3))
+        .with_modules(|m| (m == REV).then(|| aqr_archive::Wasm::Bytes(WASM.get().unwrap().into())));
     let c = enc.encode(&f, None).unwrap();
-    assert_eq!(aqr::decode(&c, &Native::default()).unwrap(), b"olleh");
+    assert_eq!(aqr_archive::decode(&c, &Native::default()).unwrap(), b"olleh");
     #[cfg(feature = "sandbox")]
     {
         let sandboxed = aqr_decompress::sandbox::Sandboxed { native: Native::default(), sandbox: &SANDBOX };
-        assert_eq!(aqr::decode(&c, &sandboxed).unwrap(), b"olleh");
+        assert_eq!(aqr_archive::decode(&c, &sandboxed).unwrap(), b"olleh");
     }
     assert!(Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).is_err());
 }
@@ -2720,13 +2731,13 @@ fn plan_holds_bounded(
     let bound = limit + plan.tasks.iter().sum::<u64>();
     aqr_decompress::record_applications(true);
     let out = match bounded {
-        true => aqr::decode(&c, &aqr_decompress::WasmBounded(bound)),
-        false => aqr::decode(&c, &Wasm),
+        true => aqr_archive::decode(&c, &aqr_decompress::WasmBounded(bound)),
+        false => aqr_archive::decode(&c, &Wasm),
     };
     let applied = aqr_decompress::record_applications(false);
     // (the same under a bound short of one unit of each class: a failure before anything starts)
     aqr_decompress::record_applications(true);
-    let short = bounded.then(|| aqr::decode(&c, &aqr_decompress::WasmBounded(bound - 1)));
+    let short = bounded.then(|| aqr_archive::decode(&c, &aqr_decompress::WasmBounded(bound - 1)));
     let kept = aqr_decompress::record_applications(false);
     drop(recording);
     assert!(out.as_ref().is_ok_and(|o| o == want), "{what}: {:?}", out.err());
@@ -5972,7 +5983,7 @@ fn jpeg_plans_hold() {
 #[test]
 fn git_plans_hold() {
     struct Git;
-    impl aqr_formula::Modules for Git {
+    impl aqr_archive::Modules for Git {
         fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
             aqr_git::formula::apply(a, inputs, 1).map_err(|e| aqr_formula::Error::new(e.to_string()))
         }
@@ -6107,7 +6118,7 @@ fn mca_plans_hold() {
     for (what, d) in files {
         let f = aqr_minecraft::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}"));
         let c = archive.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{what}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{what}");
         let w = decode_wasm(&c);
         assert!(w.as_ref().is_ok_and(|w| *w == d), "{what}: {:?}", w.err());
         plan_holds(&format!("mca {what}"), f, &d);
@@ -6576,7 +6587,7 @@ fn zstd_frames_plans_hold() {
         let (d, frames) = zstd_frames_file(n, big, 5 + n as u64);
         let f = aqr_zstd::formula::frames_in(&d, &frames, 3, aqr_formula::Kind::Table, 2).expect(what);
         let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{what}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == d, "{what}");
         plan_holds(&format!("zstd-frames {what}"), f, &d);
     }
 }
@@ -6601,7 +6612,7 @@ fn dh_lods_plans_hold() {
         let contents = g.eval(&Native::default()).unwrap();
         plan_holds(&format!("dh-lods {n}"), g, &contents);
         let c = Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == db, "{n}");
+        assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == db, "{n}");
         let w = decode_wasm(&c);
         assert!(w.as_ref().is_ok_and(|w| *w == db), "{n}: {:?}", w.err());
     }

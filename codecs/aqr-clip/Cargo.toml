@@ -20,10 +20,13 @@ aqr-psd = { path = "../aqr-psd", optional = true }
 aqr-raw = { path = "../aqr-raw", optional = true }
 aqr-sqlite = { path = "../aqr-sqlite", optional = true }
 
-# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
-# that names do not collide in the workspace's target directory.
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 
-[[bin]]
+# Tools are named <crate>-<tool> (the crate's own one, examples/aqr-clip.rs, after the crate),
+# so that names do not collide in the workspace's target directory.
+
+[[example]]
 name = "aqr-clip"
-path = "src/main.rs"
+path = "examples/aqr-clip.rs"
 required-features = ["encode"]

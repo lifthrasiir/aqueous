@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use aqr_archive::Evaluate;
 use aqr_vorbis::packet;
 use aqr_vorbis::setup::{Ident, Setup};
 use aqr_vorbis::setups::Setups;

@@ -1,5 +1,6 @@
 //! The whole way on an AVI made of real frames: the formula, evaluated by the module, gives the file back.
 //! The frames come from a corpus file named by AQR_DIV3_AVI (measurements only: the test is skipped without it).
+use aqr_archive::Evaluate;
 use aqr_div3::formula;
 
 fn chunk(id: &[u8; 4], d: &[u8]) -> Vec<u8> {

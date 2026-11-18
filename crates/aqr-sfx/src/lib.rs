@@ -12,10 +12,10 @@ mod native;
 #[cfg(windows)]
 pub mod resource;
 
+use aqr_archive::{Decoded, Failure, Loaded, Runner};
 use aqr_blob::interp::Interpreter;
 #[cfg(windows)]
 use aqr_blob::interp::Vtable;
-use aqr_formula::aqr::{Decoded, Failure, Loaded, Runner};
 #[cfg(windows)]
 use native::Fns;
 pub use native::native_name;
@@ -185,7 +185,7 @@ impl Sfx {
 
 use std::path::Path;
 
-use aqr_formula::aqr::{EntryNode, Value};
+use aqr_archive::{EntryNode, Value};
 
 /// Writes the files of `value` under `dest`, returning how many were written. Nothing there is
 /// written over or through: a file there already fails, and so does a link (or junction) where a
@@ -271,7 +271,7 @@ fn sanitized(name: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{extract, sanitized};
-    use aqr_formula::aqr::{Entry, EntryNode, Extra, Tree, Value};
+    use aqr_archive::{Entry, EntryNode, Extra, Tree, Value};
 
     /// A tree of a directory `sub` holding a file `x`.
     fn tree() -> Value {

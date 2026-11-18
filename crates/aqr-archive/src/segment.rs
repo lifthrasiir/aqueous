@@ -10,7 +10,7 @@
 //! nothing of what goes together. A batch is checked alone ([`Batch::standalone`]) before it is
 //! written: its blocks with the module and resource blocks before them make an archive of a
 //! single file, its leaves' outputs one after another. Its bytes are written as that archive
-//! from the first, in the store where one is set ([`crate::store::Writer`]), so that a batch of
+//! from the first, in the store where one is set ([`aqr_formula::store::Writer`]), so that a batch of
 //! gigabytes is not held on the heap.
 //!
 //! The blocks of a batch alike (of a class and kind of stream) may take a dictionary trained
@@ -28,7 +28,7 @@ use super::{
     CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, Out, STORED, SWAP, always_compressed, block, block_of,
     block_ranges, checksum_of, dictionary_block, dictionary_stand_in, footer, footer_with, formula_block, key_how,
 };
-use crate::{Bytes, Error, Formula, Module, Node, Resource, Result};
+use aqr_formula::{Bytes, Error, Formula, Module, Node, Resource, Result};
 
 /// The content of one or more files: outputs over the streams (and the applications of several
 /// outputs) of a formula.
@@ -157,7 +157,7 @@ impl Batch {
 /// The bytes of a batch being made, after the head of its archive alone ([`Batch::standalone`]),
 /// as [`Out`] counts them: from the first of its blocks.
 struct Blocks {
-    w: crate::store::Writer,
+    w: aqr_formula::store::Writer,
     front: usize,
     len: usize,
 }
@@ -528,7 +528,7 @@ impl SegmentWriter {
 
         let level = enc.base_level();
         let mut out =
-            Blocks { w: crate::store::Writer::new(None), front: HEADER_MAGIC.len() + self.prefix.len(), len: 0 };
+            Blocks { w: aqr_formula::store::Writer::new(None), front: HEADER_MAGIC.len() + self.prefix.len(), len: 0 };
         out.w.write(&HEADER_MAGIC);
         out.w.write(&self.prefix);
         let mut b = Batch {
@@ -655,7 +655,7 @@ impl SegmentWriter {
         b.end = b.front + out.len;
         footer(out, b.end - HEADER_MAGIC.len());
         // (one on the heap kept there, not copied to the store)
-        b.archive = std::mem::replace(&mut out.w, crate::store::Writer::new(Some(0))).into_bytes_in_place();
+        b.archive = std::mem::replace(&mut out.w, aqr_formula::store::Writer::new(Some(0))).into_bytes_in_place();
         Ok(b)
     }
 
@@ -1004,7 +1004,7 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
         resources: Vec::new(),
         module_bytes: Vec::new(),
     };
-    fn note(u: &mut Uses, a: &crate::Apply) {
+    fn note(u: &mut Uses, a: &aqr_formula::Apply) {
         if !u.modules.contains(&a.module) {
             u.modules.push(a.module);
         }
@@ -1047,7 +1047,7 @@ mod tests {
         open_indexed, open_indexed_upto, open_upto,
     };
     use super::*;
-    use crate::{Apply, Kind};
+    use aqr_formula::{Apply, Kind};
     use tree::{Entry, EntryNode, Extra, Time};
 
     fn entry(parent: Option<usize>, name: &str, node: EntryNode) -> Entry {
@@ -1211,12 +1211,12 @@ mod tests {
         let a = f.push("a", b"hello".to_vec());
         let enc = Encoder::new(Level::Zstd(3));
         let block_of = |m| -> std::sync::Arc<[u8]> {
-            let w = crate::aqr::stand_in(m);
-            crate::aqr::always_compressed(&mut zstd::zstd_safe::CCtx::create(), &[&w], 3, 1).unwrap().into()
+            let w = crate::stand_in(m);
+            crate::always_compressed(&mut zstd::zstd_safe::CCtx::create(), &[&w], 3, 1).unwrap().into()
         };
         let (rev, cut) = (block_of(REV), block_of(CUT));
-        let stored = crate::aqr::always_compressed(&mut zstd::zstd_safe::CCtx::create(), &[b"model"], 3, 1).unwrap();
-        let r = Resource::stored(stored.clone()).unwrap();
+        let stored = crate::always_compressed(&mut zstd::zstd_safe::CCtx::create(), &[b"model"], 3, 1).unwrap();
+        let r = crate::stored_resource(stored.clone()).unwrap();
         let leaves = vec![
             Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![a.clone()], 5)], sums: vec![None] },
             Leaf {
@@ -1356,7 +1356,7 @@ mod tests {
             params: vec![],
             inputs: vec![solid(2, 6)],
             len: 0,
-            memory_limit: crate::NO_LIMIT,
+            memory_limit: aqr_formula::NO_LIMIT,
             task_limits: Vec::new(),
         };
         let outs = f.share(cut, vec![2, 4]);

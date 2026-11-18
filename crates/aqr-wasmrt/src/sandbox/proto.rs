@@ -10,7 +10,7 @@
 
 use std::io::{self, Read, Write};
 
-use aqr_formula::aqr::Failure;
+use aqr_archive::Failure;
 
 /// The first bytes each way: the decoder's (then the threads of the worker), and the worker's
 /// once it is locked down.

@@ -1,6 +1,7 @@
 //! PDB files made here (an MSF container of a DBI stream and modules' streams of symbol records),
 //! rebuilt by `pdb-msf` and `pdb-symbols`.
 
+use aqr_archive::Evaluate;
 use aqr_pdb::{msf, symbols};
 
 /// A record of `kind` and `payload`, padded to 4 bytes with `pad`.
@@ -255,7 +256,7 @@ fn formula() {
 /// The modules of this crate, natively.
 struct Native;
 
-impl aqr_formula::Modules for Native {
+impl aqr_archive::Modules for Native {
     fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
         let r = if a.module == aqr_pdb::formula::MODULE {
             aqr_pdb::formula::decode(&a.params, inputs, a.len)

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Regenerates crates/aqr-formula/src/released.rs: the SHA-512/256 of the modules of the releases
+# Regenerates crates/aqr-archive/src/released.rs: the SHA-512/256 of the modules of the releases
 # that are no longer in crates/aqr-modules/src/known.rs. A decoder accepts the earlier Apply
 # instruction (opcode 11, reserved) only for these modules.
 #
@@ -14,7 +14,7 @@ cd "${0:A:h}/.."
 #   its modules were in aqr-modules/ at the root.
 revs=(9e9476c2 v0.0.20261031 v0.0.20261101 v0.0.20261105 v0.0.20261110)
 
-out=crates/aqr-formula/src/released.rs
+out=crates/aqr-archive/src/released.rs
 now=$(mktemp)
 rows=$(mktemp)
 trap 'rm -f $now $rows' EXIT

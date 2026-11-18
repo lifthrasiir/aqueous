@@ -1,6 +1,7 @@
 //! HDF5 files through the formula (fixtures that h5py wrote of synthetic data: `tests/data`),
 //! evaluated back through aqr-flate's module; corrupted inputs.
 
+use aqr_archive::Evaluate;
 use aqr_hdf5::formula::{self, Options};
 use aqr_hdf5::hdf5;
 

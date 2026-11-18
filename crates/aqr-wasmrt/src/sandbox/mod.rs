@@ -29,8 +29,8 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use aqr_archive::{Failure, Loaded, Runner};
 use aqr_formula::Resource;
-use aqr_formula::aqr::{self, Failure, Loaded, Runner};
 use sha2::{Digest, Sha512_256};
 
 use proto::*;
@@ -128,7 +128,10 @@ impl Sandbox {
     }
 
     /// `f` on an idle worker, or one started; the worker kept unless it failed.
-    fn with_worker<T>(&self, f: impl FnOnce(&mut Worker) -> io::Result<aqr::Decoded<T>>) -> aqr::Decoded<T> {
+    fn with_worker<T>(
+        &self,
+        f: impl FnOnce(&mut Worker) -> io::Result<aqr_archive::Decoded<T>>,
+    ) -> aqr_archive::Decoded<T> {
         let idle = self.idle.lock().unwrap().pop();
         let mut w = match idle {
             Some(w) => w,
@@ -153,7 +156,7 @@ impl Sandbox {
 
     /// What a worker found it could do, for the tests: [`worker::probe`] of `path` and `port`.
     #[doc(hidden)]
-    pub fn probe(&self, path: &str, port: u16) -> aqr::Decoded<Vec<String>> {
+    pub fn probe(&self, path: &str, port: u16) -> aqr_archive::Decoded<Vec<String>> {
         self.with_worker(|w| {
             put_u8(&mut w.to, PROBE)?;
             put_bytes(&mut w.to, path.as_bytes())?;
@@ -172,7 +175,7 @@ impl Sandbox {
 /// Every module run as WebAssembly in a worker, whether known or not, as
 /// [`wasm::load`](crate::wasm::load) runs it in this process.
 impl Runner for Sandbox {
-    fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
+    fn load(&self, wasm: &[u8]) -> aqr_archive::Decoded<Box<dyn Loaded + '_>> {
         let hash: [u8; 32] = Sha512_256::digest(wasm).into();
         let wasm: Arc<[u8]> = wasm.into();
         if !self.valid.lock().unwrap().contains(&hash) {
@@ -180,7 +183,7 @@ impl Runner for Sandbox {
             self.valid.lock().unwrap().insert(hash);
         }
         // (the module is valid: the worker loaded it)
-        let slots = aqr::class_slots(&wasm).into_iter().map(|s| s as usize).collect();
+        let slots = aqr_archive::class_slots(&wasm).into_iter().map(|s| s as usize).collect();
         Ok(Box::new(Remote { sandbox: self, hash, wasm, slots }))
     }
 }
@@ -203,7 +206,7 @@ impl Loaded for Remote<'_> {
         sizes: &[u64],
         memory_limit: u64,
         task_limits: &[u64],
-    ) -> aqr::Decoded<Vec<Vec<u8>>> {
+    ) -> aqr_archive::Decoded<Vec<Vec<u8>>> {
         // (the concurrency chosen here)
         let concurrency = crate::wasm::choose_concurrency(
             &self.slots,
@@ -262,7 +265,7 @@ impl Worker {
         }
     }
 
-    fn load(&mut self, hash: [u8; 32], wasm: &[u8]) -> io::Result<aqr::Decoded<()>> {
+    fn load(&mut self, hash: [u8; 32], wasm: &[u8]) -> io::Result<aqr_archive::Decoded<()>> {
         self.child.limit_memory((OVERHEAD.get() as u64).saturating_add(4 * wasm.len() as u64))?;
         put_u8(&mut self.to, LOAD)?;
         self.to.write_all(&hash)?;
@@ -283,7 +286,7 @@ impl Worker {
         inputs: &[&[u8]],
         sizes: &[u64],
         b: crate::wasm::Bounds,
-    ) -> io::Result<aqr::Decoded<Vec<Vec<u8>>>> {
+    ) -> io::Result<aqr_archive::Decoded<Vec<Vec<u8>>>> {
         let crate::wasm::Bounds { memory_limit, task_limits, concurrency } = b;
         // (the worker's memory bound: its tasks' at the concurrency chosen)
         let bound = crate::wasm::application_bound(

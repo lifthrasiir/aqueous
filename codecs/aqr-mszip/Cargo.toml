@@ -18,6 +18,7 @@ aqr-lzx = { path = "../aqr-lzx", default-features = false }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-decompress = { path = "../../crates/aqr-decompress" }
 aqr-flate = { path = "../aqr-flate" }
 aqr-lzx = { path = "../aqr-lzx" }

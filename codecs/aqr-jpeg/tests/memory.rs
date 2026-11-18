@@ -2,6 +2,7 @@
 //! stripe at a time, so memory must not follow the pixels. (A test binary of its own: the
 //! allocator counts every thread.)
 
+use aqr_archive::Evaluate;
 use aqr_common::mem::{Counting, peak};
 use aqr_formula::Apply;
 use aqr_jpeg::formula::{self, MODULE};

@@ -6,7 +6,7 @@ is 100 MB/s single-threaded on an Apple M4, both ways. A small rANS coder is the
 backend of the value streams; the archive (aqr-formula) compresses the other streams.
 
 ```sh
-cargo build --release
+cargo build --release --example aqr-obj   # target/release/examples/aqr-obj
 aqr-obj bench [-n ITERS] [-B BLOCK] [-x] [-t N] [-c|-d] [-v] FILE...   # archive size, round trip check, throughput
 aqr-obj stats FILE...                                  # line templates and lines kept as text
 aqr-obj fuzz [-n N] [-s SEED] FILE...                  # mutated files
@@ -47,7 +47,7 @@ included) over the input size.
 The files are taken as for every crate (`docs/file-formats.md`), files over 300 MB left out.
 Memory, with one process per file, is 24 MB + 3.1× the file (a linear fit).
 `aqr-obj bench` reports the size of an archive of the formula (`formula::encode`,
-then `aqr_formula::aqr::encode`) and the speed of making and decoding it. The other
+then `aqr_archive::encode`) and the speed of making and decoding it. The other
 compressors' sizes per file are cached by `scripts/baseline.sh`.
 
 ### Threads and portions
@@ -209,7 +209,7 @@ The format is specified in [FORMAT.md](FORMAT.md).
 
 ```sh
 cargo test --release
-../../target/release/aqr-obj fuzz -n 200 $(find corpus -name '*.obj' -size -5M)
+../../target/release/examples/aqr-obj fuzz -n 200 $(find corpus -name '*.obj' -size -5M)
 ```
 
 - `tests/roundtrip.rs`: edge cases (no line end, CRLF, tabs, odd numbers, relative

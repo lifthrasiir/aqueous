@@ -1,4 +1,4 @@
-//! The order formulas are sealed into the sink in (`aqr_formula::aqr::sink`,
+//! The order formulas are sealed into the sink in (`aqr_archive::sink`,
 //! `docs/streaming-encoder-design.md`): that of the contents, depth first, whatever the threads,
 //! as the archive's bytes depend on it. Each content made apart has a slot ([`Order::slots`])
 //! under that of the formula it is of; a slot's job (sealing the content's formula, what of it
@@ -8,8 +8,8 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 
+use aqr_archive::sink::{self, Ready, Sunk};
 use aqr_formula::Result;
-use aqr_formula::aqr::sink::{self, Ready, Sunk};
 
 use crate::choose::Settled;
 
@@ -207,7 +207,7 @@ mod tests {
     /// panic too.
     #[test]
     fn panicking_job_wakes_waiters() {
-        let enc = aqr_formula::aqr::Encoder::new(aqr_formula::aqr::Level::Zstd(1));
+        let enc = aqr_archive::Encoder::new(aqr_archive::Level::Zstd(1));
         let order = Arc::new(Order::new(sink::Sink::new(&enc, 1 << 10)));
         let slots = order.slots(ROOT, 2);
         let (told, heard) = std::sync::mpsc::channel();

@@ -429,7 +429,7 @@ fn repairs_encrypted() {
 /// testing those of the mirror blocks.
 #[test]
 fn differing_mirror_fails_test() {
-    use aqr_formula::aqr::mirror;
+    use aqr_archive::mirror;
     let d = scratch("differing");
     let want = source(&d);
     aqr_in(&d, &["-q", "-A", "-o", "a.aqr", "src"]);

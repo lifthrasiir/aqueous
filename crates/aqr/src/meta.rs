@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::Arc;
 
-use aqr_formula::aqr::{EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, WIN_ATTRS_ALLOWED};
+use aqr_archive::{EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, WIN_ATTRS_ALLOWED};
 
 /// The name of the resource fork of macOS among forks (spec, "forks").
 #[cfg(target_os = "macos")]
@@ -558,7 +558,7 @@ mod os {
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
 
-    use aqr_formula::aqr::{EntryNode, Extra, Time};
+    use aqr_archive::{EntryNode, Extra, Time};
 
     use super::Kind;
 
@@ -875,7 +875,7 @@ mod os {
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
 
-    use aqr_formula::aqr::{EntryNode, Extra, Time};
+    use aqr_archive::{EntryNode, Extra, Time};
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,

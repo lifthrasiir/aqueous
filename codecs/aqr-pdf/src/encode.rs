@@ -22,7 +22,7 @@ use crate::standard::{self, Standard};
 use crate::tok;
 use crate::varint;
 use aqr_flate::inflate::{self, Layout};
-use aqr_formula::{Formula, Kind, Node};
+use aqr_formula::{Apply, Formula, Kind, Node};
 
 aqr_common::zopt_namespace!("pdf", "PDF files (aqr-pdf)");
 
@@ -31,8 +31,8 @@ aqr_common::zopt! {
     static MIN_ITEM: Opt<usize> = Opt::size("pdf:min-item", 64, "streams shorter stay in the skeleton");
     /// Default of [`Options::speed`]: the target speed in MB/s of PDF (none: no limit).
     static SPEED: Opt<Option<f64>> = Opt::value("pdf:speed", Some(100.0), "target speed in MB/s of PDF, none: no limit").off(None);
-    /// Default of [`Options::verify`].
-    static VERIFY: Opt<bool> = Opt::flag("pdf:verify", false, "evaluate the formula and compare");
+    /// Whether [`Options::verify`] is given, by whoever evaluates formulas (aqr-compress).
+    pub static VERIFY: Opt<bool> = Opt::flag("pdf:verify", false, "evaluate the formula and compare");
     /// Default of [`Options::level`].
     static LEVEL: Opt<i32> = Opt::value("pdf:level", 9, "zstd level to judge whether the formula is smaller");
     /// Default of [`Options::tok`].
@@ -47,15 +47,20 @@ aqr_common::zopt! {
     static IN_FLIGHT: Opt<usize> = Opt::size("pdf:in-flight", 256 << 20, "estimated memory of the pipeline's jobs in flight");
 }
 
+/// The evaluation of a formula, its modules run by the function given: aqr-archive's
+/// `Evaluate::eval`, for [`Options::verify`].
+pub type Eval =
+    fn(&Formula, &(dyn Fn(&Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> + Sync)) -> aqr_formula::Result<Vec<u8>>;
+
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Target speed in MB/s of PDF, both ways, on one thread: coding that would not fit the
     /// time this gives is skipped (by estimates, so the output does not depend on timing).
     /// Infinite: no limit.
     pub speed: f64,
-    /// Evaluate the formula and compare; on a mismatch, code the file again without the
-    /// models (tokens, full, PNG).
-    pub verify: bool,
+    /// Evaluate the formula by this and compare; on a mismatch, code the file again without
+    /// the models (tokens, full, PNG).
+    pub verify: Option<Eval>,
     /// zstd level the table, the skeleton and the pools are measured at, for judging whether
     /// the formula is smaller than the file.
     pub level: i32,
@@ -77,7 +82,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             speed: SPEED.get().unwrap_or(f64::INFINITY),
-            verify: VERIFY.get(),
+            verify: None,
             level: LEVEL.get(),
             tok: ALLOW_TOK.get(),
             full: ALLOW_FULL.get(),

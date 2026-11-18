@@ -1,6 +1,7 @@
 //! xna_xnb on files written here from XNA's content format: textures (Color and DXT1, with
 //! mipmaps), a sprite font's texture, a sound's samples; their formulas given back.
 
+use aqr_archive::Evaluate;
 use aqr_bundle::packs::unity_assets::{Pixels, Raw};
 use aqr_bundle::packs::xna_xnb::{Asset, asset, encode_with, files, starts};
 

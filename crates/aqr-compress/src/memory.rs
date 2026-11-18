@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use aqr_formula::{Apply, Contents, Formula, Module, Modules, NO_LIMIT, Node, Plan};
+use aqr_archive::Evaluate;
+use aqr_archive::Modules;
+use aqr_formula::{Apply, Contents, Formula, Module, NO_LIMIT, Node, Plan};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is but for its inputs' bytes: its module, parameters, resources'

@@ -1,6 +1,7 @@
 //! FITS files through the formula: images, and tile-compressed images that fpack made (of
 //! synthetic images: `tests/data`), evaluated back through the modules; corrupted inputs.
 
+use aqr_archive::Evaluate;
 use aqr_fits::formula::{self, IMAGE, RICE, TABLE};
 use aqr_formula::{Apply, Formula, Module};
 

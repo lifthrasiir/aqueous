@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use aqr_alz::{alz, formula};
+use aqr_archive::Evaluate;
 use aqr_formula::Apply;
 
 fn walk(p: &Path, out: &mut Vec<PathBuf>) {

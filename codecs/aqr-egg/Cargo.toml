@@ -19,3 +19,6 @@ aqr-azo = { path = "../aqr-azo" }
 [[example]]
 name = "aqr-egg-check"
 path = "examples/check.rs"
+
+[dev-dependencies]
+aqr-archive = { path = "../../crates/aqr-archive" }

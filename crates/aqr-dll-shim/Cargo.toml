@@ -9,6 +9,7 @@ publish = false
 aqr-api = { path = "../aqr-api", default-features = false }
 aqr-decompress = { path = "../aqr-decompress" }
 aqr-formula = { path = "../aqr-formula" }
+aqr-archive = { path = "../aqr-archive" }
 aqr-modules = { path = "../aqr-modules" }
 sha2 = "0.10"
 

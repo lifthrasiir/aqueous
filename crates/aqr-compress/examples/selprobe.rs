@@ -5,8 +5,8 @@
 
 use std::time::Instant;
 
+use aqr_archive::{Encoder, Level};
 use aqr_formula::Formula;
-use aqr_formula::aqr::{Encoder, Level};
 
 fn z(f: &Formula) -> usize {
     f.streams.iter().map(|s| zstd::bulk::compress(&s.data, 3).map_or(s.data.len(), |c| c.len())).sum()

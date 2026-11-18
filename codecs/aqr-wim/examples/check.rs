@@ -6,6 +6,7 @@
 //! cargo run --release -p aqr-wim --example aqr-wim-check -- FILE [OFFSET LEN]
 //! ```
 
+use aqr_archive::Evaluate;
 use std::time::Instant;
 
 fn main() {

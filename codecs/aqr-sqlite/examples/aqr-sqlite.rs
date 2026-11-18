@@ -1,4 +1,4 @@
-use aqr_formula::aqr::{self, Level};
+use aqr_archive::Level;
 use aqr_formula::{Apply, Error, Formula, Node};
 use aqr_sqlite::formula::{self, MODULE, Options};
 use aqr_sqlite::mem::{Counting, PEAK, peak_reset};
@@ -6,6 +6,7 @@ use aqr_sqlite::transform::{NSTREAMS, STREAM_NAMES};
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
+use aqr_archive::Evaluate;
 use std::sync::atomic::Ordering::Relaxed;
 
 /// Seconds: the thread's CPU time with one thread, wall time with more.
@@ -32,7 +33,7 @@ fn eval(f: &Formula, threads: usize) -> Result<Vec<u8>, Error> {
 /// The file in archive `c`, if it decodes.
 fn unpack(c: &[u8], threads: usize) -> Option<Vec<u8>> {
     let m = |a: &Apply, inputs: &[&[u8]]| apply(a, inputs, threads);
-    aqr::decode(c, &aqr::natives(&[MODULE], &m)).ok()
+    aqr_archive::decode(c, &aqr_archive::natives(&[MODULE], &m)).ok()
 }
 
 fn usage() -> ! {
@@ -56,7 +57,7 @@ fn main() {
 fn pack(src: &[u8], opt: &Options) -> Option<(Vec<u8>, Vec<usize>)> {
     let f = formula::encode_with(src, opt)?;
     let raw = f.streams.iter().map(|s| s.data.len()).collect();
-    Some((aqr::encode(&f, Some(aqr::checksum(src)), Level::MID).expect("archive"), raw))
+    Some((aqr_archive::encode(&f, Some(aqr_archive::checksum(src)), Level::MID).expect("archive"), raw))
 }
 
 fn bench(args: &[String]) {

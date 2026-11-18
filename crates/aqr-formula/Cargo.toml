@@ -2,18 +2,10 @@
 name = "aqr-formula"
 version = "0.1.0"
 edition = "2024"
-description = "Entry formulas: what a recompressor makes of a file, as slices, concatenations and module applications over extracted streams, and as Aqueous archives"
+description = "Entry formulas: what a recompressor makes of a file, as slices, concatenations and module applications over extracted streams"
 publish = false
 
 [dependencies]
-crc-fast = { version = "1.10", default-features = false, features = ["std"] }
 aqr-common = { path = "../aqr-common" }
-chacha20 = "0.9"
-chacha20poly1305 = { version = "0.10", default-features = false }
-getrandom = "0.4"
-hkdf = "0.12"
-hmac = "0.12"
-scrypt = { version = "0.11", default-features = false }
-sha2 = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
-zstd = { workspace = true, features = ["zstdmt", "experimental", "zdict_builder"] }
+zstd = { workspace = true }

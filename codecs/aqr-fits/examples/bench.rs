@@ -2,6 +2,7 @@
 //! (streams of the model as they are, others through zstd at `LEVEL`, 19 by default), against
 //! the file through zstd alone, and the time of each way.
 
+use aqr_archive::Evaluate;
 use aqr_fits::formula::{self, IMAGE, RICE, TABLE};
 use aqr_formula::{Apply, Formula, Kind};
 use std::time::Instant;

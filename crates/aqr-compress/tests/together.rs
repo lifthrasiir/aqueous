@@ -10,9 +10,7 @@ mod common;
 fn files_given_back() {
     aqr_common::zopt::apply(&["together:always"]).unwrap();
     let r = common::files_given_back();
-    let together = r
-        .solid
-        .iter()
-        .any(|s| s.class == aqr_formula::aqr::TOGETHER && [1, 2, 8].iter().all(|c| s.contents.contains(c)));
+    let together =
+        r.solid.iter().any(|s| s.class == aqr_archive::TOGETHER && [1, 2, 8].iter().all(|c| s.contents.contains(c)));
     assert!(together, "{:?}", r.solid);
 }
