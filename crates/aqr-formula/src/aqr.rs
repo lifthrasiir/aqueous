@@ -3139,6 +3139,8 @@ pub struct Archive<'c, 'n> {
     items: Vec<Option<usize>>,
     /// Whether the pages of the blocks are let go of as they are read ([`Archive::let_go_read`]).
     let_go: bool,
+    /// The payload decrypted as its data blocks are read, where it is ([`open_decrypting`]).
+    sealed: Option<&'c envelope::Decrypting<'c>>,
 }
 
 /// A journal point of an archive (spec, "`journal`"): the state after a segment, named by a time
@@ -3308,7 +3310,37 @@ fn open_indexed_with<'c, 'n>(
         tell: None,
         items: Vec::new(),
         let_go: false,
+        sealed: None,
     })
+}
+
+/// The payload `d` of an encrypted archive (decrypted as it is read) opened as [`open_payload`]
+/// opens it whole, but decrypting at first only what tells where the blocks are and what they
+/// are: every block but the data blocks, and of those their heads, the start and the end of
+/// their data. A data block is decrypted as it is read in evaluating (the leaves, as
+/// [`Archive::write_file`] and [`Archive::hashed`] evaluate them), and let go of once read,
+/// decrypted again where it is read again: not all of the payload in memory at once.
+pub fn open_decrypting<'c, 'n>(d: &'c envelope::Decrypting<'c>, runner: &'n dyn Runner) -> Decoded<Archive<'c, 'n>> {
+    let p = Payload::Sealed(d);
+    let (_, archive_end, _, _) = footer_fields(p)?;
+    let mut at = HEADER_MAGIC.len();
+    while at < archive_end {
+        let (ty, data, next) = index::frame_at(p, at, archive_end)?;
+        if matches!(ty, 0x20..=0x37 | 0x40..=0x4b) {
+            // (a dictionary's index, a frame's header, a checksum)
+            const ENDS: usize = 64;
+            p.get(data.start..data.end.min(data.start + ENDS))?;
+            p.get(data.end.saturating_sub(ENDS).max(data.start)..data.end)?;
+        } else {
+            p.get(data)?;
+        }
+        at = next;
+    }
+    // SAFETY: what is read of the payload but data blocks is got above; a data block is got as it
+    // is read (`Contents::ensure`), and let go of after (`Contents::read`)
+    let mut a = open_as(unsafe { d.unread() }, runner, true)?;
+    a.sealed = Some(d);
+    Ok(a)
 }
 
 /// [`open`] of an archive, the payload of an encrypted one where `sealed`.
@@ -3339,6 +3371,7 @@ fn open_with<'c, 'n>(
         tell: None,
         items: Vec::new(),
         let_go: false,
+        sealed: None,
     })
 }
 
@@ -3686,11 +3719,13 @@ impl<'c, 'n> Archive<'c, 'n> {
             dictionaries: &blocks.dictionaries,
             tally: &tally,
             let_go: self.let_go,
+            sealed: self.sealed,
         };
         let mut out = Vec::new();
         for (leaf, p) in blocks.leaves.iter().zip(&programs) {
             out.push(match (leaf, p) {
                 (&LeafBlock::Stored(raw, zstd, checked, dict), _) => {
+                    contents.ensure(raw)?;
                     let d = decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d]))?;
                     contents.read(raw);
                     Some(vec![(Ch::of(&d), Vec::new())])
@@ -3865,6 +3900,7 @@ impl<'c, 'n> Archive<'c, 'n> {
             dictionaries: &blocks.dictionaries,
             tally: &tally,
             let_go: self.let_go,
+            sealed: self.sealed,
         };
         let weights: Vec<u64> = picked.iter().map(|&i| weights[i]).collect();
         let gate = Gate::new(self.budget, &weights, order);
@@ -3889,7 +3925,9 @@ impl<'c, 'n> Archive<'c, 'n> {
                     LeafBlock::Bad(ref e) => Err(e.clone()),
                     LeafBlock::Unread => unreachable!("a leaf taken"),
                     LeafBlock::Stored(raw, zstd, checked, dict) => {
-                        let d = decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d]));
+                        let d = contents
+                            .ensure(raw)
+                            .and_then(|()| decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d])));
                         contents.read(raw);
                         tally.add(raw.len() as u64, 0);
                         d.map(|d| vec![d])
@@ -5045,6 +5083,8 @@ struct Contents<'c, 't> {
     tally: &'t Tally<'t>,
     /// Whether the pages of a block are let go of once it is read ([`Archive::let_go_read`]).
     let_go: bool,
+    /// The payload decrypted as the blocks are read, and let go of once read ([`open_decrypting`]).
+    sealed: Option<&'c envelope::Decrypting<'c>>,
 }
 
 /// A value under a lock with a condition variable of its own: one condition variable waited on
@@ -5114,6 +5154,7 @@ impl<'c> Contents<'c, '_> {
             s = self.data[o].wait(s).unwrap();
         }
         if let Slot::Raw(d, zstd, dict) = *s {
+            self.ensure(d)?;
             let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
             self.tally.add(d.len() as u64, 0);
             *s = Slot::Decoded(Arc::new(decoded?));
@@ -5129,7 +5170,7 @@ impl<'c> Contents<'c, '_> {
     /// is not decoded yet: checked, and let go of as read, not copied. None for any other.
     fn stored(&self, o: usize) -> Option<Decoded<&'c [u8]>> {
         let Slot::Raw(d, false, _) = *self.data[o].lock().unwrap() else { return None };
-        let d = stored_checked(d);
+        let d = self.ensure(d).and_then(|()| stored_checked(d));
         if let Ok(d) = d {
             self.tally.add(d.len() as u64, 0);
         }
@@ -5143,7 +5184,7 @@ impl<'c> Contents<'c, '_> {
         let Slot::Raw(d, zstd, dict) = *s else { return };
         *s = Slot::Ahead;
         drop(s);
-        let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
+        let decoded = self.ensure(d).and_then(|()| decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d])));
         let mut s = self.data[o].lock().unwrap();
         *s = match decoded {
             Ok(b) => {
@@ -5158,11 +5199,26 @@ impl<'c> Contents<'c, '_> {
     }
 
     /// Block `d` of the archive read (decoded), not to be read again: its pages let go of where
-    /// they are to be ([`Archive::let_go_read`]).
+    /// they are to be ([`Archive::let_go_read`]), or its chunks decrypted ([`open_decrypting`]).
     fn read(&self, d: &[u8]) {
         if self.let_go {
             // SAFETY: of the archive, a file mapped read only (as `let_go_read` was told)
             unsafe { aqr_common::pages::let_go(d.as_ptr(), d.len()) };
+        }
+        if let Some(p) = self.sealed
+            && let Some(r) = p.range_of(d)
+        {
+            // SAFETY: the block read, its bytes not used again (got again where it is read again)
+            unsafe { p.release(r) };
+        }
+    }
+
+    /// Block `d` of the archive to be read: its chunks decrypted where the payload is decrypted
+    /// as it is read ([`open_decrypting`]); invalid where they do not authenticate.
+    fn ensure(&self, d: &[u8]) -> Decoded<()> {
+        match self.sealed.zip(self.sealed.and_then(|p| p.range_of(d))) {
+            Some((p, r)) => p.get(r).map(|_| ()),
+            None => Ok(()),
         }
     }
 

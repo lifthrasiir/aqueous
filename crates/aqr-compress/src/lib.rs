@@ -786,6 +786,43 @@ pub trait Sink: Write {
         let _ = len;
         Ok(())
     }
+
+    /// Where the archive written so far is an encrypted one: what reads it back, decrypting its
+    /// payload as it is read ([`aqr::open_decrypting`]) rather than all of it ([`Sink::written`]).
+    fn sealed_back(&mut self) -> io::Result<Option<SealedBack>> {
+        Ok(None)
+    }
+}
+
+/// An encrypted archive written ([`Sink::sealed_back`]): its file mapped, and what unseals it.
+pub struct SealedBack {
+    map: memmap2::Mmap,
+    opener: aqr::envelope::Opener,
+}
+
+/// An archive written, read back to be verified: its bytes (a file mapped, read only, where
+/// `mapped`: [`Sink::mapped`]), or an encrypted archive's payload decrypted as it is read.
+#[derive(Clone, Copy)]
+enum Back<'a> {
+    Plain(&'a [u8], bool),
+    Sealed(&'a aqr::envelope::Decrypting<'a>),
+}
+
+impl<'a> Back<'a> {
+    /// The archive opened, its pages (or chunks decrypted) let go of as its blocks are read.
+    fn open<'n>(self, runner: &'n dyn aqr::Runner) -> aqr::Decoded<aqr::Archive<'a, 'n>> {
+        match self {
+            Back::Plain(c, mapped) => {
+                let mut a = aqr::open(c, runner)?;
+                if mapped {
+                    // SAFETY: the archive's file mapped read only ([`Sink::mapped`])
+                    unsafe { a.let_go_read() };
+                }
+                Ok(a)
+            }
+            Back::Sealed(d) => aqr::open_decrypting(d, runner),
+        }
+    }
 }
 
 /// An archive written at offsets ([`Sink::place`]): a file, or the payload of an encrypted
@@ -890,10 +927,15 @@ impl<S: Sink + ?Sized> Sink for aqr::Mirroring<&mut S> {
     fn mapped(&self) -> bool {
         self.get_ref().mapped()
     }
+
+    fn sealed_back(&mut self) -> io::Result<Option<SealedBack>> {
+        self.get_mut().sealed_back()
+    }
 }
 
 /// An encrypted archive being written to a file, read back decrypted (into memory not backed
-/// by a file, so that nothing decrypted is written out).
+/// by a file, so that nothing decrypted is written out), the pages of the file let go of as
+/// they are decrypted.
 impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::envelope::Sealer<F> {
     fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>> {
         self.finish()?;
@@ -901,7 +943,9 @@ impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::env
         let c = unsafe { memmap2::Mmap::map(std::borrow::Borrow::<std::fs::File>::borrow(self.get_ref()))? };
         let u = self.unseal(&c).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let mut d = memmap2::MmapMut::map_anon(u.len().max(1))?;
-        u.decrypt_into(&mut d[..u.len()], aqr_common::pool::size())
+        // SAFETY: of the file mapped read only above
+        let read = |c: &[u8]| unsafe { aqr_common::pages::let_go(c.as_ptr(), c.len()) };
+        u.decrypt_into_then(&mut d[..u.len()], aqr_common::pool::size(), &read)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         Ok(Box::new(d.make_read_only()?))
     }
@@ -920,6 +964,13 @@ impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::env
 
     fn placed(&mut self, len: u64) -> io::Result<()> {
         aqr::envelope::Sealer::placed(self, len)
+    }
+
+    fn sealed_back(&mut self) -> io::Result<Option<SealedBack>> {
+        self.finish()?;
+        // SAFETY: as of a file above
+        let map = unsafe { memmap2::Mmap::map(std::borrow::Borrow::<std::fs::File>::borrow(self.get_ref()))? };
+        Ok(Some(SealedBack { map, opener: self.opener() }))
     }
 }
 
@@ -1122,7 +1173,7 @@ fn finish(
     // resident by the end; not where it is decrypted into memory of its own)
     let mapped = out.mapped();
     let memo = std::cell::RefCell::new(memo);
-    let decodes = |c: &[u8]| {
+    let decodes = |c: Back| {
         let _s = aqr_common::trace::span("verify");
         let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
         let m = verify::Cached::new(Native { threads: opt.threads }, std::mem::take(&mut *memo.borrow_mut()), &files);
@@ -1132,11 +1183,7 @@ fn finish(
         // (the bytes compared let go of as it goes, [`LET_GO`] at a time, where `d` is a file mapped)
         let (mut at, mut gone) = (0, 0);
         let let_go = LET_GO.get();
-        let decodes = aqr::open(c, &runner).is_ok_and(|mut a| {
-            if mapped {
-                // SAFETY: the archive's file mapped read only ([`Sink::mapped`])
-                unsafe { a.let_go_read() };
-            }
+        let decodes = c.open(&runner).is_ok_and(|a| {
             let written = a.write_file(opt.threads, &mut |p: &[u8]| {
                 let same = d.get(at..at + p.len()) == Some(p);
                 at += p.len();
@@ -1153,12 +1200,22 @@ fn finish(
         decodes
     };
     // by the hashes recorded, without running a module; else decoded
-    let verified = |c: &[u8]| match hashed(c, d, Some(&read), &memo, opt, mapped) {
+    let verified = |c: Back| match hashed(c, d, Some(&read), &memo, opt) {
         Some(same) => same,
         None => decodes(c),
     };
+    // (an encrypted archive's payload decrypted as its blocks are read, its file's pages let go
+    // of as they are decrypted: not all of it in memory, nor its file resident, at once)
+    let verified_out = |out: &mut dyn Sink| -> io::Result<bool> {
+        let Some(b) = out.sealed_back()? else { return Ok(verified(Back::Plain(&out.written()?, mapped))) };
+        let Ok(u) = b.opener.unseal(&b.map) else { return Ok(false) };
+        let mut p = u.decrypting();
+        // SAFETY: of the archive's file mapped read only
+        unsafe { p.let_go_read() };
+        Ok(verified(Back::Sealed(&p)))
+    };
     let r = match n {
-        Ok(n) if !opt.verify || verified(&out.written()?) => (n, f),
+        Ok(n) if !opt.verify || verified_out(out)? => (n, f),
         // a leaf of other bytes than `d` is not encoded with its checksum
         _ => {
             out.restart()?;
@@ -1297,22 +1354,17 @@ fn through_len() -> usize {
 /// of all of `d`, it is compared with `read` of it, if given, and `d` is not read again. None
 /// where any application is not recorded.
 fn hashed(
-    c: &[u8],
+    c: Back,
     d: &[u8],
     read: Option<&Through>,
     memo: &std::cell::RefCell<verify::Memo>,
     opt: &Options,
-    mapped: bool,
 ) -> Option<bool> {
     use aqr_formula::chash::Ch;
     let _s = aqr_common::trace::span("verify");
     let native = Native { threads: opt.threads };
     let runner = aqr_decompress::natives(&native);
-    let Ok(mut a) = aqr::open(c, &runner) else { return Some(false) };
-    if mapped {
-        // SAFETY: the archive's file mapped read only ([`Sink::mapped`])
-        unsafe { a.let_go_read() };
-    }
+    let Ok(a) = c.open(&runner) else { return Some(false) };
     let roots = match a.hashed(&*memo.borrow(), &aqr_decompress::identify, opt.threads) {
         Ok(Some(roots)) => roots,
         Ok(None) => return None,
@@ -5706,15 +5758,15 @@ mod tests {
         assert!(!f.applies().is_empty());
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         let memo = std::cell::RefCell::new(memo);
-        assert_eq!(hashed(&c, &d, None, &memo, &opt, false), Some(true));
+        assert_eq!(hashed(Back::Plain(&c, false), &d, None, &memo, &opt), Some(true));
         let mut other = d.clone();
         other[1000] ^= 1;
-        assert_eq!(hashed(&c, &other, None, &memo, &opt, false), Some(false));
+        assert_eq!(hashed(Back::Plain(&c, false), &other, None, &memo, &opt), Some(false));
         // (as it was read through before: compared with that, not read again)
-        assert_eq!(hashed(&c, &other, Some(&through(&d, 2)), &memo, &opt, false), Some(true));
-        assert_eq!(hashed(&c, &d, Some(&through(&other, 2)), &memo, &opt, false), Some(false));
+        assert_eq!(hashed(Back::Plain(&c, false), &other, Some(&through(&d, 2)), &memo, &opt), Some(true));
+        assert_eq!(hashed(Back::Plain(&c, false), &d, Some(&through(&other, 2)), &memo, &opt), Some(false));
         // (without the records: evaluated where they do not tell)
-        assert_eq!(hashed(&c, &d, None, &Default::default(), &opt, false), Some(true));
+        assert_eq!(hashed(Back::Plain(&c, false), &d, None, &Default::default(), &opt), Some(true));
         let memo = memo.into_inner();
         let decode = |c: &[u8], memo: verify::Memo| {
             let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
@@ -5790,7 +5842,7 @@ mod tests {
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
         for threads in [1, 4] {
             assert_eq!(
-                hashed(&c, &d, None, &Default::default(), &Options { threads, ..opt.clone() }, false),
+                hashed(Back::Plain(&c, false), &d, None, &Default::default(), &Options { threads, ..opt.clone() }),
                 Some(true)
             );
         }
@@ -5825,7 +5877,7 @@ mod tests {
         assert!(!f.applies().is_empty());
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         // (the memo of the batch it was evaluated in gone)
-        assert_eq!(hashed(&c, &d, None, &Default::default(), &opt, false), Some(true));
+        assert_eq!(hashed(Back::Plain(&c, false), &d, None, &Default::default(), &opt), Some(true));
     }
 
     /// A module run whose output is a whole file is run once: the same application again takes

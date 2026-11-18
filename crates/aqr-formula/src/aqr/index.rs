@@ -67,7 +67,7 @@ fn frame<'c>(p: Payload<'c>, at: usize, end: usize) -> Decoded<(u64, &'c [u8], u
 }
 
 /// [`frame`], of the block's data where it is alone (not read).
-fn frame_at(p: Payload<'_>, at: usize, end: usize) -> Decoded<(u64, std::ops::Range<usize>, usize)> {
+pub(super) fn frame_at(p: Payload<'_>, at: usize, end: usize) -> Decoded<(u64, std::ops::Range<usize>, usize)> {
     // (the type and the size field: 10 bytes of LEB128 and 8 at most)
     if at >= end {
         return invalid("truncated block");

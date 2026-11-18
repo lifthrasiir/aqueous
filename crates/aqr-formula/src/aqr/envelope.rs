@@ -388,11 +388,12 @@ impl<W: Write + Seek> Sealer<W> {
 
     /// Archive `c` sealed here, unlocked by the file key (rather than the passphrase).
     pub fn unseal<'c>(&self, c: &'c [u8]) -> Decoded<Unlocked<'c>> {
-        let e = open(c)?;
-        if e.fields.0 != self.fields.0 {
-            return invalid("not the archive sealed");
-        }
-        Ok(Unlocked { cipher: self.cipher.clone(), key: self.fields.payload_key(&self.file_key), chunks: e.chunks })
+        self.opener().unseal(c)
+    }
+
+    /// What unseals the archive sealed here ([`Opener::unseal`]), apart from the sealer.
+    pub fn opener(&self) -> Opener {
+        Opener { fields: self.fields, cipher: self.cipher.clone(), key: self.fields.payload_key(&self.file_key) }
     }
 
     pub fn get_ref(&self) -> &W {
@@ -444,6 +445,24 @@ impl<W: Write + Seek> Write for Sealer<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.out.flush()
+    }
+}
+
+/// The archive a [`Sealer`] sealed, unlocked by its file key ([`Sealer::opener`]).
+pub struct Opener {
+    fields: Fields,
+    cipher: ChaCha20Poly1305,
+    key: Key,
+}
+
+impl Opener {
+    /// Archive `c` unlocked: the one sealed (as its header fields tell), else invalid.
+    pub fn unseal<'c>(&self, c: &'c [u8]) -> Decoded<Unlocked<'c>> {
+        let e = open(c)?;
+        if e.fields.0 != self.fields.0 {
+            return invalid("not the archive sealed");
+        }
+        Ok(Unlocked { cipher: self.cipher.clone(), key: self.key, chunks: e.chunks })
     }
 }
 
@@ -783,6 +802,12 @@ impl<'c> Unlocked<'c> {
     /// The payload decrypted into `out` (of [`Unlocked::len`] bytes), on up to `threads`
     /// threads.
     pub fn decrypt_into(&self, out: &mut [u8], threads: usize) -> Decoded<()> {
+        self.decrypt_into_then(out, threads, &|_| {})
+    }
+
+    /// [`Unlocked::decrypt_into`], `read` told of the bytes of the archive decrypted (several
+    /// chunks, and the mirrored headers between them) as it goes: to let go of a mapping's pages.
+    pub fn decrypt_into_then(&self, out: &mut [u8], threads: usize, read: &(dyn Fn(&[u8]) + Sync)) -> Decoded<()> {
         assert_eq!(out.len(), self.len());
         /// Chunks decrypted by a task: 4 MiB.
         const TASK: usize = 64;
@@ -799,6 +824,10 @@ impl<'c> Unlocked<'c> {
                     return invalid(format!("encrypted chunk {m} does not authenticate"));
                 }
             }
+            let (a, b) = (self.chunks[t * TASK], self.chunks[(t * TASK + TASK).min(last + 1) - 1]);
+            let n = b.as_ptr() as usize + b.len() - a.as_ptr() as usize;
+            // SAFETY: the chunks are of the archive's bytes, one after another
+            read(unsafe { std::slice::from_raw_parts(a.as_ptr(), n) });
             Ok(())
         });
         r.into_iter().collect()
@@ -867,41 +896,57 @@ impl<'c> Unlocked<'c> {
     /// The payload to be decrypted a chunk at a time, as its bytes are read ([`Decrypting`]).
     pub fn decrypting(self) -> Decrypting<'c> {
         let len = self.len();
-        let layout = std::alloc::Layout::array::<u8>(len.max(1)).expect("a payload of a file's size");
-        // (zeroed: of pages the system maps as they are touched, so that the chunks not read take
-        // no memory)
-        // SAFETY: a layout of a nonzero size
-        let buf = std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })
-            .unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
-        let done = (0..self.chunks.len()).map(|_| std::sync::OnceLock::new()).collect();
-        Decrypting { unlocked: self, buf, len, done, decrypted: std::sync::atomic::AtomicUsize::new(0) }
+        // (zeroed pages of its own, mapped as they are touched, so that the chunks not read take
+        // no memory, and given back as they are let go of: [`Decrypting::release`])
+        let buf = aqr_common::pages::map_own(len)
+            .ok()
+            .and_then(std::ptr::NonNull::new)
+            .unwrap_or_else(|| std::alloc::handle_alloc_error(std::alloc::Layout::array::<u8>(len.max(1)).unwrap()));
+        let done = (0..self.chunks.len()).map(|_| Mutex::new(Chunk::Not)).collect();
+        let decrypted = std::sync::atomic::AtomicUsize::new(0);
+        Decrypting { unlocked: self, buf, len, done, decrypted, let_go: false }
     }
+}
+
+/// Where a chunk of [`Decrypting`] is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chunk {
+    /// Not decrypted (or let go of since).
+    Not,
+    Authentic,
+    /// Decrypted, but it does not authenticate.
+    Bad,
 }
 
 /// The payload of an encrypted archive, decrypted a chunk at a time as its bytes are first read
 /// ([`Decrypting::get`]), each chunk authenticated: a file read alone decrypts its blocks' chunks
-/// and those of the blocks that tell where they are, not the whole archive.
+/// and those of the blocks that tell where they are, not the whole archive. Chunks read may be
+/// let go of ([`Decrypting::release`]), to be decrypted again where they are read again.
 pub struct Decrypting<'c> {
     unlocked: Unlocked<'c>,
-    /// The payload's bytes, of each chunk once it is decrypted ([`Decrypting::done`]).
+    /// The payload's bytes, of each chunk once it is decrypted ([`Decrypting::done`]): pages of
+    /// its own ([`aqr_common::pages::map_own`]).
     buf: std::ptr::NonNull<u8>,
     len: usize,
-    /// By chunk, once decrypted: whether it authenticates.
-    done: Vec<std::sync::OnceLock<bool>>,
-    /// The chunks decrypted so far.
+    /// By chunk: whether it is decrypted, and authenticates.
+    done: Vec<Mutex<Chunk>>,
+    /// The chunks decrypted so far (again where they were let go of).
     decrypted: std::sync::atomic::AtomicUsize,
+    /// Whether the encrypted chunks' pages are let go of as they are decrypted
+    /// ([`Decrypting::let_go_read`]).
+    let_go: bool,
 }
 
-// SAFETY: the bytes of a chunk are written once, by the one initializing its `done`, before any
-// reference to them is made; then only read.
+// SAFETY: the bytes of a chunk are written by the one holding its lock in `done`, while it is not
+// decrypted: before any reference to them is made, or after those made are no longer used (as
+// `release` is told); otherwise only read.
 unsafe impl Send for Decrypting<'_> {}
 unsafe impl Sync for Decrypting<'_> {}
 
 impl Drop for Decrypting<'_> {
     fn drop(&mut self) {
-        let layout = std::alloc::Layout::array::<u8>(self.len.max(1)).unwrap();
-        // SAFETY: allocated so in `Unlocked::decrypting`, no reference to it left
-        unsafe { std::alloc::dealloc(self.buf.as_ptr(), layout) };
+        // SAFETY: mapped so in `Unlocked::decrypting`, no reference to it left
+        unsafe { aqr_common::pages::unmap_own(self.buf.as_ptr(), self.len) };
     }
 }
 
@@ -930,20 +975,81 @@ impl<'c> Decrypting<'c> {
         self.decrypted.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Lets go of the pages of the encrypted chunks as they are decrypted.
+    ///
+    /// # Safety
+    ///
+    /// The archive unlocked is a mapping, read only, of a file (pages let go of read as zeros
+    /// otherwise).
+    pub unsafe fn let_go_read(&mut self) {
+        self.let_go = true;
+    }
+
     /// Chunk `m` decrypted where it is not yet: whether it authenticates.
     fn chunk(&self, m: usize) -> bool {
-        *self.done[m].get_or_init(|| {
+        let mut s = self.done[m].lock().unwrap();
+        if *s == Chunk::Not {
             let c = self.unlocked.chunks[m];
             let n = c.len() - 16;
-            // SAFETY: the bytes of chunk `m`, within the allocation; written by this one call
-            // alone (that of `done[m]`'s initialization), with no reference to them yet
+            // SAFETY: the bytes of chunk `m`, within the mapping; written under its lock alone,
+            // with no reference to them in use (none made yet, or let go of)
             let d = unsafe { std::slice::from_raw_parts_mut(self.buf.as_ptr().add(m * CHUNK), n) };
             d.copy_from_slice(&c[..n]);
             self.decrypted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let tag = Tag::from_slice(&c[n..]);
             let last = m + 1 == self.done.len();
-            self.unlocked.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, last), &[], d, tag).is_ok()
-        })
+            let ok = self.unlocked.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, last), &[], d, tag).is_ok();
+            if self.let_go {
+                // SAFETY: of a file mapped read only (as `let_go_read` was told)
+                unsafe { aqr_common::pages::let_go(c.as_ptr(), c.len()) };
+            }
+            *s = if ok { Chunk::Authentic } else { Chunk::Bad };
+        }
+        *s == Chunk::Authentic
+    }
+
+    /// Lets go of the chunks wholly within bytes `r` of the payload: their pages given back, each
+    /// decrypted again where it is read again.
+    ///
+    /// # Safety
+    ///
+    /// No reference to the bytes of those chunks ([`Decrypting::get`]'s, [`Decrypting::unread`]'s)
+    /// is used after, until they are got again.
+    pub unsafe fn release(&self, r: std::ops::Range<usize>) {
+        let first = r.start.div_ceil(CHUNK);
+        let end = if r.end >= self.len { self.done.len() } else { r.end / CHUNK };
+        for m in first..end {
+            let mut s = self.done[m].lock().unwrap();
+            if *s != Chunk::Not {
+                let n = CHUNK.min(self.len - m * CHUNK);
+                // SAFETY: the chunk's pages, of the mapping of its own; not read until written
+                // again (as the caller tells), under its lock
+                unsafe { aqr_common::pages::forget(self.buf.as_ptr().add(m * CHUNK), n) };
+                *s = Chunk::Not;
+            }
+        }
+    }
+
+    /// The chunks decrypted and not let go of since.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.done.iter().filter(|c| *c.lock().unwrap() != Chunk::Not).count()
+    }
+
+    /// Where bytes `d` are in the payload, where they are of it.
+    pub fn range_of(&self, d: &[u8]) -> Option<std::ops::Range<usize>> {
+        let at = (d.as_ptr() as usize).checked_sub(self.buf.as_ptr() as usize)?;
+        (at + d.len() <= self.len).then_some(at..at + d.len())
+    }
+
+    /// All of the payload's bytes, whether decrypted or not.
+    ///
+    /// # Safety
+    ///
+    /// No bytes of it are read but those got ([`Decrypting::get`]) and not let go of since.
+    pub unsafe fn unread(&self) -> &[u8] {
+        // SAFETY: of the mapping, of `len` bytes (as the caller reads them)
+        unsafe { std::slice::from_raw_parts(self.buf.as_ptr(), self.len) }
     }
 
     /// Bytes `r` of the payload, the chunks they are in decrypted where they are not yet: an
@@ -1069,6 +1175,49 @@ mod tests {
         let mut d = c.clone();
         d[8] = WORK_FACTOR_LIMIT + 1;
         assert!(matches!(open(&d).map(|_| ()), Err(Failure::Resource(_))));
+    }
+
+    /// An archive of a file sealed, opened decrypting its data blocks as they are read
+    /// ([`super::super::open_decrypting`]): the file given back, by its blocks and a module's
+    /// applications, the chunks of the data blocks let go of once read, all but those a block
+    /// shares with the next (and its head); and again, the chunks decrypted again.
+    #[test]
+    fn opened_decrypting() {
+        use super::super::open_decrypting;
+        use super::super::tests::{REV, natives};
+        use crate::Node;
+        let parts: Vec<Vec<u8>> = (0..12).map(|k| aqr_common::rng::noise((1 << 20) + k)).collect();
+        let mut f = Formula::default();
+        let mut nodes = Vec::new();
+        for (k, p) in parts.iter().enumerate() {
+            nodes.push(match k % 3 {
+                2 => {
+                    let s = f.push("r", p.iter().rev().copied().collect::<Vec<u8>>());
+                    Node::apply(REV, vec![1, 2, 3], vec![s], p.len() as u64)
+                }
+                _ => f.push("p", p.clone()),
+            });
+        }
+        f.root = Node::concat(nodes);
+        let want = parts.concat();
+        let a = Encoder::new(Level::Zstd(1)).with_size_hint(true).encode(&f, None).unwrap();
+        let c = sealed(&a, b"p", true);
+        let d = open(&c).unwrap().unlock(b"p").unwrap().decrypting();
+        let natives = natives();
+        for _ in 0..2 {
+            let archive = open_decrypting(&d, &natives).unwrap();
+            assert!(archive.parsed().unwrap().non_leaf.len() > 4);
+            let mut got = Vec::new();
+            let n = archive
+                .write_file(2, &mut |b: &[u8]| {
+                    got.extend_from_slice(b);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(n == want.len() as u64 && got == want);
+            assert!(d.held() * 4 < d.chunks(), "{} of {} chunks held", d.held(), d.chunks());
+        }
+        assert!(d.decrypted() > d.chunks(), "decrypted again");
     }
 
     /// An encrypted archive of 24 files (of 3 chunks or so each: in parcels of their own, two by
