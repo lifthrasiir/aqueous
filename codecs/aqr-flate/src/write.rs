@@ -42,60 +42,6 @@ impl Bits {
     }
 }
 
-/// Length code (0-based) of every match length.
-pub(super) static LEN_CODE: [u8; 259] = {
-    let mut t = [0u8; 259];
-    let mut c = 0;
-    let mut l = 3;
-    while l <= 258 {
-        while c + 1 < 29 && LEN_BASE[c + 1] as usize <= l {
-            c += 1;
-        }
-        t[l] = c as u8;
-        l += 1;
-    }
-    t
-};
-
-/// Distance code of distances 1..=256, and of the larger ones by `(dist - 1) >> 7`.
-static DIST_LO: [u8; 256] = {
-    let mut t = [0u8; 256];
-    let mut c = 0;
-    let mut d = 1;
-    while d <= 256 {
-        while c + 1 < 30 && DIST_BASE[c + 1] as usize <= d {
-            c += 1;
-        }
-        t[d - 1] = c as u8;
-        d += 1;
-    }
-    t
-};
-static DIST_HI: [u8; 256] = {
-    let mut t = [0u8; 256];
-    let mut i = 2;
-    while i < 256 {
-        // The code of distance i * 128 + 1 (codes are constant over such spans past 256).
-        let d = i * 128 + 1;
-        let mut c = 0;
-        while c + 1 < 30 && DIST_BASE[c + 1] as usize <= d {
-            c += 1;
-        }
-        t[i] = c as u8;
-        i += 1;
-    }
-    t
-};
-
-#[inline(always)]
-pub(super) fn dist_code(d: usize) -> usize {
-    if d <= 256 {
-        DIST_LO[d - 1] as usize
-    } else {
-        DIST_HI[(d - 1) >> 7] as usize
-    }
-}
-
 /// (code, length) per symbol (of the first 288); length 0 for symbols without a code. (One
 /// size for both trees: one function in the modules.)
 fn table(lens: &[u8]) -> [(u32, u32); 288] {
@@ -441,18 +387,14 @@ fn write_tokens(
                 dist,
                 alt258,
             } => {
-                let lc = if alt258 {
-                    27
-                } else {
-                    LEN_CODE[ml as usize] as usize
-                };
+                let lc = if alt258 { 27 } else { huffman::len_code(ml) };
                 let (c, l) = lt[257 + lc];
                 ok &= l > 0;
                 acc |= (c as u64) << n;
                 n += l;
                 acc |= ((ml - LEN_BASE[lc]) as u64) << n;
                 n += LEN_EXTRA[lc] as u32;
-                let dc = dist_code(dist as usize);
+                let dc = huffman::dist_code(dist);
                 let (c, l) = dt[dc];
                 ok &= l > 0;
                 acc |= (c as u64) << n;
@@ -482,16 +424,6 @@ fn write_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn code_tables() {
-        for l in 3..=258u16 {
-            assert_eq!(LEN_CODE[l as usize] as usize, huffman::len_code(l), "{l}");
-        }
-        for d in 1..=32768u16 {
-            assert_eq!(dist_code(d as usize), huffman::dist_code(d), "{d}");
-        }
-    }
 
     /// Blocks written apart on threads, around stored blocks and appended at any bit offset,
     /// are what they are written one after another.

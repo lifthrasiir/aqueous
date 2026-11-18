@@ -26,14 +26,55 @@ pub const CL_ORDER: [usize; 19] = [
 ];
 
 /// Length code (0-based, i.e. symbol - 257) of a match length in 3..=258, canonical form.
+#[inline(always)]
 pub fn len_code(len: u16) -> usize {
-    debug_assert!((3..=258).contains(&len));
-    LEN_BASE.partition_point(|&b| b <= len) - 1
+    LEN_CODE[len as usize] as usize
 }
 
+/// Distance code of a distance in 1..=32768.
+#[inline(always)]
 pub fn dist_code(dist: u16) -> usize {
-    debug_assert!(dist >= 1);
-    DIST_BASE.partition_point(|&b| b <= dist) - 1
+    let d = dist as usize;
+    if d <= 256 {
+        DIST_LO[d - 1] as usize
+    } else {
+        DIST_HI[(d - 1) >> 7] as usize
+    }
+}
+
+/// The code of each length (0 below 3).
+static LEN_CODE: [u8; 259] = {
+    let mut t = [0u8; 259];
+    let (mut c, mut l) = (0, 3);
+    while l <= 258 {
+        while c + 1 < 29 && LEN_BASE[c + 1] as usize <= l {
+            c += 1;
+        }
+        t[l] = c as u8;
+        l += 1;
+    }
+    t
+};
+
+/// The code of distances 1..=256, and of the larger ones by `(dist - 1) >> 7`: codes are
+/// constant over such spans past 256.
+static DIST_LO: [u8; 256] = dist_codes(1, 1);
+static DIST_HI: [u8; 256] = dist_codes(128, 1);
+
+/// The code of distance `i * step + first` for each `i`.
+const fn dist_codes(step: usize, first: usize) -> [u8; 256] {
+    let mut t = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        let d = i * step + first;
+        let mut c = 0;
+        while c + 1 < 30 && DIST_BASE[c + 1] as usize <= d {
+            c += 1;
+        }
+        t[i] = c as u8;
+        i += 1;
+    }
+    t
 }
 
 pub fn fixed_lit_lens() -> [u8; 288] {
@@ -377,17 +418,23 @@ pub fn rle_expand(ops: &[RleOp], total: usize) -> Result<Lens> {
 mod tests {
     use super::*;
 
+    /// The tables are the codes whose bases are the last at most the length or distance.
     #[test]
-    fn len_and_dist_codes() {
-        assert_eq!(len_code(3), 0);
-        assert_eq!(len_code(10), 7);
-        assert_eq!(len_code(11), 8);
-        assert_eq!(len_code(257), 27);
-        assert_eq!(len_code(258), 28);
-        assert_eq!(dist_code(1), 0);
-        assert_eq!(dist_code(4), 3);
-        assert_eq!(dist_code(5), 4);
-        assert_eq!(dist_code(32768), 29);
+    fn code_tables() {
+        for l in 3..=258u16 {
+            assert_eq!(
+                len_code(l),
+                LEN_BASE.partition_point(|&b| b <= l) - 1,
+                "{l}"
+            );
+        }
+        for d in 1..=32768u16 {
+            assert_eq!(
+                dist_code(d),
+                DIST_BASE.partition_point(|&b| b <= d) - 1,
+                "{d}"
+            );
+        }
     }
 
     #[test]

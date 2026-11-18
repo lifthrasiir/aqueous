@@ -9,7 +9,6 @@
 
 use super::code::{get_usize, put_gamma};
 use super::trees::{self, Lens288};
-use super::write::{LEN_CODE, dist_code};
 use crate::bits::{BitReader, BitWriter};
 use crate::deflate::{DynHeader, Lens, Ops, Token};
 use crate::huffman::{self, CL_ORDER, RleOp};
@@ -25,13 +24,8 @@ pub fn freqs(tokens: &[Token]) -> ([u32; 288], [u32; 32]) {
         match t {
             Token::Lit(b) => lf[b as usize] += 1,
             Token::Match { len, dist, alt258 } => {
-                lf[257
-                    + if alt258 {
-                        27
-                    } else {
-                        LEN_CODE[len as usize] as usize
-                    }] += 1;
-                df[dist_code(dist as usize)] += 1;
+                lf[257 + if alt258 { 27 } else { huffman::len_code(len) }] += 1;
+                df[huffman::dist_code(dist)] += 1;
             }
         }
     }

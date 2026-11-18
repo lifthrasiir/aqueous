@@ -25,7 +25,7 @@ use crate::filter;
 use crate::rans::{self, BitR, BitW, Decoder, Tables};
 use aqr_common::wire::Wire;
 use aqr_flate::deflate::Token;
-use aqr_flate::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
+use aqr_flate::huffman::{self, DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
 use aqr_flate::inflate::{self, Sink};
 use aqr_raw::image::pixel::{self, ACT, bucket, get, mag, med, put, unzigzag, zigzag};
 
@@ -2341,50 +2341,16 @@ fn lit_run<I: Io, const BPP: usize, const FT: u8>(
     Ok((run, None))
 }
 
-/// Length code (0-based) of every match length.
-static LEN_CODE: [u8; 259] = {
-    let mut t = [0u8; 259];
-    let (mut c, mut l) = (0, 3);
-    while l <= 258 {
-        while c + 1 < 29 && LEN_BASE[c + 1] as usize <= l {
-            c += 1;
-        }
-        t[l] = c as u8;
-        l += 1;
-    }
-    t
-};
-
-/// Distance code of distances 1..=256, and of the larger ones by `(dist - 1) >> 7`.
-static DIST_CODE: [[u8; 256]; 2] = {
-    let mut t = [[0u8; 256]; 2];
-    let mut i = 0;
-    while i < 256 {
-        let (lo, hi) = (i + 1, i * 128 + 1);
-        let mut c = 0;
-        while c + 1 < 30 && DIST_BASE[c + 1] as usize <= lo {
-            c += 1;
-        }
-        t[0][i] = c as u8;
-        let mut c = 0;
-        while c + 1 < 30 && DIST_BASE[c + 1] as usize <= hi {
-            c += 1;
-        }
-        t[1][i] = c as u8;
-        i += 1;
-    }
-    t
-};
-
+/// [`huffman::len_code`] of any `len` (decoding passes none).
 #[inline(always)]
 fn len_code(len: u32) -> u32 {
-    LEN_CODE[len.min(258) as usize] as u32
+    huffman::len_code(len.min(258) as u16) as u32
 }
 
+/// [`huffman::dist_code`] of any `d` (decoding passes none).
 #[inline(always)]
 fn dist_code(d: u32) -> u32 {
-    let d = d.clamp(1, 32768) as usize;
-    if d <= 256 { DIST_CODE[0][d - 1] as u32 } else { DIST_CODE[1][(d - 1) >> 7] as u32 }
+    huffman::dist_code(d.clamp(1, 32768) as u16) as u32
 }
 
 /// How the byte at a position is coded: its table, and what turns the symbol into the
@@ -2628,16 +2594,6 @@ mod tests {
             assert!(symbols(rows) == symbols(tokens), "sparse {sparse}");
             let tokens = encode_bpp::<4, true>(&g, &variant, None).unwrap();
             assert!(symbols(alone) == symbols(tokens), "sparse {sparse}, alone");
-        }
-    }
-
-    #[test]
-    fn code_tables() {
-        for l in 3..=258u16 {
-            assert_eq!(super::len_code(l as u32) as usize, aqr_flate::huffman::len_code(l));
-        }
-        for d in 1..=32768u16 {
-            assert_eq!(super::dist_code(d as u32) as usize, aqr_flate::huffman::dist_code(d));
         }
     }
 }

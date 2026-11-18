@@ -20,7 +20,7 @@ use crate::{Error, Result};
 use aqr_flate::bits::{BitReader, BitWriter};
 use aqr_flate::deflate::{Block, Body, DynHeader, Token};
 use aqr_flate::header::{self, Recipe};
-use aqr_flate::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
+use aqr_flate::huffman::{self, DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
 use aqr_flate::inflate::{Layout, Sink};
 use aqr_flate::write::Writer;
 use aqr_raw::image::pixel::{ACT, bucket, med as med3};
@@ -45,35 +45,6 @@ const LIT_CTX: usize = 256;
 const PER_CLASS: usize = LIT_CTX + DIST_CTX;
 /// Most literal tables of a slot at a resolution.
 const MAX_IDS: usize = if PIX_CTX > LIT_CTX { PIX_CTX } else { LIT_CTX };
-
-/// The length code of every length 3-258.
-static LEN_CODE: [u8; 259] = {
-    let mut t = [0u8; 259];
-    let mut c = 0;
-    while c < 29 {
-        let lo = LEN_BASE[c] as usize;
-        let hi = if c == 28 { 259 } else { LEN_BASE[c + 1] as usize };
-        let mut l = lo;
-        while l < hi && l < 259 {
-            t[l] = c as u8;
-            l += 1;
-        }
-        c += 1;
-    }
-    t[258] = 28;
-    t
-};
-
-#[inline(always)]
-fn dist_code(d: u32) -> usize {
-    // 32 - lz(d - 1) is the bit length; codes come in pairs per bit length.
-    if d <= 4 {
-        return d as usize - 1;
-    }
-    let x = d - 1;
-    let nb = 31 - x.leading_zeros();
-    (2 * nb + ((x >> (nb - 1)) & 1)) as usize
-}
 
 /// Coarse byte classes for text-like data (content streams, object streams): buckets of
 /// similar bytes, grouped by fours so that `bucket >> 2` is a coarser class.
@@ -483,8 +454,7 @@ impl Sink for Part {
     fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
         let prev = self.ctx().0;
         self.after = true;
-        let lc = LEN_CODE[len as usize] as usize;
-        let dc = dist_code(dist as u32);
+        let (lc, dc) = (huffman::len_code(len), huffman::dist_code(dist));
         self.sym(prev, 256 + lc);
         self.raw.bits(LEN_EXTRA[lc] as u32, (len - LEN_BASE[lc]) as u32);
         self.sym(LIT_CTX + lc.min(DIST_CTX - 1), dc);
@@ -1225,18 +1195,6 @@ impl<'a> DecoderState<'a> {
 mod tests {
     use super::*;
     use aqr_flate::deflate::Stream;
-
-    #[test]
-    fn codes() {
-        for d in 1..=32768u32 {
-            let c = dist_code(d);
-            assert!(DIST_BASE[c] as u32 <= d && (c == 29 || d < DIST_BASE[c + 1] as u32), "{d}");
-        }
-        for l in 3..=258u16 {
-            let c = LEN_CODE[l as usize] as usize;
-            assert!(LEN_BASE[c] <= l && (c == 28 || l < LEN_BASE[c + 1]) || l == 258 && c == 28, "{l}");
-        }
-    }
 
     #[test]
     fn roundtrip() {

@@ -162,7 +162,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "clip-recons",
         version: 3,
-        sha512_256: hex("0c709bd8c637ce49da1f5120d9185f7f88fe3ae5e644002566e12c32d93d6a8e"),
+        sha512_256: hex("f192f3cdfac2ab652448f1ade2a3465600796ff41ed73ef212ed9781744d6b39"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
@@ -294,7 +294,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 4,
-        sha512_256: hex("8c7644b86bfead9713455a44ead2ffbb2015068f44218aaf4e51a5d963da1148"),
+        sha512_256: hex("e7f26ac070c92a66a8b3cba961051b8e2703c5726bea71760dc5bb7c462b4cd6"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -414,7 +414,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "mca-recons",
         version: 2,
-        sha512_256: hex("af651fa2da3f0ca95664f2af624261cbf291cdf8300a2d71fde91e8b365ee943"),
+        sha512_256: hex("216344f2356e88e2604fbd0db7d499ac9b5381777bf414c548f7b8622dfaacbd"),
         block: include_bytes!("../wasm/mca-recons.block"),
     },
     Known {
@@ -474,25 +474,25 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "pdf-recons",
         version: 3,
-        sha512_256: hex("f4494270df932626ad9a95d2cd25938c0d16b0c7c8a88e0e0dfba5ba32949434"),
+        sha512_256: hex("fac37428ac2315cb88d97fe30191cf33aa3338abcbf56faf4245f1f8925db312"),
         block: include_bytes!("../wasm/pdf-recons.block"),
     },
     Known {
         name: "png-against",
         version: 2,
-        sha512_256: hex("93a3743faab4fd99c777e30be20f6a5202bf84cee924bb7f3f4b7788762c69b7"),
+        sha512_256: hex("dbfd85f28b73603d8c58b72d67066c56cde661def7e63102aba976906e2fcb93"),
         block: include_bytes!("../wasm/png-against.block"),
     },
     Known {
         name: "png-recons",
         version: 5,
-        sha512_256: hex("00dfe75651258450c1c517d577e3f1877fbc215130beeca75f9f1e10508d1a9a"),
+        sha512_256: hex("5680af51169fb124b42513f39bddbe55b037a18fac3c4b83b18ac0da29e25c9e"),
         block: include_bytes!("../wasm/png-recons.block"),
     },
     Known {
         name: "png-set",
         version: 3,
-        sha512_256: hex("0714e033fb242c7e85d2db24dbb55d4c9f8aa7d97b45b3d8b63519e71ed1a313"),
+        sha512_256: hex("f4e9b4f65167e3e7160117cf654f5545d228b2bac9c8cdc2d2a2991ad25c2e95"),
         block: include_bytes!("../wasm/png-set.block"),
     },
     Known {
