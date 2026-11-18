@@ -15,7 +15,9 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 
 type GenRandom = unsafe extern "system" fn(*mut c_void, u32) -> u8;
 
