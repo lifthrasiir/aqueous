@@ -291,11 +291,13 @@ impl Worker {
             task_limits,
             &concurrency.iter().map(|&c| c as u64).collect::<Vec<_>>(),
         );
-        // the bytes sent, held by the worker beside the memories it makes of them
-        let sent = params.len() as u64
-            + resources.iter().map(|r| r.len() as u64).sum::<u64>()
-            + inputs.iter().map(|i| i.len() as u64).sum::<u64>();
-        self.child.limit_memory((OVERHEAD.get() as u64).saturating_add(bound).saturating_add(sent))?;
+        // the bytes sent and the outputs, held by the worker beside the memories it makes of them
+        // (a part module's are far beyond its memory, and in the messages)
+        let held = (params.len() as u64)
+            .saturating_add(resources.iter().map(|r| r.len() as u64).fold(0, u64::saturating_add))
+            .saturating_add(inputs.iter().map(|i| i.len() as u64).fold(0, u64::saturating_add))
+            .saturating_add(sizes.iter().copied().fold(0, u64::saturating_add));
+        self.child.limit_memory((OVERHEAD.get() as u64).saturating_add(bound).saturating_add(held))?;
         // the inputs and outputs in the arena where they are many and fit in the memories (else
         // the application fails before any of them is made)
         let lens = inputs.iter().map(|i| i.len() as u64).chain(sizes.iter().copied());
