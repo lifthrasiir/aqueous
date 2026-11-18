@@ -37,7 +37,7 @@ pub(crate) struct Apply<'a> {
     /// The task limits, one for each class of the module.
     pub(crate) task_limits: Vec<u64>,
     /// Whether it is of the opcode [`APPLY_OLD`], without task limits.
-    pub(crate) old: bool,
+    old: bool,
     pub(crate) num_inputs: usize,
     pub(crate) output_sizes: Vec<u64>,
 }
@@ -195,14 +195,14 @@ aqr_common::zopt! {
 /// go before it, up to the limit's bytes of weights (after which it is let in as soon as it
 /// fits, or alone), and past `eval:passing` leaves that do not at most.
 pub(crate) struct Gate<'w> {
-    pub(crate) budget: Option<&'w Budget>,
-    pub(crate) weights: &'w [u64],
-    pub(crate) order: Vec<usize>,
+    budget: Option<&'w Budget>,
+    weights: &'w [u64],
+    order: Vec<usize>,
     /// (locked within the budget's lock, never the other way)
-    pub(crate) state: Mutex<GateState>,
+    state: Mutex<GateState>,
     /// The leaves in (changed within the budget's lock, or as a leaf ends, which then tells the
     /// budget).
-    pub(crate) on: AtomicUsize,
+    on: AtomicUsize,
 }
 
 aqr_common::zopt! {
@@ -211,15 +211,15 @@ aqr_common::zopt! {
     pub(crate) static PASSING: Opt<usize> = Opt::value("eval:passing", 64, "most leaves that do not fit that the leaves passing a waiting one look past");
 }
 
-pub(crate) struct GateState {
+struct GateState {
     /// The leaves let in, and the first not (by their places in the order, as below).
-    pub(crate) taken: Vec<bool>,
-    pub(crate) first: usize,
+    taken: Vec<bool>,
+    first: usize,
     /// While it waits: the leaves after it looked at and not let in, the first not looked at,
     /// and the weights of those let in.
-    pub(crate) skipped: Vec<usize>,
-    pub(crate) scan: usize,
-    pub(crate) passed: u64,
+    skipped: Vec<usize>,
+    scan: usize,
+    passed: u64,
 }
 
 impl GateState {
@@ -245,7 +245,7 @@ impl GateState {
 }
 
 /// A leaf let in, until dropped, and what it takes of the budget.
-pub(crate) struct Admitted<'g>(pub(crate) &'g Gate<'g>, pub(crate) Option<Taken<'g>>);
+pub(crate) struct Admitted<'g>(&'g Gate<'g>, Option<Taken<'g>>);
 
 impl<'w> Gate<'w> {
     pub(crate) fn new(budget: Option<&'w Budget>, weights: &'w [u64], order: Vec<usize>) -> Self {
@@ -452,7 +452,7 @@ pub(crate) fn read<'a>(
 
 /// A ModuleBytes or ResourceBytes instruction pushing `data`, the data of a block as stored,
 /// which its operand says is of `size` bytes.
-pub(crate) fn stored_bytes(data: &[u8], size: u64) -> Decoded<Insn<'_>> {
+fn stored_bytes(data: &[u8], size: u64) -> Decoded<Insn<'_>> {
     if data.len() as u64 != size {
         return invalid(format!("a block of {} bytes, not {size}", data.len()));
     }
@@ -477,8 +477,8 @@ pub(crate) struct Contents<'c, 't> {
 /// A value under a lock with a condition variable of its own: one condition variable waited on
 /// with several mutexes is an error to POSIX (and panics in std on macOS, which checks it).
 pub(crate) struct Waited<T> {
-    pub(crate) value: Mutex<T>,
-    pub(crate) changed: std::sync::Condvar,
+    value: Mutex<T>,
+    changed: std::sync::Condvar,
 }
 
 impl<T> Waited<T> {
@@ -628,7 +628,7 @@ pub(crate) type Taker<'a> = dyn FnMut(&[u8]) -> Decoded<()> + 'a;
 
 /// Whether Wasm module `w` is of a release (SHA-512/256 in [`crate::released::RELEASED`]), the
 /// only modules that the reserved Apply instruction ([`APPLY_OLD`]) is valid for.
-pub(crate) fn released(w: &[u8]) -> bool {
+fn released(w: &[u8]) -> bool {
     use sha2::Digest;
     let sum = sha2::Sha512_256::digest(w);
     let hex: String = sum.iter().map(|b| format!("{b:02x}")).collect();
@@ -647,12 +647,12 @@ pub fn is_released(hash: &[u8; 32]) -> bool {
 pub(crate) static TEST_RELEASED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
-pub(crate) fn tests_released(hex: &str) -> bool {
+fn tests_released(hex: &str) -> bool {
     TEST_RELEASED.lock().unwrap().iter().any(|h| h == hex)
 }
 
 #[cfg(not(test))]
-pub(crate) fn tests_released(_: &str) -> bool {
+fn tests_released(_: &str) -> bool {
     false
 }
 
@@ -660,7 +660,7 @@ aqr_common::zopt! {
     /// Whether the decoder holds applications to the memory limits their instructions declare
     /// (`no-declared-limit`: read as no limit, [`aqr_formula::NO_LIMIT`], the instance's and each task
     /// class's alike), so that an archive declaring too little decodes still: for development.
-    pub(crate) static DECLARED_LIMIT: Opt<bool> =
+    static DECLARED_LIMIT: Opt<bool> =
         Opt::flag("declared-limit", true, "hold applications to their declared memory limits (no-declared-limit: none)");
 }
 
@@ -715,7 +715,7 @@ pub(crate) fn apply(
 }
 
 /// `outputs` of application `a` of module block `module`, if they are of the sizes declared.
-pub(crate) fn checked_outputs(outputs: Vec<Vec<u8>>, a: &Apply, module: usize) -> Decoded<Vec<Vec<u8>>> {
+fn checked_outputs(outputs: Vec<Vec<u8>>, a: &Apply, module: usize) -> Decoded<Vec<Vec<u8>>> {
     if outputs.len() != a.output_sizes.len() || outputs.iter().zip(&a.output_sizes).any(|(o, &n)| o.len() as u64 != n) {
         return invalid(format!("module block {module}: outputs of other sizes than declared"));
     }

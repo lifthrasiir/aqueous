@@ -146,14 +146,14 @@ pub fn natives<'a, M: crate::Modules + Sync>(modules: &[Module], m: &'a M) -> Na
 /// its Wasm module is identified as it, by its [`stand_in`] unless [`Natives::identified_by`].
 /// A shorthand module block's module is reconstructed by [`Natives::registered_by`], if given.
 pub struct Natives<'a, M> {
-    pub(crate) modules: Vec<Module>,
-    pub(crate) m: &'a M,
-    pub(crate) identify: fn(&[u8]) -> Option<String>,
-    pub(crate) registered: Option<Registered>,
+    modules: Vec<Module>,
+    m: &'a M,
+    identify: fn(&[u8]) -> Option<String>,
+    registered: Option<Registered>,
 }
 
 /// The Wasm module of a shorthand module block's registered hash ([`Natives::registered_by`]).
-pub(crate) type Registered = fn(&[u8; 32]) -> Decoded<Vec<u8>>;
+type Registered = fn(&[u8; 32]) -> Decoded<Vec<u8>>;
 
 impl<M> Natives<'_, M> {
     /// The modules known by `identify`, which gives the name of the module of a Wasm module

@@ -79,25 +79,25 @@ impl Archival {
 /// those evaluated at once.
 pub struct Archive<'c, 'n> {
     pub(crate) kept: Archived<'c>,
-    pub(crate) runner: &'n dyn Runner,
+    runner: &'n dyn Runner,
     /// The modules loaded, by module block, as they are first applied.
-    pub(crate) loaded: Vec<OnceLock<Decoded<Box<dyn Loaded + 'n>>>>,
+    loaded: Vec<OnceLock<Decoded<Box<dyn Loaded + 'n>>>>,
     /// The tree, and its contents (each a leaf, an output of it and its size).
     pub(crate) tree: Option<(Tree, Vec<ContentRef>)>,
     /// What the last segment tells of the writing it ends ([`Archive::status`]).
-    pub(crate) status: Option<Status>,
+    status: Option<Status>,
     /// The journal points of its segments, in the order of the segments ([`Archive::journal`]).
-    pub(crate) journal: Vec<JournalPoint>,
+    journal: Vec<JournalPoint>,
     /// The budget the leaves evaluated take of by their weights ([`Archive::set_budget`]).
-    pub(crate) budget: Option<&'n Budget>,
+    budget: Option<&'n Budget>,
     /// Told how far the evaluation is ([`Archive::on_progress`]).
-    pub(crate) tell: Option<Telling>,
+    tell: Option<Telling>,
     /// By leaf, the item its evaluation is told of as ([`Archive::set_items`]).
-    pub(crate) items: Vec<Option<usize>>,
+    items: Vec<Option<usize>>,
     /// Whether the pages of the blocks are let go of as they are read ([`Archive::let_go_read`]).
-    pub(crate) let_go: bool,
+    let_go: bool,
     /// The payload decrypted as its data blocks are read, where it is ([`open_decrypting`]).
-    pub(crate) sealed: Option<&'c envelope::Decrypting<'c>>,
+    sealed: Option<&'c envelope::Decrypting<'c>>,
 }
 
 /// A journal point of an archive (spec, "`journal`"): the state after a segment, named by a time
@@ -242,7 +242,7 @@ pub fn open_indexed_at<'c, 'n>(
     open_indexed_with(p, runner, threads, Some(paths), None)
 }
 
-pub(crate) fn open_indexed_with<'c, 'n>(
+fn open_indexed_with<'c, 'n>(
     p: Payload<'c>,
     runner: &'n dyn Runner,
     threads: usize,
@@ -301,13 +301,13 @@ pub fn open_decrypting<'c, 'n>(d: &'c envelope::Decrypting<'c>, runner: &'n dyn 
 }
 
 /// [`open`] of an archive, the payload of an encrypted one where `sealed`.
-pub(crate) fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded<Archive<'c, 'n>> {
+fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded<Archive<'c, 'n>> {
     open_with(c, runner, sealed, false, None)
 }
 
 /// [`open_as`], salvaging where `salvaging` ([`open_salvaging`]), the archive ended after the
 /// segment whose metadata block is at `upto` where it is given ([`open_upto`]).
-pub(crate) fn open_with<'c, 'n>(
+fn open_with<'c, 'n>(
     c: &'c [u8],
     runner: &'n dyn Runner,
     sealed: bool,
@@ -979,7 +979,7 @@ impl<'c, 'n> Archive<'c, 'n> {
 /// What tells the leaf block at a place of an archive ([`tree_of`]): its index and its outputs
 /// (where they are known), a file's dictionary (1-based in its segment) given to be checked; none
 /// where none is there.
-pub(crate) type LeafAt<'a> = dyn FnMut(usize, Option<u64>) -> Decoded<Option<(usize, Option<u64>)>> + 'a;
+type LeafAt<'a> = dyn FnMut(usize, Option<u64>) -> Decoded<Option<(usize, Option<u64>)>> + 'a;
 
 /// The tree of metadata block `m` at `at`, the metadata block before it at `prev` (the end of the
 /// header magic, less 1, where it is the first), `leaf_at` telling the leaf block at a place (by

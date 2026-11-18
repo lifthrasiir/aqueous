@@ -85,7 +85,7 @@ aqr_common::zopt! {
     /// not see what repeats from afar (a video's keyframes, the same each time).
     pub(crate) static PROBE_LEVEL: Opt<i32> = Opt::value("zstd:probe-level", 1, "zstd level that tells whether a stream compresses at all");
     /// A stream is kept compressed only where that saves 1/N of it at least ([`saves`]).
-    pub(crate) static STORE_MARGIN: Opt<usize> = Opt::value("zstd:store-margin", 32, "a stream compressed is kept if it saves 1/N or more");
+    static STORE_MARGIN: Opt<usize> = Opt::value("zstd:store-margin", 32, "a stream compressed is kept if it saves 1/N or more");
     /// A lower level of a [`Pick`] wins where it is smaller than the base by 1/N at least (beyond
     /// what a sample may be off by).
     pub(crate) static LOWER_MARGIN: Opt<usize> = Opt::value("zstd:lower-margin", 32, "a lower level wins if smaller than the base by 1/N or more");
@@ -93,18 +93,18 @@ aqr_common::zopt! {
     pub(crate) static BASE_LEVEL: Opt<i32> = Opt::value("zstd:base-level", 3, "base zstd level of archive levels from 2 on");
     /// The bytes per second the base level compresses (as measured on text and PSD skeletons, as
     /// are the others).
-    pub(crate) static BASE_SPEED: Opt<f64> = Opt::value("zstd:base-speed", 350e6, "assumed speed of the base level, bytes per second");
+    static BASE_SPEED: Opt<f64> = Opt::value("zstd:base-speed", 350e6, "assumed speed of the base level, bytes per second");
     /// The zstd levels above the base that [`Level::Of`] picks from: of level 5 the first three,
     /// below as many fewer as it is lower; of level 9 all.
-    pub(crate) static HIGHER: Opt<&'static [i32]> = Opt::value("zstd:higher", &[4, 6, 9, 16], "higher levels picked from, as many as the archive level allows");
+    static HIGHER: Opt<&'static [i32]> = Opt::value("zstd:higher", &[4, 6, 9, 16], "higher levels picked from, as many as the archive level allows");
     /// The speed of each of [`HIGHER`], bytes per second.
-    pub(crate) static HIGHER_SPEEDS: Opt<&'static [f64]> =
+    static HIGHER_SPEEDS: Opt<&'static [f64]> =
         Opt::value("zstd:higher-speeds", &[330e6, 140e6, 100e6, 8.2e6], "assumed speeds of the higher levels, bytes per second");
     /// The bytes that [`Level::MID`] would save for a second of compression above the base:
     /// level 9 where it saves 0.71% of the data over level 3 (2??% of what they compress to,
     /// where 10gb's solid blocks save 8% at the median); zstd at 100 MB/s on a core is still far
     /// from all of compression's time.
-    pub(crate) static MID_RATE: Opt<f64> = Opt::value("zstd:mid-rate", 1e6, "bytes saved per second that justify a higher level (archive levels below 6)");
+    static MID_RATE: Opt<f64> = Opt::value("zstd:mid-rate", 1e6, "bytes saved per second that justify a higher level (archive levels below 6)");
     /// The zstd level of dense streams from level 8 ([`Level::HIGH`]) on: level 16 (btultra, 8.2
     /// MB/s on a core; 9 at 89) was smaller than 9 on every block of 1 MiB or more of 10gb's PE
     /// code (0.949 of it at the median, 0.996 at most) and text (0.935, 0.957 at most), about ??9

@@ -15,14 +15,14 @@ pub struct Encoder {
     pub(crate) streams: RefCell<HashMap<StreamKey, Option<aqr_formula::Bytes>>>,
     /// Whether the streams compressed are kept in [`Encoder::streams`] (not while
     /// [`Encoder::encode_pieces`] writes).
-    pub(crate) keep: std::cell::Cell<bool>,
+    keep: std::cell::Cell<bool>,
     /// Whether archives are being sized ([`Encoder::len_of`]): their slices are of blocks all of
     /// them, no literals ([`literals`]). A formula sized is sized alone, where its small
     /// streams would be literals; archived with others (embedded, or in a batch), they are
     /// merged with those of their class, which they compress better with.
-    pub(crate) sizing: std::cell::Cell<bool>,
+    sizing: std::cell::Cell<bool>,
     /// Compressed resources by their [`StreamKey`].
-    pub(crate) resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
+    resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
     /// The archived lengths ([`Encoder::raw_len`]) of streams forgotten compressed
     /// ([`Encoder::forget`]), or compared with a formula at the base level of [`Level::Of`]
     /// ([`Encoder::smaller`]), by their [`StreamKey`]: a stream is compared with formulas of it
@@ -30,24 +30,24 @@ pub struct Encoder {
     pub(crate) raw_lens: RefCell<HashMap<StreamKey, usize>>,
     /// Samples of streams compressed by [`Encoder::least`], by their stream's [`StreamKey`]
     /// and level, for picking the level of the stream without compressing them again.
-    pub(crate) trials: RefCell<HashMap<(StreamKey, i32), Compressed>>,
+    trials: RefCell<HashMap<(StreamKey, i32), Compressed>>,
     /// The Zstandard context every stream is compressed with, so that its workers and buffers
     /// are made once rather than for each stream (while they take at most [`CCTX_KEPT`]).
-    pub(crate) cctx: RefCell<CCtx<'static>>,
+    cctx: RefCell<CCtx<'static>>,
     /// Whether formulas are sized without their resource blocks ([`Encoder::share_resources`]).
-    pub(crate) shared: bool,
+    shared: bool,
     /// Whether archives begin with [`SIZE_HINT_PLACEHOLDER`] ([`Encoder::with_size_hint`]).
-    pub(crate) size_hint: bool,
+    size_hint: bool,
     /// Whether formulas are sized without their module blocks ([`Encoder::share_modules`]).
-    pub(crate) shared_modules: bool,
+    shared_modules: bool,
     /// The resources that formulas are sized without ([`Encoder::hold_resource`]).
-    pub(crate) held: RefCell<HashSet<StreamKey>>,
+    held: RefCell<HashSet<StreamKey>>,
     /// The Wasm module of each module ([`Encoder::with_modules`]).
-    pub(crate) wasm: WasmOf,
+    wasm: WasmOf,
     /// Module blocks compressed, by their module and level.
-    pub(crate) module_blocks: RefCell<HashMap<(Module, i32), ModuleBlock>>,
+    module_blocks: RefCell<HashMap<(Module, i32), ModuleBlock>>,
     /// Told of the streams compressed at once ([`Encoder::on_precompress`]).
-    pub(crate) progress: Option<Progress>,
+    progress: Option<Progress>,
     /// The zstd level each stream compressed by [`Encoder::precompress`] was compressed at, by
     /// its [`StreamKey`] (for the dictionaries of a batch, [`dict`]).
     pub(crate) levels: RefCell<HashMap<StreamKey, i32>>,
@@ -58,14 +58,14 @@ pub struct Encoder {
 
 /// The dictionaries of a batch where its blocks take them, and the index of their first in
 /// the segment ([`Encoder::content_block`]).
-pub(crate) type Dicts<'a> = Option<(&'a dict::Planned, usize)>;
+type Dicts<'a> = Option<(&'a dict::Planned, usize)>;
 
 /// What [`Encoder::precompress`] tells as it compresses: the bytes of the streams compressed so
 /// far, of all of them, from any of its threads.
 pub type Progress = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 /// A module block compressed, shared by the formulas that have it.
-pub(crate) type ModuleBlock = std::sync::Arc<Vec<u8>>;
+type ModuleBlock = std::sync::Arc<Vec<u8>>;
 
 /// The Wasm module of a module, if there is one ([`Encoder::with_modules`]).
 pub type WasmOf = fn(Module) -> Option<Wasm>;
@@ -168,7 +168,7 @@ pub(crate) type Compressed = Option<Vec<u8>>;
 /// A compressed stream as [`Encoder::streams`] keeps it: moved to the store where one is set
 /// ([`aqr_formula::store`]), so that what is kept to be written later (all the streams of a file, as
 /// its formula is sized) is not held in memory.
-pub(crate) fn kept(c: Compressed) -> Option<aqr_formula::Bytes> {
+fn kept(c: Compressed) -> Option<aqr_formula::Bytes> {
     c.map(|c| {
         let mut b = aqr_formula::Bytes::from(c);
         aqr_formula::store::spill(&mut b);
@@ -179,18 +179,18 @@ pub(crate) fn kept(c: Compressed) -> Option<aqr_formula::Bytes> {
 /// What an [`Encoder`] kept of the streams, resources and module blocks it compressed
 /// ([`Encoder::into_kept`]), without its Zstandard context.
 pub struct Kept {
-    pub(crate) streams: HashMap<StreamKey, Option<aqr_formula::Bytes>>,
-    pub(crate) resources: HashMap<StreamKey, Vec<u8>>,
-    pub(crate) raw_lens: HashMap<StreamKey, usize>,
-    pub(crate) trials: HashMap<(StreamKey, i32), Compressed>,
-    pub(crate) levels: HashMap<StreamKey, i32>,
-    pub(crate) module_blocks: HashMap<(Module, i32), ModuleBlock>,
+    streams: HashMap<StreamKey, Option<aqr_formula::Bytes>>,
+    resources: HashMap<StreamKey, Vec<u8>>,
+    raw_lens: HashMap<StreamKey, usize>,
+    trials: HashMap<(StreamKey, i32), Compressed>,
+    levels: HashMap<StreamKey, i32>,
+    module_blocks: HashMap<(Module, i32), ModuleBlock>,
 }
 
 /// The Zstandard contexts of encoders alive (each [`Encoder`] has one), and the most at once
 /// since [`reset_contexts_peak`]. Zstandard allocates outside the Rust heap, so that what they
 /// hold (up to [`CCTX_KEPT`] each) is out of sight of the heap's accounting.
-pub(crate) static CONTEXTS: (AtomicUsize, AtomicUsize) = (AtomicUsize::new(0), AtomicUsize::new(0));
+static CONTEXTS: (AtomicUsize, AtomicUsize) = (AtomicUsize::new(0), AtomicUsize::new(0));
 
 /// The Zstandard contexts of encoders alive, and the most at once since
 /// [`reset_contexts_peak`].

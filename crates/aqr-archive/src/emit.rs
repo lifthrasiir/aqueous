@@ -244,10 +244,10 @@ impl Emit<'_> {
 }
 
 /// Items of a level of a concatenation put together at a time ([`Emit::fold`]).
-pub(crate) const FOLD: usize = 8;
+const FOLD: usize = 8;
 
 /// Whether node `n` takes an output of an application of several outputs.
-pub(crate) fn takes_output(n: &Node) -> bool {
+fn takes_output(n: &Node) -> bool {
     match n {
         Node::Output { .. } => true,
         Node::Slice { .. } | Node::ModuleBytes(..) | Node::ResourceBytes(_) => false,
@@ -261,7 +261,7 @@ pub(crate) fn takes_output(n: &Node) -> bool {
 /// The classes of tasks that [`description_bound`] allows an application's module, of task limits
 /// not yet declared (each as large as a memory limit): no module has more (checked as
 /// instructions are written).
-pub(crate) const TASK_CLASSES: usize = 2;
+const TASK_CLASSES: usize = 2;
 
 /// Bytes of the instructions pushing node `n` at most, wherever the streams of its formula are
 /// among others (up to 2^21 of them, and 2^14 modules and resources each): the bounds of

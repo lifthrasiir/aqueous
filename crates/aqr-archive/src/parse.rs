@@ -291,7 +291,7 @@ pub(crate) fn parse(d: &[u8], base: usize, size_hint: u64, metadata: bool, seale
 
 /// A block framed: where it starts, its type, its data and the bytes it takes (with its
 /// padding).
-pub(crate) type Framed<'d> = (usize, u64, &'d [u8], u64);
+type Framed<'d> = (usize, u64, &'d [u8], u64);
 
 /// The blocks `d` framed.
 pub(crate) fn frame(d: &[u8]) -> Decoded<Vec<Framed<'_>>> {
@@ -326,7 +326,7 @@ pub(crate) fn frame(d: &[u8]) -> Decoded<Vec<Framed<'_>>> {
 
 /// The leading digit of block type `ty`: the first digit of its hexadecimal representation,
 /// padded with zeros to at least 2 digits.
-pub(crate) fn leading_digit(ty: u64) -> u64 {
+fn leading_digit(ty: u64) -> u64 {
     let digits = (64 - ty.leading_zeros()).div_ceil(4).max(2);
     ty >> (4 * (digits - 1))
 }
@@ -409,12 +409,12 @@ pub(crate) fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&di
     Ok(out)
 }
 
-pub(crate) fn zstd_failure(e: zstd_safe::ErrorCode) -> Failure {
+fn zstd_failure(e: zstd_safe::ErrorCode) -> Failure {
     Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)))
 }
 
 /// Zstandard `blocks` of `window` making exactly `size` bytes, with dictionary `dict`.
-pub(crate) fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
+fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
     let _s = aqr_common::trace::span("unzstd");
     // A context of the thread's, kept for the next frame (with its input buffer) where there is
     // no dictionary to refer to: archives have a formula block a leaf, each a frame, and making
@@ -443,7 +443,7 @@ pub(crate) fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::D
 }
 
 /// [`unzstd`] with `dctx` (of its dictionary, if any).
-pub(crate) fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
+fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
     // the frame: a header, then the blocks (not copied after it)
     let head = [ZSTD_MAGIC[0], ZSTD_MAGIC[1], ZSTD_MAGIC[2], ZSTD_MAGIC[3], 0, window];
     let mut frame = [&head[..], blocks].into_iter();

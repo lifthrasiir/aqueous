@@ -5,7 +5,7 @@ use super::*;
 
 /// The data compressed on this thread told of as a sweep, until dropped ([`external`]); the one
 /// before, if any, then as it was.
-pub(crate) struct Swept(pub(crate) Option<aqr_common::progress::Sweep>);
+pub(crate) struct Swept(Option<aqr_common::progress::Sweep>);
 
 impl Swept {
     pub(crate) fn over(s: aqr_common::progress::Sweep) -> Swept {
@@ -23,8 +23,8 @@ impl Drop for Swept {
 /// so that it hands back now and then, for data of more than [`SWEPT_MIN`] bytes: up to 512
 /// KiB, Zstandard compresses on the calling thread, which makes other output with less room
 /// than it may take.
-pub(crate) const SWEPT_WINDOW: usize = 256 << 10;
-pub(crate) const SWEPT_MIN: usize = 1 << 20;
+const SWEPT_WINDOW: usize = 256 << 10;
+const SWEPT_MIN: usize = 1 << 20;
 
 thread_local! {
     /// The Zstandard context of a thread compressing streams for [`Encoder::precompress`].
@@ -32,7 +32,7 @@ thread_local! {
 }
 
 /// A compression of a sample at a level (or of all the data, given none).
-pub(crate) type Compress<'a> = dyn FnMut(Option<&[u8]>, i32) -> Result<Compressed> + 'a;
+type Compress<'a> = dyn FnMut(Option<&[u8]>, i32) -> Result<Compressed> + 'a;
 
 /// What to make of `data` at `level`: `compress` compresses a sample at a level (or all of
 /// `data`, given none), as [`compressed`] does.
@@ -100,21 +100,21 @@ pub(crate) fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Com
 /// depend on which was met first. (Of the Windows 7 SP1 DVD's trials, 15% of the bytes were
 /// of data met before.)
 #[derive(Clone, Copy)]
-pub(crate) enum Planned {
+enum Planned {
     Probe,
     Stored,
     Done(i32),
     Level(i32, usize),
 }
 
-pub(crate) static PLANNED: std::sync::Mutex<Option<HashMap<(StreamKey, u8), Planned>>> = std::sync::Mutex::new(None);
+static PLANNED: std::sync::Mutex<Option<HashMap<(StreamKey, u8), Planned>>> = std::sync::Mutex::new(None);
 
 /// Plans [`PLANNED`] holds at most, before it is cleared.
-pub(crate) const PLANNED_MAX: usize = 1 << 20;
+const PLANNED_MAX: usize = 1 << 20;
 
 /// [`plan_by`] at a level of [`Level::Of`] picking `p`, of `n` bytes of data of which `sample` is
 /// the sample, by `compress`.
-pub(crate) fn plan_of(p: &Pick, how: How, n: usize, sample: &[u8], compress: &mut Compress) -> Result<Plan> {
+fn plan_of(p: &Pick, how: How, n: usize, sample: &[u8], compress: &mut Compress) -> Result<Plan> {
     let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
     let probe = compress(Some(sample), PROBE_LEVEL.get())?;
     if !saves(len(&probe), sample.len()) {
@@ -282,7 +282,7 @@ pub(crate) fn always_compressed(c: &mut CCtx, data: &[&[u8]], level: i32, thread
 pub(crate) const STORED: i32 = 0;
 
 /// The largest Zstandard block (RFC 8878, `Block_Maximum_Size`).
-pub(crate) const ZSTD_BLOCK_MAX: usize = 128 << 10;
+const ZSTD_BLOCK_MAX: usize = 128 << 10;
 
 /// The compressed external structure of `data` (Zstandard, XXH64) of raw Zstandard blocks.
 pub(crate) fn stored_external(data: &[&[u8]]) -> Vec<u8> {
@@ -410,7 +410,7 @@ pub(crate) fn scaled(to: usize, of: usize, n: usize) -> usize {
 
 /// The most memory a context is kept with ([`compressed`]): it holds what the largest data
 /// and highest level it compressed took, and a new one gives that back.
-pub(crate) const CCTX_KEPT: usize = 4 << 20;
+const CCTX_KEPT: usize = 4 << 20;
 
 /// [`compressed`], expected to give about `size` bytes: room is made for a little more, and
 /// for as much as Zstandard may give only where that does not do (the output does not depend
@@ -428,23 +428,17 @@ pub(crate) fn compressed_to(
 
 /// The compressed external structure of `data` as [`compressed_to`] makes it, and whether its
 /// Zstandard blocks are longer than `data`.
-pub(crate) fn external(
-    c: &mut CCtx,
-    data: &[&[u8]],
-    level: i32,
-    threads: usize,
-    size: usize,
-) -> Result<(Vec<u8>, bool)> {
+fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<(Vec<u8>, bool)> {
     external_with(c, data, level, threads, size, dict::With::None)
 }
 
-pub(crate) fn zstd_error(e: zstd_safe::ErrorCode) -> Error {
+fn zstd_error(e: zstd_safe::ErrorCode) -> Error {
     Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)))
 }
 
 /// Sets context `c` to compress `data` at `level` on up to `threads` threads, with `dict`:
 /// the workers of the pool lent while it compresses, and the length of `data`.
-pub(crate) fn begin<'a>(
+fn begin<'a>(
     c: &mut CCtx<'a>,
     data: &[&[u8]],
     level: i32,

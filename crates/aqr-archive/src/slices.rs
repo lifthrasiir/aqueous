@@ -55,9 +55,9 @@ aqr_common::zopt! {
 /// [`LITERAL_MAX`] by default; none in this crate's tests, which look at the blocks of small
 /// streams (those of literals set it).
 #[cfg(not(test))]
-pub(crate) const LITERAL_MAX_DEFAULT: usize = 1 << 10;
+const LITERAL_MAX_DEFAULT: usize = 1 << 10;
 #[cfg(test)]
-pub(crate) const LITERAL_MAX_DEFAULT: usize = 0;
+const LITERAL_MAX_DEFAULT: usize = 0;
 
 /// Of each of `streams` streams, whether the slices below `nodes` are literals, not slices of
 /// its blocks: where they take [`LITERAL_MAX`] bytes at most, all of them (as many times as
