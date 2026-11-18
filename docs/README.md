@@ -12,4 +12,5 @@ Most of them are currently written in Korean, sorry.
 - `macos-app-todo.md`: what is left for macOS application bundles.
 - `disk-image-design.md`: the plan for disk images (file systems, partition tables, virtual disks).
 - `other-projects.md`: survey of other projects.
+- `encrypted-sfx-design.md`: self-extracting programs of encrypted archives: the subsystem patched per program, decryption and its UI as blobs.
 - `rar3-decoding.md`, `rar5-decoding.md`: notes on the RAR formats for the clean-room aqr-rar.
