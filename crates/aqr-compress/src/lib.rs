@@ -164,8 +164,8 @@ use std::sync::Arc;
 
 pub use aqr_formula::{Formula, Kind, Module, Node, Region};
 pub use archive::{
-    Appending, Archived, ClassBytes, FileReport, Input, Output, Plain, Report, Solid, Source, Stop, Stopped, compress_tree,
-    compress_tree_into, compress_tree_to,
+    Appending, Archived, ClassBytes, FileReport, Input, Output, Plain, Report, Solid, Source, Stop, Stopped,
+    compress_tree, compress_tree_into, compress_tree_to,
 };
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
@@ -2989,7 +2989,13 @@ fn make_later(
             // (where the data is of a file mapped, an image's file of the input: read through once
             // sealed, but in verifying)
             let input = (d.as_ptr() as usize, d.len());
-            let child = child.map(|c| Made::from(c.cut(d)));
+            // (what those within it that are not sealed kept beside their data, [`made_deferring`]:
+            // nothing chooses once it is sealed, so the data kept, as it was compared)
+            let child = child.map(|c| {
+                let mut f = c.cut(d);
+                keep_eithers(&mut f, false);
+                Made::from(f)
+            });
             let size = child.as_ref().map(|c| bound_of(&c.f).saturating_sub(description_bound(n)));
             // (the bytes taken let go of now where they have a formula, made again of it in the
             // rare case it is turned down for the bound; but kept where formulas are sealed in

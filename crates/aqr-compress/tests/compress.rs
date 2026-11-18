@@ -2121,6 +2121,23 @@ fn tar(files: &[(&str, &[u8])]) -> Vec<u8> {
     d
 }
 
+/// A file alone whose members are sealed as they are made (a tar archive's), a member holding
+/// formulas kept beside their data (a ZIP archive's PNG files, losing only by their module):
+/// what was kept beside is resolved before the member is sealed (an MSI file's cabinet of
+/// programs panicked so: "an alternative not resolved").
+#[test]
+fn sealed_member_with_alternatives() {
+    let big = natural(100_000, false).repeat(10);
+    let z = zip(&[
+        ("big.txt", &big, true),
+        ("a.png", &picture(160, 120, None), false),
+        ("b.png", &picture(320, 240, None), false),
+    ]);
+    let t = tar(&[("a.zip", &z), ("a.txt", &text(5000))]);
+    let c = compress(&t, &Options::default());
+    assert!(decompress(&c, 1).unwrap() == t);
+}
+
 /// ar, tar and cpio archives go to aqr-bundle, and their members to their recompressors (by
 /// their names, or found in them); a tar archive in a gzip file too.
 #[test]
