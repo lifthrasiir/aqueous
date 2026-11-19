@@ -386,7 +386,9 @@ fn disk_full() {
 }
 
 /// write/5: an archive made inside the tree it archives is not among its files while it is made;
-/// replaced (`-f`) or appended to, it is an input like any file, read as it was.
+/// replaced (`-f`), it is an input like any file, read as it was; appended to, it is not
+/// archived into itself (skipped, as Windows' lock on it would not let it be read), the entry of
+/// it before left as it was.
 #[test]
 fn archive_in_its_input_tree() {
     let d = scratch("in-tree");
@@ -401,9 +403,11 @@ fn archive_in_its_input_tree() {
     let got = extracted(&d, "src/a.aqr");
     assert_eq!(names(&got), names(&files(&d.join("src"))));
     assert_eq!(got.iter().find(|f| f.0 == "a.aqr").unwrap().1, first);
-    ok(&d, &["-q", "-a", "src/a.aqr", "src"]);
+    let o = ok(&d, &["-a", "src/a.aqr", "src"]);
+    assert!(stderr(&o).contains("(the archive appended to)"), "{}", stderr(&o));
     let got = extracted(&d, "src/a.aqr");
-    assert_eq!(got.iter().find(|f| f.0 == "a.aqr").unwrap().1, second);
+    assert_eq!(got.iter().find(|f| f.0 == "a.aqr").unwrap().1, first);
+    assert!(fs::read(d.join("src/a.aqr")).unwrap().starts_with(&second[..second.len() - 16]));
     let t = ok(&d, &["-K", "src/a.aqr"]);
     assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
     fs::remove_dir_all(&d).unwrap();
@@ -941,6 +945,7 @@ fn ipc_extraction_ended() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+#[cfg(unix)]
 fn walk_len(d: &Path) -> usize {
     fs::read_dir(d).map(|r| r.count()).unwrap_or(0)
 }

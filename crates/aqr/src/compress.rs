@@ -143,6 +143,9 @@ pub(crate) struct Gathered {
     pub(crate) gone: Option<Vec<Gone>>,
     /// With `-p`, the access times of the paths read, put back once they are archived.
     pub(crate) atimes: Atimes,
+    /// The archive appended to (`-a`, its path as canonicalized), not archived into itself where
+    /// it is among the inputs (a file Windows has locked as it is appended to).
+    pub(crate) itself: Option<PathBuf>,
 }
 
 /// The access times of the paths read as they were before (`-p`, as they are archived), put
@@ -179,6 +182,7 @@ impl Gathered {
             inodes: Default::default(),
             gone: None,
             atimes: Atimes(preserve.then(Vec::new)),
+            itself: None,
         }
     }
 
@@ -436,6 +440,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
 
     let mut g = Gathered::new(mapper, a.preserve);
     g.gone = a.rm.then(Vec::new);
+    g.itself = opened.as_ref().and_then(|_| fs::canonicalize(out).ok());
     let gathering = aqr_common::trace::span("gather");
     // (what a session's inventory gathered of the same, if any)
     if let Some(cached) = session::cached(a, inputs) {

@@ -382,6 +382,14 @@ fn entry(
     l: &view::Listing,
 ) -> Result<Option<usize>, String> {
     let m = &s.m;
+    if m.file_type().is_file()
+        && let Some(itself) = &g.itself
+        && itself.file_name() == Some(name)
+        && fs::canonicalize(path).is_ok_and(|p| p == *itself)
+    {
+        g.skipped.push(format!("{} (the archive appended to)", path.display()));
+        return Ok(None);
+    }
     let name = name_from(&os_bytes(name));
     let (mut extra, forks) = g.reader.extra(path, s, &mut |w| g.warnings.push(w));
     let t = m.file_type();
