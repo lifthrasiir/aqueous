@@ -292,7 +292,7 @@ impl Split<'_> {
                 segment(self)?;
                 continue;
             }
-            let (size, n) = leb(&self.d[self.at..end], L32)?;
+            let (size, n) = leb(self.d.get(self.at..end)?, L32)?;
             let stop = (self.at + n).checked_add(usize::try_from(size).ok()?).filter(|&e| e <= end)?;
             let (start, mark) = (self.at, self.mark());
             if n == varint::len(size) {
@@ -518,4 +518,21 @@ pub fn from_split_form(d: &[u8]) -> Option<Vec<u8>> {
     // (every byte is copied once, but for a byte of `local` or `skeleton`, which give five at most)
     let max = d.len().checked_mul(5)?;
     join_to(ins, max, d.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A code section whose function count runs past the section's end is not split.
+    #[test]
+    fn count_past_section_end() {
+        for (count, size) in [(&[0x80u8, 0x01][..], 1u8), (&[0xff, 0xff, 0x03], 2), (&[0x05], 1)] {
+            let mut m = HEADER.to_vec();
+            m.extend_from_slice(&[CODE_SECTION, size]);
+            m.extend_from_slice(count);
+            m.extend_from_slice(&[0, 0, 0]);
+            assert!(split(&m).is_some());
+        }
+    }
 }

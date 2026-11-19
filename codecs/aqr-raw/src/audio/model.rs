@@ -53,7 +53,8 @@ impl Lms {
     /// residuals at about `IN_BITS` bits; the stored history is rescaled.
     pub fn set_scale(&mut self, sc: &Scale) {
         let l = 31 - sc.avg.leading_zeros();
-        let sh = l.saturating_sub(5 + IN_BITS).min(16);
+        // (at most 15: the history is 16 bits, and a shift by 16 would overflow)
+        let sh = l.saturating_sub(5 + IN_BITS).min(15);
         if sh != self.in_shift {
             for v in &mut self.h {
                 *v = if sh > self.in_shift {
@@ -784,4 +785,26 @@ pub fn advance(a: &mut Scale, ea: &[i32], b: Option<(&mut Scale, &[i32])>) {
         sa.next_short(zigzag(x));
     }
     *a = sa;
+}
+
+/// Residuals near 2^31 raise the scale to its top, the history's shift from none to the most
+/// at once: the history must not be shifted past its width.
+#[cfg(test)]
+#[test]
+fn set_scale_from_zero_to_largest() {
+    let mut l = Lms::default();
+    l.h = [-5; TAPS];
+    l.h[1] = 1000;
+    l.set_scale(&Scale { avg: 1 << 31, pend: 0 });
+    assert_eq!(l.h[0], -1);
+    assert_eq!(l.h[1], 0);
+    // and back
+    l.set_scale(&Scale::default());
+    assert_eq!(l.in_shift, 0);
+    // a shift that did not overflow gives the same as before
+    let mut l = Lms::default();
+    l.h[0] = -1000;
+    l.set_scale(&Scale { avg: 1 << 24, pend: 0 });
+    assert_eq!(l.in_shift, 10);
+    assert_eq!(l.h[0], -1);
 }
