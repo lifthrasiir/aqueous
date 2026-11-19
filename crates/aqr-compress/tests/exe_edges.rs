@@ -449,3 +449,122 @@ fn plain_images_are_filtered() {
         assert!(modules.iter().any(|m| m.starts_with("exe-recons")), "{name}: {modules:?}");
     }
 }
+
+fn le32(v: u32) -> [u8; 4] {
+    v.to_le_bytes()
+}
+
+/// A section of a .NET assembly (RVA `base`) of three method bodies (tiny, fat with an exception
+/// table, and one cut short), the metadata root at 0x200, and MethodDef rows for them (as
+/// aqr-exe's CIL tests make one).
+fn cil_section(base: u32) -> Vec<u8> {
+    let mut d = vec![0u8; 0x400];
+    let a = 0x10;
+    let code_a = [0x72, 1, 0, 0, 0x70, 0x28, 2, 0, 0, 0x0a, 0x28, 2, 0, 0, 0x0a, 0x2a];
+    d[a] = (code_a.len() << 2 | 2) as u8;
+    d[a + 1..a + 1 + code_a.len()].copy_from_slice(&code_a);
+    let b = 0x24;
+    let mut code_b = vec![0x20, 0x78, 0x56, 0x34, 0x12, 0x45];
+    code_b.extend(le32(2).into_iter().chain(le32(5)).chain(le32(0xffff_fffe)));
+    code_b.extend([0x2b, 0x00, 0xfe, 0x0c, 0x01, 0x00, 0xfe, 0x15, 3, 0, 0, 0x01, 0xde, 0x00, 0x2a]);
+    d[b..b + 2].copy_from_slice(&0x301bu16.to_le_bytes());
+    d[b + 2..b + 4].copy_from_slice(&8u16.to_le_bytes());
+    d[b + 4..b + 8].copy_from_slice(&le32(code_b.len() as u32));
+    d[b + 8..b + 12].copy_from_slice(&le32(0x1100_0001));
+    d[b + 12..b + 12 + code_b.len()].copy_from_slice(&code_b);
+    let eh = (b + 12 + code_b.len() + 3) & !3;
+    d[eh..eh + 4].copy_from_slice(&[0x01, 16, 0, 0]);
+    d[eh + 4..eh + 16].copy_from_slice(&[0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let c = 0x80;
+    d[c..c + 4].copy_from_slice(&[3 << 2 | 2, 0x20, 1, 2]);
+
+    let mut m = Vec::new();
+    m.extend(b"BSJB");
+    m.extend([1, 0, 1, 0, 0, 0, 0, 0]);
+    m.extend(le32(12));
+    m.extend(b"v4.0.30319\0\0");
+    m.extend([0, 0, 5, 0]);
+    let names: [&[u8]; 5] = [b"#~", b"#Strings", b"#US", b"#GUID", b"#Blob"];
+    let header_len = m.len() + names.iter().map(|n| 8 + ((n.len() + 4) & !3)).sum::<usize>();
+    let mut tables = vec![0, 0, 0, 0, 2, 0, 0, 1];
+    tables.extend(((1u64 << 0) | (1 << 2) | (1 << 6)).to_le_bytes());
+    tables.extend(0u64.to_le_bytes());
+    tables.extend(le32(1).into_iter().chain(le32(2)).chain(le32(5)));
+    tables.extend([0, 0, 1, 0, 1, 0, 0, 0, 0, 0]);
+    for (name, methods) in [(1u16, 1u16), (5, 3)] {
+        tables.extend(le32(0x100001));
+        for v in [name, 0, 0, 1, methods] {
+            tables.extend(v.to_le_bytes());
+        }
+    }
+    for rva in [base + a as u32, base + b as u32, 0, base + c as u32, 0x9999] {
+        tables.extend(le32(rva));
+        for v in [0u16, 0x86, 5, 1, 1] {
+            tables.extend(v.to_le_bytes());
+        }
+    }
+    while tables.len() % 4 != 0 {
+        tables.push(0);
+    }
+    let heaps: [&[u8]; 5] = [&tables, b"\0Foo\0Bar\0\0\0\0", b"\0\x05h\0i\0\0\0", &[0x5a; 16], b"\0\x03abc\0\0\0"];
+    let mut at = header_len;
+    for (name, h) in names.iter().zip(heaps) {
+        m.extend(le32(at as u32));
+        m.extend(le32(h.len() as u32));
+        m.extend(*name);
+        m.extend(vec![0; ((name.len() + 4) & !3) - name.len()]);
+        at += h.len();
+    }
+    for h in heaps {
+        m.extend(h);
+    }
+    d[0x200..0x200 + m.len()].copy_from_slice(&m);
+    d
+}
+
+/// A PE32+ .NET assembly of x86-64: one section (RVA 0x1000, at 0x400, 0x1000 bytes) of a CIL
+/// section and, past it, the CLR header (RVA 0x1800) of metadata at 0x1200; where `functions`
+/// are given (`(begin, end)`, RVAs), a ReadyToRun image (header at 0x1900, runtime functions at
+/// 0x1a00) of native code there, else of IL alone.
+fn dotnet(functions: Option<&[(u32, u32)]>) -> Vec<u8> {
+    let mut d = pe(0x8664, 0x20b, 16, &[s(0x1000, 0x1000, 0x400, CODE)], 0x1400);
+    put(&mut d, 0x400, &cil_section(0x1000));
+    // the COM descriptor directory (15th), then the header: size, versions, metadata (RVA, size), flags
+    put(&mut d, 0x178, &[le32(0x1800), le32(72)].concat());
+    let il_only = functions.is_none() as u32;
+    put(&mut d, 0xc00, &[le32(72), [2, 0, 5, 0], le32(0x1200), le32(0x100), le32(il_only)].concat());
+    if let Some(functions) = functions {
+        // (the managed native header: signature, version, flags, one section of runtime functions)
+        put(&mut d, 0xc00 + 64, &[le32(0x1900), le32(28)].concat());
+        put(&mut d, 0xd00, b"RTR\0");
+        put(&mut d, 0xd04, &[5u16.to_le_bytes(), 0u16.to_le_bytes()].concat());
+        put(&mut d, 0xd0c, &le32(1));
+        put(&mut d, 0xd10, &[le32(102), le32(0x1a00), le32(12 * functions.len() as u32)].concat());
+        for (i, &(b, e)) in functions.iter().enumerate() {
+            put(&mut d, 0xe00 + 12 * i, &[le32(b), le32(e), le32(0x1f00)].concat());
+            let at = 0x400 + (b - 0x1000) as usize;
+            put(&mut d, at, &code((e - b) as usize, i as u32 + 3));
+        }
+    }
+    d
+}
+
+/// A .NET assembly goes through the CIL filter, the native code of a ReadyToRun one within what
+/// the filter keeps as it is filtered in turn (x86-64 code); both come back byte for byte.
+#[test]
+fn dotnet_assemblies_are_filtered() {
+    let o = Options { smaller: false, ..Options::default() };
+    let r2r = [(0x1600, 0x1680), (0x1700, 0x1780), (0x1000, 0x1010), (0x1100, 0x1300)];
+    for (name, functions) in
+        [("il only", None), ("ready to run", Some(&r2r[..2])), ("over the metadata", Some(&r2r[2..]))]
+    {
+        let d = dotnet(functions);
+        let f = aqr_compress::recompress(&d, &o);
+        let modules: Vec<_> = f.applies().iter().map(|a| a.module.name).collect();
+        // (native code written over the metadata: not CIL any more, the code filtered as it is)
+        assert_eq!(modules.iter().any(|m| m.ends_with("/cil")), name != "over the metadata", "{name}: {modules:?}");
+        let native = modules.iter().filter(|m| !m.ends_with("/cil")).count();
+        assert_eq!(native > 0, name != "il only", "{name}: {modules:?}");
+        given_back(name, &d);
+    }
+}
