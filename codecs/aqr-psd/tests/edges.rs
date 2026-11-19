@@ -442,3 +442,133 @@ fn layers_of_absurd_rectangles_and_canvases() {
         assert!(most() < SMALL, "an allocation of {}", most());
     }
 }
+
+/// Row-wise delta of ZIP with prediction at `depth` (the inverse of `pixels`'s): 8 bits are
+/// bytes, 16 bits are big-endian words, 32 bits are split into byte planes in the row, then
+/// bytes are delta coded across the row.
+fn predicted_at(d: &[u8], width: usize, depth: usize) -> Vec<u8> {
+    let rb = width * depth / 8;
+    let mut o = d.to_vec();
+    for row in o.chunks_mut(rb) {
+        match depth {
+            8 => (1..rb).rev().for_each(|i| row[i] = row[i].wrapping_sub(row[i - 1])),
+            16 => {
+                for i in (1..width).rev() {
+                    let v = u16::from_be_bytes([row[2 * i], row[2 * i + 1]])
+                        .wrapping_sub(u16::from_be_bytes([row[2 * i - 2], row[2 * i - 1]]));
+                    row[2 * i..2 * i + 2].copy_from_slice(&v.to_be_bytes());
+                }
+            }
+            _ => {
+                let inter = row.to_vec();
+                for x in 0..width {
+                    for b in 0..4 {
+                        row[b * width + x] = inter[4 * x + b];
+                    }
+                }
+                (1..rb).rev().for_each(|i| row[i] = row[i].wrapping_sub(row[i - 1]));
+            }
+        }
+    }
+    o
+}
+
+/// The composite image is decoded to its planes whatever the compression and depth.
+#[test]
+fn composite_planes_are_decoded() {
+    let (w, h) = (13usize, 6usize);
+    for depth in [8usize, 16, 32] {
+        let pl = planes(3, w, h, depth);
+        let header =
+            Header { psb: false, channels: 3, w: w as u32, h: h as u32, depth: depth as u16, mode: 3, color_data: &[] };
+        let sizes = [(0u16, pl.clone()), (2, pl.clone()), (3, predicted_at(&pl, w, depth))];
+        let mut files: Vec<(u16, Vec<u8>)> = sizes.iter().map(|(c, d)| (*c, header.file(*c, d))).collect();
+        if depth == 8 {
+            // (RLE of 8-bit planes: rows of w bytes)
+            files.push((1, header.file(1, &pl)));
+            let psb = Header { psb: true, ..header };
+            files.push((1, psb.file(1, &pl)));
+        }
+        for (comp, file) in files {
+            let p = aqr_psd::parse(&file).unwrap();
+            let got =
+                aqr_psd::pixels::composite(&p, &file).unwrap_or_else(|e| panic!("depth {depth} comp {comp}: {e}"));
+            assert_eq!(got, pl, "depth {depth} comp {comp}");
+        }
+    }
+    assert_eq!(
+        [0u16, 1, 2, 3, 9].map(|c| aqr_psd::psd::Compression::from_u16(c).name()),
+        ["raw", "rle", "zip", "zippred", "comp9"]
+    );
+}
+
+/// The channels of layers are decoded by their own compression; a channel of no data is empty.
+#[test]
+fn layer_channels_are_decoded() {
+    let (w, h) = (20usize, 7usize);
+    let ls = layers(w, h, true);
+    let file = psd(w, h, &ls, aqr_psd::packbits::NO_TILES, 0, &[1]);
+    let p = aqr_psd::parse(&file).unwrap();
+    for (i, l) in ls.iter().enumerate() {
+        assert_eq!(p.layer_info.layers[i].channels.len(), l.channels.len());
+        for (j, (_, data)) in l.channels.iter().enumerate() {
+            let got = aqr_psd::pixels::layer_channel(&p, &file, i, j).unwrap();
+            assert_eq!(&got, data, "layer {i} channel {j} ({})", if i == 1 { "raw" } else { "RLE" });
+        }
+    }
+    // an unknown compression of a channel
+    let mut cut = file.clone();
+    let c = &p.layer_info.layers[0].channels[0];
+    cut[c.span.start + 1] = 9; // an unknown compression
+    let p = aqr_psd::parse(&cut).unwrap();
+    let e = aqr_psd::pixels::layer_channel(&p, &cut, 0, 0).unwrap_err();
+    assert!(e.to_string().contains("compression 9"), "{e}");
+}
+
+/// Data that does not hold its planes is an error, not a panic or a short plane.
+#[test]
+fn damaged_composite_planes_are_errors() {
+    let (w, h) = (16usize, 4usize);
+    let pl = planes(3, w, h, 8);
+    let header = Header::rgb(w as u32, h as u32);
+    let decode = |file: &[u8]| {
+        let p = aqr_psd::parse(file).ok()?;
+        Some(aqr_psd::pixels::composite(&p, file).map_err(|e| e.to_string()))
+    };
+    let err = |file: &[u8], what: &str| {
+        let r = decode(file).unwrap_or_else(|| panic!("{what}: not parsed"));
+        assert!(r.is_err(), "{what}: decoded");
+        r.unwrap_err()
+    };
+    assert!(err(&header.file(0, &pl[..pl.len() - 1]), "raw short").contains("raw data too short"));
+    // RLE: counts cut, a row cut, rows decoding to the wrong width, no data at all
+    let rle = header.file(1, &pl);
+    let counts = 2 * h * 3;
+    let head = rle.len() - rle_counted(&pl, w, aqr_psd::packbits::NO_TILES, 0, 2).len();
+    assert!(err(&rle[..head + counts - 1], "counts cut").contains("RLE counts truncated"));
+    assert!(err(&rle[..rle.len() - 1], "last row cut").contains("RLE row truncated"));
+    let mut wrong = header.head(1);
+    for _ in 0..h * 3 {
+        be16(&mut wrong, 2);
+    }
+    for _ in 0..h * 3 {
+        wrong.extend_from_slice(&[0, 7]); // a literal of one byte, not 16
+    }
+    assert!(err(&wrong, "short rows").contains("RLE row length mismatch"));
+    let mut bad = header.head(1);
+    for _ in 0..h * 3 {
+        be16(&mut bad, 2);
+    }
+    for _ in 0..h * 3 {
+        bad.extend_from_slice(&[0x80, 0]); // -128: a no-op, so the row is empty
+    }
+    assert!(err(&bad, "empty rows").contains("RLE row"));
+    // ZIP: a stream too short for its header, wrong inflated size, damaged deflate
+    assert!(err(&[header.head(2), vec![0x78]].concat(), "one byte").contains("short zlib stream"));
+    assert!(err(&header.file(2, &pl[..pl.len() - 1]), "zip short").contains("ZIP data size mismatch"));
+    assert!(err(&header.file(3, &[pl.clone(), vec![0]].concat()), "zip long").contains("ZIP data size mismatch"));
+    let mut z = header.head(2);
+    z.extend_from_slice(&[0x78, 0x01, 0x07, 0x00, 0x00, 0x00]); // block type 3
+    assert!(err(&z, "bad deflate").contains("zip channel"));
+    assert!(err(&header.file(9, &pl), "unknown").contains("compression 9"));
+}

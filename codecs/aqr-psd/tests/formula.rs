@@ -482,3 +482,42 @@ fn corrupt_streams_are_errors_not_panics() {
         }
     }
 }
+
+/// Layers of rows in runs of equal rows (as flat artwork has them): the pipelined reader skips
+/// a row whose PackBits bytes are the previous row's, also where the encoder misses them.
+fn repeating_layers(w: usize, h: usize, alpha: bool) -> Vec<Layer> {
+    let mut v = layers(w, h, alpha);
+    for l in &mut v {
+        for (_, data) in &mut l.channels {
+            let unique = image(w, h.div_ceil(7), data[0] as u32 + data.len() as u32);
+            *data = (0..h).flat_map(|y| unique[y / 7 * w..(y / 7 + 1) * w].to_vec()).collect();
+        }
+    }
+    v
+}
+
+#[test]
+fn threads_repeated_rows() {
+    let (w, h) = (700usize, 400usize);
+    for (enc, mangle) in [
+        (packbits::NO_TILES, 0),
+        // (every row a literal one: none is reproduced, and the rows after the first repeat it)
+        (packbits::NO_TILES, 1),
+        (Encoder::Photoshop { phase: 77, period: 368 }, 5),
+    ] {
+        let file = psd(w, h, &repeating_layers(w, h, true), enc, mangle, &[]);
+        check_threads_few(&file);
+    }
+    // the same with the composite as the layers render it (coded with the hint)
+    let file = hinted(w, h, &repeating_layers(w, h, true), &[]);
+    check_threads_few(&file);
+}
+
+/// [`check_threads`] on one and four threads.
+fn check_threads_few(file: &[u8]) {
+    let one = formula::encode(file, 1).expect("not coded");
+    assert!(formula::encode(file, 4).as_ref() == Some(&one), "encode differs with 4 threads");
+    for d in [1, 4] {
+        assert!(one.eval(&modules(d)).unwrap() == file, "decode with {d} threads");
+    }
+}

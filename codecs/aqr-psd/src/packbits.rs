@@ -541,4 +541,81 @@ mod tests {
         encode(Encoder::Photoshop { phase: 100, period: 368 }, &[7; 300], &mut e);
         assert_eq!(e, [(1 - 100i32) as u8, 7, 0x81, 7, (1 - 72i32) as u8, 7]);
     }
+
+    /// Rows of runs and noise, from a small LCG.
+    fn sample_rows(n: usize, width: usize, seed: u32) -> Vec<Vec<u8>> {
+        let mut x = seed;
+        let mut next = || {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            x >> 16
+        };
+        (0..n)
+            .map(|_| {
+                let mut row = Vec::with_capacity(width);
+                while row.len() < width {
+                    let v = (next() % 6) as u8;
+                    let len = match next() % 4 {
+                        0 => 1,
+                        1 => 2,
+                        2 => 3,
+                        _ => 1 + next() as usize % 200,
+                    };
+                    row.extend(std::iter::repeat_n(v, len.min(width - row.len())));
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// `identify` finds the encoder that made the rows (one that reproduces them all), and
+    /// counts the rows it does not reproduce: other encoders' rows, and rows that do not decode.
+    #[test]
+    fn identify_finds_the_encoder_and_counts_misses() {
+        let rows = sample_rows(40, 700, 99);
+        for enc in [
+            NO_TILES,
+            Encoder::Photoshop { phase: 37, period: 368 },
+            Encoder::Greedy { min_run: 2, split_rest: false },
+            Encoder::Greedy { min_run: 3, split_rest: true },
+        ] {
+            let mut encoded: Vec<Vec<u8>> = rows
+                .iter()
+                .map(|r| {
+                    let mut e = Vec::new();
+                    encode(enc, r, &mut e);
+                    e
+                })
+                .collect();
+            fn refs(e: &[Vec<u8>]) -> Vec<&[u8]> {
+                e.iter().map(|v| v.as_slice()).collect()
+            }
+            let (found, ok) = identify(&refs(&encoded));
+            assert_eq!(ok, rows.len(), "{enc:?} reproduces all of its rows");
+            assert!(encoded.iter().zip(&rows).all(|(e, r)| reproduces(found, r, e)), "{enc:?}: found {found:?}");
+            let (found_rows, bad) = {
+                let r: Vec<&[u8]> = rows.iter().map(|v| v.as_slice()).collect();
+                identify_rows(&refs(&encoded), &r)
+            };
+            assert!(bad.is_empty());
+            assert_eq!(found_rows, found);
+
+            // rows no encoder makes (all literals), and one that is cut: not reproduced, whatever
+            // the encoder found
+            let literal =
+                |r: &[u8]| r.chunks(128).flat_map(|c| [&[c.len() as u8 - 1][..], c].concat()).collect::<Vec<u8>>();
+            let mangled = [3usize, 17, 18, 30];
+            for &m in &mangled {
+                encoded[m] = literal(&rows[m]);
+            }
+            let cut = encoded[5].len() - 1;
+            encoded[5].truncate(cut);
+            let (found, ok) = identify(&refs(&encoded));
+            assert_eq!(ok, rows.len() - mangled.len() - 1, "{enc:?}: {found:?}");
+        }
+        // one row, none
+        let mut e = Vec::new();
+        encode(NO_TILES, &rows[0], &mut e);
+        assert_eq!(identify(&[&e]).1, 1);
+        assert_eq!(identify(&[]).1, 0);
+    }
 }
