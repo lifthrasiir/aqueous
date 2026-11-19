@@ -147,14 +147,14 @@ fn record(d: &[u8], mut p: usize, dia: &Dialect, fields: &mut Vec<Field>) -> Opt
             if d[k..].starts_with(&dia.delim) {
                 break (k, None);
             }
-            if line {
-                // (d[k] is LF)
+            // (a byte of a delimiter that is none is no end: only the LF ends a line)
+            if line && d[k] == b'\n' {
                 match k > p && d[k - 1] == b'\r' {
                     true => break (k - 1, Some((k + 1, E_CRLF))),
                     false => break (k, Some((k + 1, E_TERM))),
                 }
             }
-            if d[k..].starts_with(&dia.term) {
+            if !line && d[k..].starts_with(&dia.term) {
                 break (k, Some((k + dia.term.len(), E_TERM)));
             }
             i = k + 1;

@@ -1266,6 +1266,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-num",
+ "aqr-testkit",
  "memchr",
  "zstd",
 ]
@@ -1963,6 +1964,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-num",
+ "aqr-testkit",
  "memchr",
  "zstd",
 ]
