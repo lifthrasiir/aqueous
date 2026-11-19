@@ -757,6 +757,14 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
         destuff(&d[s.start..s.end], clean);
         let r = decode_scan(j, s, clean, out);
         // sequential scans are independent: a bad one is simply kept verbatim
+        if r.is_err() {
+            // (what it decoded of its components before failing is of no use, and a model of
+            // that may not hold: they are left empty)
+            for sc in &s.comps {
+                out[sc.ci].blocks.fill([0; 64]);
+                out[sc.ci].masks.fill(0);
+            }
+        }
         infos.push(match r {
             Ok(i) if i.standard => i,
             _ => ScanInfo { raw: true, ..Default::default() },
