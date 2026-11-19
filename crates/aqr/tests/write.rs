@@ -517,3 +517,143 @@ fn append_to_truncated_and_torn() {
     assert!(appended > 0);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// write/7: more entries than a 16-bit count holds (65535 and a few over): written, listed and
+/// extracted whole.
+#[test]
+fn over_65535_files() {
+    let d = scratch("many");
+    let src = d.join("src");
+    for i in 0..660 {
+        let sub = src.join(format!("d{i:03}"));
+        fs::create_dir_all(&sub).unwrap();
+        for j in 0..100 {
+            fs::write(sub.join(format!("f{j:03}")), b"").unwrap();
+        }
+    }
+    let o = ok(&d, &["-o", "m.aqr", "src"]);
+    assert!(stderr(&o).contains("66000 files"), "{}", stderr(&o));
+    let o = ok(&d, &["-t", "-q", "m.aqr"]);
+    assert_eq!(o.stdout.iter().filter(|&&b| b == b'\n').count(), 66000 + 660, "{}", stderr(&o));
+    let o = ok(&d, &["-d", "-o", "x", "m.aqr"]);
+    assert!(stderr(&o).contains("66000 files"), "{}", stderr(&o));
+    let (a, b) = (fs::read_dir(d.join("x")).unwrap().count(), fs::read_dir(&src).unwrap().count());
+    assert_eq!((a, b), (660, 660));
+    let last = fs::metadata(d.join("x/d659/f099")).unwrap();
+    assert!(last.is_file() && last.len() == 0);
+    // (appended to, one more)
+    fs::write(src.join("d000/new"), b"n").unwrap();
+    let o = ok(&d, &["-a", "m.aqr", "src"]);
+    assert!(stderr(&o).contains("1 file"), "{}", stderr(&o));
+    ok(&d, &["-q", "-K", "m.aqr"]);
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// The entries under `d`: path and kind, by bytes, with the contents of files.
+#[cfg(unix)]
+fn walk(d: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = Vec::new();
+    let mut stack = vec![(d.to_owned(), Vec::new())];
+    while let Some((dir, at)) = stack.pop() {
+        for e in fs::read_dir(&dir).unwrap() {
+            let e = e.unwrap();
+            let name = [&at[..], e.file_name().as_bytes()].concat();
+            if e.file_type().unwrap().is_dir() {
+                out.push((name.clone(), b"/".to_vec()));
+                stack.push((e.path(), [&name[..], b"/"].concat()));
+            } else {
+                out.push((name, fs::read(e.path()).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// write/7: names a Unix file system takes and other systems do not (a backslash, a colon, a
+/// trailing dot or space, a device's name, bytes that are not UTF-8 or are a surrogate's, of
+/// 255 bytes, a path of 900 bytes), and the times of files at extremes (before 1970, far on,
+/// of 999999999 nanoseconds): archived by one thread and by eight to the same bytes, extracted
+/// as they were. What the file system will not take is left out of the sources.
+#[cfg(unix)]
+#[test]
+fn names_and_times_roundtrip() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::time::{Duration, SystemTime};
+    let d = scratch("names");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let long = "l".repeat(255);
+    let names: Vec<Vec<u8>> = vec![
+        b"back\\slash".to_vec(),
+        b"a\\b\\c.txt".to_vec(),
+        b"co:lon".to_vec(),
+        b"trailing.".to_vec(),
+        b"trailing ".to_vec(),
+        b"CON".to_vec(),
+        b"nul.txt".to_vec(),
+        b"-dash".to_vec(),
+        b"\xff\xfe-bytes".to_vec(),
+        b"surrogate-\xed\xa0\x80".to_vec(),
+        "emoji-\u{1F600}".into(),
+        "\u{e9}-composed".into(),
+        long.clone().into_bytes(),
+        b"d\xffir/inner".to_vec(),
+        format!("{long}/{long}").into_bytes(),
+    ];
+    let mut made = 0;
+    for (i, n) in names.iter().enumerate() {
+        let p = src.join(OsStr::from_bytes(n));
+        if let Some(parent) = p.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                continue;
+            }
+        }
+        if fs::write(&p, text(i as u64, 2000 + i * 100)).is_ok() {
+            made += 1;
+        }
+    }
+    // (a path of 900 bytes, a directory of 100 a level)
+    let mut deep = src.clone();
+    for k in 0..9 {
+        deep.push(format!("{k}{}", "p".repeat(98)));
+    }
+    if fs::create_dir_all(&deep).is_ok() && fs::write(deep.join("leaf"), b"deep").is_ok() {
+        made += 1;
+    }
+    // (times: before 1970, far on, the last nanosecond of a second)
+    let at = |secs: i64, nanos: u32| match secs {
+        s if s < 0 => SystemTime::UNIX_EPOCH - Duration::new(-s as u64, 0) + Duration::new(0, nanos),
+        s => SystemTime::UNIX_EPOCH + Duration::new(s as u64, nanos),
+    };
+    let times = [(-1_000_000_000, 0), (-1, 999_999_999), (0, 1), (4_102_444_800, 999_999_999), (7_258_118_400, 5)];
+    let mut want = Vec::new();
+    for (k, &(s, n)) in times.iter().enumerate() {
+        let p = src.join(format!("time{k}"));
+        fs::write(&p, text(k as u64, 500)).unwrap();
+        let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
+        if f.set_modified(at(s, n)).is_ok() {
+            // (as the file system keeps it: what is compared is what it reads back)
+            want.push((p.clone(), fs::metadata(&p).unwrap().modified().unwrap()));
+        }
+    }
+    eprintln!("{made} of {} names made, {} times set", names.len() + 1, want.len());
+    assert!(made > 5 && !want.is_empty(), "{made} {}", want.len());
+    let before = walk(&src);
+    ok(&d, &["-q", "-T", "1", "-o", "one.aqr", "src"]);
+    ok(&d, &["-q", "-T", "8", "-o", "eight.aqr", "src"]);
+    assert!(fs::read(d.join("one.aqr")).unwrap() == fs::read(d.join("eight.aqr")).unwrap(), "-T1 and -T8 differ");
+    ok(&d, &["-q", "-d", "-o", "x", "one.aqr"]);
+    assert_eq!(walk(&d.join("x")), before);
+    for (p, m) in want {
+        let got = fs::metadata(d.join("x").join(p.strip_prefix(&src).unwrap())).unwrap().modified().unwrap();
+        assert_eq!(got, m, "{}", p.display());
+    }
+    ok(&d, &["-q", "-K", "one.aqr"]);
+    // (appended to: nothing new, and the names are the same ones)
+    let o = ok(&d, &["-a", "one.aqr", "src"]);
+    assert!(stderr(&o).contains("nothing to append"), "{}", stderr(&o));
+    fs::remove_dir_all(&d).unwrap();
+}
