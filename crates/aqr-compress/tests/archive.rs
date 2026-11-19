@@ -311,6 +311,8 @@ struct Logged {
     ops: Vec<Op>,
     /// Committed once, as it ends ([`aqr_compress::Output::commits_once`]).
     once: bool,
+    /// A stop requested once so many operations are logged.
+    trip: Option<(std::sync::Arc<std::sync::atomic::AtomicBool>, usize)>,
 }
 
 enum Op {
@@ -323,6 +325,11 @@ impl Write for Logged {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.bytes.extend_from_slice(buf);
         self.ops.push(Op::Append(buf.len()));
+        if let Some((flag, n)) = &self.trip
+            && self.ops.len() >= *n
+        {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(buf.len())
     }
 
@@ -410,6 +417,126 @@ fn committed() {
         }
     }
     assert!(none && syncs > 6 && states > 10, "{syncs} {states}");
+}
+
+/// An archive of `sample()`'s first files appended to with the rest (`write/4`), the file's
+/// states as the operations are undone from the last (a write cut in half too) each the archive
+/// before or of a commit: its files those before and some of the new, never fewer as it grows.
+/// `kill`: the footer before made a spacer block (else the file cut at it first, a crash between
+/// that and the new footer leaving none); `once`: committed as it ends; `stop_after`: a stop
+/// requested once so many operations are written.
+fn appended_log(kill: bool, once: bool, stop_after: Option<usize>) -> bool {
+    use aqr_archive::Status;
+    let files = sample();
+    let base_files = &files[..3];
+    let new = [
+        ("n/u0.txt", text(25_000, 5)),
+        ("n/u1.txt", text(25_000, 6)),
+        ("m/u2.txt", text(25_000, 7)),
+        ("u3.txt", text(25_000, 8)),
+    ];
+    let new_files = &new[..];
+    let opt = Options { batch: 30_000, segment: 1, ..Options::default() };
+    let (base, _) = archived(base_files, &opt);
+    let (base_names, _) = located(&base);
+    let (footer, metadata) = aqr_archive::footer_of(&base).unwrap();
+    let from = aqr_compress::Appending { footer: footer.clone(), metadata: metadata.unwrap(), link_groups: 0, kill };
+    let start = if kill { base.clone() } else { base[..footer.start].to_vec() };
+    let (mut tree, contents) = tree_of(new_files);
+    tree.entries.retain(|e| !matches!(e.node, EntryNode::Link(_)));
+    let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut out =
+        Logged { bytes: start.clone(), once, trip: stop_after.map(|n| (flag.clone(), n)), ..Logged::default() };
+    let ended = |_: &aqr_compress::Report| {};
+    let stop = aqr_compress::Stop { requested: &flag, ended: &ended };
+    let r = aqr_compress::compress_tree_into(
+        &tree,
+        &inputs[..],
+        &opt,
+        &mut out,
+        Some(&from),
+        stop_after.map(|_| &stop),
+        &|_| {},
+    );
+    let r = match (stop_after, r) {
+        (None, Ok(r)) => r,
+        (Some(_), Ok(r)) if r.stopped.is_some() => {
+            assert!(r.stopped.unwrap().kept);
+            // (the stop ended it as it is: the archive of a commit, telling what it left out)
+            let (names, status) = located(&out.bytes);
+            assert!(names.len() > base_names.len() && matches!(status, Some(Status::Incomplete { .. })), "{status:?}");
+            assert!(names.len() < base_names.len() + new_files.len(), "stopped too late: {}", names.len());
+            replay(&start, &out, &base, &base_names, kill, once);
+            return true;
+        }
+        // (the stop come too late to be seen: done as it is)
+        (Some(_), Ok(r)) => r,
+        (s, r) => panic!("{s:?}: {:?} of {} ops", r.map(|r| r.len), out.ops.len()),
+    };
+    assert!(r.len > 0);
+    let (all, status) = located(&out.bytes);
+    assert_eq!(status, Some(Status::Complete), "stop {stop_after:?}, kill {kill}, once {once}: {:?}", r.stopped);
+    assert!(base_names.iter().all(|n| all.contains(n)) && all.len() > base_names.len());
+    replay(&start, &out, &base, &base_names, kill, once);
+    false
+}
+
+/// Of [`appended_log`]: the states of the file from `out`'s end back to `start`.
+fn replay(start: &[u8], out: &Logged, base: &[u8], base_names: &[Vec<u8>], kill: bool, once: bool) {
+    let mut file = out.bytes.clone();
+    let mut seen = located(&file).0;
+    let (mut none, mut states) = (false, 0);
+    let check = |file: &[u8], seen: &mut Vec<Vec<u8>>, none: &mut bool| {
+        if aqr_archive::locate(file).is_none() {
+            // (the crash between cutting the file at the footer and the new one)
+            assert!(!kill, "an archive appended to, with none");
+            *none = true;
+            return;
+        }
+        assert!(!*none, "an archive before its first commit");
+        let (names, _) = located(file);
+        assert!(base_names.iter().all(|n| names.contains(n)), "files of the archive before lost");
+        assert!(names.iter().all(|n| seen.contains(n)), "files appear as the file shrinks");
+        *seen = names;
+    };
+    for op in out.ops.iter().rev() {
+        match op {
+            Op::Append(n) => {
+                check(&file[..file.len() - n / 2], &mut seen, &mut none);
+                file.truncate(file.len() - n);
+                check(&file, &mut seen, &mut none);
+                states += 2;
+            }
+            Op::Sync => {}
+            Op::Patch(at, was) => {
+                file[*at..*at + was.len()].copy_from_slice(was);
+                check(&file, &mut seen, &mut none);
+                states += 1;
+            }
+        }
+    }
+    assert_eq!(file, start, "the file undone is not what it was");
+    if kill && !once {
+        assert_eq!(file, base);
+    }
+    assert!(states > 4, "{states}");
+    assert_eq!(none, !kill, "none states: {none}");
+}
+
+/// Files appended to an archive that is committed as it is written (`write/4`): each state of
+/// the file, cut at every operation, an archive holding all it held before and some of the new,
+/// the footer before made a spacer block or the file written over it; committed once, or
+/// stopped on the way.
+#[test]
+fn appended_committed() {
+    for kill in [true, false] {
+        for once in [false, true] {
+            assert!(!appended_log(kill, once, None));
+        }
+        let stopped = (1..9).filter(|&after| appended_log(kill, false, Some(after))).count();
+        assert!(stopped > 3, "{stopped} stops seen");
+    }
 }
 
 /// Files of the same content far apart by their names (of other extensions, others between
