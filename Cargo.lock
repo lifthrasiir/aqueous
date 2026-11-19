@@ -233,6 +233,7 @@ dependencies = [
  "aqr-lz4",
  "aqr-msadpcm",
  "aqr-raw",
+ "aqr-testkit",
  "aqr-tex",
  "zstd",
 ]
