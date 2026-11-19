@@ -11,8 +11,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 - `site/` — the project site, a single page deployed by the same workflow at the Pages root
   (with `droplet.svg`); its downloads are filled in from the latest GitHub release by script.
 - `docs/` — design documents, mostly in Korean: `10gb-todo.md` (what is left for the 10 GB
-  benchmark), `file-formats.md` (measurements by format), `*-design.md`, and `glossary.md` (in English: the
-  words of the code and the spec not obvious at a glance).
+  benchmark), `edge-tests-todo.md` (the edge cases left untested), `file-formats.md`
+  (measurements by format), `*-design.md`, and `glossary.md` (in English: the words of the
+  code and the spec not obvious at a glance).
 - `crates/` — the core crates
   - `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`); `--ipc` drives it from a frontend (`src/ipc.rs`); `--session` serves a
     compression dialog's questions before it begins (`src/session.rs`). `--format sfx` (`src/sfx.rs`,
@@ -68,6 +69,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-foreign` — what aqr-unpack and aqr-pack share, both ways: the encryptions (ZIP's,
     WinZip's AES, 7-Zip's AES) and times (FILETIME, MS-DOS's).
   - `aqr-common` — shared parts: varints, rANS, bit I/O, heap accounting, the task pool.
+  - `aqr-testkit` — what the tests share (a dev-dependency): inputs damaged deterministically, a
+    bound on a case's time, an allocator refusing large requests (`Refusing`).
     `aqr-num` — numbers printed as text.
   - `aqr-version` — the binaries' version for their build scripts: the tag's (`AQR_VERSION`, set
     by the release workflow) or `git describe`'s, as `env!("AQR_VERSION")` and Windows' `VERSIONINFO`.
