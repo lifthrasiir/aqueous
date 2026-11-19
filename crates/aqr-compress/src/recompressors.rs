@@ -254,10 +254,18 @@ pub(crate) fn rar(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 
 /// aqr-7z's formula, the contents of the files a content of the applications (or of the formula,
 /// those of stored folders), recompressed in turn, each by its kind by its name
-/// ([`kind_by_name`]).
-pub(crate) fn sevenz(d: &[u8], opt: &Options) -> Option<Formula> {
-    let o = aqr_7z::formula::Options { threads: opt.threads, kind: kind_by_name, ..Default::default() };
-    aqr_7z::formula::encode_with(d, &o)
+/// ([`kind_by_name`]). Its coders decode within what is left of the budget
+/// ([`Options::expansion`]).
+pub(crate) fn sevenz(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let o = aqr_7z::formula::Options {
+        threads: opt.threads,
+        limit: cx.inflate_left(),
+        kind: kind_by_name,
+        ..Default::default()
+    };
+    let e = aqr_7z::formula::encode_with(d, &o)?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
 }
 
 /// aqr-mszip's formula of a CAB file, the contents of the files a content of the applications,

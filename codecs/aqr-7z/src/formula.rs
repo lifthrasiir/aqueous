@@ -30,6 +30,10 @@ const BCJ2: &[u8] = &[3, 3, 1, 0x1b];
 #[derive(Debug, Clone)]
 pub struct Options {
     pub threads: usize,
+    /// The most bytes of data that the coders may decode to, all together, by the sizes the
+    /// header tells (and at most [`LIMIT`]): the folders past it are kept as they are, an
+    /// archive whose encoded header is past it not taken.
+    pub limit: u64,
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
     pub kind: fn(&[u8]) -> Kind,
@@ -39,7 +43,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, kind: |_| Kind::Unknown, own: OWN_MIN.get() }
+        Options { threads: 1, limit: u64::MAX, kind: |_| Kind::Unknown, own: OWN_MIN.get() }
     }
 }
 
@@ -104,11 +108,12 @@ fn rebuild(f: &mut Formula, how: Rebuild, data: Node, len: u64) -> Node {
     }
 }
 
-/// The data of `f`'s packed stream (a folder of one coder of LZMA, LZMA2 or Copy), decoded alone.
-fn unpack(f: &Folder, packed: &[u8]) -> Option<Vec<u8>> {
+/// The data of `f`'s packed stream (a folder of one coder of LZMA, LZMA2 or Copy), decoded alone,
+/// where it is of at most `limit` bytes.
+fn unpack(f: &Folder, packed: &[u8], limit: u64) -> Option<Vec<u8>> {
     let c = f.single()?;
     let size = f.size()?;
-    if size > LIMIT as u64 {
+    if size > limit.min(LIMIT as u64) {
         return None;
     }
     let data = match &c.id[..] {
@@ -257,12 +262,15 @@ pub fn extent(d: &[u8]) -> Option<usize> {
 }
 
 /// The span of an encoded header's packed stream, and its folder.
-type Encoded = (Range<u64>, Folder);
+type EncodedHeader = (Range<u64>, Folder);
 
 /// The header of the archive whose bytes `read` gives by their span, decoded where it is
-/// encoded (a folder of one coder of LZMA, LZMA2 or Copy, of the CRC-32 it is told); and the
-/// span and the folder of the encoded header.
-fn header_of(read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>) -> Option<(header::Header, Option<Encoded>)> {
+/// encoded (a folder of one coder of LZMA, LZMA2 or Copy, of the CRC-32 it is told, of at most
+/// `limit` bytes); and the span and the folder of the encoded header.
+fn header_of(
+    read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>,
+    limit: u64,
+) -> Option<(header::Header, Option<EncodedHeader>)> {
     let (span, crc) = header::signature(&read(0..header::SIGNATURE as u64)?)?;
     let bytes = read(span)?;
     if aqr_common::crc32::hash(&bytes) != crc {
@@ -273,7 +281,7 @@ fn header_of(read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>) -> Option<(hea
         Top::Encoded(s) => {
             let [folder] = &s.folders[..] else { return None };
             let [packs] = &s.pack_spans()?[..] else { return None };
-            let data = unpack(folder, &read(packs.clone())?)?;
+            let data = unpack(folder, &read(packs.clone())?, limit)?;
             if folder.crc.is_some_and(|c| c != aqr_common::crc32::hash(&data)) {
                 return None;
             }
@@ -289,7 +297,7 @@ fn header_of(read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>) -> Option<(hea
 /// their span (the signature header, the header, and the packed stream of an encoded header),
 /// of those whose CRC-32 it tells.
 pub fn entry_sums(read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>) -> Vec<(u32, u64)> {
-    let Some((h, _)) = header_of(read) else { return Vec::new() };
+    let Some((h, _)) = header_of(read, LIMIT as u64) else { return Vec::new() };
     let sizes = h.main.subs.iter().flatten();
     sizes.zip(&h.main.sub_crcs).filter_map(|(&n, c)| Some(((*c)?, n))).collect()
 }
@@ -297,13 +305,32 @@ pub fn entry_sums(read: &mut dyn FnMut(Range<u64>) -> Option<Vec<u8>>) -> Vec<(u
 /// The formula rebuilding archive `input`. None where it is not one, or no folder of its main
 /// streams is rebuilt (of [`LIMIT`] bytes of data in all).
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    encode_with(input, &Options { threads, ..Options::default() })
+    encode_with(input, &Options { threads, ..Options::default() }).map(|e| e.formula)
+}
+
+/// What [`encode_with`] made.
+pub struct Encoded {
+    pub formula: Formula,
+    /// Bytes of data decoded from the coders (what counts against [`Options::limit`]).
+    pub inflated: u64,
+}
+
+/// The bytes that the coders of folder `f` decode to, by the sizes the header tells, where it is
+/// of a shape rebuilt.
+fn decoded_size(f: &Folder) -> Option<u64> {
+    match shape(f)? {
+        Shape::Chain(_, (_, size, _)) => Some(size),
+        Shape::Bcj2(parts, _) => parts.iter().try_fold(0u64, |n, p| n.checked_add(p.1)),
+    }
 }
 
 /// [`encode`] with `opt`.
-pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
+pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let mut read = |r: Range<u64>| input.get(usize_range(&r)?).map(<[u8]>::to_vec);
-    let (h, encoded) = header_of(&mut read)?;
+    let mut left = opt.limit.min(LIMIT as u64);
+    let (h, encoded) = header_of(&mut read, left)?;
+    let header_size = encoded.as_ref().and_then(|e| e.1.size()).unwrap_or(0);
+    left = left.saturating_sub(header_size);
     let mut f = Formula::default();
     f.push("7z", Vec::new());
     // the packed streams rebuilt, by their spans
@@ -315,8 +342,19 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     }
     // (the folders side by side, each stream's parts on the workers free)
     let first_packs: Vec<usize> = s.folder_packs()?.iter().map(|r| r.start).collect();
+    // (the folders taken in order while what their coders decode to is within the limit, before
+    // any is decoded)
+    let taken: Vec<bool> = (s.folders.iter())
+        .map(|f| match decoded_size(f) {
+            Some(n) if n <= left => {
+                left -= n;
+                true
+            }
+            _ => false,
+        })
+        .collect();
     let made = aqr_common::pool::par_map(s.folders.len(), opt.threads, |i| {
-        make(s, i, first_packs[i], &packs, input, opt.threads)
+        if taken[i] { make(s, i, first_packs[i], &packs, input, opt.threads) } else { None }
     });
     // the names of the files of each folder's substreams
     let names: Vec<&[u8]> = h.files.iter().filter(|f| f.stream).map(|f| &f.name[..]).collect();
@@ -421,7 +459,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     container.extend_from_slice(&input[at..]);
     f.streams[0].data = container.into();
     f.root = Node::concat(nodes);
-    Some(f)
+    Some(Encoded { formula: f, inflated: total as u64 + header_size })
 }
 
 #[cfg(test)]

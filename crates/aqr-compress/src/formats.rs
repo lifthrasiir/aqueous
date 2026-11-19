@@ -457,7 +457,7 @@ formats! {
     /// 7z archive (aqr-7z, and aqr-lzma on its folders of LZMA or LZMA2), known by its
     /// signature header.
     SevenZip = "7z" {
-        recompressor: Cx(|d, _, opt, _, _| crate::sevenz(d, opt)),
+        recompressor: Cx(|d, _, opt, _, cx| crate::sevenz(d, opt, cx)),
         heap: 12.0,
         exts: &["7z"],
         extent: aqr_7z::formula::extent,

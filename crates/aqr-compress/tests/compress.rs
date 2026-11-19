@@ -1561,6 +1561,20 @@ fn zip_nested_like_42() {
     assert!(inflated >= 96 << 20, "{inflated}");
 }
 
+/// A 7z archive of 96 MiB of zeros (a few KB), past what may be inflated, stays as it is, its
+/// LZMA2 not decoded; with room for it, it is taken.
+#[test]
+fn sevenz_past_expansion() {
+    let zeros = vec![0; 96 << 20];
+    let d = aqr_7z::write::solid(&[("zeros", &zeros)]);
+    assert!(d.len() < 1 << 20, "{}", d.len());
+    let raw = |f: &Formula| f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum::<usize>();
+    let f = roundtrip(&d, &all());
+    assert!(raw(&f) < 64 << 20, "{}", raw(&f));
+    let f = roundtrip(&d, &Options { expansion: 1 << 20, ..all() });
+    assert!(raw(&f) >= 96 << 20, "{}", raw(&f));
+}
+
 /// An LZFSE stream of 96 MiB of zeros (a few KB), past what may be inflated, stays as it is;
 /// with room for it, it is taken.
 #[test]

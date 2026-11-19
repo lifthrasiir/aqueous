@@ -66,7 +66,7 @@ fn archives_rebuilt() {
     for (name, d) in fixtures().into_iter().filter(|f| !f.0.starts_with("filter-")) {
         assert!(formula::starts(&d) && formula::extent(&d) == Some(d.len()), "{name}");
         let opt = Options { threads: 2, kind, ..Options::default() };
-        let f = formula::encode_with(&d, &opt).unwrap_or_else(|| panic!("{name}"));
+        let f = formula::encode_with(&d, &opt).unwrap_or_else(|| panic!("{name}")).formula;
         assert!(eval(&f).unwrap() == d, "{name}");
         // every file of 1 KiB or more a slice of its own (the PE file's in a folder of BCJ too)
         let sums = formula::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
@@ -141,7 +141,7 @@ fn written_rebuilt() {
     let a: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 27) as u8 + b'a').collect();
     let files: [(&str, &[u8]); 4] = [("d/a.txt", &a), ("e", b""), ("d/b", b"hello"), ("d/c.txt", &a[1000..5000])];
     let d = aqr_7z::write::solid(&files);
-    let f = formula::encode_with(&d, &Options { kind, ..Options::default() }).unwrap();
+    let f = formula::encode_with(&d, &Options { kind, ..Options::default() }).unwrap().formula;
     assert!(eval(&f).unwrap() == d);
     let sums = formula::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
     let want: Vec<(u32, u64)> =
