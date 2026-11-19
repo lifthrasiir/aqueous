@@ -246,7 +246,11 @@ pub(crate) fn write_placing<T>(
     force: bool,
     write: impl FnOnce(&mut fs::File, &Path) -> std::io::Result<(T, bool)>,
 ) -> Result<T, String> {
-    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    // (placing it tells its path already, as it fails at its first commit: told once)
+    let err = |p: &Path, e: std::io::Error| match e.to_string() {
+        m if m.starts_with(&format!("{}: ", p.display())) => m,
+        m => format!("{}: {m}", p.display()),
+    };
     path.file_name().ok_or(format!("{}: not a file's name", path.display()))?;
     let part = part_of(path);
     let open = || fs::OpenOptions::new().read(true).write(true).create_new(true).open(&part);
