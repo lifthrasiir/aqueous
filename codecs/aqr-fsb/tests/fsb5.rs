@@ -149,6 +149,11 @@ impl aqr_vorbis::packet::Source for Random<'_> {
 /// A Vorbis bank of one sample of `channels` (1, 2 or 6) and `packets` random packets, of the
 /// database's setup of CRC-32 `crc`: framed packets, a length of 0, padding to 32 bytes.
 fn vorbis_bank(crc: u32, channels: usize, packets: u64) -> Vec<u8> {
+    vorbis_bank_with(crc, channels, packets, None)
+}
+
+/// [`vorbis_bank`] with a channels chunk (of the byte) before the sample's CRC-32 chunk.
+fn vorbis_bank_with(crc: u32, channels: usize, packets: u64, chunk: Option<u8>) -> Vec<u8> {
     let db = aqr_vorbis::setups::database().unwrap();
     let setup = db.assemble_row(db.row(crc).unwrap()).unwrap();
     let ident = aqr_vorbis::setup::Ident { channels, blocksizes: [256, 2048], stripped: false };
@@ -166,6 +171,10 @@ fn vorbis_bank(crc: u32, channels: usize, packets: u64) -> Vec<u8> {
     let mut headers = Vec::new();
     let code = [1, 2, 6].iter().position(|&c| c == channels).unwrap() as u64;
     headers.extend_from_slice(&(1u64 | 9 << 1 | code << 5 | 1000 << 34).to_le_bytes());
+    if let Some(c) = chunk {
+        headers.extend_from_slice(&(1u32 << 25 | 4 << 1 | 1).to_le_bytes());
+        headers.extend_from_slice(&[c, 0, 0, 0]);
+    }
     headers.extend_from_slice(&(11u32 << 25 | 4 << 1).to_le_bytes());
     headers.extend_from_slice(&crc.to_le_bytes());
     let mut d = b"FSB5".to_vec();
@@ -220,4 +229,98 @@ fn ima_adpcm_samples_through_the_module() {
         })
         .unwrap();
     assert_eq!(out, d);
+}
+
+/// `d` through its formula and back, the modules applied as aqr-formula's callers do.
+fn back(d: &[u8]) -> Option<Vec<u8>> {
+    let f = formula::encode(d, 1)?;
+    f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+        let r = if a.module == aqr_ima::formula::MODULE {
+            aqr_ima::formula::decode(&a.params, inputs, a.len).map_err(|e| e.0)
+        } else {
+            aqr_vorbis::formula::decode(&a.params, inputs, a.len).map_err(|e| e.0)
+        };
+        r.map_err(aqr_formula::Error::new)
+    })
+    .ok()
+}
+
+/// A bank of version 0 (its header 4 bytes longer) from one of version 1.
+fn version_0(d: &[u8]) -> Vec<u8> {
+    let mut e = d.to_vec();
+    e[4] = 0;
+    e.splice(0x3C..0x3C, [0; 4]);
+    e
+}
+
+#[test]
+fn version_0_banks() {
+    for d in [bank(15, &[64, 96, 32], 20), bank(7, &[32], 0), vorbis_bank(0x632b1fac, 1, 10)] {
+        let e = version_0(&d);
+        assert!(starts(&e));
+        let (l1, l0) = (Layout::of(&d).unwrap(), Layout::of(&e).unwrap());
+        assert_eq!((l0.codec, l0.head, l0.headers.len()), (l1.codec, l1.head + 4, l1.headers.len()));
+        assert_eq!(extent(&e), Some(e.len()));
+        assert_eq!(l0.samples.len(), l1.samples.len());
+        // (the chunks of its first sample are where its header puts them)
+        assert_eq!(l0.headers[0].chunks.len(), l1.headers[0].chunks.len());
+        assert_eq!(l0.headers[0].chunks[0].1.start, l1.headers[0].chunks[0].1.start + 4);
+        assert_eq!(back(&e).as_deref(), Some(&e[..]));
+    }
+    // cut inside the longer header, or taken as version 1: no bank
+    let e = version_0(&bank(15, &[64], 0));
+    for n in 0..0x40 + 8 {
+        assert!(Layout::of(&e[..n]).is_none());
+    }
+    let mut e1 = e.clone();
+    e1[4] = 1;
+    assert!(Layout::of(&e1).is_none() || extent(&e1).is_some());
+}
+
+/// A channels chunk of 0, of more than 8 and of 255: the sample is coded or kept as it is, and
+/// comes back.
+#[test]
+fn channels_chunk_out_of_range() {
+    for c in [0u8, 1, 2, 7, 8, 9, 100, 255] {
+        let d = vorbis_bank_with(0x632b1fac, 1, 6, Some(c));
+        let l = Layout::of(&d).unwrap();
+        assert_eq!(l.headers[0].channels, c as usize);
+        assert_eq!(back(&d).as_deref(), Some(&d[..]), "vorbis {c}");
+        // a stereo setup under any count
+        let d = vorbis_bank_with(0x988e56d5, 2, 6, Some(c));
+        assert_eq!(back(&d).as_deref(), Some(&d[..]), "stereo {c}");
+        // Xbox ADPCM of whole blocks (36 bytes a channel) for the count, and of none
+        let blocks = 3 * 36 * (c as usize).max(1);
+        let mut d = bank(7, &[blocks.next_multiple_of(32) + 32], 0);
+        // (the first sample's chunk is the channels chunk now)
+        d[0x3C + 8..0x3C + 12].copy_from_slice(&(1u32 << 25 | 4 << 1).to_le_bytes());
+        d[0x3C + 12] = c;
+        assert_eq!(Layout::of(&d).unwrap().headers[0].channels, c as usize);
+        assert_eq!(back(&d).as_deref(), Some(&d[..]), "ima {c}");
+    }
+    // a chunk of no bytes leaves the channels of the header
+    let mut d = bank(7, &[64], 0);
+    d[0x3C + 8..0x3C + 12].copy_from_slice(&(1u32 << 25).to_le_bytes());
+    d.drain(0x3C + 12..0x3C + 16);
+    d[12..16].copy_from_slice(&12u32.to_le_bytes());
+    assert_eq!(Layout::of(&d).unwrap().headers[0].channels, 1);
+}
+
+/// Damaged banks of each kind: no panic, no hang, no allocation the data cannot hold, and what
+/// has a formula gives the bank back.
+#[test]
+fn damaged_banks() {
+    #[global_allocator]
+    static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 28);
+    let banks = [
+        bank(15, &[64, 96, 32], 20),
+        version_0(&bank(7, &[72 * 2 + 32], 4)),
+        vorbis_bank_with(0x988e56d5, 2, 8, Some(2)),
+    ];
+    for d in banks {
+        aqr_testkit::damaged(&d, 40, 0x80, std::time::Duration::from_secs(60), |v| {
+            let _ = (starts(v), extent(v), sample_sums(v, 0));
+            assert!(back(v).is_none_or(|o| o == v));
+        });
+    }
 }
