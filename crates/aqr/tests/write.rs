@@ -745,3 +745,109 @@ fn hostile_names_stay_inside() {
     assert_eq!(fs::read(d.join("victim")).unwrap(), b"mine");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// The blocks of archive `a` (from its header to its footer): where each starts, its type and
+/// where its data is.
+fn blocks(a: &[u8]) -> Vec<(usize, u64, std::ops::Range<usize>)> {
+    let leb = |at: &mut usize| {
+        let (mut v, mut shift) = (0u64, 0);
+        loop {
+            let b = a[*at];
+            *at += 1;
+            v |= u64::from(b & 0x7f) << shift;
+            if b & 0x80 == 0 {
+                return v;
+            }
+            shift += 7;
+        }
+    };
+    let mut out = Vec::new();
+    let mut at = 6;
+    loop {
+        let start = at;
+        let ty = leb(&mut at);
+        if ty == 0x90_5bcb_957d {
+            return out;
+        }
+        let width = 1 << (ty % 4);
+        let size = u64::from_le_bytes(std::array::from_fn(|i| if i < width { a[at + i] } else { 0 }));
+        at += width;
+        let data = at..at + size as usize;
+        at = data.end + (data.end - start) % 2;
+        out.push((start, ty, data));
+    }
+}
+
+/// out/4: an archive without mirror blocks damaged in one place: `-K` and `-d` name exactly the
+/// files that cannot be given back (by their paths, each told however quiet, the run failing
+/// with exit code 3) and give the others back; `-t` lists whatever the damage is to data, and
+/// (`-t -q`, the paths alone, whatever it is) fails clearly where it is to a formula or module
+/// the listing needs.
+#[test]
+fn damaged_files_named() {
+    let d = scratch("out4");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    // (repeating beyond DEFLATE's window: recompressed, so with a module and a formula)
+    fs::write(d.join("big.txt"), text(1, 80_000).repeat(8)).unwrap();
+    ok(&d, &["-q", "--format", "gz", "-o", "src/big.txt.gz", "big.txt"]);
+    for i in 0..5 {
+        fs::write(src.join(format!("t{i}.txt")), text(10 + i, 3000 + 500 * i as usize)).unwrap();
+    }
+    let all = files(&src);
+    ok(&d, &["-q", "-b", "2K", "-o", "a.aqr", "src"]);
+    let a = fs::read(d.join("a.aqr")).unwrap();
+    // (the blocks: two modules, formulas, big.txt.gz's data, then the data of t0 to t4)
+    let types: Vec<u64> = blocks(&a).iter().map(|b| b.1).collect();
+    assert_eq!(types[..3], [0x61, 0x61, 0x64], "{types:x?}");
+    let bl = blocks(&a);
+    let mid = |k: usize| (bl[k].2.start + bl[k].2.end) / 2;
+    let data = |t: usize| bl.iter().rposition(|b| b.1 == 0x2d).unwrap() - 4 + t;
+    let cases: [(&str, Vec<usize>, Vec<&str>, bool); 6] = [
+        ("two files' data", vec![data(1), data(3)], vec!["t1.txt", "t3.txt"], true),
+        ("a module", vec![0], vec!["big.txt.gz"], false),
+        ("the other module", vec![1], vec!["big.txt.gz"], false),
+        ("a formula", vec![2], vec!["big.txt.gz"], false),
+        ("big.txt.gz's data", vec![6], vec!["big.txt.gz"], true),
+        ("big.txt.gz's other data", vec![7], vec!["big.txt.gz"], true),
+    ];
+    for (what, hit, lost, listable) in cases {
+        let mut b = a.clone();
+        for &k in &hit {
+            b[mid(k)] ^= 0x10;
+        }
+        fs::write(d.join("b.aqr"), &b).unwrap();
+        let _ = fs::remove_dir_all(d.join("xb"));
+        for args in [&["-K", "b.aqr"][..], &["-q", "-K", "b.aqr"], &["-d", "-o", "xb", "b.aqr"]] {
+            let o = aqr(&d, args);
+            let e = stderr(&o);
+            assert_eq!(o.status.code(), Some(3), "{what} {args:?}: {e}");
+            let mut told: Vec<&str> = e
+                .lines()
+                .filter_map(|l| l.strip_prefix("b.aqr: ")?.split(": lost").next().filter(|_| l.contains(": lost")))
+                .collect();
+            told.sort();
+            assert_eq!(told, lost, "{what} {args:?}: {e}");
+            let n = lost.len();
+            assert!(e.contains(&format!("{n} file{} lost", if n == 1 { "" } else { "s" })), "{what}: {e}");
+        }
+        let got = files(&d.join("xb"));
+        let want: Vec<_> = all.iter().filter(|f| !lost.contains(&f.0.as_str())).cloned().collect();
+        assert_eq!(got, want, "{what}");
+        // (the paths alone come from the metadata, which the damage is not to)
+        let o = aqr(&d, &["-t", "-q", "b.aqr"]);
+        assert!(o.status.success(), "{what}: {}", stderr(&o));
+        assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 6, "{what}");
+        let o = aqr(&d, &["-t", "b.aqr"]);
+        if listable {
+            assert!(o.status.success(), "{what}: {}", stderr(&o));
+            let listing = String::from_utf8_lossy(&o.stdout).into_owned();
+            assert!(all.iter().all(|f| listing.contains(&f.0)), "{what}: {listing}");
+        } else {
+            let e = stderr(&o);
+            assert_eq!(o.status.code(), Some(3), "{what}: {e}");
+            assert!(e.contains("invalid archive") && !e.contains("panicked"), "{what}: {e}");
+        }
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
