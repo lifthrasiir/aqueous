@@ -7,10 +7,11 @@ use crate::layout::Layout;
 use crate::texture::Family;
 use crate::{Result, corrupt, texture};
 
-/// No output is larger than this many times its coded form, and 16 MiB (a texture of one
-/// colour codes to about 1/5000 of its blocks), so that a few bytes of input cannot make the
-/// module take much memory.
-const MAX_RATIO: u64 = 8192;
+/// No output is larger than this many times its coded form, and 16 MiB, so that a few bytes of
+/// input cannot make the module run for long (its memory is held by the plan). A texture of one
+/// colour codes to about 1/90000 of its blocks (BC7, ETC2; 8192 once turned such a texture
+/// down), more the larger it is.
+const MAX_RATIO: u64 = 1 << 20;
 
 /// The layout of params `params`, of a format of family `F` and of `len` bytes.
 fn layout<F: Family>(params: &[u8], len: u64) -> Option<Layout> {

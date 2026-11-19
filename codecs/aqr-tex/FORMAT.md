@@ -75,7 +75,7 @@ Contents:
   items and the end of each, u64 little-endian, then the items), or empty where there are
   none.
 - **Output**: the blocks of the layout (§3), whose length must be the declared one. It must be
-  at most 8192 times the length of the input, plus 2^24; otherwise, or where any inconsistency
+  at most 2^20 times the length of the input, plus 2^24; otherwise, or where any inconsistency
   arises (§7, §4), it is an error.
 
 ## 3. Blocks
