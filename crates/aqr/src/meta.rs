@@ -891,9 +891,10 @@ mod os {
     /// `ERROR_MORE_DATA` and `ERROR_INSUFFICIENT_BUFFER`: more than a buffer holds.
     const MORE_DATA: i32 = 234;
     const INSUFFICIENT_BUFFER: i32 = 122;
-    /// `ERROR_INVALID_FUNCTION` and `ERROR_INVALID_PARAMETER`: a file system of no streams
-    /// (FAT and exFAT, those of VeraCrypt volumes among them).
-    const NO_STREAMS: [i32; 2] = [1, 87];
+    /// `ERROR_INVALID_FUNCTION`, `ERROR_INVALID_PARAMETER` and `ERROR_NOT_SUPPORTED`: a file
+    /// system of no streams (FAT and exFAT, those of VeraCrypt volumes among them; the 9P shares
+    /// of `\\wsl$`).
+    const NO_STREAMS: [i32; 3] = [1, 87, 50];
 
     /// `p` as the system's calls take it, of a NUL: of more characters than they take without
     /// it (`MAX_PATH`, the NUL and the room CreateDirectoryW keeps for a name), absolute and of

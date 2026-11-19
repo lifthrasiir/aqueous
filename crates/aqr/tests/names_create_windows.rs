@@ -189,3 +189,37 @@ fn case_colliding_names() {
     ok(&d, &["-K", "a.aqr"]);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// Names that differ by case alone read from a directory: where the temporary directory takes
+/// them apart (made case-sensitive beforehand; the test changes no setting), each archived, and
+/// extracted as [`case_colliding_names`] has it; elsewhere skipped, told so.
+#[test]
+fn case_colliding_names_from_a_directory() {
+    let d = scratch("case-dir");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("probe"), "").unwrap();
+    let apart = !src.join("PROBE").exists();
+    fs::remove_file(src.join("probe")).unwrap();
+    if !apart {
+        eprintln!("skipped: {} takes names of another case as one", d.display());
+        fs::remove_dir_all(&d).unwrap();
+        return;
+    }
+    for (k, n) in ["Case", "case", "CASE"].into_iter().enumerate() {
+        fs::write(src.join(n), format!("content {k}")).unwrap();
+    }
+    // (a file system of no streams, as \\wsl$'s, is told of nothing)
+    let o = ok(&d, &["-o", "a.aqr", "src"]);
+    assert!(!stderr(&o).contains("streams not read"), "{}", stderr(&o));
+    let list = String::from_utf8_lossy(&ok(&d, &["-t", "-v", "a.aqr"]).stdout).into_owned();
+    for n in ["Case", "case", "CASE"] {
+        assert_eq!(list.lines().filter(|l| l.ends_with(&format!("  {n}"))).count(), 1, "{n} in {list}");
+    }
+    // (extracted, one of them made and the others told, as this system takes them as one)
+    let o = ok(&d, &["-d", "-o", "out", "a.aqr"]);
+    let got: Vec<_> = fs::read_dir(d.join("out")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(stderr(&o).matches("not extracted, as this file system may take its name").count(), 2, "{}", stderr(&o));
+    fs::remove_dir_all(&d).unwrap();
+}
