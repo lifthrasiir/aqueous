@@ -1859,6 +1859,7 @@ dependencies = [
  "aqr-decompress",
  "aqr-formula",
  "aqr-lzx",
+ "aqr-testkit",
  "memmap2",
 ]
 

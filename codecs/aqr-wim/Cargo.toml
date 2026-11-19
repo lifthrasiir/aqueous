@@ -14,6 +14,7 @@ aqr-lzx = { path = "../aqr-lzx" }
 aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-decompress = { path = "../../crates/aqr-decompress" }
 memmap2 = "0.9"
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

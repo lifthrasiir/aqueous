@@ -16,6 +16,9 @@ pub const MAGIC: &[u8; 8] = b"MSWIM\0\0\0";
 pub const HEADER: usize = 208;
 pub const CHUNK: usize = 32768;
 
+/// The most bytes of data a compressed chunk can claim for each of its bytes.
+pub const MAX_RATIO: usize = 2048;
+
 /// Flags of the header: compressed, and by XPRESS, LZX or LZMS.
 pub const COMPRESSED: u32 = 0x2;
 pub const XPRESS: u32 = 0x2_0000;
@@ -142,7 +145,10 @@ fn chunks(d: &[u8], r: &Reshdr, span: Range<usize>) -> Option<Resource> {
         let (a, b) = (starts[i], starts[i + 1]);
         let len = CHUNK.min(orig - i * CHUNK);
         // (each chunk at most as long as its data, as stored chunks are)
-        if b <= a || b - a > len {
+        // (and at least a 2048th of it: an LZX chunk of 32 KiB, with its block's header and its
+        // trees, is longer than 16 bytes, so that a file cannot claim more data than a few
+        // thousand times its size, planned as buffers before any chunk is read)
+        if b <= a || b - a > len || len > (b - a).saturating_mul(MAX_RATIO) {
             return None;
         }
         chunks.push((base + a..base + b, len));
