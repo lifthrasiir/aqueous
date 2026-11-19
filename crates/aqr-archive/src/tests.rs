@@ -2631,3 +2631,164 @@ fn footers_and_headers_fail() {
     // (the original through the same path stays valid)
     assert!(open(&remeta(&c, |_| {}), &n).is_ok());
 }
+
+/// read/4: formula data failing by hand, in each way `program::read` checks: what is decoded of
+/// an archive of one formula block of `outputs` outputs, a module block of `rev`, a shorthand
+/// module block and one non-leaf block `xyz`.
+#[test]
+fn formula_data_fails() {
+    let n = natives();
+    let hash = [7u8; 32];
+    let run_with = |d: &[u8], outputs: u64, stream: bool| {
+        let c = archive(|out| {
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap());
+            shorthand_block(out, MODULE, &hash);
+            formula_block(out, outputs, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
+            if stream {
+                content_block(out, false, &[b"xyz"], compressed(&mut CCtx::create(), &[b"xyz"], 3, 1).unwrap().as_deref());
+            }
+        });
+        decode_value(&c, &n).map(|_| ())
+    };
+    // (the stream is there where the program refers to one)
+    let run = |d: &[u8], outputs: u64| run_with(d, outputs, d.first() == Some(&1));
+    let bad = |d: &[u8], outputs: u64, want: &str| match run(d, outputs) {
+        Err(Failure::Invalid(m)) => assert!(m.contains(want), "{d:?}: {m} for {want}"),
+        r => panic!("{d:?}: {r:?} for {want}"),
+    };
+    // (no blocks, resources or modules listed: [0, 0, 0])
+    let lit = [LITERAL, 3, b'a', b'b', b'c'];
+    let prog = |tail: &[u8]| [&[0u8, 0, 0][..], tail].concat();
+    assert_eq!(run(&prog(&lit), 1), Ok(()));
+    bad(&prog(&[0x30]), 1, "reserved opcode 0x30");
+    bad(&prog(&[0x04]), 1, "reserved opcode 0x04");
+    bad(&prog(&[0xff]), 1, "reserved opcode 0xff");
+    // checksums: truncated, of an empty stack, wrong
+    bad(&prog(&[&lit[..], &[CHECKSUM, 1, 2, 3, 4, 5, 6, 7]].concat()), 1, "truncated checksum");
+    bad(&prog(&[&lit[..], &[CHECKSUM]].concat()), 1, "truncated checksum");
+    bad(&prog(&[CHECKSUM, 0, 0, 0, 0, 0, 0, 0, 0]), 1, "a checksum of an empty stack");
+    bad(&prog(&lit), 0, "a formula block of no outputs");
+    bad(&prog(&[&lit[..], &[CHECKSUM, 0, 0, 0, 0, 0, 0, 0, 0]].concat()), 1, "checksum");
+    // outputs counted
+    bad(&prog(&lit), 2, "1 outputs, not 2");
+    bad(&prog(&[&lit[..], &lit[..]].concat()), 1, "2 outputs, not 1");
+    bad(&prog(&[]), 1, "0 outputs, not 1");
+    // a stack too shallow
+    bad(&prog(&[SWAP, 0]), 1, "out of range");
+    bad(&prog(&[&lit[..], &[SWAP, 1]].concat()), 1, "index 1 out of range");
+    bad(&prog(&[&lit[..], &[CONCAT, 2]].concat()), 1, "out of range");
+    bad(&prog(&[&lit[..], &[PACK, 2]].concat()), 1, "out of range");
+    bad(&prog(&[&lit[..], &[PATCH, 3]].concat()), 1, "stack underflow");
+    bad(&prog(&[SPLIT, 1, 3]), 1, "stack underflow");
+    bad(&prog(&[&lit[..], &[SPLIT, 0]].concat()), 1, "a split into no items");
+    // a swap with itself is a no-op, a concatenation of nothing is empty
+    assert_eq!(run(&prog(&[&lit[..], &[SWAP, 0]].concat()), 1), Ok(()));
+    let c = |tail: &[u8]| {
+        let d = prog(tail);
+        let c = formula(&d, &[]);
+        decode(&c, &n)
+    };
+    assert_eq!(c(&[CONCAT, 0]).unwrap(), b"");
+    assert_eq!(c(&[PACK, 0]).unwrap(), [0; 8]);
+    assert_eq!(c(&[&lit[..], &[CONCAT, 0, CONCAT, 2]].concat()).unwrap(), b"abc");
+    // references and lists: past the blocks, resources and modules there are; listed and not used
+    bad(&[1, 0, 0, 0, SLICE, 1, 0, 1], 1, "out of range");
+    bad(&[1, 5, 0, 0, SLICE, 0, 0, 1], 1, "a referenced block that does not exist");
+    bad(&[1, 0, 0, 0], 1, "a block listed but not used");
+    bad(&[0, 1, 0, 0, SLICE, 0, 0, 1], 1, "out of range");
+    bad(&[0, 0, 1, 0, SLICE, 0, 0, 1], 1, "out of range");
+    bad(&[0, 0, 1, 7, MODULE_BYTES, 0, 1], 1, "out of range");
+    bad(&[0, 1, 0, 0, RESOURCE_BYTES, 0, 1], 1, "out of range");
+    bad(&[0, 0, 0, 0, MODULE_BYTES, 0, 1], 1, "out of range");
+    // counts past the bytes there are
+    bad(&[0xff, 0xff, 0x7f], 1, "count");
+    bad(&[0, 0xff, 0x7f], 1, "count");
+    bad(&[0, 0, 0xff, 0xff, 0xff, 0xff, 0x0f], 1, "count");
+    bad(&prog(&[LITERAL, 9, 1, 2]), 1, "count 9 out of range");
+    bad(&prog(&[APPLY, 0]), 1, "out of range");
+    bad(&[0, 0, 1, 0, APPLY, 0, 0xff, 0x7f], 1, "count");
+    // a module block as stored, and a shorthand one that has no bytes
+    let stored = always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap();
+    let mut d = vec![0, 0, 1, 0, MODULE_BYTES, 0];
+    varint::put(&mut d, stored.len() as u64);
+    assert_eq!(run(&d, 1), Ok(()));
+    let mut d = vec![0, 0, 1, 1, MODULE_BYTES, 0];
+    varint::put(&mut d, 32);
+    bad(&d, 1, "a ModuleBytes instruction of a shorthand module block");
+    // (the size of the block as stored told wrong)
+    let mut d = vec![0, 0, 1, 0, MODULE_BYTES, 0];
+    varint::put(&mut d, stored.len() as u64 + 1);
+    bad(&d, 1, "bytes, not");
+}
+
+/// read/5: Checksum instructions over intermediate values, several to a value, and over
+/// literals, slices and the pieces of a split: a wrong one among right ones fails the formula
+/// whichever way it is evaluated.
+#[test]
+fn intermediate_checksums() {
+    let n = natives();
+    let sum = |d: &[u8]| {
+        let mut v = vec![CHECKSUM];
+        v.extend_from_slice(&checksum(d).to_le_bytes());
+        v
+    };
+    let wrong = |d: &[u8]| sum(&[d, b"!"].concat());
+    let lit = |d: &[u8]| {
+        let mut v = vec![LITERAL, d.len() as u8];
+        v.extend_from_slice(d);
+        v
+    };
+    // (of the stream "xyz" where a program slices it: its first instruction)
+    let prog = |parts: &[&[u8]]| {
+        let head: &[u8] = if parts[0][0] == SLICE { &[1, 0, 0, 0] } else { &[0, 0, 0] };
+        [head, &parts.concat()].concat()
+    };
+    // the stream "xyz" sliced as it is, and the piece of it checksummed
+    let slice = [SLICE, 0, 0, 3];
+    let run = |d: &[u8]| {
+        let c = formula(d, if d[0] == 1 { &[b"xyz"] } else { &[] });
+        let r = decode(&c, &n);
+        // (evaluated by leaves too, and written out)
+        let a = open(&c, &n).unwrap();
+        let by_leaves = a.leaves(1, |_, _| Ok(()));
+        let mut got = Vec::new();
+        let written = a.write_file(1, &mut |b: &[u8]| {
+            got.extend_from_slice(b);
+            Ok(())
+        });
+        assert_eq!(by_leaves.is_ok(), r.is_ok(), "{d:?}");
+        assert_eq!(written.is_ok(), r.is_ok(), "{d:?}");
+        if let Ok(r) = &r {
+            assert_eq!(&got, r);
+        }
+        r
+    };
+    let (abc, def, xyz) = (&b"abc"[..], &b"def"[..], &b"xyz"[..]);
+    // each of the intermediate values right, and the output
+    let good = prog(&[&lit(abc), &sum(abc), &lit(def), &sum(def), &[CONCAT, 2], &sum(b"abcdef")]);
+    assert_eq!(run(&good).unwrap(), b"abcdef");
+    // a wrong one among them, wherever it is
+    for (a, b, c) in [(false, true, true), (true, false, true), (true, true, false)] {
+        let pick = |ok: bool, d: &[u8]| if ok { sum(d) } else { wrong(d) };
+        let p = prog(&[&lit(abc), &pick(a, abc), &lit(def), &pick(b, def), &[CONCAT, 2], &pick(c, b"abcdef")]);
+        assert_eq!(run(&p), invalid("output checksum mismatch"), "{a} {b} {c}");
+    }
+    // two to a value, the second wrong; and both wrong in the same way
+    assert_eq!(run(&prog(&[&lit(abc), &sum(abc), &wrong(abc)])), invalid("output checksum mismatch"));
+    assert_eq!(run(&prog(&[&lit(abc), &wrong(abc), &sum(abc)])), invalid("output checksum mismatch"));
+    assert_eq!(run(&prog(&[&lit(abc), &sum(abc), &sum(abc)])).unwrap(), abc);
+    // a slice, and the pieces of a split, each by its own: the one swapped to the top
+    let split = prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &sum(b"cdef"), &[SWAP, 1], &sum(b"ab"), &[SWAP, 1, CONCAT, 2]]);
+    assert_eq!(run(&split).unwrap(), b"abcdef");
+    let wrong_piece = prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &sum(b"cdef"), &[SWAP, 1], &sum(b"cd"), &[SWAP, 1, CONCAT, 2]]);
+    assert_eq!(run(&wrong_piece), invalid("output checksum mismatch"));
+    // (a checksum of the top after a swap is of the item swapped up, not of the one below)
+    let swapped = prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &[SWAP, 1], &sum(b"cdef"), &[SWAP, 1, CONCAT, 2]]);
+    assert_eq!(run(&swapped), invalid("output checksum mismatch"));
+    let sliced = prog(&[&slice, &sum(xyz), &lit(abc), &sum(abc), &[CONCAT, 2]]);
+    assert_eq!(run(&sliced).unwrap(), b"xyzabc");
+    assert_eq!(run(&prog(&[&slice, &wrong(xyz), &lit(abc), &[CONCAT, 2]])), invalid("output checksum mismatch"));
+    // the checksum of a Split input, checked before its pieces are taken
+    let input = prog(&[&lit(b"abcdef"), &wrong(b"abcdef"), &[SPLIT, 2, 3, 3, CONCAT, 2]]);
+    assert_eq!(run(&input), invalid("output checksum mismatch"));
+}

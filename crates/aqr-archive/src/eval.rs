@@ -619,6 +619,11 @@ impl<'a> Source<'a> for Fanned {
                         return Ok(Some(c));
                     }
                     if *read >= end {
+                        // (the last piece is the input's end: its source is pulled to the end
+                        // for it to be done, which is where a checksum of it is checked)
+                        if end == *ends.last().expect("an output") && input.next(at)?.is_some() {
+                            return invalid("a split of a value longer than declared");
+                        }
                         return Ok(None);
                     }
                     let Some(mut c) = input.next(at)? else {

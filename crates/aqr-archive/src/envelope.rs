@@ -1177,6 +1177,77 @@ mod tests {
         assert!(matches!(open(&d).map(|_| ()), Err(Failure::Resource(_))));
     }
 
+    /// The strict opener (no damage tolerated): a payload cut at the bound of a chunk, chunks
+    /// swapped, doubled or dropped, and work factors out of 12..=22 are refused, never opened
+    /// as another payload.
+    #[test]
+    fn refuses_rearranged_chunks() {
+        let a = archive(3 * CHUNK);
+        let invalid = |d: &[u8], what: &str| {
+            let r = opened(d, b"pass");
+            assert!(matches!(r, Err(Failure::Invalid(_))), "{what}: {:?}", r.map(|p| p.len()));
+        };
+        for mirrored in [false, true] {
+            let c = sealed(&a, b"pass", mirrored);
+            let chunks = open(&c).unwrap().chunks() as u64;
+            assert!(chunks >= 4);
+            // cut where a chunk (with its mirrored header) starts, and a byte or a tag's width after
+            for m in 1..chunks {
+                let at = chunk_with_mirror_at(m, mirrored) as usize;
+                for cut in [at, at + 1, at + 16, at + 17, chunk_at(m, mirrored) as usize] {
+                    invalid(&c[..cut], &format!("mirrored {mirrored}: cut at chunk {m} + {}", cut - at));
+                }
+            }
+        }
+        // without mirrors, the chunks are at regular places
+        let c = sealed(&a, b"pass", false);
+        let h = header_len(false);
+        let chunk = |m: usize| h + m * SEALED..(h + (m + 1) * SEALED).min(c.len());
+        let n = open(&c).unwrap().chunks();
+        let with = |order: &[usize]| {
+            let mut d = c[..h].to_vec();
+            order.iter().for_each(|&m| d.extend_from_slice(&c[chunk(m)]));
+            d
+        };
+        assert_eq!(opened(&with(&(0..n).collect::<Vec<_>>()), b"pass").unwrap().len(), a.len());
+        invalid(&with(&[1, 0, 2, 3]), "the first two swapped");
+        invalid(&with(&[0, 2, 1, 3]), "the middle two swapped");
+        invalid(&with(&[0, 1, 2, 3, 2, 3]), "the tail twice");
+        invalid(&with(&[0, 1, 1, 2, 3]), "a chunk doubled");
+        invalid(&with(&[0, 2, 3]), "one dropped");
+        invalid(&with(&[1, 2, 3]), "the first dropped");
+        invalid(&with(&[0, 1, 2]), "the last dropped");
+        invalid(&with(&[0, 1, 2, 2]), "the last chunk's place taken by the one before");
+        invalid(&with(&[3, 1, 2, 0]), "the first and the last swapped");
+        // the header alone has no payload
+        assert!(matches!(open(&c[..h]).map(|_| ()), Err(Failure::Invalid(_))));
+        // work factors: under 12, over the largest known, over the limit
+        for wf in [0u8, 1, 11, 0x3f, 0x40, 0xff] {
+            for mirrored in [false, true] {
+                let mut d = sealed(&a, b"pass", mirrored);
+                d[8] = wf;
+                if mirrored {
+                    // (the checksum of the header made again)
+                    let sum = xxh64(&d[..header_len(true) - 8], 0).to_le_bytes();
+                    let h = header_len(true);
+                    d[h - 8..h].copy_from_slice(&sum);
+                }
+                assert!(matches!(open(&d).map(|_| ()), Err(Failure::Invalid(m)) if m == "bad work factor"), "{wf}");
+            }
+        }
+        for wf in [WORK_FACTOR_LIMIT + 1, 0x3e] {
+            let mut d = c.clone();
+            d[8] = wf;
+            assert!(matches!(open(&d).map(|_| ()), Err(Failure::Resource(_))), "{wf}");
+        }
+        // and one sealed by the least work factor is opened
+        let mut s = Sealer::new(io::Cursor::new(Vec::new()), b"pass", 12, false).unwrap();
+        s.write_all(&a).unwrap();
+        let d = s.into_inner().unwrap().into_inner();
+        assert_eq!(open(&d).unwrap().work_factor(), 12);
+        assert_eq!(opened(&d, b"pass").unwrap().len(), a.len());
+    }
+
     /// An archive of a file sealed, opened decrypting its data blocks as they are read
     /// ([`super::super::open_decrypting`]): the file given back, by its blocks and a module's
     /// applications, the chunks of the data blocks let go of once read, all but those a block
