@@ -32,25 +32,48 @@ pub fn decode(_params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Res
     if total != len || at > coded.len() as u64 {
         return Err(corrupt());
     }
+    // the decoders (8 MiB of model each) are kept for the next chunk and reset by what the last one used: a table of
+    // many small chunks costs what they hold
+    let spare = std::sync::Mutex::new(Vec::<stream::Decoder>::new());
     let parts = aqr_common::pool::par_map(ranges.len(), threads, |i| -> Result<Vec<u8>> {
         let (from, to, bytes) = ranges[i];
-        let mut rc = Decoder::new(SliceSource::new(&coded[from..to]));
-        let mut sd = stream::Decoder::new();
-        let mut out = Vec::with_capacity(bytes.min(OUT_RESERVE));
-        let mut buf = Vec::with_capacity(RECORD);
-        while out.len() < bytes {
-            buf = sd.next(&mut rc, buf).map_err(|_| corrupt())?;
-            out.extend_from_slice(&buf);
+        let taken = spare.lock().map_err(|_| corrupt())?.pop();
+        let mut sd = match taken {
+            Some(mut d) => {
+                d.reset();
+                d
+            }
+            None => stream::Decoder::new(),
+        };
+        let r = chunk(&mut sd, &coded[from..to], bytes);
+        if let Ok(mut s) = spare.lock() {
+            s.push(sd);
         }
-        if out.len() != bytes {
-            return Err(Error("output of another length"));
-        }
-        Ok(out)
+        r
     });
     let parts = parts.into_iter().collect::<Result<Vec<_>>>()?;
     let mut out = Vec::with_capacity(parts.iter().map(Vec::len).sum());
     for p in &parts {
         out.extend_from_slice(p);
+    }
+    Ok(out)
+}
+
+/// The `bytes` of a chunk decoded from its coded bytes by `sd`, new or reset.
+fn chunk(sd: &mut stream::Decoder, coded: &[u8], bytes: usize) -> Result<Vec<u8>> {
+    let mut rc = Decoder::new(SliceSource::new(coded));
+    let mut out = Vec::with_capacity(bytes.min(OUT_RESERVE));
+    let mut buf = Vec::with_capacity(RECORD);
+    while out.len() < bytes {
+        buf = sd.next(&mut rc, buf).map_err(|_| corrupt())?;
+        // (a stream read past its end decodes zeros: no records out of a few bytes)
+        if rc.past_end() {
+            return Err(corrupt());
+        }
+        out.extend_from_slice(&buf);
+    }
+    if out.len() != bytes {
+        return Err(Error("output of another length"));
     }
     Ok(out)
 }

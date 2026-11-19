@@ -6,7 +6,7 @@
 //! (feature `encode`) makes the formulas of AVI files that use it.
 #![no_std]
 extern crate alloc;
-#[cfg(feature = "encode")]
+#[cfg(any(feature = "encode", not(target_family = "wasm")))]
 extern crate std;
 
 aqr_common::zopt_namespace!("div3", "DivX 3 video in AVI (aqr-div3)");

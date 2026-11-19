@@ -64,17 +64,24 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     } else if !rest.is_empty() || at != coded.len() {
         return Err(corrupt());
     }
+    // the models (16 MiB each) are kept for the next chunk and reset by what the last one used: a table of many small
+    // chunks costs what they hold, not 2 ms each
+    let spare = std::sync::Mutex::new(Vec::<Codec>::new());
     let decoded = aqr_common::pool::par_map(chunks.len(), threads, |i| -> Result<Vec<u8>> {
         let (range, l) = &chunks[i];
-        let mut codec = Codec::new(w, h);
-        let mut rc = Decoder::new(SliceSource::new(&coded[range.clone()]));
-        let mut out = Vec::with_capacity(l.iter().sum::<usize>().min(OUT_RESERVE));
-        let mut frame = Vec::with_capacity(FRAME_MAX + 8);
-        for &n in l {
-            frame = codec.decode(&mut rc, n, frame).map_err(|_| corrupt())?;
-            out.extend_from_slice(&frame);
+        let taken = spare.lock().map_err(|_| corrupt())?.pop();
+        let mut codec = match taken {
+            Some(mut c) => {
+                c.reset();
+                c
+            }
+            None => Codec::new(w, h),
+        };
+        let r = decode_chunk(&mut codec, &coded[range.clone()], l);
+        if let Ok(mut s) = spare.lock() {
+            s.push(codec);
         }
-        Ok(out)
+        r
     });
     let decoded = decoded.into_iter().collect::<Result<Vec<_>>>()?;
     // the frames' bytes in order: the chunks decoded, or those kept
@@ -102,6 +109,22 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     out.extend_from_slice(&skeleton[sk..]);
     if out.len() as u64 != len || au != audio.len() {
         return Err(Error("output of another length"));
+    }
+    Ok(out)
+}
+
+/// The frames of a chunk (their lengths `l`) decoded from its coded bytes by `codec`, which is new or reset.
+fn decode_chunk(codec: &mut Codec, coded: &[u8], l: &[usize]) -> Result<Vec<u8>> {
+    let mut rc = Decoder::new(SliceSource::new(coded));
+    let mut out = Vec::with_capacity(l.iter().sum::<usize>().min(OUT_RESERVE));
+    let mut frame = Vec::with_capacity(FRAME_MAX + 8);
+    for &n in l {
+        frame = codec.decode(&mut rc, n, frame).map_err(|_| corrupt())?;
+        // (a stream read past its end decodes zeros: no frames out of a few bytes)
+        if rc.past_end() {
+            return Err(corrupt());
+        }
+        out.extend_from_slice(&frame);
     }
     Ok(out)
 }

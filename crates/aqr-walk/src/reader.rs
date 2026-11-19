@@ -12,11 +12,13 @@ pub struct Reader<'a> {
     len: usize,
     /// Bytes that may still be read before the limit ([`Reader::limit`]).
     left: u64,
+    /// Bytes asked past the end or the limit since it was set ([`Source::over`]).
+    over: usize,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(src: &'a mut dyn Pull, buffer: usize) -> Self {
-        Reader { src, buf: vec![0; buffer], pos: 0, len: 0, left: u64::MAX }
+        Reader { src, buf: vec![0; buffer], pos: 0, len: 0, left: u64::MAX, over: 0 }
     }
 
     fn fill(&mut self) -> bool {
@@ -78,6 +80,7 @@ impl<'a> Reader<'a> {
     /// Reads no more than `n` bytes from here on (until the limit is set again).
     pub fn limit(&mut self, n: u64) {
         self.left = n;
+        self.over = 0;
     }
 
     /// The bytes left up to the limit read and dropped.
@@ -93,7 +96,13 @@ impl<'a> Reader<'a> {
 
 impl Source for Reader<'_> {
     fn byte(&mut self) -> u8 {
-        self.next().unwrap_or(0)
+        self.next().unwrap_or_else(|| {
+            self.over = self.over.saturating_add(1);
+            0
+        })
+    }
+    fn over(&self) -> usize {
+        self.over
     }
 }
 
@@ -101,10 +110,16 @@ impl<S: Source + ?Sized> Source for &mut S {
     fn byte(&mut self) -> u8 {
         (**self).byte()
     }
+    fn over(&self) -> usize {
+        (**self).over()
+    }
 }
 
 impl<S: Source + ?Sized> Source for &core::cell::RefCell<S> {
     fn byte(&mut self) -> u8 {
         self.borrow_mut().byte()
+    }
+    fn over(&self) -> usize {
+        self.borrow().over()
     }
 }

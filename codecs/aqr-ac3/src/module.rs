@@ -38,6 +38,8 @@ pub fn run(coded: &mut dyn Pull, coded_len: u64, out: &mut dyn Put, size: u64) -
     let mut input = Reader::new(coded, BUF);
     let chunks = chunks::read(&mut input, coded_len).map_err(|_| corrupt())?;
     let mut produced = 0u64;
+    // (one model for all the chunks, reset by what each used: 8 MiB made afresh for each took 1 ms)
+    let mut sd = stream::Decoder::new();
     for (bytes, coded_len) in chunks {
         // (a chunk of nothing, or of no coded bytes, is never made, and each starts a model)
         if bytes == 0 || coded_len == 0 {
@@ -45,11 +47,15 @@ pub fn run(coded: &mut dyn Pull, coded_len: u64, out: &mut dyn Put, size: u64) -
         }
         input.limit(coded_len);
         {
-            let mut sd = stream::Decoder::new();
+            sd.reset();
             let mut rc = Decoder::new(&mut input);
             let mut got = 0u64;
             while got < bytes {
                 buf = sd.next(&mut rc, buf).map_err(|_| corrupt())?;
+                // (a chunk read past its end decodes zeros: no records out of a few bytes)
+                if rc.past_end() {
+                    return Err(corrupt());
+                }
                 got += buf.len() as u64;
                 if got > bytes {
                     return Err(corrupt());

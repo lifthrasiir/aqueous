@@ -33,16 +33,76 @@ pub fn frame_len(d: &[u8]) -> Option<usize> {
 
 const POLY: u16 = 0x8005;
 
-fn crc_byte(mut crc: u16, byte: u8) -> u16 {
-    crc ^= (byte as u16) << 8;
-    for _ in 0..8 {
+/// The register after the byte `b` is shifted in from a zero register (bit by bit).
+const fn crc_entry(b: u8) -> u16 {
+    let mut crc = (b as u16) << 8;
+    let mut i = 0;
+    while i < 8 {
         crc = if crc & 0x8000 != 0 { crc << 1 ^ POLY } else { crc << 1 };
+        i += 1;
     }
     crc
 }
 
+/// `TABLES[k][x]`: the register after the byte `x` and `k` zero bytes from a zero register; the register is linear in
+/// the data, so eight bytes step it by eight lookups, one for each.
+static TABLES: [[u16; 256]; 8] = {
+    let mut t = [[0u16; 256]; 8];
+    let mut x = 0;
+    while x < 256 {
+        t[0][x] = crc_entry(x as u8);
+        x += 1;
+    }
+    let mut k = 1;
+    while k < 8 {
+        let mut x = 0;
+        while x < 256 {
+            let p = t[k - 1][x];
+            t[k][x] = p << 8 ^ t[0][(p >> 8) as usize];
+            x += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
+/// The register `crc` after `d` is shifted in, eight bytes at a time through the tables.
+fn crc_run(mut crc: u16, d: &[u8]) -> u16 {
+    let mut words = d.chunks_exact(8);
+    for w in &mut words {
+        let a = crc ^ u16::from_be_bytes([w[0], w[1]]);
+        crc = TABLES[7][(a >> 8) as usize]
+            ^ TABLES[6][(a & 0xFF) as usize]
+            ^ TABLES[5][w[2] as usize]
+            ^ TABLES[4][w[3] as usize]
+            ^ TABLES[3][w[4] as usize]
+            ^ TABLES[2][w[5] as usize]
+            ^ TABLES[1][w[6] as usize]
+            ^ TABLES[0][w[7] as usize];
+    }
+    words.remainder().iter().fold(crc, |c, &b| c << 8 ^ TABLES[0][(c >> 8) as usize ^ b as usize])
+}
+
 fn crc16(d: &[u8]) -> u16 {
-    d.iter().fold(0, |c, &b| crc_byte(c, b))
+    crc_run(0, d)
+}
+
+/// The same, a bit at a time (the definition `crc16` is checked against).
+#[doc(hidden)]
+pub fn crc16_bitwise(d: &[u8]) -> u16 {
+    d.iter().fold(0, |c, &b| {
+        let mut crc = c ^ (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { crc << 1 ^ POLY } else { crc << 1 };
+        }
+        crc
+    })
+}
+
+/// The checksum of `d` as the module computes it.
+#[doc(hidden)]
+pub fn crc16_of(d: &[u8]) -> u16 {
+    crc16(d)
 }
 
 /// One bit of the CRC register stepped back (the register before the bit was shifted in, the data bit being xored
@@ -101,7 +161,9 @@ fn crc1_of(frame: &[u8]) -> u16 {
 pub fn crcs_ok(frame: &[u8]) -> bool {
     let words = frame.len() / 2;
     let n58 = ((words >> 1) + (words >> 3)) * 2;
-    crc16(&frame[2..n58]) == 0 && crc16(&frame[2..]) == 0
+    // (the second covers the first: its register goes on from the first's, in one pass)
+    let first = crc16(&frame[2..n58]);
+    first == 0 && crc_run(first, &frame[n58..]) == 0
 }
 
 /// Sets the checksums of a syncframe whose other bits are written: crc1 first, as crc2 covers it.

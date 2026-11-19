@@ -135,6 +135,14 @@ impl Decoder {
         Self::default()
     }
 
+    /// Back to the state of a new decoder (the start of a chunk), the model reset by what it was used for.
+    pub fn reset(&mut self) {
+        self.m.reset();
+        self.ctx = Ctx::default();
+        self.prev = 0;
+        self.run = 0;
+    }
+
     /// The next bytes of the chunk into `out` (cleared first): a syncframe, or a piece of a run of other bytes.
     /// `out` should have the capacity of [`FRAME_MAX`] and [`RUN_PIECE`] bytes at least.
     pub fn next<C: Coder>(&mut self, rc: &mut C, out: Vec<u8>) -> Result<Vec<u8>, Error> {

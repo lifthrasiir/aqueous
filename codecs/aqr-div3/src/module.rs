@@ -103,7 +103,12 @@ pub fn run(
                 left = frames;
             }
             left -= 1;
-            frame = codec.decode(dec.as_mut().ok_or_else(corrupt)?, n as usize, frame).map_err(|_| corrupt())?;
+            let rc = dec.as_mut().ok_or_else(corrupt)?;
+            frame = codec.decode(rc, n as usize, frame).map_err(|_| corrupt())?;
+            // (a chunk read past its end decodes zeros: no frames out of a few bytes)
+            if rc.past_end() {
+                return Err(corrupt());
+            }
             out.put(&frame).ok_or(Error("output of another length"))?;
         } else if !aud.copy(n, out) {
             return Err(Error("input of another length"));

@@ -5,7 +5,7 @@
 //! formulas that use it.
 #![no_std]
 extern crate alloc;
-#[cfg(feature = "encode")]
+#[cfg(any(feature = "encode", not(target_family = "wasm")))]
 extern crate std;
 
 #[cfg(feature = "encode")]
@@ -23,7 +23,7 @@ pub mod module;
 pub mod native;
 pub mod stream;
 
-pub use ac3::{BLK_BYTES, Ctx, check, decode, encode, frame_len};
+pub use ac3::{BLK_BYTES, Ctx, check, crc16_bitwise, crc16_of, decode, encode, frame_len};
 pub use aqr_walk::Error;
 pub use aqr_walk::model::Model;
 

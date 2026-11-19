@@ -116,9 +116,17 @@ impl Coder for Encoder {
     }
 }
 
-/// Where a decoder takes its bytes from; past the end it gets zeros.
+/// The bytes a decoder may read past the end of a valid stream: the encoder's last bytes are all flushed, so a
+/// decoder reads no more than it wrote; this is margin only.
+pub const SLACK: usize = 4;
+
+/// Where a decoder takes its bytes from; past the end it gets zeros (and counts them: [`Source::over`]).
 pub trait Source {
     fn byte(&mut self) -> u8;
+    /// How many bytes were asked of it past its end (zeros given), from the start or the last limit.
+    fn over(&self) -> usize {
+        0
+    }
 }
 
 pub struct SliceSource<'a> {
@@ -135,8 +143,11 @@ impl<'a> SliceSource<'a> {
 impl Source for SliceSource<'_> {
     fn byte(&mut self) -> u8 {
         let b = *self.data.get(self.pos).unwrap_or(&0);
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
         b
+    }
+    fn over(&self) -> usize {
+        self.pos.saturating_sub(self.data.len())
     }
 }
 
@@ -154,6 +165,12 @@ impl<S: Source> Decoder<S> {
             code = code << 8 | src.byte() as u32;
         }
         Decoder { src, range: 0xFFFF_FFFF, code }
+    }
+    /// Whether the decoder has read more than [`SLACK`] bytes past its source's end: a coded stream cut short (or
+    /// lying about what it holds) decodes zeros, so what it decodes is not to be believed or waited for.
+    #[inline]
+    pub fn past_end(&self) -> bool {
+        self.src.over() > SLACK
     }
     fn decode(&mut self, p0: u32) -> u32 {
         let bound = (self.range >> 12) * p0;
