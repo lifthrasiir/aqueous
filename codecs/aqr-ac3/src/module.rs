@@ -39,6 +39,10 @@ pub fn run(coded: &mut dyn Pull, coded_len: u64, out: &mut dyn Put, size: u64) -
     let chunks = chunks::read(&mut input, coded_len).map_err(|_| corrupt())?;
     let mut produced = 0u64;
     for (bytes, coded_len) in chunks {
+        // (a chunk of nothing, or of no coded bytes, is never made, and each starts a model)
+        if bytes == 0 || coded_len == 0 {
+            return Err(corrupt());
+        }
         input.limit(coded_len);
         {
             let mut sd = stream::Decoder::new();

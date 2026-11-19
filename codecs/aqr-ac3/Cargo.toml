@@ -23,3 +23,6 @@ aqr-common = { path = "../../crates/aqr-common" }
 [[example]]
 name = "aqr-ac3-check"
 path = "examples/check.rs"
+
+[dev-dependencies]
+aqr-testkit = { path = "../../crates/aqr-testkit" }

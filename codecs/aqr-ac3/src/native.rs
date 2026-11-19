@@ -20,6 +20,10 @@ pub fn decode(_params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Res
     let mut ranges = Vec::new();
     let (mut at, mut total) = (pos as u64, 0u64);
     for &(a, b) in &table {
+        // (a chunk of nothing, or of no coded bytes, is never made, and each starts a model)
+        if a == 0 || b == 0 {
+            return Err(corrupt());
+        }
         let end = at.checked_add(b).ok_or_else(corrupt)?;
         ranges.push((at as usize, end as usize, a as usize));
         at = end;
