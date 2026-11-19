@@ -3,7 +3,7 @@
 //! Every memory is created whether the module uses it or not, and the memory limit is not enforced.
 //! A trap is a panic, which [`apply`] catches as a [`Failure`]; so are the violations of
 //! the host functions, which the spec signals as errors to the invocation.
-//! `aqr_log` messages go to stderr, and the last one to the [`Failure`].
+//! The last `aqr_log` message goes to the [`Failure`] (to stderr outside [`apply`]).
 //!
 //! Tasks (`crate::task`) run on threads of their own from their spawn, with every memory but
 //! the working one empty to them and the functions of part modules a violation; a task's trap is
@@ -896,10 +896,12 @@ pub(crate) mod sys {
         })
     }
 
-    /// Also outside [`apply`](super::apply), where the code of a module runs as a library.
+    /// Kept for the [`Failure`](super::Failure), as Wasmtime's host does; told on stderr only
+    /// outside [`apply`](super::apply), where the code of a module runs as a library.
     pub fn log(msg: &[u8]) {
-        eprintln!("aqr_log: {}", String::from_utf8_lossy(msg));
-        super::current(|h| h.last_log = Some(msg.to_vec()));
+        if super::current(|h| h.last_log = Some(msg.to_vec())).is_none() {
+            eprintln!("aqr_log: {}", String::from_utf8_lossy(msg));
+        }
     }
 
     pub fn trap() -> ! {
