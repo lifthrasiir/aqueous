@@ -439,3 +439,73 @@ impl Node {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node's bytes split, or a patch's output cut, are given as the outputs the sizes declare;
+    /// inputs of another number or length, a damaged patch, or sizes that do not add up, are
+    /// errors; an application is not a patch.
+    #[test]
+    fn patched_outputs() {
+        let split = Shared { of: Of::Node(Node::slice(0, 0, 10)), sizes: vec![4, 0, 6], split: true };
+        let data = *b"0123456789";
+        let got = split.patched(&[&data]).unwrap().unwrap();
+        assert_eq!(got, [b"0123".to_vec(), Vec::new(), b"456789".to_vec()]);
+        assert_eq!((split.name(), split.bytes()), ("split".to_string(), 10));
+        assert_eq!(split.inputs(), [Node::slice(0, 0, 10)]);
+        assert!(split.patched(&[]).unwrap().is_err() && split.patched(&[&data, &data]).unwrap().is_err());
+        assert!(split.patched(&[&data[..9]]).unwrap().is_err());
+
+        let (source, target) = (b"the quick brown fox".repeat(20), b"the quick brown cat".repeat(20));
+        let patch = crate::patch::make(&source, &target, 3).unwrap();
+        let of = |sizes: Vec<u64>, len: u64| Shared {
+            of: Of::Patch { inputs: [Node::slice(0, 0, 1), Node::slice(1, 0, 1)], len },
+            sizes,
+            split: true,
+        };
+        let len = target.len() as u64;
+        let cut = of(vec![100, len - 100], len);
+        let got = cut.patched(&[&source, &patch]).unwrap().unwrap();
+        assert_eq!(got, [target[..100].to_vec(), target[100..].to_vec()]);
+        assert_eq!((cut.name(), cut.bytes()), ("patch".to_string(), len));
+        // inputs of another number, a patch of another length, sizes not adding up, a damaged patch
+        assert!(cut.patched(&[&source]).unwrap().is_err());
+        assert!(of(vec![100, len - 100], len + 1).patched(&[&source, &patch]).unwrap().is_err());
+        assert!(of(vec![100, len - 101], len).patched(&[&source, &patch]).unwrap().is_err());
+        let mut bad = patch.clone();
+        bad.truncate(bad.len() / 2);
+        assert!(cut.patched(&[&source, &bad]).unwrap().is_err());
+
+        // (an application is none of these)
+        let apply = Shared {
+            of: Of::Apply(Apply {
+                module: Module::new("m", 1),
+                resources: vec![],
+                params: vec![],
+                inputs: vec![],
+                len: 3,
+                memory_limit: NO_LIMIT,
+                task_limits: vec![],
+            }),
+            sizes: vec![3],
+            split: false,
+        };
+        assert!(apply.patched(&[&data]).is_none() && apply.apply().is_some() && apply.bytes() == 3);
+        assert_eq!(apply.name(), "m@1".to_string());
+        assert!(split.apply().is_none() && cut.apply().is_none());
+    }
+
+    /// A resource tells its length and, if given, what it is stored in.
+    #[test]
+    fn resources_shown() {
+        let plain = Resource::new(vec![1, 2, 3]);
+        assert_eq!(plain.stored_data(), None);
+        assert!(format!("{plain:?}").starts_with("Resource(3 bytes, ") && format!("{plain:?}").ends_with(')'));
+        let stored = Resource::with_stored(vec![1, 2, 3], vec![9; 2]);
+        assert_eq!(stored.stored_data(), Some(&[9, 9][..]));
+        assert!(format!("{stored:?}").ends_with(", stored in 2 bytes)"));
+        assert_eq!(&stored[..], &[1, 2, 3]);
+    }
+}
