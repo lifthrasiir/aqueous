@@ -114,6 +114,7 @@ dependencies = [
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
+ "aqr-testkit",
 ]
 
 [[package]]
@@ -925,6 +926,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-lzma",
+ "aqr-testkit",
 ]
 
 [[package]]

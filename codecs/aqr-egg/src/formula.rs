@@ -160,7 +160,7 @@ fn kinds(a: &Egg, input: &[u8], kind: fn(&[u8]) -> Kind) -> Vec<Vec<(Kind, usize
             if j == 0 && a.solid && !pending.is_empty() {
                 pending.push(i);
                 let sizes: Vec<u64> = pending.iter().map(|&p| a.entries[p].size).collect();
-                if sizes.iter().sum::<u64>() == b.size as u64 {
+                if sizes.iter().try_fold(0u64, |a, &s| a.checked_add(s)) == Some(b.size as u64) {
                     let mut at = 0;
                     for (&p, s) in pending.iter().zip(sizes).filter(|(_, s)| *s > 0) {
                         at += s as usize;
