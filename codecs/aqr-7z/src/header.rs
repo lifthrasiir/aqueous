@@ -298,6 +298,11 @@ impl Reader<'_> {
                         s.subs = s.folders.iter().map(|f| f.size().map(|n| vec![n])).collect::<Option<_>>()?;
                         s.sub_crcs = s.folders.iter().map(|f| f.crc).collect();
                     }
+                    // (substreams of the folders as they are: not of ones an earlier info or a
+                    // later one gave)
+                    if s.subs.len() != s.folders.len() {
+                        return None;
+                    }
                     return Some(s);
                 }
                 id::PACK_INFO => {

@@ -93,6 +93,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-lzma",
+ "aqr-testkit",
 ]
 
 [[package]]

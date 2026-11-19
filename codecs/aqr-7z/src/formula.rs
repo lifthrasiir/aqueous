@@ -79,7 +79,9 @@ fn take(c: &Coder, size: u64, packed: &[u8], threads: usize) -> Option<(Vec<u8>,
         header::LZMA2 => {
             let dict = lzma2::dict_size(*c.props.first()?)?;
             let sps = lzma2::split(packed, dict, LIMIT, threads).ok()?;
-            let (mut data, mut records, mut lens) = (Vec::with_capacity(size as usize), Vec::new(), Vec::new());
+            let held = sps.iter().map(|x| x.data.len()).sum::<usize>();
+            // (the size is the header's claim: not reserved before the data shows it)
+            let (mut data, mut records, mut lens) = (Vec::with_capacity(held), Vec::new(), Vec::new());
             let mut used = 0;
             for x in sps {
                 lens.push((x.data.len(), x.record.len()));
@@ -235,9 +237,12 @@ fn make(s: &Streams, i: usize, first: usize, packs: &[Range<usize>], input: &[u8
             let (m, c, j) = (m?, c?, j?);
             let rc = first + rc;
             let streams = bcj2::Streams { main: m.0, call: c.0, jump: j.0 };
-            let size = f.size()? as usize;
-            let data = bcj2::decode(&streams, &input[packs[rc].clone()], size)
-                .ok()
+            // (the data is the main stream and the targets taken out: no more than the streams hold)
+            let size = usize::try_from(f.size()?).ok()?;
+            let held = streams.main.len() + streams.call.len() + streams.jump.len();
+            let data = (size <= held)
+                .then(|| bcj2::decode(&streams, &input[packs[rc].clone()], size).ok())
+                .flatten()
                 .filter(|d| bcj2::encode(d, &input[packs[rc].clone()]).ok().as_ref() == Some(&streams));
             match data {
                 Some(data) => Some(Made::Bcj2 { data, parts: [m.1, c.1, j.1], rc }),
