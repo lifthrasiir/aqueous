@@ -39,7 +39,7 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
 
 ### Known limits, pinned
 - aqr-div3, aqr-ac3: the over-read check is per frame or record, so one huge frame still
-  decodes from zeros before it is caught; its slack of 4 bytes could be 0.
+  decodes from zeros before it is caught.
 - aqr-wim: a valid LZX stream of a real high ratio still makes a large formula.
 - The sandbox: an idle worker's death fails the next application once (not retried).
 - aqr: a footer of more than 16 MiB is left a spacer on a cancel (`FOOTER_RESTORE`); a second

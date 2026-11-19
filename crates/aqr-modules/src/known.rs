@@ -6,7 +6,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "ac3-recons",
         version: 1,
-        sha512_256: hex("1f613a74727f1421548c56de928734349e969122906dca85bdcef5fe4f64f800"),
+        sha512_256: hex("0340b07c9796f035362f3dcc6689a8a8958de3dd2bdbf9263a4ebd57bb74bbb9"),
         block: include_bytes!("../wasm/ac3-recons.block"),
     },
     Known {
@@ -180,7 +180,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "div3-recons",
         version: 3,
-        sha512_256: hex("6fbdd0db3fc1f3ec68b0545ac44489e287078a835a8b6210af75d06d78fe74cc"),
+        sha512_256: hex("e12a7755150abd4d519f61f5acd47851721269e4b135324e982ba5a4d3aff7a2"),
         block: include_bytes!("../wasm/div3-recons.block"),
     },
     Known {

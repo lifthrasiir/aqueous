@@ -43,10 +43,33 @@ fn a_valid_stream_is_not_read_past_its_end() {
     }
 }
 
+/// A valid stream cut by even one byte is told past its end once all of it is decoded: what a
+/// decoder reads does not depend on the bytes, so it asks as many as were written.
+#[test]
+fn a_stream_cut_short_is_past_its_end() {
+    let mut s = 5u64;
+    for n in [1usize, 50, 3000] {
+        let bits: Vec<u32> = (0..n).map(|_| xorshift(&mut s).is_multiple_of(3) as u32).collect();
+        let mut enc = Encoder::new();
+        code(&mut enc, &bits);
+        let data = enc.finish();
+        for cut in 1..=5.min(data.len()) {
+            let mut src = SliceSource::new(&data[..data.len() - cut]);
+            let mut dec = Decoder::new(&mut src);
+            code(&mut dec, &vec![0; n]);
+            assert!(dec.past_end(), "n {n}, {cut} of {} bytes cut", data.len());
+            assert_eq!(src.over(), cut, "n {n}");
+        }
+    }
+}
+
 #[test]
 fn zeros_past_the_end_are_counted() {
-    // three bytes decode as many bits as asked, but not unnoticed
-    let data = [0u8, 0, 0];
+    // eight bytes decode as many bits as asked, but not unnoticed (three are past it at once: the
+    // decoder starts by reading four)
+    let mut dec = Decoder::new(SliceSource::new(&[0u8, 0, 0]));
+    assert!(dec.past_end());
+    let data = [0u8; 8];
     let mut dec = Decoder::new(SliceSource::new(&data));
     assert!(!dec.past_end());
     let mut m = Model::new(12);
