@@ -32,8 +32,6 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
   read (e_shnum 0 taken as it is): a feature, if wanted.
 - aqr-wasmrt's interpreter path (wasm/interp.rs, the SFX's interpreter blob) has no test in
   aqr-decompress: the host's fixes reach aqr.exe and the SFX once the pack is rebuilt.
-- Windows: case-colliding names from a directory need one made case-sensitive (`fsutil file
-  setCaseSensitiveInfo`).
 - A real crash between an append's writes is not simulated (the op log's replay cuts at each).
 
 ### Known limits, pinned
@@ -47,12 +45,8 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
   read verbatim (only the walk's names are).
 - aqr-xsv: tables wider than about 1000 columns are not recognised (the dialect's sample of
   64 KiB holds too few records).
-- aqr-unpack keeps the last of two ZIP entries of one name (aqr-pack writes both).
 
 ### Housekeeping
-- tests/wasm.rs holds copies of aqr-dex's writer and of a CIL section writer: a
-  `tests/common/synth.rs` of each crate, taken by `#[path]` (as aqr-flac's is by
-  tests/alike_misc.rs), would share them.
 - The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs
   pack.py).
 - The wwise pad-byte heuristic (wem.rs) is unchecked on real `.wem` files (none in the corpus).
