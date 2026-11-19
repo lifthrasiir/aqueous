@@ -34,12 +34,16 @@ pub fn files(d: &dyn aqr_disk::Image) -> Vec<File> {
 fn walk(d: &dyn aqr_disk::Image, root: &[u8], block: usize, ucs2: bool, out: &mut Vec<File>) {
     let mut seen = std::collections::HashSet::new();
     let mut dirs = vec![(le32(root, 2) as usize, le32(root, 10) as usize, Vec::new())];
+    // (the directories of an image do not overlap: what they read in all is no more than the
+    // image, as records of its size pointing at each other would otherwise make a square of it)
+    let mut budget = d.len();
     while let Some((lba, size, path)) = dirs.pop() {
         if !seen.insert(lba) {
             continue;
         }
-        let at = lba * block;
-        let data = d.cut(at..at.saturating_add(size));
+        let at = lba.saturating_mul(block);
+        let data = d.cut(at..at.saturating_add(size.min(budget)));
+        budget -= data.len();
         // the file whose next record continues it
         let mut open: Option<File> = None;
         let mut p = 0;
@@ -62,7 +66,9 @@ fn walk(d: &dyn aqr_disk::Image, root: &[u8], block: usize, ucs2: bool, out: &mu
             let name = join_path(&path, name(id, ucs2));
             let (at, size) = ((le32(r, 2) as usize + r[1] as usize) * block, le32(r, 10) as usize);
             if flags & 2 != 0 {
-                dirs.push((le32(r, 2) as usize, size, name));
+                if !seen.contains(&(le32(r, 2) as usize)) {
+                    dirs.push((le32(r, 2) as usize, size, name));
+                }
                 continue;
             }
             let mut f = match open.take() {
