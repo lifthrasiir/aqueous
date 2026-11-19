@@ -1248,6 +1248,7 @@ dependencies = [
  "aqr-archive",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "xxhash-rust",
  "zstd",
 ]
@@ -1261,6 +1262,7 @@ dependencies = [
  "aqr-bcj",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
 ]
 
 [[package]]
