@@ -5660,7 +5660,53 @@ fn log_plans_hold() {
         );
     }
     let no_lf = syslog.trim_end().to_string();
+    // (a word of letters alone of `i`: a template of its own)
+    let word = |mut i: usize| {
+        let mut w = String::new();
+        loop {
+            w.push((b'a' + (i % 26) as u8) as char);
+            i /= 26;
+            if i == 0 {
+                break w;
+            }
+        }
+    };
+    // (a template for every line, each of a few numbers; and of many numbers, as many columns)
+    let templates: String = (0..9000usize)
+        .map(|i| {
+            format!(
+                "{} {} n {} {}
+",
+                word(i),
+                word(i / 7 + 1000),
+                i * 3,
+                rng.below(100)
+            )
+        })
+        .collect();
+    let wide: String = (0..300usize)
+        .map(|i| {
+            (0..1200).map(|c| (i * c % 1000).to_string()).collect::<Vec<_>>().join(" ")
+                + "
+"
+        })
+        .collect();
+    let many: String = (0..3000usize)
+        .map(|i| {
+            let nums: Vec<String> = (0..40).map(|c| (i * c % 997).to_string()).collect();
+            format!(
+                "{} {} {}
+",
+                word(i),
+                word(i / 3),
+                nums.join(" ")
+            )
+        })
+        .collect();
     for (t, d, segment) in [
+        ("many templates", templates, usize::MAX),
+        ("many columns", wide, usize::MAX),
+        ("templates of many columns", many, usize::MAX),
         ("syslog", syslog, usize::MAX),
         ("no LF", no_lf, usize::MAX),
         ("table", table.clone(), usize::MAX),
@@ -6662,5 +6708,69 @@ fn dh_lods_plans_hold() {
         assert!(aqr_archive::decode(&c, &Native::default()).unwrap() == db, "{n}");
         let w = decode_wasm(&c);
         assert!(w.as_ref().is_ok_and(|w| *w == db), "{n}: {:?}", w.err());
+    }
+}
+
+/// A formula `f` of `d` of one application or several side by side: each application's plan held
+/// by [`plan_holds`], and together they make the whole of `d`.
+fn plans_hold_in_parts(what: &str, f: &Formula, d: &[u8]) {
+    let parts = match &f.root {
+        Node::Concat(nodes) => nodes.clone(),
+        n => vec![n.clone()],
+    };
+    let mut at = 0;
+    for (k, n) in parts.into_iter().enumerate() {
+        let Node::Apply(a) = &n else { panic!("{what}: not an application") };
+        let len = a.len as usize;
+        let mut g = f.clone();
+        g.root = n;
+        plan_holds(&format!("{what} {k}"), g, &d[at..at + len]);
+        at += len;
+    }
+    assert_eq!(at, d.len(), "{what}");
+}
+
+/// xsv-recons lays its memory out as a stack, its limit its plan, however wide the table: a few
+/// columns of every kind (numbers, times, text), a table of as many columns as it takes (4096)
+/// and more (the rest in the last), one of a thousand and short rows, and segments.
+#[test]
+fn xsv_plans_hold() {
+    let mut rng = aqr_common::rng::Rng::new(31);
+    let mut rows = |columns: usize, n: usize, sep: &str| {
+        let mut t = (0..columns).map(|c| format!("col{c}")).collect::<Vec<_>>().join(sep) + "\n";
+        for i in 0..n {
+            let fields: Vec<String> = (0..columns)
+                .map(|c| match c % 4 {
+                    0 => (i * 3 + c).to_string(),
+                    1 => format!("{}.{:02}", rng.below(1000), rng.below(100)),
+                    2 => format!("2024-05-{:02} 12:{:02}:{:02}", 1 + i % 28, i / 60 % 60, i % 60),
+                    _ => format!("w{}", rng.below(50)),
+                })
+                .collect();
+            t += &(fields.join(sep) + "\n");
+        }
+        t
+    };
+    let cases = [
+        ("5 columns", rows(5, 3000, ","), usize::MAX),
+        ("tabs", rows(8, 2000, "\t"), usize::MAX),
+        ("segments", rows(12, 3000, ","), 20_000),
+        // (a table too wide for the sample to tell its dialect: given)
+        ("1000 columns", rows(1000, 40, ","), 0),
+        ("4095 columns", rows(4095, 8, ","), 0),
+        ("4096 columns", rows(4096, 8, ","), 0),
+        ("4097 columns", rows(4097, 8, ","), 0),
+        ("6000 columns", rows(6000, 6, ","), 0),
+    ];
+    for (t, d, segment) in cases {
+        let d = d.into_bytes();
+        let f = match segment {
+            0 => aqr_xsv::formula::encode_as(
+                &d,
+                &aqr_xsv::table::Dialect { delim: b",".to_vec(), quote: Some(b'"'), term: vec![] },
+            ),
+            n => aqr_xsv::formula::encode_in(&d, n, false).unwrap_or_else(|| panic!("{t}")),
+        };
+        plans_hold_in_parts(&format!("xsv {t}"), &f, &d);
     }
 }
