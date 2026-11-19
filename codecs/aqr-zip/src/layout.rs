@@ -601,7 +601,9 @@ pub fn build(layout: &[u8], data: &[u8], flate: &[u8], kept: &[u8], len: u64) ->
 /// [`build`], with the deflated bodies given and an output of at most `len` bytes.
 pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u8], len: u64) -> Result<Vec<u8>> {
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out: Vec<u8> = Vec::with_capacity(len.min(u32::MAX as usize));
+    // (the length an archive declares, reserved where the heap holds it: else an error, not an abort)
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(len.min(u32::MAX as usize)).map_err(|_| Error("an output past the memory"))?;
     assemble_into(layout, &mut Slices::new(data, bodies, kept), len, &mut out)?;
     Ok(out)
 }

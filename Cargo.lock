@@ -1910,6 +1910,7 @@ dependencies = [
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
+ "aqr-testkit",
  "flate2",
  "memchr",
  "zstd",
