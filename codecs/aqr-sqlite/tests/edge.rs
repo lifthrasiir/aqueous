@@ -127,7 +127,7 @@ fn freelist_lies() {
     }
     // two trunks of one another
     let mut d = db.clone();
-    let other = if trunk + 1 <= n { trunk + 1 } else { trunk - 1 };
+    let other = if trunk < n { trunk + 1 } else { trunk - 1 };
     set32(&mut d, at, other as u32);
     set32(&mut d, (other - 1) * 512, trunk as u32);
     run(&d, "trunks in a ring");
@@ -144,7 +144,7 @@ fn overflow_cycles() {
     assert!(free > 0);
     let mut found = 0;
     for p in 2..=n {
-        let t = db[(p - 1) * 512 + 0];
+        let t = db[(p - 1) * 512];
         if matches!(t, 2 | 5 | 10 | 13) {
             continue;
         }
