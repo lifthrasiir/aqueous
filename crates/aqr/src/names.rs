@@ -414,6 +414,45 @@ mod tests {
         assert_eq!(escaped(b"\x95\\\x8e\xa6%.txt"), "%95%5C%8E%A6%25.txt");
     }
 
+    /// What `aqr -d` and a self-extracting program (aqr-sfx's `sanitized`) make of the same name
+    /// on Windows: the same (out/3), over every name of up to four of the characters that matter
+    /// (a dot or a space at the end, a separator, a colon, a device's name, a digit, a non-ASCII).
+    #[test]
+    fn sfx_sanitizes_names_as_aqr_does() {
+        let alphabet: Vec<char> = ".: \\/aCONMPUXL1\u{b9}\u{e9}$?".chars().collect();
+        let mut names: Vec<String> = vec![String::new()];
+        let mut layer: Vec<String> = vec![String::new()];
+        for _ in 0..4 {
+            layer = layer.iter().flat_map(|p| alphabet.iter().map(move |c| format!("{p}{c}"))).collect();
+            names.extend(layer.iter().cloned());
+        }
+        for extra in [
+            "CON",
+            "con.txt",
+            "NUL.tar.gz",
+            "COM1",
+            "COM\u{b2}.x",
+            "LPT9 .a",
+            "CONIN$",
+            "a..",
+            "..",
+            ".",
+            "...",
+            "..\\..\\x",
+        ] {
+            names.push(extra.into());
+        }
+        let mut differ = Vec::new();
+        for n in names.iter().filter(|n| !n.is_empty()) {
+            let w = windows_wide(&n.encode_utf16().collect::<Vec<_>>()).map(|o| String::from_utf16(&o).unwrap());
+            let (a, s) = (w.unwrap_or_else(|| n.clone()), aqr_sfx::sanitized(n.as_bytes()));
+            if a != s {
+                differ.push(format!("{n:?}: aqr {a:?}, sfx {s:?}"));
+            }
+        }
+        assert!(differ.is_empty(), "{} names differ, as {:?}", differ.len(), &differ[..differ.len().min(8)]);
+    }
+
     #[test]
     fn windows_names() {
         let w = |s: &str| windows_wide(&s.encode_utf16().collect::<Vec<_>>()).map(|o| String::from_utf16(&o).unwrap());

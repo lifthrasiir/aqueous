@@ -694,3 +694,54 @@ fn extraction_write_fails() {
     assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("big.out")));
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// out/3: entries (directories and files) whose names mean something to a shell or another
+/// system (`C:\x`, `\\server\share`, `CON`, `...`, `a..b`, `~`, `-rf`) are made inside the
+/// directory extracted into under those names, whatever they hold, and nothing outside it. (Names
+/// `.`, `..`, empty, with `/` or NUL are not in an archive: the encoder refuses them.)
+#[cfg(unix)]
+#[test]
+fn hostile_names_stay_inside() {
+    use aqr_archive::{Entry, EntryNode, Extra, Tree};
+    use aqr_compress::{Input, Options, compress_tree};
+    let names: [&[u8]; 9] =
+        [b"C:\\x", b"\\\\server\\share\\y", b"CON", b"...", b"a..b", b"..a", b"~", b"-rf", b"nul.txt"];
+    let d = scratch("out3");
+    let e = |parent, name: &[u8], node| Entry { parent, name: name.to_vec(), node, extra: Extra::default() };
+    let mut t = Tree::default();
+    for n in names {
+        let dir = t.entries.len();
+        t.entries.push(e(None, n, EntryNode::Dir));
+        t.entries.push(e(Some(dir), n, EntryNode::File(0)));
+        t.entries.push(e(Some(dir), b"inner", EntryNode::Dir));
+        t.entries.push(e(Some(dir + 2), b"..b", EntryNode::File(0)));
+        t.entries.push(e(None, &[n, b"-file"].concat(), EntryNode::File(0)));
+    }
+    let contents = [b"payload".to_vec()];
+    let inputs: Vec<Input> = contents.iter().map(|c| Input { name: b"c", data: c }).collect();
+    fs::write(d.join("a.aqr"), compress_tree(&t, &inputs, &Options::default()).archive).unwrap();
+    // (beside it, what an escape would write over or into)
+    fs::create_dir_all(d.join("w/deeper")).unwrap();
+    fs::write(d.join("victim"), b"mine").unwrap();
+    let o = aqr(&d.join("w/deeper"), &["-d", "-o", "../out", "../../a.aqr"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let inside = walk(&d.join("w/out"));
+    assert_eq!(
+        inside.len(),
+        names.len() * 5,
+        "{:?}",
+        inside.iter().map(|f| String::from_utf8_lossy(&f.0).into_owned()).collect::<Vec<_>>()
+    );
+    for n in names {
+        for p in [[n, b"/", n].concat(), [n, b"/inner/..b"].concat(), [n, b"-file"].concat()] {
+            assert!(inside.iter().any(|f| f.0 == p && f.1 == b"payload"), "{}", String::from_utf8_lossy(&p));
+        }
+    }
+    // (nothing made beside the directory: only what was there)
+    let mut outside: Vec<_> = walk(&d).into_iter().map(|f| String::from_utf8_lossy(&f.0).into_owned()).collect();
+    outside.retain(|n| !n.starts_with("w/out"));
+    outside.sort();
+    assert_eq!(outside, ["a.aqr", "victim", "w", "w/deeper"]);
+    assert_eq!(fs::read(d.join("victim")).unwrap(), b"mine");
+    fs::remove_dir_all(&d).unwrap();
+}

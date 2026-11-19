@@ -248,12 +248,12 @@ fn write(path: &Path, data: &[u8]) -> Result<(), String> {
 }
 
 /// An entry name (WTF-8) as a path component, lossily, as a Windows name cannot escape its
-/// directory: separators, `..` and the characters a name cannot have (`<>:"|?*`, controls: a
+/// directory: separators and the characters a name cannot have (`<>:"|?*`, controls: a
 /// `C:x` would replace the directory, `x:y` name a stream) as `_`, a dot or a space at its end
 /// as `_`, and `_` before a device's name (`CON`, `NUL.txt`, ...; as `aqr`'s own extraction).
-fn sanitized(name: &[u8]) -> String {
+pub fn sanitized(name: &[u8]) -> String {
     let bad = |c: char| c < ' ' || "<>:\"|?*/\\".contains(c);
-    let mut s: String = String::from_utf8_lossy(name).replace(bad, "_").replace("..", "_");
+    let mut s: String = String::from_utf8_lossy(name).replace(bad, "_");
     if s.ends_with(['.', ' ']) {
         s.pop();
         s.push('_');
@@ -317,10 +317,10 @@ mod tests {
             ("C:evil", "C_evil"),
             ("x:ads", "x_ads"),
             ("\\\\host\\share", "__host_share"),
-            ("..\\..\\x", "____x"),
+            ("..\\..\\x", ".._.._x"),
             ("a/b", "a_b"),
             ("what?", "what_"),
-            ("dots..", "dots_"),
+            ("dots..", "dots._"),
             ("con", "_con"),
             ("NUL.tar.gz", "_NUL.tar.gz"),
             ("COM1", "_COM1"),
