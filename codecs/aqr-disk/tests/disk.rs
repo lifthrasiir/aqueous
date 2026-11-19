@@ -338,3 +338,58 @@ fn gpt_many_partitions() {
         assert!(!f.streams.is_empty());
     }
 }
+
+/// A WOF stream of more than 4 GiB of data (chunk table entries of 8 bytes) is read, and its
+/// entries of the extremes, or a table of 4-byte ones, are not.
+#[test]
+fn wof_chunks_over_4_gib() {
+    let (chunk, len) = (32768usize, 5u64 << 30);
+    let k = (len as usize).div_ceil(chunk);
+    let table = (k - 1) * 8;
+    let mut s: Vec<u8> = (1..k as u64).flat_map(|i| (i * 3).to_le_bytes()).collect();
+    s.resize(table + 3 * k, 0x55);
+    let (t, chunks) = aqr_disk::compressed::wof_chunks(&s, len, chunk).unwrap();
+    assert_eq!((t, chunks.len()), (0..table, k));
+    assert_eq!(chunks[0], (table..table + 3, chunk));
+    assert_eq!(chunks.iter().map(|c| c.1 as u64).sum::<u64>(), len);
+    // entries past the stream, past usize, or going back
+    for v in [u64::MAX, u64::MAX - 7, 1 << 62, 0] {
+        let mut e = s.clone();
+        e[8 * 100..8 * 100 + 8].copy_from_slice(&v.to_le_bytes());
+        let r = aqr_testkit::within(std::time::Duration::from_secs(10), || {
+            aqr_disk::compressed::wof_chunks(&e, len, chunk)
+        });
+        assert!(r.unwrap().is_none(), "{v:#x}");
+    }
+    // the table cut short
+    assert!(aqr_disk::compressed::wof_chunks(&s[..table - 1], len, chunk).is_none());
+    // a length of 4 GiB less one byte is a table of 4-byte entries
+    assert!(aqr_disk::compressed::wof_chunks(&s, u32::MAX as u64, chunk).is_none());
+}
+
+/// Streams of WOF and LZNT1 damaged: none or data of the length declared, within the time.
+#[test]
+fn compressed_streams_damaged() {
+    use aqr_disk::Compressed;
+    use aqr_disk::compressed::unpack;
+    // two chunks of XPRESS Huffman, stored as they are is no stream: make the bytes of a table of
+    // two chunks of data of 4096 and 17 whose chunks are noise
+    let noise: Vec<u8> = (0..4200u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
+    let mut s = 3000u32.to_le_bytes().to_vec();
+    s.extend_from_slice(&noise);
+    let how = Compressed::Wof { algorithm: 0, len: 4096 + 17 };
+    let lznt = |len: u64| Compressed::Lznt1 { len, unit: 4096, allocated: vec![1200, 1200, 1200] };
+    for d in aqr_testkit::damages(s.len(), 200, 64) {
+        let e = d.apply(&s);
+        let r = aqr_testkit::within(std::time::Duration::from_secs(10), || {
+            let a = unpack(&e, &how);
+            let b = unpack(e.get(4..).unwrap_or(&[]), &lznt(3 * 4096 - 5));
+            let c = unpack(&e, &lznt(u64::MAX));
+            (a.map(|u| u.data.len()), b.map(|u| u.data.len()), c.is_none())
+        });
+        let (a, b, c) = r.unwrap_or_else(|m| panic!("{d}: {m}"));
+        assert!(a.is_none_or(|n| n == 4096 + 17), "{d}");
+        assert!(b.is_none_or(|n| n == 3 * 4096 - 5), "{d}");
+        assert!(c, "{d}");
+    }
+}
