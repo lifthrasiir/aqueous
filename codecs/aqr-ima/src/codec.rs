@@ -81,6 +81,10 @@ impl Bit {
 /// Codes decisions: the encoder codes `b` and returns it, the decoder returns what it decodes.
 trait Coder {
     fn bit(&mut self, k: &mut Bit, b: bool) -> bool;
+    /// Whether decoding has run past its record (never encoding).
+    fn failed(&self) -> bool {
+        false
+    }
 }
 
 impl Coder for ArithEncoder {
@@ -98,6 +102,9 @@ impl Coder for ArithDecoder<'_> {
         let b = self.decode(k.p as u32);
         k.update(b);
         b
+    }
+    fn failed(&self) -> bool {
+        self.overrun()
     }
 }
 
@@ -241,6 +248,10 @@ fn code<C: Coder>(cod: &mut C, l: Layout, d: Option<&[u8]>, blocks: usize, out: 
     let mut nib = vec![0u8; ch * n];
     let mut block = vec![0u8; bs];
     for k in 0..blocks {
+        // (a record's end ends it: a length it does not hold is not run through)
+        if cod.failed() {
+            break;
+        }
         let src = d.map(|d| &d[k * bs..(k + 1) * bs]);
         // a channel's nibble `j` at its place in the block
         let at = |c: usize, j: usize| 4 * ch + 4 * ((j / 8) * ch + c) + (j % 8) / 2;
@@ -304,7 +315,9 @@ pub fn decode(l: Layout, record: &[u8], len: usize) -> Result<Vec<u8>> {
         return Err(Error("not whole blocks"));
     }
     let mut c = ArithDecoder::new(record);
-    let mut out = Vec::with_capacity(len);
+    // (one reservation of the whole, as the plan counts it, but a failing one)
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| Error("output too large"))?;
     code(&mut c, l, None, len / l.block(), &mut out);
     if c.overrun() {
         return Err(Error("corrupt record"));

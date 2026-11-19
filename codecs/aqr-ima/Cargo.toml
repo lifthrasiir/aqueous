@@ -17,3 +17,4 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
