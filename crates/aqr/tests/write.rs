@@ -32,7 +32,7 @@ fn source(d: &Path, n: u64) -> Vec<(String, Vec<u8>)> {
 }
 
 fn extracted(d: &Path, name: &str) -> Vec<(String, Vec<u8>)> {
-    let out = format!("out-{name}");
+    let out = format!("out-{}", name.replace('/', "_"));
     let _ = fs::remove_dir_all(d.join(&out));
     ok(d, &["-q", "-d", "-o", &out, name]);
     files(&d.join(&out))
@@ -258,4 +258,153 @@ fn ipc_append_cancelled() {
         assert!(want.iter().all(|f| got.contains(f)));
         fs::remove_dir_all(&d).unwrap();
     }
+}
+
+/// Many files, slowly archived (the last, `f119.txt`, read after the archive's first commit).
+#[cfg(unix)]
+fn slow_inputs(d: &Path) {
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    for i in 0..120 {
+        fs::write(src.join(format!("f{i:03}.txt")), text(i, 40_000)).unwrap();
+    }
+}
+
+/// `--rm` archiving, the last input changed once the archive has its first commit (`what`): the
+/// archive is of what was read; a file that changed is kept, told so, and the run fails; one that
+/// is gone or unreadable stops the archive where it is (not removing anything), which `-a`
+/// completes once it is mended.
+#[cfg(unix)]
+#[test]
+fn inputs_changing_while_archived() {
+    use std::os::unix::fs::PermissionsExt;
+    for what in ["cut", "grow", "same-size", "delete", "unreadable"] {
+        let d = scratch(&format!("changing-{what}"));
+        slow_inputs(&d);
+        let before = files(&d.join("src"));
+        let out = d.join("b.aqr");
+        let last = d.join("src/f119.txt");
+        let (o, _) = signalled(
+            &d,
+            &["--rm", "-T", "1", "-B", "100K", "-S", "1", "-o", "b.aqr", "src"],
+            &|| {
+                if !out.exists() {
+                    return false;
+                }
+                match what {
+                    "cut" => fs::write(&last, text(299, 100)).unwrap(),
+                    "grow" => fs::write(&last, text(299, 90_000)).unwrap(),
+                    "same-size" => fs::write(&last, text(298, 40_000)).unwrap(),
+                    "delete" => fs::remove_file(&last).unwrap(),
+                    _ => fs::set_permissions(&last, fs::Permissions::from_mode(0)).unwrap(),
+                }
+                true
+            },
+            &[],
+        );
+        let e = stderr(&o);
+        assert!(!o.status.success(), "{what}: {e}");
+        let t = ok(&d, &["-K", "b.aqr"]);
+        let listed = fs::read_dir(d.join("src")).map(|r| r.count()).unwrap_or(0);
+        match what {
+            "cut" | "grow" | "same-size" => {
+                assert!(e.contains("kept src/f119.txt (changed since it was read)"), "{what}: {e}");
+                assert!(!stderr(&t).contains("incomplete"), "{what}: {}", stderr(&t));
+                // (what it holds is what it read, the file as it was then or as it is now)
+                let got = extracted(&d, "b.aqr");
+                assert_eq!(got.len(), 120);
+                let now = fs::read(&last).unwrap();
+                let held = &got.iter().find(|f| f.0 == "f119.txt").unwrap().1;
+                assert!(*held == now || *held == before[119].1, "{what}");
+                assert_eq!(listed, 1, "{what}: only the changed file stays");
+            }
+            _ => {
+                assert!(e.contains("f119.txt"), "{what}: {e}");
+                assert!(stderr(&t).contains("incomplete"), "{what}: {}", stderr(&t));
+                // (nothing removed: the archive is not whole)
+                assert_eq!(listed, if what == "delete" { 119 } else { 120 }, "{what}");
+                let _ = fs::set_permissions(&last, fs::Permissions::from_mode(0o644));
+                if what == "delete" {
+                    fs::write(&last, &before[119].1).unwrap();
+                }
+                ok(&d, &["-q", "-a", "b.aqr", "src"]);
+                assert_eq!(extracted(&d, "b.aqr"), files(&d.join("src")), "{what}");
+            }
+        }
+        fs::remove_dir_all(&d).unwrap();
+    }
+}
+
+/// `aqr args` in `dir` with files limited to `kib` KiB (what a full disk does to a write: the
+/// signal ignored, the write failing).
+#[cfg(unix)]
+fn limited(dir: &Path, kib: u32, args: &[&str]) -> Output {
+    Command::new("sh")
+        .current_dir(dir)
+        .arg("-c")
+        .arg(format!("trap '' XFSZ; ulimit -f {kib}; exec \"$0\" \"$@\""))
+        .arg(env!("CARGO_BIN_EXE_aqr"))
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// write/5: a write failing for want of room (as a full disk does) fails the run, tells which
+/// file, and leaves no archive passed off as whole: nothing where it was being made, the
+/// archive as it was where appended to (what was written after it cut off by the next append).
+#[cfg(unix)]
+#[test]
+fn disk_full() {
+    let d = scratch("full");
+    source(&d, 5);
+    for args in [&["-o", "full.aqr"][..], &["--atomic", "-o", "full.aqr"], &["-o", "full.zip"], &["-o", "full.tar.gz"]]
+    {
+        let args: Vec<&str> = args.iter().copied().chain(["src"]).collect();
+        let o = limited(&d, 3, &args);
+        let e = stderr(&o);
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {e}");
+        assert!(e.contains("full.") && e.contains("File too large"), "{args:?}: {e}");
+        assert!(fs::read_dir(&d).unwrap().all(|e| e.unwrap().file_name() == "src"), "{args:?}");
+    }
+    // appended to
+    ok(&d, &["-q", "-o", "b.aqr", "src"]);
+    let before = fs::read(d.join("b.aqr")).unwrap();
+    for i in 10..16 {
+        fs::write(d.join(format!("src/n{i}.txt")), text(i, 6000)).unwrap();
+    }
+    let o = limited(&d, 9, &["-a", "b.aqr", "src"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains("File too large"), "{}", stderr(&o));
+    let now = fs::read(d.join("b.aqr")).unwrap();
+    assert!(now.starts_with(&before));
+    assert_eq!(extracted(&d, "b.aqr").len(), 5);
+    let o = ok(&d, &["-a", "b.aqr", "src"]);
+    assert!(stderr(&o).contains("an append not committed cut off"), "{}", stderr(&o));
+    assert_eq!(extracted(&d, "b.aqr"), files(&d.join("src")));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// write/5: an archive made inside the tree it archives is not among its files while it is made;
+/// replaced (`-f`) or appended to, it is an input like any file, read as it was.
+#[test]
+fn archive_in_its_input_tree() {
+    let d = scratch("in-tree");
+    source(&d, 5);
+    let names = |g: &[(String, Vec<u8>)]| g.iter().map(|f| f.0.clone()).collect::<Vec<_>>();
+    let plain = files(&d.join("src"));
+    ok(&d, &["-q", "-o", "src/a.aqr", "src"]);
+    let first = fs::read(d.join("src/a.aqr")).unwrap();
+    assert_eq!(extracted(&d, "src/a.aqr"), plain);
+    ok(&d, &["-q", "-f", "-o", "src/a.aqr", "src"]);
+    let second = fs::read(d.join("src/a.aqr")).unwrap();
+    let got = extracted(&d, "src/a.aqr");
+    assert_eq!(names(&got), names(&files(&d.join("src"))));
+    assert_eq!(got.iter().find(|f| f.0 == "a.aqr").unwrap().1, first);
+    ok(&d, &["-q", "-a", "src/a.aqr", "src"]);
+    let got = extracted(&d, "src/a.aqr");
+    assert_eq!(got.iter().find(|f| f.0 == "a.aqr").unwrap().1, second);
+    let t = ok(&d, &["-K", "src/a.aqr"]);
+    assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
+    fs::remove_dir_all(&d).unwrap();
 }

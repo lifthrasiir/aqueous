@@ -265,7 +265,7 @@ fn compress_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Stri
 /// beside it first (a single file in it by its name), then the program of it.
 fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     sfx::pack()?;
-    let Some(_) = output(a, out)? else { return Ok(Vec::new()) };
+    let Some(force) = output(a, out)? else { return Ok(Vec::new()) };
     let renames = match inputs.sole() {
         Some(input) if !input.is_dir() => vec![input.file_name().map(PathBuf::from)],
         _ => inputs.renames.to_vec(),
@@ -276,7 +276,8 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     let made = compress_aqr(a, Inputs { renames: &renames, ..inputs }, &tmp).and_then(|gone| {
         let archive = fs::read(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
         let made = sfx::make(&archive)?;
-        fs::write(out, &made.exe).map_err(|e| format!("{}: {e}", out.display()))?;
+        // (written beside it and renamed: not a program in part where the disk is full)
+        files::write_whole(out, force, |f| std::io::Write::write_all(f, &made.exe))?;
         Ok((gone, made, archive.len()))
     });
     let _ = fs::remove_file(&tmp);
