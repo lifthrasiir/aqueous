@@ -111,12 +111,13 @@ pub fn gpt(d: &dyn Image) -> Vec<Range<usize>> {
         let Some(at) = entries.checked_mul(sector).and_then(|a| usize::try_from(a).ok()) else { continue };
         let mut out = Vec::new();
         for i in 0..count.min(MOST) {
-            let Some(e) = d.get(at + i * size..at + i * size + 128) else { break };
+            let Some(from) = i.checked_mul(size).and_then(|o| at.checked_add(o)) else { break };
+            let Some(e) = from.checked_add(128).and_then(|to| d.get(from..to)) else { break };
             let (first, last) = (le64(&e, 32), le64(&e, 40));
             if e[..16] == [0; 16] || last < first {
                 continue;
             }
-            out.extend(span(first, last - first + 1, sector));
+            out.extend((last - first).checked_add(1).and_then(|n| span(first, n, sector)));
         }
         return out;
     }

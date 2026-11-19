@@ -281,3 +281,60 @@ fn pieces_of_a_file_left_out() {
 fn wof_chunks_of_huge_length() {
     assert!(aqr_disk::compressed::wof_chunks(&[0; 16], 1 << 60, 4096).is_none());
 }
+
+/// A GPT of 512-byte sectors with its header's fields and entries `(first, last)` as given.
+fn gpt_of(entries_lba: u64, count: u32, size: u32, entries: &[(u64, u64)], len: usize) -> Vec<u8> {
+    let mut d = vec![0u8; len];
+    let h = &mut d[512..512 + 92];
+    h[..8].copy_from_slice(b"EFI PART");
+    h[12..16].copy_from_slice(&92u32.to_le_bytes());
+    h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
+    h[80..84].copy_from_slice(&count.to_le_bytes());
+    h[84..88].copy_from_slice(&size.to_le_bytes());
+    if let Some(at) = usize::try_from(entries_lba.saturating_mul(512)).ok().filter(|&a| a < len) {
+        for (i, &(first, last)) in entries.iter().enumerate() {
+            let Some(e) = d.get_mut(at + i * size as usize..at + i * size as usize + 128) else { break };
+            e[..16].fill(1);
+            e[32..40].copy_from_slice(&first.to_le_bytes());
+            e[40..48].copy_from_slice(&last.to_le_bytes());
+        }
+    }
+    d
+}
+
+/// GPT fields at the extremes: spans that do not fit in `usize`, an entry array placed at the
+/// end of the address space, a count of everything.
+#[test]
+fn gpt_extremes() {
+    let gpt = |d: &[u8]| partition::gpt(&Plain(d));
+    let len = 4096 * 4;
+    // entries near 2^55 and u64::MAX sectors: out of the image, none
+    for lba in [1 << 55, (1 << 55) - 1, u64::MAX >> 9, u64::MAX / 512 + 1, u64::MAX] {
+        for size in [128, 4096] {
+            for count in [1, u32::MAX] {
+                let d = gpt_of(lba, count, size, &[(0, 0)], len);
+                let r = aqr_testkit::within(std::time::Duration::from_secs(10), || gpt(&d));
+                assert_eq!(r.as_deref(), Ok(&[][..]), "{lba} {size} {count}");
+            }
+        }
+    }
+    // partitions at the extremes: those that are not ranges of usize are left out
+    let d = gpt_of(2, 8, 128, &[(0, u64::MAX), (u64::MAX, u64::MAX), (1 << 55, (1 << 55) + 5), (3, 2), (4, 4)], len);
+    assert_eq!(gpt(&d), [4 * 512..5 * 512]);
+    let d = gpt_of(2, 8, 128, &[(0, u64::MAX >> 10), (u64::MAX >> 9, u64::MAX >> 9)], len);
+    assert!(gpt(&d).len() <= 2);
+}
+
+/// A thousand partitions of one volume: all read (up to the most), the same part of the disk.
+#[test]
+fn gpt_many_partitions() {
+    let all = vec![(100u64, 199u64); 5000];
+    let d = gpt_of(2, 5000, 128, &all, 2 * 512 + 5000 * 128 + 512);
+    let spans = partition::gpt(&Plain(&d));
+    assert!(spans.len() <= 1024 && spans.len() > 100, "{}", spans.len());
+    assert!(spans.iter().all(|s| *s == (100 * 512..200 * 512)));
+    let d = aqr_disk::formula::encode_with(&d, &options());
+    if let Some(f) = d {
+        assert!(!f.streams.is_empty());
+    }
+}
