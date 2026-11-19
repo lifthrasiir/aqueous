@@ -1,7 +1,8 @@
 //! Self-extracting programs made by `aqr -c --format sfx` (Windows x86-64): run, they write the
-//! files out as they were. The aqr built has the pack of `target/aqr-sfx/` (`AQR_SFX_PACK`'s
-//! where that is set; `crates/aqr-sfx/pack.py` makes it) written into a copy of it, as the
-//! release does; skipped where there is none.
+//! files out as they were; and the modules run as WebAssembly by the pack's interpreter blob.
+//! The aqr built has the pack of `target/aqr-sfx/` (`AQR_SFX_PACK`'s where that is set;
+//! `crates/aqr-sfx/pack.py` makes it) written into a copy of it, as the release does; the tests
+//! fail where there is none.
 
 mod common;
 
@@ -96,6 +97,31 @@ fn sfx_of_a_file() {
     made(&d, &["a.txt"], "a.exe");
     run(&d, "a.exe", "out");
     assert!(fs::read(d.join("a.txt")).unwrap() == fs::read(d.join("out/a.txt")).unwrap());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// The modules run as WebAssembly (`-Z wasm`) by the interpreter blob of the pack, as aqr.exe
+/// links no Wasmtime: an archive of a module (aqr-wrt's) tested and extracted as it was.
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[test]
+fn wasm_through_the_interpreter() {
+    let d = scratch("interp");
+    fs::create_dir_all(d.join("in")).unwrap();
+    fs::write(d.join("in/a.txt"), prose(300_000)).unwrap();
+    fs::write(d.join("in/b.txt"), prose(5_000)).unwrap();
+    let o = aqr_in(&d, &["-c", "-q", "-o", "a.aqr", "in"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let pack = "(the pack: crates/aqr-sfx/pack.py, which `cargo aqr` runs, or AQR_SFX_PACK)";
+    for args in [&["-K", "-Z", "wasm", "a.aqr"][..], &["-d", "-q", "-Z", "wasm", "-o", "out", "a.aqr"]] {
+        let o = aqr_in(&d, args);
+        assert!(o.status.success(), "aqr {args:?}: {} {pack}", String::from_utf8_lossy(&o.stderr));
+    }
+    for f in ["a.txt", "b.txt"] {
+        assert!(fs::read(d.join("in").join(f)).unwrap() == fs::read(d.join("out").join(f)).unwrap(), "{f}");
+    }
+    // (and a module it ran: the archive of text has aqr-wrt's)
+    let list = String::from_utf8_lossy(&aqr_in(&d, &["-t", "-v", "a.aqr"]).stdout).into_owned();
+    assert!(list.contains("wrt"), "{list}");
     fs::remove_dir_all(&d).unwrap();
 }
 

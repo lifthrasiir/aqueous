@@ -30,8 +30,11 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
 - aqr-exe through aqr-compress: the CIL, Inno and NSIS paths (inputs of 12-24 KiB); a Mach-O
   arch at an offset inside the fat header; FAT_MAGIC arch sizes over 4 GiB. SHN_XINDEX is not
   read (e_shnum 0 taken as it is): a feature, if wanted.
-- aqr-wasmrt's interpreter path (wasm/interp.rs, the SFX's interpreter blob) has no test in
-  aqr-decompress: the host's fixes reach aqr.exe and the SFX once the pack is rebuilt.
+- aqr-wasmrt's interpreter path (wasm/interp.rs, the pack's interpreter blob): only a round
+  trip (aqr's tests/sfx.rs, `wasm_through_the_interpreter`), not the host's violations nor
+  damaged inputs. The blob is of aqr-wasmrt as the pack was made: `cargo aqr` runs pack.py
+  again for known.rs's modules, not for aqr-wasmrt's sources, so the host's fixes reach aqr.exe
+  and the SFX only once the pack is rebuilt by hand.
 - A real crash between an append's writes is not simulated (the op log's replay cuts at each).
 
 ### Known limits, pinned
