@@ -763,13 +763,17 @@ pub struct Split {
 
 /// Bytes of the data of a stream of units.
 pub fn data_len(units: &[(&[u8], usize)]) -> usize {
-    units.iter().map(|c| c.1).sum()
+    units.iter().fold(0usize, |a, c| a.saturating_add(c.1))
 }
 
 /// Splits a stream of units: None where a unit does not read whole, or the units are not all of
 /// one length (but the last, which is shorter).
 pub fn split(units: &[(&[u8], usize)]) -> Result<Split> {
-    let mut data = vec![0; data_len(units)];
+    // (before anything is allocated: the lengths are the container's claim)
+    if data_len(units) >= u32::MAX as usize - WINDOW {
+        return Err(Error("data too long"));
+    }
+    let mut data = aqr_common::mem::try_zeroed(data_len(units)).ok_or(Error("data too long"))?;
     let (us, cl) = read_into(units, &mut data)?;
     if units.is_empty() {
         return Ok(Split { data, record: Vec::new(), cost: [0.0; CATS] });
