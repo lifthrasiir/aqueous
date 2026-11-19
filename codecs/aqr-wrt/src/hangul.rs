@@ -715,4 +715,63 @@ mod tests {
         assert!(bad(&[1, 0x80, 0]) && bad(&[1, b'\n', 0]) && bad(&[0, 0, b'\n']) && bad(&[0, 33]));
         assert!(bad(&[0, 0, b'x']));
     }
+
+    /// Text of Hangul with no ASCII byte but spaces has no byte to cut at: cut anyway, at the
+    /// start of a character, each piece coded on its own.
+    #[test]
+    fn uncuttable() {
+        let unit = "한국어 사람 ";
+        let d = unit.repeat(PIECE.get() * 5 / 2 / unit.len()).into_bytes();
+        let parts = pieces(&d);
+        assert!(parts.len() == 3 && parts.concat() == d, "{}", parts.len());
+        assert!(parts.iter().all(|p| std::str::from_utf8(p).is_ok()));
+        let dict = Dictionary::of(&[&d], 2).unwrap();
+        back_with(&dict, &d, 2);
+        // no spaces either
+        let d = "한국어".repeat(PIECE.get() * 5 / 2 / 9).into_bytes();
+        let parts = pieces(&d);
+        assert!(parts.len() == 3 && parts.concat() == d);
+        assert!(parts.iter().all(|p| std::str::from_utf8(p).is_ok()));
+        // (one token of all of it: no entry worth a code, so no dictionary)
+        if let Some(dict) = Dictionary::of(&[&d], 2) {
+            back_with(&dict, &d, 2);
+        }
+    }
+
+    /// A CRLF at a piece's end: the cut is before the CR.
+    #[test]
+    fn crlf_at_piece_boundary() {
+        let mut d = Vec::new();
+        while d.len() + 8 <= PIECE.get() {
+            d.extend_from_slice("한국 ".as_bytes());
+        }
+        while d.len() < PIECE.get() {
+            d.push(b' ');
+        }
+        d.extend_from_slice("\r\n끝이다\r\n".as_bytes());
+        d.extend_from_slice(&"사람은 나다\r\n".repeat(100).into_bytes());
+        let parts = pieces(&d);
+        assert!(parts.len() == 2 && parts[1].starts_with(b"\r\n"), "{}", parts.len());
+        let dict = Dictionary::of(&[&d], 2).unwrap();
+        back_with(&dict, &d, 2);
+    }
+
+    #[test]
+    fn damaged_text_and_params() {
+        let d = "나는 사람이다. 사람은 나다.\r\n한 English \x01 é\n".repeat(30).into_bytes();
+        let dict = Dictionary::of(&[&d], 1).unwrap();
+        let (text, lens) = dict.encode(&d, 1);
+        let r = dict.to_bytes();
+        let p = params(&r, &lens);
+        let limit = std::time::Duration::from_secs(20);
+        aqr_testkit::damaged(&text, 60, 64, limit, |v| {
+            let _ = decode(&p, &r, v, d.len(), 1);
+        });
+        aqr_testkit::damaged(&r, 60, 64, limit, |v| {
+            let _ = decode(&p, v, &text, d.len(), 1);
+        });
+        aqr_testkit::damaged(&p, 60, 64, limit, |v| {
+            let _ = decode(v, &r, &text, d.len(), 1);
+        });
+    }
 }

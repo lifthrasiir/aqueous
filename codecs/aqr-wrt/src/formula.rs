@@ -418,4 +418,28 @@ mod tests {
         assert!(matches!(&f.root, Node::Concat(ns) if ns.len() >= 2));
         assert_eq!(eval(&f, d.len()).unwrap(), d);
     }
+
+    /// Text of words and then of Hangul (and the reverse), in segments cut across the change.
+    #[test]
+    fn mixed_segments() {
+        let en = "The quick brown fox jumps over the lazy dog; <b>THE</b> &amp; dog.\n".repeat(7000);
+        let ko = String::from_utf8(korean_text(450_000)).unwrap();
+        for (what, d) in [
+            ("en+ko", [en.as_bytes(), ko.as_bytes()].concat()),
+            ("ko+en", [ko.as_bytes(), en.as_bytes()].concat()),
+            ("en+ko+en", [en.as_bytes(), ko.as_bytes(), en.as_bytes()].concat()),
+        ] {
+            // (the shared dictionaries of both kinds, as when archived with a text of each)
+            let shared = Shared::of(&[en.as_bytes(), ko.as_bytes(), &d], 2).unwrap();
+            for segment in [100_000, 300_000, usize::MAX] {
+                if let Some(f) = coded_in(&d, &shared, 0, 2, segment) {
+                    assert_eq!(eval(&f, d.len()).unwrap(), d, "{what} {segment}");
+                    assert!(eval(&f, d.len() + 1).is_err(), "{what} {segment}");
+                }
+            }
+            if let Some(f) = encode(&d, 2) {
+                assert_eq!(eval(&f, d.len()).unwrap(), d, "{what}");
+            }
+        }
+    }
 }

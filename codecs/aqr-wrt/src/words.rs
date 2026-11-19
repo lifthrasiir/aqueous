@@ -936,4 +936,52 @@ mod tests {
         assert!(Layout::parse(&[1, 2, 3, b'a', 0, 0, 0]).is_err());
         assert!(Layout::parse(&[1, 2, 3, 4, 0, 0, 0, 0]).is_err());
     }
+
+    /// A piece ends between the CR and the LF of a line end: the pieces code as the whole does.
+    #[test]
+    fn crlf_at_piece_boundary() {
+        // (words and spaces up to the piece's size, where the first byte to cut at is a CR)
+        let mut d = Vec::new();
+        while d.len() + 4 <= PIECE.get() {
+            d.extend_from_slice(b"ab ");
+        }
+        while d.len() < PIECE.get() {
+            d.push(b' ');
+        }
+        d.extend_from_slice(b"\r\nthe end\r\nnext line here\r\n");
+        d.extend_from_slice(&b"some more words\r\n".repeat(100));
+        let parts = pieces(&d);
+        assert!(parts.len() == 2 && parts[1].starts_with(b"\n"), "{}", parts.len());
+        let dict = Dictionary::of(&[&d], 2).unwrap();
+        let (text, lens) = dict.encode(&d, 2);
+        assert_eq!(lens.len(), 2);
+        let r = dict.to_bytes();
+        assert!(decode(&params(&r, &lens), &r, &text, d.len(), 2).unwrap() == d);
+        // (each line end alone, either end of the text, and a lone CR or LF)
+        for s in [&b"\r\n"[..], b"\r", b"\n", b"\r\r\n\n\r", b"a\r\n", b"\r\nb"] {
+            let d = s.repeat(500);
+            if let Some(dict) = Dictionary::of(&[&d], 1) {
+                back_with(&dict, &d);
+            }
+        }
+    }
+
+    #[test]
+    fn damaged_text_and_params() {
+        let d = times("the cat and The CAT &amp; <b>the</b> cat.\r\n", 30);
+        let dict = Dictionary::of(&[&d], 1).unwrap();
+        let (text, lens) = dict.encode(&d, 1);
+        let r = dict.to_bytes();
+        let p = params(&r, &lens);
+        let limit = std::time::Duration::from_secs(20);
+        aqr_testkit::damaged(&text, 60, 64, limit, |v| {
+            let _ = decode(&p, &r, v, d.len(), 1);
+        });
+        aqr_testkit::damaged(&r, 60, 64, limit, |v| {
+            let _ = decode(&p, v, &text, d.len(), 1);
+        });
+        aqr_testkit::damaged(&p, 60, 64, limit, |v| {
+            let _ = decode(v, &r, &text, d.len(), 1);
+        });
+    }
 }
