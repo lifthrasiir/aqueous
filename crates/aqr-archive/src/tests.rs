@@ -2792,3 +2792,363 @@ fn intermediate_checksums() {
     let input = prog(&[&lit(b"abcdef"), &wrong(b"abcdef"), &[SPLIT, 2, 3, 3, CONCAT, 2]]);
     assert_eq!(run(&input), invalid("output checksum mismatch"));
 }
+
+/// read/6: sizes a formula declares past what its bytes can hold (a Patch's length, an
+/// application's output sizes, a Split's, a Slice's): refused as invalid or as a resource the
+/// decoder lacks, with no allocation of them (the testkit's allocator refuses 1 GiB).
+#[test]
+fn declared_sizes_past_the_bytes() {
+    let n = natives();
+    let noise = aqr_common::rng::noise(1000);
+    let patch = aqr_formula::patch::make(&noise, &noise[..900], 3).unwrap();
+    let big = [1u64 << 36, 1 << 38, 1 << 40, 1 << 62, u64::MAX];
+    let verdict = |c: &[u8], what: &str| {
+        aqr_testkit::within(std::time::Duration::from_secs(20), || {
+            aqr_testkit::case(what);
+            let r = decode_value(c, &n).map(|_| ());
+            // no request for what the formula only declares
+            assert!(aqr_testkit::most() < 1 << 30, "{what}: a request of {} bytes", aqr_testkit::most());
+            r
+        })
+        .unwrap()
+    };
+    for len in big {
+        // a Patch of the source "noise" by a patch of 900 bytes, its length declared as `len`
+        let mut d = vec![1, 0, 0, 0, SLICE, 0, 0];
+        varint::put(&mut d, 1000);
+        d.extend_from_slice(&[LITERAL]);
+        varint::put(&mut d, patch.len() as u64);
+        d.extend_from_slice(&patch);
+        d.push(PATCH);
+        varint::put(&mut d, len);
+        let c = formula(&d, &[&noise]);
+        let r = verdict(&c, &format!("a patch of {len} bytes"));
+        assert!(matches!(r, Err(Failure::Invalid(_) | Failure::Resource(_))), "patch {len}: {r:?}");
+        // an application's outputs of those sizes, and one of them among others
+        for sizes in [vec![len], vec![len, 1], vec![1, len], vec![len, len]] {
+            let mut d = vec![1, 0, 0, 1, 0, SLICE, 0, 0, 3, SLICE, 0, 1, 2, APPLY, 0, 0, 3, 1, 2, 3];
+            varint::put(&mut d, MEMORY_LIMIT);
+            d.extend_from_slice(&[0, 2]);
+            varint::put(&mut d, sizes.len() as u64);
+            sizes.iter().for_each(|&s| varint::put(&mut d, s));
+            let c = formula(&d, &[b"abc"]);
+            let r = verdict(&c, &format!("an application of outputs {sizes:?}"));
+            assert!(matches!(r, Err(Failure::Invalid(_) | Failure::Resource(_))), "apply {sizes:?}: {r:?}");
+        }
+        // a Split into those sizes, and a Slice of them
+        let mut d = vec![1, 0, 0, 0, SLICE, 0, 0, 3, SPLIT, 2];
+        varint::put(&mut d, len);
+        varint::put(&mut d, 3u64.wrapping_sub(len));
+        d.extend_from_slice(&[CONCAT, 2]);
+        let r = verdict(&formula(&d, &[b"abc"]), &format!("a split of {len}"));
+        assert!(matches!(r, Err(Failure::Invalid(_) | Failure::Resource(_))), "split {len}: {r:?}");
+        let mut d = vec![1, 0, 0, 0, SLICE, 0, 0];
+        varint::put(&mut d, len);
+        let r = verdict(&formula(&d, &[b"abc"]), &format!("a slice of {len}"));
+        assert!(matches!(r, Err(Failure::Invalid(_) | Failure::Resource(_))), "slice {len}: {r:?}");
+        let mut d = vec![1, 0, 0, 0, SLICE, 0];
+        varint::put(&mut d, len);
+        d.push(1);
+        let r = verdict(&formula(&d, &[b"abc"]), &format!("a slice from {len}"));
+        assert!(matches!(r, Err(Failure::Invalid(_) | Failure::Resource(_))), "slice from {len}: {r:?}");
+    }
+}
+
+/// A metadata block's data as `tree::read` takes it, made by hand: `prev`, the offsets of
+/// modules, resources and dictionaries, then entries (directories, files, specials in this order;
+/// each its parent's number and name; a file its dictionary, offset, output and size; a special
+/// its kind and what follows it) and the optional metadata.
+#[derive(Clone, Default)]
+struct Meta {
+    prev: u64,
+    modules: Vec<u64>,
+    resources: Vec<u64>,
+    dictionaries: Vec<u64>,
+    dirs: Vec<(u64, &'static str)>,
+    files: Vec<(u64, &'static str, u64, u64, u64, u64)>,
+    specials: Vec<(u64, &'static str, u64, Vec<u8>)>,
+    opt: Vec<u8>,
+}
+
+impl Meta {
+    fn bytes(&self) -> Vec<u8> {
+        let width = |n: u64| match n {
+            0 => 0,
+            1..0x100 => 1,
+            0x100..0x1_0000 => 2,
+            0x1_0000..0x1_0000_0000 => 4,
+            _ => 8,
+        };
+        let put = |out: &mut Vec<u8>, bound: u64, v: u64| out.extend_from_slice(&v.to_le_bytes()[..width(bound)]);
+        let mut entries = Vec::new();
+        let mut starts = Vec::new();
+        for (_, name) in &self.dirs {
+            starts.push(entries.len() as u64);
+            entries.extend_from_slice(name.as_bytes());
+            entries.push(0);
+        }
+        for (_, name, .., size) in &self.files {
+            starts.push(entries.len() as u64);
+            entries.extend_from_slice(name.as_bytes());
+            entries.push(0);
+            varint::put(&mut entries, *size);
+        }
+        for (_, name, kind, rest) in &self.specials {
+            starts.push(entries.len() as u64);
+            entries.extend_from_slice(name.as_bytes());
+            entries.push(0);
+            varint::put(&mut entries, *kind);
+            entries.extend_from_slice(rest);
+        }
+        let mut m = Vec::new();
+        varint::put(&mut m, self.prev);
+        for c in [
+            self.modules.len(),
+            self.resources.len(),
+            self.dictionaries.len(),
+            self.dirs.len(),
+            self.files.len(),
+            self.specials.len(),
+            entries.len(),
+            self.opt.len(),
+        ] {
+            varint::put(&mut m, c as u64);
+        }
+        for list in [&self.modules, &self.resources, &self.dictionaries] {
+            list.iter().for_each(|&o| put(&mut m, self.prev, o));
+        }
+        let parents = (self.dirs.iter().map(|d| d.0))
+            .chain(self.files.iter().map(|f| f.0))
+            .chain(self.specials.iter().map(|s| s.0));
+        parents.skip(1).for_each(|p| put(&mut m, self.dirs.len() as u64, p));
+        for &(_, _, dictionary, offset, output, _) in &self.files {
+            put(&mut m, self.dictionaries.len() as u64, dictionary);
+            put(&mut m, self.prev, offset + (output > 0) as u64);
+            if output > 0 {
+                varint::put(&mut m, output - 1);
+            }
+        }
+        starts.iter().skip(1).for_each(|&s| put(&mut m, entries.len() as u64, s));
+        m.extend_from_slice(&entries);
+        m.extend_from_slice(&self.opt);
+        m
+    }
+}
+
+/// A CBOR array (or map, tag) of `kind` nested `depth` times around a 0.
+fn nested(kind: &str, depth: usize) -> Vec<u8> {
+    let mut v = Vec::new();
+    for _ in 0..depth {
+        match kind {
+            "array" => v.push(0x81),
+            "indefinite" => v.push(0x9f),
+            "map" => v.extend_from_slice(&[0xa1, 0x00]),
+            "tag" => v.push(0xc1),
+            _ => unreachable!(),
+        }
+    }
+    v.push(0x00);
+    if kind == "indefinite" {
+        v.extend(std::iter::repeat_n(0xff, depth));
+    }
+    v
+}
+
+/// read/7: the metadata block's own structure, malformed by hand: what `tree::read` and
+/// `tree_of` refuse, and a CBOR nested past the depth they read.
+#[test]
+fn malformed_metadata() {
+    use crate::tree;
+    let read = |m: &Meta| tree::read(&m.bytes()).map(|m| m.entries.len());
+    let bad = |m: &Meta, want: &str| match read(m) {
+        Err(Failure::Invalid(e)) => assert!(e.contains(want), "{e} for {want}"),
+        r => panic!("{r:?} for {want}"),
+    };
+    let base = Meta {
+        prev: 100,
+        dirs: vec![(0, "d"), (1, "e")],
+        files: vec![(2, "f", 0, 10, 0, 5), (0, "g", 0, 20, 2, 7)],
+        specials: vec![(0, "l", 1, b"d/f\0".to_vec()), (1, "t", 0, vec![])],
+        ..Meta::default()
+    };
+    assert_eq!(read(&base), Ok(6));
+    let r = tree::read(&base.bytes()).unwrap();
+    assert!(matches!(r.entries[3].2, tree::Read::File { offset: 20, output: 2, size: 7, .. }));
+    // parents: after its entry, itself, past the directories
+    let mut m = base.clone();
+    m.dirs[1].0 = 2;
+    bad(&m, "a parent after its entry");
+    m.dirs[1].0 = 3;
+    bad(&m, "a field out of range");
+    let mut m = base.clone();
+    m.files[0].0 = 3;
+    bad(&m, "a field out of range");
+    // fields over their bounds: offsets past `prev`, a dictionary of none
+    for (f, want) in [(Meta { modules: vec![101], ..base.clone() }, "a field out of range")] {
+        bad(&f, want);
+    }
+    let mut m = base.clone();
+    (m.dictionaries, m.files[0].2) = (vec![5], 2);
+    bad(&m, "a field out of range");
+    let mut m = base.clone();
+    m.files[0].3 = 101;
+    bad(&m, "a field out of range");
+    // names
+    for name in ["", ".", "..", "a/b", "/"] {
+        let mut m = base.clone();
+        m.dirs[0].1 = Box::leak(name.to_string().into_boxed_str());
+        bad(&m, "an invalid entry name");
+    }
+    // links: no target, a target of no bytes, one unended
+    let mut m = base.clone();
+    m.specials[0].3 = b"\0".to_vec();
+    bad(&m, "an invalid link target");
+    m.specials[0].3 = b"abc".to_vec();
+    bad(&m, "an unended link target");
+    m.specials[0].3 = vec![];
+    bad(&m, "an unended link target");
+    // bytes after an entry, after the entries, after the optional metadata, truncations
+    let mut m = base.clone();
+    m.specials[1].3 = vec![9];
+    bad(&m, "bytes after an entry");
+    let good = base.bytes();
+    let mut longer = good.clone();
+    longer.push(0);
+    assert!(matches!(tree::read(&longer), Err(Failure::Invalid(e)) if e.contains("bytes after")), "trailing");
+    for cut in 0..good.len() {
+        assert!(matches!(tree::read(&good[..cut]), Err(Failure::Invalid(_))), "cut at {cut}");
+    }
+    // entry offsets: one moved
+    let mut moved = good.clone();
+    let at = good.len() - base.opt.len() - (6 + 2) - 1;
+    moved[at] ^= 1;
+    assert!(tree::read(&moved).is_err());
+    // counts past the data
+    let mut m = good.clone();
+    m[1] = 0xff;
+    m.insert(2, 0x7f);
+    assert!(matches!(tree::read(&m), Err(Failure::Invalid(e)) if e.contains("count")));
+
+    // CBOR: nested within the limit, and past it (a resource failure), whatever nests
+    let with_opt = |opt: Vec<u8>| Meta { opt, ..Meta { prev: 5, dirs: vec![(0, "d")], ..Meta::default() } };
+    let unknown = |v: Vec<u8>| [&[0xa1, 0x01][..], &v].concat();
+    let in_extras = |v: Vec<u8>| [&[0xa1, 0x21, 0x82, 0xf6, 0xa1, 0x18, 0x63][..], &v].concat();
+    for kind in ["array", "indefinite", "map", "tag"] {
+        for depth in [0, 10, 50] {
+            for opt in [unknown(nested(kind, depth)), in_extras(nested(kind, depth))] {
+                let m = with_opt(opt);
+                let r = tree::read(&m.bytes());
+                assert!(r.is_ok(), "{kind} {depth}: {:?}", r.map(|_| ()));
+            }
+        }
+        for depth in [70, 1000, 100_000] {
+            for opt in [unknown(nested(kind, depth)), in_extras(nested(kind, depth))] {
+                let m = with_opt(opt);
+                let r = tree::read(&m.bytes());
+                assert!(matches!(r, Err(Failure::Resource(_))), "{kind} {depth}: {:?}", r.map(|_| ()));
+                // (and the extras of no entry wanted, gone over by their heads alone)
+                let r = tree::read_with(&m.bytes(), &mut |e| Some(vec![false; e.len() + 1]));
+                assert!(matches!(r, Err(Failure::Resource(_))), "{kind} {depth} skipped: {:?}", r.map(|_| ()));
+            }
+        }
+    }
+}
+
+/// An archive of one segment of two files, `a` (100 bytes) and `b` (200), each of a leaf block.
+fn two_files_archive() -> Vec<u8> {
+    use crate::{ContentAt, Entry, EntryNode, Extra, Leaf, SegmentWriter, Tree};
+    let enc = Encoder::new(Level::STORED);
+    let mut w = SegmentWriter::new();
+    let mut out = SegmentWriter::header().to_vec();
+    let mut f = Formula::default();
+    let leaves: Vec<Leaf> = [100, 200]
+        .iter()
+        .map(|&n| Leaf { outputs: vec![f.push("t", vec![n as u8; n])], sums: vec![None] })
+        .collect();
+    let b = w.batch(&enc, &f, &leaves).unwrap();
+    w.commit(&b);
+    out.extend_from_slice(b.blocks());
+    let entries = ["a", "b"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| Entry {
+            parent: None,
+            name: name.as_bytes().to_vec(),
+            node: EntryNode::File(i),
+            extra: Extra::default(),
+        })
+        .collect();
+    let t = Tree { entries, ..Tree::default() };
+    let contents: Vec<ContentAt> =
+        [100, 200].iter().enumerate().map(|(i, &n)| ContentAt { leaf: b.leaf_at[i], output: 0, size: n }).collect();
+    out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+    out
+}
+
+/// read/7: what `tree_of` refuses of a metadata block that reads, in an archive of its own:
+/// two entries of a name, a tombstone of an extra, files of one output of two sizes, of an
+/// output its leaf block lacks, and not at a leaf block.
+#[test]
+fn metadata_not_matching_the_blocks() {
+    let n = natives();
+    let c = dir_archive();
+    let refused = |c: &[u8], want: &str| {
+        for r in [
+            open(c, &n).map(drop),
+            // (the indexed opener reads the leaf blocks as they are taken: its failure may be of
+            // reading them)
+            open_indexed(Payload::Plain(c), &n, 1).and_then(|a| a.value(1)).map(drop),
+            open_salvaging(c, &n, false).map(|_| ()).and(Err(Failure::Invalid("(salvaged)".into()))),
+        ] {
+            match r {
+                Err(Failure::Invalid(e)) if e == "(salvaged)" => {}
+                Err(Failure::Invalid(e)) => assert!(e.contains(want), "{e} for {want}"),
+                r => panic!("{r:?} for {want}"),
+            }
+        }
+    };
+    let dirs = |m: Meta| remeta(&c, |d| *d = Meta { prev: 1, ..m }.bytes());
+    refused(&dirs(Meta { dirs: vec![(0, "d"), (0, "d")], ..Meta::default() }), "two entries of a name");
+    refused(&dirs(Meta { dirs: vec![(0, "d"), (1, "d"), (1, "d")], ..Meta::default() }), "two entries of a name");
+    // (the same name in two directories is not)
+    assert!(open(&dirs(Meta { dirs: vec![(0, "d"), (0, "e"), (1, "d"), (2, "d")], ..Meta::default() }), &n).is_ok());
+    let tomb = |extra: &[u8]| {
+        dirs(Meta {
+            dirs: vec![(0, "d")],
+            specials: vec![(0, "t", 0, vec![])],
+            opt: [&[0xa1, 0x21, 0x83, 0xf6, 0xf6][..], extra].concat(),
+            ..Meta::default()
+        })
+    };
+    assert!(open(&tomb(&[0xf6]), &n).is_ok());
+    refused(&tomb(&[0xa0]), "a tombstone of an extra");
+    // the first segment has to have an entry
+    refused(&dirs(Meta::default()), "the first segment of no entries");
+
+    let c = two_files_archive();
+    let m = crate::tree::read(&decoded_metadata(&c)).unwrap();
+    let crate::tree::Read::File { offset: oa, size: sa, .. } = m.entries[0].2 else { panic!("a file") };
+    let crate::tree::Read::File { offset: ob, size: sb, .. } = m.entries[1].2 else { panic!("a file") };
+    let files = |files: Vec<(u64, &'static str, u64, u64, u64, u64)>| {
+        remeta(&c, |d| *d = Meta { prev: m.prev, files, ..Meta::default() }.bytes())
+    };
+    assert!(open(&files(vec![(0, "a", 0, oa, 0, sa), (0, "b", 0, ob, 0, sb)]), &n).is_ok());
+    // two files of one output, of the one size: one content
+    let same = files(vec![(0, "a", 0, oa, 0, sa), (0, "b", 0, oa, 0, sa)]);
+    let a = open(&same, &n).unwrap();
+    assert_eq!(a.contents_len(), 1);
+    refused(&files(vec![(0, "a", 0, oa, 0, sa), (0, "b", 0, oa, 0, sb)]), "of other sizes");
+    refused(&files(vec![(0, "a", 0, oa, 0, sa), (0, "b", 0, oa, 1, sa)]), "an output its leaf block does not have");
+    refused(&files(vec![(0, "a", 0, oa, 0, sa), (0, "b", 0, oa - 2, 0, sb)]), "not at a leaf block");
+    refused(&files(vec![(0, "a", 0, 0, 0, sa), (0, "b", 0, ob, 0, sb)]), "not at a leaf block");
+    // a dictionary the metadata tells that no block is of, and a file of it
+    let listed = Meta { prev: m.prev, dictionaries: vec![1], files: vec![(0, "a", 1, oa, 0, sa)], ..Meta::default() };
+    refused(&remeta(&c, |d| *d = listed.bytes()), "dictionary");
+}
+
+/// The data of the last metadata block of archive `c`.
+fn decoded_metadata(c: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    remeta(c, |m| data = m.clone());
+    data
+}

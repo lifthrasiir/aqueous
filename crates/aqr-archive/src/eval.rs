@@ -456,6 +456,11 @@ impl<'a> Source<'a> for Made {
             Op::Apply(a, ref inputs, _) => applied(at, a, inputs)?.pop().expect("an output"),
             Op::Patch(source, patch, len) => {
                 let (source, patch) = (whole(at, source)?, whole(at, patch)?);
+                // (a Zstandard block of 128 KiB takes 4 bytes at the least, as a run: a length
+                // past that is not the patch's, and is no memory to ask for)
+                if len / PATCH_EXPANSION > patch.len() as u64 {
+                    return invalid("a patch of a length its bytes cannot give");
+                }
                 aqr_formula::patch::apply(&source, &patch, len).map_err(|e| Failure::Invalid(e.0))?
             }
             _ => unreachable!("an application or a patch"),
@@ -463,6 +468,9 @@ impl<'a> Source<'a> for Made {
         Ok((!out.is_empty()).then(|| Chunk::owned(out)))
     }
 }
+
+/// The most bytes a patch's byte gives: a block of 128 KiB (a run) is 4 bytes.
+const PATCH_EXPANSION: u64 = (128 << 10) / 4;
 
 /// The outputs of application `a` on `inputs`, pulled whole.
 fn applied<'e, 'a>(at: At<'_, 'e, 'a>, a: Ap<'e, 'a>, inputs: &[Val]) -> Decoded<Vec<Vec<u8>>> {
