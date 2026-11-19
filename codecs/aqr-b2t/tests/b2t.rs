@@ -527,3 +527,126 @@ fn f_layout(d: &[u8]) -> Vec<u8> {
     let f = formula::encode(d, 1).unwrap();
     f.streams.iter().find(|s| s.class == "b2t/layout").unwrap().data.to_vec()
 }
+
+/// A block of `p` wrapped at `line` with the separator `sep` between its lines, in a mail.
+fn block_with(p: &[u8], line: usize, sep: &[u8]) -> Vec<u8> {
+    let mut d = b"Content-Transfer-Encoding: base64\n\n".to_vec();
+    d.extend(wrap(&b64(p, false, true), line, line, sep));
+    d.extend_from_slice(b"\nplain text again\n");
+    d
+}
+
+#[test]
+fn separators_of_the_most_bytes() {
+    // 32 bytes a separator is the most, 33 are not taken (as a whole, or alone in a file)
+    let p = payload(2000, 20);
+    for n in [1usize, 2, 31, 32] {
+        let sep = [&b"\n"[..], &b" ".repeat(n - 1)].concat();
+        assert_eq!(data_of(&taken(&block_with(&p, 60, &sep))), p, "{n}");
+    }
+    for n in [33usize, 34, 70] {
+        let sep = [&b"\n"[..], &b" ".repeat(n - 1)].concat();
+        not_taken(&block_with(&p, 60, &sep));
+    }
+}
+
+#[test]
+fn more_than_64_distinct_separators() {
+    // blocks each with a separator of its own: the first 64 are taken, the others left as text
+    let mut d = words(300, 1);
+    let mut all = Vec::new();
+    for i in 0..100usize {
+        let p = payload(600, 100 + i as u64);
+        // (a distinct separator: i spaces of indentation, at most 31, and a tab pattern)
+        let mut sep = b"\n".to_vec();
+        sep.extend(std::iter::repeat_n(b' ', i % 30));
+        sep.extend(std::iter::repeat_n(b'\t', i / 30));
+        d.extend_from_slice(b"\nname: ");
+        d.extend(wrap(&b64(&p, false, true), 48, 48, &sep));
+        d.extend_from_slice(b"\n");
+        d.extend(words(40, i as u64));
+        all.push(p);
+    }
+    let f = taken(&d);
+    let got = data_of(&f);
+    assert!(!got.is_empty() && got.len() <= all.iter().map(|p| p.len()).sum::<usize>());
+    // (the blocks taken are blocks of the file, in order)
+    let mut rest = &got[..];
+    for p in &all {
+        if rest.starts_with(p) {
+            rest = &rest[p.len()..];
+        }
+    }
+    assert!(rest.is_empty());
+    // exactly the 64th and the 65th: 64 distinct are taken, a 65th is not
+    // (a separator of spaces and tabs by the bits of i: all different)
+    let distinct = |i: usize| -> Vec<u8> {
+        (0..7).fold(b"\n".to_vec(), |mut v, b| {
+            v.push(if i >> b & 1 == 1 { b'\t' } else { b' ' });
+            v
+        })
+    };
+    let blocks = |n: usize| {
+        let mut d = words(300, 1);
+        for i in 0..n {
+            d.extend_from_slice(b"\nname: ");
+            d.extend(wrap(&b64(&payload(600, 7 + i as u64), false, true), 48, 48, &distinct(i)));
+            d.push(b'\n');
+            d.extend(words(40, i as u64));
+        }
+        d
+    };
+    assert_eq!(data_of(&taken(&blocks(64))).len(), 64 * 600);
+    assert_eq!(data_of(&taken(&blocks(65))).len(), 64 * 600);
+}
+
+#[test]
+fn mixed_line_ends_in_a_run() {
+    let p = payload(2000, 21);
+    let chars = b64(&p, false, true);
+    for (what, seps) in [
+        ("lf then crlf", vec![&b"\n"[..], b"\r\n"]),
+        ("alternating", vec![b"\r\n", b"\n", b"\r\n", b"\n"]),
+        ("a lone cr", vec![b"\n", b"\r", b"\n"]),
+        ("lf, one different", vec![b"\n", b"\n", b"\n", b"\n \n"]),
+    ] {
+        let mut d = b"Content-Transfer-Encoding: base64\n\n".to_vec();
+        for (i, l) in chars.chunks(76).enumerate() {
+            if i > 0 {
+                d.extend_from_slice(seps[(i - 1) % seps.len()]);
+            }
+            d.extend_from_slice(l);
+        }
+        d.extend_from_slice(b"\nplain text again\n");
+        // (taken in part or left alone: the text back either way)
+        if let Some(f) = formula::encode(&d, 1) {
+            assert_eq!(eval(&f).unwrap(), d, "{what}");
+        }
+    }
+}
+
+#[test]
+fn damaged_streams_and_params() {
+    let p = payload(1500, 22);
+    let mut d = words(200, 3);
+    d.extend_from_slice(b"-----BEGIN X-----\n");
+    d.extend(wrap(&b64(&p, false, true), 64, 64, b"\n"));
+    d.extend_from_slice(b"\n-----END X-----\n");
+    let f = taken(&d);
+    let a = match &f.root {
+        aqr_formula::Node::Apply(a) => a,
+        _ => panic!("not an application"),
+    };
+    let datas: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
+    let limit = std::time::Duration::from_secs(20);
+    for k in 0..datas.len() {
+        aqr_testkit::damaged(&datas[k], 50, 64, limit, |v| {
+            let inputs: Vec<&[u8]> = datas.iter().enumerate().map(|(i, s)| if i == k { v } else { &s[..] }).collect();
+            let _ = formula::decode(&a.params, &inputs, a.len);
+        });
+    }
+    let inputs: Vec<&[u8]> = datas.iter().map(|s| &s[..]).collect();
+    aqr_testkit::damaged(&a.params, 50, 64, limit, |v| {
+        let _ = formula::decode(v, &inputs, a.len);
+    });
+}
