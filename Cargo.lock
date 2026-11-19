@@ -1601,6 +1601,7 @@ dependencies = [
  "aqr-archive",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "zstd",
 ]
 

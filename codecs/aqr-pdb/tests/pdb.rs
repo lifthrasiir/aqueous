@@ -704,3 +704,199 @@ fn formula_types() {
         assert_eq!(f.eval(&Native).unwrap(), d);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Damaged files and lying superblocks
+
+#[global_allocator]
+static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 30);
+
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A file taken apart and put together is the file; the memory asked for stays in bounds.
+fn taken_or_not(v: &[u8]) {
+    let _ = msf::extent(v);
+    if let Some(inputs) = msf::encode(v) {
+        let refs: Vec<&[u8]> = inputs.iter().map(|x| &x[..]).collect();
+        assert_eq!(msf::decode(&refs, v.len() as u64).unwrap(), v, "taken but not rebuilt");
+    }
+    if let Some(f) = aqr_pdb::formula::encode(v, 1) {
+        assert_eq!(f.eval(&Native).unwrap(), v, "formula taken but not rebuilt");
+    }
+    assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+}
+
+#[test]
+fn damaged_files() {
+    let (small, _) = pdb(true);
+    aqr_testkit::damaged(&small, 300, 600, LIMIT, taken_or_not);
+    let (types, _) = type_pdb(1, true, true, |_, _| {});
+    aqr_testkit::damaged(&types, 150, 600, LIMIT, taken_or_not);
+}
+
+/// The first block of the directory of `d` (made by `msf_file`: its map is block 3).
+fn directory_at(d: &[u8]) -> usize {
+    u32::from_le_bytes(d[3 * 512..3 * 512 + 4].try_into().unwrap()) as usize * 512
+}
+
+#[test]
+fn damaged_directory() {
+    let (d, _) = pdb(false);
+    let at = directory_at(&d);
+    // (the header of the directory and the first streams' sizes, with every value)
+    for k in 0..4 + 4 * 10 + 4 * 14 {
+        for x in [0x00u8, 0x01, 0x7f, 0x80, 0xff] {
+            let mut v = d.clone();
+            v[at + k] = x;
+            aqr_testkit::case(&format!("directory byte {k} set to {x:#04x}"));
+            taken_or_not(&v);
+        }
+    }
+}
+
+#[test]
+fn lying_superblocks() {
+    let (d, _) = pdb(false);
+    let words = [0u32, 1, 2, 511, 512, 513, 4096, 65536, 1 << 17, 0x7fff_ffff, 0x8000_0000, u32::MAX - 1, u32::MAX];
+    // each field of the superblock after the magic: block size, free page map, blocks,
+    // directory size, unknown, the directory's map
+    for field in 0..6 {
+        for &w in &words {
+            let mut v = d.clone();
+            v[32 + 4 * field..36 + 4 * field].copy_from_slice(&w.to_le_bytes());
+            aqr_testkit::case(&format!("superblock field {field} set to {w:#x}"));
+            taken_or_not(&v);
+        }
+    }
+    // the number of streams and some stream's size in the directory
+    let at = directory_at(&d);
+    for off in [0, 4, 8, 4 + 4 * 4] {
+        for &w in &words {
+            let mut v = d.clone();
+            v[at + off..at + off + 4].copy_from_slice(&w.to_le_bytes());
+            aqr_testkit::case(&format!("directory word at {off} set to {w:#x}"));
+            taken_or_not(&v);
+        }
+    }
+    // files of no blocks, and the superblock alone
+    for n in [32, 36, 56, 512] {
+        aqr_testkit::case("cut");
+        taken_or_not(&d[..n]);
+    }
+}
+
+#[test]
+fn block_sizes_and_overlaps() {
+    let streams: Vec<Option<Vec<u8>>> =
+        vec![Some(vec![0; 60]), Some(b"pdb info".to_vec()), None, Some((0..9000u32).map(|i| i as u8).collect())];
+    for bs in [512usize, 1024, 4096, 8192, 65536] {
+        let d = msf_file(bs, &streams, bs % 1024 == 0, 0x33);
+        let inputs = msf::encode(&d).unwrap_or_else(|| panic!("block size {bs} not taken"));
+        let refs: Vec<&[u8]> = inputs.iter().map(|x| &x[..]).collect();
+        assert_eq!(msf::decode(&refs, d.len() as u64).unwrap(), d, "{bs}");
+    }
+    // block sizes outside the format's (a power of two, 512 to 65536)
+    let d = msf_file(512, &streams, false, 0);
+    for bs in [0u32, 256, 768, 1 << 17] {
+        let mut v = d.clone();
+        v[32..36].copy_from_slice(&bs.to_le_bytes());
+        assert!(msf::encode(&v).is_none(), "{bs}");
+    }
+    // a stream's first block made another block's: the superblock's and the map's are not
+    // free for a stream; a free page map's is (the file is rebuilt as it is)
+    let dir_at = directory_at(&d);
+    let first = dir_at + 4 + 4 * 4;
+    for (what, b) in [("the superblock", 0u32), ("the map", 3)] {
+        let mut v = d.clone();
+        v[first..first + 4].copy_from_slice(&b.to_le_bytes());
+        assert!(msf::encode(&v).is_none(), "{what}");
+    }
+    let mut v = d.clone();
+    v[first..first + 4].copy_from_slice(&1u32.to_le_bytes());
+    let inputs = msf::encode(&v).expect("a free page map's block is a stream's");
+    let refs: Vec<&[u8]> = inputs.iter().map(|x| &x[..]).collect();
+    assert_eq!(msf::decode(&refs, v.len() as u64).unwrap(), v);
+    let mut v = d.clone();
+    let other = v[first + 4..first + 8].to_vec();
+    v[first..first + 4].copy_from_slice(&other);
+    assert!(msf::encode(&v).is_none(), "a block of two streams");
+    // a block past the file
+    let mut v = d.clone();
+    v[first..first + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(msf::encode(&v).is_none());
+}
+
+#[test]
+fn msf_inputs_damaged() {
+    let (d, _) = pdb(true);
+    let inputs = msf::encode(&d).unwrap();
+    for k in 0..3 {
+        aqr_testkit::damaged(&inputs[k], 400, 600, LIMIT, |v| {
+            let mut ins = inputs.clone();
+            ins[k] = v.to_vec();
+            let refs: Vec<&[u8]> = ins.iter().map(|x| &x[..]).collect();
+            if let Ok(out) = msf::decode(&refs, d.len() as u64) {
+                assert_eq!(out.len(), d.len());
+            }
+            assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+        });
+    }
+    // lengths of the file that the layout does not give
+    let refs: Vec<&[u8]> = inputs.iter().map(|x| &x[..]).collect();
+    for len in [0, 1, 31, 32, 512, d.len() as u64 + 512, u32::MAX as u64 + 1, u64::MAX] {
+        aqr_testkit::case("length");
+        assert!(msf::decode(&refs, len).is_err(), "{len}");
+    }
+    // inputs of no layout, or a layout declaring a file of nothing
+    assert!(msf::decode(&[&[], &[], &[]], 0).is_err());
+    assert!(msf::decode(&[&[], &[9, 0, 0, 0, 0, 0], &[]], 0).is_err());
+    assert!(msf::decode(&[&[]], 0).is_err());
+    assert!(aqr_pdb::module::msf_plan(&[0, 0, 0], &[], 0).is_none());
+}
+
+#[test]
+fn symbols_and_types_damaged() {
+    use aqr_pdb::types;
+    let (_, mods) = pdb(false);
+    let info = |m: &Vec<u8>| aqr_pdb::dbi::Module { stream: 0, symbols: m.len(), c11: 0, c13: 0 };
+    let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> = mods.iter().map(|m| (&m[..], info(m))).collect();
+    let (params, st) = symbols::encode(&subs).unwrap();
+    for k in 0..st.len() {
+        if st[k].is_empty() {
+            continue;
+        }
+        aqr_testkit::damaged(&st[k], 200, 200, LIMIT, |v| {
+            let mut s = st.clone();
+            s[k] = v.to_vec();
+            let refs: Vec<&[u8]> = s.iter().map(|x| &x[..]).collect();
+            let _ = symbols::decode(&params, &refs);
+            assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+        });
+    }
+    aqr_testkit::damaged(&params, 100, 100, LIMIT, |p| {
+        let refs: Vec<&[u8]> = st.iter().map(|x| &x[..]).collect();
+        let _ = symbols::decode(p, &refs);
+        assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+    });
+    let (d, _) = type_pdb(1, true, false, |_, _| {});
+    let (inputs, spans) = msf::encode_streams(&d).unwrap();
+    let e = types::encode(&inputs[0], &spans).unwrap();
+    let len: u64 = e.sizes.iter().sum();
+    for k in 0..e.streams.len() {
+        if e.streams[k].is_empty() {
+            continue;
+        }
+        aqr_testkit::damaged(&e.streams[k], 150, 100, LIMIT, |v| {
+            let mut s = e.streams.clone();
+            s[k] = v.to_vec();
+            let ins: Vec<&[u8]> = s.iter().map(|x| &x[..]).collect();
+            let _ = aqr_pdb::module::types(&e.params, &ins, len);
+            assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+        });
+    }
+    aqr_testkit::damaged(&e.params, 200, 200, LIMIT, |p| {
+        let ins: Vec<&[u8]> = e.streams.iter().map(|x| &x[..]).collect();
+        let _ = aqr_pdb::module::types(p, &ins, len);
+        assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+    });
+}

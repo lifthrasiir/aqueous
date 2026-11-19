@@ -17,6 +17,7 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 aqr-formula = { path = "../../crates/aqr-formula" }
 zstd.workspace = true
 
