@@ -271,4 +271,64 @@ mod tests {
         let c = cuts(d, 8);
         assert!(c.len() > 1 && c.iter().skip(1).all(|&i| d[i] == b'\n' && d[i + 1] != b'>'), "{c:?}");
     }
+
+    /// Every stream and the params damaged in every way: an error or a file, no panic or hang.
+    #[test]
+    fn damaged_streams() {
+        let d = file(21, 6, 700, true);
+        let f = encode(&d, 1).unwrap();
+        assert_eq!(eval(&f), d);
+        let Node::Apply(a) = &f.root else { panic!("not one application") };
+        let datas: Vec<Vec<u8>> = a
+            .inputs
+            .iter()
+            .map(|n| match n {
+                &Node::Slice { stream, start, len } => {
+                    f.streams[stream].data[start as usize..][..len as usize].to_vec()
+                }
+                _ => panic!("not a slice"),
+            })
+            .collect();
+        let limit = std::time::Duration::from_secs(20);
+        for k in 0..datas.len() {
+            aqr_testkit::damaged(&datas[k], 60, 80, limit, |v| {
+                let inputs: Vec<&[u8]> =
+                    datas.iter().enumerate().map(|(i, s)| if i == k { v } else { &s[..] }).collect();
+                if let Ok(out) = decode(&a.params, &inputs, a.len, 1) {
+                    assert_eq!(out.len() as u64, a.len);
+                }
+            });
+        }
+        let inputs: Vec<&[u8]> = datas.iter().map(|s| &s[..]).collect();
+        aqr_testkit::damaged(&a.params, 60, 80, limit, |v| {
+            let _ = decode(v, &inputs, a.len, 1);
+        });
+        // lengths that lie
+        for len in [0, 1, a.len / 2, u32::MAX as u64, u64::MAX] {
+            let _ = decode(&a.params, &inputs, len, 1);
+        }
+    }
+
+    /// Files of one letter, of one case, and of nothing but other letters: parsed, coded or
+    /// turned down, and the file back where coded.
+    #[test]
+    fn degenerate_files() {
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for c in [b'A', b'a', b'N', b'n', b'R'] {
+            let mut d = b">x\n".to_vec();
+            for _ in 0..4000 {
+                d.extend(std::iter::repeat_n(c, 60));
+                d.push(b'\n');
+            }
+            cases.push(d);
+        }
+        cases.push(b">a\n".repeat(100_000));
+        cases.push(b">".repeat(300_000));
+        cases.push(b">a\n\n\n\n\n\n".repeat(50_000));
+        for d in &cases {
+            if let Some(f) = encode(d, 1) {
+                assert_eq!(&eval(&f), d);
+            }
+        }
+    }
 }

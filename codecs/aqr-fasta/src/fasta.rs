@@ -424,4 +424,78 @@ mod tests {
         let p: Vec<u8> = b">p\n".iter().copied().chain((0..1000).map(|i| b"MKVLAWQERTYIPSDFHN"[i % 18])).collect();
         assert!(parse(&p).is_none());
     }
+
+    /// Widths at their edges: of 0 (no sequence), 1, lines of the width and one more or less,
+    /// the last line of exactly the width, a line of the width in a record of one line, records
+    /// of other widths than the file's.
+    #[test]
+    fn width_edges() {
+        // (a header only: the width is 0)
+        assert_eq!(width_of(b">a\n>b\n"), Some(0));
+        back(b">a\n>b\n");
+        back(b">a\n\n>b\n\n");
+        // a width of 1
+        back(b">a\nA\nC\nG\nT\n>b\nA\n");
+        assert_eq!(width_of(b">a\nA\nC\nG\nT\n"), Some(1));
+        // the last line exactly the width, one less, one more; a record of one line of the width
+        for last in 1..=5 {
+            let mut d = b">a\nACGTA\nCGTAC\n".to_vec();
+            d.extend(std::iter::repeat_n(b'G', last));
+            d.push(b'\n');
+            d.extend_from_slice(b">b\nACGTA\n");
+            back(&d);
+            d.pop();
+            back(&d);
+        }
+        // an empty line inside, at the end, before a header; a width larger than any line
+        back(b">a\nACGTA\n\nCGTAC\n");
+        back(b">a\nACGTA\nCGTAC\n\n");
+        back(b">a\nACGTA\nCGTAC\n\n>b\nAC\n");
+        back(b">a\nAC\n>b\nGT\n");
+        // widths of the parts, forced: lines wider than the width given, and narrower
+        for width in [0u64, 1, 2, 3, 5, 6, 1 << 40, u64::MAX] {
+            let d = b">a\nACGTA\nCGTAC\nGT\n>b\nA\n";
+            if let Some(p) = parse_part(d, width, false) {
+                let streams = [&p.headers[..], &p.layout, &p.case, &p.other];
+                let bases = p.bases.iter(0..p.bases.len());
+                assert_eq!(rebuild(p.shape(), streams, bases, d.len() as u64).unwrap(), d, "{width}");
+            }
+        }
+        // a width that does not fit what the layout says is an error, not a panic or a loop
+        let p = parse(b">a\nACGTA\nCGTAC\nG\n").unwrap();
+        for width in [0u64, 1, 4, 6, u64::MAX] {
+            let shape = Shape { width, ..p.shape() };
+            let streams = [&p.headers[..], &p.layout, &p.case, &p.other];
+            let r = rebuild(shape, streams, p.bases.iter(0..p.bases.len()), 18);
+            if let Ok(out) = r {
+                assert_eq!(out.len(), 18);
+            }
+        }
+    }
+
+    /// A CR anywhere (the headers' too) turns the file down; a lone CR does as well.
+    #[test]
+    fn carriage_returns() {
+        assert!(parse(b">a\rb\nACGT\n").is_none());
+        assert!(parse(b">a\r\nACGT\n").is_none());
+        assert!(parse(b">a\nACGT\r\nACGT\n").is_none());
+        assert!(parse(b">a\nACGT\n\r").is_none());
+        assert!(parse(b">\r").is_none());
+        assert!(parse_part(b"\nACGT\r\n", 4, true).is_none());
+        // (not in the headers either, as a part of a longer file)
+        let mut d = b">a\nACGT\n".repeat(100);
+        d.extend_from_slice(b">x\ry\nACGT\n");
+        assert!(parse(&d).is_none());
+    }
+
+    /// Headers of odd bytes: `>` inside, bytes past ASCII, NUL, tabs; and a `>` line among the
+    /// sequence.
+    #[test]
+    fn odd_headers() {
+        back(b">>>\nACGT\n");
+        back(b">a>b>c\nACGT\n>>\n>\n");
+        back(b">\xff\xfe\0\t \x7f\nACGT\n");
+        back("> 한글 é\nACGT\n".as_bytes());
+        assert!(parse(b">a\nAC>GT\n").is_none());
+    }
 }
