@@ -93,6 +93,7 @@ aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wa
 aqr-7z = { path = "../../codecs/aqr-7z" }
 aqr-exe = { path = "../../codecs/aqr-exe" }
 aqr-prores = { path = "../../codecs/aqr-prores", features = ["synth"] }
+aqr-testkit = { path = "../aqr-testkit" }
 wat = "1"
 # (`.lzma` files for lzma-decode, as aqr-compress's `-Z lzma` makes them)
 liblzma = { version = "0.4", default-features = false, features = ["static", "parallel"] }

@@ -434,6 +434,7 @@ dependencies = [
  "aqr-snappy",
  "aqr-sqlite",
  "aqr-tensors",
+ "aqr-testkit",
  "aqr-tex",
  "aqr-vorbis",
  "aqr-walk",
