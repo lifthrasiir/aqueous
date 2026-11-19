@@ -1083,6 +1083,31 @@ fn ipc_closed_after_the_end() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// out/5: the frontend closing its end between two archives (`test:linger` after the first's
+/// `end`): the first is kept as it was made, the second not begun, the process ends with exit code
+/// 130 and one `stopped`.
+#[cfg(unix)]
+#[test]
+fn ipc_closed_between_archives() {
+    let d = scratch("out5-between");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), text(1, 2000)).unwrap();
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    ok(&d, &["-q", "-o", "b.aqr", "src"]);
+    let (mut c, rx) = ipc_start(&d, &["-Z", "test:linger=300", "-d", "--each", "a.aqr", "b.aqr"], &[]);
+    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    let (begin, end) = (next_event(&rx), next_event(&rx));
+    assert_eq!((begin["output"].as_str(), end["event"].as_str()), (Some("a"), Some("end")), "{end}");
+    drop(c.stdin.take());
+    let rest: Vec<_> = rx.iter().filter(|v| v["event"] != "progress").collect();
+    assert_eq!(c.wait().unwrap().code(), Some(130), "{rest:?}");
+    assert_eq!(rest, [serde_json::json!({"event": "stopped"})]);
+    assert_eq!(files(&d.join("a")), files(&src));
+    assert!(!d.join("b").exists());
+    fs::remove_dir_all(&d).unwrap();
+}
+
 /// out/5: a session's requests that are wrong are answered by an error (or ignored where they
 /// are not requests), the session going on to answer a right one; a `begin` without arguments
 /// ends it with an error, and the frontend gone before `begin` ends it as stopped.

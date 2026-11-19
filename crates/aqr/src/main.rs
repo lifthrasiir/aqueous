@@ -500,8 +500,6 @@ aqr_common::zopt! {
         true,
         "decoding, run the Wasm modules not known (all with wasm) in workers locked down by the system",
     );
-    /// For tests: milliseconds the process waits once the work is done, before it ends.
-    static TEST_LINGER: Opt<u64> = Opt::value("test:linger", 0, "wait so many milliseconds once the work is done, for tests");
 }
 
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
@@ -564,8 +562,6 @@ fn main() -> ExitCode {
         _ if args.decompress => decompress_all(&args),
         _ => compress_all(&args),
     });
-    // (for tests: the process kept a while once the work is done, a frontend's cancel then seen)
-    std::thread::sleep(std::time::Duration::from_millis(TEST_LINGER.get()));
     // (of the archives done, whether or not all are)
     let r = match args.stats.as_ref().map(|s| s.write(stats::Status::Finished, std::io::stderr().is_terminal())) {
         Some(Err(e)) => r.and(Err(e)),

@@ -102,6 +102,13 @@ struct Pause {
 
 static PAUSE: Mutex<Pause> = Mutex::new(Pause { between: false, cancelled: false });
 
+aqr_common::zopt! {
+    /// For tests: milliseconds waited after an archive's `end` or `skipped` is told, for a
+    /// frontend's cancel to come between archives (or after the last one).
+    static TEST_LINGER: Opt<u64> =
+        Opt::value("test:linger", 0, "with --ipc, wait so many milliseconds after each archive is told done, for tests");
+}
+
 /// Tells the frontend `v`, the `end` or `skipped` of an archive: from then until the next
 /// [`begin`], a cancel stops the next archive, not this one.
 pub fn between(v: Value) {
@@ -109,6 +116,7 @@ pub fn between(v: Value) {
         // (before it is told: the frontend may close its end as soon as it is)
         PAUSE.lock().unwrap().between = true;
         send(&v);
+        std::thread::sleep(std::time::Duration::from_millis(TEST_LINGER.get()));
     }
 }
 
