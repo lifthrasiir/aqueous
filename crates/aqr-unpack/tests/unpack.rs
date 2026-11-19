@@ -616,3 +616,223 @@ fn selected() {
     solid(Format::Egg, &codec_data("aqr-egg", "solid.egg"), "s/lorem_ipsum_short2.txt", Some(1));
     solid(Format::Alz, &codec_data("aqr-alz", "normal.alz"), "subdir", None);
 }
+
+/// What `d`, an xz file, gives as a single file.
+fn xz_decoded(d: &[u8]) -> Result<Vec<u8>, String> {
+    let o = Opened::open(Format::Single(Filter::Xz), d)?;
+    let mut out = Vec::new();
+    o.decompress(
+        4,
+        &mut |b| {
+            out.extend_from_slice(b);
+            Ok(())
+        },
+        &|_| {},
+    )?;
+    Ok(out)
+}
+
+/// An xz file of streams one after another (with their padding of zeros, in fours) gives them
+/// all; one of a stream, block, index or footer damaged is refused (their checks made good where
+/// that is what the damage is to show).
+#[test]
+fn xz_streams() {
+    let one = data("one.txt.xz");
+    let n = one.len();
+    assert_eq!(xz_decoded(&one).unwrap(), text());
+    let twice = [&one[..], &[0; 8], &one[..], &[0; 4]].concat();
+    assert_eq!(xz_decoded(&twice).unwrap(), [text(), text()].concat());
+    // (padding not in fours; a stream cut short; nothing but the header)
+    assert!(xz_decoded(&[&one[..], &[0; 3]].concat()).is_err());
+    assert!(xz_decoded(&[&one[..], &[0; 2], &one[..]].concat()).is_err());
+    assert!(xz_decoded(&[&one[..], &one[..n - 20]].concat()).is_err());
+    assert!(xz_decoded(&one[..n - 1]).is_err() && xz_decoded(&one[..11]).is_err() && xz_decoded(&one[..30]).is_err());
+    assert!(xz_decoded(&[&one[..], b"junk"].concat()).is_err());
+
+    let crc = |d: &mut Vec<u8>, from: usize, to: usize| {
+        let c = aqr_common::crc32::hash(&d[from..to]).to_le_bytes();
+        d[to..to + 4].copy_from_slice(&c);
+    };
+    let broken = |name: &str, why: &str, edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut d = one.clone();
+        edit(&mut d);
+        let e = xz_decoded(&d).expect_err(name);
+        assert!(e.contains(why), "{name}: {e}");
+    };
+    // the stream header: its magic, its flags (not their check), a check type not defined
+    broken("magic", "not a stream", &|d| d[0] ^= 1);
+    broken("flags crc", "not a stream", &|d| d[7] ^= 1);
+    broken("check type 16", "not a stream", &|d| {
+        d[7] = 16;
+        crc(d, 6, 8);
+    });
+    // the block header at 12 (of 12 bytes): its CRC, reserved flag bits, a chain not ending in
+    // LZMA2, a filter not known, a size of the packed data past the file, more filters than there are
+    let hdr = 12 + (one[12] as usize + 1) * 4 - 4;
+    broken("block header crc", "damaged block header", &|d| d[13] ^= 1);
+    broken("reserved flags", "damaged block header", &|d| {
+        d[13] |= 0x04;
+        crc(d, 12, hdr);
+    });
+    broken("not LZMA2", "not of LZMA2", &|d| {
+        d[14] = 0x22;
+        crc(d, 12, hdr);
+    });
+    broken("a second filter, none LZMA2", "not of LZMA2", &|d| {
+        d[13] |= 1;
+        crc(d, 12, hdr);
+    });
+    broken("a stream of no block header", "cut short", &|d| d[12] = 0xff);
+    // the index (before the footer, its size in the footer): a record that is not the block's,
+    // the count, the padding, the CRC; the footer's flags and magic
+    let footer = n - 12;
+    let index = footer - (u32::from_le_bytes(one[footer + 4..footer + 8].try_into().unwrap()) as usize + 1) * 4;
+    broken("index record", "index not of its blocks", &|d| {
+        d[index + 2] ^= 1;
+        crc(d, index, footer - 4);
+    });
+    broken("index count", "index not of its blocks", &|d| {
+        d[index + 1] = 2;
+        crc(d, index, footer - 4);
+    });
+    broken("index crc", "damaged index", &|d| d[footer - 4] ^= 1);
+    broken("footer flags", "damaged footer", &|d| d[footer + 9] ^= 1);
+    broken("footer magic", "damaged footer", &|d| d[n - 1] ^= 1);
+    broken("footer crc", "damaged footer", &|d| d[footer] ^= 1);
+}
+
+/// A RAR5 header of `kind`: its fields, extra area and the size of the data after it.
+fn rar5_header(kind: u64, flags: u64, fields: &[u8], extra: &[u8], data: usize) -> Vec<u8> {
+    use aqr_common::{crc32, varint};
+    let v = |x: u64| {
+        let mut o = Vec::new();
+        varint::put(&mut o, x);
+        o
+    };
+    let mut f = flags;
+    if !extra.is_empty() {
+        f |= 1;
+    }
+    if data != 0 {
+        f |= 2;
+    }
+    let mut body = [v(kind), v(f)].concat();
+    if !extra.is_empty() {
+        body.extend(v(extra.len() as u64));
+    }
+    if data != 0 {
+        body.extend(v(data as u64));
+    }
+    body.extend_from_slice(fields);
+    body.extend_from_slice(extra);
+    let h = [v(body.len() as u64), body].concat();
+    [crc32::hash(&h).to_le_bytes().to_vec(), h].concat()
+}
+
+/// A RAR5 file header: `file_flags` (1: a directory, 8: of no size told), unpacked `size`,
+/// `attrs`, compression information `ci`, the host `os`, header flags `hflags` and `extra`
+/// records, over `data` as stored.
+#[allow(clippy::too_many_arguments)]
+fn rar5_file(
+    name: &str,
+    file_flags: u64,
+    size: u64,
+    attrs: u64,
+    ci: u64,
+    os: u64,
+    hflags: u64,
+    extra: &[u8],
+    data: &[u8],
+) -> Vec<u8> {
+    use aqr_common::{crc32, varint};
+    let mut f = Vec::new();
+    for x in [file_flags | 4, size, attrs] {
+        varint::put(&mut f, x);
+    }
+    f.extend_from_slice(&crc32::hash(data).to_le_bytes());
+    for x in [ci, os, name.len() as u64] {
+        varint::put(&mut f, x);
+    }
+    f.extend_from_slice(name.as_bytes());
+    [rar5_header(2, hflags, &f, extra, data.len()), data.to_vec()].concat()
+}
+
+/// An extra record of `kind` holding `body`.
+fn rar5_record(kind: u64, body: &[u8]) -> Vec<u8> {
+    use aqr_common::varint;
+    let mut r = Vec::new();
+    varint::put(&mut r, kind);
+    r.extend_from_slice(body);
+    let mut o = Vec::new();
+    varint::put(&mut o, r.len() as u64);
+    o.extend(r);
+    o
+}
+
+/// A redirection record of `kind` and `flags` to `target`.
+fn rar5_redirect(kind: u8, flags: u8, target: &str) -> Vec<u8> {
+    rar5_record(5, &[&[kind, flags, target.len() as u8][..], target.as_bytes()].concat())
+}
+
+/// RAR5 headers of every kind of file there is, over stored data: the links of each kind, the
+/// directory and the empty file, and those left out (encrypted, split, of no size told, of a
+/// size other than the data's, of a method not known, a hard link, a copy, a redirection of a
+/// kind not known, a path out of the tree), each told.
+#[test]
+fn rar5_kinds() {
+    let sig = data("tree-rar5.rar")[..8].to_vec();
+    let mut d = sig;
+    d.extend(rar5_header(1, 0, &[0], &[], 0));
+    let files = [
+        rar5_file("a.txt", 0, 5, 0o100644, 0, 1, 0, &[], b"hello"),
+        rar5_file("d", 1, 0, 0x10, 0, 0, 0, &[], b""),
+        rar5_file("link", 0, 0, 0, 0, 1, 0, &rar5_redirect(1, 0, "a.txt"), b""),
+        rar5_file("wlink", 0, 0, 0, 0, 0, 0, &rar5_redirect(2, 1, "d"), b""),
+        rar5_file("junction", 0, 0, 0, 0, 0, 0, &rar5_redirect(3, 0, "d"), b""),
+        rar5_file("hard", 0, 0, 0, 0, 1, 0, &rar5_redirect(4, 0, "a.txt"), b""),
+        rar5_file("copy", 0, 0, 0, 0, 1, 0, &rar5_redirect(5, 0, "a.txt"), b""),
+        rar5_file("strange", 0, 0, 0, 0, 1, 0, &rar5_redirect(9, 0, "a.txt"), b""),
+        rar5_file("secret", 0, 5, 0, 0, 1, 0, &rar5_record(1, &[0; 4]), b"abcde"),
+        rar5_file("secret-packed", 0, 9, 0, 1 << 7, 1, 0, &rar5_record(1, &[0; 4]), b"abcde"),
+        rar5_file("split", 0, 5, 0, 0, 1, 0x10, &[], b"abcde"),
+        rar5_file("unknown-size", 8, 0, 0, 0, 1, 0, &[], b"abcde"),
+        rar5_file("short", 0, 9, 0, 0, 1, 0, &[], b"abcde"),
+        rar5_file("future", 0, 9, 0, 2 | 1 << 7, 1, 0, &[], b"abcde"),
+        rar5_file("../out.txt", 0, 5, 0, 0, 1, 0, &[], b"abcde"),
+        rar5_file("empty", 0, 0, 0, 0, 1, 0, &[], b""),
+        rar5_file("d/in.txt", 0, 5, 0, 0, 1, 0, &[], b"in it"),
+    ];
+    files.iter().for_each(|f| d.extend_from_slice(f));
+    d.extend(rar5_header(5, 0, &[0], &[], 0));
+    let (done, r) = unpack(Format::Rar, &d).unwrap();
+    let notes = r.notes.lock().unwrap().join("\n");
+    let l = listing(&done, &r);
+    assert_eq!(l["a.txt"].0, Node::File(b"hello".to_vec()));
+    assert_eq!(l["a.txt"].1.mode, Some(0o644));
+    assert_eq!(l["d"].0, Node::Dir);
+    assert_eq!(l["d/in.txt"].0, Node::File(b"in it".to_vec()));
+    assert_eq!(l["empty"].0, Node::File(Vec::new()));
+    assert_eq!(l["link"].0, Node::Link(b"a.txt".to_vec()));
+    assert_eq!((l["wlink"].0.clone(), l["wlink"].1.win_link_type), (Node::Link(b"d".to_vec()), Some(1)));
+    assert_eq!((l["junction"].0.clone(), l["junction"].1.win_link_type), (Node::Link(b"d".to_vec()), Some(2)));
+    let left = ["hard", "copy", "strange", "secret", "secret-packed", "split", "unknown-size", "short", "future"];
+    for name in left {
+        assert!(!l.contains_key(name), "{name}");
+        assert!(notes.contains(&format!("{name}: ")), "{name}: {notes}");
+    }
+    for why in [
+        "a hard link",
+        "a copy of another file",
+        "a redirection of no known type",
+        "encrypted",
+        "split across volumes",
+        "of no size given",
+        "stored data not of its size",
+        "of an algorithm not known",
+        "a path reaching out of the directory",
+    ] {
+        assert!(notes.contains(why), "{why}: {notes}");
+    }
+    assert_eq!(l.len(), 7, "{:?}", l.keys());
+    assert_eq!(done.skipped, 10, "{notes}");
+}

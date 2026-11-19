@@ -99,6 +99,12 @@ struct E {
     local_name: Option<Vec<u8>>,
     /// The central directory's offset of the local header, where it is another.
     offset: Option<u64>,
+    /// Extra fields of the central header and of the local one, after the zip64 field.
+    central_extra: Vec<u8>,
+    local_extra: Vec<u8>,
+    /// The host system of the version made by (0: MS-DOS, 3: Unix), and the external attributes.
+    host: u8,
+    external: u32,
 }
 
 impl E {
@@ -115,6 +121,10 @@ impl E {
             local: None,
             local_name: None,
             offset: None,
+            central_extra: Vec::new(),
+            local_extra: Vec::new(),
+            host: 0,
+            external: 0,
         }
     }
 
@@ -149,7 +159,7 @@ fn zip_of(entries: &[E], end64: bool) -> Vec<u8> {
         le(&mut out, lc as u64, 4);
         le(&mut out, lu as u64, 4);
         le(&mut out, lname.len() as u64, 2);
-        le(&mut out, if e.zip64 { 20 } else { 0 }, 2);
+        le(&mut out, if e.zip64 { 20 } else { 0 } + e.local_extra.len() as u64, 2);
         out.extend_from_slice(lname);
         if e.zip64 {
             le(&mut out, 1, 2);
@@ -157,6 +167,7 @@ fn zip_of(entries: &[E], end64: bool) -> Vec<u8> {
             le(&mut out, e.size, 8);
             le(&mut out, e.csize, 8);
         }
+        out.extend_from_slice(&e.local_extra);
         out.extend_from_slice(&e.body);
         // the central header
         let off = e.offset.unwrap_or(at);
@@ -171,8 +182,9 @@ fn zip_of(entries: &[E], end64: bool) -> Vec<u8> {
         } else {
             (e.size, e.csize, off)
         };
+        x.extend_from_slice(&e.central_extra);
         cd.extend_from_slice(b"PK\x01\x02");
-        le(&mut cd, 45, 2);
+        le(&mut cd, 45 | (e.host as u64) << 8, 2);
         le(&mut cd, 45, 2);
         le(&mut cd, e.flags as u64, 2);
         le(&mut cd, e.method as u64, 2);
@@ -182,7 +194,8 @@ fn zip_of(entries: &[E], end64: bool) -> Vec<u8> {
         le(&mut cd, su, 4);
         le(&mut cd, e.name.len() as u64, 2);
         le(&mut cd, x.len() as u64, 2);
-        cd.extend_from_slice(&[0; 10]);
+        cd.extend_from_slice(&[0; 6]);
+        le(&mut cd, e.external as u64, 4);
         le(&mut cd, so, 4);
         cd.extend_from_slice(&e.name);
         cd.extend_from_slice(&x);
@@ -708,6 +721,8 @@ struct F {
     pack: Vec<u8>,
     size: u64,
     subs: Vec<(u64, u32)>,
+    /// The CRC-32 of the whole folder's data, where it is told (of a folder of several files).
+    crc: Option<u32>,
 }
 
 impl F {
@@ -724,6 +739,7 @@ impl F {
             pack: pack.to_vec(),
             size,
             subs: vec![(d.len() as u64, crc32::hash(d))],
+            crc: None,
         }
     }
 }
@@ -736,17 +752,23 @@ struct Fl {
     /// Of no stream: a file (else a directory).
     empty_file: bool,
     anti: bool,
+    /// Its attributes (the high 16 bits a Unix mode where 0x8000 is set).
+    attrs: Option<u32>,
 }
 
 impl Fl {
     fn data(name: &str) -> Fl {
-        Fl { name: name.into(), stream: true, empty_file: false, anti: false }
+        Fl { name: name.into(), stream: true, empty_file: false, anti: false, attrs: None }
     }
     fn empty(name: &str) -> Fl {
-        Fl { name: name.into(), stream: false, empty_file: true, anti: false }
+        Fl { name: name.into(), stream: false, empty_file: true, anti: false, attrs: None }
     }
     fn dir(name: &str) -> Fl {
-        Fl { name: name.into(), stream: false, empty_file: false, anti: false }
+        Fl { name: name.into(), stream: false, empty_file: false, anti: false, attrs: None }
+    }
+    fn attrs(mut self, a: u32) -> Fl {
+        self.attrs = Some(a);
+        self
     }
     fn anti(mut self) -> Fl {
         self.anti = true;
@@ -793,6 +815,12 @@ fn sevenz_of(folders: &[F], files: &[Fl]) -> Vec<u8> {
         }
         h.push(12);
         folders.iter().for_each(|f| number(&mut h, f.size));
+        if folders.iter().any(|f| f.crc.is_some()) {
+            h.push(10);
+            h.push(0);
+            bits(&mut h, &folders.iter().map(|f| f.crc.is_some()).collect::<Vec<_>>());
+            folders.iter().filter_map(|f| f.crc).for_each(|c| h.extend(c.to_le_bytes()));
+        }
         h.push(0);
         h.push(8);
         h.push(13);
@@ -835,6 +863,15 @@ fn sevenz_of(folders: &[F], files: &[Fl]) -> Vec<u8> {
     h.push(17);
     number(&mut h, names.len() as u64);
     h.extend(names);
+    if files.iter().any(|f| f.attrs.is_some()) {
+        let mut b = vec![0];
+        bits(&mut b, &files.iter().map(|f| f.attrs.is_some()).collect::<Vec<_>>());
+        b.push(0);
+        files.iter().filter_map(|f| f.attrs).for_each(|a| b.extend(a.to_le_bytes()));
+        h.push(21);
+        number(&mut h, b.len() as u64);
+        h.extend(b);
+    }
     h.extend([0, 0]);
     let packed: Vec<u8> = folders.iter().flat_map(|f| f.pack.iter().copied()).collect();
     let mut start = Vec::new();
@@ -1024,4 +1061,135 @@ fn zip_duplicate_keeps_last() {
     assert_eq!(o.files.get("a").map(Vec::as_slice), Some(&b"second"[..]), "{:?}", o.files);
     assert_eq!(o.files.len(), 2, "{:?}", o.files);
     assert_eq!(o.done.tree.entries.len(), 2);
+}
+
+/// An extra field of `id` holding `data`.
+fn field(id: u16, data: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    le(&mut v, id as u64, 2);
+    le(&mut v, data.len() as u64, 2);
+    v.extend_from_slice(data);
+    v
+}
+
+/// The metadata that extra fields tell: NTFS's times (found past other attributes), Info-ZIP's
+/// extended timestamps (the local header's, of the flagged ones), its Unix owners (new and old, a
+/// number too wide skipped), the Unicode path (taken only of the name's CRC-32) and the mode of
+/// a Unix host.
+#[test]
+fn zip_extra_fields() {
+    use aqr_foreign::time::from_filetime;
+    let t = text();
+    let stored = |name: &str| {
+        let mut e = E::stored(name, &t);
+        e.host = 3;
+        e.external = 0o100640 << 16;
+        e
+    };
+    let ft = |secs: u64, frac: u64| (secs + 11_644_473_600) * 10_000_000 + frac;
+    let ntfs = |first: Option<(u16, usize)>, times: [u64; 3]| {
+        let mut d = vec![0; 4];
+        if let Some((tag, n)) = first {
+            d.extend(field(tag, &vec![0; n]));
+        }
+        d.extend(field(1, &times.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>()));
+        field(0x000a, &d)
+    };
+    let times = [ft(1_600_000_000, 1234567), ft(1_600_000_100, 0), ft(1_500_000_000, 5)];
+    let mut a = stored("ntfs.txt");
+    a.central_extra = ntfs(None, times);
+    let mut b = stored("ntfs-late.txt");
+    b.local_extra = ntfs(Some((2, 8)), times);
+    // (an NTFS field of no times of its own, then an extended timestamp of the mtime and atime)
+    let mut c = stored("ext.txt");
+    c.central_extra = field(0x000a, &[0; 32]);
+    c.local_extra = field(0x5455, &[3, 0x80, 0x96, 0x98, 0x59, 0x50, 0x96, 0x98, 0x59]);
+    // (a flag of a time cut short is no time)
+    let mut cut = stored("ext-cut.txt");
+    cut.central_extra = field(0x5455, &[7, 0x80, 0x96, 0x98, 0x59]);
+    let mut d = stored("new-owner.txt");
+    d.local_extra = field(0x7875, &[1, 4, 0xe8, 3, 0, 0, 2, 100, 0]);
+    // (a number of 9 bytes is no owner; the old field after it is)
+    let mut wide = stored("wide-owner.txt");
+    wide.central_extra =
+        [field(0x7875, &[1, 9, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 7]), field(0x7855, &[0xf4, 1, 20, 0])].concat();
+    let mut short = stored("short-owner.txt");
+    short.central_extra = field(0x7875, &[1, 4, 1, 0, 0]);
+    // the Unicode path, of the CRC-32 of the name stored, and of another name
+    let uni = |crc: u32, name: &str| field(0x7075, &[&[1][..], &crc.to_le_bytes(), name.as_bytes()].concat());
+    let mut u = stored("plain.txt");
+    u.central_extra = uni(crc32::hash(b"plain.txt"), "ünï.txt");
+    let mut w = stored("other.txt");
+    w.central_extra = uni(0x1234, "no.txt");
+    let mut dir = E::stored("sub/", b"");
+    dir.host = 3;
+    dir.external = 0o040755 << 16;
+    let o = case("zip extra fields", Format::Zip, &zip_of(&[a, b, c, cut, d, wide, short, u, w, dir], false)).unwrap();
+    let e = |name: &str| {
+        let e = o.done.tree.entries.iter().find(|e| e.name == name.as_bytes());
+        e.unwrap_or_else(|| panic!("{name}: {:?}", o.done.tree.entries.iter().map(|e| &e.name).collect::<Vec<_>>()))
+            .extra
+            .clone()
+    };
+    let want = [from_filetime(times[0]), from_filetime(times[1]), from_filetime(times[2])];
+    for name in ["ntfs.txt", "ntfs-late.txt"] {
+        let x = e(name);
+        assert_eq!([x.mtime, x.atime, x.crtime], want, "{name}");
+        assert_eq!(x.mode, Some(0o640), "{name}");
+    }
+    assert_eq!(want[0].unwrap().nanos, 123_456_700);
+    let x = e("ext.txt");
+    let secs = |s: i64| Some(aqr_unpack::Time::new(s, 0));
+    assert_eq!((x.mtime, x.atime, x.crtime), (secs(0x59989680), secs(0x59989650), None));
+    let x = e("ext-cut.txt");
+    assert_eq!((x.mtime, x.atime, x.crtime), (secs(0x59989680), None, None));
+    let x = e("new-owner.txt");
+    assert_eq!((x.uid, x.gid), (Some(1000), Some(100)));
+    let x = e("wide-owner.txt");
+    assert_eq!((x.uid, x.gid), (Some(500), Some(20)));
+    let x = e("short-owner.txt");
+    assert_eq!((x.uid, x.gid), (None, None));
+    assert!(o.files.contains_key("ünï.txt") && o.files.contains_key("other.txt") && !o.files.contains_key("plain.txt"));
+    let x = e("sub");
+    assert_eq!(x.mode, Some(0o755));
+    assert!(o.done.tree.entries.iter().any(|e| e.name == b"sub" && e.node == EntryNode::Dir));
+}
+
+/// A folder of several files with a CRC-32 of its own: checked where all its files are given
+/// (the bytes together), a mismatch an error.
+#[test]
+fn sevenz_folder_crc() {
+    let two = |crc| F { subs: vec![(2, crc32::hash(b"da")), (2, crc32::hash(b"ta"))], crc, ..F::copy(b"data") };
+    let files = [Fl::data("a"), Fl::data("b")];
+    let o = sz_case("folder crc", &sevenz_of(&[two(Some(crc32::hash(b"data")))], &files)).unwrap();
+    assert_eq!((&o.files["a"][..], &o.files["b"][..]), (&b"da"[..], &b"ta"[..]));
+    let r = sz_case("folder crc wrong", &sevenz_of(&[two(Some(crc32::hash(b"data") ^ 1))], &files));
+    assert!(r.is_err_and(|e| e.contains("CRC")));
+    // (told of none: the files' own checked)
+    assert_eq!(sz_case("no folder crc", &sevenz_of(&[two(None)], &files)).unwrap().files.len(), 2);
+}
+
+/// Symbolic links (a Unix mode in the attributes, the target the data): one given, one of a target
+/// holding a zero byte, and one of no data, each left out and told (a link to nothing).
+#[test]
+fn sevenz_links() {
+    const LINK: u32 = 0x8000 | 0o120777 << 16;
+    let nul = F::copy(b"a\0b");
+    let files = [
+        Fl::data("target").attrs(0x8000 | 0o100644 << 16),
+        Fl::data("link").attrs(LINK),
+        Fl::data("nul").attrs(LINK),
+        Fl::empty("none").attrs(LINK),
+    ];
+    let folders = [F::copy(b"file data"), F::copy(b"target"), nul];
+    let o = sz_case("links", &sevenz_of(&folders, &files)).unwrap();
+    assert_eq!(o.files["target"], b"file data");
+    let by = |n: &str| o.done.tree.entries.iter().find(|e| e.name == n.as_bytes()).map(|e| e.node.clone());
+    assert_eq!(by("link"), Some(EntryNode::Link(b"target".to_vec())));
+    // (the target with a zero byte, and the link of no data, are special entries not made: told)
+    assert!(matches!(by("nul"), Some(EntryNode::Special(_))));
+    assert_eq!(by("none"), None);
+    assert!(o.notes.iter().any(|n| n.starts_with("nul: a link to nothing")), "{:?}", o.notes);
+    assert!(o.notes.iter().any(|n| n.starts_with("none: a link to nothing")), "{:?}", o.notes);
+    assert_eq!(o.done.skipped, 2);
 }
