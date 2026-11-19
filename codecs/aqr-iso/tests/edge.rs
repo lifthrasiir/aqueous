@@ -2,6 +2,8 @@
 //! files, sparse and chained UDF extents) and of what a hostile image does (directories of the
 //! image's size pointing at each other).
 
+#![allow(clippy::single_range_in_vec_init)]
+
 use aqr_disk::Plain;
 use aqr_testkit::within;
 use std::time::Duration;
