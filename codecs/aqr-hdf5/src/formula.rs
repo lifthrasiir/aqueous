@@ -158,7 +158,9 @@ fn jobs(input: &[u8], file: &File, mut limit: u64) -> Vec<Job> {
         // change its size
         let before = &active[..k];
         let size = match before.iter().all(|&id| matches!(id, hdf5::SHUFFLE | FLETCHER32)) {
-            true => ds.chunk_bytes().map(|n| n + 4 * before.iter().filter(|&&id| id == FLETCHER32).count() as u64),
+            true => ds
+                .chunk_bytes()
+                .and_then(|n| n.checked_add(4 * before.iter().filter(|&&id| id == FLETCHER32).count() as u64)),
             false => None,
         };
         let cost = size.unwrap_or(d.len() as u64);

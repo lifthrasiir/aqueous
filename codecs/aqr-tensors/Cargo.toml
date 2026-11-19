@@ -28,3 +28,4 @@ path = "examples/bench.rs"
 aqr-formula = { path = "../../crates/aqr-formula" }
 memmap2 = "0.9"
 zstd.workspace = true
+aqr-testkit = { path = "../../crates/aqr-testkit" }

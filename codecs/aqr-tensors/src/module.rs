@@ -530,7 +530,8 @@ fn grid(
 /// and the side bytes), whole, natively.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
     let &[syms, raw, side] = inputs else { return Err(corrupt()) };
-    let mut out = Vec::with_capacity(len.min(1 << 30) as usize);
+    // (the length is the caller's claim: reserved as far as the inputs may hold, the rest as it grows)
+    let mut out = Vec::with_capacity(len.min(1 << 24) as usize);
     let (mut s, mut r, mut d) = (Slice(syms), Slice(raw), Slice(side));
     run(params, &mut s, syms.len() as u64, &mut r, &mut d, &mut out, len)?;
     Ok(out)

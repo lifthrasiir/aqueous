@@ -557,7 +557,7 @@ impl<'a> Walk<'a> {
         let direct_rows = h.max_direct.trailing_zeros() - h.start.trailing_zeros() + 2;
         let mut children = Vec::new();
         for row in 0..rows {
-            let size = if row == 0 { h.start } else { h.start.checked_shl(row - 1)? };
+            let size = if row == 0 { h.start } else { h.start.checked_mul(1u64.checked_shl(row - 1)?)? };
             for _ in 0..h.width {
                 let c = r.addr()?;
                 if c == UNDEF {
@@ -568,7 +568,8 @@ impl<'a> Walk<'a> {
                 } else {
                     // an indirect block of `size × width` bytes
                     let sub = size.checked_mul(h.width)?;
-                    let sub_rows = sub.trailing_zeros().checked_sub((h.start * h.width).trailing_zeros())? + 1;
+                    let sub_rows =
+                        sub.trailing_zeros().checked_sub(h.start.checked_mul(h.width)?.trailing_zeros())? + 1;
                     children.push((c, sub_rows));
                 }
             }
