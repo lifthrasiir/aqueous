@@ -91,6 +91,22 @@ fn encrypted(folder: &Folder) -> bool {
     folder.coders.iter().any(|c| c.id == SEVENZ_AES_ID)
 }
 
+/// The most bytes of output that `folder` makes per byte of its packed streams, where its coders
+/// are known (those not known are left out, told, at their turn).
+fn expansion(folder: &Folder) -> Option<usize> {
+    folder.coders.iter().try_fold(1usize, |e, c| {
+        let x = match &c.id[..] {
+            header::COPY | BCJ2 | SEVENZ_AES_ID => 1,
+            DEFLATE => aqr_zip::zip::MAX_EXPANSION as usize,
+            BZIP2 => codec::EXPANSION_ANY,
+            header::LZMA | header::LZMA2 => codec::EXPANSION,
+            PPMD => return None,
+            id => Filter::from_7z(id, &c.props).map(|_| 1)?,
+        };
+        Some(e.saturating_mul(x))
+    })
+}
+
 /// A part of a folder's data, decoded apart from the others: a segment of an LZMA2 stream, an
 /// LZMA stream (as it goes, both), or the whole data of other coders (filters too) at once.
 enum Part<'d> {
@@ -504,7 +520,12 @@ impl<'d> Listing<'d> {
         let p0 = (0..parts.len()).take_while(|&r| starts[r] + parts[r].1 <= lo && starts[r] < lo).count();
         let p1 = (0..parts.len()).find(|&r| r > p0 && starts[r] >= hi).unwrap_or(parts.len());
         let whole = (0..ends.len()).all(want) && p0 == 0 && p1 == parts.len();
-        let mut buf = codec::room(size + codec::LZMA_ROOM)?;
+        // (the room is reserved before anything is decoded: what no coders could make is not)
+        if let Some(e) = expansion(&self.main.folders[f]) {
+            let packed: u64 = self.spans[self.packs[f].clone()].iter().map(|r| r.end - r.start).sum();
+            codec::plausible(size, usize::try_from(packed).unwrap_or(usize::MAX), e)?;
+        }
+        let mut buf = codec::room(size.checked_add(codec::LZMA_ROOM).ok_or("a coder's output not of its size")?)?;
         let room = buf.capacity();
         let raw = Raw(buf.as_mut_ptr());
         let done: Vec<usize> = (0..parts.len()).map(|r| if r < p0 { parts[r].1 } else { 0 }).collect();

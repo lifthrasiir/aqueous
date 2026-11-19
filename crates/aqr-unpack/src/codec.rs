@@ -186,15 +186,19 @@ pub fn room(n: usize) -> Result<Vec<u8>, String> {
     Ok(v)
 }
 
-/// The most bytes of data that LZMA, Zstandard and xz streams hold per byte of them (Zstandard's
-/// run-length blocks, 128 KiB for 4 bytes, are the most; LZMA's long repeated matches the next).
-const EXPANSION: usize = 1 << 16;
+/// The most bytes of data that a single LZMA, Zstandard or xz stream holds per byte of it
+/// (Zstandard's run-length blocks, 128 KiB for 4 bytes, are the most; LZMA's long repeated
+/// matches the next).
+pub const EXPANSION: usize = 1 << 16;
 
-/// Whether `size` bytes of data may be of `input` bytes of a stream of such a format: a size
-/// told by an archive is room reserved before anything is decoded, so one that no stream could
-/// make is refused rather than reserved.
-pub fn plausible(size: usize, input: usize) -> Result<(), String> {
-    match input.checked_mul(EXPANSION).and_then(|m| m.checked_add(EXPANSION)) {
+/// The same of any coder (bzip2's runs of 900 KB blocks are the most, about 1.5 million to one).
+pub const EXPANSION_ANY: usize = 1 << 22;
+
+/// Whether `size` bytes of data may be of `input` bytes of a stream that holds `expansion` bytes
+/// per byte at most: a size told by an archive is room reserved before anything is decoded, so
+/// one that no stream could make is refused rather than reserved.
+pub fn plausible(size: usize, input: usize, expansion: usize) -> Result<(), String> {
+    match input.checked_mul(expansion).and_then(|m| m.checked_add(expansion)) {
         Some(max) if size > max => Err(format!("{size} bytes of data of {input} bytes of stream")),
         _ => Ok(()),
     }
@@ -210,6 +214,9 @@ fn lzma_props(b: u8) -> Result<Props, String> {
 pub fn lzma(input: &[u8], props: u8, size: Option<u64>, limit: usize) -> Result<(Vec<u8>, usize), String> {
     let props = lzma_props(props)?;
     let corrupt = |_| "LZMA: damaged data".to_string();
+    if let Some(n) = size {
+        plausible(usize::try_from(n).unwrap_or(usize::MAX), input.len(), EXPANSION)?;
+    }
     let mut c = Rc::new(input).ok_or("LZMA: damaged data")?;
     let mut m = Dec::new(props);
     let size = size.map(|s| usize::try_from(s).unwrap_or(usize::MAX));

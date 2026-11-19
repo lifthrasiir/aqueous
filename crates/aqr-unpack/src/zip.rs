@@ -476,7 +476,7 @@ fn decode(d: &[u8], u: &Unit, pass: Option<&[u8]>) -> Result<Vec<u8>, Fail> {
 fn plain(body: &[u8], u: &Unit) -> Result<Vec<u8>, String> {
     let size = usize::try_from(u.size).map_err(|_| "too large")?;
     if matches!(u.method, 14 | 93 | 95) {
-        codec::plausible(size, body.len())?;
+        codec::plausible(size, body.len(), codec::EXPANSION)?;
     }
     let data = match u.method {
         0 if body.len() != size => return Err("not of its size".into()),

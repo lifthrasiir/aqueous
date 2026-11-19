@@ -488,3 +488,525 @@ fn find_end() {
     assert!(case("end cut", Format::Zip, &z[..z.len() - 10]).is_err());
     assert!(case("empty", Format::Zip, &[]).is_err());
 }
+
+// ---- tar
+
+/// A ustar header of `name` (of kind `kind`, size field `size`, link `link`).
+fn tar_header(name: &[u8], kind: u8, size: u64, link: &[u8]) -> Vec<u8> {
+    let mut b = vec![0u8; 512];
+    b[..name.len()].copy_from_slice(name);
+    b[100..108].copy_from_slice(b"0000644\0");
+    b[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+    b[136..148].copy_from_slice(b"00000000000\0");
+    b[156] = kind;
+    b[157..157 + link.len()].copy_from_slice(link);
+    b[257..265].copy_from_slice(b"ustar\x0000");
+    tar_sum(&mut b);
+    b
+}
+
+fn tar_sum(b: &mut [u8]) {
+    b[148..156].fill(b' ');
+    let sum: u32 = b.iter().map(|&x| x as u32).sum();
+    b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+}
+
+/// A member: its header and body (padded).
+fn tar_member(name: &[u8], kind: u8, body: &[u8], link: &[u8]) -> Vec<u8> {
+    let mut v = tar_header(name, kind, body.len() as u64, link);
+    v.extend_from_slice(body);
+    v.resize(v.len().next_multiple_of(512), 0);
+    v
+}
+
+fn tar_end(mut v: Vec<u8>) -> Vec<u8> {
+    v.extend_from_slice(&[0; 1024]);
+    v
+}
+
+fn pax_record(k: &str, v: &[u8]) -> Vec<u8> {
+    let rest = k.len() + v.len() + 3;
+    let mut len = rest + 1;
+    while len.to_string().len() + rest != len {
+        len += 1;
+    }
+    let mut r = format!("{len} {k}=").into_bytes();
+    r.extend_from_slice(v);
+    r.push(b'\n');
+    r
+}
+
+fn tar_files(d: &[u8]) -> Out {
+    case("tar", Format::Tar(None), d).unwrap()
+}
+
+/// A path given again takes the place of the one before (a file or a link for either); a
+/// directory and a file of one name leave the later out, told.
+#[test]
+fn tar_duplicates() {
+    let mut t = Vec::new();
+    t.extend(tar_member(b"a", b'0', b"first", b""));
+    t.extend(tar_member(b"a", b'0', b"second", b""));
+    t.extend(tar_member(b"d/", b'5', b"", b""));
+    t.extend(tar_member(b"d", b'0', b"file after dir", b""));
+    t.extend(tar_member(b"f", b'0', b"file", b""));
+    t.extend(tar_member(b"f/", b'5', b"", b""));
+    t.extend(tar_member(b"f/in", b'0', b"in", b""));
+    t.extend(tar_member(b"l", b'2', b"", b"a"));
+    t.extend(tar_member(b"l", b'0', b"link then file", b""));
+    let o = tar_files(&tar_end(t));
+    assert_eq!(o.files["a"], b"second");
+    // (a directory and a file of one name: the later left out, told, and what is under it too)
+    assert_eq!(o.files["f"], b"file");
+    assert!(!o.files.contains_key("d") && !o.files.contains_key("f/in"));
+    assert_eq!(o.files["l"], b"link then file");
+    assert_eq!(o.done.skipped, 3, "{:?}", o.notes);
+}
+
+/// A zero byte in a name: the header's field ends there (as C strings do); pax's `path` and
+/// GNU's long names with one are left out, told.
+#[test]
+fn tar_nul_names() {
+    let mut t = Vec::new();
+    t.extend(tar_member(b"cut\0off", b'0', b"x", b""));
+    let mut p = pax_record("path", b"pax\0name");
+    p.extend(pax_record("mtime", b"1.5"));
+    t.extend(tar_member(b"PaxHeader", b'x', &p, b""));
+    t.extend(tar_member(b"plain", b'0', b"y", b""));
+    t.extend(tar_member(b"././@LongLink", b'L', b"long\0name\0", b""));
+    t.extend(tar_member(b"short", b'0', b"z", b""));
+    t.extend(tar_member(b"ok", b'0', b"w", b""));
+    let o = tar_files(&tar_end(t));
+    assert!(o.files.contains_key("cut"), "{:?}", o.files.keys());
+    assert!(o.files.contains_key("ok"));
+    assert!(!o.files.keys().any(|k| k.contains('\0')));
+    // (the pax path's NUL: left out; the long name's ends at its NUL, as C strings do)
+    assert!(o.notes.iter().any(|n| n.contains("reaching out")), "{:?}", o.notes);
+}
+
+/// Sparse members (old GNU's with a map of extension headers, pax's `GNU.sparse` records),
+/// multi-volume parts and members of types not known: told, and what follows still read.
+#[test]
+fn tar_sparse_and_volumes() {
+    let mut t = Vec::new();
+    // an old GNU sparse header with one extension block (isextended = byte 482)
+    let mut s = tar_header(b"sparse", b'S', 512, b"");
+    s[482] = 1;
+    tar_sum(&mut s);
+    t.extend(s);
+    t.extend(vec![0u8; 512]);
+    t.extend(vec![7u8; 512]);
+    t.extend(tar_member(b"after1", b'0', b"1", b""));
+    // an old GNU sparse header with no extension
+    let mut s = tar_header(b"sparse2", b'S', 3, b"");
+    s[482] = 0;
+    tar_sum(&mut s);
+    t.extend(s);
+    t.extend(tar_member(b"", b'0', b"abc", b"")[512..].to_vec());
+    t.extend(tar_member(b"after2", b'0', b"2", b""));
+    // pax's
+    let mut p = pax_record("GNU.sparse.major", b"1");
+    p.extend(pax_record("GNU.sparse.name", b"sp3"));
+    t.extend(tar_member(b"PaxHeader", b'x', &p, b""));
+    t.extend(tar_member(b"GNUSparseFile.0/sp3", b'0', b"data", b""));
+    t.extend(tar_member(b"after3", b'0', b"3", b""));
+    // multi-volume
+    t.extend(tar_member(b"mv", b'M', b"rest of a file", b""));
+    t.extend(tar_member(b"after4", b'0', b"4", b""));
+    t.extend(tar_member(b"typed", b'Z', b"taken for a file", b""));
+    let o = tar_files(&tar_end(t));
+    let names: Vec<_> = o.files.keys().map(String::as_str).collect();
+    assert_eq!(names, ["after1", "after2", "after3", "after4", "typed"], "{:?}", o.notes);
+    assert!(o.done.skipped >= 4, "{:?}", o.notes);
+}
+
+/// Hard links to a missing target, to one that comes later, to a directory, to themselves.
+#[test]
+fn tar_hard_links() {
+    let mut t = Vec::new();
+    t.extend(tar_member(b"missing", b'1', b"", b"nowhere"));
+    t.extend(tar_member(b"early", b'1', b"", b"later"));
+    t.extend(tar_member(b"later", b'0', b"data", b""));
+    t.extend(tar_member(b"dir/", b'5', b"", b""));
+    t.extend(tar_member(b"todir", b'1', b"", b"dir"));
+    t.extend(tar_member(b"self", b'1', b"", b"self"));
+    t.extend(tar_member(b"out", b'1', b"", b"../x"));
+    t.extend(tar_member(b"empty", b'1', b"", b""));
+    t.extend(tar_member(b"good", b'1', b"", b"later"));
+    let o = tar_files(&tar_end(t));
+    assert_eq!(o.files["later"], b"data");
+    assert_eq!(o.files["good"], b"data");
+    for gone in ["missing", "early", "todir", "self", "out", "empty"] {
+        assert!(!o.files.contains_key(gone), "{gone}");
+    }
+    assert_eq!(o.done.skipped, 6, "{:?}", o.notes);
+}
+
+/// A size past the data (the header's, base-256's, pax's): an error, with no room of that size
+/// reserved; sizes near 2^64 as the skipping and the padding take them.
+#[test]
+fn tar_sizes_past_data() {
+    for size in [1u64 << 20, 1 << 40, (1 << 63) + 1, u64::MAX - 1, u64::MAX - 511] {
+        for kind in *b"052SxLM" {
+            let mut h = tar_header(b"a", kind, 0, b"t");
+            h[124] = 0x80;
+            h[125..128].fill(0);
+            h[128..136].copy_from_slice(&size.to_be_bytes());
+            tar_sum(&mut h);
+            let mut t = h;
+            t.extend(vec![b'x'; 1000]);
+            let name = format!("size {size} kind {}", kind as char);
+            let r = case(&name, Format::Tar(None), &tar_end(t));
+            assert!(r.is_err(), "{name}");
+        }
+        // pax's size
+        let mut t = tar_member(b"PaxHeader", b'x', &pax_record("size", size.to_string().as_bytes()), b"");
+        t.extend(tar_member(b"a", b'0', b"short", b""));
+        let r = case(&format!("pax size {size}"), Format::Tar(None), &tar_end(t));
+        assert!(r.is_err(), "pax size {size}");
+    }
+}
+
+/// Fields at their extremes: times, modes, ids, devices.
+#[test]
+fn tar_fields_extreme() {
+    let mut h = tar_header(b"a", b'0', 1, b"");
+    h[100..108].fill(0xff);
+    h[108..124].fill(0x80);
+    h[136..148].fill(0xff);
+    h[136] = 0x80;
+    h[329..345].fill(0xff);
+    tar_sum(&mut h);
+    let mut t = h;
+    t.extend(vec![b'x'; 512]);
+    let mut p = pax_record("mtime", b"-9223372036854775808.999999999");
+    p.extend(pax_record("atime", b"9223372036854775807.5"));
+    p.extend(pax_record("uid", b"99999999999999999999999"));
+    p.extend(pax_record("SCHILY.devmajor", b"-1"));
+    t.extend(tar_member(b"PaxHeader", b'x', &p, b""));
+    t.extend(tar_member(b"b", b'0', b"y", b""));
+    // (no panic, in whichever way it ends)
+    let _ = case("extreme fields", Format::Tar(None), &tar_end(t));
+}
+
+// ---- 7z
+
+const COPY: &[u8] = &[0];
+const LZMA: &[u8] = &[3, 1, 1];
+const LZMA2: &[u8] = &[0x21];
+const DEFLATE: &[u8] = &[4, 1, 8];
+const BZIP2: &[u8] = &[4, 2, 2];
+
+/// A folder of one coder: its id and properties, the packed stream, the size it tells of its
+/// output, its files' sizes and CRC-32s (a size each, the last one's left to the folder's).
+struct F {
+    id: Vec<u8>,
+    props: Vec<u8>,
+    pack: Vec<u8>,
+    size: u64,
+    subs: Vec<(u64, u32)>,
+}
+
+impl F {
+    /// Of the data `d` as stored (the packed stream is `d`), a file.
+    fn copy(d: &[u8]) -> F {
+        F::of(COPY, &[], d, d.len() as u64, d)
+    }
+
+    /// Coder `id` of `props` over `pack`, giving `size` bytes, the file of data `d`.
+    fn of(id: &[u8], props: &[u8], pack: &[u8], size: u64, d: &[u8]) -> F {
+        F {
+            id: id.to_vec(),
+            props: props.to_vec(),
+            pack: pack.to_vec(),
+            size,
+            subs: vec![(d.len() as u64, crc32::hash(d))],
+        }
+    }
+}
+
+/// A file of the 7z archive's list.
+#[derive(Clone)]
+struct Fl {
+    name: String,
+    stream: bool,
+    /// Of no stream: a file (else a directory).
+    empty_file: bool,
+    anti: bool,
+}
+
+impl Fl {
+    fn data(name: &str) -> Fl {
+        Fl { name: name.into(), stream: true, empty_file: false, anti: false }
+    }
+    fn empty(name: &str) -> Fl {
+        Fl { name: name.into(), stream: false, empty_file: true, anti: false }
+    }
+    fn dir(name: &str) -> Fl {
+        Fl { name: name.into(), stream: false, empty_file: false, anti: false }
+    }
+    fn anti(mut self) -> Fl {
+        self.anti = true;
+        self
+    }
+}
+
+fn number(out: &mut Vec<u8>, v: u64) {
+    let n = (0..8).find(|&n| v < 1u64 << (7 * (n + 1))).unwrap_or(8);
+    let first = if n == 8 { 0xff } else { (0xff00u16 >> n) as u8 | (v >> (8 * n)) as u8 };
+    out.push(first);
+    out.extend(&v.to_le_bytes()[..n]);
+}
+
+fn bits(out: &mut Vec<u8>, b: &[bool]) {
+    let mut v = vec![0u8; b.len().div_ceil(8)];
+    b.iter().enumerate().filter(|x| *x.1).for_each(|(i, _)| v[i / 8] |= 0x80 >> (i % 8));
+    out.extend(v);
+}
+
+/// A 7z archive of `folders` (a plain header) and the files `files`.
+fn sevenz_of(folders: &[F], files: &[Fl]) -> Vec<u8> {
+    let mut h = vec![1];
+    if !folders.is_empty() {
+        h.push(4);
+        h.push(6);
+        number(&mut h, 0);
+        number(&mut h, folders.len() as u64);
+        h.push(9);
+        folders.iter().for_each(|f| number(&mut h, f.pack.len() as u64));
+        h.push(0);
+        h.push(7);
+        h.push(11);
+        number(&mut h, folders.len() as u64);
+        h.push(0);
+        for f in folders {
+            number(&mut h, 1);
+            h.push(f.id.len() as u8 | if f.props.is_empty() { 0 } else { 0x20 });
+            h.extend(&f.id);
+            if !f.props.is_empty() {
+                number(&mut h, f.props.len() as u64);
+                h.extend(&f.props);
+            }
+        }
+        h.push(12);
+        folders.iter().for_each(|f| number(&mut h, f.size));
+        h.push(0);
+        h.push(8);
+        h.push(13);
+        folders.iter().for_each(|f| number(&mut h, f.subs.len() as u64));
+        h.push(9);
+        for f in folders {
+            f.subs.iter().take(f.subs.len().saturating_sub(1)).for_each(|s| number(&mut h, s.0));
+        }
+        h.push(10);
+        h.push(1);
+        folders.iter().flat_map(|f| &f.subs).for_each(|s| h.extend(s.1.to_le_bytes()));
+        h.extend([0, 0]);
+    }
+    h.push(5);
+    number(&mut h, files.len() as u64);
+    let empties: Vec<&Fl> = files.iter().filter(|f| !f.stream).collect();
+    if !empties.is_empty() {
+        let mut b = Vec::new();
+        bits(&mut b, &files.iter().map(|f| !f.stream).collect::<Vec<_>>());
+        h.push(14);
+        number(&mut h, b.len() as u64);
+        h.extend(b);
+        let mut b = Vec::new();
+        bits(&mut b, &empties.iter().map(|f| f.empty_file).collect::<Vec<_>>());
+        h.push(15);
+        number(&mut h, b.len() as u64);
+        h.extend(b);
+        if empties.iter().any(|f| f.anti) {
+            let mut b = Vec::new();
+            bits(&mut b, &empties.iter().map(|f| f.anti).collect::<Vec<_>>());
+            h.push(16);
+            number(&mut h, b.len() as u64);
+            h.extend(b);
+        }
+    }
+    let mut names = vec![0];
+    for f in files {
+        f.name.encode_utf16().chain([0]).for_each(|u| names.extend(u.to_le_bytes()));
+    }
+    h.push(17);
+    number(&mut h, names.len() as u64);
+    h.extend(names);
+    h.extend([0, 0]);
+    let packed: Vec<u8> = folders.iter().flat_map(|f| f.pack.iter().copied()).collect();
+    let mut start = Vec::new();
+    start.extend((packed.len() as u64).to_le_bytes());
+    start.extend((h.len() as u64).to_le_bytes());
+    start.extend(crc32::hash(&h).to_le_bytes());
+    let mut out = b"7z\xbc\xaf\x27\x1c\0\x04".to_vec();
+    out.extend(crc32::hash(&start).to_le_bytes());
+    out.extend(start);
+    out.extend(packed);
+    out.extend(h);
+    out
+}
+
+fn sevenz(d: &[u8]) -> Result<Out, String> {
+    unpack(Format::SevenZip, d)
+}
+
+fn sz_case(name: &str, d: &[u8]) -> Result<Out, String> {
+    case(name, Format::SevenZip, d)
+}
+
+#[test]
+fn sevenz_builder() {
+    let o = sz_case("plain", &sevenz_of(&[F::copy(b"hello")], &[Fl::data("a")])).unwrap();
+    assert_eq!(o.files["a"], b"hello");
+    let _ = sevenz;
+}
+
+/// Items of no stream: empty files, directories, anti-items (left out, silently: they are
+/// what an update removes).
+#[test]
+fn sevenz_empty_and_anti() {
+    let files = [
+        Fl::data("a"),
+        Fl::empty("empty"),
+        Fl::dir("dir"),
+        Fl::empty("gone").anti(),
+        Fl::dir("gonedir").anti(),
+        Fl::empty("dir/in"),
+    ];
+    let o = sz_case("empty and anti", &sevenz_of(&[F::copy(b"data")], &files)).unwrap();
+    assert_eq!(o.files.keys().collect::<Vec<_>>(), ["a", "dir/in", "empty"]);
+    assert_eq!(o.files["empty"], b"");
+    assert_eq!(o.done.tree.entries.len(), 4);
+    assert_eq!(o.done.skipped, 0, "{:?}", o.notes);
+}
+
+/// More files of data than there are substreams, and more substreams than files: damage, not
+/// empty files made of what is missing.
+#[test]
+fn sevenz_streams_and_files_disagree() {
+    let r = sz_case("files without streams", &sevenz_of(&[F::copy(b"data")], &[Fl::data("a"), Fl::data("b")]));
+    assert!(r.is_err(), "{:?}", r.map(|o| o.files));
+    let two = F { subs: vec![(2, crc32::hash(b"da")), (2, crc32::hash(b"ta"))], ..F::copy(b"data") };
+    let r = sz_case("streams without files", &sevenz_of(&[two], &[Fl::data("a")]));
+    assert!(r.is_err(), "{:?}", r.map(|o| o.files));
+}
+
+/// The same path in two folders: the later one's (a name cannot hold a zero byte in 7z: it
+/// ends the name); a path reaching out left out, told.
+#[test]
+fn sevenz_duplicates_and_outside() {
+    let es = [F::copy(b"first"), F::copy(b"second"), F::copy(b"out"), F::copy(b"ok")];
+    let files = [Fl::data("a"), Fl::data("a"), Fl::data("../out"), Fl::data("ok")];
+    let o = sz_case("duplicates", &sevenz_of(&es, &files)).unwrap();
+    assert_eq!(o.files["a"], b"second");
+    assert_eq!(o.files["ok"], b"ok");
+    assert_eq!(o.files.len(), 2);
+    assert_eq!(o.done.skipped, 1, "{:?}", o.notes);
+}
+
+/// Folders telling more output than any stream of their coder could make: an error, and no
+/// room of that size reserved.
+#[test]
+fn sevenz_lying_sizes() {
+    let t = text();
+    let zstd_free: Vec<(&[u8], Vec<u8>, Vec<u8>)> = vec![
+        (COPY, vec![], t.clone()),
+        (DEFLATE, vec![], {
+            // a stored block
+            let mut v = vec![1];
+            v.extend((t.len() as u16).to_le_bytes());
+            v.extend((!(t.len() as u16)).to_le_bytes());
+            v.extend(&t);
+            v
+        }),
+        (LZMA, vec![0x5d, 0, 0, 0x10, 0], vec![0; 20]),
+        (LZMA2, vec![16], vec![1, 0, 3, b'a', b'b', b'c', b'd', 0]),
+        (BZIP2, vec![], vec![b'B', b'Z', b'h', b'9', 0x17, 0x72, 0x45, 0x38, 0x50, 0x90, 0, 0, 0, 0]),
+    ];
+    for (id, props, pack) in &zstd_free {
+        for size in [t.len() as u64 + 1, u32::MAX as u64, 1 << 32, 1 << 40, 1 << 62, u64::MAX - 100, u64::MAX] {
+            let f = F { subs: vec![(size, 0)], ..F::of(id, props, pack, size, &t) };
+            let name = format!("coder {id:02x?} size {size}");
+            let r = sz_case(&name, &sevenz_of(&[f], &[Fl::data("a")]));
+            assert!(r.is_err(), "{name}: {:?}", r.map(|o| o.files.len()));
+        }
+    }
+}
+
+/// Two files whose sizes together pass 2^64.
+#[test]
+fn sevenz_sizes_sum() {
+    let f = F { subs: vec![(1 << 63, 0), (1 << 63, 0), (5, 0)], ..F::copy(b"x") };
+    let r = sz_case("sizes sum", &sevenz_of(&[f], &[Fl::data("a"), Fl::data("b"), Fl::data("c")]));
+    assert!(r.is_err());
+}
+
+/// 7-Zip's AES coder of properties telling 2^25 and more rounds of its key (refused: the key
+/// would take minutes), and of the raw key (`0x3f`: no rounds) that decrypts.
+#[test]
+fn sevenz_aes_powers() {
+    use aqr_foreign::crypt;
+    let data = b"secret data of a file".to_vec();
+    let pass = b"pass";
+    let iv = [7u8; 16];
+    let salt = [9u8; 4];
+    // props: byte 0: power, bit 7 a salt, bit 6 an IV; byte 1: their lengths less one
+    let props = |power: u8| {
+        let mut p = vec![power | 0xc0, (3 << 4) | 15];
+        p.extend(salt);
+        p.extend(iv);
+        p
+    };
+    let key = crypt::sevenz_key(pass, &salt, 0x3f);
+    let enc = crypt::sevenz_aes_encrypt(&key, &iv, &data);
+    let mk = |power: u8| {
+        sevenz_of(&[F::of(crypt::SEVENZ_AES_ID, &props(power), &enc, data.len() as u64, &data)], &[Fl::data("a")])
+    };
+    // no rounds at all
+    aqr_testkit::case("raw key");
+    let a = mk(0x3f);
+    let mut l = Opened::open(Format::SevenZip, &a).unwrap();
+    assert!(l.encrypted());
+    assert!(l.unlock(pass).unwrap());
+    let r = Rec::default();
+    l.unpack(1, &r).unwrap();
+    assert_eq!(r.contents.lock().unwrap().values().next().unwrap(), &data);
+    // too many rounds: refused at once
+    for power in [25u8, 30, 0x3e] {
+        let a = mk(power);
+        let r = aqr_testkit::within(Duration::from_secs(20), || {
+            let mut l = Opened::open(Format::SevenZip, &a).unwrap();
+            let ok = l.unlock(pass);
+            (ok, l.unpack(1, &Rec::default()))
+        })
+        .unwrap();
+        assert!(!matches!(r.0, Ok(true)), "power {power}");
+        let _ = r.1;
+    }
+}
+
+/// Every damage of an archive (its start header, header, folders) is an error or a tree, in
+/// time.
+#[test]
+fn sevenz_damaged() {
+    let files = [Fl::data("a"), Fl::empty("e"), Fl::dir("d"), Fl::data("d/b")];
+    let a = sevenz_of(&[F::copy(&text()), F::copy(b"second")], &files);
+    aqr_testkit::damaged(&a, 400, 64, Duration::from_secs(20), |v| {
+        let _ = unpack(Format::SevenZip, v);
+    });
+    let b = aqr_7z::write::solid(&[("a", &text()), ("b", b"bee"), ("e", b"")]);
+    aqr_testkit::damaged(&b, 400, 64, Duration::from_secs(20), |v| {
+        let _ = unpack(Format::SevenZip, v);
+    });
+    // the header's CRC and the start header's: each an error
+    let mut c = a.clone();
+    *c.last_mut().unwrap() ^= 1;
+    assert!(sz_case("header crc", &c).is_err());
+    let mut c = a.clone();
+    c[9] ^= 1;
+    assert!(sz_case("start header crc", &c).is_err());
+    let mut c = a.clone();
+    c[40] ^= 1;
+    c.truncate(c.len() - 1);
+    assert!(sz_case("cut", &c).is_err());
+}
