@@ -16,3 +16,14 @@ random syllables), `code.bin` (30,002 B of x86-like bytes with `E8` calls), `tab
 | `r4_ppmd.rar` | `-ma4 -m5 -mct+` | words |
 | `r4_audio.rar` | `-ma4 -m5 -mcA+` | audio |
 | `r4_stored.rar` | `-ma4 -m0` | small |
+
+Made on 2026-11-19 with rar 6.24 and `-ma4 -m5 -ep` (the inputs generated: `image.bmp` is a 60x50
+24-bit BMP of gradients and noise, `audio.pcm` 6,000 frames of 16-bit stereo sines with noise,
+`code.bin` 6,000 groups of x86-like bytes with `E8` calls):
+
+| archive | switches | inputs |
+|---|---|---|
+| `r4_rgb.rar` | `-mcc+` | image |
+| `r4_audio_forced.rar` | `-mc2a+` | audio |
+| `r4_ppmd_e8.rar` | `-mct+ -mce+` | code |
+| `r4_e8.rar` | `-mce+` | code |
