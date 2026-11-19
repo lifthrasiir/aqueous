@@ -21,7 +21,7 @@ pub const WRONG: &str = "WRONG";
 /// multiples of `1 << align`; `None` where they are not as [`decode`] makes them.
 #[cfg(feature = "encode")]
 fn entries(d: &[u8], align: u8) -> Option<Vec<(u32, u8)>> {
-    let unit = 1usize << align;
+    let unit = 1usize.checked_shl(align.into())?;
     let (mut out, mut at) = (Vec::new(), 0);
     while at < d.len() {
         let page = crate::util::to_u32(d.get(at..at + 4)?);
@@ -177,13 +177,15 @@ pub fn decode_merged(
     if t > 15 {
         return None;
     }
-    let unit = 1usize << align;
+    let unit = 1usize.checked_shl(align.into())?;
     let mut out = crate::util::room(len.checked_add(more)?)?;
     let mut start = None::<(usize, u32)>;
-    let close = |out: &mut Vec<u8>, start: usize| {
-        out.resize((out.len()).next_multiple_of(unit), 0);
+    // (a block padded past the output is none: the unit is a parameter, up to 2^255)
+    let close = |out: &mut Vec<u8>, start: usize| -> Option<()> {
+        out.resize(out.len().checked_next_multiple_of(unit).filter(|&n| n <= len)?, 0);
         let size = (out.len() - start) as u32;
         out[start + 4..start + 8].copy_from_slice(&size.to_le_bytes());
+        Some(())
     };
     // the entries listed, and the predictions right, merged by RVA
     let mut last = 0u32;
@@ -235,7 +237,7 @@ pub fn decode_merged(
         let page = rva & !0xfff;
         if start.is_none_or(|(_, p)| p != page) {
             if let Some((s, _)) = start {
-                close(&mut out, s);
+                close(&mut out, s)?;
             }
             start = Some((out.len(), page));
             out.extend_from_slice(&page.to_le_bytes());
@@ -247,7 +249,7 @@ pub fn decode_merged(
         }
     }
     if let Some((s, _)) = start {
-        close(&mut out, s);
+        close(&mut out, s)?;
     }
     // (every stream read to its end, every wrong index of a prediction)
     (rvas.is_empty() && next_wrong.is_none() && out.len() == len).then_some(out)

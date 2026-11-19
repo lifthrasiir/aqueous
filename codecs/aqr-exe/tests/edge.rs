@@ -213,7 +213,7 @@ fn pe_damaged() {
     put(&mut r, 0x240 + 20, &0x60u32.to_le_bytes());
     put(&mut r, 0x260, &[0x70, 0x10, 0, 0, 8, 0, 0, 0]);
     put(&mut r, 0x270, &[1; 8]);
-    assert_eq!(pe::resources(&r), [0x270..0x278]);
+    assert_eq!(pe::resources(&r), vec![0x270..0x278]);
     damaged(&r, 6, 0x300, LIMIT, pe_all);
 }
 
@@ -462,14 +462,7 @@ fn macho_all(d: &[u8]) {
 
 /// A thin Mach-O image of `cputype` (and `subtype`), `wide` or not, with one segment command
 /// holding `sects` as `(segname, sectname, addr, size, offset, flags)` and saying `declared`.
-fn thin_macho(
-    wide: bool,
-    cputype: u32,
-    subtype: u32,
-    declared: u32,
-    sects: &[(&[u8], &[u8], u64, u64, u32, u32)],
-    len: usize,
-) -> Vec<u8> {
+fn thin_macho(wide: bool, cputype: u32, subtype: u32, declared: u32, sects: &[MSect], len: usize) -> Vec<u8> {
     let (header, seg, ssz) = if wide { (32, 72, 80) } else { (28, 56, 68) };
     let cmdsize = seg + sects.len() * ssz;
     let mut d = vec![0u8; len.max(header + cmdsize)];
@@ -503,7 +496,10 @@ fn thin_macho(
 }
 
 const PURE: u32 = 0x8000_0000;
-const TEXT: (&[u8], &[u8], u64, u64, u32, u32) = (b"__TEXT", b"__text", 0x1000, 0x80, 0x100, PURE | 0x400);
+
+/// A section of a Mach-O image: segment, name, address, size, offset, flags.
+type MSect = (&'static [u8], &'static [u8], u64, u64, u32, u32);
+const TEXT: MSect = (b"__TEXT", b"__text", 0x1000, 0x80, 0x100, PURE | 0x400);
 
 #[test]
 fn macho_variants() {
