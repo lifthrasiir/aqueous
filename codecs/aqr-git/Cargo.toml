@@ -19,6 +19,7 @@ sha1 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

@@ -220,7 +220,11 @@ fn offsets(idx: &[u8]) -> Option<Vec<u64>> {
             match o & 0x8000_0000 {
                 0 => Some(o as u64),
                 _ => Some(u64::from_be_bytes(
-                    idx.get(large + 8 * (o & 0x7fff_ffff) as usize..)?.get(..8)?.try_into().ok()?,
+                    idx[..idx.len() - 2 * ID]
+                        .get(large + 8 * (o & 0x7fff_ffff) as usize..)?
+                        .get(..8)?
+                        .try_into()
+                        .ok()?,
                 )),
             }
         })
@@ -261,4 +265,70 @@ pub fn ids(pack: &[u8], starts: &[usize], idx: &[u8], rev: Option<&[u8]>) -> Opt
     build(pack, starts, &ids, rev.is_some(), &mut made).ok()?;
     let (i, r) = made.split_at(made.len().min(idx.len()));
     (i == idx && r == rev.unwrap_or_default()).then_some(ids)
+}
+
+#[cfg(all(test, feature = "encode"))]
+mod tests {
+    use super::*;
+
+    /// An index of version 2 of entries with the offset words `words` (the ids ascending, the
+    /// CRC-32s zeros) and the 64-bit offsets `large`; its SHA-1 is not made (not read).
+    fn idx_of(words: &[u32], large: &[u64]) -> Vec<u8> {
+        let n = words.len();
+        let mut d = IDX_MAGIC.to_vec();
+        for b in 0..256usize {
+            d.extend_from_slice(&((n * (b + 1) / 256) as u32).to_be_bytes());
+        }
+        // (the last entry of the fan-out is the count)
+        for k in 0..n {
+            d.extend_from_slice(&[(k * 255 / n.max(1)) as u8; ID]);
+        }
+        d.extend_from_slice(&vec![0; 4 * n]);
+        for w in words {
+            d.extend_from_slice(&w.to_be_bytes());
+        }
+        for o in large {
+            d.extend_from_slice(&o.to_be_bytes());
+        }
+        d.extend_from_slice(&[0; 2 * ID]);
+        d
+    }
+
+    #[test]
+    fn offsets_of_64_bits_and_out_of_range_slots() {
+        let big = 0x1_0000_0005u64;
+        let idx = idx_of(&[7, 0x8000_0001, 0x8000_0000, 3], &[0xffff_ffff_0000_0000, big]);
+        assert_eq!(offsets(&idx), Some(vec![7, big, 0xffff_ffff_0000_0000, 3]));
+        // in the order of the pack, on a 64-bit target
+        assert_eq!(starts(&idx), Some(vec![3, 7, big as usize, 0xffff_ffff_0000_0000u64 as usize]));
+        // 2^31 - 1 is the largest of the 31 bits' offsets
+        assert_eq!(offsets(&idx_of(&[0x7fff_ffff], &[])), Some(vec![0x7fff_ffff]));
+        // a slot past the table of 64-bit ones is none (the trailer's checksums follow it)
+        assert_eq!(offsets(&idx_of(&[0x8000_0002], &[1, 2])), None);
+        assert_eq!(offsets(&idx_of(&[0x8000_0000], &[])), None);
+        assert_eq!(offsets(&idx_of(&[0x8000_0001], &[1, 2])), Some(vec![2]));
+        assert_eq!(offsets(&idx_of(&[0x8000_0000, 0xffff_ffff], &[1])), None);
+        // equal offsets, or an empty index
+        assert_eq!(starts(&idx_of(&[5, 5], &[])), None);
+        assert_eq!(starts(&idx_of(&[5, 0x8000_0000], &[5])), None);
+        assert_eq!(starts(&idx_of(&[], &[])), Some(vec![]));
+        // not an index: other magic, version 3, short, the count past the file
+        let ok = idx_of(&[1, 2], &[]);
+        assert!(starts(&ok).is_some());
+        let mut v3 = ok.clone();
+        v3[7] = 3;
+        assert_eq!(starts(&v3), None);
+        assert_eq!(starts(&ok[..ok.len() - 41]), None);
+        assert_eq!(starts(&ok[..IDX_MAGIC.len() + 255 * 4 + 2]), None);
+        let mut many = ok.clone();
+        let at = IDX_MAGIC.len() + 255 * 4;
+        many[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(starts(&many), None);
+        // damaged: no panic
+        for d in aqr_testkit::damages(ok.len(), 64, 1100) {
+            let q = d.apply(&ok);
+            aqr_testkit::within(std::time::Duration::from_secs(10), || starts(&q))
+                .unwrap_or_else(|e| panic!("{d}: {e}"));
+        }
+    }
 }

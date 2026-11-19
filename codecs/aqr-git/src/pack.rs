@@ -203,4 +203,97 @@ mod tests {
         assert_eq!(header_size(&[0x95, 0x80, 0]), 5);
         assert_eq!(header_len(&[0x80; 10]), None);
     }
+
+    /// An entry of type `t` (header of the size 3, a stored block of "abc"), with `base` between.
+    #[cfg(feature = "encode")]
+    fn entry(t: u8, base: &[u8], zlib: [u8; 2]) -> Vec<u8> {
+        let mut e = Vec::new();
+        put_header(t, 3, &mut e);
+        e.extend_from_slice(base);
+        e.extend_from_slice(&zlib);
+        e.extend_from_slice(&[1, 3, 0, 0xfc, 0xff, b'a', b'b', b'c']);
+        e.extend_from_slice(&[0x02, 0x4d, 0x01, 0x27]);
+        e
+    }
+
+    #[cfg(feature = "encode")]
+    fn pack_of(count: u32, entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut p = b"PACK\0\0\0\x02".to_vec();
+        p.extend_from_slice(&count.to_be_bytes());
+        for e in entries {
+            p.extend_from_slice(e);
+        }
+        p
+    }
+
+    #[cfg(feature = "encode")]
+    #[test]
+    fn entries_reject_one_by_one() {
+        let ok = [0x78, 0x01];
+        let good = entry(BLOB, &[], ok);
+        let p = pack_of(1, std::slice::from_ref(&good));
+        assert_eq!(entries(&p).unwrap().len(), 1);
+        assert_eq!(extent(&p), Some(p.len()));
+        // (a ofs-delta's distance, and a ref-delta's id)
+        assert_eq!(entries(&pack_of(1, &[entry(OFS_DELTA, &[5], ok)])).unwrap()[0].base.len(), 1);
+        assert_eq!(entries(&pack_of(1, &[entry(REF_DELTA, &[7; ID], ok)])).unwrap()[0].base.len(), ID);
+        // the types 0 and 5 are no entry's
+        for t in [0, 5] {
+            assert!(entries(&pack_of(1, &[entry(t, &[], ok)])).is_none(), "type {t}");
+        }
+        // zlib headers: a preset dictionary (FDICT), not 0x78 (other windows are fine), not DEFLATE,
+        // a bad check
+        assert!(zlib_header([0x78, 0x9c]) && !zlib_header([0x78, 0xbb]));
+        assert!(entries(&pack_of(1, &[entry(BLOB, &[], [0x78, 0xbb])])).is_none(), "FDICT");
+        assert!(entries(&pack_of(1, &[entry(BLOB, &[], [0x78, 0x00])])).is_none(), "bad check");
+        assert!(entries(&pack_of(1, &[entry(BLOB, &[], [0x79, 0x00])])).is_none(), "not DEFLATE");
+        assert!(entries(&pack_of(1, &[entry(BLOB, &[], [0x68, 0x81])])).is_some(), "a smaller window");
+        assert!(entries(&pack_of(1, &[entry(BLOB, &[], [0x88, 0x00])])).is_none(), "window 2^16");
+        // version 3 is a pack, 4 not
+        let mut v = p.clone();
+        v[7] = 3;
+        assert!(entries(&v).is_some());
+        v[7] = 4;
+        assert!(entries(&v).is_none());
+        v[7] = 1;
+        assert!(entries(&v).is_none());
+        // the count past the entries; none where one is told; the count short of them is a prefix
+        assert!(entries(&pack_of(2, std::slice::from_ref(&good))).is_none());
+        assert!(entries(&pack_of(1, &[])).is_none());
+        assert_eq!(entries(&pack_of(1, &[good.clone(), good.clone()])).unwrap().len(), 1);
+        assert_eq!(entries(&pack_of(0, &[])).unwrap().len(), 0);
+        assert_eq!(extent(&pack_of(0, &[])), Some(HEADER));
+        // the Adler-32 cut off
+        assert!(entries(&p[..p.len() - 1]).is_none());
+        // too short for a header
+        assert!(entries(&p[..11]).is_none() && entries(b"").is_none());
+    }
+
+    #[cfg(feature = "encode")]
+    #[test]
+    fn entries_of_huge_counts_and_damage() {
+        use std::time::Duration;
+        let good = entry(BLOB, &[], [0x78, 0x01]);
+        let p = pack_of(2, &[good.clone(), good]);
+        // (a count of 4 billion takes no allocation it cannot fill)
+        let mut big = p.clone();
+        big[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(aqr_testkit::within(Duration::from_secs(10), || entries(&big)).unwrap().is_none());
+        for d in aqr_testkit::damages(p.len(), 64, p.len()) {
+            let q = d.apply(&p);
+            aqr_testkit::within(Duration::from_secs(10), || {
+                let _ = entries(&q);
+                let _ = extent(&q);
+                let _ = entries_end(&q, &[HEADER, HEADER + 25], 2);
+            })
+            .unwrap_or_else(|e| panic!("{d}: {e}"));
+        }
+        // entries_end: the places must follow one another
+        let e = entries(&p).unwrap();
+        let at = [e[0].header.start, e[1].header.start];
+        assert_eq!(entries_end(&p, &at, 2), Some(e[1].end()));
+        assert_eq!(entries_end(&p, &[at[0], at[1] + 1], 1), None);
+        assert_eq!(entries_end(&p, &at[..1], 1), None);
+        assert_eq!(entries_end(&p, &[at[0] + 1, at[1]], 1), None);
+    }
 }
