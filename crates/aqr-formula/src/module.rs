@@ -145,6 +145,11 @@ impl Contents for Vec<&[u8]> {
 /// Bytes of a page of WebAssembly memory.
 pub const PAGE: u64 = 65536;
 
+/// The most bytes of the parameters, resources and inputs, and of the outputs, of an application
+/// that [`Module::plan_for`] plans (256 TiB each): past it, none (the module run as WebAssembly,
+/// where its memories fail as they are made), so that the plans' sums do not overflow.
+pub const MOST_PLANNED: u64 = 1 << 48;
+
 impl Module {
     /// The module `name@version`, of no memory plan: for a stand-in in a test, as every module
     /// built into a Wasm module has a plan ([`Module::with_plan`]), and none is declared a limit
@@ -173,6 +178,12 @@ impl Module {
     /// (see [`Planner`]); None where it has no plan.
     pub fn plan_for(&self, usage: &Usage<'_>) -> Option<Plan> {
         let page = |n: u64| n.div_ceil(PAGE) * PAGE;
+        // (lengths a hostile archive declares, near 2^64, would overflow the plans' sums)
+        let sum = |lens: &[u64]| lens.iter().try_fold(0u64, |a, &n| a.checked_add(n));
+        let lens = [&[usage.params.len() as u64][..], usage.resources, usage.inputs].concat();
+        if sum(&lens).zip(sum(usage.outputs)).is_none_or(|(c, o)| c > MOST_PLANNED || o > MOST_PLANNED) {
+            return None;
+        }
         let p = match self.plan? {
             Planner::Whole(f) => Plan { instance: f(usage)?, tasks: Vec::new() },
             Planner::Tasks(f) => f(usage)?,

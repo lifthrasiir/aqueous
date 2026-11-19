@@ -7357,6 +7357,44 @@ fn dex_plans_hold() {
     assert!(taken > 9, "damaged files taken: {taken}");
 }
 
+/// Every module's plan asked of outputs a hostile archive declares (lengths near 2^64, alone or
+/// summing past it), of a few arities, params and inputs of zeros: an answer or none, never a
+/// panic (overflow checks are on).
+#[test]
+fn huge_declared_outputs_have_no_plan() {
+    let zeros = [0u8; 64];
+    // (and at the most planned, which is answered)
+    let most = aqr_formula::MOST_PLANNED;
+    let shapes: [&[u64]; 7] = [
+        &[u64::MAX],
+        &[u64::MAX - 15],
+        &[1 << 63],
+        &[u64::MAX / 2 + 1, u64::MAX / 2 + 1],
+        &[1, u64::MAX],
+        &[most],
+        &[most / 2, most / 2],
+    ];
+    let mut panicked = Vec::new();
+    for m in MODULES {
+        for arity in 0..=12 {
+            let contents: Vec<&[u8]> = vec![&zeros[..]; arity];
+            let inputs = vec![zeros.len() as u64; arity];
+            for params in [&[][..], &zeros[..10], &zeros[..]] {
+                for outputs in shapes {
+                    let r = std::panic::catch_unwind(|| {
+                        aqr_decompress::needed_by(m, params, &[], &inputs, outputs, &contents)
+                    });
+                    if r.is_err() {
+                        panicked.push(format!("{m} ({arity} inputs, {} params, {outputs:?})", params.len()));
+                    }
+                }
+            }
+        }
+    }
+    panicked.dedup_by(|a, b| a.split(' ').next() == b.split(' ').next());
+    assert!(panicked.is_empty(), "plans panicking:\n{}", panicked.join("\n"));
+}
+
 /// The plans of dex-recons, arsc-recons and pdb-msf, asked of the sizes a hostile archive declares
 /// (the file's length up to 2^64 - 1; counts, sizes and blocks of the streams past any file): an
 /// answer or none, never a panic (overflow checks are on) or a loop.
