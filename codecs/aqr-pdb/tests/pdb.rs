@@ -946,3 +946,116 @@ fn big_blocks_whole_file_damaged() {
     aqr_testkit::damaged(&d[..3 * 65536 + 4096], 60, 200, LIMIT, taken_or_not);
     aqr_testkit::damaged(&d, 12, 40, LIMIT, taken_or_not);
 }
+
+/// A C13 subsection of `kind` and `body`, padded to 4 bytes.
+fn subsection(kind: u32, body: &[u8]) -> Vec<u8> {
+    let mut s = u32s(&[kind, body.len() as u32]);
+    s.extend_from_slice(body);
+    s.resize(s.len().next_multiple_of(4), 0);
+    s
+}
+
+/// A lines subsection: `blocks` of (file, lines of (offset, line | flags << 24)), columns after
+/// each block's lines where `cols`.
+fn lines_sub(offset: u32, cols: bool, blocks: &[(u32, Vec<(u32, u32)>)]) -> Vec<u8> {
+    let mut b = u32s(&[offset]);
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&(cols as u16).to_le_bytes());
+    b.extend_from_slice(&0x100u32.to_le_bytes());
+    for (file, lines) in blocks {
+        let per = if cols { 12 } else { 8 };
+        b.extend(u32s(&[*file, lines.len() as u32, 12 + per * lines.len() as u32]));
+        for &(o, l) in lines {
+            b.extend(u32s(&[o, l]));
+        }
+        if cols {
+            for i in 0..lines.len() as u32 {
+                b.extend((i << 16 | 5).to_le_bytes());
+            }
+        }
+    }
+    subsection(0xf2, &b)
+}
+
+/// C13 lines (line numbers by offset, with columns, inlinee lines repeating an item, a subsection
+/// of another kind, and one that is not as lines are laid out) are made again, in modules of
+/// several of them, and are not taken where they are cut or damaged.
+#[test]
+fn c13_lines_round_trip() {
+    let lines =
+        |n: u32, base: u32| -> Vec<(u32, u32)> { (0..n).map(|i| (i * 6, (base + i * 2) | (i % 3) << 24)).collect() };
+    let mut c13s: Vec<Vec<u8>> = Vec::new();
+    for k in 0..3u32 {
+        let mut c = lines_sub(0x1000 * k, false, &[(0, lines(5, 10 + k)), (8, lines(3, 100))]);
+        c.extend(lines_sub(0x2000, true, &[(16, lines(4, 40)), (24, lines(2, 41))]));
+        // inlinee lines: signature 0, entries (item, file, line); an item seen again
+        let mut inl = u32s(&[0]);
+        inl.extend(u32s(&[0x1000, 8, 20, 0x1001, 16, 30, 0x1000, 8, 24 + k]));
+        c.extend(subsection(0xf6, &inl));
+        // file checksums (kept as they are)
+        c.extend(subsection(0xf4, &[1, 2, 3, 4, 5, 6, 7, 8, 9]));
+        // lines whose block sizes do not add up, and inlinee lines of another signature
+        let mut bad = lines_sub(0, false, &[(0, lines(2, 1))]);
+        bad[8 + 12 + 8] ^= 4;
+        c.extend(bad);
+        c.extend(subsection(0xf6, &u32s(&[1, 2, 3, 4])));
+        c.extend(subsection(0xf2, &[1, 2, 3]));
+        c13s.push(c);
+    }
+    // not subsections at all: kept whole
+    c13s.push(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    // a subsection longer than the rest, and one padded with something other than zeros
+    let mut long = subsection(0xf2, &[0; 8]);
+    long[4] = 200;
+    c13s.push(long);
+    let mut padded = subsection(0xf4, &[1, 2, 3]);
+    *padded.last_mut().unwrap() = 7;
+    c13s.push(padded);
+    let (_, mods) = pdb(false);
+    let wholes: Vec<Vec<u8>> = c13s
+        .iter()
+        .enumerate()
+        .map(|(k, c)| [&mods[k % mods.len()][..], &[9u8, 9, 9][..], &c[..], b"tail"].concat())
+        .collect();
+    let infos: Vec<aqr_pdb::dbi::Module> = c13s
+        .iter()
+        .enumerate()
+        .map(|(k, c)| aqr_pdb::dbi::Module { stream: 0, symbols: mods[k % mods.len()].len(), c11: 3, c13: c.len() })
+        .collect();
+    let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> = wholes.iter().map(|w| &w[..]).zip(infos.iter().copied()).collect();
+    let (params, st) = symbols::encode(&subs).expect("taken");
+    let refs: Vec<&[u8]> = st.iter().map(|v| &v[..]).collect();
+    assert_eq!(symbols::decode(&params, &refs).unwrap(), wholes.concat());
+    // the lines' fields went to the streams of their own
+    for name in ["c13", "c13line", "c13off", "c13flag", "c13inl", "c13inlline", "c13inlid"] {
+        let k = symbols::STREAM_NAMES.iter().position(|&n| n == name).unwrap();
+        assert!(!st[k].is_empty(), "{name}");
+    }
+    // a C13 size past the rest of the stream is not coded as lines
+    let mut over = infos.clone();
+    over[0].c13 = wholes[0].len();
+    let subs: Vec<(&[u8], aqr_pdb::dbi::Module)> = wholes.iter().map(|w| &w[..]).zip(over.iter().copied()).collect();
+    let (p, s2) = symbols::encode(&subs).expect("taken");
+    let r2: Vec<&[u8]> = s2.iter().map(|v| &v[..]).collect();
+    assert_eq!(symbols::decode(&p, &r2).unwrap(), wholes.concat());
+    // damaged: every stream of the lines cut, and bits flipped in them, never a panic
+    let mut errors = 0;
+    for name in ["c13", "c13line", "c13off", "c13flag", "c13inl", "c13inlline", "c13inlid", "lines"] {
+        let k = symbols::STREAM_NAMES.iter().position(|&n| n == name).unwrap();
+        for cut in [0, st[k].len() / 2, st[k].len().saturating_sub(1)] {
+            let mut s = st.clone();
+            s[k].truncate(cut);
+            let r: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
+            errors += symbols::decode(&params, &r).is_err() as usize;
+        }
+        for i in 0..st[k].len().min(400) {
+            for bit in [0x01u8, 0x80] {
+                let mut s = st.clone();
+                s[k][i] ^= bit;
+                let r: Vec<&[u8]> = s.iter().map(|v| &v[..]).collect();
+                errors += symbols::decode(&params, &r).is_err() as usize;
+            }
+        }
+    }
+    assert!(errors > 100, "{errors}");
+}
