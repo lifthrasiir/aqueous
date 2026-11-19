@@ -22,6 +22,7 @@ aqr-sqlite = { path = "../aqr-sqlite", optional = true }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 # Tools are named <crate>-<tool> (the crate's own one, examples/aqr-clip.rs, after the crate),
 # so that names do not collide in the workspace's target directory.

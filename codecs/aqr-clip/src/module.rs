@@ -202,8 +202,10 @@ fn walk<'a>(
             continue;
         }
         if kind != b"Exta" {
+            // (checked before it is kept: a size past the data is no count of bytes to keep)
+            let end = body_end(p, n)?;
             out.keep(n);
-            p = body_end(p, n)?;
+            p = end;
             continue;
         }
         // external data: its ID and the size of its data, then block data or anything
@@ -215,8 +217,9 @@ fn walk<'a>(
         }
         let data = p + head;
         if string_is(src, data + 4, BEGIN).is_none() {
+            let end = body_end(p, n)?;
             out.keep(n);
-            p = body_end(p, n)?;
+            p = end;
             continue;
         }
         out.keep(head);

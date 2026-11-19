@@ -261,6 +261,7 @@ dependencies = [
  "aqr-psd",
  "aqr-raw",
  "aqr-sqlite",
+ "aqr-testkit",
 ]
 
 [[package]]
