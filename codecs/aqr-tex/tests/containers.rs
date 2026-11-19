@@ -272,3 +272,122 @@ fn damaged_files() {
         });
     }
 }
+
+/// The format each container's format codes mean (OpenGL's in KTX, Vulkan's in KTX 2, PVR's
+/// pixel formats), and none for the codes of formats not taken.
+#[test]
+fn format_codes() {
+    use aqr_tex::layout::{ASTC_FOOTPRINTS, Format, Layout};
+    let bytes_of = |format: Format| -> usize {
+        let l = Layout { format, width: 32, height: 32, mips: 1, layers: 1 };
+        l.mip_surfaces().map(|s| s.blocks() * l.format.block_bytes()).sum()
+    };
+    let (b6u, b6s) = (Format::Bc6h { signed: false }, Format::Bc6h { signed: true });
+    let astc = |i: usize| Format::Astc { w: ASTC_FOOTPRINTS[i].0, h: ASTC_FOOTPRINTS[i].1 };
+    let pvrtc = |two| Format::Pvrtc { two };
+    let eac = |rg, signed| Format::Eac { rg, signed };
+    let formats_of = |d: &[u8]| container::detect(d).map(|f| f.layout.format);
+    // KTX
+    let gl: &[(u32, Option<Format>)] = &[
+        (0x83f0, Some(Format::Bc1)),
+        (0x8c4d, Some(Format::Bc1)),
+        (0x83f2, Some(Format::Bc2)),
+        (0x8c4f, Some(Format::Bc3)),
+        (0x8dbb, Some(Format::Bc4)),
+        (0x8dbe, Some(Format::Bc5)),
+        (0x8e8e, Some(b6s)),
+        (0x8e8f, Some(b6u)),
+        (0x8e8d, Some(Format::Bc7)),
+        (0x8d64, Some(Format::Etc1)),
+        (0x9275, Some(Format::Etc2)),
+        (0x9277, Some(Format::Etc2P)),
+        (0x9279, Some(Format::Etc2A)),
+        (0x9270, Some(eac(false, false))),
+        (0x9271, Some(eac(false, true))),
+        (0x9272, Some(eac(true, false))),
+        (0x9273, Some(eac(true, true))),
+        (0x8c00, Some(pvrtc(false))),
+        (0x8c03, Some(pvrtc(true))),
+        (0x93b0, Some(astc(0))),
+        (0x93bd, Some(astc(13))),
+        (0x93d5, Some(astc(5))),
+        (0x1234, None),
+    ];
+    for &(code, want) in gl {
+        let format = want.unwrap_or(Format::Bc1);
+        let mut p = vec![];
+        le(&mut p, &[bytes_of(format) as u32]);
+        p.extend(vec![0u8; bytes_of(format)]);
+        let mut d = ktx(32, 32, 0, 1, 0, 1, 0, &p);
+        d[28..32].copy_from_slice(&code.to_le_bytes());
+        assert_eq!(formats_of(&d), want, "KTX {code:#x}");
+    }
+    // KTX 2
+    let vk: &[(u32, Option<Format>)] = &[
+        (131, Some(Format::Bc1)),
+        (134, Some(Format::Bc1)),
+        (136, Some(Format::Bc2)),
+        (138, Some(Format::Bc3)),
+        (140, Some(Format::Bc4)),
+        (142, Some(Format::Bc5)),
+        (143, Some(b6u)),
+        (144, Some(b6s)),
+        (146, Some(Format::Bc7)),
+        (147, Some(Format::Etc2)),
+        (150, Some(Format::Etc2P)),
+        (152, Some(Format::Etc2A)),
+        (153, Some(eac(false, false))),
+        (154, Some(eac(false, true))),
+        (155, Some(eac(true, false))),
+        (156, Some(eac(true, true))),
+        (157, Some(astc(0))),
+        (184, Some(astc(13))),
+        (1_000_066_005, Some(astc(5))),
+        (1_000_054_000, Some(pvrtc(true))),
+        (1_000_054_005, Some(pvrtc(false))),
+        (37, None),
+        (185, None),
+    ];
+    for &(code, want) in vk {
+        let format = want.unwrap_or(Format::Bc1);
+        let n = bytes_of(format);
+        let mut d = ktx2(code, 32, 32, 0, 0, 1, 1, 0);
+        d.extend(104u64.to_le_bytes());
+        d.extend((n as u64).to_le_bytes());
+        d.extend((n as u64).to_le_bytes());
+        d.extend(vec![0u8; n]);
+        assert_eq!(formats_of(&d), want, "KTX 2 {code}");
+    }
+    // PVR (signed EAC and BC6H by the channel type)
+    let pf: &[(u64, u32, Option<Format>)] = &[
+        (0, 0, Some(pvrtc(true))),
+        (3, 0, Some(pvrtc(false))),
+        (6, 0, Some(Format::Etc1)),
+        (7, 0, Some(Format::Bc1)),
+        (9, 0, Some(Format::Bc2)),
+        (11, 0, Some(Format::Bc3)),
+        (12, 0, Some(Format::Bc4)),
+        (13, 0, Some(Format::Bc5)),
+        (14, 0, Some(b6u)),
+        (14, 3, Some(b6s)),
+        (15, 0, Some(Format::Bc7)),
+        (22, 0, Some(Format::Etc2)),
+        (23, 0, Some(Format::Etc2A)),
+        (24, 0, Some(Format::Etc2P)),
+        (25, 0, Some(eac(false, false))),
+        (25, 1, Some(eac(false, true))),
+        (26, 0, Some(eac(true, false))),
+        (26, 5, Some(eac(true, true))),
+        (27, 0, Some(astc(0))),
+        (40, 0, Some(astc(13))),
+        (41, 0, None),
+        (4, 0, None),
+    ];
+    for &(code, channel, want) in pf {
+        let format = want.unwrap_or(Format::Bc1);
+        let mut d = pvr(code, 32, 32, 1, 1, 1, 1, 0);
+        d[20..24].copy_from_slice(&channel.to_le_bytes());
+        d.extend(vec![0u8; bytes_of(format)]);
+        assert_eq!(formats_of(&d), want, "PVR {code} channel {channel}");
+    }
+}

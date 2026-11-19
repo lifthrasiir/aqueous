@@ -763,3 +763,17 @@ fn astc_smooth_codes_small() {
     eprintln!("astc smooth: {} -> {n} (zstd -19 {z}) {cost:?}", blocks.len());
     assert!(n * 10 < z * 9, "{n} against zstd's {z}");
 }
+
+/// A second mipmap of several stripes predicts from its own planes' upsampling too: the planes
+/// of ETC and ASTC blocks taken as the stripes decode (`planes_of`), on any number of threads.
+#[test]
+fn mipmap_in_stripes() {
+    let l = Layout { format: Format::Etc2, width: 2048, height: 1040, mips: 2, layers: 1 };
+    assert!(texture::stripes::<aqr_tex::etcm::Etc>(l.mip_surfaces().nth(1).unwrap().blocks()) > 1);
+    round(&l, &etc_random(l.len() as usize / 8, 8, 5));
+    let l = Layout { format: Format::Etc2A, width: 2048, height: 1040, mips: 2, layers: 1 };
+    round(&l, &etc_random(l.len() as usize / 16, 16, 6));
+    let l = Layout { format: Format::Astc { w: 4, h: 4 }, width: 2048, height: 1040, mips: 2, layers: 1 };
+    assert!(texture::stripes::<aqr_tex::astcm::Astc>(l.mip_surfaces().nth(1).unwrap().blocks()) > 1);
+    round(&l, &astc_random(l.len() as usize / 16, 8, (4, 4)));
+}
