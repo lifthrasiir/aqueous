@@ -148,6 +148,48 @@ fn template() {
     assert!(template::verify(&t, &files, 0).is_none());
 }
 
+/// A file of `n` zstd chunks in the format of `sizes_end_to_end`: the count, the sizes, the chunks.
+fn chunks(rng: &mut Rng, n: usize) -> Vec<u8> {
+    let (mut sizes, mut data) = (Vec::new(), Vec::new());
+    for _ in 0..n {
+        let len = 2000 + rng.below(6000) as usize;
+        let c = zstd::bulk::compress(&member(rng, len), 3).unwrap();
+        sizes.push(c.len() as u64);
+        data.extend(c);
+    }
+    let mut pak = b"CHUNKS\0\0".to_vec();
+    pak.extend((n as u64).to_le_bytes());
+    for s in &sizes {
+        pak.extend(s.to_le_bytes());
+    }
+    pak.extend(data);
+    pak
+}
+
+/// A template of sizes laid end to end (`template::implicit`) holds in other files of the format,
+/// the count in the header or not; a file whose sizes do not end at its end does not hold.
+#[test]
+fn template_of_sizes() {
+    use aqr_infer_pak::template;
+    let mut rng = Rng(11);
+    let big = chunks(&mut rng, 200);
+    let files = [File { name: "a.chunks".into(), data: &big }];
+    let (dirs, _) = infer(&files, &Options::default());
+    assert!(matches!(dirs[0].cand.layout, Layout::Implicit { .. }));
+    let t = template::learn(&files, 0, &dirs).expect("no template");
+    for n in [40, 3] {
+        let small = chunks(&mut rng, n);
+        let files = [File { name: "b.chunks".into(), data: &small }];
+        let dirs = template::verify(&t, &files, 0).unwrap_or_else(|| panic!("{n} chunks: does not hold"));
+        assert_eq!(dirs[0].members.len(), n);
+        assert_eq!(dirs[0].codecs, vec![("zstd", n.min(8))]);
+        // a chunk lost from the end: the sizes no longer end at the file's end
+        let cut = &small[..small.len() - 40];
+        let files = [File { name: "c.chunks".into(), data: cut }];
+        assert!(template::verify(&t, &files, 0).is_none(), "{n} chunks, cut");
+    }
+}
+
 /// The format of `offsets_and_sizes` over seeds: the members' bytes, sizes and the hashes
 /// change the table's and the data's statistics (seed 7 had the table merged with its data).
 #[test]
