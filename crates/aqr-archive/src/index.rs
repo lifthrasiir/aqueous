@@ -188,7 +188,8 @@ pub(super) fn open<'c>(
         let m = tree::read_with(&decoded(data, ty & 0x04 != 0, true)?, &mut |entries| {
             paths.map(|_| wanted(entries, &mut open))
         })?;
-        let prev = usize::try_from(m.prev).ok().and_then(|b| at.checked_sub(b));
+        // (a metadata block points to one before it: 0 is itself, a loop)
+        let prev = usize::try_from(m.prev).ok().filter(|&b| b > 0).and_then(|b| at.checked_sub(b));
         let settled = paths.is_some() && open.is_empty();
         metas.push((at, next, m));
         match prev {

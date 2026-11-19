@@ -143,6 +143,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "chacha20",
  "chacha20poly1305",
  "crc-fast",

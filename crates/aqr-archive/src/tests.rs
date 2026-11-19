@@ -2393,3 +2393,241 @@ fn invalid_split_forms() {
     long.insert(2, 0x7f);
     bad(long);
 }
+
+#[global_allocator]
+static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 30);
+
+/// An archive of two segments: directories, files of extras and in a link group, a link, a
+/// journal; then a tombstone, a file and a directory replacing one.
+fn segmented_archive() -> Vec<u8> {
+    use crate::{ContentAt, Entry, EntryNode, Extra, Leaf, SegmentWriter, Time, Tree};
+    let enc = Encoder::new(Level::STORED);
+    let mut w = SegmentWriter::new();
+    let mut out = SegmentWriter::header().to_vec();
+    let segments: [Vec<Entry>; 2] = [
+        vec![
+            Entry {
+                parent: None,
+                name: b"d".to_vec(),
+                node: EntryNode::Dir,
+                extra: Extra { mode: Some(0o755), ..Extra::default() },
+            },
+            Entry {
+                parent: Some(0),
+                name: b"a".to_vec(),
+                node: EntryNode::File(0),
+                extra: Extra { mtime: Some(Time::new(10, 5)), link_group: Some(7), ..Extra::default() },
+            },
+            Entry {
+                parent: Some(0),
+                name: b"b".to_vec(),
+                node: EntryNode::File(1),
+                extra: Extra { link_group: Some(7), uid: Some(1000), ..Extra::default() },
+            },
+            Entry { parent: None, name: b"l".to_vec(), node: EntryNode::Link(b"d/a".to_vec()), extra: Extra::default() },
+        ],
+        vec![
+            Entry { parent: None, name: b"d".to_vec(), node: EntryNode::Dir, extra: Extra::default() },
+            Entry::tombstone(Some(0), b"b".to_vec()),
+            Entry {
+                parent: Some(0),
+                name: b"c".to_vec(),
+                node: EntryNode::File(0),
+                extra: Extra { mtime: Some(Time::new(20, 0)), ..Extra::default() },
+            },
+        ],
+    ];
+    for (k, entries) in segments.iter().enumerate() {
+        let files: Vec<Vec<u8>> = (0..entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count())
+            .map(|i| format!("file {k} {i} ").repeat(30).into_bytes())
+            .collect();
+        let mut f = Formula::default();
+        let leaves: Vec<Leaf> =
+            files.iter().map(|b| Leaf { outputs: vec![f.push("t", b.clone())], sums: vec![None] }).collect();
+        let b = w.batch(&enc, &f, &leaves).unwrap();
+        w.commit(&b);
+        out.extend_from_slice(b.blocks());
+        let t = Tree { entries: entries.clone(), ..Tree::default() };
+        let contents: Vec<ContentAt> = (files.iter().enumerate())
+            .map(|(j, d)| ContentAt { leaf: b.leaf_at[j], output: 0, size: d.len() as u64 })
+            .collect();
+        w.set_journal(vec![(1000 * (k as u64 + 1), format!("point {k}"))]).unwrap();
+        if k + 1 < segments.len() {
+            out.extend_from_slice(&w.close(&enc, &t, &contents).unwrap());
+        } else {
+            out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        }
+    }
+    out
+}
+
+/// What reading `c` as the archive's openers do ends in: an error or what it holds, never a
+/// panic, a hang or an allocation of what its bytes do not hold.
+fn read_all(c: &[u8]) {
+    let natives = natives();
+    let path = vec![vec![b"d".to_vec(), b"c".to_vec()]];
+    let paths: [&[Vec<Vec<u8>>]; 2] = [&path, &[]];
+    if let Ok(a) = open(c, &natives) {
+        let _ = a.value(1);
+    }
+    let _ = open_upto(c, &natives, c.len());
+    let _ = open_salvaging(c, &natives, false);
+    if let Ok(a) = open_indexed(Payload::Plain(c), &natives, 1) {
+        let _ = a.value(1);
+    }
+    for p in paths {
+        if let Ok(a) = open_indexed_at(Payload::Plain(c), &natives, 1, p) {
+            let _ = a.tree().map(|t| t.entries.len());
+            let _ = a.contents_len();
+        }
+    }
+}
+
+/// read/1: an archive of several segments, with links, extras, a journal and a tombstone,
+/// damaged in every way: every opener ends in an error or an archive.
+#[test]
+fn segmented_archive_damaged() {
+    let c = segmented_archive();
+    let n = natives();
+    let a = open(&c, &n).unwrap();
+    assert_eq!(a.journal().len(), 2);
+    let Value::Tree(t, contents) = a.value(1).unwrap() else { panic!("a tree") };
+    assert!(t.entries.iter().any(|e| e.name == b"c") && !t.entries.iter().any(|e| e.name == b"b"));
+    assert_eq!(contents.len(), 2);
+    let b = open_indexed_at(Payload::Plain(&c), &n, 1, &[vec![b"d".to_vec(), b"c".to_vec()]]).unwrap();
+    assert!(b.tree().unwrap().entries.iter().any(|e| e.name == b"c"));
+    aqr_testkit::damaged(&c, 4, c.len(), std::time::Duration::from_secs(20), read_all);
+}
+
+/// An archive of one segment of a directory alone.
+fn dir_archive() -> Vec<u8> {
+    use crate::{Entry, EntryNode, Extra, SegmentWriter, Tree};
+    let enc = Encoder::new(Level::STORED);
+    let mut out = SegmentWriter::header().to_vec();
+    let t = Tree {
+        entries: vec![Entry { parent: None, name: b"d".to_vec(), node: EntryNode::Dir, extra: Extra::default() }],
+        ..Tree::default()
+    };
+    out.extend_from_slice(&SegmentWriter::new().finish(&enc, &t, &[]).unwrap().0);
+    out
+}
+
+/// `c`, a one-segment archive, with its metadata block's data changed by `f` (stored again,
+/// its checksum made) and a footer made again.
+fn remeta(c: &[u8], f: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let fields = u16::from_le_bytes([c[c.len() - 2], c[c.len() - 1]]) as usize;
+    let d = &c[HEADER_MAGIC.len()..c.len() - 2 - fields - 8];
+    let framed = crate::parse::frame(d).unwrap();
+    let &(start, ty, data, _) = framed.iter().rev().find(|b| crate::locate::metadata(b.1)).unwrap();
+    let mut out = [&HEADER_MAGIC[..], &d[..start]].concat();
+    let mut m = decoded(data, ty & 0x04 != 0, true).unwrap();
+    f(&mut m);
+    let at = out.len();
+    block_of(&mut out, 0x10, &[&m, &checksum_of(&[&m]).to_le_bytes()]);
+    let end = out.len();
+    footer_with(&mut out, end - HEADER_MAGIC.len(), (end + FOOTER_MAGIC.len() + 2 - at) as u64);
+    out
+}
+
+/// Every opener's verdict on `c`, which `must` not accept: invalid, within a time.
+fn all_openers_refuse(c: &[u8], what: &str) {
+    let n = natives();
+    let p = Payload::Plain(c);
+    let results: Vec<(&str, Decoded<()>)> = aqr_testkit::within(std::time::Duration::from_secs(10), || {
+        aqr_testkit::case(what);
+        vec![
+            ("open", open(c, &n).map(drop)),
+            ("open_salvaging", open_salvaging(c, &n, false).map(drop)),
+            ("open_indexed", open_indexed(p, &n, 1).map(drop)),
+            ("open_indexed_at", open_indexed_at(p, &n, 1, &[vec![b"d".to_vec()]]).map(drop)),
+        ]
+    })
+    .unwrap();
+    for (name, r) in results {
+        // (salvaging may open what is damaged: that it does not panic is what is checked)
+        if name != "open_salvaging" {
+            assert!(matches!(r, Err(Failure::Invalid(_))), "{what}: {name}: {r:?}");
+        }
+    }
+}
+
+/// read/2: footers and headers failing by hand, of the messages `footer_fields` and the index
+/// have, `prev` pointers making loops, a header alone.
+#[test]
+fn footers_and_headers_fail() {
+    let c = dir_archive();
+    let n = natives();
+    assert!(open(&c, &n).is_ok());
+    let msg = |c: &[u8]| match open(c, &n) {
+        Err(Failure::Invalid(m)) => m,
+        r => panic!("{:?}", r.map(drop)),
+    };
+    let fields = u16::from_le_bytes([c[c.len() - 2], c[c.len() - 1]]) as usize;
+    let end = c.len() - 2 - fields - 8;
+    // a header alone, and its footer's two sizes
+    assert_eq!(msg(&HEADER_MAGIC), "truncated footer");
+    assert_eq!(msg(&[]), "bad header magic");
+    assert_eq!(msg(&c[..3]), "bad header magic");
+    let mut bad = c.clone();
+    bad[0] ^= 1;
+    assert_eq!(msg(&bad), "bad header magic");
+    let mut bad = c.clone();
+    bad[end] ^= 1;
+    assert_eq!(msg(&bad), "bad footer");
+    // the leading size of the footer's fields not the trailing one
+    let mut bad = c.clone();
+    bad[end + 6] ^= 1;
+    assert_eq!(msg(&bad), "bad footer");
+    // the trailing size past the archive, and a footer's fields reaching into the header
+    for len in [c.len() as u16, 0xffff, (c.len() - 8) as u16, 1] {
+        let mut bad = c.clone();
+        bad[end + 6..end + 8].copy_from_slice(&len.to_le_bytes());
+        let l = bad.len();
+        bad[l - 2..].copy_from_slice(&len.to_le_bytes());
+        assert!(matches!(open(&bad, &n), Err(Failure::Invalid(_))), "{len}");
+        all_openers_refuse(&bad, &format!("fields of {len}"));
+    }
+    // a header and a footer, nothing between: no metadata block, one without blocks
+    let mut empty = HEADER_MAGIC.to_vec();
+    footer_with(&mut empty, 0, 0);
+    assert_eq!(open(&empty, &n).map(|a| a.leaves_len()).ok(), Some(0));
+    // the size hint: not the blocks' size; the fields with bytes after them
+    for hint in [0, 1, (end - HEADER_MAGIC.len() + 1) as u64, u64::MAX] {
+        let mut bad = c[..end].to_vec();
+        footer_with(&mut bad, hint as usize, (c.len() - 2 - fields - 8 - end).max(1) as u64);
+        // (the metadata offset is wrong too: either is invalid)
+        all_openers_refuse(&bad, &format!("hint {hint}"));
+    }
+    let mut more = c[..end].to_vec();
+    let mut f = Vec::new();
+    varint::put(&mut f, (end - HEADER_MAGIC.len()) as u64);
+    varint::put(&mut f, (c.len() - 2 - fields - end) as u64);
+    f.push(0);
+    more.extend_from_slice(&FOOTER_MAGIC);
+    more.extend_from_slice(&(f.len() as u16).to_le_bytes());
+    more.extend_from_slice(&f);
+    more.extend_from_slice(&(f.len() as u16).to_le_bytes());
+    assert_eq!(msg(&more), "bad footer");
+    // the metadata offset: 0 (none, so the archive is one file of no blocks), past the start, at
+    // the header's end, one byte off
+    let meta_back = (c.len() - 2 - fields - end) as u64;
+    for back in [meta_back + 1, meta_back - 1, meta_back + 2, 1 << 40, u64::MAX] {
+        let mut bad = c[..end].to_vec();
+        footer_with(&mut bad, end - HEADER_MAGIC.len(), back);
+        all_openers_refuse(&bad, &format!("metadata at {back} back"));
+    }
+    // a metadata block of a previous pointer of 0 (itself: a loop), one into the middle of the
+    // header, one of the block's own place, one past it
+    for prev in [0u64, 2, 3, 1 << 40, u64::MAX] {
+        let bad = remeta(&c, |m| {
+            let mut at = 0;
+            leb(m, &mut at).unwrap();
+            let mut v = Vec::new();
+            varint::put(&mut v, prev);
+            m.splice(..at, v);
+        });
+        all_openers_refuse(&bad, &format!("prev {prev}"));
+    }
+    // (the original through the same path stays valid)
+    assert!(open(&remeta(&c, |_| {}), &n).is_ok());
+}
