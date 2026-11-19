@@ -1291,6 +1291,39 @@ mod tests {
         assert_eq!(files(&d), files(&m));
     }
 
+    /// A block and its mirror block both damaged is lost: nothing is restored of it (the
+    /// mirror is told broken, the block unmirrored), the archive fails as it is and others'
+    /// repairs are not undone by it.
+    #[test]
+    fn block_and_mirror_both_damaged() {
+        use super::super::Failure;
+        let m = mirrored(&archive(), 4096, false);
+        let c = check(&m);
+        let n = natives();
+        for (k, t) in c.mirrors.iter().enumerate() {
+            let mut d = m.clone();
+            d[t.target_end() - 3] ^= 0x55;
+            d[t.data.start + 1] ^= 1;
+            let cd = check(&d);
+            assert_eq!((cd.mirrors.len(), cd.broken, cd.unmirrored()), (4, 1, 1), "block {k}");
+            assert_eq!(repair(&d, &cd, false, &[]), None, "block {k}");
+            assert!(!cd.mirrored(&d, false));
+            // (what is damaged is no valid archive, never a panic)
+            let r = decode_value(&d, &n);
+            assert!(matches!(r, Err(Failure::Invalid(_))), "block {k}: {:?}", r.map(|_| ()));
+            // and another block damaged too, whose mirror is intact: that one restored, this not
+            let other = &c.mirrors[(k + 1) % c.mirrors.len()];
+            let mut e = d.clone();
+            e[other.target_end() - 3] ^= 0x55;
+            let ce = check(&e);
+            let r = repair(&e, &ce, false, &[]).unwrap();
+            assert_eq!(r.restored, 1, "block {k}");
+            let (own, theirs) = (t.target..t.target_end(), other.target..other.target_end());
+            assert_eq!(r.bytes[theirs.clone()], m[theirs], "block {k}");
+            assert_eq!(r.bytes[own.clone()], d[own], "block {k}");
+        }
+    }
+
     /// The metadata block's mirror block before the last files (its target following it), and
     /// none after them; a truncation into the metadata block restores it, and the footer.
     #[test]

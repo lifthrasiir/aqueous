@@ -2424,7 +2424,12 @@ fn segmented_archive() -> Vec<u8> {
                 node: EntryNode::File(1),
                 extra: Extra { link_group: Some(7), uid: Some(1000), ..Extra::default() },
             },
-            Entry { parent: None, name: b"l".to_vec(), node: EntryNode::Link(b"d/a".to_vec()), extra: Extra::default() },
+            Entry {
+                parent: None,
+                name: b"l".to_vec(),
+                node: EntryNode::Link(b"d/a".to_vec()),
+                extra: Extra::default(),
+            },
         ],
         vec![
             Entry { parent: None, name: b"d".to_vec(), node: EntryNode::Dir, extra: Extra::default() },
@@ -2645,7 +2650,12 @@ fn formula_data_fails() {
             shorthand_block(out, MODULE, &hash);
             formula_block(out, outputs, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
             if stream {
-                content_block(out, false, &[b"xyz"], compressed(&mut CCtx::create(), &[b"xyz"], 3, 1).unwrap().as_deref());
+                content_block(
+                    out,
+                    false,
+                    &[b"xyz"],
+                    compressed(&mut CCtx::create(), &[b"xyz"], 3, 1).unwrap().as_deref(),
+                );
             }
         });
         decode_value(&c, &n).map(|_| ())
@@ -2778,9 +2788,11 @@ fn intermediate_checksums() {
     assert_eq!(run(&prog(&[&lit(abc), &wrong(abc), &sum(abc)])), invalid("output checksum mismatch"));
     assert_eq!(run(&prog(&[&lit(abc), &sum(abc), &sum(abc)])).unwrap(), abc);
     // a slice, and the pieces of a split, each by its own: the one swapped to the top
-    let split = prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &sum(b"cdef"), &[SWAP, 1], &sum(b"ab"), &[SWAP, 1, CONCAT, 2]]);
+    let split =
+        prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &sum(b"cdef"), &[SWAP, 1], &sum(b"ab"), &[SWAP, 1, CONCAT, 2]]);
     assert_eq!(run(&split).unwrap(), b"abcdef");
-    let wrong_piece = prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &sum(b"cdef"), &[SWAP, 1], &sum(b"cd"), &[SWAP, 1, CONCAT, 2]]);
+    let wrong_piece =
+        prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &sum(b"cdef"), &[SWAP, 1], &sum(b"cd"), &[SWAP, 1, CONCAT, 2]]);
     assert_eq!(run(&wrong_piece), invalid("output checksum mismatch"));
     // (a checksum of the top after a swap is of the item swapped up, not of the one below)
     let swapped = prog(&[&lit(b"abcdef"), &[SPLIT, 2, 2, 4], &[SWAP, 1], &sum(b"cdef"), &[SWAP, 1, CONCAT, 2]]);
@@ -3061,10 +3073,8 @@ fn two_files_archive() -> Vec<u8> {
     let mut w = SegmentWriter::new();
     let mut out = SegmentWriter::header().to_vec();
     let mut f = Formula::default();
-    let leaves: Vec<Leaf> = [100, 200]
-        .iter()
-        .map(|&n| Leaf { outputs: vec![f.push("t", vec![n as u8; n])], sums: vec![None] })
-        .collect();
+    let leaves: Vec<Leaf> =
+        [100, 200].iter().map(|&n| Leaf { outputs: vec![f.push("t", vec![n as u8; n])], sums: vec![None] }).collect();
     let b = w.batch(&enc, &f, &leaves).unwrap();
     w.commit(&b);
     out.extend_from_slice(b.blocks());
@@ -3151,4 +3161,376 @@ fn decoded_metadata(c: &[u8]) -> Vec<u8> {
     let mut data = Vec::new();
     remeta(c, |m| data = m.clone());
     data
+}
+
+/// read/8: a spacer block of `ty` (0 to 3: a size field of 1, 2, 4 or 8 bytes) of `n` bytes of
+/// `fill`, padded to an even length.
+fn spacer_of(out: &mut Vec<u8>, ty: u8, n: usize, fill: u8) {
+    out.push(ty);
+    out.extend_from_slice(&(n as u64).to_le_bytes()[..1 << ty]);
+    out.extend(std::iter::repeat_n(fill, n));
+    if (1 + (1 << ty) + n) % 2 == 1 {
+        out.push(fill);
+    }
+}
+
+/// read/8: spacer blocks of every size field and size, of any bytes, anywhere among the blocks
+/// (the first, between, after the last); cut short or past the archive they are invalid.
+#[test]
+fn spacer_blocks_of_every_size_field() {
+    let n = natives();
+    let plain = |out: &mut Vec<u8>| {
+        formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[&[0, 0, 0, LITERAL, 1, b'x']], 3, 1).unwrap());
+    };
+    let want = archive(plain);
+    assert_eq!(decode(&want, &n).unwrap(), b"x");
+    for ty in 0..=3u8 {
+        for len in [0, 1, 2, 3, 254, 255, 256, 257, 4000] {
+            for fill in [0, 0xa5] {
+                // (a size field of 1 byte holds 255 at most)
+                if ty == 0 && len > 255 {
+                    continue;
+                }
+                let c = archive(|out| {
+                    spacer_of(out, ty, len, fill);
+                    plain(out);
+                    spacer_of(out, ty, len, fill);
+                });
+                assert_eq!(decode(&c, &n).as_deref(), Ok(&b"x"[..]), "type {ty}, {len} bytes of {fill:#x}");
+                let c = archive(|out| {
+                    plain(out);
+                    spacer_of(out, ty, len, fill);
+                });
+                assert_eq!(decode(&c, &n).as_deref(), Ok(&b"x"[..]), "after: type {ty}, {len} bytes");
+            }
+        }
+    }
+    // past the archive: a size field naming more than there is, up to the numbers' end
+    for ty in 0..=3u8 {
+        for size in [5u64, 1 << 20, 1 << 40, u64::MAX] {
+            if size >= 1 << (8 << ty).min(63) && ty < 3 {
+                continue;
+            }
+            let c = archive(|out| {
+                out.push(ty);
+                out.extend_from_slice(&size.to_le_bytes()[..1 << ty]);
+                out.extend_from_slice(&[0; 3]);
+                plain(out);
+            });
+            let r = decode(&c, &n);
+            assert!(matches!(r, Err(Failure::Invalid(_))), "type {ty}, size {size}: {r:?}");
+        }
+    }
+    // a spacer block that ends the blocks as it is (even), or short of its padding byte (odd)
+    for (tail, ok) in [(&[0u8, 0][..], true), (&[0, 2, 0, 0], true), (&[0, 1, 0], false), (&[0, 2, 0], false)] {
+        let c = archive(|out| {
+            plain(out);
+            out.extend_from_slice(tail);
+        });
+        let r = decode(&c, &n);
+        assert!(
+            if ok { r.as_deref() == Ok(&b"x"[..]) } else { matches!(r, Err(Failure::Invalid(_))) },
+            "{tail:?}: {r:?}"
+        );
+    }
+}
+
+/// read/8: dictionary references to no dictionary block (before the block, or at all), and the
+/// import blocks 58 to 5F, which no reader here takes.
+#[test]
+fn dictionaries_and_imports_refused() {
+    let n = natives();
+    let junk = [3u8; 12];
+    // a dictionary index in a leaf, a non-leaf and a formula block: the index first
+    for ty in [LEAF_ZSTD_DICT, NON_LEAF_ZSTD_DICT, FORMULA + 4] {
+        for index in [0u64, 1, 2, 1 << 40, u64::MAX] {
+            let mut data = Vec::new();
+            if ty == FORMULA + 4 {
+                varint::put(&mut data, index);
+                data.push(1);
+            } else {
+                varint::put(&mut data, index);
+            }
+            data.extend_from_slice(&junk);
+            // (a block of no dictionary before it, and of one dictionary before it: index 1 and up)
+            let none = archive(|out| block(out, ty, &data));
+            let r = decode_value(&none, &n).map(|_| ());
+            assert!(matches!(r, Err(Failure::Invalid(_))), "type {ty:#x}, index {index}: {r:?}");
+            let raw =
+                always_compressed(&mut CCtx::create(), &[&b"a raw dictionary of content".repeat(10)], 3, 1).unwrap();
+            let some = archive(|out| {
+                block(out, DICTIONARY_RAW + 1, &raw);
+                block(out, ty, &data);
+            });
+            let r = decode_value(&some, &n).map(|_| ());
+            assert!(matches!(r, Err(Failure::Invalid(_))), "type {ty:#x}, index {index} of one: {r:?}");
+            let r = open(&some, &n).map(|a| a.leaves_len());
+            if index >= 1 {
+                assert!(matches!(r, Err(Failure::Invalid(_))), "type {ty:#x}, index {index} of one, opened: {r:?}");
+            }
+        }
+        // a dictionary block coming after the block that names it
+        let mut data = vec![0];
+        data.extend_from_slice(&junk);
+        let raw = always_compressed(&mut CCtx::create(), &[&b"content".repeat(10)], 3, 1).unwrap();
+        let late = archive(|out| {
+            block(out, ty, &data);
+            block(out, DICTIONARY_RAW + 1, &raw);
+        });
+        assert!(matches!(decode_value(&late, &n), Err(Failure::Invalid(_))), "type {ty:#x} late");
+    }
+    // imports, of any size and content, wherever
+    // (the type with a size field of 1 byte, widened by the size of the data)
+    for ty in [0x58, 0x5c] {
+        for data in [&[][..], &[0u8; 5], &[0xffu8; 300]] {
+            let c = archive(|out| {
+                block(out, ty, data);
+                formula_block(
+                    out,
+                    1,
+                    &always_compressed(&mut CCtx::create(), &[&[0, 0, 0, LITERAL, 0]], 3, 1).unwrap(),
+                );
+            });
+            let r = decode_value(&c, &n).map(|_| ());
+            assert!(
+                matches!(&r, Err(Failure::Unsupported(e)) if e.contains("undefined critical type")),
+                "{ty:#x}: {r:?}"
+            );
+            for r in [
+                open(&c, &n).map(drop),
+                open_indexed(Payload::Plain(&c), &n, 1).map(drop),
+                open_salvaging(&c, &n, false).map(drop),
+            ] {
+                assert!(matches!(r, Err(Failure::Unsupported(_) | Failure::Invalid(_)) | Ok(())), "{ty:#x}: {r:?}");
+            }
+            // (the inspector tells blocks as they are, imports among them, never panicking)
+            let _ = crate::inspect::inspect(&c, false, &|_| None, None);
+        }
+    }
+}
+
+/// read/8: a content block after the last metadata block (the inspector counts the imports 58
+/// to 5F, the registered dictionary 50 and the others of 20 to 77 among them) is invalid.
+#[test]
+fn content_after_the_last_metadata_block() {
+    let n = natives();
+    let c = dir_archive();
+    let fields = u16::from_le_bytes([c[c.len() - 2], c[c.len() - 1]]) as usize;
+    let end = c.len() - 2 - fields - 8;
+    let back = (c.len() - 2 - fields - end) as u64;
+    for ty in [0x20, 0x40, 0x50, 0x54, 0x58, 0x5c, 0x60, 0x64, 0x70] {
+        let mut v = c[..end].to_vec();
+        block(&mut v, ty, &[0u8; 40]);
+        let added = (v.len() - end) as u64;
+        let hint = v.len() - HEADER_MAGIC.len();
+        footer_with(&mut v, hint, back + added);
+        let r = open(&v, &n).map(drop);
+        assert!(matches!(r, Err(Failure::Invalid(_) | Failure::Unsupported(_))), "{ty:#x}: {r:?}");
+        let i = crate::inspect::inspect(&v, false, &|_| None, None).map(|_| ());
+        assert!(
+            matches!(&i, Err(Failure::Invalid(e)) if e.contains("content blocks after the last metadata block")),
+            "{ty:#x}: {i:?}"
+        );
+    }
+}
+
+/// read/8: a formula block's output count of 0 or past what the archive holds, and numbers not
+/// in their shortest form (valid but for block types).
+#[test]
+fn output_counts_and_long_numbers() {
+    let n = natives();
+    let data = [0u8, 0, 0, LITERAL, 1, b'x'];
+    let run = |outputs: u64, d: &[u8]| {
+        let c =
+            archive(|out| formula_block(out, outputs, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap()));
+        aqr_testkit::within(std::time::Duration::from_secs(10), || {
+            aqr_testkit::case(&format!("{outputs} outputs"));
+            let r = decode_value(&c, &n);
+            assert!(aqr_testkit::most() < 1 << 30);
+            r
+        })
+        .unwrap()
+    };
+    assert_eq!(run(1, &data), Ok(Value::File(b"x".to_vec())));
+    for outputs in [0, 2, 1 << 32, 1 << 40, u64::MAX] {
+        assert!(matches!(run(outputs, &data), Err(Failure::Invalid(_))), "{outputs}");
+    }
+    // the counts and indexes of a formula in a longer form than needed
+    let long = [0x80u8, 0x00, 0x80, 0x80, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+    assert_eq!(
+        run(1, &[0x80, 0x00, 0x80, 0x00, 0x80, 0x00, LITERAL, 0x81, 0x00, b'x']),
+        Ok(Value::File(b"x".to_vec()))
+    );
+    // (a number past 64 bits is not)
+    let mut over = vec![0x80u8; 10];
+    over.push(0x00);
+    over.extend_from_slice(&[0, 0, LITERAL, 1, b'x']);
+    assert!(matches!(run(1, &over), Err(Failure::Invalid(_))));
+    assert!(matches!(run(1, &[&long[..], &[0, 0]].concat()), Err(Failure::Invalid(_))));
+    // the footer's fields in a longer form (the size hint, the metadata offset) are read
+    let c = formula(&data, &[]);
+    let fields = u16::from_le_bytes([c[c.len() - 2], c[c.len() - 1]]) as usize;
+    let end = c.len() - 2 - fields - 8;
+    let mut f = Vec::new();
+    f.extend_from_slice(&[(end - HEADER_MAGIC.len()) as u8 | 0x80, 0x00, 0x80, 0x00]);
+    let mut longer = c[..end].to_vec();
+    longer.extend_from_slice(&FOOTER_MAGIC);
+    longer.extend_from_slice(&(f.len() as u16).to_le_bytes());
+    longer.extend_from_slice(&f);
+    longer.extend_from_slice(&(f.len() as u16).to_le_bytes());
+    assert_eq!(decode(&longer, &n), decode(&c, &n));
+    // (a block's type is not: the type in a longer form is invalid)
+    let mut typed = c.clone();
+    let at = HEADER_MAGIC.len();
+    typed.splice(at..at + 1, [typed[at] | 0x80, 0x00]);
+    assert!(matches!(decode(&typed, &n), Err(Failure::Invalid(_))));
+}
+
+/// read/8: `journal` and `segment-status` of the optional metadata, at their ranges: times of
+/// an unsigned 64-bit integer (any, but not repeated or negative), labels of text, counts of
+/// the unsigned.
+#[test]
+fn journal_and_status_ranges() {
+    use crate::tree::{self, Status};
+    let read = |opt: &[u8]| {
+        let m = Meta { prev: 5, dirs: vec![(0, "d")], opt: opt.to_vec(), ..Meta::default() };
+        tree::read(&m.bytes()).map(|m| (m.journal, m.status))
+    };
+    let journal = |pairs: &[u8]| [&[0xa1, 0x23][..], pairs].concat();
+    let status = |v: &[u8]| [&[0xa1, 0x22][..], v].concat();
+    let bad = |opt: &[u8], want: &str| match read(opt) {
+        Err(Failure::Invalid(e)) => assert!(e.contains(want), "{e} for {want}"),
+        r => panic!("{r:?} for {want}"),
+    };
+    // times: 0, a middle one, the largest u64, in the order of the times whatever the order given
+    let ok = read(&journal(&[
+        0xa3, 0x00, 0x61, b'a', 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x61, b'c', 0x18, 0x40, 0x61,
+        b'b',
+    ]));
+    let (points, _) = ok.unwrap();
+    assert_eq!(points, [(0, "a".to_string()), (0x40, "b".to_string()), (u64::MAX, "c".to_string())]);
+    // an empty journal; a time negative, one past u64 as a bignum, a label not text, repeated times
+    assert_eq!(read(&journal(&[0xa0])).unwrap().0, []);
+    bad(&journal(&[0xa1, 0x20, 0x61, b'a']), "a journal time out of range");
+    bad(&journal(&[0xa1, 0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x61, b'a']), "out of range");
+    bad(&journal(&[0xa1, 0xc2, 0x49, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0x61, b'a']), "not an integer");
+    bad(&journal(&[0xa1, 0x00, 0x01]), "");
+    // (a byte string is an `aqr-text` of an unknown encoding)
+    assert_eq!(read(&journal(&[0xa1, 0x00, 0x41, 0x00])).unwrap().0, [(0, "\0".to_string())]);
+    bad(&journal(&[0xa2, 0x00, 0x61, b'a', 0x00, 0x61, b'b']), "duplicate");
+    bad(&journal(&[0xa1, 0x61, b'x', 0x61, b'a']), "not an integer");
+    bad(&journal(&[0x01]), "journal not a map");
+    bad(&journal(&[0x80]), "journal not a map");
+    // a text that is not UTF-8 is a byte string's: of a text string it is invalid CBOR
+    assert!(matches!(read(&journal(&[0xa1, 0x00, 0x62, 0xff, 0xfe])), Err(Failure::Invalid(_))));
+    // a label longer than the data
+    bad(&journal(&[0xa1, 0x00, 0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]), "");
+    // the journal twice
+    bad(&[&[0xa2, 0x23, 0xa0, 0x23, 0xa0][..]].concat(), "duplicate");
+    // the status: true, none, counts of every size, a count negative or past u64, not true
+    assert_eq!(read(&status(&[0xf5])).unwrap().1, Status::Complete);
+    assert_eq!(read(&status(&[0xa0])).unwrap().1, Status::Incomplete { files: None, bytes: None });
+    assert_eq!(
+        read(&status(&[0xa2, 0x00, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x00])).unwrap().1,
+        Status::Incomplete { files: Some(u64::MAX), bytes: Some(0) }
+    );
+    bad(&status(&[0xf4]), "neither true nor a map");
+    bad(&status(&[0xf6]), "neither true nor a map");
+    bad(&status(&[0x01]), "neither true nor a map");
+    bad(&status(&[0xa1, 0x00, 0x20]), "a count out of range");
+    bad(&status(&[0xa1, 0x01, 0x3b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]), "a count out of range");
+    bad(&status(&[0xa1, 0x00, 0xf5]), "a count not an integer");
+    bad(&status(&[0xa1, 0x00, 0x61, b'1']), "a count not an integer");
+    bad(&status(&[0xa2, 0x00, 0x01, 0x00, 0x02]), "duplicate");
+    // other keys of the status are let be, repeated ones are not
+    assert!(read(&status(&[0xa1, 0x05, 0x01])).is_ok());
+    bad(&status(&[0xa2, 0x05, 0x01, 0x05, 0x02]), "duplicate");
+    // both
+    let both = [&[0xa2, 0x22, 0xf5][..], &[0x23, 0xa1, 0x01, 0x61, b'x']].concat();
+    let r = read(&both).unwrap();
+    assert_eq!((r.0, r.1), (vec![(1, "x".to_string())], Status::Complete));
+}
+
+/// read/8: the metadata block of a segment tells where its module blocks are: not where they
+/// are, past its own segment, or not in order, it is invalid.
+#[test]
+fn module_offsets_of_segments() {
+    use crate::{ContentAt, Entry, EntryNode, Extra, Leaf, SegmentWriter, Tree};
+    let n = natives();
+    let enc = Encoder::new(Level::STORED);
+    let mut w = SegmentWriter::new();
+    let mut out = SegmentWriter::header().to_vec();
+    let mut metas = Vec::new();
+    for k in 0..2usize {
+        let mut f = Formula::default();
+        let a = f.push("a", format!("file {k}").repeat(10).into_bytes());
+        let len = 60;
+        let leaves = vec![Leaf { outputs: vec![Node::apply(REV, vec![1, 2, 3], vec![a], len)], sums: vec![None] }];
+        let b = w.batch(&enc, &f, &leaves).unwrap();
+        w.commit(&b);
+        out.extend_from_slice(b.blocks());
+        let name = format!("f{k}").into_bytes();
+        let t = Tree {
+            entries: vec![Entry { parent: None, name, node: EntryNode::File(0), extra: Extra::default() }],
+            ..Tree::default()
+        };
+        let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: len }];
+        let m = if k == 0 { w.close(&enc, &t, &contents).unwrap() } else { w.finish(&enc, &t, &contents).unwrap().0 };
+        metas.push(out.len());
+        out.extend_from_slice(&m);
+    }
+    assert_eq!(decode_value(&out, &n).map(|_| ()), Ok(()));
+    // where each metadata block's list of module offsets starts (its fields: prev, the counts)
+    let fields_of = |c: &[u8], at: usize| -> (usize, usize) {
+        let framed_at = at;
+        let (mut p, mut q) = (0, 0);
+        // (the block: its type, a size field, then the data; the type 0x10 + the size field)
+        let ty = c[framed_at] as usize;
+        assert_eq!(ty & 0xf0, 0x10, "a metadata block");
+        let start = framed_at + 1 + (1 << (ty % 4));
+        let d = &c[start..];
+        let prev = leb(d, &mut p).unwrap();
+        let modules = leb(d, &mut p).unwrap();
+        assert_eq!(modules, 1);
+        for _ in 0..7 {
+            leb(d, &mut p).unwrap();
+        }
+        q += start + p;
+        (q, if prev < 0x100 { 1 } else { 2 })
+    };
+    for (k, &at) in metas.iter().enumerate() {
+        let (field, width) = fields_of(&out, at);
+        assert_eq!(width, 1, "the sample is small");
+        let good = out[field];
+        let start = at + 1 + (1 << (out[at] % 4));
+        let prev = {
+            let mut p = 0;
+            leb(&out[start..], &mut p).unwrap()
+        };
+        // each new value of the offset, the block's checksum made again (the data's length is
+        // the same: the field's width)
+        let size = {
+            let ty = out[at] as usize;
+            let w = 1 << (ty % 4);
+            let mut b = [0u8; 8];
+            b[..w].copy_from_slice(&out[at + 1..at + 1 + w]);
+            u64::from_le_bytes(b) as usize
+        };
+        for value in [0, 1, good.wrapping_sub(2), good + 2, good + 1, prev as u8, (prev as u8).wrapping_add(1), 0xff] {
+            if value == good {
+                continue;
+            }
+            let mut c = out.clone();
+            c[field] = value;
+            let sum = checksum_of(&[&c[start..start + size - 8]]).to_le_bytes();
+            c[start + size - 8..start + size].copy_from_slice(&sum);
+            let verdicts = [
+                decode_value(&c, &n).map(drop),
+                open_indexed(Payload::Plain(&c), &n, 1).and_then(|a| a.value(1)).map(drop),
+            ];
+            for r in verdicts {
+                assert!(matches!(r, Err(Failure::Invalid(_))), "segment {k}, offset {value} for {good}: {r:?}");
+            }
+        }
+    }
 }
