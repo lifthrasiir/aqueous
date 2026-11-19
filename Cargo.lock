@@ -1148,6 +1148,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "xxhash-rust",
  "zstd",
 ]
