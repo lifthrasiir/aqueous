@@ -1436,6 +1436,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "zstd",
 ]
 
@@ -1556,6 +1557,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "aqr-vorbis",
 ]
 

@@ -100,6 +100,12 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     }
     // (the output first: all else is freed above it, last made first)
     let len = usize::try_from(len).map_err(|_| corrupt())?;
+    // (a page takes a byte of the layout at least, and its header, lacing values and body of
+    // the packets fill the file: a length over that is no file's)
+    let most = layout.len().saturating_mul(page::HEADER + 255).saturating_add(packets.len());
+    if len > most {
+        return Err(corrupt());
+    }
     let mut out = Vec::with_capacity(len);
     // (the CRC's tables now, not at the first page: the plan has them here)
     crc::init();

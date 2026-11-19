@@ -338,7 +338,8 @@ impl Layout {
         };
         let most = len / HEADER as u64;
         let n = get(&mut at)?;
-        if n == 0 || n > most {
+        // (a stream takes 6 bytes of the record at least)
+        if n == 0 || n > most || n > (d.len() - at) as u64 / 6 {
             return Err(corrupt());
         }
         let mut streams = Vec::with_capacity(n as usize);
@@ -371,7 +372,8 @@ impl Layout {
             streams.push(Stream { serial, bytes, open: flags & 1 != 0, predictor });
         }
         let n = get(&mut at)?;
-        if n > most {
+        // (a page takes 5 bytes of the record at least)
+        if n > most || n > (d.len() - at) as u64 / 5 {
             return Err(corrupt());
         }
         let n = n as usize;

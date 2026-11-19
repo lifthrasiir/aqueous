@@ -18,6 +18,7 @@ aqr-vorbis = { path = "../aqr-vorbis", optional = true }
 
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
