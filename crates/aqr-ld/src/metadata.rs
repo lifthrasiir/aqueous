@@ -15,9 +15,12 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-/// Whether aqr-ld is run as a wrapper of rustc: Cargo gives the path of rustc first.
+/// Whether aqr-ld is run as a wrapper of rustc: Cargo gives the path of rustc first. Its last
+/// component is cut at either separator, as `Path` takes only `/` outside Windows.
 pub fn is_wrapper(args: &[OsString]) -> bool {
-    args.first().and_then(|a| Path::new(a).file_stem()).is_some_and(|s| s == "rustc")
+    let Some(a) = args.first().map(|a| a.to_string_lossy()) else { return false };
+    let name = a.rsplit(['/', '\\']).next().unwrap_or(&a);
+    Path::new(name).file_stem().is_some_and(|s| s == "rustc")
 }
 
 /// FNV-1a of 64 bits, each key ended by a byte that no UTF-8 string has.
