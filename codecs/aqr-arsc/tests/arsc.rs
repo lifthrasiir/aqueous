@@ -304,3 +304,222 @@ fn corrupt() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Damaged tables and streams, long strings, other chunk layouts, declared sizes
+
+#[global_allocator]
+static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 30);
+
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A table of `body`.
+fn table(body: &[u8]) -> Vec<u8> {
+    chunk(0x0002, &1u32.to_le_bytes(), body)
+}
+
+/// A table taken is rebuilt as it is; nothing is reserved that it cannot hold.
+fn taken_or_not(d: &[u8]) {
+    let _ = formula::extent(d);
+    if let Some(f) = formula::encode(d, 1) {
+        assert!(eval(&f).unwrap() == d, "taken but not rebuilt");
+    }
+    assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+}
+
+#[test]
+fn damaged_tables() {
+    for seed in [3, 8] {
+        let (d, _) = write(seed, Shape::default());
+        aqr_testkit::damaged(&d, 300, 400, LIMIT, taken_or_not);
+    }
+}
+
+#[test]
+fn damaged_streams() {
+    let (d, _) = write(3, Shape::default());
+    let st = encode::split(&d).unwrap();
+    for k in 0..st.len() {
+        aqr_testkit::damaged(&st[k], 150, 150, LIMIT, |v| {
+            let mut bad = st.clone();
+            bad[k] = v.to_vec();
+            let refs: Vec<&[u8]> = bad.iter().map(|x| x.as_slice()).collect();
+            if let Ok(m) = formula::decode(&[], &refs, d.len() as u64) {
+                assert_eq!(m.len(), d.len());
+            }
+            assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+        });
+    }
+}
+
+/// Lengths of the file the streams do not make.
+#[test]
+fn lengths_declared() {
+    let (d, _) = write(3, Shape::default());
+    let st = encode::split(&d).unwrap();
+    let refs: Vec<&[u8]> = st.iter().map(|x| x.as_slice()).collect();
+    for len in [0, 1, 11, 12, d.len() as u64 - 1, d.len() as u64 + 1, u32::MAX as u64, u64::MAX] {
+        aqr_testkit::case(&format!("length {len}"));
+        assert!(formula::decode(&[], &refs, len).is_err(), "{len}");
+        assert!(aqr_testkit::most() < 1 << 28, "{len}: {} bytes reserved", aqr_testkit::most());
+    }
+}
+
+/// `check` for tables that may be kept whole.
+fn check_any(d: &[u8]) -> Vec<Vec<u8>> {
+    let st = encode::split(d).expect("taken");
+    let refs: Vec<&[u8]> = st.iter().map(|v| v.as_slice()).collect();
+    assert!(arsc::decode(&refs, d.len()).unwrap() == d);
+    st
+}
+
+/// A UTF-16 pool of `strings` whose lengths are written as the format does (two units from
+/// 0x8000), with no styles.
+fn pool16(strings: &[String]) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut offs = Vec::new();
+    for s in strings {
+        offs.push(data.len() as u32);
+        let u: Vec<u16> = s.encode_utf16().collect();
+        if u.len() < 0x8000 {
+            data.extend_from_slice(&(u.len() as u16).to_le_bytes());
+        } else {
+            data.extend_from_slice(&(0x8000 | (u.len() >> 16) as u16).to_le_bytes());
+            data.extend_from_slice(&(u.len() as u16).to_le_bytes());
+        }
+        for x in u {
+            data.extend_from_slice(&x.to_le_bytes());
+        }
+        data.extend_from_slice(&[0, 0]);
+    }
+    while data.len() % 4 != 0 {
+        data.push(0);
+    }
+    let strings_start = 28 + 4 * strings.len();
+    let mut h = Vec::new();
+    for v in [strings.len() as u32, 0, 0, strings_start as u32, 0] {
+        h.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut body: Vec<u8> = offs.iter().flat_map(|o| o.to_le_bytes()).collect();
+    body.extend_from_slice(&data);
+    chunk(0x0001, &h, &body)
+}
+
+/// A table's pool of strings of two-byte lengths in both encodings, and ones too long for the
+/// format's lengths, which are kept as they are.
+#[test]
+fn long_strings() {
+    let long8: String = "a".repeat(0x90);
+    let longest8: String = "b".repeat(0x7fff);
+    let too_long8: String = "c".repeat(0x8000);
+    for strings in [vec![long8.clone(), "x".into()], vec![longest8.clone()], vec![too_long8.clone()]] {
+        let d = table(&pool(&strings, true, 0, false));
+        let st = check_any(&d);
+        let text = streams(&st)[s::TEXT].len();
+        let raw = streams(&st)[s::RAW].len();
+        if strings[0].len() < 0x8000 {
+            assert!(text >= strings[0].len() && raw == 0, "taken: {text} {raw}");
+        } else {
+            assert!(text == 0 && raw > 0x8000, "kept: {text} {raw}");
+        }
+    }
+    // UTF-16 strings of 0x7fff and 0x8000 units, and 70000 (a length in two units)
+    for n in [0x7fffusize, 0x8000, 70000] {
+        let d = table(&pool16(&["e".repeat(n)]));
+        let st = check_any(&d);
+        assert!(streams(&st)[s::TEXT16].len() == 2 * n + 2, "{n}");
+    }
+}
+
+/// Type chunks of the sparse and 16-bit offset layouts (flags of the type chunk's header) are
+/// not what the module rebuilds: kept as they are.
+#[test]
+fn sparse_and_offset16() {
+    let (d, _) = write(5, Shape::default());
+    let plain = streams(&check(&d))[s::RAW].len();
+    // (type chunks: type 0x0201, the header's 84 bytes)
+    let at: Vec<usize> = (0..d.len() - 4).filter(|&p| d[p..p + 4] == [1, 2, 84, 0]).collect();
+    assert!(at.len() >= 3);
+    for flags in [1u8, 2, 3, 0x80] {
+        let mut v = d.clone();
+        v[at[0] + 9] = flags;
+        let st = check_any(&v);
+        assert!(streams(&st)[s::RAW].len() > plain, "flags {flags}");
+        taken_or_not(&v);
+    }
+}
+
+/// Counts and sizes in the head stream beyond what a file can hold are refused, not reserved.
+#[test]
+fn declared_sizes_in_the_head() {
+    let mut head = Vec::new();
+    head.extend_from_slice(&arsc::ty::TABLE.to_le_bytes());
+    head.extend_from_slice(&8u16.to_le_bytes());
+    head.extend_from_slice(&u32::MAX.to_le_bytes());
+    head.push(arsc::mode::CONTAINER);
+    let size = u32::MAX / 300;
+    for k in 0..300usize {
+        head.extend_from_slice(&arsc::ty::TYPE.to_le_bytes());
+        head.extend_from_slice(&20u16.to_le_bytes());
+        head.extend_from_slice(&size.to_le_bytes());
+        head.extend_from_slice(&[(k % 256) as u8, 0, 0, 0]);
+        head.extend_from_slice(&(size / 4).to_le_bytes());
+        head.extend_from_slice(&[0; 4]);
+        head.push(arsc::mode::TYPE);
+    }
+    let mut st = vec![Vec::new(); s::N];
+    st[s::HEAD] = head;
+    let inputs = arsc::pack(&st);
+    let refs: Vec<&[u8]> = inputs.iter().map(|v| v.as_slice()).collect();
+    for len in [8usize, 1 << 20, u32::MAX as usize] {
+        aqr_testkit::case(&format!("heads for a file of {len}"));
+        assert!(arsc::decode(&refs, len).is_err());
+        assert!(aqr_testkit::most() < 1 << 28, "{len}: {} bytes reserved", aqr_testkit::most());
+    }
+}
+
+/// Type chunks each holding the most entries its size can, of a file of 4 GiB declared whose
+/// streams hold nothing: refused, with no room for the file or the entries reserved first.
+#[test]
+fn entries_of_many_types_declared() {
+    let each = 0x7fff_fff0u32;
+    let mut head = Vec::new();
+    head.extend_from_slice(&arsc::ty::TABLE.to_le_bytes());
+    head.extend_from_slice(&8u16.to_le_bytes());
+    head.extend_from_slice(&(8 + 2 * each).to_le_bytes());
+    head.push(arsc::mode::CONTAINER);
+    for k in 0..2u32 {
+        head.extend_from_slice(&arsc::ty::TYPE.to_le_bytes());
+        head.extend_from_slice(&20u16.to_le_bytes());
+        head.extend_from_slice(&each.to_le_bytes());
+        head.extend_from_slice(&[k as u8 + 1, 0, 0, 0]);
+        head.extend_from_slice(&(each / 4).to_le_bytes());
+        head.extend_from_slice(&[0; 4]);
+        head.push(arsc::mode::TYPE);
+    }
+    let mut st = vec![Vec::new(); s::N];
+    st[s::HEAD] = head;
+    let inputs = arsc::pack(&st);
+    let refs: Vec<&[u8]> = inputs.iter().map(|v| v.as_slice()).collect();
+    aqr_testkit::case("many entries");
+    assert!(arsc::decode(&refs, 8 + 2 * each as usize).is_err());
+    assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
+}
+
+/// A head declaring one raw chunk of 4 GiB (its bytes absent) is refused without the room for
+/// the file reserved.
+#[test]
+fn file_of_gigabytes_declared() {
+    let mut head = Vec::new();
+    head.extend_from_slice(&arsc::ty::TABLE.to_le_bytes());
+    head.extend_from_slice(&12u16.to_le_bytes());
+    head.extend_from_slice(&(u32::MAX - 3).to_le_bytes());
+    head.extend_from_slice(&[0; 4]);
+    head.push(arsc::mode::RAW);
+    let mut st = vec![Vec::new(); s::N];
+    st[s::HEAD] = head;
+    let inputs = arsc::pack(&st);
+    let refs: Vec<&[u8]> = inputs.iter().map(|v| v.as_slice()).collect();
+    aqr_testkit::case("4 GiB");
+    assert!(arsc::decode(&refs, u32::MAX as usize - 3).is_err());
+}

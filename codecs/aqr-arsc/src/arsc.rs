@@ -321,9 +321,16 @@ pub fn decode_plan(head: &[u8], len: u64) -> Option<u64> {
 /// The file of `len` bytes from the module's inputs ([`INPUTS`], FORMAT.md §3).
 pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
     let r = readers(inputs)?;
-    let seen = Flat::new(&type_entries(r[s::HEAD].rest(), len)?);
+    let most = type_entries(r[s::HEAD].rest(), len)?;
+    // (each entry of a type chunk, present or not, is a byte of `present`)
+    if most.iter().map(|&m| m as u64).sum::<u64>() > r[s::PRESENT].rest().len() as u64 {
+        return Err(corrupt());
+    }
+    let seen = Flat::new(&most);
     let mut d = Dec { r, seen, last_str: 0 };
-    let mut out = Vec::with_capacity(len);
+    // (a file's length is the application's word, not the streams': room refused is corrupt)
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| corrupt())?;
     while out.len() < len {
         chunk(&mut d, &mut out, len, 0)?;
     }

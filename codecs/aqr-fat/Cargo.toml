@@ -11,6 +11,7 @@ aqr-disk = { path = "../aqr-disk" }
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
