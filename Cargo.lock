@@ -1614,6 +1614,7 @@ dependencies = [
  "encoding_rs",
  "getrandom",
  "liblzma",
+ "memmap2",
  "zstd",
 ]
 

@@ -395,6 +395,15 @@ aqr_common::zopt! {
     static PAR_MIN: Opt<usize> = Opt::size("png:par-min", 1 << 16, "files smaller are handled on one thread");
 }
 
+/// The layout codes the data length in 32 bits.
+#[cfg(feature = "encode")]
+fn check_data_len(len: usize) -> Result<()> {
+    if len as u64 > u64::from(u32::MAX) {
+        return Err(Error::Unsupported("image data of 4 GiB or more"));
+    }
+    Ok(())
+}
+
 /// Appends the record of a coded image to `rec`, against `reference` if given.
 #[cfg(feature = "encode")]
 fn image_record(
@@ -407,10 +416,7 @@ fn image_record(
     let g = Geometry::new(ih).ok_or(Error::Unsupported("bad image header"))?;
     let kind = if ih.depth == 8 && matches!(ih.color, 0 | 2 | 4 | 6) { Kind::Image } else { Kind::Bytes };
     let enc = model::encode_threads(kind, &g, payload, threads, reference)?;
-    // The layout codes the data length in 32 bits.
-    if enc.len > u32::MAX as usize {
-        return Err(Error::Unsupported("image data of 4 GiB or more"));
-    }
+    check_data_len(enc.len)?;
     if crate::DEBUG.get() {
         eprintln!("  {} zlib streams, {} bytes of data", enc.streams.len(), enc.len);
     }
@@ -1123,6 +1129,20 @@ pub(crate) mod common;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The data length of a record is 32 bits: 4 GiB - 1 is the most, a byte more is refused.
+    #[cfg(feature = "encode")]
+    #[test]
+    fn data_len_limit() {
+        assert!(check_data_len(0).is_ok());
+        assert!(check_data_len(u32::MAX as usize).is_ok());
+        #[cfg(target_pointer_width = "64")]
+        {
+            let e = check_data_len(u32::MAX as usize + 1).unwrap_err();
+            assert!(matches!(e, Error::Unsupported(_)), "{e}");
+            assert!(check_data_len(usize::MAX).is_err());
+        }
+    }
 
     /// The references a file's rebuild keeps are those parsed of it: of images coded (frames
     /// among them, also on threads) and kept as they are.

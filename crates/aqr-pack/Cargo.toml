@@ -24,3 +24,4 @@ zstd = { workspace = true, features = ["zstdmt"] }
 
 [dev-dependencies]
 aqr-unpack = { path = "../aqr-unpack" }
+memmap2 = "0.9"
