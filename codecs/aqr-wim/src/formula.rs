@@ -6,9 +6,8 @@
 //! (a WIM file in it is one). `FORMAT.md` tells of the streams.
 
 use std::ops::Range;
-use std::sync::Mutex;
 
-use aqr_formula::store::{Buffer, Writer};
+use aqr_formula::store::Writer;
 use aqr_formula::{Bytes, Formula, Kind, Node};
 use aqr_lzx::formula::Stream;
 
@@ -58,6 +57,15 @@ pub fn encode_shared(input: &Bytes, threads: usize) -> Option<Formula> {
 }
 
 fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<Formula> {
+    // (the bytes shared, or a copy of them: the data is made again of them)
+    let owned;
+    let (whole, input) = match shared {
+        Some(b) => (b, input),
+        None => {
+            owned = Bytes::from(input.to_vec());
+            (&owned, &owned[..])
+        }
+    };
     let w = wim::parse(input)?;
     // the streams of chunks of each resource, of at most [`STREAM_CHUNKS`], and the resources of
     // no compression
@@ -81,50 +89,20 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
     let lens: Vec<usize> = (0..parts.len())
         .map(|i| if stored(i) { parts[i].span.len() } else { aqr_lzx::recons::data_len(&parts[i].chunks) })
         .collect();
-    // the data of each application, and of each resource of no compression, a stream of `raw`
-    // (let go of as its contents are made of it: aqr-compress's make_later), laid out as if
-    // every part is taken: a buffer of each (of the store where one is set: aqr-compress's spill,
-    // see aqr_formula::store), each part's data written in its place. (Buffers of each part's
-    // own, joined after, took 2 s more of boot.wim's 12.)
-    let all: Vec<usize> = (0..parts.len()).collect();
+    // the data of each application, and of each resource of no compression, a stream of `raw`:
+    // not held but made again from its chunks where it is needed, so that only the parts being
+    // split are held (a file claiming 2048 times its size is not planned as buffers at once)
     let spans: Vec<Range<usize>> = parts.iter().map(|p| p.span.clone()).collect();
-    let planned = groups(&all, stored, &lens, &spans);
-    // (where the bytes are shared, each part's data only while its record is made)
-    let mut buffers: Vec<Option<Buffer>> = match shared {
-        None => planned.iter().map(|g| Some(Buffer::new(g.iter().map(|&i| lens[i]).sum()))).collect(),
-        Some(_) => Vec::new(),
-    };
-    let mut outs: Vec<Mutex<Option<&mut [u8]>>> = (0..parts.len()).map(|_| Mutex::new(None)).collect();
-    for (g, b) in planned.iter().zip(&mut buffers) {
-        let mut left = &mut b.as_mut().expect("a buffer")[..];
-        for &i in g {
-            let (a, b) = std::mem::take(&mut left).split_at_mut(lens[i]);
-            *outs[i].get_mut().unwrap() = Some(a);
-            left = b;
-        }
-    }
     let records = aqr_common::pool::par_map(parts.len(), threads, |i| {
-        let mut own;
-        let out = match outs[i].lock().unwrap().take() {
-            Some(out) => out,
-            None if stored(i) => return Some(Vec::new()),
-            None => {
-                own = vec![0; lens[i]];
-                &mut own[..]
-            }
-        };
         if stored(i) {
-            out.copy_from_slice(&input[parts[i].span.clone()]);
             return Some(Vec::new());
         }
-        aqr_lzx::recons::split_into(&parts[i].chunks, out).ok()
+        let mut own = vec![0; lens[i]];
+        aqr_lzx::recons::split_into(&parts[i].chunks, &mut own).ok()
     });
-    drop(outs);
-    // (the chunks read through where the bytes are shared: of a file mapped, its pages let go
-    // of, read again as the data is made again of them)
-    if shared.is_some() {
-        parts.iter().flat_map(|p| &p.chunks).for_each(|&(c, _)| aqr_formula::store::let_go(c));
-    }
+    // (the chunks read through: of a file mapped, its pages let go of, read again as the data
+    // is made again of them)
+    parts.iter().flat_map(|p| &p.chunks).for_each(|&(c, _)| aqr_formula::store::let_go(c));
     // a resource of a stream not split kept whole, with the bytes around it
     let mut taken = vec![true; w.resources.len()];
     for (p, r) in parts.iter().zip(&records) {
@@ -134,17 +112,9 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
         return None;
     }
 
-    // laid out again of the parts taken: a buffer as planned kept, else the data copied
+    // laid out of the parts taken
     let kept: Vec<usize> = (0..parts.len()).filter(|&i| taken[parts[i].resource]).collect();
     let laid = groups(&kept, stored, &lens, &spans);
-    let (mut planned_of, mut planned_at) = (vec![0; parts.len()], vec![0; parts.len()]);
-    for (k, g) in planned.iter().enumerate() {
-        let mut at = 0;
-        for &i in g {
-            (planned_of[i], planned_at[i]) = (k, at);
-            at += lens[i];
-        }
-    }
     let (mut group_of, mut offset) = (vec![usize::MAX; parts.len()], vec![0; parts.len()]);
     let mut data: Vec<Option<Bytes>> = Vec::with_capacity(laid.len());
     for (k, g) in laid.iter().enumerate() {
@@ -153,29 +123,12 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
             (group_of[i], offset[i]) = (k, at);
             at += lens[i];
         }
-        if let Some(whole) = shared {
-            data.push(Some(match stored(g[0]) {
-                // (a run of them, one right after another in the file)
-                true => whole.slice(spans[g[0]].start..spans[g[g.len() - 1]].end),
-                false => made_again(whole, input, g.iter().map(|&i| &parts[i].chunks[..]), at),
-            }));
-            continue;
-        }
-        let p = planned_of[g[0]];
-        let d = match planned[p] == *g {
-            true => buffers[p].take().expect("a buffer as planned").into_bytes(),
-            false => {
-                let mut d = Writer::new(Some(at));
-                for &i in g {
-                    let from = buffers[planned_of[i]].as_ref().expect("a buffer as planned");
-                    d.write(&from[planned_at[i]..][..lens[i]]);
-                }
-                d.into_bytes()
-            }
-        };
-        data.push(Some(d));
+        data.push(Some(match stored(g[0]) {
+            // (a run of them, one right after another in the file)
+            true => whole.slice(spans[g[0]].start..spans[g[g.len() - 1]].end),
+            false => made_again(whole, input, g.iter().map(|&i| &parts[i].chunks[..]), at),
+        }));
     }
-    drop(buffers);
 
     // the first stream of `raw` stream 0 (an empty one where none is taken), the others after
     // the rest, stream 1, as the archive puts the streams of a class together in the order of
@@ -260,6 +213,10 @@ fn encode_as(input: &[u8], shared: Option<&Bytes>, threads: usize) -> Option<For
     f.streams[1].data = rest.into();
     f.root = Node::concat(nodes);
     debug_assert_eq!(f.root.len(), input.len() as u64);
+    if shared.is_none() {
+        // (the data held, of the parts that were split: the whole of what they gave)
+        f.streams.iter_mut().for_each(|s| s.data = s.data.made());
+    }
     Some(f)
 }
 
