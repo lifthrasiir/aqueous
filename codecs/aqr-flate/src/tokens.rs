@@ -70,9 +70,7 @@ pub struct Rule {
 
 pub const MAX_WAYS: u8 = 8;
 /// Search depths of [`Kind::Chain`], by [`Rule::depth`].
-pub const DEPTHS: [u16; 16] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
-];
+pub const DEPTHS: [u16; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
 /// Nice lengths of [`Kind::Chain`], by [`Rule::nice`].
 pub const NICES: [u16; 8] = [8, 16, 24, 32, 64, 128, 192, 258];
 /// [`Rule::inner`]: every position is inserted.
@@ -105,11 +103,7 @@ impl std::fmt::Display for Rule {
             Kind::Literals => return f.write_str("literals"),
             Kind::Runs => return write!(f, "runs,min={}", self.min_len),
             Kind::Chain => {
-                return write!(
-                    f,
-                    "chain,depth={},nice={}",
-                    DEPTHS[self.depth as usize], NICES[self.nice as usize]
-                );
+                return write!(f, "chain,depth={},nice={}", DEPTHS[self.depth as usize], NICES[self.nice as usize]);
             }
             Kind::Search => {}
         }
@@ -207,11 +201,7 @@ impl Rule {
             && self.min_len >= 3
             && (self.far_len == 0 || self.far_len >= 3)
             && (1..=WINDOW as u16).contains(&self.window);
-        if ok {
-            Ok(())
-        } else {
-            Err(Error::Param(format!("rule out of range: {self:?}")))
-        }
+        if ok { Ok(()) } else { Err(Error::Param(format!("rule out of range: {self:?}"))) }
     }
 
     /// Writes the rule: its kind in 2 bits, then for [`Kind::Chain`] the depth and nice
@@ -320,14 +310,7 @@ impl Rule {
                 } else if l < self.min_len as usize {
                     (lit, 1)
                 } else {
-                    (
-                        Token::Match {
-                            len: l as u16,
-                            dist: 1,
-                            alt258: false,
-                        },
-                        1,
-                    )
+                    (Token::Match { len: l as u16, dist: 1, alt258: false }, 1)
                 }
             }
             Kind::Chain => {
@@ -335,14 +318,7 @@ impl Rule {
                 if len < 3 {
                     return (lit, 0);
                 }
-                (
-                    Token::Match {
-                        len: len as u16,
-                        dist: dist as u16,
-                        alt258: false,
-                    },
-                    1,
-                )
+                (Token::Match { len: len as u16, dist: dist as u16, alt258: false }, 1)
             }
             Kind::Search => {
                 let window = self.window as usize;
@@ -350,9 +326,7 @@ impl Rule {
                 if len < 3 {
                     return (lit, 0);
                 }
-                if len < self.min_len as usize
-                    || (len <= self.far_len as usize && dist > self.far_dist as usize)
-                {
+                if len < self.min_len as usize || (len <= self.far_len as usize && dist > self.far_dist as usize) {
                     return (lit, 1);
                 }
                 if len < self.lazy as usize && p + 1 < d.len() {
@@ -361,14 +335,7 @@ impl Rule {
                         return (lit, 1);
                     }
                 }
-                (
-                    Token::Match {
-                        len: len as u16,
-                        dist: dist as u16,
-                        alt258: false,
-                    },
-                    1,
-                )
+                (Token::Match { len: len as u16, dist: dist as u16, alt258: false }, 1)
             }
         }
     }
@@ -486,9 +453,7 @@ pub fn code_range<C: Corr>(
     match rule.kind {
         Kind::Search => {}
         Kind::Chain => {
-            return go!(ChainTable::new(
-                d, range.pos, range.end, rule.depth, rule.nice
-            ));
+            return go!(ChainTable::new(d, range.pos, range.end, rule.depth, rule.nice));
         }
         _ => return go!(NoTable),
     }
@@ -501,20 +466,12 @@ pub fn code_range<C: Corr>(
     }
     macro_rules! by_long {
         ($w:literal, $k:literal) => {
-            if long > 0 {
-                table!($w, $k, true)
-            } else {
-                table!($w, $k, false)
-            }
+            if long > 0 { table!($w, $k, true) } else { table!($w, $k, false) }
         };
     }
     macro_rules! by_key {
         ($w:literal) => {
-            if rule.key == 4 {
-                by_long!($w, 4)
-            } else {
-                by_long!($w, 3)
-            }
+            if rule.key == 4 { by_long!($w, 4) } else { by_long!($w, 3) }
         };
     }
     match rule.ways {
@@ -560,11 +517,7 @@ fn code_with<C: Corr, T: Search + ?Sized>(
                 if c.lookahead()
                     && let Token::Match { .. } = pred
                 {
-                    let next = if p + 1 < n {
-                        t.peek(d, p + 1, rule.window as usize).0
-                    } else {
-                        0
-                    };
+                    let next = if p + 1 < n { t.peek(d, p + 1, rule.window as usize).0 } else { 0 };
                     c.next_len(next);
                 }
                 (pred, class)
@@ -619,19 +572,11 @@ pub fn code_chains<C: Corr>(
             let (pred, class) = if f.len < 3 {
                 (Token::Lit(d[p]), 0)
             } else {
-                let m = Token::Match {
-                    len: f.len as u16,
-                    dist: f.dist as u16,
-                    alt258: false,
-                };
+                let m = Token::Match { len: f.len as u16, dist: f.dist as u16, alt258: false };
                 (m, 1)
             };
             if class == 1 && c.lookahead() {
-                let len = if p + 1 < n {
-                    next.get_or_insert_with(|| t.search(d, p + 1))[i].len
-                } else {
-                    0
-                };
+                let len = if p + 1 < n { next.get_or_insert_with(|| t.search(d, p + 1))[i].len } else { 0 };
                 c.next_len(if len < 3 { 0 } else { len });
             }
             let tok = c.token(&mut t, d, p, pred, class, Some(a))?;
@@ -767,15 +712,7 @@ impl Corr for Recorder {
 impl Recorder {
     /// Records a miss (kept out of line: hits are the common case).
     #[inline(never)]
-    fn miss(
-        &mut self,
-        t: &mut dyn Cands,
-        d: &[u8],
-        p: usize,
-        pred: Token,
-        class: usize,
-        a: Token,
-    ) -> Result<Token> {
+    fn miss(&mut self, t: &mut dyn Cands, d: &[u8], p: usize, pred: Token, class: usize, a: Token) -> Result<Token> {
         self.counts[GAP + class].add(self.hits[class]);
         let gap = self.hits[class];
         self.hits[class] = 0;
@@ -792,15 +729,7 @@ impl Recorder {
     }
 
     #[inline]
-    fn payload(
-        &mut self,
-        t: &mut dyn Cands,
-        d: &[u8],
-        p: usize,
-        pred: Token,
-        class: usize,
-        a: Token,
-    ) {
+    fn payload(&mut self, t: &mut dyn Cands, d: &[u8], p: usize, pred: Token, class: usize, a: Token) {
         payload(t, d, p, pred, class, a, |f, v| self.put(f, v));
     }
 }
@@ -836,9 +765,7 @@ pub fn payload(
     put(DIST_IDX, i);
     if i == 0 {
         if t.ranked() {
-            let r = t
-                .rank(d, p, len as usize, dist as usize, RANK_LIMIT)
-                .map_or(0, |r| r as u32 + 1);
+            let r = t.rank(d, p, len as usize, dist as usize, RANK_LIMIT).map_or(0, |r| r as u32 + 1);
             put(DIST_RANK, r);
             if r > 0 {
                 return;
@@ -858,11 +785,7 @@ pub struct Player<'a> {
 }
 
 impl<'a> Player<'a> {
-    pub fn new(
-        buf: &'a [u8],
-        models: &'a [code::Model; FIELDS],
-        misses: [usize; 2],
-    ) -> Result<Self> {
+    pub fn new(buf: &'a [u8], models: &'a [code::Model; FIELDS], misses: [usize; 2]) -> Result<Self> {
         let mut r = code::Reader::new(buf)?;
         let mut gap = [0; 2];
         for c in 0..2 {
@@ -870,12 +793,7 @@ impl<'a> Player<'a> {
                 gap[c] = r.get(&models[GAP + c])?;
             }
         }
-        Ok(Player {
-            r,
-            models,
-            misses,
-            gap,
-        })
+        Ok(Player { r, models, misses, gap })
     }
 
     /// Whether every correction has been used.
@@ -909,14 +827,7 @@ impl Corr for Player<'_> {
 impl Player<'_> {
     /// Reads a miss's correction (kept out of line: hits are the common case).
     #[inline(never)]
-    fn miss(
-        &mut self,
-        t: &mut dyn Cands,
-        d: &[u8],
-        p: usize,
-        pred: Token,
-        class: usize,
-    ) -> Result<Token> {
+    fn miss(&mut self, t: &mut dyn Cands, d: &[u8], p: usize, pred: Token, class: usize) -> Result<Token> {
         let (r, models) = (&mut self.r, self.models);
         let tok = read_miss(t, d, p, pred, class, None, |f| r.get(&models[f]))?;
         self.misses[class] -= 1;
@@ -962,9 +873,7 @@ pub fn read_miss(
         (0, _) => match (if t.ranked() { get(DIST_RANK)? } else { 0 }, known) {
             (0, _) => get(DIST_RAW)? as usize + 1,
             (_, Some(Token::Match { dist, .. })) => dist as usize,
-            (k, _) => t
-                .select(d, p, len, k as usize - 1, RANK_LIMIT)
-                .ok_or(Error::Corrupt)?,
+            (k, _) => t.select(d, p, len, k as usize - 1, RANK_LIMIT).ok_or(Error::Corrupt)?,
         },
         (_, Some(Token::Match { dist, .. })) => dist as usize,
         (i, _) => {
@@ -975,20 +884,12 @@ pub fn read_miss(
     if !valid(d, p, len, dist) {
         return Err(Error::Corrupt);
     }
-    Ok(Token::Match {
-        len: len as u16,
-        dist: dist as u16,
-        alt258,
-    })
+    Ok(Token::Match { len: len as u16, dist: dist as u16, alt258 })
 }
 
 /// Whether `d[p - dist..]` matches `d[p..]` for `len` bytes, within DEFLATE's window.
 fn valid(d: &[u8], p: usize, len: usize, dist: usize) -> bool {
-    dist >= 1
-        && dist <= p
-        && dist <= WINDOW
-        && p + len <= d.len()
-        && common(d, p - dist, p, len) == len
+    dist >= 1 && dist <= p && dist <= WINDOW && p + len <= d.len() && common(d, p - dist, p, len) == len
 }
 
 #[cfg(test)]
@@ -1000,12 +901,7 @@ mod tests {
     fn rule_numbers_out_of_range() {
         let ok: Rule = "key=3,ways=2".parse().unwrap();
         assert_eq!((ok.key, ok.ways), (3, 2));
-        for bad in [
-            "key=259,ways=2",
-            "key=3,ways=257",
-            "key=3,ways=2,long=257",
-            "key=3,ways=2,min=260",
-        ] {
+        for bad in ["key=259,ways=2", "key=3,ways=257", "key=3,ways=2,long=257", "key=3,ways=2,min=260"] {
             assert!(bad.parse::<Rule>().is_err(), "{bad}");
         }
         for bad in ["key=3,ways=2,margin=256", "key=3,ways=2,far,farlen=259"] {

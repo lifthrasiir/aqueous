@@ -29,11 +29,7 @@ pub fn bucket(v: u32) -> (usize, u32, u32) {
     let nb = 32 - v.leading_zeros(); // >= 5
     let second = (v >> (nb - 2)) & 1;
     let extra = nb - 2;
-    (
-        DIRECT as usize + (nb as usize - 5) * 2 + second as usize,
-        extra,
-        v & ((1 << extra) - 1),
-    )
+    (DIRECT as usize + (nb as usize - 5) * 2 + second as usize, extra, v & ((1 << extra) - 1))
 }
 
 /// Inverse of [`bucket`]: the value of symbol `sym` with extra bits `x`.
@@ -50,11 +46,7 @@ pub fn unbucket(sym: usize, x: u32) -> u32 {
 
 #[inline]
 pub fn extra_bits(sym: usize) -> u32 {
-    if sym < DIRECT as usize {
-        0
-    } else {
-        ((sym - DIRECT as usize) / 2 + 3) as u32
-    }
+    if sym < DIRECT as usize { 0 } else { ((sym - DIRECT as usize) / 2 + 3) as u32 }
 }
 
 pub fn put_gamma(w: &mut BitWriter, v: u64) {
@@ -192,13 +184,7 @@ impl Enc {
     fn new(start: u32, freq: u32) -> Enc {
         let x_max = ((RANS_L >> PROB_BITS) << 8) * freq;
         if freq == 1 {
-            return Enc {
-                rcp: u32::MAX,
-                shift: 0,
-                bias: start + TOTAL - 1,
-                cmpl: TOTAL - 1,
-                x_max,
-            };
+            return Enc { rcp: u32::MAX, shift: 0, bias: start + TOTAL - 1, cmpl: TOTAL - 1, x_max };
         }
         let shift = 32 - (freq - 1).leading_zeros();
         Enc {
@@ -244,9 +230,7 @@ impl Model {
         if sum > 0 {
             // Make them sum to TOTAL, on the most frequent symbol.
             let total: u32 = freq.iter().sum();
-            let big = (0..ALPHABET)
-                .max_by_key(|&s| (freq[s], usize::MAX - s))
-                .unwrap();
+            let big = (0..ALPHABET).max_by_key(|&s| (freq[s], usize::MAX - s)).unwrap();
             freq[big] = freq[big] + TOTAL - total;
         }
         let mut cum = [0u32; ALPHABET + 1];
@@ -270,13 +254,7 @@ impl Model {
                 enc[s] = Enc::new(cum[s], freq[s]);
             }
         }
-        Model {
-            freq,
-            cum,
-            q,
-            lut,
-            enc,
-        }
+        Model { freq, cum, q, lut, enc }
     }
 
     /// The rounded frequencies: whether there are any, the last symbol used, then for every
@@ -301,9 +279,7 @@ impl Model {
     fn table_bits(&self) -> f64 {
         match self.q.iter().rposition(|&q| q > 0) {
             None => 1.0,
-            Some(last) => {
-                8.0 + (last + 1) as f64 + 6.0 * self.q.iter().filter(|&&q| q > 0).count() as f64
-            }
+            Some(last) => 8.0 + (last + 1) as f64 + 6.0 * self.q.iter().filter(|&&q| q > 0).count() as f64,
         }
     }
 
@@ -346,28 +322,18 @@ impl Model {
     pub fn from_distribution(p: &[f64]) -> Model {
         let mut q = [0u8; ALPHABET];
         for (x, &p) in q.iter_mut().zip(p) {
-            *x = 1
-                + (2.0 * (p * (1u64 << 24) as f64).max(1.0).log2())
-                    .round()
-                    .min(62.0) as u8;
+            *x = 1 + (2.0 * (p * (1u64 << 24) as f64).max(1.0).log2()).round().min(62.0) as u8;
         }
         Model::from_q(q)
     }
 
     /// The rounded frequencies as text (see [`Model::parse`]).
     pub fn to_text(&self) -> String {
-        self.q
-            .iter()
-            .map(|q| q.to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
+        self.q.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(" ")
     }
 
     pub fn parse(s: &str) -> Option<Model> {
-        let v: Vec<u8> = s
-            .split_whitespace()
-            .map(|x| x.parse().ok())
-            .collect::<Option<_>>()?;
+        let v: Vec<u8> = s.split_whitespace().map(|x| x.parse().ok()).collect::<Option<_>>()?;
         Model::from_qs(&v)
     }
 
@@ -379,9 +345,7 @@ impl Model {
     /// A default model of [`Model::qs`] `q`, if every symbol has one in 1 to 63.
     pub fn from_qs(q: &[u8]) -> Option<Model> {
         let q: [u8; ALPHABET] = q.try_into().ok()?;
-        q.iter()
-            .all(|q| (1..=63).contains(q))
-            .then(|| Model::from_q(q))
+        q.iter().all(|q| (1..=63).contains(q)).then(|| Model::from_q(q))
     }
 
     /// Every symbol equally likely.
@@ -393,9 +357,7 @@ impl Model {
     pub fn bits(&self, c: &Counts) -> f64 {
         (0..ALPHABET)
             .filter(|&s| c.0[s] > 0)
-            .map(|s| {
-                c.0[s] as f64 * ((TOTAL as f64 / self.freq[s] as f64).log2() + extra_bits(s) as f64)
-            })
+            .map(|s| c.0[s] as f64 * ((TOTAL as f64 / self.freq[s] as f64).log2() + extra_bits(s) as f64))
             .sum()
     }
 }
@@ -472,12 +434,7 @@ struct Bits<'a> {
 
 impl<'a> Bits<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Bits {
-            data,
-            at: 0,
-            acc: 0,
-            n: 0,
-        }
+        Bits { data, at: 0, acc: 0, n: 0 }
     }
 
     #[inline]
@@ -509,30 +466,18 @@ impl<'a> Bits<'a> {
 impl<'a> Reader<'a> {
     pub fn new(body: &'a [u8]) -> Result<Reader<'a>> {
         if body.is_empty() {
-            return Ok(Reader {
-                x: 0,
-                rans: &[],
-                at: 0,
-                extra: Bits::new(&[]),
-            });
+            return Ok(Reader { x: 0, rans: &[], at: 0, extra: Bits::new(&[]) });
         }
         let mut at = 0;
         let n = get_varint(body, &mut at)? as usize;
-        let rans = body
-            .get(at..at.checked_add(n).ok_or(Error::Corrupt)?)
-            .ok_or(Error::Corrupt)?;
+        let rans = body.get(at..at.checked_add(n).ok_or(Error::Corrupt)?).ok_or(Error::Corrupt)?;
         let extra = Bits::new(&body[at + n..]);
         let mut x = 0;
         if n > 0 {
             let head = rans.get(..4).ok_or(Error::Corrupt)?;
             x = u32::from_be_bytes(head.try_into().unwrap());
         }
-        Ok(Reader {
-            x,
-            rans,
-            at: 4,
-            extra,
-        })
+        Ok(Reader { x, rans, at: 4, extra })
     }
 
     #[inline]
@@ -587,13 +532,7 @@ mod tests {
     fn codes_round_trip() {
         let vals: Vec<u32> = (0..3000u32).map(|i| (i * 7919) % (1 + i % 300)).collect();
         let skewed: Vec<u32> = (0..5000u32).map(|i| (i % 97 == 0) as u32).collect();
-        for set in [
-            &vals[..],
-            &skewed[..],
-            &[5, 5, 5][..],
-            &[][..],
-            &[1, 100000][..],
-        ] {
+        for set in [&vals[..], &skewed[..], &[5, 5, 5][..], &[][..], &[1, 100000][..]] {
             // Two fields interleaved.
             let mut c = [Counts::default(), Counts::default()];
             for (i, &v) in set.iter().enumerate() {
@@ -611,10 +550,7 @@ mod tests {
             }
             let body = cw.finish();
             let mut r = BitReader::new(&table);
-            let m = [
-                Model::read(&mut r, &def).unwrap(),
-                Model::read(&mut r, &def).unwrap(),
-            ];
+            let m = [Model::read(&mut r, &def).unwrap(), Model::read(&mut r, &def).unwrap()];
             let mut cr = Reader::new(&body).unwrap();
             for (i, &v) in set.iter().enumerate() {
                 assert_eq!(cr.get(&m[i % 2]).unwrap(), v);
@@ -622,11 +558,7 @@ mod tests {
             }
             if set == &skewed[..] {
                 let ideal = c[0].cost() + c[1].cost() + 3.0 * set.len() as f64;
-                assert!(
-                    (body.len() * 8) as f64 <= ideal * 1.05 + 64.0,
-                    "{} vs {ideal}",
-                    body.len() * 8
-                );
+                assert!((body.len() * 8) as f64 <= ideal * 1.05 + 64.0, "{} vs {ideal}", body.len() * 8);
             }
         }
     }

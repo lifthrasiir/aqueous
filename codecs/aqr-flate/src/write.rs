@@ -65,9 +65,7 @@ pub const TOKEN_SLACK: usize = 6 * TOKEN_CHUNK + 16;
 pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -> Result<Vec<u8>> {
     let mut w = Writer::new(data.len() / 2 + 64);
     for (i, b) in stream.blocks.iter().enumerate() {
-        let toks = tokens
-            .get(starts[i]..starts[i + 1])
-            .ok_or(Error::Invalid("tokens past the end"))?;
+        let toks = tokens.get(starts[i]..starts[i + 1]).ok_or(Error::Invalid("tokens past the end"))?;
         w.block(b, toks, data)?;
     }
     w.finish(stream.tail_pad, &stream.trailing)
@@ -84,22 +82,12 @@ pub struct Writer {
 impl Writer {
     /// A writer with room for `capacity` bytes.
     pub fn new(capacity: usize) -> Writer {
-        Writer {
-            w: Bits {
-                out: Vec::with_capacity(capacity),
-                acc: 0,
-                n: 0,
-            },
-            pos: 0,
-        }
+        Writer { w: Bits { out: Vec::with_capacity(capacity), acc: 0, n: 0 }, pos: 0 }
     }
 
     /// A writer appending to `out`, from a byte boundary.
     pub fn append_to(out: Vec<u8>) -> Writer {
-        Writer {
-            w: Bits { out, acc: 0, n: 0 },
-            pos: 0,
-        }
+        Writer { w: Bits { out, acc: 0, n: 0 }, pos: 0 }
     }
 
     /// Bytes of the data written so far, where the next block's data starts.
@@ -125,10 +113,7 @@ impl Writer {
             w.put(16, *len as u32);
             w.put(16, !*len as u32);
             w.flush();
-            w.out.extend_from_slice(
-                rest.get(..*len as usize)
-                    .ok_or(Error::Invalid("stored block past end"))?,
-            );
+            w.out.extend_from_slice(rest.get(..*len as usize).ok_or(Error::Invalid("stored block past end"))?);
             self.pos += *len as usize;
             return Ok(());
         }
@@ -145,10 +130,9 @@ impl Writer {
         w.put(2, b.body.btype() as u32);
         match &b.body {
             // (made again for each block rather than kept: no memory taken as it goes)
-            Body::Fixed { .. } => Ok(Open {
-                lit: table(&huffman::fixed_lit_lens()),
-                dist: table(&huffman::FIXED_DIST_LENS),
-            }),
+            Body::Fixed { .. } => {
+                Ok(Open { lit: table(&huffman::fixed_lit_lens()), dist: table(&huffman::FIXED_DIST_LENS) })
+            }
             Body::Dynamic { header: h, .. } => {
                 w.put(5, h.hlit as u32 - 257);
                 w.put(5, h.hdist as u32 - 1);
@@ -166,10 +150,7 @@ impl Writer {
                     w.put(l as u32, clc[op.sym as usize] as u32);
                     w.put(RleOp::extra_bits(op.sym), op.extra as u32);
                 }
-                Ok(Open {
-                    lit: table(h.lit_lens()),
-                    dist: table(h.dist_lens()),
-                })
+                Ok(Open { lit: table(h.lit_lens()), dist: table(h.dist_lens()) })
             }
             Body::Stored { .. } => Err(Error::Invalid("a stored block has no tokens")),
         }
@@ -203,17 +184,13 @@ impl Writer {
         at: usize,
         threads: usize,
     ) -> Result<()> {
-        let tokens = |r: &Range<usize>| {
-            toks.get(r.clone())
-                .ok_or(Error::Invalid("tokens past the end"))
-        };
+        let tokens = |r: &Range<usize>| toks.get(r.clone()).ok_or(Error::Invalid("tokens past the end"));
         // the data from `pos` on, where block `b` is stored (a coded block reads none, and the
         // data before `at` is not at hand)
         let rest = |b: &Block, pos: usize| match b.body {
-            Body::Stored { .. } => pos
-                .checked_sub(at)
-                .and_then(|p| data.get(p..))
-                .ok_or(Error::Invalid("stored block's data not at hand")),
+            Body::Stored { .. } => {
+                pos.checked_sub(at).and_then(|p| data.get(p..)).ok_or(Error::Invalid("stored block's data not at hand"))
+            }
             _ => Ok(&[][..]),
         };
         if threads <= 1 {
@@ -273,8 +250,7 @@ impl Writer {
             } else {
                 me.out.reserve(out.len());
                 me.out.push(me.acc as u8 | out[0] << s);
-                me.out
-                    .extend(out.windows(2).map(|p| p[0] >> (8 - s) | p[1] << s));
+                me.out.extend(out.windows(2).map(|p| p[0] >> (8 - s) | p[1] << s));
                 me.acc = (last >> (8 - s)) as u64;
             }
         }
@@ -345,12 +321,7 @@ pub struct Open {
 ///
 /// Room is reserved a chunk of [`TOKEN_CHUNK`] tokens at a time: a writer of room for its
 /// output and [`TOKEN_SLACK`] more never grows.
-fn write_tokens(
-    w: &mut Bits,
-    toks: &[Token],
-    lt: &[(u32, u32)],
-    dt: &[(u32, u32)],
-) -> Result<usize> {
+fn write_tokens(w: &mut Bits, toks: &[Token], lt: &[(u32, u32)], dt: &[(u32, u32)]) -> Result<usize> {
     // Up to 6 bytes per token and the end of block, and the 8 of the last store, a chunk of
     // tokens at a time (so that what is reserved past what is written is bounded).
     w.out.reserve(16);
@@ -382,11 +353,7 @@ fn write_tokens(
                 n += l;
                 span += 1;
             }
-            Token::Match {
-                len: ml,
-                dist,
-                alt258,
-            } => {
+            Token::Match { len: ml, dist, alt258 } => {
                 let lc = if alt258 { 27 } else { huffman::len_code(ml) };
                 let (c, l) = lt[257 + lc];
                 ok &= l > 0;
@@ -437,35 +404,16 @@ mod tests {
         }));
         d.extend(include_bytes!("write.rs").repeat(8));
         let mut stored = 0;
-        for spec in [
-            "zlib:level=6",
-            "zlib:level=1,strategy=huffman",
-            "libdeflate:level=9",
-        ] {
-            let raw = spec
-                .parse::<flate_zoo::Encoder>()
-                .unwrap()
-                .compress(&d)
-                .unwrap();
+        for spec in ["zlib:level=6", "zlib:level=1,strategy=huffman", "libdeflate:level=9"] {
+            let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(&d).unwrap();
             let f = crate::inflate::parse(&raw).unwrap();
-            let blocks: Vec<(Block, Range<usize>)> = f
-                .stream
-                .blocks
-                .iter()
-                .cloned()
-                .zip(f.starts.windows(2).map(|s| s[0]..s[1]))
-                .collect();
-            stored += blocks
-                .iter()
-                .filter(|(b, _)| matches!(b.body, Body::Stored { .. }))
-                .count();
+            let blocks: Vec<(Block, Range<usize>)> =
+                f.stream.blocks.iter().cloned().zip(f.starts.windows(2).map(|s| s[0]..s[1])).collect();
+            stored += blocks.iter().filter(|(b, _)| matches!(b.body, Body::Stored { .. })).count();
             for threads in [1, 2, 3, 8] {
                 let mut w = Writer::new(64);
                 w.blocks(&blocks, &f.tokens, &f.data, 0, threads).unwrap();
-                assert!(
-                    w.finish(f.stream.tail_pad, &f.stream.trailing).unwrap() == raw,
-                    "{spec}, {threads} threads"
-                );
+                assert!(w.finish(f.stream.tail_pad, &f.stream.trailing).unwrap() == raw, "{spec}, {threads} threads");
             }
         }
         assert!(stored > 0);
@@ -478,20 +426,13 @@ mod tests {
         let block = |last, body| crate::deflate::Block { last, body };
         // After a block header (3 bits), 5 bits pad a stored block.
         for (pad, ok) in [(31, true), (32, false)] {
-            let s = Stream {
-                blocks: vec![block(true, Body::Stored { pad, len: 0 })],
-                tail_pad: 0,
-                trailing: vec![],
-            };
+            let s = Stream { blocks: vec![block(true, Body::Stored { pad, len: 0 })], tail_pad: 0, trailing: vec![] };
             assert_eq!(write(&s, &[0, 0], &[], &[]).is_ok(), ok, "{pad}");
         }
         // A fixed block of no tokens ends 10 bits in: 6 bits of tail padding.
         for (pad, ok) in [(63, true), (64, false)] {
-            let s = Stream {
-                blocks: vec![block(true, Body::Fixed { tokens: vec![] })],
-                tail_pad: pad,
-                trailing: vec![],
-            };
+            let s =
+                Stream { blocks: vec![block(true, Body::Fixed { tokens: vec![] })], tail_pad: pad, trailing: vec![] };
             assert_eq!(write(&s, &[0, 0], &[], &[]).is_ok(), ok, "{pad}");
         }
     }

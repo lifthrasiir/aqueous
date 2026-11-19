@@ -35,9 +35,7 @@ fn fixed_block(last: bool, f: impl FnOnce(&mut BitWriter)) -> Vec<u8> {
     finish(w)
 }
 
-const CL_ORDER: [usize; 19] = [
-    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
-];
+const CL_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
 /// A dynamic block with `hlit`/`hdist` counts and the lengths `lens` (of both codes, as many
 /// as the counts say) written by a code length code of 4 bits for each of 0..=15; `body`
@@ -83,25 +81,14 @@ fn check(name: &str, raw: &[u8], expect: Option<&[u8]>) {
             (None, None) => true,
             _ => false,
         };
-        results.push((
-            "inflate::parse",
-            ok(aqr_flate::inflate::parse(&raw)
-                .ok()
-                .map(|f| f.data.to_vec())),
-        ));
+        results.push(("inflate::parse", ok(aqr_flate::inflate::parse(&raw).ok().map(|f| f.data.to_vec()))));
         results.push((
             "inflate::parse_segments",
-            ok(aqr_flate::inflate::parse_segments(&raw, 5)
-                .ok()
-                .map(|f| f.data.to_vec())),
+            ok(aqr_flate::inflate::parse_segments(&raw, 5).ok().map(|f| f.data.to_vec())),
         ));
         results.push((
             "inflate::parse_segments_head",
-            ok(
-                aqr_flate::inflate::parse_segments_head(&raw, 5, 3, usize::MAX, 0, false)
-                    .ok()
-                    .map(|f| f.data.to_vec()),
-            ),
+            ok(aqr_flate::inflate::parse_segments_head(&raw, 5, 3, usize::MAX, 0, false).ok().map(|f| f.data.to_vec())),
         ));
         results.push(("inflate::data", ok(aqr_flate::inflate::data(&raw, n).ok())));
         let streamed = {
@@ -127,24 +114,14 @@ fn check(name: &str, raw: &[u8], expect: Option<&[u8]>) {
             r.ok().map(|()| out)
         };
         results.push(("inflate::data_streamed", ok(streamed)));
-        results.push((
-            "deflate::parse",
-            ok(aqr_flate::deflate::parse(&raw).ok().map(|(_, d)| d)),
-        ));
+        results.push(("deflate::parse", ok(aqr_flate::deflate::parse(&raw).ok().map(|(_, d)| d))));
         let d = aqr_flate::deconstruct(&raw);
         if let Ok((data, meta)) = &d {
-            assert_eq!(
-                aqr_flate::reconstruct(data, meta).as_deref().ok(),
-                Some(&raw[..]),
-                "{name}"
-            );
+            assert_eq!(aqr_flate::reconstruct(data, meta).as_deref().ok(), Some(&raw[..]), "{name}");
         }
         results.push(("deconstruct", ok(d.ok().map(|(d, _)| d))));
         let bad: Vec<_> = results.iter().filter(|r| !r.1).map(|r| r.0).collect();
-        assert!(
-            bad.is_empty(),
-            "{name}: not as expected ({expect:?}) in {bad:?}"
-        );
+        assert!(bad.is_empty(), "{name}: not as expected ({expect:?}) in {bad:?}");
     })
     .unwrap();
 }
@@ -169,10 +146,7 @@ fn valid_streams_are_read_by_all() {
 fn malformed_streams_fail_alike() {
     let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
     cases.push(("btype 3", vec![0x07, 0, 0, 0]));
-    cases.push((
-        "stored with a bad NLEN",
-        vec![0x01, 3, 0, 0, 0, b'a', b'b', b'c'],
-    ));
+    cases.push(("stored with a bad NLEN", vec![0x01, 3, 0, 0, 0, b'a', b'b', b'c']));
     cases.push(("stored cut short", vec![0x01, 3, 0, 0xfc, 0xff, b'a']));
     cases.push((
         "distance before the start (none written)",
@@ -293,24 +267,15 @@ fn malformed_streams_fail_alike() {
     {
         let mut l = simple_lens();
         l[98] = 1; // three symbols of one bit
-        cases.push((
-            "oversubscribed literal code",
-            dynamic(257, 1, &l, |w| code(w, 0, 1)),
-        ));
+        cases.push(("oversubscribed literal code", dynamic(257, 1, &l, |w| code(w, 0, 1))));
         let mut l = simple_lens();
         l.extend([1, 1]);
-        cases.push((
-            "oversubscribed distance code",
-            dynamic(257, 3, &l, |w| code(w, 1, 1)),
-        ));
+        cases.push(("oversubscribed distance code", dynamic(257, 3, &l, |w| code(w, 1, 1))));
         // no end of block symbol in the code, then the stream ends
         let mut l = simple_lens();
         l[256] = 0;
         l[98] = 1;
-        cases.push((
-            "no end of block symbol",
-            dynamic(257, 1, &l, |w| code(w, 0, 1)),
-        ));
+        cases.push(("no end of block symbol", dynamic(257, 1, &l, |w| code(w, 0, 1))));
         // a code used where it has no symbol (incomplete)
         let mut l = vec![0u8; 258];
         l[256] = 2;
@@ -354,9 +319,7 @@ fn malformed_streams_fail_alike() {
 /// header, the bytes after it) are kept in the record: the stream is made again byte for byte.
 #[test]
 fn padding_and_trailing_bytes_are_kept() {
-    let text: Vec<u8> = (0..3000)
-        .flat_map(|i| format!("{} {}\n", i % 97, i % 13).into_bytes())
-        .collect();
+    let text: Vec<u8> = (0..3000).flat_map(|i| format!("{} {}\n", i % 97, i % 13).into_bytes()).collect();
     // a fixed block: the last byte's padding set (31 bits: one pad bit)
     let fixed_raw = fixed_block(true, |w| {
         fixed(w, b'a' as u32);
@@ -386,11 +349,7 @@ fn padding_and_trailing_bytes_are_kept() {
     }));
     let alone = stored(0b11111, &text[..500], true);
     let with_tail = |raw: &[u8], tail: &[u8]| [raw, tail].concat();
-    let z = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&text)
-        .unwrap();
+    let z = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(&text).unwrap();
     let mut z_padded = z.clone();
     // (the real encoder's last byte, its bits above the stream's end set when there are any)
     let (d, m) = aqr_flate::deconstruct(&z).unwrap();
@@ -399,10 +358,7 @@ fn padding_and_trailing_bytes_are_kept() {
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("fixed", fixed_raw.clone()),
         ("fixed, padding set", padded.clone()),
-        (
-            "fixed, padding set, trailing bytes",
-            with_tail(&padded, b"\xff\0trail"),
-        ),
+        ("fixed, padding set, trailing bytes", with_tail(&padded, b"\xff\0trail")),
         ("fixed, trailing zeros", with_tail(&fixed_raw, &[0; 7])),
         ("stored padding", mixed),
         ("stored padding, only", alone.clone()),
@@ -414,9 +370,7 @@ fn padding_and_trailing_bytes_are_kept() {
         let opts = aqr_flate::Options::for_profile(profile).unwrap();
         for (name, raw) in &cases {
             let r = aqr_flate::deconstruct_with(raw, &opts);
-            let Ok((data, meta)) = r else {
-                panic!("{name} (profile {profile}): {:?}", r.err())
-            };
+            let Ok((data, meta)) = r else { panic!("{name} (profile {profile}): {:?}", r.err()) };
             let back = aqr_flate::reconstruct(&data, &meta).unwrap();
             assert!(&back == raw, "{name} (profile {profile}) is not made again");
         }
@@ -427,9 +381,7 @@ fn padding_and_trailing_bytes_are_kept() {
 /// point: all fail, or all give the same data; the record of one that is read makes it again.
 #[test]
 fn damaged_streams_are_read_alike() {
-    let text: Vec<u8> = (0..400)
-        .flat_map(|i| format!("{} {}\n", i % 97, i % 13).into_bytes())
-        .collect();
+    let text: Vec<u8> = (0..400).flat_map(|i| format!("{} {}\n", i % 97, i % 13).into_bytes()).collect();
     let mut raws = Vec::new();
     for spec in ["zlib:level=6", "zlib:level=1", "zlib:level=0"] {
         let enc = spec.parse::<flate_zoo::Encoder>().unwrap();
@@ -440,18 +392,12 @@ fn damaged_streams_are_read_alike() {
         aqr_testkit::damaged(&raw, 40, 24, Duration::from_secs(20), |v| {
             let a = aqr_flate::inflate::parse(v).ok();
             let b = aqr_flate::deflate::parse(v).ok();
-            assert_eq!(
-                a.as_ref().map(|f| f.data.to_vec()),
-                b.as_ref().map(|x| x.1.clone())
-            );
+            assert_eq!(a.as_ref().map(|f| f.data.to_vec()), b.as_ref().map(|x| x.1.clone()));
             if let Some(f) = &a {
                 let n = f.data.len();
                 // (`data` wants the stream to end where it does: trailing bytes are an error)
                 if f.stream.trailing.is_empty() {
-                    assert_eq!(
-                        aqr_flate::inflate::data(v, n).ok().as_deref(),
-                        Some(&f.data[..])
-                    );
+                    assert_eq!(aqr_flate::inflate::data(v, n).ok().as_deref(), Some(&f.data[..]));
                 }
             }
             if let Ok((data, meta)) = aqr_flate::deconstruct(v) {

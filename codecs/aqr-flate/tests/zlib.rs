@@ -13,17 +13,12 @@ fn zlib_headers_are_predicted() {
     use aqr_flate::deflate::Body;
     let text = include_bytes!("../src/zlib.rs").repeat(3);
     for level in 1..=9 {
-        let enc = flate_zoo::Encoder::new(flate_zoo::backend("zlib").unwrap())
-            .set("level", level)
-            .unwrap();
+        let enc = flate_zoo::Encoder::new(flate_zoo::backend("zlib").unwrap()).set("level", level).unwrap();
         let raw = enc.compress(&text).unwrap();
         let (stream, _) = aqr_flate::deflate::parse(&raw).unwrap();
         for (i, b) in stream.blocks.iter().enumerate() {
             if let Body::Dynamic { header, tokens } = &b.body {
-                assert!(
-                    aqr_flate::header::zlib_header(tokens) == *header,
-                    "level {level}, block {i}"
-                );
+                assert!(aqr_flate::header::zlib_header(tokens) == *header, "level {level}, block {i}");
             }
         }
     }
@@ -35,12 +30,7 @@ fn zlib_params(enc: &flate_zoo::Encoder) -> Option<aqr_flate::zlib::Params> {
     let strategy = Strategy::ALL[enc.get("strategy")? as usize];
     let wbits = (enc.get("wbits")? as u8).max(9);
     let mem = enc.get("mem")? as u8;
-    (level > 0).then_some(Params {
-        level,
-        strategy,
-        wbits,
-        mem,
-    })
+    (level > 0).then_some(Params { level, strategy, wbits, mem })
 }
 
 fn zlib_inputs() -> Vec<Vec<u8>> {
@@ -52,12 +42,7 @@ fn zlib_inputs() -> Vec<Vec<u8>> {
         (lcg >> 24) as u8
     }));
     mixed.extend(include_bytes!("../src/deflate.rs").repeat(4));
-    vec![
-        b"a".to_vec(),
-        b"abcabcabd".repeat(20_000),
-        vec![0; 100_000],
-        mixed,
-    ]
+    vec![b"a".to_vec(), b"abcabcabd".repeat(20_000), vec![0; 100_000], mixed]
 }
 
 /// [`aqr_flate::zlib::compress`] writes what zlib writes, byte for byte, at the levels of
@@ -80,10 +65,12 @@ fn zlib_compress_is_exact() {
     inputs.push(tile);
     let zlib = flate_zoo::backend("zlib").unwrap();
     let mut failures = vec![];
-    for (level, strategy, wbits, mem) in (1..=9)
-        .flat_map(|l| [(l, 0, 15, 8), (l, 0, 15, 9), (l, 0, 10, 1)])
-        .chain([(1, 1, 15, 9), (1, 4, 15, 9), (2, 0, 12, 9), (3, 0, 15, 7)])
-    {
+    for (level, strategy, wbits, mem) in (1..=9).flat_map(|l| [(l, 0, 15, 8), (l, 0, 15, 9), (l, 0, 10, 1)]).chain([
+        (1, 1, 15, 9),
+        (1, 4, 15, 9),
+        (2, 0, 12, 9),
+        (3, 0, 15, 7),
+    ]) {
         let enc = flate_zoo::Encoder::new(zlib)
             .set("level", level)
             .and_then(|e| e.set("strategy", strategy))
@@ -136,9 +123,7 @@ fn zlib_emulation_is_exact() {
             while let Some(g) = aqr_flate::zlib::zlib_block(&mut e, pos) {
                 pos += match &g.body {
                     Body::Stored { len, .. } => *len as usize,
-                    Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
-                        tokens.iter().map(|t| t.span()).sum()
-                    }
+                    Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens.iter().map(|t| t.span()).sum(),
                 };
                 let last = g.last;
                 generated.push(g);
@@ -146,8 +131,7 @@ fn zlib_emulation_is_exact() {
                     break;
                 }
             }
-            let regenerated =
-                generated == stream.blocks && aqr_flate::zlib::compress(&input, p) == Some(raw);
+            let regenerated = generated == stream.blocks && aqr_flate::zlib::compress(&input, p) == Some(raw);
             match d {
                 Some(d) if d.misses == 0 && blocks_ok && regenerated => {}
                 _ => failures.push(format!(
@@ -166,10 +150,7 @@ fn zlib_emulation_is_exact() {
 fn multi_slow_matches_single() {
     use aqr_flate::detect;
     use aqr_flate::zlib::{Params, Strategy};
-    let inputs = [
-        include_bytes!("../src/zlib.rs").repeat(6),
-        b"abcabcabd".repeat(20_000),
-    ];
+    let inputs = [include_bytes!("../src/zlib.rs").repeat(6), b"abcabcabd".repeat(20_000)];
     let specs = [
         "zlib:level=4",
         "zlib:level=6",
@@ -183,20 +164,12 @@ fn multi_slow_matches_single() {
     ];
     let lanes: Vec<Params> = (4..=9)
         .flat_map(|level| {
-            [Strategy::Default, Strategy::Filtered].map(|strategy| Params {
-                level,
-                strategy,
-                ..Params::default()
-            })
+            [Strategy::Default, Strategy::Filtered].map(|strategy| Params { level, strategy, ..Params::default() })
         })
         .collect();
     for input in &inputs {
         for spec in specs.into_iter().filter(built) {
-            let raw = spec
-                .parse::<flate_zoo::Encoder>()
-                .unwrap()
-                .compress(input)
-                .unwrap();
+            let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(input).unwrap();
             let (stream, data) = aqr_flate::deflate::parse(&raw).unwrap();
             for wbits in [15, 10] {
                 let lanes: Vec<Params> = lanes.iter().map(|&p| Params { wbits, ..p }).collect();
@@ -204,11 +177,7 @@ fn multi_slow_matches_single() {
                 assert_eq!(multi.len(), lanes.len(), "{spec}");
                 for (m, &p) in multi.iter().zip(&lanes) {
                     let single = detect::trial(&stream, &data, p, usize::MAX, usize::MAX).unwrap();
-                    assert_eq!(
-                        (m.params, m.tokens, m.misses),
-                        (p, single.tokens, single.misses),
-                        "{spec} {p}"
-                    );
+                    assert_eq!((m.params, m.tokens, m.misses), (p, single.tokens, single.misses), "{spec} {p}");
                 }
             }
         }
@@ -218,10 +187,7 @@ fn multi_slow_matches_single() {
 /// The zlib header zlib itself writes for these parameters (deflate.c).
 fn zlib_header_for(p: aqr_flate::zlib::Params) -> [u8; 2] {
     use aqr_flate::zlib::Strategy;
-    let special = matches!(
-        p.strategy,
-        Strategy::HuffmanOnly | Strategy::Rle | Strategy::Fixed
-    );
+    let special = matches!(p.strategy, Strategy::HuffmanOnly | Strategy::Rle | Strategy::Fixed);
     let flevel = if special || p.level < 2 {
         0
     } else if p.level < 6 {
@@ -275,13 +241,9 @@ fn large_input() -> Vec<u8> {
     let mut out = vec![];
     for k in 0..40u8 {
         // A different rendering of the text each time.
-        out.extend(srcs[k as usize % 4].iter().map(|&b| {
-            if b.is_ascii_lowercase() {
-                b'a' + (b - b'a' + k) % 26
-            } else {
-                b
-            }
-        }));
+        out.extend(
+            srcs[k as usize % 4].iter().map(|&b| if b.is_ascii_lowercase() { b'a' + (b - b'a' + k) % 26 } else { b }),
+        );
         out.extend((0..2_000 * (k as usize % 3)).map(|_| {
             lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
             (lcg >> 24) as u8
@@ -296,10 +258,8 @@ fn large_input() -> Vec<u8> {
 fn zlib_checkpoints_reconstruct_in_parallel() {
     let input = large_input();
     assert!(input.len() > 1 << 20, "{}", input.len());
-    let opts = aqr_flate::Options {
-        segment: 128 << 10,
-        ..aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap()
-    };
+    let opts =
+        aqr_flate::Options { segment: 128 << 10, ..aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap() };
     for (level, wbits) in [(6, 15), (9, 12), (4, 10)] {
         let enc = flate_zoo::Encoder::new(flate_zoo::backend("zlib").unwrap())
             .set("level", level)
@@ -326,20 +286,12 @@ fn zlib_checkpoints_reconstruct_in_parallel() {
 fn deconstruction_follows_hints() {
     use aqr_flate::Hints;
     let input = include_bytes!("../src/zlib.rs").repeat(2);
-    let raw = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&input)
-        .unwrap();
+    let raw = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(&input).unwrap();
     let opts = aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap();
     for (header, level) in [([0x78, 0xda], None), ([0x78, 0x9c], Some(6))] {
         let hints = Hints::zlib_header(header);
         let (data, meta, report) = aqr_flate::deconstruct_hinted(&raw, &opts, &hints).unwrap();
-        assert!(
-            report.zlib.is_none_or(|p| hints.allows(&p)),
-            "{header:02x?}: {:?}",
-            report.zlib
-        );
+        assert!(report.zlib.is_none_or(|p| hints.allows(&p)), "{header:02x?}: {:?}", report.zlib);
         if let Some(level) = level {
             assert_eq!(report.zlib.map(|p| p.level), Some(level), "{header:02x?}");
         }
@@ -353,34 +305,19 @@ fn deconstruction_follows_hints() {
 fn exact_hinted_params_are_taken() {
     use aqr_flate::zlib::Params;
     let input = include_bytes!("../src/zlib.rs")[..3000].to_vec();
-    let raw = "zlib:level=7"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&input)
-        .unwrap();
+    let raw = "zlib:level=7".parse::<flate_zoo::Encoder>().unwrap().compress(&input).unwrap();
     let (stream, data) = aqr_flate::deflate::parse(&raw).unwrap();
     let exact: Vec<Params> = (4..=9)
-        .map(|level| Params {
-            level,
-            ..Params::default()
-        })
-        .filter(|&p| {
-            aqr_flate::detect::trial(&stream, &data, p, usize::MAX, 0).is_some_and(|d| d.complete)
-        })
+        .map(|level| Params { level, ..Params::default() })
+        .filter(|&p| aqr_flate::detect::trial(&stream, &data, p, usize::MAX, 0).is_some_and(|d| d.complete))
         .collect();
     assert!(exact.len() >= 2, "{exact:?}");
     let opts = aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap();
     for p in exact {
-        let hints = aqr_flate::Hints {
-            params: Some(p),
-            ..Default::default()
-        };
+        let hints = aqr_flate::Hints { params: Some(p), ..Default::default() };
         let (data, meta, report) = aqr_flate::deconstruct_hinted(&raw, &opts, &hints).unwrap();
         assert_eq!(report.zlib, Some(p));
-        assert!(
-            aqr_flate::reconstruct_with_threads(&data, &meta, 1).unwrap() == raw,
-            "{p}"
-        );
+        assert!(aqr_flate::reconstruct_with_threads(&data, &meta, 1).unwrap() == raw, "{p}");
     }
 }
 
@@ -389,21 +326,9 @@ fn exact_hinted_params_are_taken() {
 fn inexact_hinted_params_change_nothing() {
     let input = include_bytes!("../src/zlib.rs").repeat(2);
     let opts = aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap();
-    let hints = aqr_flate::Hints {
-        params: Some(aqr_flate::zlib::Params::default()),
-        ..Default::default()
-    };
-    for spec in [
-        "zlib:level=1",
-        "zlib:level=9",
-        "zlib:level=6,mem=9",
-        "libdeflate:level=6",
-    ] {
-        let raw = spec
-            .parse::<flate_zoo::Encoder>()
-            .unwrap()
-            .compress(&input)
-            .unwrap();
+    let hints = aqr_flate::Hints { params: Some(aqr_flate::zlib::Params::default()), ..Default::default() };
+    for spec in ["zlib:level=1", "zlib:level=9", "zlib:level=6,mem=9", "libdeflate:level=6"] {
+        let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(&input).unwrap();
         let plain = aqr_flate::deconstruct_with(&raw, &opts).unwrap();
         let (data, meta, _) = aqr_flate::deconstruct_hinted(&raw, &opts, &hints).unwrap();
         assert!((data, meta) == plain, "{spec}");
@@ -464,10 +389,7 @@ fn check_followed(
         }
     }
     let fe = fe.or_else(|| follow(&log, pos));
-    assert!(
-        followed.is_none(),
-        "{what}: never got to where the emulation was"
-    );
+    assert!(followed.is_none(), "{what}: never got to where the emulation was");
     assert_eq!(fe.unwrap().predict(), e.predict(), "{what}: at the end");
 }
 
@@ -477,40 +399,20 @@ fn check_followed(
 fn followed_emulations_carry_on() {
     use aqr_flate::deflate::Body;
     use aqr_flate::zlib::{MultiSlow, Params};
-    let lanes: Vec<Params> = (4..=9)
-        .map(|level| Params {
-            level,
-            ..Params::default()
-        })
-        .collect();
+    let lanes: Vec<Params> = (4..=9).map(|level| Params { level, ..Params::default() }).collect();
     let inputs = zlib_inputs();
-    for spec in [
-        "zlib:level=6",
-        "zlib:level=9,mem=1",
-        "zlib-ng:level=6",
-        "libdeflate:level=9",
-    ]
-    .into_iter()
-    .filter(built)
+    for spec in
+        ["zlib:level=6", "zlib:level=9,mem=1", "zlib-ng:level=6", "libdeflate:level=9"].into_iter().filter(built)
     {
         for input in &inputs {
-            let raw = spec
-                .parse::<flate_zoo::Encoder>()
-                .unwrap()
-                .compress(input)
-                .unwrap();
+            let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(input).unwrap();
             let (stream, data) = aqr_flate::deflate::parse(&raw).unwrap();
-            if let Some((d, Some(f))) = aqr_flate::detect::detect_refined_followed(
-                &stream,
-                &data,
-                aqr_flate::detect::candidates(&stream),
-            ) {
+            if let Some((d, Some(f))) =
+                aqr_flate::detect::detect_refined_followed(&stream, &data, aqr_flate::detect::candidates(&stream))
+            {
                 check_followed(&stream, &data, d.params, f, &format!("{spec} detected"));
             }
-            let stored = stream
-                .blocks
-                .iter()
-                .any(|b| matches!(b.body, Body::Stored { .. }));
+            let stored = stream.blocks.iter().any(|b| matches!(b.body, Body::Stored { .. }));
             if stored {
                 continue;
             }
@@ -523,9 +425,7 @@ fn followed_emulations_carry_on() {
                 })
                 .collect();
             // After literals and matches alike.
-            for cut in
-                [0, 1, 2, 3, 7, 100, 999, 1000, 1001, tokens.len()].map(|c| c.min(tokens.len()))
-            {
+            for cut in [0, 1, 2, 3, 7, 100, 999, 1000, 1001, tokens.len()].map(|c| c.min(tokens.len())) {
                 for k in 0..lanes.len() {
                     let mut m = MultiSlow::new(&data, &lanes);
                     let mut pos = 0;
@@ -578,24 +478,8 @@ fn zlib_compress_across_window_slides() {
                 .set("level", level as i64)
                 .and_then(|e| e.set("wbits", wbits as i64))
                 .unwrap();
-            let p = Params {
-                level,
-                strategy: Strategy::Default,
-                wbits,
-                mem: 8,
-            };
-            for n in [
-                w - 1,
-                w,
-                w + 1,
-                2 * w - 262,
-                2 * w - 261,
-                2 * w,
-                2 * w + 1,
-                3 * w - 262,
-                3 * w,
-                4 * w + 3,
-            ] {
+            let p = Params { level, strategy: Strategy::Default, wbits, mem: 8 };
+            for n in [w - 1, w, w + 1, 2 * w - 262, 2 * w - 261, 2 * w, 2 * w + 1, 3 * w - 262, 3 * w, 4 * w + 3] {
                 let input = repeating(n, n as u32 ^ 0x55);
                 if aqr_flate::zlib::compress(&input, p) != Some(enc.compress(&input).unwrap()) {
                     failures.push(format!("{p} on {n} bytes"));
@@ -616,14 +500,7 @@ fn zlib_with_buffers_of_each_call() {
     let input = repeating(150_000, 3);
     let mut failures = vec![];
     for level in 0..=9i64 {
-        for (inbuf, outbuf) in [
-            (0, 0),
-            (4096, 0),
-            (0, 4096),
-            (1000, 777),
-            (65536, 65536),
-            (7, 100_000),
-        ] {
+        for (inbuf, outbuf) in [(0, 0), (4096, 0), (0, 4096), (1000, 777), (65536, 65536), (7, 100_000)] {
             let enc = flate_zoo::Encoder::new(zlib)
                 .set("level", level)
                 .and_then(|e| e.set("inbuf", inbuf))
@@ -631,21 +508,14 @@ fn zlib_with_buffers_of_each_call() {
                 .unwrap();
             let raw = enc.compress(&input).unwrap();
             if level > 0 {
-                let p = Params {
-                    level: level as u8,
-                    strategy: Strategy::Default,
-                    wbits: 15,
-                    mem: 8,
-                };
+                let p = Params { level: level as u8, strategy: Strategy::Default, wbits: 15, mem: 8 };
                 if aqr_flate::zlib::compress(&input, p) != Some(raw.clone()) {
                     failures.push(format!("{enc}: emulation differs"));
                 }
             }
             match aqr_flate::deconstruct(&raw) {
                 Ok((data, meta)) => {
-                    if data != input
-                        || aqr_flate::reconstruct(&data, &meta).ok().as_ref() != Some(&raw)
-                    {
+                    if data != input || aqr_flate::reconstruct(&data, &meta).ok().as_ref() != Some(&raw) {
                         failures.push(format!("{enc}: not made again"));
                     }
                 }
@@ -662,42 +532,19 @@ fn zlib_with_buffers_of_each_call() {
 fn max_data_boundaries() {
     use aqr_flate::{Error, Options};
     let input = repeating(5000, 9);
-    let raw = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&input)
-        .unwrap();
-    let empty = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(b"")
-        .unwrap();
+    let raw = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(&input).unwrap();
+    let empty = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(b"").unwrap();
     for profile in [0, aqr_flate::DEFAULT_PROFILE, aqr_flate::ADAPTIVE] {
-        for (max, want_err) in [
-            (0, true),
-            (1, true),
-            (4999, true),
-            (5000, false),
-            (5001, false),
-        ] {
-            let opts = Options {
-                max_data: max,
-                ..Options::for_profile(profile).unwrap()
-            };
+        for (max, want_err) in [(0, true), (1, true), (4999, true), (5000, false), (5001, false)] {
+            let opts = Options { max_data: max, ..Options::for_profile(profile).unwrap() };
             let r = aqr_flate::deconstruct_with(&raw, &opts);
             match (r, want_err) {
                 (Err(Error::Limit), true) => {}
                 (Ok((d, m)), false) => assert_eq!(aqr_flate::reconstruct(&d, &m).unwrap(), raw),
-                (r, _) => panic!(
-                    "profile {profile}, max_data {max}: {:?}",
-                    r.map(|x| x.0.len())
-                ),
+                (r, _) => panic!("profile {profile}, max_data {max}: {:?}", r.map(|x| x.0.len())),
             }
         }
-        let opts = Options {
-            max_data: 0,
-            ..Options::for_profile(profile).unwrap()
-        };
+        let opts = Options { max_data: 0, ..Options::for_profile(profile).unwrap() };
         let (d, m) = aqr_flate::deconstruct_with(&empty, &opts).unwrap();
         assert!(d.is_empty());
         assert_eq!(aqr_flate::reconstruct(&d, &m).unwrap(), empty);

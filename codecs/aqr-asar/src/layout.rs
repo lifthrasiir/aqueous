@@ -134,9 +134,7 @@ pub fn build(data: &[u8], header: &[u8], index: &[u8], len: u64) -> Result<Vec<u
     // (the length claimed, of one block as the plan has it: not past what the inputs can give, a
     // hole of the header of 2 bytes filled with a number or a hash of 64 hex digits, a list of
     // blocks' hashes with one quoted for each byte of data at most; nor past what the heap holds)
-    let most = (header.len().saturating_mul(40))
-        .saturating_add(data.len().saturating_mul(68))
-        .saturating_add(PREFIX);
+    let most = (header.len().saturating_mul(40)).saturating_add(data.len().saturating_mul(68)).saturating_add(PREFIX);
     if len > most {
         return Err(corrupt());
     }

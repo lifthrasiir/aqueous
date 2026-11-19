@@ -100,9 +100,7 @@ impl Stats {
         if p >= self.next && k > 0 && k != self.no_cut {
             self.cuts.push(k);
             self.cut_pos.push(p);
-            self.next = p
-                .saturating_add(self.segment)
-                .min(self.max.saturating_add(1));
+            self.next = p.saturating_add(self.segment).min(self.max.saturating_add(1));
         }
     }
 }
@@ -161,11 +159,7 @@ impl<'a> Bits<'a> {
 
     /// Fails if more bits were consumed than the input has.
     fn check(&self) -> Result<()> {
-        if self.bit_pos() > self.d.len() * 8 {
-            Err(Error::Truncated)
-        } else {
-            Ok(())
-        }
+        if self.bit_pos() > self.d.len() * 8 { Err(Error::Truncated) } else { Ok(()) }
     }
 }
 
@@ -188,11 +182,7 @@ struct Table {
 impl Table {
     /// A table to be built.
     fn empty(bits: u32) -> Table {
-        Table {
-            t: vec![],
-            bits,
-            mask: (1 << bits) - 1,
-        }
+        Table { t: vec![], bits, mask: (1 << bits) - 1 }
     }
 
     /// A table to be built, with room for `entries` entries: [`Table::build`] then never
@@ -241,10 +231,7 @@ impl Table {
         // Entries no code reaches read as no code (incomplete codes are legal).
         self.t.clear();
         self.t.resize(psize, 0);
-        for (i, &l) in longest[..if max > p { psize } else { 0 }]
-            .iter()
-            .enumerate()
-        {
+        for (i, &l) in longest[..if max > p { psize } else { 0 }].iter().enumerate() {
             if l > 0 {
                 let sb = l as u32 - p;
                 self.t[i] = self.t.len() as u32 | sb << 16 | SUB;
@@ -368,12 +355,7 @@ impl<const HEAD: bool> Collect<HEAD> {
         let store = store && cfg!(feature = "encode");
         let data = if store { data.min(STORE_WINDOW) } else { data };
         #[cfg(feature = "encode")]
-        let out = store.then(|| {
-            Box::new(Out {
-                writer: None,
-                base: 0,
-            })
-        });
+        let out = store.then(|| Box::new(Out { writer: None, base: 0 }));
         // (the room a container's size asks for, which a lying size can make more than there
         // is: then none at first, and more is made as the data comes)
         let mut d = std::mem::ManuallyDrop::new(Vec::<u8>::new());
@@ -388,16 +370,7 @@ impl<const HEAD: bool> Collect<HEAD> {
             seen: 0,
             #[cfg(feature = "encode")]
             out,
-            chunks: if HEAD {
-                vec![Chunk {
-                    token: 0,
-                    kept: 0,
-                    pos: 0,
-                    count: 0,
-                }]
-            } else {
-                Vec::new()
-            },
+            chunks: if HEAD { vec![Chunk { token: 0, kept: 0, pos: 0, count: 0 }] } else { Vec::new() },
         }
     }
 
@@ -426,12 +399,7 @@ impl<const HEAD: bool> Collect<HEAD> {
         } else {
             let base = self.base();
             let pos = base + self.data.1;
-            self.chunks.push(Chunk {
-                token: self.seen,
-                kept: self.tokens.1,
-                pos,
-                count: 0,
-            });
+            self.chunks.push(Chunk { token: self.seen, kept: self.tokens.1, pos, count: 0 });
             self.keeping = true;
             self.turn = self.data.1 + CHUNK;
             self.next = next_chunk(pos) - base;
@@ -456,9 +424,7 @@ impl<const HEAD: bool> Collect<HEAD> {
         if let Some(out) = &mut self.out
             && self.data.1 + extra > STORE_FROM
         {
-            let w = out
-                .writer
-                .get_or_insert_with(|| aqr_formula::store::Writer::new(None));
+            let w = out.writer.get_or_insert_with(|| aqr_formula::store::Writer::new(None));
             let cut = self.data.1.saturating_sub(HISTORY);
             // SAFETY: the first `data.1` bytes are made.
             let made = unsafe { std::slice::from_raw_parts(self.data.0, self.data.1) };
@@ -478,21 +444,10 @@ impl<const HEAD: bool> Collect<HEAD> {
 
     /// The vectors, those of no room left in their place.
     fn take_vecs(&mut self) -> (Vec<u8>, Vec<Token>) {
-        let d = std::mem::replace(
-            &mut self.data,
-            (std::ptr::NonNull::dangling().as_ptr(), 0, 0),
-        );
-        let t = std::mem::replace(
-            &mut self.tokens,
-            (std::ptr::NonNull::dangling().as_ptr(), 0, 0),
-        );
+        let d = std::mem::replace(&mut self.data, (std::ptr::NonNull::dangling().as_ptr(), 0, 0));
+        let t = std::mem::replace(&mut self.tokens, (std::ptr::NonNull::dangling().as_ptr(), 0, 0));
         // SAFETY: as in `grow` (or the parts of empty vectors, put by an earlier call).
-        unsafe {
-            (
-                Vec::from_raw_parts(d.0, d.1, d.2),
-                Vec::from_raw_parts(t.0, t.1, t.2),
-            )
-        }
+        unsafe { (Vec::from_raw_parts(d.0, d.1, d.2), Vec::from_raw_parts(t.0, t.1, t.2)) }
     }
 
     // (`Data` is `Vec<u8>` itself without `encode`)
@@ -585,10 +540,7 @@ impl<const HEAD: bool> Sink for Collect<HEAD> {
         unsafe {
             copy_match(self.data.0, self.data.1, dist as usize, len as usize);
             if keep {
-                self.tokens
-                    .0
-                    .add(self.tokens.1)
-                    .write(Token::Match { len, dist, alt258 });
+                self.tokens.0.add(self.tokens.1).write(Token::Match { len, dist, alt258 });
             }
         }
         self.data.1 += len as usize;
@@ -600,9 +552,7 @@ impl<const HEAD: bool> Sink for Collect<HEAD> {
             self.room(bytes.len() + ROOM);
         }
         // SAFETY: room made just above.
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.data.0.add(self.data.1), bytes.len())
-        };
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.data.0.add(self.data.1), bytes.len()) };
         self.data.1 += bytes.len();
     }
 }
@@ -620,19 +570,8 @@ pub fn parse_segments(raw: &[u8], segment: usize) -> Result<Flat> {
 /// [`parse_segments`] refusing data of more than `max` bytes (as [`parse_head_max`] does); the
 /// data written to aqr-formula's store as it is made where `store` (with the feature `encode`),
 /// rather than held.
-pub fn parse_segments_max(
-    raw: &[u8],
-    segment: usize,
-    max: usize,
-    size: usize,
-    store: bool,
-) -> Result<Flat> {
-    collect(
-        raw,
-        segment,
-        max,
-        Collect::<false>::new(room(raw, max, size), raw.len(), usize::MAX, store),
-    )
+pub fn parse_segments_max(raw: &[u8], segment: usize, max: usize, size: usize, store: bool) -> Result<Flat> {
+    collect(raw, segment, max, Collect::<false>::new(room(raw, max, size), raw.len(), usize::MAX, store))
 }
 
 /// [`parse_segments`] keeping only the tokens that start before `prefix` bytes of data, and
@@ -647,12 +586,7 @@ pub fn parse_segments_head(
     size: usize,
     store: bool,
 ) -> Result<Flat> {
-    collect(
-        raw,
-        segment,
-        max,
-        Collect::<true>::new(room(raw, max, size), prefix / 2 + 64, prefix, store),
-    )
+    collect(raw, segment, max, Collect::<true>::new(room(raw, max, size), prefix / 2 + 64, prefix, store))
 }
 
 /// The bytes to make room for at first for the data of `raw`, of at most `max` bytes: `size`,
@@ -665,12 +599,7 @@ fn room(raw: &[u8], max: usize, size: usize) -> usize {
     }
 }
 
-fn collect<const HEAD: bool>(
-    raw: &[u8],
-    segment: usize,
-    max: usize,
-    mut c: Collect<HEAD>,
-) -> Result<Flat> {
+fn collect<const HEAD: bool>(raw: &[u8], segment: usize, max: usize, mut c: Collect<HEAD>) -> Result<Flat> {
     // (a recompression over its heap with the room made gives up before the parse)
     #[cfg(feature = "encode")]
     aqr_common::allowance::check();
@@ -678,15 +607,7 @@ fn collect<const HEAD: bool>(
     let (data, tokens, chunks) = c.into_vecs();
     let mut l = l?;
     l.stream.trailing = raw[l.end..].to_vec();
-    Ok(Flat {
-        stream: l.stream,
-        data,
-        tokens,
-        starts: l.starts,
-        skips: l.skips,
-        stats: l.stats,
-        chunks,
-    })
+    Ok(Flat { stream: l.stream, data, tokens, starts: l.starts, skips: l.skips, stats: l.stats, chunks })
 }
 
 /// Parses `raw` like [`parse_segments`], handing the data and tokens to `sink`.
@@ -705,18 +626,8 @@ pub fn parse_head<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
 
 /// [`parse_head`] refusing data of more than `max` bytes ([`Error::Limit`]), before it is
 /// all made (it goes at most a match beyond).
-pub fn parse_head_max<S: Sink>(
-    raw: &[u8],
-    segment: usize,
-    max: usize,
-    sink: &mut S,
-) -> Result<Layout> {
-    let mut b = Bits {
-        d: raw,
-        pos: 0,
-        buf: 0,
-        n: 0,
-    };
+pub fn parse_head_max<S: Sink>(raw: &[u8], segment: usize, max: usize, sink: &mut S) -> Result<Layout> {
+    let mut b = Bits { d: raw, pos: 0, buf: 0, n: 0 };
     let mut blocks = vec![];
     let mut starts = vec![];
     let mut skips = vec![];
@@ -757,21 +668,14 @@ pub fn parse_head_max<S: Sink>(
                 let bytes = raw.get(at..at + len as usize).ok_or(Error::Truncated)?;
                 sink.stored(bytes);
                 olen += len as usize;
-                b = Bits {
-                    d: raw,
-                    pos: at + len as usize,
-                    buf: 0,
-                    n: 0,
-                };
+                b = Bits { d: raw, pos: at + len as usize, buf: 0, n: 0 };
                 skips.push((tlen, len as usize));
                 st.no_cut = tlen;
                 st.freqs.push(([0; 288], [0; 32]));
                 Body::Stored { pad, len }
             }
             1 => {
-                tokens_into(
-                    &mut b, &fixed.0, &fixed.1, sink, &mut olen, &mut tlen, &mut st,
-                )?;
+                tokens_into(&mut b, &fixed.0, &fixed.1, sink, &mut olen, &mut tlen, &mut st)?;
                 Body::Fixed { tokens: vec![] }
             }
             2 => {
@@ -779,10 +683,7 @@ pub fn parse_head_max<S: Sink>(
                 lit.build(header.lit_lens())?;
                 dist.build(header.dist_lens())?;
                 tokens_into(&mut b, &lit, &dist, sink, &mut olen, &mut tlen, &mut st)?;
-                Body::Dynamic {
-                    header,
-                    tokens: vec![],
-                }
+                Body::Dynamic { header, tokens: vec![] }
             }
             _ => return Err(Error::Invalid("reserved block type")),
         };
@@ -801,11 +702,7 @@ pub fn parse_head_max<S: Sink>(
     let tail_pad = b.get(k) as u8;
     b.check()?;
     Ok(Layout {
-        stream: Stream {
-            blocks,
-            tail_pad,
-            trailing: Vec::new(),
-        },
+        stream: Stream { blocks, tail_pad, trailing: Vec::new() },
         starts,
         skips,
         stats: st,
@@ -829,21 +726,12 @@ impl Codes {
     }
 
     /// Bytes of the tables' two blocks.
-    pub const BYTES: [u64; 2] = [
-        4 * Codes::room(288, LIT_BITS) as u64,
-        4 * Codes::room(32, DIST_BITS) as u64,
-    ];
+    pub const BYTES: [u64; 2] = [4 * Codes::room(288, LIT_BITS) as u64, 4 * Codes::room(32, DIST_BITS) as u64];
 
     pub fn new() -> Codes {
-        let table = |n: usize, bits: u32| Table {
-            t: Vec::with_capacity(Codes::room(n, bits)),
-            bits,
-            mask: (1 << bits) - 1,
-        };
-        Codes {
-            lit: table(288, LIT_BITS),
-            dist: table(32, DIST_BITS),
-        }
+        let table =
+            |n: usize, bits: u32| Table { t: Vec::with_capacity(Codes::room(n, bits)), bits, mask: (1 << bits) - 1 };
+        Codes { lit: table(288, LIT_BITS), dist: table(32, DIST_BITS) }
     }
 }
 
@@ -857,12 +745,7 @@ impl Default for Codes {
 /// gives them), and its data's length and the stream's (where its trailing bytes start): with
 /// no memory but the tables `codes`, which every block's codes are made in.
 pub fn tokens_of<S: Sink>(raw: &[u8], sink: &mut S, codes: &mut Codes) -> Result<(usize, usize)> {
-    let mut b = Bits {
-        d: raw,
-        pos: 0,
-        buf: 0,
-        n: 0,
-    };
+    let mut b = Bits { d: raw, pos: 0, buf: 0, n: 0 };
     let mut st = Stats {
         segment: usize::MAX,
         next: usize::MAX,
@@ -887,12 +770,7 @@ pub fn tokens_of<S: Sink>(raw: &[u8], sink: &mut S, codes: &mut Codes) -> Result
                 let at = b.bit_pos() / 8;
                 sink.stored(raw.get(at..at + len as usize).ok_or(Error::Truncated)?);
                 olen += len as usize;
-                b = Bits {
-                    d: raw,
-                    pos: at + len as usize,
-                    buf: 0,
-                    n: 0,
-                };
+                b = Bits { d: raw, pos: at + len as usize, buf: 0, n: 0 };
             }
             1 => {
                 lit.build(&huffman::fixed_lit_lens())?;
@@ -928,10 +806,7 @@ impl Canon {
     /// The code of `lens`, if zlib would take it: not over-subscribed, and complete unless
     /// `single` and it has one code of one bit. `None` also where it has no code at all.
     fn new(lens: &[u8], single: bool) -> Option<Canon> {
-        let mut c = Canon {
-            count: [0; 16],
-            sorted: [0; 320],
-        };
+        let mut c = Canon { count: [0; 16], sorted: [0; 320] };
         lens.iter().for_each(|&l| c.count[l as usize] += 1);
         c.count[0] = 0;
         let max = (1..16).rev().find(|&l| c.count[l] > 0)?;
@@ -988,12 +863,7 @@ impl Canon {
 /// found in the middle of data are better without it: those that start with one hold a few
 /// hundred bytes at most.
 pub fn plausible_start(raw: &[u8], fixed: bool) -> bool {
-    let mut b = Bits {
-        d: raw,
-        pos: 0,
-        buf: 0,
-        n: 0,
-    };
+    let mut b = Bits { d: raw, pos: 0, buf: 0, n: 0 };
     let (mut out, mut tokens) = (0usize, 0);
     // block after block while tokens are left: a block that is not the last does not end
     // the stream
@@ -1034,10 +904,10 @@ pub fn plausible_start(raw: &[u8], fixed: bool) -> bool {
                 Some(s @ 257..=285) => {
                     let len = LEN_BASE[s as usize - 257] as usize;
                     b.get(LEN_EXTRA[s as usize - 257] as u32);
-                    let d = dist.decode(&mut b).filter(|&d| d < 30).map(|d| {
-                        DIST_BASE[d as usize] as usize
-                            + b.get(DIST_EXTRA[d as usize] as u32) as usize
-                    });
+                    let d = dist
+                        .decode(&mut b)
+                        .filter(|&d| d < 30)
+                        .map(|d| DIST_BASE[d as usize] as usize + b.get(DIST_EXTRA[d as usize] as u32) as usize);
                     let within = d.is_some_and(|d| d <= out);
                     out += len;
                     within
@@ -1088,10 +958,7 @@ fn plausible_codes(b: &mut Bits) -> Option<(Canon, Canon)> {
     }
     let dist = if dist.iter().all(|&l| l == 0) {
         // no match can be decoded: an empty code
-        Canon {
-            count: [0; 16],
-            sorted: [0; 320],
-        }
+        Canon { count: [0; 16], sorted: [0; 320] }
     } else {
         Canon::new(dist, true)?
     };
@@ -1123,14 +990,7 @@ fn parse_header(b: &mut Bits) -> Result<DynHeader> {
     if lens[256] == 0 {
         return Err(Error::Invalid("no end-of-block code"));
     }
-    Ok(DynHeader {
-        hlit,
-        hdist,
-        hclen,
-        cl_lens,
-        ops,
-        lens,
-    })
+    Ok(DynHeader { hlit, hdist, hclen, cl_lens, ops, lens })
 }
 
 #[inline(always)]
@@ -1208,16 +1068,12 @@ fn tokens_into<S: Sink>(
         b.refill();
         let d = DIST_BASE[dc] as usize + b.bits(DIST_EXTRA[dc] as u32) as usize;
         if d > o {
-            break b
-                .check()
-                .and(Err(Error::Invalid("distance before start of data")));
+            break b.check().and(Err(Error::Invalid("distance before start of data")));
         }
         max_dist = max_dist.max(d as u16);
         // Length codes 0 and 1 are lengths 3 and 4; distance codes 24 and 26 start past
         // 4096 and 8192.
-        far |= (c == 0 && dc >= 24) as u8
-            | ((c == 0 && dc >= 26) as u8) << 1
-            | ((c <= 1 && dc >= 24) as u8) << 2;
+        far |= (c == 0 && dc >= 24) as u8 | ((c == 0 && dc >= 26) as u8) << 1 | ((c <= 1 && dc >= 24) as u8) << 2;
         sink.mat(len, d as u16, alt258);
         o += len as usize;
         t += 1;
@@ -1281,12 +1137,7 @@ pub unsafe fn copy_match(base: *mut u8, n: usize, d: usize, len: usize) {
 /// `flate-inflate` (FORMAT.md, "The module flate-inflate"). Only the data is made, into a buffer
 /// of `len` bytes (nothing of the blocks or tokens is kept), so that its memory is the output's.
 pub fn data(raw: &[u8], len: usize) -> Result<Vec<u8>> {
-    let mut b = Bits {
-        d: raw,
-        pos: 0,
-        buf: 0,
-        n: 0,
-    };
+    let mut b = Bits { d: raw, pos: 0, buf: 0, n: 0 };
     let mut out: Vec<u8> = Vec::new();
     out.try_reserve_exact(len).map_err(|_| Error::Limit)?;
     static FIXED: std::sync::OnceLock<(Table, Table)> = std::sync::OnceLock::new();
@@ -1315,12 +1166,7 @@ pub fn data(raw: &[u8], len: usize) -> Result<Vec<u8>> {
                     return Err(Error::Limit);
                 }
                 out.extend_from_slice(bytes);
-                b = Bits {
-                    d: raw,
-                    pos: at + n as usize,
-                    buf: 0,
-                    n: 0,
-                };
+                b = Bits { d: raw, pos: at + n as usize, buf: 0, n: 0 };
             }
             1 => data_tokens(&mut b, &fixed.0, &fixed.1, &mut out, len)?,
             2 => {
@@ -1411,10 +1257,7 @@ pub fn data_streamed(
     };
     // (the two tables are made for the most entries any code can take, and every block's codes,
     // the fixed ones too, are built in them: no allocation after this)
-    let (mut lit, mut dist) = (
-        Table::reserved(LIT_BITS, LIT_ENTRIES),
-        Table::reserved(DIST_BITS, DIST_ENTRIES),
-    );
+    let (mut lit, mut dist) = (Table::reserved(LIT_BITS, LIT_ENTRIES), Table::reserved(DIST_BITS, DIST_ENTRIES));
     // (whether they hold the fixed codes now)
     let mut fixed = false;
     loop {
@@ -1438,9 +1281,7 @@ pub fn data_streamed(
                     s.flush(false)?;
                     s.ahead(1)?;
                     let at = s.state.0;
-                    let k = left
-                        .min(s.input.len() - at)
-                        .min(HISTORY + FLUSH - s.out.len());
+                    let k = left.min(s.input.len() - at).min(HISTORY + FLUSH - s.out.len());
                     if k == 0 {
                         return Err(Error::Truncated);
                     }
@@ -1512,12 +1353,7 @@ struct Streamed<'r> {
 impl Streamed<'_> {
     fn bits(&self) -> Bits<'_> {
         let (pos, buf, n) = self.state;
-        Bits {
-            d: &self.input,
-            pos,
-            buf,
-            n,
-        }
+        Bits { d: &self.input, pos, buf, n }
     }
 
     /// At least `n` bytes of the stream read ahead of where it decodes, or all that is left of
@@ -1528,9 +1364,7 @@ impl Streamed<'_> {
             return Ok(());
         }
         // (but those of the bits loaded, for the bits consumed to be counted from within them)
-        let gone = at
-            .min(self.input.len())
-            .saturating_sub((self.state.2 as usize).div_ceil(8));
+        let gone = at.min(self.input.len()).saturating_sub((self.state.2 as usize).div_ceil(8));
         self.input.drain(..gone);
         self.taken += gone as u64;
         self.state.0 -= gone;
@@ -1569,12 +1403,7 @@ impl Streamed<'_> {
             self.ahead(AHEAD_TOKEN)?;
             self.flush(false)?;
             let (pos, buf, n) = self.state;
-            let mut b = Bits {
-                d: &self.input,
-                pos,
-                buf,
-                n,
-            };
+            let mut b = Bits { d: &self.input, pos, buf, n };
             // (as many tokens as the stream read ahead and the room before a flush allow)
             let stop = self.input.len().saturating_sub(AHEAD_TOKEN);
             let room = HISTORY + FLUSH;
@@ -1616,9 +1445,7 @@ impl Streamed<'_> {
                 b.refill();
                 let d = DIST_BASE[dc] as usize + b.bits(DIST_EXTRA[dc] as u32) as usize;
                 if d as u64 > self.made.min(self.out.len() as u64) {
-                    break b
-                        .check()
-                        .and(Err(Error::Invalid("distance before start of data")));
+                    break b.check().and(Err(Error::Invalid("distance before start of data")));
                 }
                 if self.made + n as u64 > self.len {
                     break Err(Error::Limit);
@@ -1637,9 +1464,7 @@ impl Streamed<'_> {
             self.state = (b.pos, b.buf, b.n);
             match r {
                 Ok(true) => return Ok(()),
-                Ok(false)
-                    if self.taken + self.input.len() as u64 == self.len_in && b.pos > stop =>
-                {
+                Ok(false) if self.taken + self.input.len() as u64 == self.len_in && b.pos > stop => {
                     // (the end of the stream within the bytes ahead: decoded with it as they are)
                     return self.tail(lit, dist);
                 }
@@ -1654,12 +1479,7 @@ impl Streamed<'_> {
         loop {
             self.flush(false)?;
             let (pos, buf, n) = self.state;
-            let mut b = Bits {
-                d: &self.input,
-                pos,
-                buf,
-                n,
-            };
+            let mut b = Bits { d: &self.input, pos, buf, n };
             b.refill();
             if b.pos > b.d.len() + 16 {
                 return Err(Error::Truncated);
@@ -1711,13 +1531,7 @@ impl Streamed<'_> {
 
 /// The data of a block's tokens (up to its end of block) for [`data`], appended to `out`,
 /// which may not grow past `len` bytes.
-fn data_tokens(
-    bits: &mut Bits,
-    lit: &Table,
-    dist: &Table,
-    out: &mut Vec<u8>,
-    len: usize,
-) -> Result<()> {
+fn data_tokens(bits: &mut Bits, lit: &Table, dist: &Table, out: &mut Vec<u8>, len: usize) -> Result<()> {
     let mut b = *bits;
     let r = loop {
         // A token takes at most 15 + 5 + 15 + 13 = 48 bits.
@@ -1754,9 +1568,7 @@ fn data_tokens(
         b.refill();
         let d = DIST_BASE[dc] as usize + b.bits(DIST_EXTRA[dc] as u32) as usize;
         if d > out.len() {
-            break b
-                .check()
-                .and(Err(Error::Invalid("distance before start of data")));
+            break b.check().and(Err(Error::Invalid("distance before start of data")));
         }
         if out.len() + n > len {
             break Err(Error::Limit);
@@ -1791,10 +1603,7 @@ mod tests {
         assert!(cap_lit >= LIT_ENTRIES && cap_dist >= DIST_ENTRIES);
         let (mut most_lit, mut most_dist) = (0, 0);
         for round in 0..4000 {
-            for (t, n, max_len) in [
-                (&mut lit, 288, 11 + round % 5),
-                (&mut dist, 32, 8 + round % 8),
-            ] {
+            for (t, n, max_len) in [(&mut lit, 288, 11 + round % 5), (&mut dist, 32, 8 + round % 8)] {
                 // (the lengths of an undersubscribed code: a few lengths favoured, symbols
                 // of others by chance, dropped where the code would not fit)
                 let favoured: Vec<u64> = (0..3).map(|_| 1 + rng.below(15)).collect();
@@ -1823,10 +1632,7 @@ mod tests {
         }
         assert_eq!((lit.t.as_ptr(), lit.t.capacity()), (lit_ptr, cap_lit));
         assert_eq!((dist.t.as_ptr(), dist.t.capacity()), (dist_ptr, cap_dist));
-        assert!(
-            most_lit <= LIT_ENTRIES && most_dist <= DIST_ENTRIES,
-            "{most_lit} {most_dist}"
-        );
+        assert!(most_lit <= LIT_ENTRIES && most_dist <= DIST_ENTRIES, "{most_lit} {most_dist}");
         eprintln!("most entries: {most_lit} of {LIT_ENTRIES}, {most_dist} of {DIST_ENTRIES}");
         // (the fixed codes in the same tables)
         lit.build(&huffman::fixed_lit_lens()).unwrap();
@@ -1840,21 +1646,13 @@ mod tests {
     #[test]
     fn written_out_as_whole() {
         use crate::zlib::{Params, compress};
-        let text: Vec<u8> = (0..300_000)
-            .flat_map(|i| format!("line {} of {}\n", i % 977, i % 13).into_bytes())
-            .collect();
+        let text: Vec<u8> =
+            (0..300_000).flat_map(|i| format!("line {} of {}\n", i % 977, i % 13).into_bytes()).collect();
         let mut d = text.clone();
         d.extend(aqr_common::rng::noise(1_500_000));
         d.extend(&text[..2_000_000]);
         for level in [1, 6, 9] {
-            let raw = compress(
-                &d,
-                Params {
-                    level,
-                    ..Params::default()
-                },
-            )
-            .unwrap();
+            let raw = compress(&d, Params { level, ..Params::default() }).unwrap();
             let raw = [&raw[..], b"after"].concat();
             for head in [false, true] {
                 let parse = |store| match head {
@@ -1868,10 +1666,7 @@ mod tests {
                 assert_eq!(a.tokens, b.tokens);
                 assert_eq!(a.chunks, b.chunks);
                 assert_eq!(a.skips, b.skips);
-                assert_eq!(
-                    (a.stats.cuts, a.stats.cut_pos),
-                    (b.stats.cuts, b.stats.cut_pos)
-                );
+                assert_eq!((a.stats.cuts, a.stats.cut_pos), (b.stats.cuts, b.stats.cut_pos));
                 assert_eq!(a.stream.trailing, b.stream.trailing);
             }
         }
@@ -1883,40 +1678,16 @@ mod tests {
     #[test]
     fn data_only() {
         use crate::zlib::{Params, Strategy, compress};
-        let text: Vec<u8> = (0..20000)
-            .flat_map(|i| format!("line {} of {}\n", i % 97, i % 13).into_bytes())
-            .collect();
+        let text: Vec<u8> = (0..20000).flat_map(|i| format!("line {} of {}\n", i % 97, i % 13).into_bytes()).collect();
         let runs: Vec<u8> = (0..50000).map(|i| (i / 1000 % 3) as u8).collect();
-        let samples = [
-            text,
-            runs,
-            aqr_common::rng::noise(100_000),
-            b"ab".to_vec(),
-            Vec::new(),
-        ];
+        let samples = [text, runs, aqr_common::rng::noise(100_000), b"ab".to_vec(), Vec::new()];
         for d in &samples {
-            for (level, strategy) in [
-                (1, Strategy::Default),
-                (6, Strategy::Default),
-                (9, Strategy::Fixed),
-                (6, Strategy::Rle),
-            ] {
-                let raw = compress(
-                    d,
-                    Params {
-                        level,
-                        strategy,
-                        ..Params::default()
-                    },
-                )
-                .unwrap();
+            for (level, strategy) in
+                [(1, Strategy::Default), (6, Strategy::Default), (9, Strategy::Fixed), (6, Strategy::Rle)]
+            {
+                let raw = compress(d, Params { level, strategy, ..Params::default() }).unwrap();
                 assert_eq!(parse(&raw).unwrap().data, *d);
-                assert_eq!(
-                    data(&raw, d.len()).unwrap(),
-                    *d,
-                    "{} {level} {strategy:?}",
-                    d.len()
-                );
+                assert_eq!(data(&raw, d.len()).unwrap(), *d, "{} {level} {strategy:?}", d.len());
                 assert!(data(&raw, d.len() + 1).is_err());
                 assert!(d.is_empty() || data(&raw, d.len() - 1).is_err());
                 assert!(data(&[&raw[..], &[0]].concat(), d.len()).is_err());
@@ -1960,17 +1731,9 @@ mod tests {
     #[test]
     fn streamed_as_data() {
         use crate::zlib::{Params, Strategy, compress};
-        let text: Vec<u8> = (0..20000)
-            .flat_map(|i| format!("line {} of {}\n", i % 97, i % 13).into_bytes())
-            .collect();
+        let text: Vec<u8> = (0..20000).flat_map(|i| format!("line {} of {}\n", i % 97, i % 13).into_bytes()).collect();
         let runs: Vec<u8> = (0..3_000_000).map(|i| (i / 100_000 % 3) as u8).collect();
-        let samples = [
-            text,
-            runs,
-            aqr_common::rng::noise(300_000),
-            b"ab".to_vec(),
-            Vec::new(),
-        ];
+        let samples = [text, runs, aqr_common::rng::noise(300_000), b"ab".to_vec(), Vec::new()];
         for d in &samples {
             for (level, strategy) in [
                 (0, Strategy::Default),
@@ -1984,11 +1747,7 @@ mod tests {
                     0 => {
                         let mut raw = Vec::new();
                         let blocks: Vec<&[u8]> = d.chunks(65535).collect();
-                        for (k, b) in blocks
-                            .iter()
-                            .enumerate()
-                            .chain((blocks.is_empty()).then_some((0, &&[][..])))
-                        {
+                        for (k, b) in blocks.iter().enumerate().chain((blocks.is_empty()).then_some((0, &&[][..]))) {
                             raw.push((k + 1 >= blocks.len()) as u8);
                             raw.extend_from_slice(&(b.len() as u16).to_le_bytes());
                             raw.extend_from_slice(&(!(b.len() as u16)).to_le_bytes());
@@ -1996,37 +1755,19 @@ mod tests {
                         }
                         raw
                     }
-                    _ => compress(
-                        d,
-                        Params {
-                            level,
-                            strategy,
-                            ..Params::default()
-                        },
-                    )
-                    .unwrap(),
+                    _ => compress(d, Params { level, strategy, ..Params::default() }).unwrap(),
                 };
                 assert_eq!(data(&raw, d.len()).unwrap(), *d);
                 for piece in [1, 7, 4096, usize::MAX] {
                     let what = format!("{} {level} {strategy:?} {piece}", d.len());
-                    let (out, largest) =
-                        streamed(&raw, d.len(), piece).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                    let (out, largest) = streamed(&raw, d.len(), piece).unwrap_or_else(|e| panic!("{what}: {e:?}"));
                     assert!(out == *d, "{what}");
                     assert!(largest <= HISTORY + FLUSH + 258, "{what}: {largest}");
                     if piece == 7 || piece == usize::MAX {
                         assert!(streamed(&raw, d.len() + 1, piece).is_err(), "{what}");
-                        assert!(
-                            d.is_empty() || streamed(&raw, d.len() - 1, piece).is_err(),
-                            "{what}"
-                        );
-                        assert!(
-                            streamed(&[&raw[..], &[0]].concat(), d.len(), piece).is_err(),
-                            "{what}"
-                        );
-                        assert!(
-                            streamed(&raw[..raw.len() - 1], d.len(), piece).is_err(),
-                            "{what}"
-                        );
+                        assert!(d.is_empty() || streamed(&raw, d.len() - 1, piece).is_err(), "{what}");
+                        assert!(streamed(&[&raw[..], &[0]].concat(), d.len(), piece).is_err(), "{what}");
+                        assert!(streamed(&raw[..raw.len() - 1], d.len(), piece).is_err(), "{what}");
                     }
                 }
             }
@@ -2042,14 +1783,9 @@ mod tests {
         // happens: texts of many lengths of lines, so that blocks end in many places)
         for k in 0..80 {
             let text: Vec<u8> = (0..30000)
-                .flat_map(|i| {
-                    format!("line {} of {}{}\n", i % 977, i * 7 % 1013, "x".repeat(k)).into_bytes()
-                })
+                .flat_map(|i| format!("line {} of {}{}\n", i % 977, i * 7 % 1013, "x".repeat(k)).into_bytes())
                 .collect();
-            let p = crate::zlib::Params {
-                mem: 1 + k as u8 % 3,
-                ..Default::default()
-            };
+            let p = crate::zlib::Params { mem: 1 + k as u8 % 3, ..Default::default() };
             let raw = crate::zlib::compress(&text, p).unwrap();
             for piece in [usize::MAX, 0, 1000] {
                 let (out, _) = streamed(&raw, text.len(), piece).unwrap();
@@ -2096,10 +1832,7 @@ mod tests {
         let data = include_bytes!("zlib.rs");
         let stored = crate::deflate::write(
             &Stream {
-                blocks: vec![Block {
-                    last: true,
-                    body: Body::Stored { pad: 0, len: 5 },
-                }],
+                blocks: vec![Block { last: true, body: Body::Stored { pad: 0, len: 5 } }],
                 tail_pad: 0,
                 trailing: vec![],
             },
@@ -2114,11 +1847,7 @@ mod tests {
         let mut e = crate::zlib::Emulator::new(data, crate::zlib::Params::default());
         let g = crate::zlib::zlib_block(&mut e, 0).unwrap();
         let dynamic = crate::deflate::write(
-            &Stream {
-                blocks: vec![Block { last: true, ..g }],
-                tail_pad: 0,
-                trailing: vec![],
-            },
+            &Stream { blocks: vec![Block { last: true, ..g }], tail_pad: 0, trailing: vec![] },
             &data[..],
         );
         if let Ok(d) = dynamic {
@@ -2132,9 +1861,7 @@ mod tests {
         }
         assert!(by.iter().sum::<usize>() < noise.len() / 100, "{by:?}");
         assert!(by[0] < 10 && by[2] < 10, "{by:?}");
-        let n = (0..noise.len() - 64)
-            .filter(|&p| plausible_start(&noise[p..], false))
-            .count();
+        let n = (0..noise.len() - 64).filter(|&p| plausible_start(&noise[p..], false)).count();
         assert_eq!(n, by[0] + by[2]);
     }
 
@@ -2143,10 +1870,7 @@ mod tests {
     fn head_without_trailing() {
         let mut raw = crate::deflate::write(
             &Stream {
-                blocks: vec![Block {
-                    last: true,
-                    body: Body::Stored { pad: 0, len: 5 },
-                }],
+                blocks: vec![Block { last: true, body: Body::Stored { pad: 0, len: 5 } }],
                 tail_pad: 0,
                 trailing: vec![],
             },
@@ -2173,11 +1897,7 @@ mod tests {
             (lcg >> 24) as u8
         }));
         data.extend(b"abcabcabd".repeat(5000));
-        let stream = |blocks: Vec<Block>| Stream {
-            blocks,
-            tail_pad: 0,
-            trailing: vec![7, 8],
-        };
+        let stream = |blocks: Vec<Block>| Stream { blocks, tail_pad: 0, trailing: vec![7, 8] };
         // Stored, fixed and zlib's dynamic blocks over the same data.
         let mut e = crate::zlib::Emulator::new(&data, crate::zlib::Params::default());
         let mut blocks = vec![];
@@ -2185,9 +1905,7 @@ mod tests {
         while let Some(g) = crate::zlib::zlib_block(&mut e, pos) {
             pos += match &g.body {
                 Body::Stored { len, .. } => *len as usize,
-                Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
-                    tokens.iter().map(|t| t.span()).sum()
-                }
+                Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens.iter().map(|t| t.span()).sum(),
             };
             let last = g.last;
             blocks.push(g);
@@ -2198,13 +1916,7 @@ mod tests {
         let n = blocks.len();
         if let Body::Dynamic { tokens, .. } = &blocks[0].body {
             let t = tokens.clone();
-            blocks.insert(
-                0,
-                Block {
-                    last: false,
-                    body: Body::Fixed { tokens: t },
-                },
-            );
+            blocks.insert(0, Block { last: false, body: Body::Fixed { tokens: t } });
             blocks.remove(1);
         }
         assert_eq!(blocks.len(), n);
@@ -2221,10 +1933,7 @@ mod tests {
         }
         assert!(f.tokens == toks);
         assert_eq!(f.stream.blocks.len(), rs.blocks.len());
-        assert_eq!(
-            (f.stream.tail_pad, &f.stream.trailing),
-            (rs.tail_pad, &rs.trailing)
-        );
+        assert_eq!((f.stream.tail_pad, &f.stream.trailing), (rs.tail_pad, &rs.trailing));
         for (a, b) in f.stream.blocks.iter().zip(&rs.blocks) {
             assert_eq!(a.last, b.last);
             match (&a.body, &b.body) {

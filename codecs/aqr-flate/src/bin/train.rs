@@ -107,15 +107,11 @@ fn opts_files(args: &[String], with_value: &[&str]) -> Res<(Opts, Vec<String>)> 
 }
 
 fn one<'a>(o: &'a Opts, k: &str, default: &'a str) -> &'a str {
-    o.get(k)
-        .and_then(|v| v.last())
-        .map_or(default, String::as_str)
+    o.get(k).and_then(|v| v.last()).map_or(default, String::as_str)
 }
 
 fn fnv64(s: &[u8]) -> u64 {
-    s.iter().fold(0xcbf29ce484222325u64, |h, &b| {
-        (h ^ b as u64).wrapping_mul(0x100000001b3)
-    })
+    s.iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 
 fn samples(args: &[String]) -> Res<()> {
@@ -123,10 +119,8 @@ fn samples(args: &[String]) -> Res<()> {
     let sweep: Sweep = one(&o, "-s", "one").parse()?;
     let exclude = o.get("-x").cloned().unwrap_or_default();
     let out = PathBuf::from(one(&o, "-o", "cache/samples"));
-    let encoders: Vec<Encoder> = flate_zoo::presets(sweep)
-        .into_iter()
-        .filter(|e| !exclude.iter().any(|x| x == e.backend().name()))
-        .collect();
+    let encoders: Vec<Encoder> =
+        flate_zoo::presets(sweep).into_iter().filter(|e| !exclude.iter().any(|x| x == e.backend().name())).collect();
     eprintln!("{} presets", encoders.len());
     for f in &files {
         let input = std::fs::read(f)?;
@@ -155,11 +149,7 @@ fn samples(args: &[String]) -> Res<()> {
         }
         std::fs::write(dir.join("source"), format!("{f}\n"))?;
         std::fs::write(dir.join("index.tsv"), index)?;
-        eprintln!(
-            "{f}: {} distinct outputs in {:.1?}",
-            classes.len(),
-            t.elapsed()
-        );
+        eprintln!("{f}: {} distinct outputs in {:.1?}", classes.len(), t.elapsed());
     }
     Ok(())
 }
@@ -195,27 +185,23 @@ fn png_idat(file: &[u8]) -> Res<Vec<u8>> {
 
 fn parse(args: &[String]) -> Res<()> {
     // Inputs: raw DEFLATE streams, with the files' sizes.
-    let (streams, inputs): (Vec<Vec<u8>>, f64) =
-        if args.first().map(String::as_str) == Some("--png") {
-            let mut v = vec![];
-            let mut total = 0.0;
-            for f in &args[1..] {
-                let file = std::fs::read(f)?;
-                let z = png_idat(&file).map_err(|e| format!("{f}: {e}"))?;
-                v.push(z.get(2..).ok_or("empty IDAT")?.to_vec());
-                total += file.len() as f64;
-            }
-            (v, total)
-        } else {
-            let o = opts(args, &["-i", "-s"])?;
-            let samples = load(
-                Path::new(one(&o, "-i", "cache/samples")),
-                one(&o, "-s", "held"),
-            )?;
-            let v: Vec<Vec<u8>> = samples.into_iter().map(|s| s.raw).collect();
-            let total = v.iter().map(|s| s.len() as f64).sum();
-            (v, total)
-        };
+    let (streams, inputs): (Vec<Vec<u8>>, f64) = if args.first().map(String::as_str) == Some("--png") {
+        let mut v = vec![];
+        let mut total = 0.0;
+        for f in &args[1..] {
+            let file = std::fs::read(f)?;
+            let z = png_idat(&file).map_err(|e| format!("{f}: {e}"))?;
+            v.push(z.get(2..).ok_or("empty IDAT")?.to_vec());
+            total += file.len() as f64;
+        }
+        (v, total)
+    } else {
+        let o = opts(args, &["-i", "-s"])?;
+        let samples = load(Path::new(one(&o, "-i", "cache/samples")), one(&o, "-s", "held"))?;
+        let v: Vec<Vec<u8>> = samples.into_iter().map(|s| s.raw).collect();
+        let total = v.iter().map(|s| s.len() as f64).sum();
+        (v, total)
+    };
     let mut best = f64::MAX;
     let mut data = 0;
     for _ in 0..7 {
@@ -227,10 +213,8 @@ fn parse(args: &[String]) -> Res<()> {
         best = best.min(t.elapsed().as_secs_f64());
     }
     // Writing back what was parsed (and checking it).
-    let flats = streams
-        .iter()
-        .map(|s| aqr_flate::inflate::parse_segments(s, 1 << 20))
-        .collect::<Result<Vec<_>, _>>()?;
+    let flats =
+        streams.iter().map(|s| aqr_flate::inflate::parse_segments(s, 1 << 20)).collect::<Result<Vec<_>, _>>()?;
     let mut best_w = f64::MAX;
     for _ in 0..7 {
         let t = Instant::now();
@@ -327,12 +311,7 @@ fn eval(args: &[String]) -> Res<()> {
             let t1 = aqr_common::cpu::thread();
             if join {
                 let back = aqr_flate::reconstruct_with_threads(&data, &meta, 1).unwrap();
-                assert!(
-                    back == s.raw,
-                    "{} on {}: reconstruction differs",
-                    s.specs,
-                    s.source
-                );
+                assert!(back == s.raw, "{} on {}: reconstruction differs", s.specs, s.source);
             }
             let t2 = aqr_common::cpu::thread();
             (s.raw.len(), r, meta.len(), t1 - t0, t2 - t1)
@@ -412,11 +391,7 @@ fn eval(args: &[String]) -> Res<()> {
     let line = |name: &str, a: &Agg| {
         let mut rules: Vec<_> = a.rules.iter().collect();
         rules.sort_by_key(|r| std::cmp::Reverse(*r.1));
-        let rules: Vec<String> = rules
-            .iter()
-            .take(2)
-            .map(|(k, v)| format!("{k}:{v}"))
-            .collect();
+        let rules: Vec<String> = rules.iter().take(2).map(|(k, v)| format!("{k}:{v}")).collect();
         println!(
             "{name:<24} {:>4} {:>9} {:>8} {:>6.3}% | {:>6} {:>6} {:>7} | {:>6.2} | {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} | {}",
             a.n,
@@ -439,10 +414,7 @@ fn eval(args: &[String]) -> Res<()> {
         line(b, a);
     }
     line("TOTAL", &total);
-    println!(
-        "coded with their models: {:.0?}; tables {} B",
-        total.coded, total.tables
-    );
+    println!("coded with their models: {:.0?}; tables {} B", total.coded, total.tables);
     Ok(())
 }
 
@@ -459,10 +431,8 @@ fn priors(args: &[String]) -> Res<()> {
     opts.collect = true;
     let samples = load(&dir, "train")?;
     let t = Instant::now();
-    let seen: Vec<Vec<[u32; 2]>> = samples
-        .par_iter()
-        .map(|s| aqr_flate::deconstruct_report(&s.raw, &opts).unwrap().2.seen)
-        .collect();
+    let seen: Vec<Vec<[u32; 2]>> =
+        samples.par_iter().map(|s| aqr_flate::deconstruct_report(&s.raw, &opts).unwrap().2.seen).collect();
     let mut total = vec![[0u32; 2]; aqr_flate::adapt::NUM];
     for v in &seen {
         for (a, b) in total.iter_mut().zip(v) {
@@ -503,39 +473,21 @@ fn dimensions() -> Vec<Vec<Setter>> {
         dim(&[0u8, 5, 6, 8], |r, v| r.long = v),
         dim(&[false, true], |r, v| r.rank = v),
         dim(&[0u16, 4, 5, 6, 16, 32, 259], |r, v| r.inner = v),
-        dim(&[0u16, 4, 5, 6, 8, 16, 32, 64, 128, 258, 259], |r, v| {
-            r.lazy = v
-        }),
+        dim(&[0u16, 4, 5, 6, 8, 16, 32, 64, 128, 258, 259], |r, v| r.lazy = v),
         dim(&[0u8, 1], |r, v| r.margin = v),
         dim(&[3u8, 4, 5], |r, v| r.min_len = v),
-        dim(
-            &[(0u8, 4096u16), (3, 4096), (3, 8192), (4, 4096)],
-            |r, v| (r.far_len, r.far_dist) = v,
-        ),
-        dim(
-            &[
-                256u16, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768,
-            ],
-            |r, v| r.window = v,
-        ),
-        dim(&[Kind::Search, Kind::Literals, Kind::Runs], |r, v| {
-            r.kind = v
-        }),
+        dim(&[(0u8, 4096u16), (3, 4096), (3, 8192), (4, 4096)], |r, v| (r.far_len, r.far_dist) = v),
+        dim(&[256u16, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768], |r, v| r.window = v),
+        dim(&[Kind::Search, Kind::Literals, Kind::Runs], |r, v| r.kind = v),
     ]
 }
 
 /// Starting points of the search.
 fn seeds() -> Vec<Rule> {
-    [
-        "key=3,ways=1",
-        "key=3,ways=8,lazy=16,far",
-        "key=3,ways=1,starts",
-        "key=4,ways=4,min=4",
-        "literals",
-    ]
-    .iter()
-    .map(|s| s.parse().unwrap())
-    .collect()
+    ["key=3,ways=1", "key=3,ways=8,lazy=16,far", "key=3,ways=1,starts", "key=4,ways=4,min=4", "literals"]
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect()
 }
 
 /// The rule minimizing the summed cost over `streams`, by coordinate descent from each seed.
@@ -555,12 +507,9 @@ fn fit(streams: &mut [aqr_flate::Prepared], lambda: f64) -> (Rule, f64) {
         if r.check().is_err() {
             return f64::INFINITY;
         }
-        *memo.entry(r).or_insert_with(|| {
-            streams
-                .iter_mut()
-                .map(|p| penalized(&r, p.cost(r).unwrap(), p.bytes(), lambda))
-                .sum()
-        })
+        *memo
+            .entry(r)
+            .or_insert_with(|| streams.iter_mut().map(|p| penalized(&r, p.cost(r).unwrap(), p.bytes(), lambda)).sum())
     };
     let mut best = (Rule::default(), f64::INFINITY);
     for seed in seeds() {
@@ -630,21 +579,13 @@ fn rules(args: &[String]) -> Res<()> {
             if let Some(&(r, cost)) = cached.get(c) {
                 return (c.clone(), r, cost);
             }
-            let mut ps: Vec<aqr_flate::Prepared> = v
-                .iter()
-                .map(|s| aqr_flate::Prepared::new(&s.raw, prefix).unwrap())
-                .collect();
+            let mut ps: Vec<aqr_flate::Prepared> =
+                v.iter().map(|s| aqr_flate::Prepared::new(&s.raw, prefix).unwrap()).collect();
             let (r, cost) = fit(&mut ps, lambda);
             (c.clone(), r, cost)
         })
         .collect();
-    std::fs::write(
-        fitted_path,
-        fitted
-            .iter()
-            .map(|(c, r, x)| format!("{c}\t{r}\t{x}\n"))
-            .collect::<String>(),
-    )?;
+    std::fs::write(fitted_path, fitted.iter().map(|(c, r, x)| format!("{c}\t{r}\t{x}\n")).collect::<String>())?;
     eprintln!("fitted {} classes in {:.1?}", fitted.len(), t.elapsed());
     let mut cands: Vec<Rule> = fitted.iter().map(|f| f.1).collect();
     // Extra candidates, e.g. a catalog from a grid.
@@ -654,31 +595,17 @@ fn rules(args: &[String]) -> Res<()> {
     cands.sort();
     cands.dedup();
     // Every candidate on every stream used for fitting.
-    let subset: Vec<&Sample> = classes
-        .iter()
-        .flat_map(|(_, v)| v.iter().copied())
-        .collect();
+    let subset: Vec<&Sample> = classes.iter().flat_map(|(_, v)| v.iter().copied()).collect();
     let t = Instant::now();
     let costs: Vec<Vec<f64>> = subset
         .par_iter()
         .map(|s| {
             let mut p = aqr_flate::Prepared::new(&s.raw, prefix).unwrap();
-            cands
-                .iter()
-                .map(|&r| penalized(&r, p.cost(r).unwrap(), p.bytes(), lambda))
-                .collect()
+            cands.iter().map(|&r| penalized(&r, p.cost(r).unwrap(), p.bytes(), lambda)).collect()
         })
         .collect();
-    eprintln!(
-        "{} distinct rules on {} streams in {:.1?}",
-        cands.len(),
-        subset.len(),
-        t.elapsed()
-    );
-    let ideal: f64 = costs
-        .iter()
-        .map(|c| c.iter().copied().fold(f64::INFINITY, f64::min))
-        .sum();
+    eprintln!("{} distinct rules on {} streams in {:.1?}", cands.len(), subset.len(), t.elapsed());
+    let ideal: f64 = costs.iter().map(|c| c.iter().copied().fold(f64::INFINITY, f64::min)).sum();
     let mut chosen: Vec<usize> = vec![];
     let mut cur = vec![f64::INFINITY; costs.len()];
     let mut text = format!(
@@ -710,18 +637,8 @@ fn rules(args: &[String]) -> Res<()> {
             *m = c[best].min(*m);
         }
         chosen.push(best);
-        let users: Vec<&str> = fitted
-            .iter()
-            .filter(|f| f.1 == cands[best])
-            .map(|f| f.0.as_str())
-            .take(4)
-            .collect();
-        eprintln!(
-            "  + {} -> {:.0} bytes ({})",
-            cands[best],
-            total / 8.0,
-            users.join(" ")
-        );
+        let users: Vec<&str> = fitted.iter().filter(|f| f.1 == cands[best]).map(|f| f.0.as_str()).take(4).collect();
+        eprintln!("  + {} -> {:.0} bytes ({})", cands[best], total / 8.0, users.join(" "));
         text += &format!("{}\n", cands[best]);
     }
     // Which of the chosen rules is best for every fingerprint, over every training stream.
@@ -731,11 +648,7 @@ fn rules(args: &[String]) -> Res<()> {
         .par_iter()
         .map(|s| {
             let (fp, c, bytes) = aqr_flate::analyze(&s.raw, &catalog, prefix).unwrap();
-            let c = c
-                .iter()
-                .zip(&catalog)
-                .map(|(&b, r)| penalized(r, b, bytes, lambda))
-                .collect();
+            let c = c.iter().zip(&catalog).map(|(&b, r)| penalized(r, b, bytes, lambda)).collect();
             (fp, c)
         })
         .collect();
@@ -748,10 +661,7 @@ fn rules(args: &[String]) -> Res<()> {
             }
         }
     }
-    let ideal: f64 = analyzed
-        .iter()
-        .map(|(_, c)| c.iter().copied().fold(f64::INFINITY, f64::min))
-        .sum();
+    let ideal: f64 = analyzed.iter().map(|(_, c)| c.iter().copied().fold(f64::INFINITY, f64::min)).sum();
     let mapped: f64 = analyzed
         .iter()
         .map(|((fine, _), c)| {
@@ -768,10 +678,7 @@ fn rules(args: &[String]) -> Res<()> {
         mapped / 8.0,
         ideal / 8.0
     );
-    text += &format!(
-        "# the rule for each fingerprint (fine and coarse) of the {} training streams\n",
-        analyzed.len()
-    );
+    text += &format!("# the rule for each fingerprint (fine and coarse) of the {} training streams\n", analyzed.len());
     // The best rule, and the second best too where it is nearly as good (to be tried
     // against each other on a short prefix).
     for (k, s) in &sums {
@@ -793,19 +700,9 @@ fn models(args: &[String]) -> Res<()> {
     let dir = PathBuf::from(one(&o, "-i", "cache/samples"));
     let out = one(&o, "-o", "model/models.txt");
     let samples = load(&dir, "train")?;
-    let opts = catalog_opts(
-        aqr_flate::DEFAULT_PROFILE,
-        o.get("-r").and_then(|r| r.last()),
-    )?;
-    let counts: Vec<Vec<Vec<u32>>> = samples
-        .par_iter()
-        .map(|s| {
-            aqr_flate::deconstruct_report(&s.raw, &opts)
-                .unwrap()
-                .2
-                .counts
-        })
-        .collect();
+    let opts = catalog_opts(aqr_flate::DEFAULT_PROFILE, o.get("-r").and_then(|r| r.last()))?;
+    let counts: Vec<Vec<Vec<u32>>> =
+        samples.par_iter().map(|s| aqr_flate::deconstruct_report(&s.raw, &opts).unwrap().2.counts).collect();
     let mut text = format!(
         "# aqr-flate default models: mean symbol distributions of {} training streams\n\
          # (per line: gap and kind of either class, fresh length, length delta, distance index, raw, rank)\n",
@@ -845,21 +742,10 @@ fn speed(args: &[String]) -> Res<()> {
     if let Some(b) = o.get("-b") {
         samples.retain(|s| b.iter().any(|b| b == s.backend()));
     }
-    let plain: usize = samples
-        .iter()
-        .map(|s| aqr_flate::deflate::parse(&s.raw).unwrap().1.len())
-        .sum();
-    println!(
-        "{} streams, {:.1} MB of data",
-        samples.len(),
-        plain as f64 / 1e6
-    );
+    let plain: usize = samples.iter().map(|s| aqr_flate::deflate::parse(&s.raw).unwrap().1.len()).sum();
+    println!("{} streams, {:.1} MB of data", samples.len(), plain as f64 / 1e6);
     for rule in rules {
-        let opts = Options {
-            rules: vec![rule],
-            threads: 1,
-            ..Default::default()
-        };
+        let opts = Options { rules: vec![rule], threads: 1, ..Default::default() };
         // CPU time of reconstruction, summed over streams split across threads.
         let r: Vec<(usize, f64)> = samples
             .par_iter()

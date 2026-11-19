@@ -16,7 +16,11 @@ fn archive() -> (Vec<u8>, [(&'static str, Vec<u8>); 2]) {
     let leaves = [Leaf { outputs: vec![na], sums: vec![None] }, Leaf { outputs: vec![nb], sums: vec![None] }];
     let e = |parent, name: &str, node| Entry { parent, name: name.into(), node, extra: Extra::default() };
     let tree = Tree {
-        entries: vec![e(None, "a.txt", EntryNode::File(0)), e(None, "sub", EntryNode::Dir), e(Some(1), "b.bin", EntryNode::File(1))],
+        entries: vec![
+            e(None, "a.txt", EntryNode::File(0)),
+            e(None, "sub", EntryNode::Dir),
+            e(Some(1), "b.bin", EntryNode::File(1)),
+        ],
         ..Tree::default()
     };
     let seg = Segment { f: &f, leaves: &leaves, tree: &tree, contents: &[(0, 0), (1, 0)] };
@@ -50,7 +54,8 @@ fn archive_appended() {
     let (c, files) = archive();
     // as it is, and with bytes after it: a signature of a certificate's size, a few bytes of
     // padding, bytes that look like a footer's end
-    for (name, after) in [("plain", vec![]), ("signed", vec![0x30; 4096]), ("padded", vec![0; 7]), ("odd", vec![0xff, 0x7f])]
+    for (name, after) in
+        [("plain", vec![]), ("signed", vec![0x30; 4096]), ("padded", vec![0; 7]), ("odd", vec![0xff, 0x7f])]
     {
         let d = scratch(name);
         let o = run(&d, &[&c[..], &after].concat());

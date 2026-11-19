@@ -39,11 +39,7 @@ impl aqr_common::wire::Wire for Token {
     fn get(b: &mut &[u8]) -> Option<Self> {
         Some(match u8::get(b)? {
             0 => Token::Lit(u8::get(b)?),
-            t @ (1 | 2) => Token::Match {
-                len: u16::get(b)?,
-                dist: u16::get(b)?,
-                alt258: t == 2,
-            },
+            t @ (1 | 2) => Token::Match { len: u16::get(b)?, dist: u16::get(b)?, alt258: t == 2 },
             _ => return None,
         })
     }
@@ -94,19 +90,13 @@ pub struct Short<T: Copy + Default, const N: usize> {
 
 impl<T: Copy + Default, const N: usize> Short<T, N> {
     pub fn new() -> Self {
-        Short {
-            v: [T::default(); N],
-            n: 0,
-        }
+        Short { v: [T::default(); N], n: 0 }
     }
 
     /// The first `n` values of `T::default()` (as `vec![x; n]` of the default).
     pub fn zeroed(n: usize) -> Self {
         assert!(n <= N, "{n} values past {N}");
-        Short {
-            v: [T::default(); N],
-            n: n as u16,
-        }
+        Short { v: [T::default(); N], n: n as u16 }
     }
 
     pub fn from_slice(s: &[T]) -> Self {
@@ -290,9 +280,7 @@ pub fn parse(raw: &[u8]) -> Result<(Stream, Vec<u8>)> {
             1 => {
                 let lit = huffman::Decoder::new(&huffman::fixed_lit_lens())?;
                 let dist = huffman::Decoder::new(&huffman::FIXED_DIST_LENS)?;
-                Body::Fixed {
-                    tokens: parse_tokens(&mut r, &lit, &dist, &mut out)?,
-                }
+                Body::Fixed { tokens: parse_tokens(&mut r, &lit, &dist, &mut out)? }
             }
             2 => {
                 let header = parse_header(&mut r)?;
@@ -310,14 +298,7 @@ pub fn parse(raw: &[u8]) -> Result<(Stream, Vec<u8>)> {
     }
     let tail_pad = r.bits(r.pad_len())? as u8;
     let trailing = raw[r.bit_pos() / 8..].to_vec();
-    Ok((
-        Stream {
-            blocks,
-            tail_pad,
-            trailing,
-        },
-        out,
-    ))
+    Ok((Stream { blocks, tail_pad, trailing }, out))
 }
 
 fn parse_header(r: &mut BitReader) -> Result<DynHeader> {
@@ -343,14 +324,7 @@ fn parse_header(r: &mut BitReader) -> Result<DynHeader> {
     if lens[256] == 0 {
         return Err(Error::Invalid("no end-of-block code"));
     }
-    Ok(DynHeader {
-        hlit,
-        hdist,
-        hclen,
-        cl_lens,
-        ops,
-        lens,
-    })
+    Ok(DynHeader { hlit, hdist, hclen, cl_lens, ops, lens })
 }
 
 fn parse_tokens(
@@ -385,11 +359,7 @@ fn parse_tokens(
                 for i in 0..len as usize {
                     out.push(out[start + i]);
                 }
-                tokens.push(Token::Match {
-                    len,
-                    dist: d,
-                    alt258,
-                });
+                tokens.push(Token::Match { len, dist: d, alt258 });
             }
             _ => return Err(Error::Invalid("invalid literal/length symbol")),
         }
@@ -417,9 +387,7 @@ pub fn write_threads(stream: &Stream, data: &[u8], threads: usize) -> Result<Vec
         starts.push(pos);
         pos += match &b.body {
             Body::Stored { len, .. } => *len as usize,
-            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
-                tokens.iter().map(|t| t.span()).sum()
-            }
+            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens.iter().map(|t| t.span()).sum(),
         };
     }
     starts.push(pos);
@@ -434,15 +402,9 @@ pub fn write_threads(stream: &Stream, data: &[u8], threads: usize) -> Result<Vec
     }
     cuts.push(blocks.len());
     let chunks: Vec<(usize, usize)> = cuts.windows(2).map(|c| (c[0], c[1])).collect();
-    let stored = |&(a, b): &(usize, usize)| {
-        blocks[a..b]
-            .iter()
-            .any(|b| matches!(b.body, Body::Stored { .. }))
-    };
+    let stored = |&(a, b): &(usize, usize)| blocks[a..b].iter().any(|b| matches!(b.body, Body::Stored { .. }));
     let parallel = chunks.len() > 1;
-    let apart: Vec<usize> = (0..chunks.len())
-        .filter(|&i| parallel && !stored(&chunks[i]))
-        .collect();
+    let apart: Vec<usize> = (0..chunks.len()).filter(|&i| parallel && !stored(&chunks[i])).collect();
     let mut written = aqr_common::pool::par_map(apart.len(), threads, |k| -> Result<_> {
         let c = chunks[apart[k]];
         let mut w = BitWriter::new();
@@ -451,9 +413,7 @@ pub fn write_threads(stream: &Stream, data: &[u8], threads: usize) -> Result<Vec
         Ok(w.into_parts())
     })
     .into_iter();
-    let parts: Vec<_> = (0..chunks.len())
-        .map(|i| apart.contains(&i).then(|| written.next().unwrap()))
-        .collect();
+    let parts: Vec<_> = (0..chunks.len()).map(|i| apart.contains(&i).then(|| written.next().unwrap())).collect();
     let mut w = BitWriter::new();
     for (c, part) in chunks.iter().zip(parts) {
         match part {
@@ -484,10 +444,7 @@ fn write_blocks(w: &mut BitWriter, blocks: &[Block], data: &[u8], pos: &mut usiz
                 w.bits(16, *len as u32);
                 w.bits(16, !*len as u32);
                 let end = *pos + *len as usize;
-                w.bytes(
-                    data.get(*pos..end)
-                        .ok_or(Error::Invalid("stored block past end"))?,
-                );
+                w.bytes(data.get(*pos..end).ok_or(Error::Invalid("stored block past end"))?);
                 *pos = end;
             }
             Body::Fixed { tokens } => {
@@ -517,13 +474,7 @@ fn write_blocks(w: &mut BitWriter, blocks: &[Block], data: &[u8], pos: &mut usiz
     Ok(())
 }
 
-fn write_tokens(
-    w: &mut BitWriter,
-    tokens: &[Token],
-    ll: &[u8],
-    dl: &[u8],
-    pos: &mut usize,
-) -> Result<()> {
+fn write_tokens(w: &mut BitWriter, tokens: &[Token], ll: &[u8], dl: &[u8], pos: &mut usize) -> Result<()> {
     let lc = huffman::codes(ll);
     let dc = huffman::codes(dl);
     let put = |w: &mut BitWriter, lens: &[u8], codes: &[u16], sym: usize| match lens.get(sym) {
@@ -582,11 +533,7 @@ mod tests {
                                 for _ in 0..len {
                                     data.push(data[data.len() - dist as usize]);
                                 }
-                                Token::Match {
-                                    len,
-                                    dist,
-                                    alt258: false,
-                                }
+                                Token::Match { len, dist, alt258: false }
                             } else {
                                 let b = rnd(256) as u8;
                                 data.push(b);
@@ -600,18 +547,11 @@ mod tests {
             blocks.push(Block { last: false, body });
         }
         blocks.last_mut().unwrap().last = true;
-        let stream = Stream {
-            blocks,
-            tail_pad: 0,
-            trailing: vec![1, 2, 3],
-        };
+        let stream = Stream { blocks, tail_pad: 0, trailing: vec![1, 2, 3] };
         let one = write(&stream, &data).unwrap();
         assert_eq!(parse(&one).unwrap(), (stream.clone(), data.clone()));
         for threads in 2..=9 {
-            assert!(
-                write_threads(&stream, &data, threads).unwrap() == one,
-                "{threads} threads"
-            );
+            assert!(write_threads(&stream, &data, threads).unwrap() == one, "{threads} threads");
         }
     }
 }

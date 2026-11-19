@@ -202,13 +202,8 @@ pub fn profiles() -> std::ops::Range<u16> {
 
 /// The rule catalog a profile chooses from and indexes rules in, with its fingerprint map.
 pub fn profile_catalog(profile: u16) -> Result<&'static (Vec<Rule>, Map)> {
-    static C: [std::sync::OnceLock<(Vec<Rule>, Map)>; 10] =
-        [const { std::sync::OnceLock::new() }; 10];
-    let k = if profile >= ADAPTIVE {
-        CATALOGS.len() - 1
-    } else {
-        profile as usize
-    };
+    static C: [std::sync::OnceLock<(Vec<Rule>, Map)>; 10] = [const { std::sync::OnceLock::new() }; 10];
+    let k = if profile >= ADAPTIVE { CATALOGS.len() - 1 } else { profile as usize };
     if !profiles().contains(&profile) {
         return Err(Error::Param(format!("unknown profile {profile}")));
     }
@@ -233,25 +228,19 @@ pub enum Coding<'a> {
 /// The built-in model data of a profile.
 pub fn profile_data(profile: u16) -> Result<ModelData<'static>> {
     let rules = &profile_catalog(profile)?.0;
-    let coding = if profile >= ADAPTIVE {
-        Coding::Adaptive(profile_priors(profile)?)
-    } else {
-        Coding::Static(default_models())
-    };
+    let coding =
+        if profile >= ADAPTIVE { Coding::Adaptive(profile_priors(profile)?) } else { Coding::Static(default_models()) };
     Ok(ModelData { rules, coding })
 }
 
 /// The profile of a record.
 pub fn record_profile(meta: &[u8]) -> Result<u16> {
-    Ok(u16::from_le_bytes(
-        *meta.first_chunk::<2>().ok_or(Error::Corrupt)?,
-    ))
+    Ok(u16::from_le_bytes(*meta.first_chunk::<2>().ok_or(Error::Corrupt)?))
 }
 
 /// The priors of an adaptive profile.
 pub fn profile_priors(profile: u16) -> Result<&'static Priors> {
-    static P: [std::sync::OnceLock<Priors>; PRIORS.len()] =
-        [const { std::sync::OnceLock::new() }; PRIORS.len()];
+    static P: [std::sync::OnceLock<Priors>; PRIORS.len()] = [const { std::sync::OnceLock::new() }; PRIORS.len()];
     let k = profile
         .checked_sub(ADAPTIVE)
         .map(usize::from)
@@ -304,12 +293,7 @@ impl Options {
     /// The defaults for `profile`, with its catalog.
     pub fn for_profile(profile: u16) -> Result<Options> {
         let (rules, map) = profile_catalog(profile)?.clone();
-        Ok(Options {
-            profile,
-            rules,
-            map,
-            ..Default::default()
-        })
+        Ok(Options { profile, rules, map, ..Default::default() })
     }
 }
 
@@ -341,15 +325,9 @@ impl Default for Options {
 pub fn default_models() -> &'static [code::Model; FIELDS] {
     static M: std::sync::OnceLock<[code::Model; FIELDS]> = std::sync::OnceLock::new();
     M.get_or_init(|| {
-        let mut lines = include_str!("../model/models.txt")
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
-        std::array::from_fn(|_| {
-            lines
-                .next()
-                .and_then(code::Model::parse)
-                .expect("built-in models are valid")
-        })
+        let mut lines =
+            include_str!("../model/models.txt").lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
+        std::array::from_fn(|_| lines.next().and_then(code::Model::parse).expect("built-in models are valid"))
     })
 }
 
@@ -374,9 +352,7 @@ pub fn parse_catalog(text: &str) -> Result<(Vec<Rule>, Map)> {
             let bad = || Error::Param(format!("bad map line {l:?}"));
             let mut it = m.split(' ');
             let k = u64::from_str_radix(it.next().ok_or_else(bad)?, 16).map_err(|_| bad())?;
-            let v: Vec<u16> = it
-                .map(|v| v.parse().map_err(|_| bad()))
-                .collect::<Result<_>>()?;
+            let v: Vec<u16> = it.map(|v| v.parse().map_err(|_| bad())).collect::<Result<_>>()?;
             if v.is_empty() {
                 return Err(bad());
             }
@@ -416,9 +392,7 @@ fn headers(f: &Flat) -> (Vec<u8>, Option<u32>) {
 fn fingerprint(f: &Flat, recipe: u32) -> (u64, u64) {
     let (mut lf, mut df) = ([0u64; 3], [0u64; 30]);
     for (l, d) in &f.stats.freqs {
-        lf.iter_mut()
-            .zip(&l[257..])
-            .for_each(|(a, &b)| *a += b as u64);
+        lf.iter_mut().zip(&l[257..]).for_each(|(a, &b)| *a += b as u64);
         df.iter_mut().zip(d).for_each(|(a, &b)| *a += b as u64);
     }
     let n: u64 = df.iter().sum();
@@ -435,12 +409,10 @@ fn fingerprint(f: &Flat, recipe: u32) -> (u64, u64) {
     } else {
         5
     };
-    let window = [
-        256, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768,
-    ]
-    .iter()
-    .position(|&w| f.stats.max_dist as usize <= w)
-    .unwrap_or(10);
+    let window = [256, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768]
+        .iter()
+        .position(|&w| f.stats.max_dist as usize <= w)
+        .unwrap_or(10);
     // The token count of the first block, if the next has as many.
     let counts: Vec<usize> = f.starts.windows(2).map(|s| s[1] - s[0]).collect();
     let coded: Vec<usize> = f
@@ -451,21 +423,9 @@ fn fingerprint(f: &Flat, recipe: u32) -> (u64, u64) {
         .filter(|(b, _)| !matches!(b.body, Body::Stored { .. }))
         .map(|(_, &c)| c)
         .collect();
-    let full = if coded.len() >= 3 && coded[0] == coded[1] {
-        coded[0] as u64
-    } else {
-        0
-    };
-    let types = f
-        .stream
-        .blocks
-        .iter()
-        .fold(0u64, |a, b| a | 1 << b.body.btype());
-    let mix = |v: &[u64]| {
-        v.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| {
-            (h ^ x).wrapping_mul(0x100_0000_01b3)
-        })
-    };
+    let full = if coded.len() >= 3 && coded[0] == coded[1] { coded[0] as u64 } else { 0 };
+    let types = f.stream.blocks.iter().fold(0u64, |a, b| a | 1 << b.body.btype());
+    let mix = |v: &[u64]| v.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x).wrapping_mul(0x100_0000_01b3));
     let far = f.stats.far as u64;
     let coarse = mix(&[1, min_len, window as u64, far]);
     let fine = mix(&[2, min_len, window as u64, far, full, types, recipe as u64]);
@@ -494,10 +454,7 @@ impl<F: FnMut(usize, Vec<Token>)> Split<'_, F> {
         self.n += 1;
         while self.cuts.get(self.seg + 1) == Some(&self.n) {
             let next = self.cuts.get(self.seg + 2).map_or(0, |&c| c - self.n);
-            (self.send)(
-                self.seg,
-                std::mem::replace(&mut self.cur, Vec::with_capacity(next)),
-            );
+            (self.send)(self.seg, std::mem::replace(&mut self.cur, Vec::with_capacity(next)));
             self.seg += 1;
         }
     }
@@ -519,13 +476,7 @@ impl<F: FnMut(usize, Vec<Token>)> inflate::Sink for Split<'_, F> {
 /// given to `threads` threads as each segment is complete, then dropped: a few segments' at
 /// a time rather than the whole stream's. With one thread or one segment, each is coded as it
 /// is parsed, on this thread.
-fn code_streamed(
-    raw: &[u8],
-    f: &Flat,
-    rule: Rule,
-    ranges: &[Range],
-    threads: usize,
-) -> Result<Vec<tokens::Recorder>> {
+fn code_streamed(raw: &[u8], f: &Flat, rule: Rule, ranges: &[Range], threads: usize) -> Result<Vec<tokens::Recorder>> {
     use std::sync::{Mutex, mpsc};
     let code = |i: usize, toks: &[Token]| {
         let mut rec = tokens::Recorder::default();
@@ -553,8 +504,7 @@ fn code_streamed(
     if threads <= 1 {
         return serial();
     }
-    let done: Vec<Mutex<Option<Result<tokens::Recorder>>>> =
-        ranges.iter().map(|_| Mutex::new(None)).collect();
+    let done: Vec<Mutex<Option<Result<tokens::Recorder>>>> = ranges.iter().map(|_| Mutex::new(None)).collect();
     // at most two segments waiting per thread: more the parse codes itself
     let (tx, rx) = mpsc::sync_channel::<(usize, Vec<Token>)>(2 * threads);
     let (tx, rx) = (Mutex::new(Some(tx)), Mutex::new(rx));
@@ -567,10 +517,7 @@ fn code_streamed(
             let tx = tx.lock().unwrap().take().expect("one parse");
             let r = split_parsed(raw, &f.stats.cuts, |i, toks| match tx.try_send((i, toks)) {
                 Ok(()) => {}
-                Err(
-                    mpsc::TrySendError::Full((i, toks))
-                    | mpsc::TrySendError::Disconnected((i, toks)),
-                ) => {
+                Err(mpsc::TrySendError::Full((i, toks)) | mpsc::TrySendError::Disconnected((i, toks))) => {
                     *done[i].lock().unwrap() = Some(code(i, &toks));
                 }
             });
@@ -586,21 +533,13 @@ fn code_streamed(
         }
     });
     parsed.into_inner().unwrap().expect("parsed")?;
-    done.into_iter()
-        .map(|d| d.into_inner().unwrap().ok_or(Error::Inconsistent)?)
-        .collect()
+    done.into_iter().map(|d| d.into_inner().unwrap().ok_or(Error::Inconsistent)?).collect()
 }
 
 /// Parses `raw` again, giving `send` the tokens of each segment (as `cuts` mark them) in order
 /// as it is complete, those at the end without tokens too.
 fn split_parsed(raw: &[u8], cuts: &[usize], send: impl FnMut(usize, Vec<Token>)) -> Result<()> {
-    let mut split = Split {
-        cuts,
-        seg: 0,
-        n: 0,
-        cur: Vec::new(),
-        send,
-    };
+    let mut split = Split { cuts, seg: 0, n: 0, cur: Vec::new(), send };
     let r = inflate::parse_head(raw, usize::MAX, &mut split);
     // segments without tokens at the end (none at all in a stream of stored blocks)
     while split.seg + 1 < split.cuts.len() {
@@ -620,22 +559,13 @@ static ONCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::ne
 impl Flat {
     /// The whole stream as one range.
     fn whole_range(&self) -> Range<'_> {
-        Range {
-            first: 0,
-            count: self.tokens.len(),
-            pos: 0,
-            end: self.data.len(),
-            skips: &self.skips,
-        }
+        Range { first: 0, count: self.tokens.len(), pos: 0, end: self.data.len(), skips: &self.skips }
     }
 
     /// Tells that `part` of the data is coded in pass `pass` ([`aqr_common::progress`]): as
     /// that share of the data, each pass of several taking its own.
     fn tell(&self, part: std::ops::Range<usize>, pass: Pass) {
-        let (n, of) = (
-            self.data.len(),
-            pass.1.load(std::sync::atomic::Ordering::Relaxed).max(1),
-        );
+        let (n, of) = (self.data.len(), pass.1.load(std::sync::atomic::Ordering::Relaxed).max(1));
         let at = |p: usize| ((pass.0 * n + p.min(n)) / of).min(n);
         aqr_common::progress::done(&self.data[at(part.start)..at(part.end)]);
     }
@@ -716,11 +646,7 @@ pub fn deconstruct_report(raw: &[u8], opts: &Options) -> Result<(Vec<u8>, Vec<u8
 /// Like [`deconstruct_report`], with what the stream's container says about its encoder
 /// (e.g. [`Hints::zlib_header`]): zlib emulation only considers parameters `hints` allows.
 /// The metadata does not depend on hints to be read.
-pub fn deconstruct_hinted(
-    raw: &[u8],
-    opts: &Options,
-    hints: &Hints,
-) -> Result<(Vec<u8>, Vec<u8>, Report)> {
+pub fn deconstruct_hinted(raw: &[u8], opts: &Options, hints: &Hints) -> Result<(Vec<u8>, Vec<u8>, Report)> {
     Parsed::new(raw, opts)?.deconstruct(opts, hints)
 }
 
@@ -761,24 +687,9 @@ impl<'a> Parsed<'a> {
         let streamed = opts.profile < ADAPTIVE && !opts.verify;
         let mut f = if streamed {
             let prefix = opts.prefix.max(ESTIMATE_FIRST.get());
-            inflate::parse_segments_head(
-                raw,
-                opts.segment,
-                prefix,
-                opts.max_data,
-                opts.size,
-                opts.store,
-            )?
+            inflate::parse_segments_head(raw, opts.segment, prefix, opts.max_data, opts.size, opts.store)?
         } else {
-            Flat::new(
-                raw,
-                opts.segment,
-                opts.threads.max(1),
-                opts.verify,
-                opts.max_data,
-                opts.size,
-                opts.store,
-            )?
+            Flat::new(raw, opts.segment, opts.threads.max(1), opts.verify, opts.max_data, opts.size, opts.store)?
         };
         let raw = if head {
             let end = raw.len() - f.stream.trailing.len();
@@ -789,20 +700,11 @@ impl<'a> Parsed<'a> {
         };
         // What a record cannot hold, or reconstruct would reject (FORMAT.md, "Domain").
         let n = f.data.len();
-        if n >= u32::MAX as usize
-            || f.stream.trailing.len() > 1 << 30
-            || f.stream.blocks.len() > n + (1 << 20)
-        {
+        if n >= u32::MAX as usize || f.stream.trailing.len() > 1 << 30 || f.stream.blocks.len() > n + (1 << 20) {
             return Err(Error::Invalid("beyond the limits of a record"));
         }
         let secs = t0.elapsed().as_secs_f64();
-        Ok(Parsed {
-            raw,
-            f,
-            streamed,
-            secs,
-            chosen: Default::default(),
-        })
+        Ok(Parsed { raw, f, streamed, secs, chosen: Default::default() })
     }
 
     /// Bytes of the stream (without what followed it, for [`Parsed::head`]).
@@ -829,12 +731,7 @@ impl<'a> Parsed<'a> {
         let t1 = std::time::Instant::now();
         let rule = choose_rule(&self.f, opts, fp)?;
         let secs = [(t1 - t0).as_secs_f64(), t1.elapsed().as_secs_f64()];
-        Ok(self.chosen.get_or_init(|| Chosen {
-            headers,
-            fp,
-            rule,
-            secs,
-        }))
+        Ok(self.chosen.get_or_init(|| Chosen { headers, fp, rule, secs }))
     }
 
     /// About how many bytes the record of [`Parsed::deconstruct`] with `opts` takes: the
@@ -864,35 +761,15 @@ impl<'a> Parsed<'a> {
                 .map(|&(at, len)| (at - k.token, len))
                 .collect();
             let tokens = &self.f.tokens[k.kept..k.kept + k.count];
-            let spans: usize = skips.iter().map(|s| s.1).sum::<usize>()
-                + tokens.iter().map(|t| t.span()).sum::<usize>();
-            let range = Range {
-                first: 0,
-                count: k.count,
-                pos: k.pos,
-                end: k.pos + spans,
-                skips: &skips,
-            };
+            let spans: usize =
+                skips.iter().map(|s| s.1).sum::<usize>() + tokens.iter().map(|t| t.span()).sum::<usize>();
+            let range = Range { first: 0, count: k.count, pos: k.pos, end: k.pos + spans, skips: &skips };
             let from = if k.pos == 0 { 0 } else { k.pos + inflate::WARM };
-            tokens::code_range(
-                &mut Warm {
-                    rec: &mut rec,
-                    from,
-                },
-                &self.f.data,
-                c.rule,
-                &range,
-                Some(tokens),
-                None,
-            )?;
+            tokens::code_range(&mut Warm { rec: &mut rec, from }, &self.f.data, c.rule, &range, Some(tokens), None)?;
             covered += (k.pos + spans).saturating_sub(from.max(k.pos));
         }
         // (no tokens at all: stored blocks only)
-        let corrections = if covered == 0 {
-            0.0
-        } else {
-            rec.cost() / 8.0 * self.f.data.len() as f64 / covered as f64
-        };
+        let corrections = if covered == 0 { 0.0 } else { rec.cost() / 8.0 * self.f.data.len() as f64 / covered as f64 };
         Ok(w.bit_len().div_ceil(8) + c.headers.len() + corrections as usize)
     }
 
@@ -901,37 +778,20 @@ impl<'a> Parsed<'a> {
     // (`Data` is `Vec<u8>` itself without `encode`)
     #[cfg_attr(not(feature = "encode"), allow(clippy::useless_conversion))]
     pub fn deconstruct(self, opts: &Options, hints: &Hints) -> Result<(Vec<u8>, Vec<u8>, Report)> {
-        self.deconstruct_data(opts, hints)
-            .map(|(d, m, r)| (d.into(), m, r))
+        self.deconstruct_data(opts, hints).map(|(d, m, r)| (d.into(), m, r))
     }
 
     /// [`Parsed::deconstruct`] giving the data as it was made: in aqr-formula's store where it
     /// was written there ([`Options::store`]).
     #[cfg(feature = "encode")]
-    pub fn deconstruct_bytes(
-        self,
-        opts: &Options,
-        hints: &Hints,
-    ) -> Result<(aqr_formula::Bytes, Vec<u8>, Report)> {
+    pub fn deconstruct_bytes(self, opts: &Options, hints: &Hints) -> Result<(aqr_formula::Bytes, Vec<u8>, Report)> {
         self.deconstruct_data(opts, hints)
     }
 
-    fn deconstruct_data(
-        self,
-        opts: &Options,
-        hints: &Hints,
-    ) -> Result<(inflate::Data, Vec<u8>, Report)> {
+    fn deconstruct_data(self, opts: &Options, hints: &Hints) -> Result<(inflate::Data, Vec<u8>, Report)> {
         self.chosen(opts)?;
         let chosen = self.chosen.into_inner().expect("chosen");
-        deconstruct_parsed(
-            self.raw,
-            self.f,
-            self.streamed,
-            self.secs,
-            chosen,
-            opts,
-            hints,
-        )
+        deconstruct_parsed(self.raw, self.f, self.streamed, self.secs, chosen, opts, hints)
     }
 }
 
@@ -976,14 +836,7 @@ struct Ticking<'a, C> {
 
 impl<'a, C: tokens::Corr> Ticking<'a, C> {
     fn new(c: &'a mut C, f: &'a Flat, r: &Range, pass: Pass<'a>) -> Self {
-        Ticking {
-            c,
-            f,
-            pass,
-            from: r.pos,
-            next: r.pos + TICK,
-            end: r.end,
-        }
+        Ticking { c, f, pass, from: r.pos, next: r.pos + TICK, end: r.end }
     }
 
     fn end(self) {
@@ -1040,18 +893,9 @@ impl<C: tokens::Corr> tokens::Corr for Ticking<'_, C> {
 /// The runs of tokens that [`inflate::parse_segments_head`] would keep, of a stream parsed
 /// with all of them.
 fn chunks_of(f: &Flat) -> Vec<inflate::Chunk> {
-    let mut chunks = vec![inflate::Chunk {
-        token: 0,
-        kept: 0,
-        pos: 0,
-        count: 0,
-    }];
+    let mut chunks = vec![inflate::Chunk { token: 0, kept: 0, pos: 0, count: 0 }];
     let estimate_first = ESTIMATE_FIRST.get();
-    let (mut turn, mut next, mut keeping) = (
-        estimate_first,
-        inflate::next_chunk(0).max(estimate_first),
-        true,
-    );
+    let (mut turn, mut next, mut keeping) = (estimate_first, inflate::next_chunk(0).max(estimate_first), true);
     let (mut p, mut skips) = (0, f.skips.iter().peekable());
     for (k, t) in f.tokens.iter().enumerate() {
         while let Some(&&(at, len)) = skips.peek()
@@ -1066,12 +910,7 @@ fn chunks_of(f: &Flat) -> Vec<inflate::Chunk> {
                 c.count = k - c.kept;
                 (keeping, turn) = (false, next);
             } else {
-                chunks.push(inflate::Chunk {
-                    token: k,
-                    kept: k,
-                    pos: p,
-                    count: 0,
-                });
+                chunks.push(inflate::Chunk { token: k, kept: k, pos: p, count: 0 });
                 (keeping, turn, next) = (true, p + inflate::CHUNK, inflate::next_chunk(p));
             }
         }
@@ -1093,12 +932,7 @@ fn deconstruct_parsed(
     opts: &Options,
     hints: &Hints,
 ) -> Result<(inflate::Data, Vec<u8>, Report)> {
-    let Chosen {
-        headers,
-        fp,
-        rule,
-        secs: [secs_headers, secs_rule],
-    } = chosen;
+    let Chosen { headers, fp, rule, secs: [secs_headers, secs_rule] } = chosen;
     let threads = opts.threads.max(1);
     // (the coding of the data told of as that of the stream)
     let _watch = aqr_common::progress::alias(&f.data, raw);
@@ -1113,15 +947,7 @@ fn deconstruct_parsed(
     let ranges = segment_ranges(&f);
     let t2 = std::time::Instant::now();
     let choice = match priors {
-        Some(priors) => Some(choose_adaptive(
-            &f,
-            rule,
-            opts,
-            priors,
-            hints,
-            segment_ranges(&f),
-            threads,
-        )?),
+        Some(priors) => Some(choose_adaptive(&f, rule, opts, priors, hints, segment_ranges(&f), threads)?),
         None => None,
     };
     let rule = choice.as_ref().map_or(rule, |c| c.rule);
@@ -1147,10 +973,7 @@ fn deconstruct_parsed(
         fingerprint: fp,
         ..Default::default()
     };
-    let bodies = if let Some(AdaptiveChoice {
-        zlib, segs, ranges, ..
-    }) = choice
-    {
+    let bodies = if let Some(AdaptiveChoice { zlib, segs, ranges, .. }) = choice {
         report.zlib = zlib;
         report.misses = segs.iter().map(|s| s.misses).sum();
         if opts.collect {
@@ -1240,13 +1063,7 @@ fn deconstruct_parsed(
     report.main = main.len();
     report.corrections = bodies.iter().map(Vec::len).sum();
 
-    report.times = [
-        secs_parse,
-        secs_rule,
-        (t3 - t2).as_secs_f64(),
-        secs_headers,
-        t3.elapsed().as_secs_f64(),
-    ];
+    report.times = [secs_parse, secs_rule, (t3 - t2).as_secs_f64(), secs_headers, t3.elapsed().as_secs_f64()];
     let mut meta = profile.to_le_bytes().to_vec();
     put_varint(&mut meta, main.len() as u64);
     put_varint(&mut meta, headers.len() as u64);
@@ -1267,11 +1084,7 @@ fn segment_ranges(f: &Flat) -> Vec<Range<'_>> {
             first: cuts[i],
             count: cuts[i + 1] - cuts[i],
             pos: cut_pos[i],
-            end: if i + 1 < n {
-                cut_pos[i + 1]
-            } else {
-                f.data.len()
-            },
+            end: if i + 1 < n { cut_pos[i + 1] } else { f.data.len() },
             skips: &f.skips,
         })
         .collect()
@@ -1308,47 +1121,18 @@ fn choose_adaptive<'a>(
         && crate::detect::plausible(stream, &f.data, p, hints)
     {
         let zr = zlib_ranges(f, p, &ranges);
-        let segs = code_adaptive(
-            f,
-            rule,
-            Some(p),
-            Emulation::New,
-            priors,
-            &zr,
-            threads,
-            collect,
-            (0, &ONCE),
-        )?;
+        let segs = code_adaptive(f, rule, Some(p), Emulation::New, priors, &zr, threads, collect, (0, &ONCE))?;
         if segs.iter().all(|s| s.misses == 0) {
             // In a short stream the rule may predict as well, without zlib's parameters (ties
             // go to the rule, as below).
             if f.data.len() < HINT_RULE_BELOW.get() {
-                let alone = code_adaptive(
-                    f,
-                    rule,
-                    None,
-                    Emulation::New,
-                    priors,
-                    &ranges,
-                    threads,
-                    collect,
-                    (0, &ONCE),
-                )?;
+                let alone =
+                    code_adaptive(f, rule, None, Emulation::New, priors, &ranges, threads, collect, (0, &ONCE))?;
                 if size(&alone) <= size(&segs) {
-                    return Ok(AdaptiveChoice {
-                        rule,
-                        zlib: None,
-                        segs: alone,
-                        ranges,
-                    });
+                    return Ok(AdaptiveChoice { rule, zlib: None, segs: alone, ranges });
                 }
             }
-            return Ok(AdaptiveChoice {
-                rule,
-                zlib: Some(p),
-                segs,
-                ranges: zr,
-            });
+            return Ok(AdaptiveChoice { rule, zlib: Some(p), segs, ranges: zr });
         }
     }
     // zlib's parameters first: where coding with them misses few tokens, neither the rule
@@ -1362,35 +1146,15 @@ fn choose_adaptive<'a>(
     // the stream is coded with them after the others, with the best rule.
     let mut late = None;
     let cuts: Vec<usize> = ranges.iter().skip(1).map(|r| r.pos).collect();
-    match stream
-        .as_ref()
-        .and_then(|&s| zlib_params(s, &f.data, hints, &cuts))
-    {
+    match stream.as_ref().and_then(|&s| zlib_params(s, &f.data, hints, &cuts)) {
         None => passes.store(1, std::sync::atomic::Ordering::Relaxed),
-        Some((d, followed)) if d.misses > d.tokens / ZLIB_SETTLES.get() => {
-            late = Some((d.params, followed))
-        }
+        Some((d, followed)) if d.misses > d.tokens / ZLIB_SETTLES.get() => late = Some((d.params, followed)),
         Some((d, followed)) => {
             let p = d.params;
             let zr = zlib_ranges(f, p, &ranges);
             let code = |r: Rule, from: Emulation<'a, '_>, pass: usize| {
-                let segs = code_adaptive(
-                    f,
-                    r,
-                    Some(p),
-                    from,
-                    priors,
-                    &zr,
-                    threads,
-                    collect,
-                    (pass, &passes),
-                )?;
-                Ok::<_, Error>(AdaptiveChoice {
-                    rule: r,
-                    zlib: Some(p),
-                    segs,
-                    ranges: zlib_ranges(f, p, &ranges),
-                })
+                let segs = code_adaptive(f, r, Some(p), from, priors, &zr, threads, collect, (pass, &passes))?;
+                Ok::<_, Error>(AdaptiveChoice { rule: r, zlib: Some(p), segs, ranges: zlib_ranges(f, p, &ranges) })
             };
             let mut e = code(rule, followed.into(), 0)?;
             let misses: usize = e.segs.iter().map(|s| s.misses).sum();
@@ -1414,19 +1178,7 @@ fn choose_adaptive<'a>(
         }
     }
     let pass = (emulated.is_some() as usize, &passes);
-    let alone = || {
-        code_adaptive(
-            f,
-            rule,
-            None,
-            Emulation::New,
-            priors,
-            &ranges,
-            threads,
-            collect,
-            pass,
-        )
-    };
+    let alone = || code_adaptive(f, rule, None, Emulation::New, priors, &ranges, threads, collect, pass);
     let chain = || -> Result<Option<(Rule, Vec<AdaptiveSeg>)>> {
         if !opts.chain {
             return Ok(None);
@@ -1436,27 +1188,12 @@ fn choose_adaptive<'a>(
         };
         let segs = match coded {
             Some(segs) => segs,
-            None => code_adaptive(
-                f,
-                chain,
-                None,
-                Emulation::New,
-                priors,
-                &ranges,
-                threads,
-                collect,
-                pass,
-            )?,
+            None => code_adaptive(f, chain, None, Emulation::New, priors, &ranges, threads, collect, pass)?,
         };
         Ok(Some((chain, segs)))
     };
     let (alone, chain) = both(threads, alone, chain);
-    let mut best = AdaptiveChoice {
-        rule,
-        zlib: None,
-        segs: alone?,
-        ranges,
-    };
+    let mut best = AdaptiveChoice { rule, zlib: None, segs: alone?, ranges };
     if let Some((chain, segs)) = chain?
         && size(&segs) < size(&best.segs)
     {
@@ -1464,24 +1201,10 @@ fn choose_adaptive<'a>(
     }
     if let Some((p, followed)) = late {
         let ranges = zlib_ranges(f, p, &best.ranges);
-        let segs = code_adaptive(
-            f,
-            best.rule,
-            Some(p),
-            followed.into(),
-            priors,
-            &ranges,
-            threads,
-            collect,
-            (1, &passes),
-        )?;
+        let segs =
+            code_adaptive(f, best.rule, Some(p), followed.into(), priors, &ranges, threads, collect, (1, &passes))?;
         if size(&segs) < size(&best.segs) {
-            best = AdaptiveChoice {
-                rule: best.rule,
-                zlib: Some(p),
-                segs,
-                ranges,
-            };
+            best = AdaptiveChoice { rule: best.rule, zlib: Some(p), segs, ranges };
         }
         return Ok(best);
     }
@@ -1512,11 +1235,7 @@ fn choose_adaptive<'a>(
 }
 
 /// `a()` and `b()`, at once given threads.
-fn both<A: Send, B: Send>(
-    threads: usize,
-    a: impl FnOnce() -> A + Send,
-    b: impl FnOnce() -> B + Send,
-) -> (A, B) {
+fn both<A: Send, B: Send>(threads: usize, a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) {
     if threads <= 1 {
         return (a(), b());
     }
@@ -1526,10 +1245,7 @@ fn both<A: Send, B: Send>(
         }
         let hb = s.spawn(b);
         let ra = a();
-        (
-            ra,
-            hb.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
-        )
+        (ra, hb.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
     })
 }
 
@@ -1571,18 +1287,10 @@ fn chain_rule<'a>(
     };
     let mut m = crate::matchfind::Matcher::single(&f.data);
     let dq = m.depth_quantile(&f.data, matches, DEPTH_QUANTILE.get());
-    let cap = tokens::DEPTHS
-        .iter()
-        .position(|&d| d as usize > dq)
-        .unwrap_or(tokens::DEPTHS.len() - 1) as u8;
+    let cap = tokens::DEPTHS.iter().position(|&d| d as usize > dq).unwrap_or(tokens::DEPTHS.len() - 1) as u8;
     let mut rules: Vec<Rule> = CHAIN_CONFIGS
         .iter()
-        .map(|&(depth, nice)| Rule {
-            kind: tokens::Kind::Chain,
-            depth: depth.min(cap),
-            nice,
-            ..Rule::default()
-        })
+        .map(|&(depth, nice)| Rule { kind: tokens::Kind::Chain, depth: depth.min(cap), nice, ..Rule::default() })
         .collect();
     rules.sort();
     rules.dedup();
@@ -1607,9 +1315,7 @@ fn chain_rule<'a>(
     {
         let mut cs: Vec<_> = rules
             .iter()
-            .map(|_| {
-                adapt::Adaptive::new((adapt::Enc::new(), adapt::Cost::default()), priors, None)
-            })
+            .map(|_| adapt::Adaptive::new((adapt::Enc::new(), adapt::Cost::default()), priors, None))
             .collect();
         // The chains just numbered serve again (the matcher is the same as for the range).
         tokens::code_chains(&mut cs, &f.data, &rules, r, &f.tokens, Some(m))?;
@@ -1626,16 +1332,9 @@ fn chain_rule<'a>(
         };
         return Ok(Some((rules[i], Some(vec![seg]))));
     }
-    let prefix = if f.data.len() >= 2 * chain_prefix {
-        chain_prefix
-    } else {
-        usize::MAX
-    };
+    let prefix = if f.data.len() >= 2 * chain_prefix { chain_prefix } else { usize::MAX };
     let p = Prepared::from_flat(f, prefix);
-    let mut cs: Vec<_> = rules
-        .iter()
-        .map(|_| adapt::Adaptive::new(adapt::Cost::default(), priors, None))
-        .collect();
+    let mut cs: Vec<_> = rules.iter().map(|_| adapt::Adaptive::new(adapt::Cost::default(), priors, None)).collect();
     p.code_chains(&rules, &mut cs)?;
     let i = pick(&mut cs.iter().map(|a| a.b.0));
     Ok(Some((rules[i], None)))
@@ -1660,11 +1359,7 @@ fn zlib_params<'a>(
 /// The segments to code with zlib emulation under `p`: `ranges`, or the whole stream as one
 /// if the emulation cannot resume at a segment's start (it would only serve the first one).
 fn zlib_ranges<'a>(f: &'a Flat, p: zlib::Params, ranges: &[Range<'a>]) -> Vec<Range<'a>> {
-    if p.resumable() || ranges.len() <= 1 {
-        ranges.to_vec()
-    } else {
-        vec![f.whole_range()]
-    }
+    if p.resumable() || ranges.len() <= 1 { ranges.to_vec() } else { vec![f.whole_range()] }
 }
 
 /// A segment's adaptively coded corrections.
@@ -1745,9 +1440,7 @@ fn code_adaptive<'a>(
         finish(adapt::Adaptive::new(adapt::Enc::new(), priors, emu), i, cp)
     };
     let Some(p) = zlib else {
-        return par_map(ranges.len(), threads, |i| code(i, None, None).map(|r| r.0))
-            .into_iter()
-            .collect();
+        return par_map(ranges.len(), threads, |i| code(i, None, None).map(|r| r.0)).into_iter().collect();
     };
     let followed = match (from, ranges) {
         (Emulation::Followed(followed), [_]) => {
@@ -1755,15 +1448,11 @@ fn code_adaptive<'a>(
             let a = adapt::Adaptive::following(adapt::Enc::new(), priors, *followed);
             return Ok(vec![finish(a, 0, None)?.0]);
         }
-        (Emulation::Coded(segs), _)
-            if segs.len() == ranges.len() && !segs.iter().any(|s| s.lost) =>
-        {
+        (Emulation::Coded(segs), _) if segs.len() == ranges.len() && !segs.iter().any(|s| s.lost) => {
             return par_map(ranges.len(), threads, |i| {
                 let (s, enc) = (&segs[i], adapt::Enc::new());
                 let a = match s.emulated {
-                    true => {
-                        adapt::Adaptive::replaying(enc, priors, s.missed.clone(), ranges[i].end)
-                    }
+                    true => adapt::Adaptive::replaying(enc, priors, s.missed.clone(), ranges[i].end),
                     false => adapt::Adaptive::new(enc, priors, None),
                 };
                 finish(a, i, s.cp).map(|r| r.0)
@@ -1782,8 +1471,7 @@ fn code_adaptive<'a>(
             let r = &ranges[i];
             let lo = log.partition_point(|&(at, _)| at < r.pos);
             let hi = log.partition_point(|&(at, _)| at < r.end);
-            let a =
-                adapt::Adaptive::replaying(adapt::Enc::new(), priors, log[lo..hi].to_vec(), r.end);
+            let a = adapt::Adaptive::replaying(adapt::Enc::new(), priors, log[lo..hi].to_vec(), r.end);
             finish(a, i, (i > 0).then(|| cps[i - 1])).map(|r| r.0)
         })
         .into_iter()
@@ -1815,10 +1503,7 @@ fn code_adaptive<'a>(
     for (i, r) in ranges.iter().enumerate() {
         let mut cp = None;
         if i > 0 {
-            cp = emu
-                .as_ref()
-                .and_then(Emulator::checkpoint)
-                .filter(|cp| cp.cursor - cp.held as usize == r.pos);
+            cp = emu.as_ref().and_then(Emulator::checkpoint).filter(|cp| cp.cursor - cp.held as usize == r.pos);
             // Both ways the segment is coded with the emulator rebuilt from the checkpoint.
             emu = cp.as_ref().and_then(|cp| Emulator::resume(&f.data, p, cp));
             if emu.is_none() {
@@ -1893,9 +1578,7 @@ fn starts(f: &Flat, p: zlib::Params, ranges: &[Range], threads: usize) -> Option
             None => (Emulator::new(&f.data, p), 0, 0, 0),
         };
         follow(f, &mut e, (k, pos, s), r.first, &mut |_, _, _, _| {})?;
-        let cp = e
-            .checkpoint()
-            .filter(|cp| cp.cursor - cp.held as usize == r.pos)?;
+        let cp = e.checkpoint().filter(|cp| cp.cursor - cp.held as usize == r.pos)?;
         Emulator::resume(&f.data, p, &cp).map(|_| cp)
     })
     .into_iter()
@@ -1907,12 +1590,7 @@ fn starts(f: &Flat, p: zlib::Params, ranges: &[Range], threads: usize) -> Option
 /// starts, and one the emulator can be rebuilt from. Rebuilding is exact (FORMAT.md,
 /// "Checkpoints"), so the emulation's predictions over the stream are those of each segment's
 /// rebuilt emulator.
-fn replayed(
-    f: &Flat,
-    p: zlib::Params,
-    followed: &Followed,
-    ranges: &[Range],
-) -> Option<Vec<Checkpoint>> {
+fn replayed(f: &Flat, p: zlib::Params, followed: &Followed, ranges: &[Range]) -> Option<Vec<Checkpoint>> {
     if followed.pos < f.data.len() || followed.cps.len() + 1 != ranges.len() {
         return None;
     }
@@ -1921,9 +1599,7 @@ fn replayed(
         .iter()
         .zip(&ranges[1..])
         .map(|(cp, r)| {
-            cp.filter(|cp| {
-                cp.cursor - cp.held as usize == r.pos && Emulator::resume(&f.data, p, cp).is_some()
-            })
+            cp.filter(|cp| cp.cursor - cp.held as usize == r.pos && Emulator::resume(&f.data, p, cp).is_some())
         })
         .collect()
 }
@@ -1947,33 +1623,12 @@ fn get_checkpoint(r: &mut BitReader, pos: usize, wbits: u8, n: usize) -> Result<
     let ws = 1usize << wbits;
     let held = r.bits(1)? == 1;
     let cursor = pos + held as usize;
-    let origin = (cursor / ws)
-        .checked_sub(get_usize(r, n)?)
-        .ok_or(Error::Corrupt)?
-        * ws;
-    let fed = (origin + 2 * ws)
-        .checked_sub(get_usize(r, 2 * ws)?)
-        .ok_or(Error::Corrupt)?;
-    let zero_mark = (2 * ws)
-        .checked_sub(get_usize(r, 2 * ws)?)
-        .ok_or(Error::Corrupt)?;
+    let origin = (cursor / ws).checked_sub(get_usize(r, n)?).ok_or(Error::Corrupt)? * ws;
+    let fed = (origin + 2 * ws).checked_sub(get_usize(r, 2 * ws)?).ok_or(Error::Corrupt)?;
+    let zero_mark = (2 * ws).checked_sub(get_usize(r, 2 * ws)?).ok_or(Error::Corrupt)?;
     let length = 2 + get_usize(r, crate::matchfind::MAX_MATCH)?;
-    let source = if length > 2 {
-        cursor
-            .checked_sub(get_usize(r, ws)?)
-            .ok_or(Error::Corrupt)?
-    } else {
-        0
-    };
-    Ok(Checkpoint {
-        cursor,
-        origin,
-        fed,
-        zero_mark,
-        held,
-        length,
-        source,
-    })
+    let source = if length > 2 { cursor.checked_sub(get_usize(r, ws)?).ok_or(Error::Corrupt)? } else { 0 };
+    Ok(Checkpoint { cursor, origin, fed, zero_mark, held, length, source })
 }
 
 /// The cheapest of the candidate rules on a prefix of the stream.
@@ -1986,11 +1641,7 @@ fn choose_rule(f: &Flat, opts: &Options, fp: (u64, u64)) -> Result<Rule> {
         let Some(cands) = opts.map.get(&k) else {
             continue;
         };
-        let cands: Vec<Rule> = cands
-            .iter()
-            .filter_map(|&i| rules.get(i as usize))
-            .copied()
-            .collect();
+        let cands: Vec<Rule> = cands.iter().filter_map(|&i| rules.get(i as usize)).copied().collect();
         match cands[..] {
             [] => continue,
             [r] => return Ok(r),
@@ -2091,11 +1742,7 @@ impl Prepared {
 
     /// [`Prepared::cost`], or `None` once it surely exceeds `budget`.
     pub fn cost_within(&mut self, rule: Rule, budget: f64) -> Result<Option<f64>> {
-        let limit = if budget.is_finite() {
-            (budget / MIN_MISS_BITS.get()) as usize
-        } else {
-            usize::MAX
-        };
+        let limit = if budget.is_finite() { (budget / MIN_MISS_BITS.get()) as usize } else { usize::MAX };
         match self.cost_limited(rule, limit) {
             Err(Error::Corrupt) => Ok(None),
             r => r.map(Some),
@@ -2104,13 +1751,7 @@ impl Prepared {
 
     /// The whole of it as one range.
     fn range(&self) -> Range<'_> {
-        Range {
-            first: 0,
-            count: self.tokens.len(),
-            pos: 0,
-            end: self.data.len(),
-            skips: &self.skips,
-        }
+        Range { first: 0, count: self.tokens.len(), pos: 0, end: self.data.len(), skips: &self.skips }
     }
 
     /// Bytes of data covered.
@@ -2133,14 +1774,7 @@ impl Prepared {
         let mut rec = tokens::Recorder::default();
         rec.limit = limit;
         rec.count_only = true;
-        let r = tokens::code_range(
-            &mut rec,
-            &self.data,
-            rule,
-            &self.range(),
-            Some(&self.tokens),
-            None,
-        );
+        let r = tokens::code_range(&mut rec, &self.data, rule, &self.range(), Some(&self.tokens), None);
         r?;
         Ok(rec.cost())
     }
@@ -2161,9 +1795,7 @@ pub fn analyze(raw: &[u8], rules: &[Rule], prefix: usize) -> Result<((u64, u64),
 fn write_blocks(w: &mut BitWriter, f: &Flat) {
     let blocks = &f.stream.blocks;
     put_gamma(w, blocks.len() as u64);
-    let last_coded = blocks
-        .iter()
-        .rposition(|b| !matches!(b.body, Body::Stored { .. }));
+    let last_coded = blocks.iter().rposition(|b| !matches!(b.body, Body::Stored { .. }));
     let (mut prev_count, mut prev_stored) = (None, None);
     for (i, b) in blocks.iter().enumerate() {
         w.bits(2, b.body.btype() as u32);
@@ -2290,11 +1922,7 @@ fn read_blocks(r: &mut BitReader, n: usize) -> Result<Layout> {
     for _ in 0..ntrail {
         trailing.push(r.bits(8)? as u8);
     }
-    Ok(Layout {
-        blocks,
-        tail_pad,
-        trailing,
-    })
+    Ok(Layout { blocks, tail_pad, trailing })
 }
 
 pub fn reconstruct(data: &[u8], meta: &[u8]) -> Result<Vec<u8>> {
@@ -2307,12 +1935,7 @@ pub fn reconstruct_with_threads(data: &[u8], meta: &[u8], threads: usize) -> Res
 
 /// [`reconstruct_with_threads`] with the model data `model` in place of the profile's built-in
 /// one. The profile still tells static coding from adaptive, which `model` must agree with.
-pub fn reconstruct_with(
-    data: &[u8],
-    meta: &[u8],
-    model: ModelData,
-    threads: usize,
-) -> Result<Vec<u8>> {
+pub fn reconstruct_with(data: &[u8], meta: &[u8], model: ModelData, threads: usize) -> Result<Vec<u8>> {
     reconstruct_sized(data, meta, model, threads, data.len() / 2 + 64)
 }
 
@@ -2327,15 +1950,7 @@ pub fn reconstruct_into(
     threads: usize,
     sink: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
-    rebuild(
-        Source::Whole(data),
-        data.len(),
-        meta,
-        model,
-        threads,
-        Ok(sink),
-    )
-    .map(drop)
+    rebuild(Source::Whole(data), data.len(), meta, model, threads, Ok(sink)).map(drop)
 }
 
 /// [`reconstruct_into`] of the `n` bytes of data that `pull` reads a piece at a time, in order:
@@ -2350,14 +1965,7 @@ pub fn reconstruct_pulled(
     threads: usize,
     sink: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
-    rebuild(
-        Source::Pulled(&mut *pull),
-        n,
-        meta,
-        model,
-        threads,
-        Ok(sink),
-    )?;
+    rebuild(Source::Pulled(&mut *pull), n, meta, model, threads, Ok(sink))?;
     // (all of the data read, the bytes after the last stored block too)
     pull.cover(n, n)
 }
@@ -2375,11 +1983,7 @@ impl<'r> Pull<'r> {
     /// The data that `read` gives in order: called with a vector and a count `k`, it appends the
     /// next `k` bytes of the data to it.
     pub fn new(read: &'r mut dyn FnMut(&mut Vec<u8>, usize) -> Result<()>) -> Pull<'r> {
-        Pull {
-            buf: Default::default(),
-            at: 0,
-            read,
-        }
+        Pull { buf: Default::default(), at: 0, read }
     }
 
     /// The data held from `lo` (what is before it let go of, where held) to `hi` at least.
@@ -2427,12 +2031,7 @@ pub(crate) fn pull_room(n: usize, k: usize, pos: impl Fn(usize) -> usize, batch:
     let reads = |s0: usize| {
         let s1 = (s0 + batch).min(k);
         let lo = pos(s0).saturating_sub(BACK) / ALIGN * ALIGN;
-        (
-            lo,
-            if s1 < k { pos(s1) } else { n }
-                .saturating_add(AHEAD)
-                .min(n),
-        )
+        (lo, if s1 < k { pos(s1) } else { n }.saturating_add(AHEAD).min(n))
     };
     let mut most = ROUND + u16::MAX as usize;
     for s0 in (0..k).step_by(batch.max(1)) {
@@ -2490,38 +2089,21 @@ impl Big {
             Shape::Coded { btype: 2, .. } => {
                 let (lf, df) = header::get_freqs(hr, count)?;
                 let header = header::read_freqs(hr, &lf, &df, recipe)?;
-                (
-                    Body::Dynamic {
-                        header,
-                        tokens: vec![],
-                    },
-                    Some((lf, df)),
-                )
+                (Body::Dynamic { header, tokens: vec![] }, Some((lf, df)))
             }
             Shape::Coded { .. } => (Body::Fixed { tokens: vec![] }, None),
             Shape::Stored { .. } => return Err(Error::Corrupt),
         };
         let mut have = ([0; 288], [0; 32]);
         have.0[256] = 1;
-        Ok(Big {
-            open: w.open(&Block { last, body }).map_err(|_| Error::Corrupt)?,
-            left: count,
-            want,
-            have,
-        })
+        Ok(Big { open: w.open(&Block { last, body }).map_err(|_| Error::Corrupt)?, left: count, want, have })
     }
 
     /// Writes the next tokens of the block.
     fn put(&mut self, w: &mut write::Writer, toks: &[Token]) -> Result<()> {
         if self.want.is_some() {
             let (lf, df) = header::freqs(toks);
-            for (a, b) in self
-                .have
-                .0
-                .iter_mut()
-                .zip(&lf)
-                .chain(self.have.1.iter_mut().zip(&df))
-            {
+            for (a, b) in self.have.0.iter_mut().zip(&lf).chain(self.have.1.iter_mut().zip(&df)) {
                 *a += b;
             }
             // (the end of block, counted once by each)
@@ -2542,12 +2124,7 @@ impl Big {
 /// The most tokens of a block that is held until all of them are decoded (those of fewer than
 /// [`BIG`]), given the blocks' token counts.
 pub(crate) fn held_most(counts: &[usize]) -> usize {
-    counts
-        .iter()
-        .copied()
-        .filter(|&c| c < BIG)
-        .max()
-        .unwrap_or(0)
+    counts.iter().copied().filter(|&c| c < BIG).max().unwrap_or(0)
 }
 
 /// Tokens of a block of [`BIG`] tokens or more that are written at a time.
@@ -2587,40 +2164,14 @@ const PULLED_BATCH: usize = 2;
 /// [`reconstruct_with`], written into a vector reserved for `cap` bytes as the first are
 /// written (on WebAssembly, after the first segments' tasks are spawned, which copy the memory
 /// as it is then): of `cap` bytes exactly where the stream is that long.
-pub fn reconstruct_sized(
-    data: &[u8],
-    meta: &[u8],
-    model: ModelData,
-    threads: usize,
-    cap: usize,
-) -> Result<Vec<u8>> {
-    rebuild(
-        Source::Whole(data),
-        data.len(),
-        meta,
-        model,
-        threads,
-        Err(To::Sized(cap)),
-    )
+pub fn reconstruct_sized(data: &[u8], meta: &[u8], model: ModelData, threads: usize, cap: usize) -> Result<Vec<u8>> {
+    rebuild(Source::Whole(data), data.len(), meta, model, threads, Err(To::Sized(cap)))
 }
 
 /// [`reconstruct_sized`] appending to `out` (from a byte boundary), which it gives back with the
 /// stream: within its room where it has room for the stream and [`write::TOKEN_SLACK`] more.
-pub fn reconstruct_onto(
-    data: &[u8],
-    meta: &[u8],
-    model: ModelData,
-    threads: usize,
-    out: Vec<u8>,
-) -> Result<Vec<u8>> {
-    rebuild(
-        Source::Whole(data),
-        data.len(),
-        meta,
-        model,
-        threads,
-        Err(To::Onto(out)),
-    )
+pub fn reconstruct_onto(data: &[u8], meta: &[u8], model: ModelData, threads: usize, out: Vec<u8>) -> Result<Vec<u8>> {
+    rebuild(Source::Whole(data), data.len(), meta, model, threads, Err(To::Onto(out)))
 }
 
 /// Where [`rebuild`] writes a stream it gives whole: into a vector reserved for so many bytes
@@ -2673,21 +2224,14 @@ fn rebuild(
     let mut at = 2;
     let main_len = usize::try_from(get_varint(meta, &mut at)?).map_err(|_| Error::Corrupt)?;
     let hdr_len = usize::try_from(get_varint(meta, &mut at)?).map_err(|_| Error::Corrupt)?;
-    let main = meta
-        .get(at..at.checked_add(main_len).ok_or(Error::Corrupt)?)
-        .ok_or(Error::Corrupt)?;
+    let main = meta.get(at..at.checked_add(main_len).ok_or(Error::Corrupt)?).ok_or(Error::Corrupt)?;
     at += main_len;
-    let hdrs = meta
-        .get(at..at.checked_add(hdr_len).ok_or(Error::Corrupt)?)
-        .ok_or(Error::Corrupt)?;
+    let hdrs = meta.get(at..at.checked_add(hdr_len).ok_or(Error::Corrupt)?).ok_or(Error::Corrupt)?;
     at += hdr_len;
 
     let r = &mut BitReader::new(main);
-    let rule = if r.bits(1)? == 1 {
-        *catalog.get(get_usize(r, 1 << 16)?).ok_or(Error::Corrupt)?
-    } else {
-        Rule::read(r)?
-    };
+    let rule =
+        if r.bits(1)? == 1 { *catalog.get(get_usize(r, 1 << 16)?).ok_or(Error::Corrupt)? } else { Rule::read(r)? };
     let layout = read_blocks(r, n)?;
     // The coding's parameters.
     let mut models = None;
@@ -2696,9 +2240,7 @@ fn rebuild(
         if r.bits(1)? == 1 {
             let p = zlib::Params {
                 level: r.bits(4)? as u8,
-                strategy: *zlib::Strategy::ALL
-                    .get(r.bits(3)? as usize)
-                    .ok_or(Error::Corrupt)?,
+                strategy: *zlib::Strategy::ALL.get(r.bits(3)? as usize).ok_or(Error::Corrupt)?,
                 wbits: r.bits(3)? as u8 + 9,
                 mem: r.bits(4)? as u8,
             };
@@ -2721,11 +2263,7 @@ fn rebuild(
     let mut first = 0;
     for i in 0..nseg {
         let count = get_usize(r, n)?;
-        let misses = if adaptive {
-            [0, 0]
-        } else {
-            [get_usize(r, count)?, get_usize(r, count)?]
-        };
+        let misses = if adaptive { [0, 0] } else { [get_usize(r, count)?, get_usize(r, count)?] };
         let pos = if i > 0 { get_usize(r, n)? } else { 0 };
         let len = get_usize(r, meta.len())?;
         let cp = match zlib {
@@ -2734,14 +2272,7 @@ fn rebuild(
         };
         let body = meta.get(at..at + len).ok_or(Error::Corrupt)?;
         at += len;
-        segs.push(Seg {
-            first,
-            count,
-            misses,
-            pos,
-            body,
-            cp,
-        });
+        segs.push(Seg { first, count, misses, pos, body, cp });
         first += count;
     }
     let total = first;
@@ -2760,11 +2291,7 @@ fn rebuild(
         .sum();
     let rest = total.checked_sub(fixed).ok_or(Error::Corrupt)?;
     let mut counts = Vec::with_capacity(layout.blocks.len());
-    let stored = layout
-        .blocks
-        .iter()
-        .filter(|b| matches!(b, Shape::Stored { .. }))
-        .count();
+    let stored = layout.blocks.iter().filter(|b| matches!(b, Shape::Stored { .. })).count();
     let mut skips = Vec::with_capacity(stored);
     let mut k = 0;
     let mut rest_seen = false;
@@ -2789,22 +2316,10 @@ fn rebuild(
     // segment `i` decoded of `data`, the data from position `off` on (its positions so many
     // less), its tokens appended to `out`: where it ends
     let decode_into = |i: usize, data: &[u8], off: usize, out: &mut Vec<Token>| -> Result<usize> {
-        let Seg {
-            first,
-            count,
-            misses,
-            pos,
-            body,
-            cp,
-        } = segs[i];
+        let Seg { first, count, misses, pos, body, cp } = segs[i];
         let end = segs.get(i + 1).map_or(n, |s| s.pos);
-        let range = Range {
-            first,
-            count,
-            pos: pos.checked_sub(off).ok_or(Error::Corrupt)?,
-            end: end - off,
-            skips: &skips,
-        };
+        let range =
+            Range { first, count, pos: pos.checked_sub(off).ok_or(Error::Corrupt)?, end: end - off, skips: &skips };
         let cp = match cp {
             Some(cp) => Some(cp.shifted(off).ok_or(Error::Corrupt)?),
             None => None,
@@ -2821,9 +2336,7 @@ fn rebuild(
             (None, Some(priors)) => {
                 let emu = match (zlib, cp) {
                     (Some(p), None) if i == 0 => Some(Emulator::new(data, p)),
-                    (Some(p), Some(cp)) => {
-                        Some(Emulator::resume(data, p, &cp).ok_or(Error::Corrupt)?)
-                    }
+                    (Some(p), Some(cp)) => Some(Emulator::resume(data, p, &cp).ok_or(Error::Corrupt)?),
                     _ => None,
                 };
                 let mut a = adapt::Adaptive::new(adapt::Dec::new(body), priors, emu);
@@ -2848,14 +2361,9 @@ fn rebuild(
     let mut recipe = header::Recipe::default();
     // (the room to reserve before writing, if not yet)
     let (mut w, mut cap) = match &mut to {
-        Ok(_) if cfg!(target_family = "wasm") => (
-            write::Writer::new(writer_room(
-                held_most(&counts),
-                counts.len(),
-                layout.trailing.len(),
-            )),
-            None,
-        ),
+        Ok(_) if cfg!(target_family = "wasm") => {
+            (write::Writer::new(writer_room(held_most(&counts), counts.len(), layout.trailing.len())), None)
+        }
         Ok(_) => (write::Writer::new((n / 2).min(1 << 20) + 64), None),
         Err(To::Sized(c)) => (write::Writer::new(0), Some(*c)),
         Err(To::Onto(out)) => (write::Writer::append_to(std::mem::take(out)), None),
@@ -2878,20 +2386,13 @@ fn rebuild(
     // the most tokens pending at once: under the largest held block's left after writing (the
     // blocks of BIG tokens or more are written as they are decoded, none left), and a batch's
     // (reserved at the first, after the first batch's tasks are spawned)
-    let most = segs
-        .chunks(batch)
-        .map(|b| b.iter().map(|s| s.count).sum::<usize>())
-        .max()
-        .unwrap_or(0);
+    let most = segs.chunks(batch).map(|b| b.iter().map(|s| s.count).sum::<usize>()).max().unwrap_or(0);
     let round = total.min(held_most(&counts) + most);
     // (on WebAssembly decoded where the batch is taken, into the pending tokens)
     #[cfg(not(target_family = "wasm"))]
     let decode_batch = |s0: usize, data: &[u8], off: usize| {
         let s1 = (s0 + batch).min(segs.len());
-        (
-            s0,
-            aqr_common::pool::par_map_apart(s1 - s0, threads, |j| decode(s0 + j, data, off)),
-        )
+        (s0, aqr_common::pool::par_map_apart(s1 - s0, threads, |j| decode(s0 + j, data, off)))
     };
     #[cfg(target_family = "wasm")]
     let decode_batch = |s0: usize, _: &[u8], _: usize| s0;
@@ -2900,70 +2401,62 @@ fn rebuild(
     // its segments as tasks, each giving its end and its tokens, 5 bytes each; or one after
     // another on one thread. The batch's end and where its last segment's data ends.
     #[cfg(target_family = "wasm")]
-    let into_pending =
-        |s0: usize, data: &[u8], off: usize, pending: &mut Vec<Token>| -> Result<(usize, usize)> {
-            let s1 = (s0 + batch).min(segs.len());
-            let check = |i: usize, p: usize| match p == segs.get(i + 1).map_or(p, |s| s.pos) {
-                true => Ok(p),
-                false => Err(Error::Corrupt),
-            };
-            let mut end = 0;
-            if threads == 1 {
-                if pending.capacity() == 0 {
-                    pending.reserve_exact(round);
-                }
-                for i in s0..s1 {
-                    end = check(i, decode_into(i, data, off, pending)?)?;
-                }
-                return Ok((s1, end));
-            }
-            let task = |j: usize| {
-                let mut t = Vec::with_capacity(segs[s0 + j].count);
-                match decode_into(s0 + j, data, off, &mut t) {
-                    Ok(p) => {
-                        let mut b = Vec::with_capacity(9 + 5 * t.len());
-                        b.push(0);
-                        b.extend_from_slice(&(p as u64).to_le_bytes());
-                        t.iter()
-                            .for_each(|t| b.extend_from_slice(&deflate::token_bytes(*t)));
-                        b
-                    }
-                    Err(_) => vec![1],
-                }
-            };
-            let pend = std::cell::RefCell::new(pending);
-            let reserve = || {
-                let mut p = pend.borrow_mut();
-                if p.capacity() == 0 {
-                    p.reserve_exact(round);
-                }
-            };
-            aqr_common::pool::par_each_apart(s1 - s0, threads, 1, task, reserve, |j, b| {
-                let (&[0], rest) = b.split_at_checked(1).ok_or(Error::Corrupt)? else {
-                    return Err(Error::Corrupt);
-                };
-                let (p, toks) = rest.split_at_checked(8).ok_or(Error::Corrupt)?;
-                let mut pending = pend.borrow_mut();
-                for t in toks.as_chunks::<5>().0 {
-                    pending.push(deflate::token_of(*t).ok_or(Error::Corrupt)?);
-                }
-                end = check(s0 + j, u64::from_le_bytes(p.try_into().unwrap()) as usize)?;
-                Ok(())
-            })?;
-            Ok((s1, end))
+    let into_pending = |s0: usize, data: &[u8], off: usize, pending: &mut Vec<Token>| -> Result<(usize, usize)> {
+        let s1 = (s0 + batch).min(segs.len());
+        let check = |i: usize, p: usize| match p == segs.get(i + 1).map_or(p, |s| s.pos) {
+            true => Ok(p),
+            false => Err(Error::Corrupt),
         };
+        let mut end = 0;
+        if threads == 1 {
+            if pending.capacity() == 0 {
+                pending.reserve_exact(round);
+            }
+            for i in s0..s1 {
+                end = check(i, decode_into(i, data, off, pending)?)?;
+            }
+            return Ok((s1, end));
+        }
+        let task = |j: usize| {
+            let mut t = Vec::with_capacity(segs[s0 + j].count);
+            match decode_into(s0 + j, data, off, &mut t) {
+                Ok(p) => {
+                    let mut b = Vec::with_capacity(9 + 5 * t.len());
+                    b.push(0);
+                    b.extend_from_slice(&(p as u64).to_le_bytes());
+                    t.iter().for_each(|t| b.extend_from_slice(&deflate::token_bytes(*t)));
+                    b
+                }
+                Err(_) => vec![1],
+            }
+        };
+        let pend = std::cell::RefCell::new(pending);
+        let reserve = || {
+            let mut p = pend.borrow_mut();
+            if p.capacity() == 0 {
+                p.reserve_exact(round);
+            }
+        };
+        aqr_common::pool::par_each_apart(s1 - s0, threads, 1, task, reserve, |j, b| {
+            let (&[0], rest) = b.split_at_checked(1).ok_or(Error::Corrupt)? else {
+                return Err(Error::Corrupt);
+            };
+            let (p, toks) = rest.split_at_checked(8).ok_or(Error::Corrupt)?;
+            let mut pending = pend.borrow_mut();
+            for t in toks.as_chunks::<5>().0 {
+                pending.push(deflate::token_of(*t).ok_or(Error::Corrupt)?);
+            }
+            end = check(s0 + j, u64::from_le_bytes(p.try_into().unwrap()) as usize)?;
+            Ok(())
+        })?;
+        Ok((s1, end))
+    };
     // the data the batch from segment `s0` reads: from before its first segment to after its
     // last one (see BACK)
     let reads = |s0: usize| {
         let s1 = (s0 + batch).min(segs.len());
         let lo = segs[s0].pos.saturating_sub(BACK) / ALIGN * ALIGN;
-        (
-            lo,
-            segs.get(s1)
-                .map_or(n, |s| s.pos)
-                .saturating_add(AHEAD)
-                .min(n),
-        )
+        (lo, segs.get(s1).map_or(n, |s| s.pos).saturating_add(AHEAD).min(n))
     };
     let whole = match &src {
         Source::Whole(d) => Some(*d),
@@ -2986,9 +2479,7 @@ fn rebuild(
     aqr_common::pool::scope((threads > 1) as usize, |scope| -> Result<()> {
         let start = |s0: usize, src: &mut Source| -> Result<_> {
             Ok(match (whole, src) {
-                (Some(d), _) if scope.workers() > 0 => {
-                    Batch::Running(scope.spawn(move || decode_batch(s0, d, 0)))
-                }
+                (Some(d), _) if scope.workers() > 0 => Batch::Running(scope.spawn(move || decode_batch(s0, d, 0))),
                 (Some(d), _) => Batch::Done(decode_batch(s0, d, 0)),
                 (None, Source::Pulled(p)) => {
                     let (lo, hi) = reads(s0);
@@ -3016,18 +2507,13 @@ fn rebuild(
                 let s1 = s0 + results.len();
                 #[cfg(target_family = "wasm")]
                 let (s0, s1) = {
-                    let Batch::Done(s0) = h else {
-                        unreachable!("no workers")
-                    };
+                    let Batch::Done(s0) = h else { unreachable!("no workers") };
                     let (data, off) = match &src {
                         Source::Whole(d) => (*d, 0),
                         Source::Pulled(p) => (&p.buf[..], p.at),
                     };
                     let (s1, e) = into_pending(s0, data, off, &mut pending)?;
-                    (decoded, end) = (
-                        decoded + segs[s0..s1].iter().map(|s| s.count).sum::<usize>(),
-                        e,
-                    );
+                    (decoded, end) = (decoded + segs[s0..s1].iter().map(|s| s.count).sum::<usize>(), e);
                     (s0, s1)
                 };
                 if s1 < segs.len() {
@@ -3040,9 +2526,7 @@ fn rebuild(
                         // (the data of this batch's blocks, and of the next batch)
                         p.cover(reads(s0).0, reads(s1).1)?;
                         let (buf, at) = (p.buf.clone(), p.at);
-                        next = Some(Batch::Running(
-                            scope.spawn(move || decode_batch(s1, &buf, at)),
-                        ));
+                        next = Some(Batch::Running(scope.spawn(move || decode_batch(s1, &buf, at))));
                     } else {
                         after = Some(s1);
                     }
@@ -3074,14 +2558,8 @@ fn rebuild(
                         w.reserve(c);
                     }
                     if big.is_none() {
-                        big = Some(Big::open(
-                            &mut w,
-                            shapes.next().unwrap(),
-                            bi + 1 == nb,
-                            counts[bi],
-                            hr,
-                            &mut recipe,
-                        )?);
+                        big =
+                            Some(Big::open(&mut w, shapes.next().unwrap(), bi + 1 == nb, counts[bi], hr, &mut recipe)?);
                     }
                     let b = big.as_mut().unwrap();
                     while b.left > 0 && decoded > k {
@@ -3161,19 +2639,12 @@ fn rebuild(
                     let (shape, r) = item;
                     let body = match (shape, f) {
                         (Shape::Stored { pad, len }, _) => Body::Stored { pad, len },
-                        (_, Some((lf, df))) => Body::Dynamic {
-                            header: header::read_freqs(hr, &lf, &df, &mut recipe)?,
-                            tokens: vec![],
-                        },
+                        (_, Some((lf, df))) => {
+                            Body::Dynamic { header: header::read_freqs(hr, &lf, &df, &mut recipe)?, tokens: vec![] }
+                        }
                         _ => Body::Fixed { tokens: vec![] },
                     };
-                    blocks.push((
-                        Block {
-                            last: first + j + 1 == nb,
-                            body,
-                        },
-                        r,
-                    ));
+                    blocks.push((Block { last: first + j + 1 == nb, body }, r));
                 }
                 let (data, at) = match &mut src {
                     Source::Whole(d) => (*d, 0),
@@ -3195,13 +2666,8 @@ fn rebuild(
                     }
                 };
                 // (on WebAssembly on one thread: no writers of their own)
-                let writers = if cfg!(target_family = "wasm") {
-                    1
-                } else {
-                    threads
-                };
-                w.blocks(&blocks, &pending, data, at, writers)
-                    .map_err(|_| Error::Corrupt)?;
+                let writers = if cfg!(target_family = "wasm") { 1 } else { threads };
+                w.blocks(&blocks, &pending, data, at, writers).map_err(|_| Error::Corrupt)?;
                 if let (Ok(sink), None) = (&mut to, whole) {
                     sink(w.written());
                     w.forget_written();
@@ -3225,20 +2691,14 @@ fn rebuild(
         }
     })?;
     // Stored blocks after the last token cover the rest of the data.
-    end += skips
-        .iter()
-        .filter(|s| s.0 == total)
-        .map(|s| s.1)
-        .sum::<usize>();
+    end += skips.iter().filter(|s| s.0 == total).map(|s| s.1).sum::<usize>();
     if end != n || bi != nb {
         return Err(Error::Corrupt);
     }
     if let Some(c) = cap {
         w.reserve(c);
     }
-    let rest = w
-        .finish(layout.tail_pad, &layout.trailing)
-        .map_err(|_| Error::Corrupt)?;
+    let rest = w.finish(layout.tail_pad, &layout.trailing).map_err(|_| Error::Corrupt)?;
     match to {
         Ok(sink) => {
             sink(&rest);
@@ -3253,18 +2713,10 @@ mod tests {
     use super::*;
 
     /// Segments as compared: body, checkpoint, misses and what the emulation mispredicted.
-    type Coded = Vec<(
-        Vec<u8>,
-        Option<Checkpoint>,
-        usize,
-        Vec<(usize, Token)>,
-        bool,
-    )>;
+    type Coded = Vec<(Vec<u8>, Option<Checkpoint>, usize, Vec<(usize, Token)>, bool)>;
 
     fn coded(segs: &[AdaptiveSeg]) -> Coded {
-        segs.iter()
-            .map(|s| (s.body.clone(), s.cp, s.misses, s.missed.clone(), s.lost))
-            .collect()
+        segs.iter().map(|s| (s.body.clone(), s.cp, s.misses, s.missed.clone(), s.lost)).collect()
     }
 
     /// An error crosses a task as its kind (and a parameter's message): the stream cut short, a
@@ -3284,14 +2736,8 @@ mod tests {
         assert_eq!(round(&Error::Corrupt), Some(Error::Corrupt));
         assert_eq!(round(&Error::Inconsistent), Some(Error::Inconsistent));
         assert_eq!(round(&Error::Limit), Some(Error::Limit));
-        assert_eq!(
-            round(&Error::Param("a bad one".into())),
-            Some(Error::Param("a bad one".into()))
-        );
-        assert_eq!(
-            round(&Error::Invalid("lost")),
-            Some(Error::Invalid("(in a task)"))
-        );
+        assert_eq!(round(&Error::Param("a bad one".into())), Some(Error::Param("a bad one".into())));
+        assert_eq!(round(&Error::Invalid("lost")), Some(Error::Invalid("(in a task)")));
         assert_eq!(Error::get(&mut &[6u8][..]), None);
         assert_eq!(Error::get(&mut &[][..]), None);
         assert_eq!(Error::get(&mut &[4u8, 9, b'x'][..]), None);
@@ -3304,26 +2750,12 @@ mod tests {
     fn estimate_of_chunks() {
         let mut text = Vec::new();
         for i in 0..40_000u32 {
-            text.extend(
-                format!(
-                    "line {i}: {} of the text\n",
-                    i.wrapping_mul(2654435761) >> 20
-                )
-                .bytes(),
-            );
+            text.extend(format!("line {i}: {} of the text\n", i.wrapping_mul(2654435761) >> 20).bytes());
         }
         // (a level zlib does not emulate by default: the record has corrections to cost)
-        let raw = "zlib:level=3"
-            .parse::<flate_zoo::Encoder>()
-            .unwrap()
-            .compress(&text)
-            .unwrap();
+        let raw = "zlib:level=3".parse::<flate_zoo::Encoder>().unwrap().compress(&text).unwrap();
         let by = |verify: bool| {
-            let opts = Options {
-                verify,
-                threads: 1,
-                ..Options::for_profile(0).unwrap()
-            };
+            let opts = Options { verify, threads: 1, ..Options::for_profile(0).unwrap() };
             let parsed = Parsed::new(&raw, &opts).unwrap();
             let est = parsed.estimate(&opts).unwrap();
             let (_, record, _) = parsed.deconstruct(&opts, &Default::default()).unwrap();
@@ -3333,9 +2765,7 @@ mod tests {
         assert_eq!(streamed.1, whole.1);
         assert_eq!(streamed.0, whole.0, "{streamed:?} {whole:?}");
         assert!(
-            streamed.0 > 0
-                && streamed.0 < 4 * streamed.1 + 1000
-                && streamed.1 < 4 * streamed.0 + 1000,
+            streamed.0 > 0 && streamed.0 < 4 * streamed.1 + 1000 && streamed.1 < 4 * streamed.0 + 1000,
             "{streamed:?}"
         );
     }
@@ -3348,38 +2778,17 @@ mod tests {
     fn replayed_emulation_codes_alike() {
         let mut d = vec![];
         for k in 0..6u8 {
-            for src in [
-                include_bytes!("lib.rs").as_slice(),
-                include_bytes!("adapt.rs"),
-            ] {
+            for src in [include_bytes!("lib.rs").as_slice(), include_bytes!("adapt.rs")] {
                 d.extend(src.iter().map(|&b| if b == b'e' { b'a' + k } else { b }));
             }
         }
-        let raw = "zlib:level=9"
-            .parse::<flate_zoo::Encoder>()
-            .unwrap()
-            .compress(&d)
-            .unwrap();
+        let raw = "zlib:level=9".parse::<flate_zoo::Encoder>().unwrap().compress(&d).unwrap();
         let f = Flat::new(&raw, 16 << 10, 1, false, usize::MAX, 0, false).unwrap();
         let ranges = segment_ranges(&f);
         assert!(ranges.len() > 4);
-        let (catalog, priors) = (
-            &profile_catalog(ADAPTIVE).unwrap().0,
-            profile_priors(ADAPTIVE).unwrap(),
-        );
+        let (catalog, priors) = (&profile_catalog(ADAPTIVE).unwrap().0, profile_priors(ADAPTIVE).unwrap());
         let code_on = |threads: usize, rule: Rule, p: zlib::Params, from: Emulation| {
-            let segs = code_adaptive(
-                &f,
-                rule,
-                Some(p),
-                from,
-                priors,
-                &ranges,
-                threads,
-                false,
-                (0, &ONCE),
-            )
-            .unwrap();
+            let segs = code_adaptive(&f, rule, Some(p), from, priors, &ranges, threads, false, (0, &ONCE)).unwrap();
             assert!(segs.iter().all(|s| s.emulated && !s.lost));
             segs
         };
@@ -3387,18 +2796,9 @@ mod tests {
 
         // Level 7 mispredicts the stream (of level 9), strategies default and fixed alike: tied
         // over the whole stream, the detection follows all of it.
-        let p = zlib::Params {
-            level: 7,
-            ..Default::default()
-        };
+        let p = zlib::Params { level: 7, ..Default::default() };
         let cuts: Vec<usize> = ranges.iter().skip(1).map(|r| r.pos).collect();
-        let lanes = vec![
-            p,
-            zlib::Params {
-                strategy: zlib::Strategy::Fixed,
-                ..p
-            },
-        ];
+        let lanes = vec![p, zlib::Params { strategy: zlib::Strategy::Fixed, ..p }];
         let (found, followed) = detect::detect_refined_at(&f, &f.data, lanes, &cuts).unwrap();
         assert_eq!((found.params, found.complete), (p, true));
         assert!(found.misses > 100);
@@ -3407,18 +2807,8 @@ mod tests {
         // (a new emulation on threads starting the segments from their own checkpoints)
         assert!(starts(&f, p, &ranges, 4).is_some());
         let new = code(catalog[0], p, Emulation::New);
-        assert_eq!(
-            coded(&new),
-            coded(&code_on(1, catalog[0], p, Emulation::New))
-        );
-        assert_eq!(
-            coded(&code(
-                catalog[0],
-                p,
-                Emulation::Followed(Box::new(followed))
-            )),
-            coded(&new)
-        );
+        assert_eq!(coded(&new), coded(&code_on(1, catalog[0], p, Emulation::New)));
+        assert_eq!(coded(&code(catalog[0], p, Emulation::Followed(Box::new(followed)))), coded(&new));
 
         // Its misses replayed with another rule.
         let again = code(catalog[1], p, Emulation::Coded(&new));

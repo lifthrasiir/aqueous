@@ -11,14 +11,7 @@ fn inputs() -> Vec<Vec<u8>> {
         })
         .collect();
     let text = include_bytes!("../src/zlib.rs").repeat(3);
-    vec![
-        vec![],
-        b"a".to_vec(),
-        b"abcabcabd".repeat(20_000),
-        noise,
-        text,
-        vec![0; 100_000],
-    ]
+    vec![vec![], b"a".to_vec(), b"abcabcabd".repeat(20_000), noise, text, vec![0; 100_000]]
 }
 
 /// Profiles worth testing apart: the fastest and smallest static ones, the default one, and
@@ -42,10 +35,7 @@ fn every_backend_round_trips() {
 
 fn every_backend(inputs: &[Vec<u8>], opts: &aqr_flate::Options, failures: &mut Vec<String>) {
     {
-        for enc in backends()
-            .iter()
-            .flat_map(|&b| presets_of(b, Sweep::Default))
-        {
+        for enc in backends().iter().flat_map(|&b| presets_of(b, Sweep::Default)) {
             for input in inputs {
                 let Ok(raw) = enc.compress(input) else {
                     continue;
@@ -87,11 +77,8 @@ fn mixed() -> Vec<u8> {
 fn segments_round_trip() {
     let mixed = mixed();
     for profile in [aqr_flate::DEFAULT_PROFILE, aqr_flate::ADAPTIVE] {
-        let opts = aqr_flate::Options {
-            segment: 10_000,
-            prefix: 20_000,
-            ..aqr_flate::Options::for_profile(profile).unwrap()
-        };
+        let opts =
+            aqr_flate::Options { segment: 10_000, prefix: 20_000, ..aqr_flate::Options::for_profile(profile).unwrap() };
         for spec in [
             "zlib:level=6",
             "zlib:level=1",
@@ -104,11 +91,7 @@ fn segments_round_trip() {
             "stb",
             "zopfli",
         ] {
-            let raw = spec
-                .parse::<flate_zoo::Encoder>()
-                .unwrap()
-                .compress(&mixed)
-                .unwrap();
+            let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(&mixed).unwrap();
             let (data, meta, report) = aqr_flate::deconstruct_report(&raw, &opts).unwrap();
             // (The rule for RLE predicts as well as zlib's own.)
             if profile >= aqr_flate::ADAPTIVE && spec.starts_with("zlib") && !spec.contains("rle") {
@@ -123,13 +106,8 @@ fn segments_round_trip() {
             // given as it is written, in pieces
             let model = aqr_flate::profile_data(profile).unwrap();
             let mut pieces = Vec::new();
-            aqr_flate::reconstruct_into(&data, &meta, model, 2, &mut |b| pieces.push(b.to_vec()))
-                .unwrap();
-            assert!(
-                pieces.len() > 2 && pieces.concat() == raw,
-                "{spec}, profile {profile}: {} pieces",
-                pieces.len()
-            );
+            aqr_flate::reconstruct_into(&data, &meta, model, 2, &mut |b| pieces.push(b.to_vec())).unwrap();
+            assert!(pieces.len() > 2 && pieces.concat() == raw, "{spec}, profile {profile}: {} pieces", pieces.len());
         }
     }
 }
@@ -139,16 +117,9 @@ fn segments_round_trip() {
 #[test]
 fn zlib_emulation_resumes() {
     let mixed = mixed();
-    let raw = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&mixed)
-        .unwrap();
+    let raw = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(&mixed).unwrap();
     let size = |segment| {
-        let opts = aqr_flate::Options {
-            segment,
-            ..aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap()
-        };
+        let opts = aqr_flate::Options { segment, ..aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap() };
         aqr_flate::deconstruct_with(&raw, &opts).unwrap().1.len()
     };
     let (one, many) = (size(usize::MAX), size(10_000));
@@ -162,22 +133,13 @@ fn zlib_emulation_resumes() {
 fn unresumable_zlib_emulation_takes_one_segment() {
     let mixed = mixed();
     for spec in ["zlib:level=1", "zlib:level=3,strategy=filtered"] {
-        let raw = spec
-            .parse::<flate_zoo::Encoder>()
-            .unwrap()
-            .compress(&mixed)
-            .unwrap();
-        let opts = aqr_flate::Options {
-            segment: 10_000,
-            ..aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap()
-        };
+        let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(&mixed).unwrap();
+        let opts =
+            aqr_flate::Options { segment: 10_000, ..aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap() };
         let (data, meta, report) = aqr_flate::deconstruct_report(&raw, &opts).unwrap();
         assert!(report.zlib.is_some(), "{spec}: no zlib emulation");
         assert!(meta.len() < 300, "{spec}: {} B", meta.len());
-        assert!(
-            aqr_flate::reconstruct_with_threads(&data, &meta, 4).unwrap() == raw,
-            "{spec}"
-        );
+        assert!(aqr_flate::reconstruct_with_threads(&data, &meta, 4).unwrap() == raw, "{spec}");
     }
 }
 
@@ -196,11 +158,7 @@ fn chain_rule_round_trips() {
         ..aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap()
     };
     for spec in ["libdeflate:level=9", "zopfli", "zlib:level=6", "stb"] {
-        let raw = spec
-            .parse::<flate_zoo::Encoder>()
-            .unwrap()
-            .compress(&mixed)
-            .unwrap();
+        let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(&mixed).unwrap();
         let (data, meta, report) = aqr_flate::deconstruct_report(&raw, &opts).unwrap();
         assert_eq!(report.rule, chain, "{spec}");
         for threads in [1, 3] {
@@ -247,10 +205,7 @@ fn too_many_blocks_are_not_deconstructed() {
     raw[last / 8] |= 1 << (last % 8);
     // (refused: the Err is what the test is for, not a stream that would have to come back)
     assert!(
-        matches!(
-            aqr_flate::deconstruct(&raw),
-            Err(aqr_flate::Error::Invalid(_))
-        ),
+        matches!(aqr_flate::deconstruct(&raw), Err(aqr_flate::Error::Invalid(_))),
         "{:?}",
         aqr_flate::deconstruct(&raw).map(|x| x.0.len())
     );
@@ -258,11 +213,7 @@ fn too_many_blocks_are_not_deconstructed() {
 
 #[test]
 fn unknown_profiles_are_rejected() {
-    let raw = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(b"abcabcabd")
-        .unwrap();
+    let raw = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(b"abcabcabd").unwrap();
     let (data, mut meta) = aqr_flate::deconstruct(&raw).unwrap();
     meta[..2].copy_from_slice(&aqr_flate::profiles().end.to_le_bytes());
     assert!(aqr_flate::reconstruct(&data, &meta).is_err());
@@ -278,15 +229,8 @@ fn corrupt_metadata_is_rejected() {
         ("libdeflate:level=6", aqr_flate::ADAPTIVE, 1 << 20),
         ("zlib:level=6", aqr_flate::ADAPTIVE, 20_000),
     ] {
-        let raw = spec
-            .parse::<flate_zoo::Encoder>()
-            .unwrap()
-            .compress(&input)
-            .unwrap();
-        let opts = aqr_flate::Options {
-            segment,
-            ..aqr_flate::Options::for_profile(profile).unwrap()
-        };
+        let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(&input).unwrap();
+        let opts = aqr_flate::Options { segment, ..aqr_flate::Options::for_profile(profile).unwrap() };
         let (data, meta) = aqr_flate::deconstruct_with(&raw, &opts).unwrap();
         damage(&data, &meta);
     }
@@ -327,27 +271,15 @@ fn huge_stream_lengths_are_rejected() {
 #[test]
 fn data_beyond_the_limit_is_refused() {
     let input = include_bytes!("../src/zlib.rs").repeat(2);
-    let raw = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&input)
-        .unwrap();
-    for (profile, verify) in [
-        (aqr_flate::DEFAULT_PROFILE, false),
-        (aqr_flate::DEFAULT_PROFILE, true),
-        (aqr_flate::ADAPTIVE, false),
-    ] {
-        let opts = |max_data| aqr_flate::Options {
-            verify,
-            max_data,
-            ..aqr_flate::Options::for_profile(profile).unwrap()
-        };
+    let raw = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(&input).unwrap();
+    for (profile, verify) in
+        [(aqr_flate::DEFAULT_PROFILE, false), (aqr_flate::DEFAULT_PROFILE, true), (aqr_flate::ADAPTIVE, false)]
+    {
+        let opts =
+            |max_data| aqr_flate::Options { verify, max_data, ..aqr_flate::Options::for_profile(profile).unwrap() };
         let (data, _) = aqr_flate::deconstruct_with(&raw, &opts(input.len())).unwrap();
         assert!(data == input);
-        assert!(matches!(
-            aqr_flate::deconstruct_with(&raw, &opts(input.len() - 1)),
-            Err(aqr_flate::Error::Limit)
-        ));
+        assert!(matches!(aqr_flate::deconstruct_with(&raw, &opts(input.len() - 1)), Err(aqr_flate::Error::Limit)));
     }
     struct Count(usize);
     impl aqr_flate::inflate::Sink for Count {
@@ -361,18 +293,10 @@ fn data_beyond_the_limit_is_refused() {
             self.0 += b.len();
         }
     }
-    let raw = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&vec![0; 1 << 20])
-        .unwrap();
+    let raw = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(&vec![0; 1 << 20]).unwrap();
     let mut n = Count(0);
     let r = aqr_flate::inflate::parse_head_max(&raw, usize::MAX, 1000, &mut n);
-    assert!(
-        matches!(r, Err(aqr_flate::Error::Limit)) && n.0 <= 1000 + 258,
-        "{}",
-        n.0
-    );
+    assert!(matches!(r, Err(aqr_flate::Error::Limit)) && n.0 <= 1000 + 258, "{}", n.0);
 }
 
 /// The formula module reads the record with the model data it is given as resources, in
@@ -381,37 +305,24 @@ fn data_beyond_the_limit_is_refused() {
 fn formula_module_takes_its_resources() {
     use aqr_flate::formula;
     let input = include_bytes!("../src/zlib.rs").repeat(2);
-    let raw = "zlib:level=6"
-        .parse::<flate_zoo::Encoder>()
-        .unwrap()
-        .compress(&input)
-        .unwrap();
+    let raw = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(&input).unwrap();
     for profile in profiles() {
         let opts = aqr_flate::Options::for_profile(profile).unwrap();
         let (data, meta) = aqr_flate::deconstruct_with(&raw, &opts).unwrap();
         let res = formula::resources(profile).unwrap();
         let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();
-        let decode =
-            |res: &[&[u8]]| formula::decode(&[], res, &[&data, &meta, &[]], raw.len() as u64, 1);
+        let decode = |res: &[&[u8]]| formula::decode(&[], res, &[&data, &meta, &[]], raw.len() as u64, 1);
         assert_eq!(decode(&res).unwrap(), raw, "profile {profile}");
         // Too few, and the coding of the other kind of profile.
         assert!(decode(&res[..1]).is_err());
-        let other = formula::resources(if profile < aqr_flate::ADAPTIVE {
-            aqr_flate::ADAPTIVE
-        } else {
-            0
-        })
-        .unwrap();
+        let other = formula::resources(if profile < aqr_flate::ADAPTIVE { aqr_flate::ADAPTIVE } else { 0 }).unwrap();
         assert!(decode(&[res[0], &other[1]]).is_err());
         // Another catalog reads the rule's index (of a static profile) as another rule.
         if profile < aqr_flate::ADAPTIVE {
             let mut rev = formula::rules_from_bytes(res[0]).unwrap();
             rev.reverse();
             let rev = formula::rules_to_bytes(&rev);
-            assert!(
-                decode(&[&rev, res[1]]).ok().as_ref() != Some(&raw),
-                "profile {profile}"
-            );
+            assert!(decode(&[&rev, res[1]]).ok().as_ref() != Some(&raw), "profile {profile}");
         }
         // Rules damaged.
         let mut bad = res[0].to_vec();
@@ -426,34 +337,17 @@ fn formula_module_takes_its_resources() {
 #[test]
 fn formula_module_of_several_streams() {
     use aqr_flate::formula::{self, Derived};
-    let inputs: Vec<Vec<u8>> = vec![
-        include_bytes!("../src/zlib.rs").to_vec(),
-        Vec::new(),
-        include_bytes!("../src/lib.rs").repeat(3),
-    ];
-    let raws: Vec<Vec<u8>> = inputs
-        .iter()
-        .map(|d| {
-            "zlib:level=6"
-                .parse::<flate_zoo::Encoder>()
-                .unwrap()
-                .compress(d)
-                .unwrap()
-        })
-        .collect();
+    let inputs: Vec<Vec<u8>> =
+        vec![include_bytes!("../src/zlib.rs").to_vec(), Vec::new(), include_bytes!("../src/lib.rs").repeat(3)];
+    let raws: Vec<Vec<u8>> =
+        inputs.iter().map(|d| "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap().compress(d).unwrap()).collect();
     let profile = aqr_flate::DEFAULT_PROFILE;
     let opts = aqr_flate::Options::for_profile(profile).unwrap();
-    let parts: Vec<(Vec<u8>, Vec<u8>)> = raws
-        .iter()
-        .map(|r| aqr_flate::deconstruct_with(r, &opts).unwrap())
-        .collect();
+    let parts: Vec<(Vec<u8>, Vec<u8>)> = raws.iter().map(|r| aqr_flate::deconstruct_with(r, &opts).unwrap()).collect();
     let data: Vec<u8> = parts.iter().flat_map(|p| p.0.clone()).collect();
     let records: Vec<u8> = parts.iter().flat_map(|p| p.1.clone()).collect();
-    let lens: Vec<(usize, usize, usize)> = parts
-        .iter()
-        .zip(&raws)
-        .map(|(p, r)| (p.0.len(), p.1.len(), r.len()))
-        .collect();
+    let lens: Vec<(usize, usize, usize)> =
+        parts.iter().zip(&raws).map(|(p, r)| (p.0.len(), p.1.len(), r.len())).collect();
     let index = formula::index(&lens);
     let res = formula::resources(profile).unwrap();
     let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();
@@ -464,13 +358,7 @@ fn formula_module_of_several_streams() {
             derived.put(d, r.len(), &mut want);
         }
         let decode = |index: &[u8], len: usize| {
-            formula::decode(
-                &derived.params(),
-                &res,
-                &[&data, &records, index],
-                len as u64,
-                4,
-            )
+            formula::decode(&derived.params(), &res, &[&data, &records, index], len as u64, 4)
         };
         assert_eq!(decode(&index, want.len()).unwrap(), want);
         assert!(decode(&index, want.len() + 1).is_err());
@@ -502,43 +390,23 @@ fn chain_rules_coded_at_once() {
     use aqr_flate::tokens::{self, Kind, Range, Rule};
     let priors = aqr_flate::profile_priors(aqr_flate::ADAPTIVE).unwrap();
     let rules: Vec<Rule> = [(7, 5), (0, 0), (4, 1), (12, 5)]
-        .map(|(depth, nice)| Rule {
-            kind: Kind::Chain,
-            depth,
-            nice,
-            ..Rule::default()
-        })
+        .map(|(depth, nice)| Rule { kind: Kind::Chain, depth, nice, ..Rule::default() })
         .to_vec();
     let mut mixed = inputs().concat();
     mixed.extend(include_bytes!("../src/lib.rs"));
     for spec in ["zlib:level=6", "libdeflate:level=9", "miniz:level=1"] {
         for input in inputs().iter().chain([&mixed]) {
-            let raw = spec
-                .parse::<flate_zoo::Encoder>()
-                .unwrap()
-                .compress(input)
-                .unwrap();
+            let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(input).unwrap();
             let (stream, data) = aqr_flate::deflate::parse(&raw).unwrap();
             let (mut tokens, mut skips) = (vec![], vec![]);
             for b in &stream.blocks {
                 match &b.body {
                     Body::Stored { len, .. } => skips.push((tokens.len(), *len as usize)),
-                    Body::Fixed { tokens: t } | Body::Dynamic { tokens: t, .. } => {
-                        tokens.extend_from_slice(t)
-                    }
+                    Body::Fixed { tokens: t } | Body::Dynamic { tokens: t, .. } => tokens.extend_from_slice(t),
                 }
             }
-            let range = Range {
-                first: 0,
-                count: tokens.len(),
-                pos: 0,
-                end: data.len(),
-                skips: &skips,
-            };
-            let mut at_once: Vec<_> = rules
-                .iter()
-                .map(|_| Adaptive::new(Enc::new(), priors, None))
-                .collect();
+            let range = Range { first: 0, count: tokens.len(), pos: 0, end: data.len(), skips: &skips };
+            let mut at_once: Vec<_> = rules.iter().map(|_| Adaptive::new(Enc::new(), priors, None)).collect();
             tokens::code_chains(&mut at_once, &data, &rules, &range, &tokens, None).unwrap();
             for (&r, a) in rules.iter().zip(at_once) {
                 let mut alone = Adaptive::new(Enc::new(), priors, None);

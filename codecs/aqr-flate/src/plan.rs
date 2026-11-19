@@ -79,11 +79,8 @@ impl Stream {
         at += main_len;
         at = at.checked_add(hdr_len)?;
         let r = &mut crate::bits::BitReader::new(main);
-        let rule = if r.bits(1).ok()? == 1 {
-            *m.rules.get(get_usize(r, 1 << 16).ok()?)?
-        } else {
-            Rule::read(r).ok()?
-        };
+        let rule =
+            if r.bits(1).ok()? == 1 { *m.rules.get(get_usize(r, 1 << 16).ok()?)? } else { Rule::read(r).ok()? };
         let layout = crate::read_blocks(r, nn).ok()?;
         let mut zlib = None;
         if adaptive {
@@ -122,12 +119,7 @@ impl Stream {
                 true
             });
             at = at.checked_add(len)?;
-            segs.push(Seg {
-                count: count as u64,
-                pos: pos as u64,
-                end: n,
-                emu: zlib.is_some() && (i == 0 || cp),
-            });
+            segs.push(Seg { count: count as u64, pos: pos as u64, end: n, emu: zlib.is_some() && (i == 0 || cp) });
             first += count;
         }
         for i in 1..segs.len() {
@@ -243,11 +235,7 @@ fn decoder(st: &Stream, s: &Seg, off: u64, len: u64) -> u64 {
         Some((wbits, mem)) if s.emu => {
             let w = 1u64 << wbits.clamp(9, 15);
             let bits = mem.clamp(1, 9) as u32 + 7;
-            block(2 * w + wasm::WINDOW_SLACK)
-                + block(2 << bits)
-                + block(2 * w)
-                + block(wasm::LANE)
-                + block(wasm::JOB)
+            block(2 * w + wasm::WINDOW_SLACK) + block(2 << bits) + block(2 * w) + block(wasm::LANE) + block(wasm::JOB)
         }
         _ => 0,
     };
@@ -281,27 +269,17 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
     let (n, k) = (st.n as usize, st.segs.len());
     let reads = |s0: usize| {
         let s1 = (s0 + batch).min(k);
-        let lo =
-            (st.segs[s0].pos as usize).saturating_sub(crate::BACK) / crate::ALIGN * crate::ALIGN;
+        let lo = (st.segs[s0].pos as usize).saturating_sub(crate::BACK) / crate::ALIGN * crate::ALIGN;
         let hi = if s1 < k { st.segs[s1].pos as usize } else { n };
         (lo as u64, hi.saturating_add(crate::AHEAD).min(n) as u64)
     };
     if let How::Pulled(_) = how {
         // the writer, the data held
-        m.take(crate::writer_room(
-            st.largest as usize,
-            st.blocks as usize,
-            st.trailing as usize,
-        ) as u64);
+        m.take(crate::writer_room(st.largest as usize, st.blocks as usize, st.trailing as usize) as u64);
         m.take(crate::pull_room(n, k, |i| st.segs[i].pos as usize, batch) as u64);
     }
     m.take(wasm::SCOPE);
-    let most = st
-        .segs
-        .chunks(batch)
-        .map(|b| b.iter().map(|s| s.count).sum::<u64>())
-        .max()
-        .unwrap_or(0);
+    let most = st.segs.chunks(batch).map(|b| b.iter().map(|s| s.count).sum::<u64>()).max().unwrap_or(0);
     let round = st.tokens.min(st.largest + most);
     // a round of blocks to write (and the shapes they are made of), all rounds of as much room:
     // taken whenever the next block's tokens are all decoded, after the batch that decodes them
@@ -329,12 +307,7 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
             // time as it is taken
             let tasks = segs
                 .iter()
-                .map(|s| {
-                    m.task(
-                        block(wasm::TOKEN * s.count)
-                            + decoder(st, s, off, len).max(block(9 + 5 * s.count)),
-                    )
-                })
+                .map(|s| m.task(block(wasm::TOKEN * s.count) + decoder(st, s, off, len).max(block(9 + 5 * s.count))))
                 .collect();
             let t = m.top;
             m.take(segs.len() as u64);
@@ -370,10 +343,7 @@ fn rebuild(m: &mut Mem, st: &Stream, how: How) {
                 (k, next, opened) = (k + c, next + 1, false);
             } else if k + c <= decoded {
                 write(m);
-                while next < st.counts.len()
-                    && !big(st.counts[next])
-                    && k + st.counts[next] <= decoded
-                {
+                while next < st.counts.len() && !big(st.counts[next]) && k + st.counts[next] <= decoded {
                     k += st.counts[next];
                     next += 1;
                 }
@@ -402,14 +372,8 @@ pub fn plan(
     len: u64,
 ) -> Option<(u64, u64)> {
     let derived = Derived::from_params(params).ok()?;
-    let (lens, crcs) = crate::module::lens_of(
-        derived,
-        index,
-        inputs[0],
-        inputs[1],
-        derived.streams_len(len, index).ok()?,
-    )
-    .ok()?;
+    let (lens, crcs) =
+        crate::module::lens_of(derived, index, inputs[0], inputs[1], derived.streams_len(len, index).ok()?).ok()?;
     let k = lens.len() as u64;
     let profile = crate::record_profile(records).ok()?;
     let threads = crate::module::SET_THREADS;
@@ -452,10 +416,7 @@ pub fn plan(
         // a run of small streams: their data and records, their lengths and groups
         let mut j = i;
         let mut held = 0;
-        while j < lens.len()
-            && lens[j].0 < LARGE as u64
-            && (j == i || held + lens[j].0 as usize <= RUN)
-        {
+        while j < lens.len() && lens[j].0 < LARGE as u64 && (j == i || held + lens[j].0 as usize <= RUN) {
             held += lens[j].0 as usize;
             j += 1;
         }
@@ -473,10 +434,8 @@ pub fn plan(
         // then each stream rebuilt in turn onto it
         let group = |g: usize| {
             let (a, b) = (starts[g], starts[g + 1]);
-            let room = block(
-                1 + lens[i + a..i + b].iter().map(|l| l.2).sum::<u64>()
-                    + crate::write::TOKEN_SLACK as u64,
-            );
+            let room =
+                block(1 + lens[i + a..i + b].iter().map(|l| l.2).sum::<u64>() + crate::write::TOKEN_SLACK as u64);
             let most = (a..b)
                 .map(|s| {
                     let mut sub = Mem::default();
@@ -489,18 +448,10 @@ pub fn plan(
         };
         let groups = starts.len() - 1;
         if threads > 1 {
-            let tasks = (0..groups)
-                .map(&group)
-                .map(|(room, most)| m.task(room + most))
-                .collect();
+            let tasks = (0..groups).map(&group).map(|(room, most)| m.task(room + most)).collect();
             m.take(groups as u64);
             for g in 0..groups {
-                m.peak(block(
-                    1 + lens[i + starts[g]..i + starts[g + 1]]
-                        .iter()
-                        .map(|l| l.2)
-                        .sum::<u64>(),
-                ));
+                m.peak(block(1 + lens[i + starts[g]..i + starts[g + 1]].iter().map(|l| l.2).sum::<u64>()));
             }
             m.spawned(0, tasks);
         } else {

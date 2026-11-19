@@ -59,10 +59,7 @@ pub fn models_from_bytes(d: &[u8]) -> Result<Box<[code::Model; FIELDS]>> {
     for q in d.as_chunks::<ALPHABET>().0 {
         models.push(code::Model::from_qs(q).ok_or(Error::Corrupt)?);
     }
-    Ok(models
-        .into_boxed_slice()
-        .try_into()
-        .unwrap_or_else(|_| unreachable!()))
+    Ok(models.into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()))
 }
 
 /// The priors of `priors_to_bytes`, with counts up to [`adapt::LIMIT`].
@@ -74,12 +71,7 @@ pub fn priors_from_bytes(d: &[u8]) -> Result<Priors> {
     if n.iter().any(|&n| n > adapt::LIMIT) {
         return Err(Error::Corrupt);
     }
-    let p1 = p1
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&b| u16::from_le_bytes(b))
-        .collect();
+    let p1 = p1.as_chunks::<2>().0.iter().map(|&b| u16::from_le_bytes(b)).collect();
     Ok(Priors { p1, n: n.to_vec() })
 }
 
@@ -134,8 +126,7 @@ impl Derived {
             self.entry(index, &mut at)?;
             k += 1;
         }
-        len.checked_sub(k.max(1) * self.bytes() as u64)
-            .ok_or(Error::Corrupt)
+        len.checked_sub(k.max(1) * self.bytes() as u64).ok_or(Error::Corrupt)
     }
 
     /// The next entry of `index` at `at`: the lengths of a stream's data, record and stream, and
@@ -231,9 +222,7 @@ pub fn index(lens: &[(usize, usize, usize)]) -> Vec<u8> {
     let mut out = Vec::new();
     if lens.len() > 1 {
         for &(d, r, s) in lens {
-            [d, r, s]
-                .iter()
-                .for_each(|&n| aqr_common::varint::put(&mut out, n as u64));
+            [d, r, s].iter().for_each(|&n| aqr_common::varint::put(&mut out, n as u64));
         }
     }
     out
@@ -247,9 +236,7 @@ pub fn index_before(lens: &[(usize, usize, usize, u32)]) -> Vec<u8> {
     let mut out = Vec::new();
     if lens.len() > 1 || lens.iter().any(|l| l.0 >= LARGE) {
         for &(d, r, s, crc) in lens {
-            [d, r, s]
-                .iter()
-                .for_each(|&n| aqr_common::varint::put(&mut out, n as u64));
+            [d, r, s].iter().for_each(|&n| aqr_common::varint::put(&mut out, n as u64));
             if d >= LARGE {
                 aqr_common::varint::put(&mut out, crc as u64);
             }
@@ -295,8 +282,7 @@ pub fn lens_of(
             crcs.push(crc);
         }
     }
-    let sum =
-        |f: fn(&(u64, u64, u64)) -> u64| lens.iter().try_fold(0u64, |s, l| s.checked_add(f(l)));
+    let sum = |f: fn(&(u64, u64, u64)) -> u64| lens.iter().try_fold(0u64, |s, l| s.checked_add(f(l)));
     match (sum(|l| l.0), sum(|l| l.1), sum(|l| l.2)) == (Some(data), Some(records), Some(streams)) {
         true => Ok((lens, crcs)),
         false => Err(Error::Corrupt),
@@ -315,13 +301,7 @@ fn cut<'a>(
     index: &[u8],
     streams: u64,
 ) -> Result<(Vec<Item<'a>>, Vec<u32>)> {
-    let (lens, crcs) = lens_of(
-        derived,
-        index,
-        data.len() as u64,
-        records.len() as u64,
-        streams,
-    )?;
+    let (lens, crcs) = lens_of(derived, index, data.len() as u64, records.len() as u64, streams)?;
     let (mut d, mut r) = (data, records);
     let mut out = Vec::with_capacity(lens.len());
     for (dn, rn, sn) in lens {
@@ -349,10 +329,7 @@ fn par_jobs<R: Send + aqr_common::wire::Wire>(
 ) -> Vec<R> {
     // (the largest first natively; on WebAssembly no sort, whose code is large in the module)
     let large = |i: &usize| sizes[*i] >= LARGE;
-    let mut order: Vec<usize> = (0..sizes.len())
-        .filter(large)
-        .chain((0..sizes.len()).filter(|i| !large(i)))
-        .collect();
+    let mut order: Vec<usize> = (0..sizes.len()).filter(large).chain((0..sizes.len()).filter(|i| !large(i))).collect();
     if !cfg!(target_family = "wasm") {
         order.sort_by_key(|&i| std::cmp::Reverse(sizes[i]));
     }
@@ -362,19 +339,14 @@ fn par_jobs<R: Send + aqr_common::wire::Wire>(
     while k < order.len() {
         let (start, mut sum) = (k, 0);
         // (one each, but on WebAssembly)
-        while k < order.len()
-            && (k == start || (cfg!(target_family = "wasm") && sum + sizes[order[k]] <= LARGE))
-        {
+        while k < order.len() && (k == start || (cfg!(target_family = "wasm") && sum + sizes[order[k]] <= LARGE)) {
             sum += sizes[order[k]];
             k += 1;
         }
         groups.push(start..k);
     }
     let done = aqr_common::pool::par_map_apart(groups.len(), threads, |g| {
-        order[groups[g].clone()]
-            .iter()
-            .map(|&i| f(i, per(i)))
-            .collect::<Vec<R>>()
+        order[groups[g].clone()].iter().map(|&i| f(i, per(i))).collect::<Vec<R>>()
     });
     let mut out: Vec<Option<R>> = (0..sizes.len()).map(|_| None).collect();
     for (&i, r) in order.iter().zip(done.into_iter().flatten()) {
@@ -386,13 +358,7 @@ fn par_jobs<R: Send + aqr_common::wire::Wire>(
 /// [`crate::reconstruct_sized`], called once in the code (the module's tasks and the module
 /// itself run the same jobs).
 #[inline(never)]
-fn rebuild(
-    data: &[u8],
-    record: &[u8],
-    model: ModelData,
-    threads: usize,
-    cap: usize,
-) -> Result<Vec<u8>> {
+fn rebuild(data: &[u8], record: &[u8], model: ModelData, threads: usize, cap: usize) -> Result<Vec<u8>> {
     crate::reconstruct_sized(data, record, model, threads, cap)
 }
 
@@ -400,13 +366,7 @@ fn rebuild(
 /// profile) one after another and the index cutting them ([`index`]), one after another in
 /// `len` bytes, then what `params` derives of them ([`Derived`]); with `resources`, the
 /// catalog's rules and the default models or priors (by the records' profile).
-pub fn decode(
-    params: &[u8],
-    resources: &[&[u8]],
-    inputs: &[&[u8]],
-    len: u64,
-    threads: usize,
-) -> Result<Vec<u8>> {
+pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let derived = Derived::from_params(params)?;
     let (&[rules, coding], &[data, records, index]) = (resources, inputs) else {
         return Err(Error::Corrupt);
@@ -423,16 +383,10 @@ pub fn decode(
     let (models, priors);
     let model = if profile >= ADAPTIVE {
         priors = priors_from_bytes(coding)?;
-        ModelData {
-            rules: &rules,
-            coding: Coding::Adaptive(&priors),
-        }
+        ModelData { rules: &rules, coding: Coding::Adaptive(&priors) }
     } else {
         models = models_from_bytes(coding)?;
-        ModelData {
-            rules: &rules,
-            coding: Coding::Static(&models),
-        }
+        ModelData { rules: &rules, coding: Coding::Static(&models) }
     };
     let sizes: Vec<usize> = items.iter().map(|i| i.0.len()).collect();
     // (each stream of the length the index gives, but no more than its data and record could
@@ -440,9 +394,7 @@ pub fn decode(
     let cap = |i: usize| items[i].2.min(8 * (sizes[i] + items[i].1.len()) + 64);
     // (which failure it was is not kept: less code in the module's tasks)
     let mut streams = par_jobs(&sizes, threads, |i, per| {
-        rebuild(items[i].0, items[i].1, model, per, cap(i))
-            .ok()
-            .filter(|s| s.len() == items[i].2)
+        rebuild(items[i].0, items[i].1, model, per, cap(i)).ok().filter(|s| s.len() == items[i].2)
     })
     .into_iter()
     .collect::<Option<Vec<Vec<u8>>>>()
@@ -535,11 +487,7 @@ where
     /// Appends its next `n` bytes to `v`.
     fn take(&mut self, v: &mut Vec<u8>, n: usize) -> Result<()> {
         use aqr_api::{Input, Memory};
-        let end = self
-            .at
-            .checked_add(n as u64)
-            .filter(|&e| e <= self.len)
-            .ok_or(Error::Corrupt)?;
+        let end = self.at.checked_add(n as u64).filter(|&e| e <= self.len).ok_or(Error::Corrupt)?;
         let w = Input::<K>::size();
         while self.at < end {
             // (to the end of the window at most)
@@ -593,16 +541,8 @@ impl Model {
         Ok(Model {
             profile,
             rules: rules_from_bytes(rules)?,
-            models: if adaptive {
-                None
-            } else {
-                Some(models_from_bytes(coding)?)
-            },
-            priors: if adaptive {
-                Some(priors_from_bytes(coding)?)
-            } else {
-                None
-            },
+            models: if adaptive { None } else { Some(models_from_bytes(coding)?) },
+            priors: if adaptive { Some(priors_from_bytes(coding)?) } else { None },
         })
     }
 
@@ -633,32 +573,18 @@ pub fn decode_part(
     index_len: u64,
     size: u64,
 ) {
-    aqr_api::finish(set_part(
-        params_len,
-        [rules_len, coding_len],
-        [data_len, records_len, index_len],
-        size,
-    ));
+    aqr_api::finish(set_part(params_len, [rules_len, coding_len], [data_len, records_len, index_len], size));
 }
 
 fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -> Result<()> {
     use aqr_api::{Params, Resource};
     let derived = Derived::from_params(&whole_of::<Params>(params_len)?)?;
-    let (rules, coding) = (
-        whole_of::<Resource<0>>(resources[0])?,
-        whole_of::<Resource<1>>(resources[1])?,
-    );
+    let (rules, coding) = (whole_of::<Resource<0>>(resources[0])?, whole_of::<Resource<1>>(resources[1])?);
     let (mut data_in, mut records_in) = (Reader::<0>::new(inputs[0]), Reader::<1>::new(inputs[1]));
     let mut index = Vec::with_capacity(usize::try_from(inputs[2]).map_err(|_| Error::Limit)?);
     Reader::<2>::new(inputs[2]).take(&mut index, inputs[2] as usize)?;
     // each stream's data, record and stream
-    let (lens, crcs) = lens_of(
-        derived,
-        &index,
-        inputs[0],
-        inputs[1],
-        derived.streams_len(size, &index)?,
-    )?;
+    let (lens, crcs) = lens_of(derived, &index, inputs[0], inputs[1], derived.streams_len(size, &index)?)?;
     let size_of = |n: u64| usize::try_from(n).map_err(|_| Error::Limit);
     let mut out = Written { at: 0, size };
     let mut derive = Vec::with_capacity(lens.len() * derived.bytes());
@@ -673,11 +599,7 @@ fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -
     let threads = set_threads();
     let mut i = 0;
     while i < lens.len() {
-        let (d, r, sn) = (
-            size_of(lens[i].0)?,
-            size_of(lens[i].1)?,
-            size_of(lens[i].2)?,
-        );
+        let (d, r, sn) = (size_of(lens[i].0)?, size_of(lens[i].1)?, size_of(lens[i].2)?);
         if d >= LARGE {
             let mut record = Vec::with_capacity(r);
             records_in.take(&mut record, r)?;
@@ -733,10 +655,7 @@ fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -
         // a run of small streams, their data and records cut as `decode` cuts them
         let mut j = i;
         let mut held = 0;
-        while j < lens.len()
-            && lens[j].0 < LARGE as u64
-            && (j == i || held + lens[j].0 as usize <= RUN)
-        {
+        while j < lens.len() && lens[j].0 < LARGE as u64 && (j == i || held + lens[j].0 as usize <= RUN) {
             held += lens[j].0 as usize;
             j += 1;
         }
@@ -764,9 +683,7 @@ fn set_part(params_len: u64, resources: [u64; 2], inputs: [u64; 3], size: u64) -
                     return Err(Error::Corrupt);
                 };
                 for k in run.streams(g) {
-                    let (s, rest) = b
-                        .split_at_checked(run.lens[k].stream)
-                        .ok_or(Error::Corrupt)?;
+                    let (s, rest) = b.split_at_checked(run.lens[k].stream).ok_or(Error::Corrupt)?;
                     derived.put(&data[run.data(k)], s.len(), &mut derive);
                     if derived.before() {
                         out.write(&derive)?;
@@ -833,13 +750,7 @@ impl Run {
         let (mut d0, mut r0) = (0, 0);
         let mut v = Vec::with_capacity(lens.len());
         for &(d, r, s) in lens {
-            v.push(RunStream {
-                data: d as usize,
-                record: r as usize,
-                stream: s as usize,
-                data_at: d0,
-                record_at: r0,
-            });
+            v.push(RunStream { data: d as usize, record: r as usize, stream: s as usize, data_at: d0, record_at: r0 });
             (d0, r0) = (d0 + d as usize, r0 + r as usize);
         }
         let starts = group_starts(lens.iter().map(|l| l.0 as usize));
@@ -865,17 +776,8 @@ impl Run {
         1 + self
             .streams(g)
             .map(|k| {
-                let RunStream {
-                    data,
-                    record,
-                    stream,
-                    ..
-                } = self.lens[k];
-                stream.min(
-                    8usize
-                        .saturating_mul(data.saturating_add(record))
-                        .saturating_add(64),
-                )
+                let RunStream { data, record, stream, .. } = self.lens[k];
+                stream.min(8usize.saturating_mul(data.saturating_add(record)).saturating_add(64))
             })
             .sum::<usize>()
             + crate::write::TOKEN_SLACK
@@ -886,16 +788,9 @@ impl Run {
         let mut out = Vec::with_capacity(self.result_room(g));
         out.push(0);
         for k in self.streams(g) {
-            let RunStream {
-                data: d,
-                record: r,
-                stream: s,
-                data_at: d0,
-                record_at: r0,
-            } = self.lens[k];
+            let RunStream { data: d, record: r, stream: s, data_at: d0, record_at: r0 } = self.lens[k];
             let start = out.len();
-            out = match crate::reconstruct_onto(&data[d0..d0 + d], &records[r0..r0 + r], m, 1, out)
-            {
+            out = match crate::reconstruct_onto(&data[d0..d0 + d], &records[r0..r0 + r], m, 1, out) {
                 Ok(o) if o.len() - start == s => o,
                 _ => return vec![1],
             };
@@ -977,28 +872,16 @@ mod alloc_tests {
 
     unsafe impl GlobalAlloc for Largest {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-            if note(l.size()) {
-                unsafe { System.alloc(l) }
-            } else {
-                std::ptr::null_mut()
-            }
+            if note(l.size()) { unsafe { System.alloc(l) } } else { std::ptr::null_mut() }
         }
         unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-            if note(l.size()) {
-                unsafe { System.alloc_zeroed(l) }
-            } else {
-                std::ptr::null_mut()
-            }
+            if note(l.size()) { unsafe { System.alloc_zeroed(l) } } else { std::ptr::null_mut() }
         }
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
             unsafe { System.dealloc(p, l) }
         }
         unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-            if note(n) {
-                unsafe { System.realloc(p, l, n) }
-            } else {
-                std::ptr::null_mut()
-            }
+            if note(n) { unsafe { System.realloc(p, l, n) } } else { std::ptr::null_mut() }
         }
     }
 

@@ -50,11 +50,7 @@ pub fn put_freqs(w: &mut BitWriter, lf: &[u32; 288], df: &[u32; 32]) {
 pub fn get_freqs(r: &mut BitReader, count: usize) -> Result<([u32; 288], [u32; 32])> {
     let (mut lf, mut df) = ([0u32; 288], [0u32; 32]);
     for (i, f) in lf[..LIT_SYMS].iter_mut().enumerate() {
-        *f = if i == 256 {
-            1
-        } else {
-            get_usize(r, count)? as u32
-        };
+        *f = if i == 256 { 1 } else { get_usize(r, count)? as u32 };
     }
     for f in &mut df[..DIST_SYMS] {
         *f = get_usize(r, count)? as u32;
@@ -80,9 +76,7 @@ fn lens_candidate(k: usize, lf: &[u32], df: &[u32]) -> Option<(Lens288, Lens288)
 /// The builders by how often they are right: zlib, zopfli, ECT's default (brotli's
 /// smoothing, limit 15), plain package-merge (Go and others, with and without zopfli's
 /// distance patch), then the rest.
-const ORDER: [usize; NUM_LENS] = [
-    0, 8, 15, 1, 22, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21,
-];
+const ORDER: [usize; NUM_LENS] = [0, 8, 15, 1, 22, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21];
 
 /// The writer looks among these first candidates only (and the previous block's), for
 /// speed.
@@ -118,10 +112,7 @@ fn builder(k: usize, lf: &[u32], df: &[u32]) -> Option<(Lens288, Lens288)> {
             trees::patch_distances(&mut dd);
             (ll, dd)
         }
-        22 => (
-            trees::package_merge(&wide(lf)[..lf.len()], 15),
-            trees::package_merge(&wide(df)[..df.len()], 15),
-        ),
+        22 => (trees::package_merge(&wide(lf)[..lf.len()], 15), trees::package_merge(&wide(df)[..df.len()], 15)),
         _ => return None,
     })
 }
@@ -211,9 +202,7 @@ impl Recipe {
     /// What the writer found out of the headers so far, as a key: the candidate lengths if
     /// exact (else 255), the run-length coding and the code-length code.
     pub fn key(&self) -> u32 {
-        (if self.exact { self.lens as u32 } else { 255 })
-            | (self.ops as u32) << 8
-            | (self.cl as u32) << 16
+        (if self.exact { self.lens as u32 } else { 255 }) | (self.ops as u32) << 8 | (self.cl as u32) << 16
     }
 }
 
@@ -223,14 +212,7 @@ const RESEARCH: usize = 16;
 impl Default for Recipe {
     /// zlib's, to be searched beyond at the first block that differs.
     fn default() -> Self {
-        Recipe {
-            lens: 0,
-            ops: 0,
-            cl: 0,
-            since: RESEARCH,
-            exact: false,
-            ops_exact: true,
-        }
+        Recipe { lens: 0, ops: 0, cl: 0, since: RESEARCH, exact: false, ops_exact: true }
     }
 }
 
@@ -257,14 +239,7 @@ fn build(recipe: Recipe, lf: &[u32], df: &[u32]) -> Option<DynHeader> {
     for &s in &CL_ORDER[..hclen] {
         cl_lens[s] = cl[s];
     }
-    Some(DynHeader {
-        hlit: hlit as u16,
-        hdist: hdist as u8,
-        hclen: hclen as u8,
-        cl_lens,
-        ops,
-        lens,
-    })
+    Some(DynHeader { hlit: hlit as u16, hdist: hdist as u8, hclen: hclen as u8, cl_lens, ops, lens })
 }
 
 /// Whether `recipe`, whose candidate lengths are `ll` and `d`, makes `h`, checked part by
@@ -285,21 +260,12 @@ fn makes(recipe: Recipe, ll: &[u8], d: &[u8], h: &DynHeader) -> bool {
     };
     let hclen = natural_hclen(&cl);
     hclen == h.hclen as usize
-        && CL_ORDER
-            .iter()
-            .enumerate()
-            .all(|(i, &s)| h.cl_lens[s] == if i < hclen { cl[s] } else { 0 })
+        && CL_ORDER.iter().enumerate().all(|(i, &s)| h.cl_lens[s] == if i < hclen { cl[s] } else { 0 })
 }
 
 /// Writes `h`, the header of a block whose symbol frequencies are `lf` and `df` (see
 /// [`freqs`]); `recipe` carries over from block to block.
-pub fn write(
-    w: &mut BitWriter,
-    lf: &[u32; 288],
-    df: &[u32; 32],
-    h: &DynHeader,
-    recipe: &mut Recipe,
-) {
+pub fn write(w: &mut BitWriter, lf: &[u32; 288], df: &[u32; 32], h: &DynHeader, recipe: &mut Recipe) {
     let (lf, df) = (&lf[..], &df[..]);
     let (ll, d) = lens_candidate(recipe.lens, lf, df).unwrap();
     if makes(*recipe, &ll, &d, h) {
@@ -335,12 +301,7 @@ pub fn write(
     let (_, k, (ll, d)) = best;
     put_gamma(w, k as u64);
     recipe.lens = k;
-    put_field(
-        w,
-        hlit as u32 - 257,
-        last_nonzero(&ll).max(257) as u32 - 257,
-        5,
-    );
+    put_field(w, hlit as u32 - 257, last_nonzero(&ll).max(257) as u32 - 257, 5);
     put_field(w, hdist as u32 - 1, last_nonzero(&d).max(1) as u32 - 1, 5);
     let pred = cut(&ll, &d, hlit, hdist);
     let diffs: Vec<usize> = (0..pred.len()).filter(|&i| h.lens[i] != pred[i]).collect();
@@ -378,19 +339,12 @@ pub fn write(
 
     let cands = cl_candidates(&h.ops);
     let order = &CL_ORDER[..h.hclen as usize];
-    let k = cands
-        .iter()
-        .position(|c| order.iter().all(|&s| c[s] == h.cl_lens[s]));
+    let k = cands.iter().position(|c| order.iter().all(|&s| c[s] == h.cl_lens[s]));
     w.bits(2, k.unwrap_or(2) as u32);
     if let Some(k) = k {
         recipe.cl = k;
     }
-    put_field(
-        w,
-        h.hclen as u32 - 4,
-        natural_hclen(&cands[k.unwrap_or(0)]) as u32 - 4,
-        4,
-    );
+    put_field(w, h.hclen as u32 - 4, natural_hclen(&cands[k.unwrap_or(0)]) as u32 - 4, 4);
     if k.is_none() {
         for &s in order {
             w.bits(3, h.cl_lens[s] as u32);
@@ -406,12 +360,7 @@ pub fn read(r: &mut BitReader, tokens: &[Token], recipe: &mut Recipe) -> Result<
 
 /// Reads a header written by [`write()`] for a block whose symbol frequencies (see [`freqs`])
 /// the caller counted.
-pub fn read_freqs(
-    r: &mut BitReader,
-    lf: &[u32; 288],
-    df: &[u32; 32],
-    recipe: &mut Recipe,
-) -> Result<DynHeader> {
+pub fn read_freqs(r: &mut BitReader, lf: &[u32; 288], df: &[u32; 32], recipe: &mut Recipe) -> Result<DynHeader> {
     let (lf, df) = (*lf, *df);
     if r.bits(1)? == 1 {
         return build(*recipe, &lf, &df).ok_or(Error::Corrupt);
@@ -433,10 +382,7 @@ pub fn read_freqs(
         *l = r.bits(4)? as u8;
         i += 1;
     }
-    if lens[256] == 0
-        || huffman::check_lens(&lens[..hlit]).is_err()
-        || huffman::check_lens(&lens[hlit..]).is_err()
-    {
+    if lens[256] == 0 || huffman::check_lens(&lens[..hlit]).is_err() || huffman::check_lens(&lens[hlit..]).is_err() {
         return Err(Error::Corrupt);
     }
     let ops = if r.bits(1)? == 1 {
@@ -461,18 +407,10 @@ pub fn read_freqs(
     for &s in order {
         cl_lens[s] = if k < 2 { cands[k][s] } else { r.bits(3)? as u8 };
     }
-    if huffman::check_lens(&cl_lens).is_err() || ops.iter().any(|op| cl_lens[op.sym as usize] == 0)
-    {
+    if huffman::check_lens(&cl_lens).is_err() || ops.iter().any(|op| cl_lens[op.sym as usize] == 0) {
         return Err(Error::Corrupt);
     }
-    Ok(DynHeader {
-        hlit: hlit as u16,
-        hdist: hdist as u8,
-        hclen: hclen as u8,
-        cl_lens,
-        ops,
-        lens,
-    })
+    Ok(DynHeader { hlit: hlit as u16, hdist: hdist as u8, hclen: hclen as u8, cl_lens, ops, lens })
 }
 
 /// Ops one by one: their kind, and for repeats whether they run as far as they can.
@@ -515,18 +453,11 @@ fn read_ops(r: &mut BitReader, lens: &[u8]) -> Result<Ops> {
             _ => (18, Some(0), 11, 138),
         };
         let full = run(lens, i, value, max);
-        let count = if r.bits(1)? == 1 {
-            full
-        } else {
-            min + r.bits(RleOp::extra_bits(sym))? as usize
-        };
+        let count = if r.bits(1)? == 1 { full } else { min + r.bits(RleOp::extra_bits(sym))? as usize };
         if count < min || count > full {
             return Err(Error::Corrupt);
         }
-        ops.push(RleOp {
-            sym,
-            extra: (count - min) as u8,
-        });
+        ops.push(RleOp { sym, extra: (count - min) as u8 });
         i += count;
     }
     if i != lens.len() {
@@ -537,13 +468,7 @@ fn read_ops(r: &mut BitReader, lens: &[u8]) -> Result<Ops> {
 
 /// The longest run at `i` of `value` (none if `None`), up to `max`.
 fn run(lens: &[u8], i: usize, value: Option<u8>, max: usize) -> usize {
-    value.map_or(0, |v| {
-        lens[i.min(lens.len())..]
-            .iter()
-            .take_while(|&&l| l == v)
-            .count()
-            .min(max)
-    })
+    value.map_or(0, |v| lens[i.min(lens.len())..].iter().take_while(|&&l| l == v).count().min(max))
 }
 
 /// A value that usually equals `pred`: one bit, or the value in `n` bits.
@@ -557,9 +482,5 @@ fn put_field(w: &mut BitWriter, v: u32, pred: u32, n: u32) {
 }
 
 fn get_field(r: &mut BitReader, pred: u32, n: u32) -> Result<u32> {
-    if r.bits(1)? == 1 {
-        Ok(pred)
-    } else {
-        Ok(r.bits(n)?)
-    }
+    if r.bits(1)? == 1 { Ok(pred) } else { Ok(r.bits(n)?) }
 }

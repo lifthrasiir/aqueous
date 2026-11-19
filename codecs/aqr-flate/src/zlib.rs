@@ -18,13 +18,8 @@ pub enum Strategy {
 }
 
 impl Strategy {
-    pub const ALL: [Strategy; 5] = [
-        Strategy::Default,
-        Strategy::Filtered,
-        Strategy::HuffmanOnly,
-        Strategy::Rle,
-        Strategy::Fixed,
-    ];
+    pub const ALL: [Strategy; 5] =
+        [Strategy::Default, Strategy::Filtered, Strategy::HuffmanOnly, Strategy::Rle, Strategy::Fixed];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -51,25 +46,13 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
-        Params {
-            level: 6,
-            strategy: Strategy::Default,
-            wbits: 15,
-            mem: 8,
-        }
+        Params { level: 6, strategy: Strategy::Default, wbits: 15, mem: 8 }
     }
 }
 
 impl std::fmt::Display for Params {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "zlib:level={},strategy={},wbits={},mem={}",
-            self.level,
-            self.strategy.name(),
-            self.wbits,
-            self.mem
-        )
+        write!(f, "zlib:level={},strategy={},wbits={},mem={}", self.level, self.strategy.name(), self.wbits, self.mem)
     }
 }
 
@@ -86,9 +69,7 @@ impl Params {
     }
 
     fn valid(self) -> bool {
-        (1..=9).contains(&self.level)
-            && (9..=15).contains(&self.wbits)
-            && (1..=9).contains(&self.mem)
+        (1..=9).contains(&self.level) && (9..=15).contains(&self.wbits) && (1..=9).contains(&self.mem)
     }
 }
 
@@ -276,9 +257,7 @@ impl<'a> Window<'a> {
     #[inline(always)]
     fn key(&self, i: usize) -> usize {
         let t = self.shift;
-        (((self.buf[i] as usize) << (2 * t))
-            ^ ((self.buf[i + 1] as usize) << t)
-            ^ self.buf[i + 2] as usize)
+        (((self.buf[i] as usize) << (2 * t)) ^ ((self.buf[i + 1] as usize) << t) ^ self.buf[i + 2] as usize)
             & self.hash_mask
     }
 
@@ -578,11 +557,7 @@ impl<'a> Engine<'a> {
     /// Queues lane `i`'s chain search at the deferred length.
     fn add_job(&mut self, i: usize) {
         let l = &self.lanes[i];
-        let budget = if l.dlen >= l.good {
-            l.chain / 4
-        } else {
-            l.chain
-        };
+        let budget = if l.dlen >= l.good { l.chain / 4 } else { l.chain };
         self.jobs.push(Job {
             lane: i,
             best: l.dlen,
@@ -644,11 +619,7 @@ impl<'a> Engine<'a> {
                 }
             }
             let c = self.win.cursor;
-            let h = if self.win.ahead >= 3 && !self.blind {
-                self.win.chain(c)
-            } else {
-                0
-            };
+            let h = if self.win.ahead >= 3 && !self.blind { self.win.chain(c) } else { 0 };
             self.last_head = h;
             self.jobs.clear();
             let near = h != 0 && c.wrapping_sub(h) <= self.win.max_dist;
@@ -669,24 +640,12 @@ impl<'a> Engine<'a> {
             for l in self.lanes.iter_mut().filter(|l| l.alive) {
                 if l.dlen >= 3 && l.len <= l.dlen {
                     let dist = (c as isize - 1 - l.dsrc) as u16;
-                    let token = Token::Match {
-                        len: l.dlen as u16,
-                        dist,
-                        alt258: false,
-                    };
-                    l.pending = Some(Pending {
-                        token,
-                        at: c - 1,
-                        when: When::Deferred,
-                    });
+                    let token = Token::Match { len: l.dlen as u16, dist, alt258: false };
+                    l.pending = Some(Pending { token, at: c - 1, when: When::Deferred });
                     ended = true;
                 } else if self.held {
                     let token = Token::Lit(self.win.buf[c - 1]);
-                    l.pending = Some(Pending {
-                        token,
-                        at: c - 1,
-                        when: When::Deferred,
-                    });
+                    l.pending = Some(Pending { token, at: c - 1, when: When::Deferred });
                     ended = true;
                 }
             }
@@ -708,11 +667,7 @@ impl<'a> Engine<'a> {
             }
         }
         let c = self.win.cursor;
-        let h = if self.win.ahead >= 3 {
-            self.win.chain(c)
-        } else {
-            0
-        };
+        let h = if self.win.ahead >= 3 { self.win.chain(c) } else { 0 };
         let l = &mut self.lanes[0];
         if h != 0 && c.wrapping_sub(h) <= self.win.max_dist {
             let mut job = [Job {
@@ -728,11 +683,7 @@ impl<'a> Engine<'a> {
             l.src = job[0].sigma;
         }
         let token = if l.len >= 3 {
-            Token::Match {
-                len: l.len as u16,
-                dist: (c as isize - l.src) as u16,
-                alt258: false,
-            }
+            Token::Match { len: l.len as u16, dist: (c as isize - l.src) as u16, alt258: false }
         } else {
             Token::Lit(self.win.buf[c])
         };
@@ -761,15 +712,8 @@ impl<'a> Engine<'a> {
             }
         }
         self.lanes[0].len = len;
-        let token = if len >= 3 {
-            Token::Match {
-                len: len as u16,
-                dist: 1,
-                alt258: false,
-            }
-        } else {
-            Token::Lit(buf[c])
-        };
+        let token =
+            if len >= 3 { Token::Match { len: len as u16, dist: 1, alt258: false } } else { Token::Lit(buf[c]) };
         self.set_pending(token, c, When::Here);
     }
 
@@ -912,10 +856,7 @@ impl<'a> Emulator<'a> {
     /// A fresh emulator of `p` over the whole data `input`.
     pub fn new(input: &'a [u8], p: Params) -> Self {
         assert!(p.valid(), "bad zlib parameters {p:?}");
-        Emulator {
-            p,
-            e: Engine::new(input, &[p], false),
-        }
+        Emulator { p, e: Engine::new(input, &[p], false) }
     }
 
     /// An emulator of the lazy parser (or of runs or Huffman only) that neither chains nor
@@ -958,8 +899,7 @@ impl<'a> Emulator<'a> {
         {
             return None;
         }
-        if cp.length >= 3 && !(o <= cp.source && cp.source + held < c_pos && c_pos - cp.source <= w)
-        {
+        if cp.length >= 3 && !(o <= cp.source && cp.source + held < c_pos && c_pos - cp.source <= w) {
             return None;
         }
         let z = cp.zero_mark;
@@ -983,11 +923,7 @@ impl<'a> Emulator<'a> {
         e.held = cp.held;
         let l = &mut e.lanes[0];
         l.len = cp.length;
-        l.src = if cp.length >= 3 {
-            cp.source as isize - o as isize
-        } else {
-            0
-        };
+        l.src = if cp.length >= 3 { cp.source as isize - o as isize } else { 0 };
         if lazy {
             for p in o.max(c_pos.saturating_sub(w))..c_pos {
                 if p + 3 <= f {
@@ -1069,11 +1005,7 @@ impl<'a> Emulator<'a> {
                 }
             }
             if len >= 3 {
-                out.push(Token::Match {
-                    len: len as u16,
-                    dist: (c - src) as u16,
-                    alt258: false,
-                });
+                out.push(Token::Match { len: len as u16, dist: (c - src) as u16, alt258: false });
                 win.ahead -= len;
                 if len <= lazy && win.ahead >= 3 {
                     for _ in 0..len - 1 {
@@ -1100,11 +1032,7 @@ impl<'a> Emulator<'a> {
             if q >= end {
                 break;
             }
-            let t = if q + t.span() > end {
-                Token::Lit(self.e.win.input[q])
-            } else {
-                t
-            };
+            let t = if q + t.span() > end { Token::Lit(self.e.win.input[q]) } else { t };
             if !self.commit(t) {
                 return false;
             }
@@ -1146,20 +1074,11 @@ fn zlib_lenb(lf: &[u32; 288], df: &[u32; 32], h: &DynHeader) -> (i64, i64) {
         }
     };
     for (n, &l) in h.lit_lens().iter().enumerate() {
-        let x = if n >= 257 {
-            huffman::LEN_EXTRA.get(n - 257).copied().unwrap_or(0)
-        } else {
-            0
-        };
+        let x = if n >= 257 { huffman::LEN_EXTRA.get(n - 257).copied().unwrap_or(0) } else { 0 };
         add(lf[n] as u64, l, Some(fixed_lit[n]), x);
     }
     for (n, &l) in h.dist_lens().iter().enumerate() {
-        add(
-            df[n] as u64,
-            l,
-            Some(5),
-            huffman::DIST_EXTRA.get(n).copied().unwrap_or(0),
-        );
+        add(df[n] as u64, l, Some(5), huffman::DIST_EXTRA.get(n).copied().unwrap_or(0));
     }
     let mut cf = [0u64; 19];
     for op in &h.ops {
@@ -1218,10 +1137,7 @@ fn flush_block(
     let stored_len = (end - start) as i64;
     // The data must still be in zlib's window to be stored.
     let body = if stored_len + 4 <= opt && start >= e.window_base() && stored_len <= 65535 {
-        Body::Stored {
-            pad: 0,
-            len: stored_len as u16,
-        }
+        Body::Stored { pad: 0, len: stored_len as u16 }
     } else if static_lenb == opt {
         Body::Fixed { tokens }
     } else {
@@ -1300,10 +1216,7 @@ pub fn compress_part(data: &[u8], dict: usize, p: Params, last: bool) -> Option<
         start = end;
         if end_of_data {
             if !last {
-                let sync = Block {
-                    last: false,
-                    body: Body::Stored { pad: 0, len: 0 },
-                };
+                let sync = Block { last: false, body: Body::Stored { pad: 0, len: 0 } };
                 w.block(&sync, &[], part).ok()?;
             }
             return w.finish(0, &[]).ok();
@@ -1336,29 +1249,14 @@ impl<'a> MultiSlow<'a> {
     /// All `params` must be lazy-parser ones with the same windowBits and memLevel.
     pub fn new(input: &'a [u8], params: &[Params]) -> Self {
         assert!(!params.is_empty());
-        assert!(
-            params
-                .iter()
-                .all(|&p| p.valid() && kind_of(p) == Kind::Lazy)
-        );
-        assert!(
-            params
-                .iter()
-                .all(|p| (p.wbits, p.mem) == (params[0].wbits, params[0].mem))
-        );
-        MultiSlow {
-            e: Engine::new(input, params, true),
-        }
+        assert!(params.iter().all(|&p| p.valid() && kind_of(p) == Kind::Lazy));
+        assert!(params.iter().all(|p| (p.wbits, p.mem) == (params[0].wbits, params[0].mem)));
+        MultiSlow { e: Engine::new(input, params, true) }
     }
 
     /// The lanes still alive: (index, parameters, misses so far).
     pub fn lanes(&self) -> impl Iterator<Item = (usize, Params, usize)> + '_ {
-        self.e
-            .lanes
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.alive)
-            .map(|(i, l)| (i, l.p, l.misses))
+        self.e.lanes.iter().enumerate().filter(|(_, l)| l.alive).map(|(i, l)| (i, l.p, l.misses))
     }
 
     /// Stops following lane `lane`.
@@ -1386,12 +1284,7 @@ impl<'a> MultiSlow<'a> {
         e.lanes = vec![lane];
         e.track = false;
         e.jobs.clear();
-        Followed {
-            log,
-            pos,
-            emu: Emulator { p, e },
-            cps: vec![],
-        }
+        Followed { log, pos, emu: Emulator { p, e }, cps: vec![] }
     }
 
     /// The data position of the next token that the lanes predict, or None at the end (all
@@ -1419,9 +1312,7 @@ mod tests {
     fn sample(n: usize, seed: u64) -> Vec<u8> {
         let mut s = seed;
         let mut next = move || {
-            s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (s >> 33) as usize
         };
         let mut v: Vec<u8> = vec![];
@@ -1448,12 +1339,7 @@ mod tests {
         for level in [1, 3, 4, 6, 9] {
             for strategy in Strategy::ALL {
                 for (wbits, mem) in [(15, 8), (9, 1), (10, 3)] {
-                    v.push(Params {
-                        level,
-                        strategy,
-                        wbits,
-                        mem,
-                    });
+                    v.push(Params { level, strategy, wbits, mem });
                 }
             }
         }
@@ -1501,11 +1387,7 @@ mod tests {
                     && let Some(mut r) = Emulator::resume(&data, p, &cp)
                 {
                     let mut orig = e.clone();
-                    assert_eq!(
-                        run(&mut r, 60),
-                        run(&mut orig, 60),
-                        "{p} after {n} tokens {cp:?}"
-                    );
+                    assert_eq!(run(&mut r, 60), run(&mut orig, 60), "{p} after {n} tokens {cp:?}");
                 }
                 let Some((_, t)) = e.predict() else { break };
                 assert!(e.commit(t));
@@ -1519,9 +1401,7 @@ mod tests {
         let data = sample(9_000, 3);
         let mut s = 12345u64;
         let mut next = move |m: usize| {
-            s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (s >> 33) as usize % m
         };
         for p in all_params() {
@@ -1556,25 +1436,14 @@ mod tests {
         let data = sample(20_000, 11);
         let lanes: Vec<Params> = (4..=9)
             .flat_map(|level| {
-                [Strategy::Default, Strategy::Filtered].map(|strategy| Params {
-                    level,
-                    strategy,
-                    wbits: 10,
-                    mem: 8,
-                })
+                [Strategy::Default, Strategy::Filtered].map(|strategy| Params { level, strategy, wbits: 10, mem: 8 })
             })
             .collect();
         // Follow tokens of a level-6 run, so that other lanes miss.
         let mut driver = Emulator::new(&data, lanes[4]);
-        let tokens: Vec<Token> = run(&mut driver, usize::MAX)
-            .into_iter()
-            .map(|x| x.1)
-            .collect();
+        let tokens: Vec<Token> = run(&mut driver, usize::MAX).into_iter().map(|x| x.1).collect();
         let mut m = MultiSlow::new(&data, &lanes);
-        let mut singles: Vec<_> = lanes
-            .iter()
-            .map(|&p| (Emulator::new(&data, p), 0))
-            .collect();
+        let mut singles: Vec<_> = lanes.iter().map(|&p| (Emulator::new(&data, p), 0)).collect();
         let mut pos = 0;
         for &t in &tokens {
             assert_eq!(m.predict(), Some(pos));

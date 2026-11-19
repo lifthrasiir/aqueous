@@ -52,10 +52,7 @@ impl Heads {
     fn new(n: usize) -> Heads {
         match head_slot_bits(n) {
             None => Heads::Direct(vec![0; 1 << DIRECT_BITS]),
-            Some(bits) => Heads::Hash {
-                table: vec![0; 1 << bits],
-                bits,
-            },
+            Some(bits) => Heads::Hash { table: vec![0; 1 << bits], bits },
         }
     }
 
@@ -72,9 +69,9 @@ impl Heads {
     fn link(&mut self, data: &[u8], range: std::ops::Range<usize>, out: impl FnMut(usize, u32)) {
         // One loop per kind of table, rather than a dispatch per position.
         match self {
-            Heads::Direct(t) => link_with(data, range, out, |i, k| {
-                std::mem::replace(&mut t[k as usize], i as u32 + 1).wrapping_sub(1)
-            }),
+            Heads::Direct(t) => {
+                link_with(data, range, out, |i, k| std::mem::replace(&mut t[k as usize], i as u32 + 1).wrapping_sub(1))
+            }
             Heads::Hash { table, bits } => {
                 let (bits, mask) = (*bits, table.len() - 1);
                 link_with(data, range, out, |i, k| {
@@ -189,11 +186,7 @@ impl Chain {
                 // The window of every search from here on is in the second half.
                 for i in 0..RING {
                     let l = self.links[RING + i];
-                    self.links[i] = if l != NONE && l as usize >= RING {
-                        l - RING as u32
-                    } else {
-                        NONE
-                    };
+                    self.links[i] = if l != NONE && l as usize >= RING { l - RING as u32 } else { NONE };
                 }
                 self.base += RING;
             }
@@ -204,8 +197,7 @@ impl Chain {
                 prev => (prev as usize - base) as u32,
             };
             let links = &mut self.links[..stop - base];
-            self.heads
-                .link(data, self.next..stop, |i, prev| links[i - base] = rel(prev));
+            self.heads.link(data, self.next..stop, |i, prev| links[i - base] = rel(prev));
             self.next = stop;
         }
         let lo = self.start.max(self.base);
@@ -262,10 +254,7 @@ impl Matcher {
     /// [`Matcher::single`] for searches at `start..end` only: its memory is that of the
     /// range rather than of the data.
     pub fn single_range(data: &[u8], start: usize, end: usize) -> Self {
-        Matcher {
-            chain: Chain::ring(data, start, end),
-            memo: [(usize::MAX, 0, 0, Found::default()); 2],
-        }
+        Matcher { chain: Chain::ring(data, start, end), memo: [(usize::MAX, 0, 0, Found::default()); 2] }
     }
 
     /// Walks the candidates of `p` within the window, closest first, calling
@@ -290,11 +279,7 @@ impl Matcher {
     /// The closest longest match among the first `depth` candidates of `data[p..]`, stopping
     /// early once a match reaches `nice`.
     pub fn longest(&mut self, d: &[u8], p: usize, depth: usize, nice: usize) -> Found {
-        if let Some(m) = self
-            .memo
-            .iter()
-            .find(|m| (m.0, m.1, m.2) == (p, depth, nice))
-        {
+        if let Some(m) = self.memo.iter().find(|m| (m.0, m.1, m.2) == (p, depth, nice)) {
             return m.3;
         }
         let max = (d.len() - p).min(MAX_MATCH);
@@ -311,10 +296,7 @@ impl Matcher {
                 }
                 let l = common_slices(dc, dp);
                 if l > best.len {
-                    best = Found {
-                        len: l,
-                        dist: p - c,
-                    };
+                    best = Found { len: l, dist: p - c };
                     if l >= nice || l >= max {
                         return false;
                     }
@@ -331,13 +313,7 @@ impl Matcher {
     /// [`Matcher::longest`] for every `(depth, nice)` of `cfgs` at once, into `out`: one walk
     /// serves them all, since the best match so far is the same for every search not yet
     /// stopped.
-    pub fn longest_multi(
-        &mut self,
-        d: &[u8],
-        p: usize,
-        cfgs: &[(usize, usize)],
-        out: &mut [Found],
-    ) {
+    pub fn longest_multi(&mut self, d: &[u8], p: usize, cfgs: &[(usize, usize)], out: &mut [Found]) {
         debug_assert_eq!(cfgs.len(), out.len());
         let max = (d.len() - p).min(MAX_MATCH);
         let mut best = Found::default();
@@ -373,10 +349,7 @@ impl Matcher {
             if best.len == 0 || (dc[best.len] == end[1] && dc[best.len - 1] == end[0]) {
                 let l = common_slices(dc, dp);
                 if l > best.len {
-                    best = Found {
-                        len: l,
-                        dist: pr - c as usize,
-                    };
+                    best = Found { len: l, dist: pr - c as usize };
                     if l >= max {
                         break;
                     }
@@ -410,12 +383,7 @@ impl Matcher {
     /// The `q`-quantile (0..=1) of the chain indices of matches `(position, distance)`: how
     /// many closer candidates each match's source had. O(1) per match, by numbering positions
     /// within their chains in one pass; `matches` must come in order of position.
-    pub fn depth_quantile(
-        &mut self,
-        data: &[u8],
-        matches: impl Iterator<Item = (usize, usize)>,
-        q: f64,
-    ) -> usize {
+    pub fn depth_quantile(&mut self, data: &[u8], matches: impl Iterator<Item = (usize, usize)>, q: f64) -> usize {
         // Numbers of the last positions (a match's source is within the window), all of them
         // for short data.
         let mask = RING.min(data.len().next_power_of_two()) - 1;
@@ -436,11 +404,7 @@ impl Matcher {
                 for i in next..until {
                     let link = links[i - base];
                     let prev = base + link as usize;
-                    seq[i & mask] = if link != NONE && i - prev <= WINDOW {
-                        seq[prev & mask] + 1
-                    } else {
-                        0
-                    };
+                    seq[i & mask] = if link != NONE && i - prev <= WINDOW { seq[prev & mask] + 1 } else { 0 };
                 }
                 next = until;
             }
@@ -465,14 +429,7 @@ impl Matcher {
 
     /// Rank of distance `dist` among the candidates of `p` matching at least `len` bytes,
     /// closest first, or `None` if it is not among the first `limit` candidates.
-    pub fn rank(
-        &mut self,
-        d: &[u8],
-        p: usize,
-        len: usize,
-        dist: usize,
-        limit: usize,
-    ) -> Option<usize> {
+    pub fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, limit: usize) -> Option<usize> {
         let (mut r, mut found) = (0, None);
         self.walk(d, p, limit, |c, _| {
             if p - c == dist {
@@ -488,14 +445,7 @@ impl Matcher {
     }
 
     /// Inverse of [`Matcher::rank`].
-    pub fn select(
-        &mut self,
-        d: &[u8],
-        p: usize,
-        len: usize,
-        rank: usize,
-        limit: usize,
-    ) -> Option<usize> {
+    pub fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, limit: usize) -> Option<usize> {
         let (mut r, mut found) = (0, None);
         let dp = &d[p..p + len];
         self.walk(d, p, limit, |c, _| {
@@ -521,9 +471,7 @@ mod tests {
     /// bytes, from a hash map.
     fn reference_chain(data: &[u8]) -> Vec<Option<usize>> {
         let mut last = std::collections::HashMap::new();
-        (0..data.len())
-            .map(|i| data.get(i..i + 3).and_then(|k| last.insert(k, i)))
-            .collect()
+        (0..data.len()).map(|i| data.get(i..i + 3).and_then(|k| last.insert(k, i))).collect()
     }
 
     /// The first `limit` candidates of `p` within the window, closest first.
@@ -537,13 +485,7 @@ mod tests {
         v
     }
 
-    fn reference_longest(
-        d: &[u8],
-        prev: &[Option<usize>],
-        p: usize,
-        depth: usize,
-        nice: usize,
-    ) -> Found {
+    fn reference_longest(d: &[u8], prev: &[Option<usize>], p: usize, depth: usize, nice: usize) -> Found {
         let max = (d.len() - p).min(MAX_MATCH);
         let mut best = Found::default();
         if max < 3 {
@@ -552,10 +494,7 @@ mod tests {
         for c in candidates(prev, p, depth) {
             let l = common(d, c, p, max);
             if l > best.len {
-                best = Found {
-                    len: l,
-                    dist: p - c,
-                };
+                best = Found { len: l, dist: p - c };
                 if l >= nice || l == max {
                     break;
                 }
@@ -574,12 +513,7 @@ mod tests {
     ) -> Option<usize> {
         let cands = candidates(prev, p, limit);
         let i = cands.iter().position(|&c| p - c == dist)?;
-        Some(
-            cands[..i]
-                .iter()
-                .filter(|&&c| common(d, c, p, len) >= len)
-                .count(),
-        )
+        Some(cands[..i].iter().filter(|&&c| common(d, c, p, len) >= len).count())
     }
 
     fn lcg_data(n: usize, seed: u32, alphabet: &[u8]) -> Vec<u8> {
@@ -681,11 +615,7 @@ mod tests {
         for p in 0..data.len() {
             m.longest_multi(&data, p, &cfgs, &mut out);
             for (i, &(depth, nice)) in cfgs.iter().enumerate() {
-                assert_eq!(
-                    out[i],
-                    r.longest(&data, p, depth, nice),
-                    "p={p} {depth} {nice}"
-                );
+                assert_eq!(out[i], r.longest(&data, p, depth, nice), "p={p} {depth} {nice}");
             }
         }
     }
@@ -704,22 +634,12 @@ mod tests {
     #[test]
     fn depth_quantile_of_many_matches() {
         let data = b"abcXabcYabcZabcQabcRabcSabcTabcUabc";
-        let matches: Vec<(usize, usize)> = [
-            (28, 4),
-            (28, 8),
-            (28, 12),
-            (24, 4),
-            (24, 12),
-            (20, 20),
-            (16, 16),
-        ]
-        .into_iter()
-        .chain([(16, 4), (12, 12), (12, 8), (8, 4), (32, 4)])
-        .collect();
-        let mut depths: Vec<usize> = matches
-            .iter()
-            .map(|&m| Matcher::single(data).depth_quantile(data, [m].into_iter(), 0.0))
+        let matches: Vec<(usize, usize)> = [(28, 4), (28, 8), (28, 12), (24, 4), (24, 12), (20, 20), (16, 16)]
+            .into_iter()
+            .chain([(16, 4), (12, 12), (12, 8), (8, 4), (32, 4)])
             .collect();
+        let mut depths: Vec<usize> =
+            matches.iter().map(|&m| Matcher::single(data).depth_quantile(data, [m].into_iter(), 0.0)).collect();
         depths.sort();
         assert!(depths.first() != depths.last());
         let mut by_position = matches.clone();

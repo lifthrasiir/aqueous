@@ -99,18 +99,12 @@ impl Hints {
 
     /// From the XFL byte of a gzip header.
     pub fn gzip_xfl(xfl: u8) -> Hints {
-        Hints {
-            gzip_xfl: Some(xfl),
-            ..Hints::default()
-        }
+        Hints { gzip_xfl: Some(xfl), ..Hints::default() }
     }
 
     /// Whether zlib with `p` would have written these headers.
     pub fn allows(&self, p: &Params) -> bool {
-        let special = matches!(
-            p.strategy,
-            Strategy::HuffmanOnly | Strategy::Rle | Strategy::Fixed
-        );
+        let special = matches!(p.strategy, Strategy::HuffmanOnly | Strategy::Rle | Strategy::Fixed);
         let flevel = match p.level {
             _ if special || p.level < 2 => 0,
             2..=5 => 1,
@@ -193,9 +187,7 @@ pub fn candidates_hinted(stream: &dyn Tokens, hints: &Hints) -> Vec<Params> {
         }
         None => {
             let last = match stream.blocks().last() {
-                Some(b) if !matches!(b.body, Body::Stored { .. }) => {
-                    stream.tokens(stream.blocks().len() - 1).len()
-                }
+                Some(b) if !matches!(b.body, Body::Stored { .. }) => stream.tokens(stream.blocks().len() - 1).len(),
                 _ => 0,
             };
             // The default, or 9 if the block is too big (see `mem_alternatives`).
@@ -242,12 +234,7 @@ pub fn candidates_hinted(stream: &dyn Tokens, hints: &Hints) -> Vec<Params> {
                 if i > 0 && matches!(strategy, Strategy::HuffmanOnly | Strategy::Rle) {
                     continue;
                 }
-                out.push(Params {
-                    level,
-                    strategy,
-                    wbits,
-                    mem,
-                });
+                out.push(Params { level, strategy, wbits, mem });
             }
         }
     }
@@ -273,12 +260,7 @@ struct Trial<'a> {
 
 /// Takes the checkpoints due by data position `pos` (a token boundary): `cp()` for the one
 /// at `pos`, None for those passed over.
-fn mark(
-    cuts: &[usize],
-    pos: usize,
-    mut cp: impl FnMut() -> Option<Checkpoint>,
-    cps: &mut Vec<Option<Checkpoint>>,
-) {
+fn mark(cuts: &[usize], pos: usize, mut cp: impl FnMut() -> Option<Checkpoint>, cps: &mut Vec<Option<Checkpoint>>) {
     while let Some(&at) = cuts.get(cps.len())
         && at <= pos
     {
@@ -293,12 +275,7 @@ impl<'a> Trial<'a> {
             block: 0,
             token: 0,
             pos: 0,
-            d: Detection {
-                params: p,
-                tokens: 0,
-                misses: 0,
-                complete: false,
-            },
+            d: Detection { params: p, tokens: 0, misses: 0, complete: false },
             log: vec![],
             lost: false,
             cuts: cuts.to_vec(),
@@ -307,12 +284,7 @@ impl<'a> Trial<'a> {
     }
 
     fn into_followed(self) -> Followed<'a> {
-        Followed {
-            log: self.log,
-            pos: self.pos,
-            emu: self.e,
-            cps: self.cps,
-        }
+        Followed { log: self.log, pos: self.pos, emu: self.e, cps: self.cps }
     }
 
     /// Continues until `limit` tokens in total, the end of the stream, or more than
@@ -362,13 +334,7 @@ impl<'a> Trial<'a> {
 
 /// Emulates `p` over the first `limit` tokens of `stream`; gives up (`None`) once the misses
 /// exceed `give_up`.
-pub fn trial(
-    stream: &dyn Tokens,
-    data: &[u8],
-    p: Params,
-    limit: usize,
-    give_up: usize,
-) -> Option<Detection> {
+pub fn trial(stream: &dyn Tokens, data: &[u8], p: Params, limit: usize, give_up: usize) -> Option<Detection> {
     run_trial(stream, data, p, limit, give_up, &[]).map(|t| t.d)
 }
 
@@ -410,19 +376,12 @@ pub fn mem_alternatives(stream: &dyn Tokens) -> Vec<u8> {
         return vec![];
     }
     let guess = if huff[0] < (1 << 14) { 8 } else { 9 };
-    [9, 7, 6, 5, 4, 3, 2, 1, 8]
-        .into_iter()
-        .filter(|&m| m != guess && (1usize << (m + 6)) > huff[0])
-        .collect()
+    [9, 7, 6, 5, 4, 3, 2, 1, 8].into_iter().filter(|&m| m != guess && (1usize << (m + 6)) > huff[0]).collect()
 }
 
 /// The best of `candidates` (see `detect_among_followed`), then, if the best candidate is not exact over the whole stream and its
 /// memLevel was only guessed, the same candidate with the other possible memLevels.
-pub fn detect_refined(
-    stream: &dyn Tokens,
-    data: &[u8],
-    candidates: Vec<Params>,
-) -> Option<Detection> {
+pub fn detect_refined(stream: &dyn Tokens, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
     detect_refined_followed(stream, data, candidates).map(|(d, _)| d)
 }
 
@@ -465,23 +424,10 @@ pub fn detect_refined_at<'a>(
 
 /// Emulation units for `candidates`: deflate_slow candidates sharing windowBits and memLevel
 /// together (see `MultiSlow`), unless stored blocks would make their states diverge.
-fn units<'a>(
-    stream: &dyn Tokens,
-    data: &'a [u8],
-    candidates: Vec<Params>,
-    cuts: &[usize],
-) -> Vec<Unit<'a>> {
-    let shareable = |p: &Params| {
-        p.level >= 4
-            && matches!(
-                p.strategy,
-                Strategy::Default | Strategy::Filtered | Strategy::Fixed
-            )
-    };
-    let has_stored = stream
-        .blocks()
-        .iter()
-        .any(|b| matches!(b.body, Body::Stored { .. }));
+fn units<'a>(stream: &dyn Tokens, data: &'a [u8], candidates: Vec<Params>, cuts: &[usize]) -> Vec<Unit<'a>> {
+    let shareable =
+        |p: &Params| p.level >= 4 && matches!(p.strategy, Strategy::Default | Strategy::Filtered | Strategy::Fixed);
+    let has_stored = stream.blocks().iter().any(|b| matches!(b.body, Body::Stored { .. }));
     let mut units: Vec<Unit> = vec![];
     // (windowBits, memLevel) -> (candidate index, parameters)
     type Group = ((u8, u8), Vec<(usize, Params)>);
@@ -522,9 +468,7 @@ fn detect_among_followed<'a>(
             best = best.min(units[k].best());
             // Exact over the whole stream, and preferred to every other candidate left: none
             // can do better.
-            let exact = units[k]
-                .detections()
-                .find(|(_, d)| d.complete && d.misses == 0);
+            let exact = units[k].detections().find(|(_, d)| d.complete && d.misses == 0);
             if let Some((i, d)) = exact
                 && units.iter().flat_map(Unit::detections).all(|(j, _)| j >= i)
             {
@@ -621,12 +565,7 @@ impl<'a> MultiRun<'a> {
     }
 
     fn kill_above(&mut self, give_up: usize) {
-        let dead: Vec<usize> = self
-            .m
-            .lanes()
-            .filter(|&(_, _, x)| x > give_up)
-            .map(|(k, ..)| k)
-            .collect();
+        let dead: Vec<usize> = self.m.lanes().filter(|&(_, _, x)| x > give_up).map(|(k, ..)| k).collect();
         for k in dead {
             self.m.kill(k);
         }
@@ -656,10 +595,7 @@ impl<'a> Unit<'a> {
 
     /// Fewest misses among the live candidates.
     fn best(&self) -> usize {
-        self.detections()
-            .map(|(_, d)| d.misses)
-            .min()
-            .unwrap_or(usize::MAX)
+        self.detections().map(|(_, d)| d.misses).min().unwrap_or(usize::MAX)
     }
 
     /// Keeps only the candidates with `best` misses.
@@ -667,11 +603,7 @@ impl<'a> Unit<'a> {
         match self {
             Unit::Single(_, t) => t.lost |= t.d.misses != best,
             Unit::Multi(m) => {
-                let dead: Vec<usize> =
-                    m.m.lanes()
-                        .filter(|&(_, _, x)| x != best)
-                        .map(|(k, ..)| k)
-                        .collect();
+                let dead: Vec<usize> = m.m.lanes().filter(|&(_, _, x)| x != best).map(|(k, ..)| k).collect();
                 for k in dead {
                     m.m.kill(k);
                 }
@@ -686,19 +618,9 @@ impl<'a> Unit<'a> {
     fn detections(&self) -> Box<dyn Iterator<Item = (usize, Detection)> + '_> {
         match self {
             Unit::Single(i, t) => Box::new((!t.lost).then_some((*i, t.d)).into_iter()),
-            Unit::Multi(m) => Box::new(m.m.lanes().filter(|_| !m.lost).map(
-                move |(k, params, misses)| {
-                    (
-                        m.ids[k],
-                        Detection {
-                            params,
-                            tokens: m.tokens,
-                            misses,
-                            complete: m.complete,
-                        },
-                    )
-                },
-            )),
+            Unit::Multi(m) => Box::new(m.m.lanes().filter(|_| !m.lost).map(move |(k, params, misses)| {
+                (m.ids[k], Detection { params, tokens: m.tokens, misses, complete: m.complete })
+            })),
         }
     }
 }
@@ -731,11 +653,7 @@ pub fn multi_trial(
             }
             tokens += 1;
             pos += t.span();
-            let dead: Vec<usize> = m
-                .lanes()
-                .filter(|&(_, _, x)| x > give_up)
-                .map(|(i, ..)| i)
-                .collect();
+            let dead: Vec<usize> = m.lanes().filter(|&(_, _, x)| x > give_up).map(|(i, ..)| i).collect();
             for i in dead {
                 m.kill(i);
             }
@@ -744,14 +662,7 @@ pub fn multi_trial(
             }
         }
     }
-    m.lanes()
-        .map(|(_, params, misses)| Detection {
-            params,
-            tokens,
-            misses,
-            complete,
-        })
-        .collect()
+    m.lanes().map(|(_, params, misses)| Detection { params, tokens, misses, complete }).collect()
 }
 
 #[cfg(test)]
@@ -766,23 +677,14 @@ mod tests {
         while at < tokens.len() {
             let end = (at + sizes[k % sizes.len()]).min(tokens.len());
             let tokens = tokens[at..end].to_vec();
-            blocks.push(Block {
-                last: false,
-                body: Body::Dynamic {
-                    header: zlib_header(&tokens),
-                    tokens,
-                },
-            });
+            blocks.push(Block { last: false, body: Body::Dynamic { header: zlib_header(&tokens), tokens } });
             (at, k) = (end, k + 1);
         }
         let n = blocks.len();
         for (i, b) in blocks.iter_mut().enumerate() {
             b.last = i + 1 == n;
         }
-        Stream {
-            blocks,
-            ..Stream::default()
-        }
+        Stream { blocks, ..Stream::default() }
     }
 
     /// gzip's and Info-ZIP's deflate also end blocks early, at multiples of 4096 tokens: such
@@ -790,16 +692,8 @@ mod tests {
     /// none full, still rule zlib out.
     #[test]
     fn blocks_ended_early() {
-        let data = [
-            include_bytes!("lib.rs").as_slice(),
-            include_bytes!("zlib.rs"),
-        ]
-        .concat();
-        let p = Params {
-            level: 9,
-            mem: 7,
-            ..Params::default()
-        };
+        let data = [include_bytes!("lib.rs").as_slice(), include_bytes!("zlib.rs")].concat();
+        let p = Params { level: 9, mem: 7, ..Params::default() };
         let mut tokens = vec![];
         Emulator::new(&data, p).run(&mut tokens, usize::MAX);
         let full = p.block_tokens();

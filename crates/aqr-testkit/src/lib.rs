@@ -160,7 +160,8 @@ impl Refusing {
             if let Ok(c) = c.try_borrow() {
                 let end = c.iter().position(|&b| b == 0).unwrap_or(c.len());
                 let mut e = std::io::stderr();
-                let _ = writeln!(e, "refused an allocation of {n} bytes, in case: {}", String::from_utf8_lossy(&c[..end]));
+                let _ =
+                    writeln!(e, "refused an allocation of {n} bytes, in case: {}", String::from_utf8_lossy(&c[..end]));
             }
         });
         false

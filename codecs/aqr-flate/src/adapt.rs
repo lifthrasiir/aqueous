@@ -95,10 +95,7 @@ struct Model {
 
 impl Model {
     fn new(priors: &Priors) -> Self {
-        Model {
-            p1: priors.p1.clone(),
-            n: priors.n.clone(),
-        }
+        Model { p1: priors.p1.clone(), n: priors.n.clone() }
     }
 
     #[inline]
@@ -130,10 +127,7 @@ impl Model {
 /// Priors from their text form: `ctx ID P1 N` lines (the probability of a 1 in units of
 /// 2^-16, and how many observations it is worth); contexts not listed start at 1/2.
 pub fn parse_priors(text: &str) -> Result<Priors> {
-    let mut p = Priors {
-        p1: vec![(PROB_ONE / 2) as u16; NUM],
-        n: vec![0; NUM],
-    };
+    let mut p = Priors { p1: vec![(PROB_ONE / 2) as u16; NUM], n: vec![0; NUM] };
     for line in text.lines() {
         let bad = || Error::Param(format!("bad priors line {line:?}"));
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -169,9 +163,7 @@ pub fn priors_text(seen: &[[u32; 2]], n: u8, comment: &str) -> String {
     for (i, &[uses, ones]) in seen.iter().enumerate() {
         if uses > 0 {
             let q = (ones as f64 + 0.4) / (uses as f64 + 0.8);
-            let p1 = (q * PROB_ONE as f64)
-                .round()
-                .clamp(1.0, (PROB_ONE - 1) as f64) as u32;
+            let p1 = (q * PROB_ONE as f64).round().clamp(1.0, (PROB_ONE - 1) as f64) as u32;
             s += &format!("ctx {i} {p1} {n}\n");
         }
     }
@@ -196,10 +188,7 @@ pub struct Enc {
 
 impl Enc {
     pub fn new() -> Self {
-        Enc {
-            e: ArithEncoder::new(Vec::new()),
-            used: false,
-        }
+        Enc { e: ArithEncoder::new(Vec::new()), used: false }
     }
 
     pub fn finish(self) -> Vec<u8> {
@@ -253,11 +242,7 @@ impl Backend for Cost {
     fn code(&mut self, p1: u32, bit: bool) -> bool {
         // -log2(p / PROB_ONE) by probability, worked out once.
         static BITS: std::sync::OnceLock<Box<[f64]>> = std::sync::OnceLock::new();
-        let bits = BITS.get_or_init(|| {
-            (0..=PROB_ONE)
-                .map(|p| -(p as f64 / PROB_ONE as f64).log2())
-                .collect()
-        });
+        let bits = BITS.get_or_init(|| (0..=PROB_ONE).map(|p| -(p as f64 / PROB_ONE as f64).log2()).collect());
         let p = if bit { p1 } else { PROB_ONE - p1 };
         self.0 += bits[p as usize];
         bit
@@ -345,11 +330,7 @@ impl<'a, B: Backend> Adaptive<'a, B> {
     /// as far as it went: the same coding as with a fresh emulator.
     pub fn following(b: B, priors: &Priors, followed: Followed<'a>) -> Self {
         let mut a = Self::new(b, priors, Some(followed.emu));
-        a.replay = Some(Replay {
-            log: followed.log,
-            next: 0,
-            until: followed.pos,
-        });
+        a.replay = Some(Replay { log: followed.log, next: 0, until: followed.pos });
         a
     }
 
@@ -358,11 +339,7 @@ impl<'a, B: Backend> Adaptive<'a, B> {
     /// emulator after it.
     pub fn replaying(b: B, priors: &Priors, log: Vec<(usize, Token)>, until: usize) -> Self {
         let mut a = Self::new(b, priors, None);
-        a.replay = Some(Replay {
-            log,
-            next: 0,
-            until,
-        });
+        a.replay = Some(Replay { log, next: 0, until });
         a
     }
 
@@ -524,11 +501,7 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
         actual: Option<Token>,
     ) -> Result<Token> {
         let pl = pred_len(pred);
-        let cmp = if class == 1 && pl > 0 {
-            (self.next > pl) as usize + (self.next > pl + 1) as usize
-        } else {
-            0
-        };
+        let cmp = if class == 1 && pl > 0 { (self.next > pl) as usize + (self.next > pl + 1) as usize } else { 0 };
         self.next = 0;
         let ctx = FLAG + ((class * LB + len_bucket(pl)) * CMP + cmp) * HIST + self.hist[class];
         let miss = self.bit(ctx, actual.is_some_and(|a| a != pred));
@@ -552,9 +525,7 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
         let tok = tokens::read_miss(t, d, p, pred, pc, actual, |f| {
             let v = match actual {
                 Some(_) => {
-                    let (af, v) = *self.fields[..self.nfields]
-                        .get(k)
-                        .ok_or(Error::Inconsistent)?;
+                    let (af, v) = *self.fields[..self.nfields].get(k).ok_or(Error::Inconsistent)?;
                     if af != f {
                         return Err(Error::Inconsistent);
                     }
@@ -589,14 +560,9 @@ mod tests {
         seen[FLAG + 1] = [50, 0];
         seen[FLAG + 2] = [50, 50];
         let text = priors_text(&seen, 12, "fitted to\ntwo streams");
-        assert!(
-            text.starts_with("# fitted to\n# two streams\nctx "),
-            "{text}"
-        );
+        assert!(text.starts_with("# fitted to\n# two streams\nctx "), "{text}");
         let p = parse_priors(&text).unwrap();
-        let near = |got: u16, want: f64| {
-            (got as f64 - want * PROB_ONE as f64).abs() < 0.002 * PROB_ONE as f64
-        };
+        let near = |got: u16, want: f64| (got as f64 - want * PROB_ONE as f64).abs() < 0.002 * PROB_ONE as f64;
         assert!(near(p.p1[FLAG], 250.4 / 1000.8), "{}", p.p1[FLAG]);
         assert!(p.p1[FLAG + 1] >= 1 && near(p.p1[FLAG + 1], 0.4 / 50.8));
         assert!(p.p1[FLAG + 2] <= (PROB_ONE - 1) as u16 && near(p.p1[FLAG + 2], 50.4 / 50.8));

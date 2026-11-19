@@ -16,13 +16,9 @@ use crate::tokens::{FIELDS, Rule};
 use crate::{ADAPTIVE, Coding, Result};
 
 use crate::module::RULE_BYTES;
-pub use crate::module::{
-    Derived, decode, index, index_before, models_from_bytes, priors_from_bytes, rules_from_bytes,
-};
+pub use crate::module::{Derived, decode, index, index_before, models_from_bytes, priors_from_bytes, rules_from_bytes};
 
-pub const MODULE: Module = Module::new("flate-set", 4)
-    .with_task_plan(memory)
-    .with_contents(&[0]);
+pub const MODULE: Module = Module::new("flate-set", 4).with_task_plan(memory).with_contents(&[0]);
 
 /// The memory of the module: its plan ([`crate::plan::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
@@ -30,15 +26,8 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
         return None;
     };
     let contents = (u.content(1)?, u.content(2)?);
-    crate::plan::plan(
-        u.initial(),
-        u.params,
-        [r0, r1],
-        [d, r, i],
-        contents,
-        u.output(),
-    )
-    .map(|(i, t)| aqr_formula::Plan::one(i, t))
+    crate::plan::plan(u.initial(), u.params, [r0, r1], [d, r, i], contents, u.output())
+        .map(|(i, t)| aqr_formula::Plan::one(i, t))
 }
 
 /// The module `flate-inflate`: the data of a raw DEFLATE stream ([`crate::module::inflate`]),
@@ -60,14 +49,7 @@ pub fn inflated(raw: Node, len: u64) -> Node {
 /// The application rebuilding streams of `profile` from `data` and `records` (what
 /// [`crate::deconstruct`] gives, one after another) as `index` cuts them ([`index`]), of `len`
 /// bytes with `derived` after them.
-pub fn apply(
-    profile: u16,
-    data: Node,
-    records: Node,
-    index: Node,
-    len: u64,
-    derived: Derived,
-) -> Result<Apply> {
+pub fn apply(profile: u16, data: Node, records: Node, index: Node, len: u64, derived: Derived) -> Result<Apply> {
     Ok(Apply {
         module: MODULE,
         resources: resources(profile)?,
@@ -81,22 +63,9 @@ pub fn apply(
 
 /// The application rebuilding a single stream of `len` bytes from `data` and `record`, with
 /// `derived` after it.
-pub fn apply_one(
-    profile: u16,
-    data: Node,
-    record: Node,
-    len: u64,
-    derived: Derived,
-) -> Result<Node> {
+pub fn apply_one(profile: u16, data: Node, record: Node, len: u64, derived: Derived) -> Result<Node> {
     let len = len + derived.bytes() as u64;
-    let a = apply(
-        profile,
-        data,
-        record,
-        Node::Concat(Vec::new()),
-        len,
-        derived,
-    )?;
+    let a = apply(profile, data, record, Node::Concat(Vec::new()), len, derived)?;
     Ok(Node::Apply(Box::new(a)))
 }
 
@@ -117,8 +86,7 @@ pub fn streams(f: &mut Formula, items: Vec<Item>) -> Result<Vec<Node>> {
     profiles.sort_unstable();
     profiles.dedup();
     let mut out: Vec<Option<Node>> = (0..items.len()).map(|_| None).collect();
-    let mut groups: Vec<(Vec<usize>, Vec<Item>)> =
-        profiles.iter().map(|_| Default::default()).collect();
+    let mut groups: Vec<(Vec<usize>, Vec<Item>)> = profiles.iter().map(|_| Default::default()).collect();
     for (k, item) in items.into_iter().enumerate() {
         let g = &mut groups[profiles.binary_search(&item.profile).unwrap()];
         g.0.push(k);
@@ -130,23 +98,12 @@ pub fn streams(f: &mut Formula, items: Vec<Item>) -> Result<Vec<Node>> {
             out[at[0]] = Some(apply_one(p, data, record, one.len, Derived::None)?);
             continue;
         }
-        let lens: Vec<(usize, usize, usize)> = items
-            .iter()
-            .map(|i| (i.data.1, i.record.1, i.len as usize))
-            .collect();
+        let lens: Vec<(usize, usize, usize)> = items.iter().map(|i| (i.data.1, i.record.1, i.len as usize)).collect();
         let sizes: Vec<u64> = items.iter().map(|i| i.len).collect();
         let index = f.push("flate/index", crate::module::index(&lens));
         // (the data of each a content of its own, so not merged)
-        let (data, records): (Vec<Node>, Vec<Node>) =
-            items.into_iter().map(|i| (i.data.0, i.record.0)).unzip();
-        let a = apply(
-            p,
-            Node::Concat(data),
-            Node::concat(records),
-            index,
-            sizes.iter().sum(),
-            Derived::None,
-        )?;
+        let (data, records): (Vec<Node>, Vec<Node>) = items.into_iter().map(|i| (i.data.0, i.record.0)).unzip();
+        let a = apply(p, Node::Concat(data), Node::concat(records), index, sizes.iter().sum(), Derived::None)?;
         for (k, n) in at.into_iter().zip(f.split(a, sizes)) {
             out[k] = Some(n);
         }
@@ -156,8 +113,7 @@ pub fn streams(f: &mut Formula, items: Vec<Item>) -> Result<Vec<Node>> {
 
 /// The resources of a profile: its built-in model data in binary.
 pub fn resources(profile: u16) -> Result<Vec<Resource>> {
-    static CATALOGS: [OnceLock<Resource>; crate::LAMBDAS.len()] =
-        [const { OnceLock::new() }; crate::LAMBDAS.len()];
+    static CATALOGS: [OnceLock<Resource>; crate::LAMBDAS.len()] = [const { OnceLock::new() }; crate::LAMBDAS.len()];
     static CODINGS: [OnceLock<Resource>; 1 + crate::PRIORS.len()] =
         [const { OnceLock::new() }; 1 + crate::PRIORS.len()];
     let m = crate::profile_data(profile)?;
@@ -211,9 +167,7 @@ mod tests {
     fn binary_roundtrip() {
         for p in crate::profiles() {
             let m = crate::profile_data(p).unwrap();
-            let [rules, coding] = &resources(p).unwrap()[..] else {
-                panic!()
-            };
+            let [rules, coding] = &resources(p).unwrap()[..] else { panic!() };
             assert_eq!(rules_from_bytes(rules).unwrap(), m.rules);
             match m.coding {
                 Coding::Static(models) => {
@@ -242,12 +196,7 @@ mod tests {
             let w = (x >> 16) % 400;
             data.extend_from_slice(format!("word{w} ").as_bytes());
         }
-        let p = zlib::Params {
-            level: 6,
-            strategy: zlib::Strategy::Default,
-            wbits: 15,
-            mem: 8,
-        };
+        let p = zlib::Params { level: 6, strategy: zlib::Strategy::Default, wbits: 15, mem: 8 };
         let raw = zlib::compress(&data, p).unwrap();
         for profile in [3u16, crate::ADAPTIVE] {
             let mut o = Options::for_profile(profile).unwrap();
@@ -258,11 +207,7 @@ mod tests {
             assert!(s.segs.len() > 3, "{}", s.segs.len());
             assert_eq!(s.segs.iter().map(|g| g.count).sum::<u64>(), s.tokens);
             assert_eq!(s.segs.last().unwrap().end, d.len() as u64);
-            let res: Vec<u64> = resources(profile)
-                .unwrap()
-                .iter()
-                .map(|r| r.len() as u64)
-                .collect();
+            let res: Vec<u64> = resources(profile).unwrap().iter().map(|r| r.len() as u64).collect();
             let u = aqr_formula::Usage {
                 params: &[],
                 resources: &res,

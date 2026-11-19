@@ -197,7 +197,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   (`src/modules.rs`; `AQR_BINCACHE_MODULES=0` skips it).
   `cargo aqr +` lists the kept binaries; `cargo aqr +<id> <args>…` runs an earlier one, e.g. as
   the "before" of a comparison.
-- Format with the `rustfmt.toml`s (width 120).
+- Format with `cargo fmt` (the root's `rustfmt.toml`: width 120).
 - Cache the results of measurements taking over a minute in `cache/`.
 - Measure peak memory (`/usr/bin/time -l`) on runs over big inputs.
 - `aqr --stats` (compressing, decompressing or testing) samples the threads as it runs and

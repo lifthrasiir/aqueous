@@ -52,25 +52,11 @@ pub trait Cands {
     }
     /// The rank of `dist` among the earlier positions matching `len` bytes at `p` that are
     /// not among the first table's entries (walking at most `limit` of them).
-    fn rank(
-        &mut self,
-        _d: &[u8],
-        _p: usize,
-        _len: usize,
-        _dist: usize,
-        _limit: usize,
-    ) -> Option<usize> {
+    fn rank(&mut self, _d: &[u8], _p: usize, _len: usize, _dist: usize, _limit: usize) -> Option<usize> {
         None
     }
     /// Inverse of [`Cands::rank`]: the distance of the given rank.
-    fn select(
-        &mut self,
-        _d: &[u8],
-        _p: usize,
-        _len: usize,
-        _rank: usize,
-        _limit: usize,
-    ) -> Option<usize> {
+    fn select(&mut self, _d: &[u8], _p: usize, _len: usize, _rank: usize, _limit: usize) -> Option<usize> {
         None
     }
 }
@@ -202,10 +188,7 @@ impl MultiChain {
             cfgs: cfgs
                 .iter()
                 .map(|&(depth, nice)| {
-                    (
-                        super::tokens::DEPTHS[depth as usize] as usize,
-                        super::tokens::NICES[nice as usize] as usize,
-                    )
+                    (super::tokens::DEPTHS[depth as usize] as usize, super::tokens::NICES[nice as usize] as usize)
                 })
                 .collect(),
             memo: [(usize::MAX, [Found::default(); MULTI]); 2],
@@ -386,17 +369,9 @@ impl Core {
             last_start: usize::MAX,
             memo: (usize::MAX, 0, (0, 0)),
             // As many as positions can be inserted, if fewer.
-            prev: if rank {
-                vec![0; CHAIN.min((span + 1).next_power_of_two())]
-            } else {
-                vec![]
-            },
+            prev: if rank { vec![0; CHAIN.min((span + 1).next_power_of_two())] } else { vec![] },
             own,
-            heads: if rank && own {
-                vec![0; 1 << bits]
-            } else {
-                vec![]
-            },
+            heads: if rank && own { vec![0; 1 << bits] } else { vec![] },
             linked: start.saturating_sub(WINDOW),
         }
     }
@@ -412,10 +387,7 @@ impl Core {
         if p + 8 <= d.len() {
             Self::hash(load32(d, p) & mask_of(self.key), self.bits)
         } else {
-            let k = d[p..p + self.key]
-                .iter()
-                .rev()
-                .fold(0u32, |a, &b| a << 8 | b as u32);
+            let k = d[p..p + self.key].iter().rev().fold(0u32, |a, &b| a << 8 | b as u32);
             Self::hash(k, self.bits)
         }
     }
@@ -426,10 +398,7 @@ impl Core {
         if p + 8 <= d.len() {
             Self::hash(load32(d, p) & mask::<K>(), self.bits)
         } else {
-            let k = d[p..p + K]
-                .iter()
-                .rev()
-                .fold(0u32, |a, &b| a << 8 | b as u32);
+            let k = d[p..p + K].iter().rev().fold(0u32, |a, &b| a << 8 | b as u32);
             Self::hash(k, self.bits)
         }
     }
@@ -437,10 +406,7 @@ impl Core {
     /// The own chain head of `p` (`p + 3 <= d.len()`).
     #[inline(always)]
     fn h3(d: &[u8], p: usize, bits: u32) -> usize {
-        Self::hash(
-            d[p] as u32 | (d[p + 1] as u32) << 8 | (d[p + 2] as u32) << 16,
-            bits,
-        )
+        Self::hash(d[p] as u32 | (d[p + 1] as u32) << 8 | (d[p + 2] as u32) << 16, bits)
     }
 
     /// The second table's bucket of `p` (`p + 8 <= d.len()`).
@@ -520,10 +486,7 @@ impl Core {
         } else if any {
             (self.bucket_any(self.h1(d, p))[0] as usize, self.ways)
         } else {
-            (
-                Self::bucket::<W>(&self.t, self.h1k::<K>(d, p))[0] as usize,
-                W,
-            )
+            (Self::bucket::<W>(&self.t, self.h1k::<K>(d, p))[0] as usize, W)
         };
         let (mut seen, mut steps) = (0, 0);
         while e > 0 && steps < limit {
@@ -565,12 +528,7 @@ impl Core {
 
     /// Inserts the positions `from..to`, which have 8 bytes after them.
     #[inline(always)]
-    fn insert_run<const W: usize, const K: usize, const L: bool>(
-        &mut self,
-        d: &[u8],
-        from: usize,
-        to: usize,
-    ) {
+    fn insert_run<const W: usize, const K: usize, const L: bool>(&mut self, d: &[u8], from: usize, to: usize) {
         debug_assert!(to <= d.len().saturating_sub(7) || from >= to);
         let chain = !self.prev.is_empty() && !self.own;
         let (bits, lshift) = (self.bits, self.lshift);
@@ -625,11 +583,7 @@ impl Core {
             let c = bucket[i] as usize - 1;
             top = top.max(order(common(d, c, p, max), p - c));
         }
-        if top == 0 {
-            (0, 0)
-        } else {
-            ((top >> 32) as usize, !(top as u32) as usize)
-        }
+        if top == 0 { (0, 0) } else { ((top >> 32) as usize, !(top as u32) as usize) }
     }
 
     #[inline(always)]
@@ -766,10 +720,7 @@ impl Cands for Core {
             return None;
         }
         let target = (p - dist) as u32 + 1;
-        self.bucket_any(self.h1(d, p))
-            .iter()
-            .filter(|&&e| e > 0 && (e as usize - 1) < p)
-            .position(|&e| e == target)
+        self.bucket_any(self.h1(d, p)).iter().filter(|&&e| e > 0 && (e as usize - 1) < p).position(|&e| e == target)
     }
 
     // (of any shape, made once: what the Wasm modules rank by, for their size; natively each
@@ -780,14 +731,7 @@ impl Cands for Core {
     }
 
     #[inline(never)]
-    fn select(
-        &mut self,
-        d: &[u8],
-        p: usize,
-        len: usize,
-        rank: usize,
-        limit: usize,
-    ) -> Option<usize> {
+    fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, limit: usize) -> Option<usize> {
         self.select_in::<ANY, 0, false>(d, p, len, rank, limit)
     }
 }
@@ -812,14 +756,7 @@ impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
         return self.0.rank(d, p, len, dist, limit);
     }
 
-    fn select(
-        &mut self,
-        d: &[u8],
-        p: usize,
-        len: usize,
-        rank: usize,
-        limit: usize,
-    ) -> Option<usize> {
+    fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, limit: usize) -> Option<usize> {
         #[cfg(not(target_family = "wasm"))]
         return self.0.select_in::<W, K, L>(d, p, len, rank, limit);
         #[cfg(target_family = "wasm")]
