@@ -39,7 +39,9 @@ fn noise(n: usize, seed: &mut u64) -> Vec<u8> {
 
 /// Text of about `n` bytes.
 fn text(n: usize, seed: u64) -> Vec<u8> {
-    (0..n / 12 + 1).flat_map(|i| format!("w{:05} {:03}\n", (i as u64).wrapping_mul(seed) % 9973, i % 211).into_bytes()).collect()
+    (0..n / 12 + 1)
+        .flat_map(|i| format!("w{:05} {:03}\n", (i as u64).wrapping_mul(seed) % 9973, i % 211).into_bytes())
+        .collect()
 }
 
 /// A MSZIP block (with its signature) of a DEFLATE stream of `data`: stored (a final block of its
@@ -166,4 +168,79 @@ fn part_fails_as_whole() {
         }
     }
     assert!(emu::apply(&ENTRY, &[&c.inputs[0], &c.inputs[1], &c.inputs[2], &c.inputs[3]], &[], &[1], &[size]).is_err());
+}
+
+/// An MSZIP block of stored DEFLATE blocks of `sizes` bytes each (the last final): a block
+/// spanning as much of the joined stream as it takes.
+fn stored_run(sizes: &[usize], fill: u8) -> Vec<u8> {
+    let mut b = b"CK".to_vec();
+    for (i, &n) in sizes.iter().enumerate() {
+        b.push((i + 1 == sizes.len()) as u8);
+        b.extend((n as u16).to_le_bytes());
+        b.extend((!(n as u16)).to_le_bytes());
+        b.extend(std::iter::repeat_n(fill, n));
+    }
+    b
+}
+
+/// A case of the MSZIP blocks `blocks` in one folder, nothing kept.
+fn case_of(blocks: &[Vec<u8>]) -> Case {
+    let refs: Vec<&[u8]> = blocks.iter().map(|b| &b[..]).collect();
+    let mut w = BitW::new(Vec::new());
+    let joined = mszip::join(&refs, &mut w).unwrap();
+    let entries: Vec<Block> = joined.iter().map(|j| Block::Mszip { kept: 0, blocks: j.blocks }).collect();
+    Case { inputs: [w.out, vec![], vec![], module::index(&entries)], want: blocks.concat() }
+}
+
+/// A block spanning the joined stream beyond what the part module holds (`SPAN`, `JOINED`) is
+/// refused by it, and where it is within, in whatever place of the buffer it lies, the output is
+/// the whole decoding's.
+#[test]
+fn part_near_the_buffer() {
+    for lead in [0usize, 1, 1000, 40_000, 70_000] {
+        for span in [60_000usize, 65_000, 96 << 10, 100_000, 131_000, 150_000, (160 << 10) - 100] {
+            let first = if lead > 0 { vec![stored_run(&[lead.min(60_000)], 1)] } else { vec![] };
+            let sizes: Vec<usize> =
+                (0..span.div_ceil(65_535)).map(|i| span.min(65_535 * (i + 1)) - 65_535 * i).collect();
+            let mut blocks = first;
+            blocks.push(stored_run(&sizes, 2));
+            blocks.push(stored_run(&[10], 3));
+            let c = case_of(&blocks);
+            let size = c.want.len() as u64;
+            assert!(whole(&c.inputs, size).unwrap() == c.want, "whole {lead} {span}");
+            // (a CAB's block spans 78639 bytes of the stream at most: what is within is exact, what
+            // is past may be refused, but never misread)
+            match part(&c, size) {
+                Ok(o) => assert!(o == c.want, "part {lead} {span}"),
+                Err(e) => assert!(span > 78_639, "part {lead} {span}: {e}"),
+            }
+        }
+    }
+    // far past the buffer: refused, not misread
+    let c = case_of(&[stored_run(&[65_535, 65_535, 65_535, 65_535], 5), stored_run(&[10], 3)]);
+    let size = c.want.len() as u64;
+    assert!(whole(&c.inputs, size).is_ok());
+    if let Ok(o) = part(&c, size) {
+        assert!(o == c.want);
+    }
+}
+
+/// Inputs of length 0 with an index asking for blocks, and the reverse: errors, not panics.
+#[test]
+fn part_empty_inputs() {
+    let index = module::index(&[Block::Mszip { kept: 0, blocks: 1 }]);
+    for size in [0, 5] {
+        let c = Case { inputs: [vec![], vec![], vec![], index.clone()], want: vec![] };
+        assert!(whole(&c.inputs, size).is_err());
+        assert!(part(&c, size).is_err());
+    }
+    let c = Case { inputs: [vec![], vec![], vec![], vec![]], want: vec![] };
+    assert!(whole(&c.inputs, 0).unwrap().is_empty());
+    assert!(part(&c, 0).unwrap().is_empty());
+    // an index of many blocks over a stream of few
+    let many = module::index(&vec![Block::Mszip { kept: 0, blocks: 1 }; 1000]);
+    let mut c = case_of(&[stored_run(&[10], 1)]);
+    c.inputs[3] = many;
+    assert!(whole(&c.inputs, 2000).is_err());
+    assert!(part(&c, 2000).is_err());
 }

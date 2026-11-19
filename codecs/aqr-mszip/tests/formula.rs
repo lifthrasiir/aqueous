@@ -307,3 +307,111 @@ fn chm_lzx_section() {
         }
     }
 }
+
+/// The position of the LZX control data in the CHM file `d`.
+fn control_at(d: &[u8]) -> usize {
+    d.windows(4).rposition(|w| w == b"LZXC").unwrap() - 4
+}
+
+/// A CHM file of another ITSF version or header length is none; a directory of PMGI chunks
+/// alone has no LZX section, so no formula.
+#[test]
+fn chm_headers() {
+    let (d, _) = chm_file();
+    assert!(formula::encode_chm(&d, 1).is_some());
+    for (at, v) in [(4, 2u32), (4, 4), (4, 0), (8, 0x58), (8, 0x68)] {
+        let mut e = d.clone();
+        e[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        assert!(!formula::starts_chm(&e), "{at} {v}");
+        assert!(formula::encode_chm(&e, 1).is_none());
+    }
+    // the listing chunk taken for an index chunk (PMGI): no entries, so no section
+    let mut e = d.clone();
+    let at = e.windows(4).position(|w| w == b"PMGL").unwrap();
+    e[at + 3] = b'I';
+    assert!(formula::encode_chm(&e, 1).is_none());
+    // a PMGL chunk of other magic is skipped likewise
+    e[at..at + 4].copy_from_slice(b"XXXX");
+    assert!(formula::encode_chm(&e, 1).is_none());
+}
+
+/// Control data of other windows and reset intervals than the file's: where the section is taken
+/// at all the file is given back (the frames fail to rebuild, or rebuild as they were).
+#[test]
+fn chm_windows_and_resets() {
+    let (d, _) = chm_file();
+    let at = control_at(&d);
+    for reset in [0u32, 1, 2, 3, 4, 8, 0x8000_0000, u32::MAX] {
+        for window in [0u32, 1, 2, 3, 4, 8, 16, 32, 64, 128, u32::MAX, 0x8000_0000] {
+            let mut e = d.clone();
+            e[at + 8..at + 12].copy_from_slice(&2u32.to_le_bytes());
+            e[at + 12..at + 16].copy_from_slice(&reset.to_le_bytes());
+            e[at + 16..at + 20].copy_from_slice(&window.to_le_bytes());
+            let parsed = aqr_mszip::chm::parse(&e).unwrap().lzx;
+            if reset == 0 || !window.is_power_of_two() || window > 64 {
+                assert!(parsed.is_none(), "{reset} {window}");
+            }
+            if let Some(f) = formula::encode_chm(&e, 1) {
+                assert!(eval(&f) == e, "{reset} {window}");
+            }
+        }
+    }
+    // control data of version 1, or of another signature
+    for (off, v) in [(8, 1u32), (8, 3), (4, 0x4358_5a4c ^ 1)] {
+        let mut e = d.clone();
+        e[at + off..at + off + 4].copy_from_slice(&v.to_le_bytes());
+        assert!(aqr_mszip::chm::parse(&e).unwrap().lzx.is_none(), "{off} {v}");
+        assert!(formula::encode_chm(&e, 1).is_none());
+    }
+}
+
+/// The reset table of another version, entry size, frame size or counts: no section.
+#[test]
+fn chm_reset_table() {
+    let (d, _) = chm_file();
+    // the table is the last bytes of the file
+    let table = d.len() - (0x28 + 8 * 5);
+    for (off, bytes) in [
+        (0usize, 1u32.to_le_bytes().to_vec()),
+        (4, 3u32.to_le_bytes().to_vec()),
+        (4, 0u32.to_le_bytes().to_vec()),
+        (8, 4u32.to_le_bytes().to_vec()),
+        (32, 0x4000u64.to_le_bytes().to_vec()),
+        (16, u64::MAX.to_le_bytes().to_vec()),
+        (16, 0u64.to_le_bytes().to_vec()),
+        (24, u64::MAX.to_le_bytes().to_vec()),
+        (12, u32::MAX.to_le_bytes().to_vec()),
+        (0x28, u64::MAX.to_le_bytes().to_vec()),
+        (0x30, u64::MAX.to_le_bytes().to_vec()),
+    ] {
+        let mut e = d.clone();
+        e[table + off..table + off + bytes.len()].copy_from_slice(&bytes);
+        if let Some(f) = formula::encode_chm(&e, 1) {
+            assert!(eval(&f) == e, "{off} {bytes:?}");
+        }
+    }
+    // a table cut off at the file's end
+    for cut in 1..40 {
+        let e = &d[..d.len() - cut];
+        if let Some(f) = formula::encode_chm(e, 1) {
+            assert!(eval(&f) == e, "{cut}");
+        }
+    }
+}
+
+/// Every damage of the header, directory and tables of a CHM file: no panic, and a formula
+/// gives the file back.
+#[test]
+fn chm_damaged_headers() {
+    let (d, _) = chm_file();
+    let limit = std::time::Duration::from_secs(30);
+    let tail = d.len() - 0x28 - 8 * 5 - 60;
+    for x in aqr_testkit::damages(d.len(), 1, 0x120).into_iter().filter(|x| x.at < 0x120 || x.at >= tail) {
+        let v = x.apply(&d);
+        let r = aqr_testkit::within(limit, || {
+            aqr_testkit::case(&x.to_string());
+            formula::encode_chm(&v, 1).map(|f| assert!(eval(&f) == v))
+        });
+        r.unwrap_or_else(|e| panic!("{x}: {e}"));
+    }
+}
