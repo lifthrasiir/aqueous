@@ -7659,12 +7659,11 @@ fn tensors_plans_hold_across_segments() {
 
 /// div3-recons takes the plan of the picture's size on frames a real encoder wrote (ffmpeg's
 /// `msmpeg4` with the tag `DIV3`: an I frame, then P frames with motion vectors) of 1920x1080 and
-/// 4096x4096, flat and of a test pattern. Skipped where ffmpeg is not on the PATH.
+/// 4096x4096, flat and of a test pattern. It needs ffmpeg on the PATH.
 #[test]
 fn div3_real_frames_plan_holds() {
     use std::process::{Command, Stdio};
-    let scratch = [r"F:\Scratch", "/tmp"].into_iter().map(std::path::PathBuf::from).find(|p| p.is_dir());
-    let dir = scratch.unwrap_or_else(std::env::temp_dir).join(format!("aqr-div3-plan-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("aqr-div3-plan-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut made = 0;
     for (size, src) in [
@@ -7690,15 +7689,12 @@ fn div3_real_frames_plan_holds() {
             .arg(&path)
             .stdin(Stdio::null())
             .status();
-        if !status.is_ok_and(|s| s.success()) {
-            eprintln!("div3 real frames: no ffmpeg that writes DivX 3: skipped");
-            break;
-        }
+        assert!(status.is_ok_and(|s| s.success()), "ffmpeg, writing DivX 3 (msmpeg4), which this test needs");
         let file = std::fs::read(&path).unwrap();
         let f = aqr_div3::formula::encode_unchecked(&file, 1).expect("a formula");
         plan_holds(&format!("div3 real {src} {size}"), f, &file);
         made += 1;
     }
     let _ = std::fs::remove_dir_all(&dir);
-    eprintln!("div3 real frames: {made} files");
+    assert_eq!(made, 4);
 }
