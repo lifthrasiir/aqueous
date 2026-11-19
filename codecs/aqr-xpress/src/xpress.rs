@@ -222,7 +222,8 @@ pub fn read(src: &[u8], n: usize) -> Option<(Vec<u8>, Parse)> {
     if n == 0 {
         return None;
     }
-    let mut out: Vec<u8> = Vec::with_capacity(n);
+    // (the length is the container's claim: reserved as the data shows it, not up front)
+    let mut out: Vec<u8> = Vec::with_capacity(n.min(src.len().saturating_mul(8)));
     let mut parse = Parse::default();
     let mut p = 0;
     loop {
@@ -263,6 +264,7 @@ pub fn read(src: &[u8], n: usize) -> Option<(Vec<u8>, Parse)> {
             if off > out.len() || len > n - out.len() {
                 return None;
             }
+            out.try_reserve(len).ok()?;
             for _ in 0..len {
                 out.push(out[out.len() - off]);
             }

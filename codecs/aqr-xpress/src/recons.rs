@@ -734,7 +734,11 @@ pub fn split(chunks: &[(&[u8], usize)]) -> Result<Split> {
     if chunks.is_empty() {
         return Ok(Split { data: Vec::new(), record: Vec::new(), cost: [0.0; CATS] });
     }
-    let mut data = vec![0; data_len(chunks)];
+    // (before anything is allocated: the lengths are the container's claim)
+    if data_len(chunks) >= u32::MAX as usize - WINDOW {
+        return Err(Error("data too long"));
+    }
+    let mut data = aqr_common::mem::try_zeroed(data_len(chunks)).ok_or(Error("data too long"))?;
     let parses = read_into(chunks, &mut data)?;
     let size = chunk_size(chunks)?;
     let enc = best_walk(&data, size, &parses)?;
@@ -743,7 +747,7 @@ pub fn split(chunks: &[(&[u8], usize)]) -> Result<Split> {
 
 /// Bytes of the data of a stream of chunks.
 pub fn data_len(chunks: &[(&[u8], usize)]) -> usize {
-    chunks.iter().map(|c| c.1).sum()
+    chunks.iter().fold(0usize, |a, c| a.saturating_add(c.1))
 }
 
 /// [`split`] with the data written into `data` (of [`data_len`] bytes), as where a container

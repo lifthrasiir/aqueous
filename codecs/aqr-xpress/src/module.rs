@@ -83,7 +83,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     // (a little room past the length: the last token of a damaged stream is stopped by the check
     // of each token, not by the vector's end)
-    let mut out = Vec::with_capacity(len + recons::SLACK);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len.checked_add(recons::SLACK).ok_or_else(corrupt)?).map_err(|_| corrupt())?;
     if threads <= 1 || streams.len() <= 1 || cfg!(target_family = "wasm") {
         // (the streams one after another on the match finder made once)
         let mut spare = recons::Spare::new();
