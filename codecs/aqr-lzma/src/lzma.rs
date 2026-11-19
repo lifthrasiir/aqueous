@@ -428,7 +428,11 @@ pub fn decode_data(
 pub fn plausible(input: &[u8], props: Props, n: usize) -> bool {
     let Some(mut c) = Decoder::new(input) else { return false };
     let mut m = Model::new(props);
-    let mut data = Vec::with_capacity(n + MAX_LEN as usize);
+    // (the length is the caller's: reserved as far as a stream this short can give, then grown)
+    let mut data = Vec::new();
+    if data.try_reserve(n.min(1 << 20).saturating_add(MAX_LEN as usize)).is_err() {
+        return false;
+    }
     while data.len() < n {
         let pos = data.len();
         let pk = m.code(&mut c, &data, pos, Packet::LIT);
