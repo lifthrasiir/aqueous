@@ -679,14 +679,17 @@ impl<'d> Listing<'d> {
             })
             .collect();
         let given = |f: usize| -> u64 {
-            (0..self.units[f].files.len()).filter(|&k| decodes(f, k)).map(|k| self.main.subs[f][k]).sum()
+            (0..self.units[f].files.len())
+                .filter(|&k| decodes(f, k))
+                .map(|k| self.main.subs[f][k])
+                .fold(0, u64::saturating_add)
         };
         let packed: u64 = (0..self.units.len())
             .filter(|&f| decoded[f])
             .flat_map(|f| &self.spans[self.packs[f].clone()])
             .map(|r| r.end - r.start)
             .sum();
-        let total: u64 = (0..self.units.len()).filter(|&f| decoded[f]).map(given).sum();
+        let total = (0..self.units.len()).filter(|&f| decoded[f]).map(given).fold(0, u64::saturating_add);
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let held: Vec<Mutex<Option<Vec<Vec<u8>>>>> = held.into_iter().map(Mutex::new).collect();
@@ -712,7 +715,7 @@ impl<'d> Listing<'d> {
                 }
             }
             let tick = |k: u64| {
-                let k = done.fetch_add(k, Relaxed) + k;
+                let k = done.fetch_add(k, Relaxed).saturating_add(k);
                 let p = done_packed.load(Relaxed);
                 sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (k, total) }));
             };

@@ -500,7 +500,7 @@ impl<'d> Listing<'d> {
         let decoded =
             || self.units.iter().filter(|u| u.left.is_none() && (select.is_none() || u.files.iter().any(want)));
         let packed: u64 = decoded().flat_map(|u| &u.pieces).map(|p| p.body.len() as u64).sum();
-        let total: u64 = decoded().flat_map(|u| &u.files).map(|f| f.size as u64).sum();
+        let total = decoded().flat_map(|u| &u.files).map(|f| f.size as u64).fold(0, u64::saturating_add);
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let made = pool::par_map(self.units.len(), threads, |i| -> Result<(), String> {
@@ -522,9 +522,9 @@ impl<'d> Listing<'d> {
                 })
                 .map_err(|e| format!("{format}: {e}"));
             let p = u.pieces.iter().map(|p| p.body.len() as u64).sum::<u64>();
-            let n = u.files.iter().map(|f| f.size as u64).sum::<u64>();
-            let p = done_packed.fetch_add(p, Relaxed) + p;
-            let n = done.fetch_add(n, Relaxed) + n;
+            let n = u.files.iter().map(|f| f.size as u64).fold(0, u64::saturating_add);
+            let p = done_packed.fetch_add(p, Relaxed).saturating_add(p);
+            let n = done.fetch_add(n, Relaxed).saturating_add(n);
             sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (n, total) }));
             sink.step(Step::Ended(i));
             if r.is_err() {

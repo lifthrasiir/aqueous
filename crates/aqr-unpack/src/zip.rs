@@ -421,8 +421,8 @@ impl<'d> Listing<'d> {
             if r.is_err() {
                 failed.store(true, Relaxed);
             }
-            let p = done_packed.fetch_add(u.body.len() as u64, Relaxed) + u.body.len() as u64;
-            let n = done.fetch_add(u.size, Relaxed) + u.size;
+            let p = done_packed.fetch_add(u.body.len() as u64, Relaxed).saturating_add(u.body.len() as u64);
+            let n = done.fetch_add(u.size, Relaxed).saturating_add(u.size);
             sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (n, total) }));
             r
         });

@@ -310,7 +310,7 @@ impl<'d> Listing<'d> {
                 .filter(|f| select.is_none() || want(f))
         };
         let packed: u64 = given().map(|f| f.data.len() as u64).sum();
-        let total: u64 = given().map(|f| f.size as u64).sum();
+        let total = given().map(|f| f.size as u64).fold(0, u64::saturating_add);
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let made = pool::par_map(self.units.len(), threads, |i| -> Result<(), String> {
@@ -328,8 +328,8 @@ impl<'d> Listing<'d> {
             let r = self
                 .decode(u, &decodes, &mut |k, data| {
                     let f = &u.files[k];
-                    let p = done_packed.fetch_add(f.data.len() as u64, Relaxed) + f.data.len() as u64;
-                    let n = done.fetch_add(f.size as u64, Relaxed) + f.size as u64;
+                    let p = done_packed.fetch_add(f.data.len() as u64, Relaxed).saturating_add(f.data.len() as u64);
+                    let n = done.fetch_add(f.size as u64, Relaxed).saturating_add(f.size as u64);
                     sink.step(Step::Reached(Reached { decompressed: (p, packed), evaluated: (n, total) }));
                     match f.c {
                         Some(c) if want(f) => sink.content(c, data),
