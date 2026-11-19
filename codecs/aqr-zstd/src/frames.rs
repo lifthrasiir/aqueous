@@ -112,13 +112,13 @@ impl Pool {
     /// [`Pool::new`], room for `spans` free spans made at once.
     pub fn with_spans(limit: u64, spans: usize) -> Pool {
         let mut p = Pool::new(limit);
-        p.free.reserve_exact(spans);
+        let _ = p.free.try_reserve_exact(spans);
         p
     }
 
     /// A block of `n` bytes: its place, None where it would pass the limit.
     pub fn take(&mut self, n: u64) -> Option<u64> {
-        let n = n.div_ceil(GRAIN) * GRAIN;
+        let n = n.checked_next_multiple_of(GRAIN)?;
         if let Some(i) = self.free.iter().position(|&(_, l)| l >= n) {
             let (at, l) = self.free[i];
             if l == n {
@@ -129,7 +129,7 @@ impl Pool {
             return Some(at);
         }
         let at = self.top;
-        if at + n > self.limit {
+        if at.checked_add(n)? > self.limit {
             return None;
         }
         self.top += n;
@@ -196,8 +196,9 @@ pub struct Frames {
 impl Frames {
     pub fn new(p: &Params) -> Frames {
         let mut f = Frames { open: Vec::new(), pool: Pool::new(p.pool), most: 0 };
-        f.open.reserve_exact(p.open as usize);
-        f.pool.free.reserve_exact(Pool::spans(p.open) as usize);
+        // (a lying count that does not fit only leaves it to grow)
+        let _ = f.open.try_reserve_exact(p.open as usize);
+        let _ = f.pool.free.try_reserve_exact(Pool::spans(p.open) as usize);
         f
     }
 
@@ -356,7 +357,9 @@ pub fn build(
     threads: usize,
 ) -> Result<()> {
     let mut frames = Frames::new(p);
-    let mut pool = alloc::vec![0u8; p.pool as usize];
+    let mut pool = Vec::new();
+    pool.try_reserve_exact(usize::try_from(p.pool).map_err(|_| Error)?).map_err(|_| Error)?;
+    pool.resize(p.pool as usize, 0u8);
     let mut ahead = Ahead { p, lengths, contents, threads, made: Default::default(), one: None };
     let mut done = 0u64;
     while !layout.done() {
@@ -416,7 +419,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let mut k = Reader::new(&mut k, BIG_PIECE);
     let mut n = Reader::new(&mut n, SMALL_PIECE);
     let mut c = Reader::new(&mut c, BIG_PIECE);
-    let mut out = Vec::with_capacity(usize::try_from(len).map_err(|_| Error)?);
+    let mut out = Vec::new();
+    out.try_reserve_exact(usize::try_from(len).map_err(|_| Error)?).map_err(|_| Error)?;
     build(&p, &mut l, &mut k, &mut n, &mut c, &mut out, len, threads)?;
     Ok(out)
 }

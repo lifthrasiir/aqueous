@@ -1943,6 +1943,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-sqlite",
+ "aqr-testkit",
  "zstd",
 ]
 

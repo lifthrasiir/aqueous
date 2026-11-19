@@ -19,6 +19,7 @@ zstd = { workspace = true, optional = true }
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-sqlite = { path = "../aqr-sqlite" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 zstd.workspace = true
 
 # libzstd's frames made again: of pairs of contents and frames, and of a database's blobs
