@@ -408,3 +408,112 @@ fn archive_in_its_input_tree() {
     assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// write/6: a hundred appends in a row: each commit's footer made a spacer block, every state
+/// a whole archive, the file growing by what was added (and no more than a little over it).
+#[test]
+fn hundred_appends() {
+    let d = scratch("hundred");
+    source(&d, 1);
+    ok(&d, &["-q", "-o", "b.aqr", "src"]);
+    let mut sizes = vec![fs::metadata(d.join("b.aqr")).unwrap().len()];
+    for i in 0..100 {
+        fs::write(d.join(format!("src/a{i:03}.txt")), text(1000 + i, 700)).unwrap();
+        ok(&d, &["-q", "-a", "b.aqr", "src"]);
+        sizes.push(fs::metadata(d.join("b.aqr")).unwrap().len());
+        if i % 25 == 0 {
+            assert_eq!(extracted(&d, "b.aqr").len(), 2 + i as usize, "after {i}");
+        }
+    }
+    assert!(sizes.windows(2).all(|w| w[1] > w[0]));
+    // (each of 700 bytes of text, so small a commit has its own overhead: it stays bounded)
+    let per = (sizes[100] - sizes[0]) / 100;
+    assert!(per < 700, "{per} bytes an append");
+    assert_eq!(extracted(&d, "b.aqr"), files(&d.join("src")));
+    let t = ok(&d, &["-K", "b.aqr"]);
+    assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
+    ok(&d, &["-q", "--compact", "b.aqr"]);
+    assert_eq!(extracted(&d, "b.aqr"), files(&d.join("src")));
+    assert!(fs::metadata(d.join("b.aqr")).unwrap().len() < sizes[100]);
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// write/6: inputs of no files (an empty directory) make an archive of none, which is appended
+/// to; an archive of a single file is not appended to nor edited; the only file of an archive
+/// deleted leaves an archive of none (and a path given twice is refused).
+#[test]
+fn archives_of_no_files_and_of_one() {
+    let d = scratch("zero");
+    source(&d, 3);
+    fs::create_dir_all(d.join("empty/sub")).unwrap();
+    let o = ok(&d, &["-o", "e.aqr", "empty"]);
+    assert!(stderr(&o).contains("0 files"), "{}", stderr(&o));
+    assert_eq!(extracted(&d, "e.aqr"), []);
+    assert!(stderr(&ok(&d, &["-K", "e.aqr"])).contains("0 files"));
+    let o = ok(&d, &["-a", "e.aqr", "empty"]);
+    assert!(stderr(&o).contains("nothing to append"), "{}", stderr(&o));
+    ok(&d, &["-q", "-a", "e.aqr", "src"]);
+    assert_eq!(extracted(&d, "e.aqr"), files(&d.join("src")));
+    // -a with no input
+    let o = aqr(&d, &["-a", "e.aqr"]);
+    assert!(!o.status.success() && stderr(&o).contains("no inputs"), "{}", stderr(&o));
+    // an archive of a single file
+    ok(&d, &["-q", "-o", "f.aqr", "src/t0.txt"]);
+    let before = fs::read(d.join("f.aqr")).unwrap();
+    for args in [&["-a", "f.aqr", "src"][..], &["--delete", "f.aqr", "t0.txt"], &["--tag", "x", "f.aqr"]] {
+        let o = aqr(&d, args);
+        assert!(!o.status.success() && stderr(&o).contains("single file"), "{args:?}: {}", stderr(&o));
+        assert_eq!(fs::read(d.join("f.aqr")).unwrap(), before);
+    }
+    // the only file of an archive deleted
+    ok(&d, &["-q", "-o", "o.aqr", "src/t0.txt", "src/t1.txt"]);
+    let o = aqr(&d, &["--delete", "o.aqr", "src/t0.txt", "src/t0.txt"]);
+    assert!(!o.status.success() && stderr(&o).contains("given twice"), "{}", stderr(&o));
+    ok(&d, &["-q", "--delete", "o.aqr", "src/t0.txt"]);
+    assert_eq!(extracted(&d, "o.aqr").iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["src/t1.txt"]);
+    ok(&d, &["-q", "--delete", "o.aqr", "src/t1.txt"]);
+    assert_eq!(extracted(&d, "o.aqr"), []);
+    ok(&d, &["-q", "--compact", "o.aqr"]);
+    assert_eq!(extracted(&d, "o.aqr"), []);
+    let o = aqr(&d, &["--delete", "o.aqr", "src/t1.txt"]);
+    assert!(!o.status.success() && stderr(&o).contains("no src/t1.txt in it"), "{}", stderr(&o));
+    ok(&d, &["-q", "-a", "o.aqr", "src"]);
+    assert_eq!(extracted(&d, "o.aqr"), files(&d.join("src")));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// write/6: `-a` on an archive cut short or damaged ends in a clear error (or appends), never a
+/// panic; where it fails the file is as it was.
+#[test]
+fn append_to_truncated_and_torn() {
+    let d = scratch("torn");
+    source(&d, 4);
+    ok(&d, &["-q", "-o", "t.aqr", "src"]);
+    let a = fs::read(d.join("t.aqr")).unwrap();
+    fs::write(d.join("src/new.txt"), text(7, 3000)).unwrap();
+    let mut tried: Vec<(String, Vec<u8>)> =
+        [0, 5, 20, a.len() / 2, a.len() - 30, a.len() - 12, a.len() - 2, a.len() - 1]
+            .map(|n| (format!("cut {n}"), a[..n].to_vec()))
+            .into();
+    for at in (0..a.len()).step_by(a.len() / 40) {
+        let mut b = a.clone();
+        b[at] ^= 0x55;
+        tried.push((format!("flip {at}"), b));
+    }
+    let mut appended = 0;
+    for (what, bytes) in tried {
+        fs::write(d.join("c.aqr"), &bytes).unwrap();
+        let o = aqr(&d, &["-a", "c.aqr", "src"]);
+        let e = stderr(&o);
+        assert!(matches!(o.status.code(), Some(0 | 1)) && !e.contains("panicked"), "{what}: {:?} {e}", o.status);
+        if o.status.success() {
+            appended += 1;
+        } else {
+            assert!(e.starts_with("aqr: c.aqr") || e.contains("c.aqr"), "{what}: {e}");
+            assert_eq!(fs::read(d.join("c.aqr")).unwrap(), bytes, "{what}: not left as it was");
+        }
+    }
+    // (what a damaged data block holds is found as it is read, not as it is appended to)
+    assert!(appended > 0);
+    fs::remove_dir_all(&d).unwrap();
+}
