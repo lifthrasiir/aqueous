@@ -278,7 +278,7 @@ mod tests {
         w(&mut b, objects.len() as u32);
         let mut start = 0u64;
         for (i, o) in objects.iter().enumerate() {
-            while b.len() % 4 != 0 {
+            while !b.len().is_multiple_of(4) {
                 b.push(0);
             }
             b.extend((i as u64 + 1).to_le_bytes());
