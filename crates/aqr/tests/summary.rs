@@ -35,3 +35,24 @@ fn hard_links_and_copies_counted_in_full() {
     assert!(err.contains("3 files, 300.0 KB in "), "{err}");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// `-v` of a single file tells its format, modules and sizes; of a tree with mirror blocks
+/// (`-A`), what the mirror blocks cost.
+#[test]
+fn verbose_compress() {
+    let d = common::scratch("summary", "verbose");
+    let text: Vec<u8> = (0..20000).flat_map(|n| format!("line {n}\n").into_bytes()).collect();
+    fs::write(d.join("one.txt"), &text).unwrap();
+    fs::create_dir_all(d.join("t")).unwrap();
+    fs::write(d.join("t/a.txt"), &text).unwrap();
+    let run = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(&d).args(args).output().unwrap();
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    };
+    let err = run(&["-v", "-o", "one.aqr", "one.txt"]);
+    let line = err.lines().find(|l| l.starts_with("one.txt: ") && l.contains(" -> ")).expect(&err);
+    assert!(line.ends_with("%)"), "{line}");
+    let err = run(&["-v", "-A", "-o", "t.aqr", "t"]);
+    assert!(err.contains("mirror blocks: "), "{err}");
+}

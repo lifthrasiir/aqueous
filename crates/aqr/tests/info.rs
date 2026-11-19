@@ -118,3 +118,62 @@ fn applications_limits() {
     assert!(line.contains("instance") && line.contains("full") && line.contains("chain"), "{out}");
     assert!(out.contains("most memory needed:"), "{out}");
 }
+
+/// `-I` of an encrypted archive tells its encryption (with no paths), then the payload as
+/// decrypted; a foreign archive is refused.
+#[test]
+fn encrypted_and_foreign() {
+    let d = scratch("enc");
+    fs::create_dir_all(d.join("src")).unwrap();
+    fs::write(d.join("src/f.txt"), b"hello hello hello").unwrap();
+    fs::write(d.join("pass"), "secret\n").unwrap();
+    let (ok, _, err) = aqr_in(&d, &["-q", "--passphrase-from", "pass", "-o", "e.aqr", "src"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = aqr_in(&d, &["-I", "--passphrase-from", "pass", "e.aqr"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("encrypted: scrypt of work factor"), "{out}");
+    assert!(out.contains("salt ") && out.contains("nonce ") && out.contains("chunk"), "{out}");
+    assert!(out.contains("payload: ") && out.contains("kind: standalone archive"), "{out}");
+    // a path: the entry, with no encryption told
+    let (ok, out, err) = aqr_in(&d, &["-I", "--passphrase-from", "pass", "e.aqr", "f.txt"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("a file of 17 B") && !out.contains("encrypted:"), "{out}");
+    // a wrong passphrase is an error
+    fs::write(d.join("wrong"), "nope\n").unwrap();
+    let (ok, _, _) = aqr_in(&d, &["-I", "--passphrase-from", "wrong", "e.aqr"]);
+    assert!(!ok);
+    // another format's archive is not told of
+    fs::write(d.join("x.zip"), b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0").unwrap();
+    let (ok, _, err) = aqr_in(&d, &["-I", "x.zip"]);
+    assert!(!ok && err.contains("only Aqueous archives are told of"), "{err}");
+}
+
+/// `-I` of the entries of a tree: a symbolic link, a FIFO, a directory and a file, each
+/// told by what it is.
+#[cfg(unix)]
+#[test]
+fn entry_kinds() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let d = scratch("kinds");
+    let src = d.join("src");
+    fs::create_dir_all(src.join("sub")).unwrap();
+    fs::write(src.join("a"), b"content of a").unwrap();
+    std::os::unix::fs::symlink("a", src.join("link")).unwrap();
+    let fifo = CString::new(src.join("fifo").as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o640) }, 0);
+    let (ok, _, err) = aqr_in(&d, &["-q", "-p", "-o", "k.aqr", "src"]);
+    assert!(ok, "{err}");
+    let told = |p: &str| {
+        let (ok, out, err) = aqr_in(&d, &["-I", "k.aqr", p]);
+        assert!(ok, "{p}: {err}");
+        out
+    };
+    let out = told("link");
+    assert!(out.contains("a symbolic link to \"a\""), "{out}");
+    let out = told("fifo");
+    assert!(out.contains("a FIFO"), "{out}");
+    assert!(told("sub").contains("a directory"));
+    let out = told("a");
+    assert!(out.contains("a file of 12 B") && out.contains("unix-mode: "), "{out}");
+}

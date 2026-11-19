@@ -55,3 +55,50 @@ fn stats_with_another_option() {
     assert!(fs::read_dir(&d).unwrap().next().is_none());
     fs::remove_dir_all(&d).unwrap();
 }
+
+fn aqr_in(d: &std::path::Path, args: &[&str]) -> (bool, String) {
+    let o = Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(d).args(args).output().unwrap();
+    (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
+/// The runs of compressing, testing and decompressing (a tree, and a single file), each told
+/// in the JSON and the page, and what stood out on standard error.
+#[test]
+fn runs_are_told() {
+    let d = scratch("runs");
+    let text: Vec<u8> = (0..20000).flat_map(|n| format!("line {n}\n").into_bytes()).collect();
+    fs::create_dir_all(d.join("t/sub")).unwrap();
+    fs::write(d.join("t/a.txt"), &text).unwrap();
+    fs::write(d.join("t/sub/b.txt"), &text[..5000]).unwrap();
+    fs::write(d.join("single.txt"), &text).unwrap();
+    let run = |args: &[&str], file: &str| {
+        let (ok, err) = aqr_in(&d, args);
+        assert!(ok, "{args:?}: {err}");
+        assert!(err.contains("stats: "), "{err}");
+        assert!(err.lines().any(|l| l.starts_with("stats written to ")), "{err}");
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(d.join(file)).unwrap()).unwrap();
+        assert_eq!(v["state"], "finished");
+        v["runs"][0].clone()
+    };
+    let r = run(&["-q", "--stats", "--stats=c.json", "--stats=c.html", "-o", "t.aqr", "t"], "c.json");
+    assert_eq!(r["mode"], "compress");
+    let paths: Vec<&str> = r["contents"].as_array().unwrap().iter().map(|c| c["path"].as_str().unwrap()).collect();
+    assert!(paths.iter().any(|p| p.ends_with("a.txt")) && paths.iter().any(|p| p.ends_with("b.txt")), "{paths:?}");
+    assert!(fs::read_to_string(d.join("c.html")).unwrap().contains("\"mode\":\"compress\""));
+
+    let r = run(&["-Kq", "--stats", "--stats=k.json", "t.aqr"], "k.json");
+    assert_eq!(r["mode"], "test");
+    let r = run(&["-dq", "--stats", "--stats=d.json", "-o", "out", "t.aqr"], "d.json");
+    assert_eq!(r["mode"], "decompress");
+    assert_eq!(r["written"].as_u64().unwrap(), (text.len() + 5000) as u64);
+    let lens: Vec<u64> = r["contents"].as_array().unwrap().iter().map(|c| c["len"].as_u64().unwrap()).collect();
+    assert!(lens.contains(&(text.len() as u64)) && lens.contains(&5000), "{lens:?}");
+    assert_eq!(fs::read(d.join("out/a.txt")).unwrap(), text);
+
+    // a single file: one content, of the length decoded
+    run(&["-q", "--stats", "--stats=s.json", "single.txt"], "s.json");
+    let r = run(&["-dq", "--stats", "--stats=sd.json", "-o", "single.out", "single.txt.aqr"], "sd.json");
+    assert_eq!(r["contents"][0]["len"].as_u64().unwrap(), text.len() as u64);
+    assert_eq!(fs::read(d.join("single.out")).unwrap(), text);
+    fs::remove_dir_all(&d).unwrap();
+}

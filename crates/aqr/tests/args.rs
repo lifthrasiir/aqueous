@@ -107,3 +107,42 @@ fn bundled_and_joined() {
     }
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// Options and inputs that do not go together are told, the first thing, with nothing made; the
+/// version and the help are told on standard output.
+#[test]
+fn combinations_refused() {
+    let d = scratch("refused");
+    fs::write(d.join("in.txt"), "some text\n".repeat(50)).unwrap();
+    fs::write(d.join("list"), "-\n").unwrap();
+    assert!(run_in(&d, &["-q", "-o", "a.aqr", "in.txt"]).0);
+    fs::copy(d.join("a.aqr"), d.join("b.aqr")).unwrap();
+    for (args, told) in [
+        (&["-q", "--format", "nonsense", "in.txt"][..], "not a format to compress into"),
+        (&["-q", "--stats=x.txt", "in.txt"], "--stats= takes a file named .json or .html"),
+        (&["-q", "--files-from", "list", "in.txt"], "(standard input) among the paths"),
+        (&["--session", "in.txt"], "--session takes no inputs"),
+        (&["--history", "-o", "x", "in.txt"], "takes an archive"),
+        (&["--json", "in.txt"], "--json is for -t, --history and --diff"),
+        (&["-I", "--rm", "in.txt"], "-I takes an archive and its paths alone"),
+        (&["--each", "in.txt"], "--each is for decompressing"),
+        (&["-d", "--each", "-o", "x", "a.aqr", "b.aqr"], "-o with several archives to decompress"),
+        (&["-dq", "--rm", "a.aqr", "p"], "--rm with paths of an archive"),
+        (&["-q", "-A", "--format", "zip", "in.txt"], "-A: .zip archives are not made so here"),
+        (&["-q", "--format", "zip", "-l", "99", "in.txt"], "not a level of .zip"),
+        (&["-q", "-", "in.txt"], "the only input"),
+        (&["-dq", "-", "--rm"], "--rm with - (standard input)"),
+        (&["-q", "--rename", "x", "in.txt"], "--rename"),
+    ] {
+        let (ok, err) = run_in(&d, args);
+        assert!(!ok && err.contains(told), "aqr {args:?}: {err}");
+    }
+    assert!(!d.join("x").exists());
+    let out = Command::new(env!("CARGO_BIN_EXE_aqr")).arg("-V").output().unwrap();
+    assert!(out.status.success());
+    let v = String::from_utf8_lossy(&out.stdout);
+    assert!(v.starts_with("aqr ") && v.ends_with('\n'), "{v}");
+    let out = Command::new(env!("CARGO_BIN_EXE_aqr")).arg("--help").output().unwrap();
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("aqr"));
+    fs::remove_dir_all(&d).unwrap();
+}

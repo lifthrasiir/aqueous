@@ -919,4 +919,170 @@ mod tests {
             r#"{"version":1,"aqr":"0.0.20261106","args":["-c","-9","C:\\a \"b\""],"state":"interrupted","runs":[{},{}]}"#
         );
     }
+
+    /// A run of 4 workers, one busy with a file for 10 s while the others wait.
+    fn synthetic(mode: &'static str) -> Run {
+        let samples = (0..=10)
+            .map(|i| trace::Sample {
+                at: i as f64,
+                heap: 1000 * (i as i64 + 1),
+                rss: 4096 * (i as u64 + 1),
+                mapped: 1024,
+                reserved: 1,
+                held: 7,
+                threads: vec![(1, 0), (2, NO_ITEM), (2, NO_ITEM), (DEAD, NO_ITEM)],
+                bytes: vec![(0, 500)],
+                outside: vec![(0, 300), (1, 100)],
+            })
+            .collect();
+        let trace = Trace {
+            interval: Duration::from_secs(1),
+            seconds: 11.0,
+            labels: vec![("recompress", false), ("pool", true)],
+            stacks: vec![vec![], vec![0], vec![1]],
+            threads: vec![("a".into(), true), ("b".into(), true), ("c".into(), true), ("d".into(), true)],
+            samples,
+            workers: 4,
+        };
+        let content = |path: &str, kind, len, archived| Content {
+            path: path.into(),
+            kind,
+            len,
+            archived: Some(archived),
+            ..Content::default()
+        };
+        Run {
+            mode,
+            input: "in".into(),
+            output: "out\"<".into(),
+            seconds: 11.0,
+            threads: 4,
+            read: 1,
+            written: 2,
+            overhead: Some(3),
+            contents: vec![
+                content("big.png", "png", 10 << 20, (10 << 20) as f64),
+                content("t.txt", "text", 90 << 20, 1e6),
+            ],
+            fallbacks: ["a", "b", "c", "d"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, module)| aqr_compress::Fallback {
+                    module,
+                    needed: 1 << 20,
+                    bytes: 1000,
+                    kept: i == 0,
+                    heap: i == 2,
+                    panicked: i == 3,
+                    message: if i == 3 { "boom".into() } else { String::new() },
+                })
+                .collect(),
+            trace,
+        }
+    }
+
+    /// What stands out of a run: its summary, the narrow stretch, the long file, the waiting
+    /// workers, the kind barely compressed or slow, and each kind of fallback.
+    #[test]
+    fn outliers_tell_what_stands_out() {
+        let text = outliers(&synthetic("compress"));
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("stats: 11.00 s, 4 workers "), "{text}");
+        assert!(lines[0].contains("heap peak"), "{text}");
+        assert!(lines[0].contains("by recompress"), "{text}");
+        assert!(lines[0].contains("resident peak"), "{text}");
+        assert!(lines[0].contains("spill peak"), "{text}");
+        assert!(text.contains("threads busy (the pool has 4 workers), mostly recompress of big.png"), "{text}");
+        assert!(text.contains("big.png (png,"), "{text}");
+        assert!(text.contains("worked on for"), "{text}");
+        assert!(text.contains("workers waiting for pool"), "{text}");
+        assert!(text.contains("png: 10.0% of the bytes took"), "{text}");
+        assert!(text.contains("png: 10.0% of the bytes, compressed hardly at all"), "{text}");
+        assert!(text.contains("a: 1 applications kept over the bound"), "{text}");
+        assert!(text.contains("b: 1 recompressions not used for the bound"), "{text}");
+        assert!(text.contains("c: 1 recompressions given up for their heap"), "{text}");
+        assert!(text.contains("d: 1 recompressions panicked"), "{text}");
+        assert!(text.contains(": boom"), "{text}");
+        assert!(!text.contains("nothing stands out"));
+        // decompressing does not tell what compressed hardly
+        assert!(!outliers(&synthetic("decompress")).contains("hardly"));
+    }
+
+    /// With nothing sampled, nothing stands out.
+    #[test]
+    fn outliers_of_an_empty_run() {
+        let run = Run {
+            mode: "test",
+            input: String::new(),
+            output: String::new(),
+            seconds: 0.1,
+            threads: 1,
+            read: 0,
+            written: 0,
+            overhead: None,
+            contents: Vec::new(),
+            fallbacks: Vec::new(),
+            trace: Trace::default(),
+        };
+        let text = outliers(&run);
+        assert!(text.starts_with("stats: 0.10 s, 1 workers "), "{text}");
+        assert!(text.ends_with("  nothing stands out\n"), "{text}");
+    }
+
+    /// The JSON of a run parses, with the fields of what was sampled, and tells a partial one.
+    #[test]
+    fn json_of_a_run_parses() {
+        let run = synthetic("compress");
+        let v: serde_json::Value = serde_json::from_str(&json(&run, false)).unwrap();
+        assert_eq!(v["mode"], "compress");
+        assert_eq!(v["output"], "out\"<");
+        assert_eq!(v["overhead"], 3);
+        assert!(v.get("partial").is_none());
+        assert_eq!(v["contents"][0]["path"], "big.png");
+        assert_eq!(v["contents"][1]["archived"], 1e6);
+        assert_eq!(v["fallbacks"][3]["message"], "boom");
+        assert_eq!(v["fallbacks"][3]["panicked"], true);
+        assert!(v["fallbacks"][0].get("message").is_none());
+        assert_eq!(v["trace"]["workers"], 4);
+        assert_eq!(v["trace"]["samples"][0], serde_json::json!([1, 0, 2, -1, 2, -1, -1, -1]));
+        assert_eq!(v["trace"]["heap"][1], 2000);
+        assert_eq!(v["trace"]["outside"][0], serde_json::json!([0, 300, 1, 100]));
+        // other modes tell no fallbacks, a partial run says so, a non-finite time is null
+        let mut run = synthetic("test");
+        run.seconds = f64::NAN;
+        let v: serde_json::Value = serde_json::from_str(&json(&run, true)).unwrap();
+        assert_eq!(v["partial"], true);
+        assert!(v["seconds"].is_null());
+        assert!(v.get("fallbacks").is_none());
+    }
+
+    /// The files written as it runs: nothing before any run, then the runs so far as `live`, and
+    /// no more once written for the last time.
+    #[test]
+    fn write_meanwhile_writes_what_was_sampled() {
+        let d = std::env::temp_dir().join(format!("aqr-stats-unit-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (j, h) = (d.join("a.json"), d.join("a.html"));
+        let s = Stats {
+            outputs: vec![j.clone(), h.clone()],
+            runs: Mutex::default(),
+            current: Mutex::default(),
+            writing: Mutex::new(false),
+        };
+        assert!(s.write_meanwhile());
+        assert!(!j.exists(), "nothing to write yet");
+        s.runs.lock().unwrap().push(json(&synthetic("compress"), false));
+        assert!(s.write_meanwhile());
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&j).unwrap()).unwrap();
+        assert_eq!(v["state"], "live");
+        assert_eq!(v["runs"][0]["mode"], "compress");
+        let page = std::fs::read_to_string(&h).unwrap();
+        assert!(page.contains("\"state\":\"live\""));
+        s.write(Status::Finished, false).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&j).unwrap()).unwrap();
+        assert_eq!(v["state"], "finished");
+        assert!(!s.write_meanwhile(), "written for the last time");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }

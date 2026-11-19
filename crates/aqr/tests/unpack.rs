@@ -352,3 +352,66 @@ fn privileged_xattrs_held() {
     }
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// Encrypted entries of other formats: extracted with the passphrase, left out (told, an error
+/// at the end) with none; a 7z of encrypted headers, and a wrong passphrase, refused whole.
+#[test]
+fn encrypted_extracted() {
+    let d = scratch("enc");
+    fs::write(d.join("pass"), "pass word\n").unwrap();
+    fs::write(d.join("pass7"), "päss wörd\n").unwrap();
+    fs::write(d.join("wrong"), "nope\n").unwrap();
+    let run = |args: &[&str]| {
+        let args: Vec<&std::ffi::OsStr> = args.iter().map(|s| s.as_ref()).collect();
+        aqr_in(&d, &args)
+    };
+    for (name, pass) in [("enc-aes256.zip", "pass"), ("enc-zipcrypto.zip", "pass"), ("enc.7z", "pass7")] {
+        fixture(&d, name, name);
+        let out = format!("out-{name}");
+        let pf = format!("--passphrase-from={pass}");
+        let o = run(&["-d", &pf, "-o", &out, name]);
+        assert!(o.status.success(), "{name}: {}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(fs::read(d.join(&out).join("secret.txt")).unwrap(), text(), "{name}");
+        assert_eq!(fs::read(d.join(&out).join("small.txt")).unwrap(), b"small\n", "{name}");
+        // tested alike
+        let o = run(&["-K", &pf, name]);
+        assert!(o.status.success(), "{name}: {}", String::from_utf8_lossy(&o.stderr));
+        // a wrong passphrase leaves them out
+        let o = run(&["-d", "--passphrase-from=wrong", "-o", &format!("w-{name}"), name]);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success() && err.contains("encrypted"), "{name}: {err}");
+    }
+    // the headers encrypted too: nothing is known without the passphrase
+    fixture(&d, "enc-headers.7z", "h.7z");
+    let o = run(&["-d", "--passphrase-from=wrong", "-o", "h-out", "h.7z"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && err.contains("passphrase"), "{err}");
+    assert!(!d.join("h-out").join("secret.txt").exists());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// `--stats=FILE.json` of an archive of another format extracted: its run, with the contents.
+#[test]
+fn foreign_stats() {
+    let d = scratch("stats");
+    fixture(&d, "tree.tar.gz", "t.tar.gz");
+    fixture(&d, "one.txt.xz", "one.txt.xz");
+    let o = aqr_in(&d, &["-d".as_ref(), "--stats=s.json".as_ref(), "-o".as_ref(), "out".as_ref(), "t.tar.gz".as_ref()]);
+    // (an entry left out is an error at the end, the stats written all the same)
+    assert!(!o.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(d.join("s.json")).unwrap()).unwrap();
+    let run = &v["runs"][0];
+    assert_eq!(run["mode"], "decompress");
+    assert_eq!(run["input"], "t.tar.gz");
+    assert!(run["written"].as_u64().unwrap() > 0);
+    assert!(
+        run["contents"].as_array().unwrap().iter().any(|c| c["path"].as_str().is_some_and(|p| p.ends_with("file.txt")))
+    );
+    // a single stream, tested: one content, of the length decoded
+    let o = aqr_in(&d, &["-K".as_ref(), "--stats=u.json".as_ref(), "one.txt.xz".as_ref()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(d.join("u.json")).unwrap()).unwrap();
+    assert_eq!(v["runs"][0]["mode"], "test");
+    assert_eq!(v["runs"][0]["contents"][0]["len"], text().len());
+    fs::remove_dir_all(&d).unwrap();
+}
