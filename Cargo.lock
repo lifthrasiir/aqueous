@@ -1044,6 +1044,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-ima",
+ "aqr-testkit",
  "aqr-vorbis",
 ]
 
@@ -1141,6 +1142,7 @@ name = "aqr-inno"
 version = "0.1.0"
 dependencies = [
  "aqr-lzma",
+ "aqr-testkit",
  "crc32fast",
 ]
 
@@ -1666,6 +1668,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "memchr",
  "memmap2",
  "rayon",
@@ -1818,6 +1821,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
 ]
 
 [[package]]
