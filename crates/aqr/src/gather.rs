@@ -276,7 +276,7 @@ fn walk(
         if out {
             continue;
         }
-        let mut path = dir.join(&name);
+        let mut path = joined(dir, &name);
         let mut t = t;
         if follow.on && t.is_symlink() {
             let m = fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -296,6 +296,43 @@ fn walk(
     }
     follow.chain.pop();
     Ok(())
+}
+
+/// `dir` and `name` joined: where `name` is one Win32 reads as another (a trailing dot or space
+/// taken off, a device's name such as `CON` or `NUL.txt`), the extended-length path (`\\?\`) it
+/// takes as it is, as the entry could be listed but not opened else.
+fn joined(dir: &Path, name: &OsStr) -> PathBuf {
+    #[cfg(windows)]
+    if win32_changes(name) {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let base = std::path::absolute(dir).unwrap_or_else(|_| dir.to_owned());
+        let wide: Vec<u16> = base.as_os_str().encode_wide().collect();
+        let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
+        let v: Vec<u16> = if wide.starts_with(&verbatim) {
+            wide
+        } else if wide.starts_with(&[b'\\' as u16, b'\\' as u16]) {
+            [r"\\?\UNC\".encode_utf16().collect::<Vec<u16>>(), wide[2..].to_vec()].concat()
+        } else {
+            [verbatim, wide].concat()
+        };
+        return PathBuf::from(std::ffi::OsString::from_wide(&v)).join(name);
+    }
+    dir.join(name)
+}
+
+/// Whether Win32 takes `name` as another name than it is.
+#[cfg(windows)]
+fn win32_changes(name: &OsStr) -> bool {
+    let n = name.to_string_lossy();
+    if n.ends_with(['.', ' ']) && n != "." && n != ".." {
+        return true;
+    }
+    let stem = n.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    let numbered = |p: &str| {
+        stem.strip_prefix(p)
+            .is_some_and(|d| matches!(d.chars().collect::<Vec<_>>()[..], ['1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}',]))
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT")
 }
 
 /// What `-x` (`--exclude`) leaves out of the inputs, with what is under it: the entries of a
