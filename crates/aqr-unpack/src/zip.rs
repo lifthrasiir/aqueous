@@ -395,7 +395,8 @@ impl<'d> Listing<'d> {
         // (by their indices among all, as Opened::units has them)
         let units: Vec<usize> = (0..self.units.len()).filter(|&k| want(self.units[k].c)).collect();
         let packed: u64 = units.iter().map(|&k| self.units[k].body.len() as u64).sum();
-        let total: u64 = units.iter().map(|&k| self.units[k].size).sum();
+        // (sizes are as the archive tells: a sum of liars may pass 2^64)
+        let total = units.iter().map(|&k| self.units[k].size).fold(0, u64::saturating_add);
         let (done_packed, done) = (AtomicU64::new(0), AtomicU64::new(0));
         let failed = AtomicBool::new(false);
         let left = AtomicU64::new(0);
@@ -474,6 +475,9 @@ fn decode(d: &[u8], u: &Unit, pass: Option<&[u8]>) -> Result<Vec<u8>, Fail> {
 /// The data of `body` (decrypted) of unit `u`.
 fn plain(body: &[u8], u: &Unit) -> Result<Vec<u8>, String> {
     let size = usize::try_from(u.size).map_err(|_| "too large")?;
+    if matches!(u.method, 14 | 93 | 95) {
+        codec::plausible(size, body.len())?;
+    }
     let data = match u.method {
         0 if body.len() != size => return Err("not of its size".into()),
         0 => body.to_vec(),

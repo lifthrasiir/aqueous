@@ -186,6 +186,20 @@ pub fn room(n: usize) -> Result<Vec<u8>, String> {
     Ok(v)
 }
 
+/// The most bytes of data that LZMA, Zstandard and xz streams hold per byte of them (Zstandard's
+/// run-length blocks, 128 KiB for 4 bytes, are the most; LZMA's long repeated matches the next).
+const EXPANSION: usize = 1 << 16;
+
+/// Whether `size` bytes of data may be of `input` bytes of a stream of such a format: a size
+/// told by an archive is room reserved before anything is decoded, so one that no stream could
+/// make is refused rather than reserved.
+pub fn plausible(size: usize, input: usize) -> Result<(), String> {
+    match input.checked_mul(EXPANSION).and_then(|m| m.checked_add(EXPANSION)) {
+        Some(max) if size > max => Err(format!("{size} bytes of data of {input} bytes of stream")),
+        _ => Ok(()),
+    }
+}
+
 fn lzma_props(b: u8) -> Result<Props, String> {
     Props::from_byte(b).ok_or_else(|| "LZMA: bad properties".to_string())
 }

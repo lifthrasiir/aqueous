@@ -1773,6 +1773,7 @@ dependencies = [
  "aqr-foreign",
  "aqr-lzma",
  "aqr-rar",
+ "aqr-testkit",
  "aqr-zip",
  "encoding_rs",
  "sha2",
