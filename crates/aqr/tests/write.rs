@@ -1142,3 +1142,129 @@ fn req_id(req: &[u8]) -> u64 {
     let at = s.find("\"id\":").unwrap() + 5;
     s[at..].split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap()
 }
+
+/// out/6: an archive of no files is extracted (an empty directory made, by `-o`, by its name,
+/// and told where there is one already), tested and listed.
+#[test]
+fn extracting_an_archive_of_no_files() {
+    let d = scratch("out6-zero");
+    fs::create_dir_all(d.join("empty/sub")).unwrap();
+    ok(&d, &["-q", "-o", "z.aqr", "empty"]);
+    let o = ok(&d, &["-d", "-o", "zo", "z.aqr"]);
+    assert!(stderr(&o).contains("0 files"), "{}", stderr(&o));
+    assert!(d.join("zo").is_dir() && fs::read_dir(d.join("zo")).unwrap().count() == 1);
+    let o = aqr(&d, &["-d", "-o", "zo", "z.aqr"]);
+    assert!(!o.status.success() && stderr(&o).contains("zo exists (-f to overwrite)"), "{}", stderr(&o));
+    ok(&d, &["-d", "-f", "-o", "zo", "z.aqr"]);
+    ok(&d, &["-d", "z.aqr"]);
+    assert!(d.join("z").is_dir());
+    assert!(stderr(&ok(&d, &["-K", "z.aqr"])).contains("0 files"));
+    assert!(String::from_utf8_lossy(&ok(&d, &["-t", "-q", "z.aqr"]).stdout).contains("sub"));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// out/6: modification times at the extremes of what an archive can hold (the least and greatest
+/// seconds, a nanosecond short of the next second, millennia off) are applied as far as the file
+/// system takes them, on the right side of 1970 and not wrapped round; nothing fails or panics.
+#[cfg(unix)]
+#[test]
+fn extracting_extreme_times() {
+    use aqr_archive::{Entry, EntryNode, Extra, Time, Tree};
+    use aqr_compress::{Input, Options, compress_tree};
+    let d = scratch("out6-times");
+    for (secs, nanos) in
+        [(i64::MIN, 0), (i64::MAX, 999_999_999), (-1, 999_999_999), (1 << 40, 5), (-(1 << 40), 5), (i64::MIN / 2, 1)]
+    {
+        let extra = Extra { mtime: Some(Time::new(secs, nanos)), ..Extra::default() };
+        let entry = Entry { parent: None, name: b"f".to_vec(), node: EntryNode::File(0), extra };
+        let t = Tree { root: Extra::default(), entries: vec![entry] };
+        let contents = [b"x".to_vec()];
+        let inputs: Vec<Input> = contents.iter().map(|c| Input { name: b"c", data: c }).collect();
+        fs::write(d.join("t.aqr"), compress_tree(&t, &inputs, &Options::default()).archive).unwrap();
+        let _ = fs::remove_dir_all(d.join("tx"));
+        let o = aqr(&d, &["-d", "-o", "tx", "t.aqr"]);
+        assert!(o.status.success() && !stderr(&o).contains("panicked"), "{secs} {nanos}: {}", stderr(&o));
+        assert_eq!(fs::read(d.join("tx/f")).unwrap(), b"x");
+        let m = fs::metadata(d.join("tx/f")).unwrap().modified().unwrap();
+        let after_1970 = m >= std::time::UNIX_EPOCH;
+        assert_eq!(after_1970, secs >= 0, "{secs} {nanos}: {m:?}");
+        if secs == -1 {
+            assert_eq!(m, std::time::UNIX_EPOCH - std::time::Duration::new(0, 1));
+        }
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// out/6: a destination that cannot be written (a read-only directory, a parent that is a file,
+/// the output a file there already) fails with the path and the reason, nothing made.
+#[cfg(unix)]
+#[test]
+fn unwritable_destinations() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = scratch("out6-dest");
+    fs::write(d.join("f.txt"), b"x").unwrap();
+    ok(&d, &["-q", "-o", "a.aqr", "f.txt"]);
+    fs::create_dir_all(d.join("ro")).unwrap();
+    fs::set_permissions(d.join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+    // (root writes anywhere)
+    let root = fs::write(d.join("ro/probe"), b"").is_ok();
+    for (args, why) in [
+        (&["-d", "-o", "ro/out", "a.aqr"][..], "Permission denied"),
+        (&["-d", "-f", "-o", "ro", "a.aqr"], ""),
+        (&["-d", "-o", "f.txt/sub", "a.aqr"], "Not a directory"),
+        (&["-d", "-o", "f.txt", "a.aqr"], "f.txt exists (-f to overwrite)"),
+    ] {
+        let o = aqr(&d, args);
+        let e = stderr(&o);
+        if args[1] == "-o" && args[2] == "ro/out" && root {
+            continue;
+        }
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {e}");
+        assert!(e.starts_with("aqr: ") && e.contains(why) && !e.contains("panicked"), "{args:?}: {e}");
+    }
+    assert!(!d.join("ro/out").exists() && !d.join("f.txt/sub").exists());
+    assert_eq!(fs::read(d.join("f.txt")).unwrap(), b"x");
+    assert_eq!(fs::read_dir(d.join("ro")).unwrap().count(), root as usize);
+    fs::set_permissions(d.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// out/6: `--stats` on archives damaged (a byte flipped, cut short, not an archive): the run ends
+/// as it does without it (exit code 3, the files lost named), and the stats files are written, of
+/// the run finished, valid.
+#[test]
+fn stats_on_damaged_archives() {
+    let d = scratch("out6-stats");
+    source(&d, 4);
+    ok(&d, &["-q", "-o", "s.aqr", "src"]);
+    let a = fs::read(d.join("s.aqr")).unwrap();
+    let flipped = {
+        let mut b = a.clone();
+        b[a.len() / 3] ^= 1;
+        b
+    };
+    for (what, bytes) in [("flipped", flipped), ("cut", a[..a.len() / 2].to_vec()), ("junk", vec![7; 100])] {
+        fs::write(d.join("sd.aqr"), &bytes).unwrap();
+        for args in [&["-K"][..], &["-d", "-f", "-o", "sdx"]] {
+            for stats in ["--stats=st.json", "--stats=st.html"] {
+                let _ = fs::remove_file(d.join("st.json"));
+                let _ = fs::remove_file(d.join("st.html"));
+                let mut a: Vec<&str> = args.to_vec();
+                a.extend([stats, "sd.aqr"]);
+                let o = aqr(&d, &a);
+                let e = stderr(&o);
+                assert_eq!(o.status.code(), Some(3), "{what} {a:?}: {e}");
+                assert!(e.contains("stats written to") && !e.contains("panicked"), "{what} {a:?}: {e}");
+                let name = &stats[8..];
+                let written = fs::read_to_string(d.join(name)).unwrap();
+                if name.ends_with("json") {
+                    let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+                    assert_eq!(v["state"], "finished", "{what} {a:?}");
+                } else {
+                    assert!(written.contains("</html>"), "{what} {a:?}");
+                }
+            }
+        }
+    }
+    fs::remove_dir_all(&d).unwrap();
+}

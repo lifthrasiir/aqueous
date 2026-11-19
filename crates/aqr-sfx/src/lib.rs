@@ -310,6 +310,66 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    fn entry(parent: Option<usize>, name: &[u8], node: EntryNode) -> Entry {
+        Entry { parent, name: name.to_vec(), node, extra: Extra::default() }
+    }
+
+    /// Names that collide once sanitised (`a:b`, `a_b`) are a failure to write the second, not
+    /// one written over the first; the first stays. Links and special entries are left out (as
+    /// this first stub has it), not counted, and what is after them is written.
+    #[test]
+    fn collisions_and_links() {
+        let d = std::env::temp_dir().join(format!("aqr-sfx-collide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let t = Tree {
+            entries: vec![
+                entry(None, b"a:b", EntryNode::File(0)),
+                entry(None, b"link", EntryNode::Link(b"a:b".to_vec())),
+                entry(None, b"special", EntryNode::Special(1)),
+                entry(None, b"fine", EntryNode::File(1)),
+                entry(None, b"a_b", EntryNode::File(1)),
+            ],
+            ..Tree::default()
+        };
+        let v = || Value::Tree(Box::new(t.clone()), vec![b"first".to_vec(), b"second".to_vec()]);
+        let e = extract(v(), &d).unwrap_err();
+        assert!(e.contains("a_b") && e.contains("there already, not written over"), "{e}");
+        assert_eq!(std::fs::read(d.join("a_b")).unwrap(), b"first");
+        assert_eq!(std::fs::read(d.join("fine")).unwrap(), b"second");
+        assert!(!d.join("link").exists() && !d.join("special").exists());
+        // (without the collision: two files, and the link and special entry not counted)
+        let _ = std::fs::remove_dir_all(&d);
+        let mut t2 = t.clone();
+        t2.entries.pop();
+        assert_eq!(extract(Value::Tree(Box::new(t2), vec![b"first".to_vec(), b"second".to_vec()]), &d), Ok(2));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A name that is nothing but what is replaced (a dot, a space, `:`) still has a name, and a
+    /// device's name as a directory makes a directory of the replaced name that files go in.
+    #[test]
+    fn names_that_sanitize_to_little() {
+        for (name, want) in [(" ", "_"), (".", "_"), (":", "_"), ("::", "__"), ("\u{1}", "_"), ("CON ", "CON_")] {
+            let got = sanitized(name.as_bytes());
+            assert_eq!(got, want, "{name:?}");
+            assert!(!got.is_empty() && got != "." && got != "..");
+        }
+        let d = std::env::temp_dir().join(format!("aqr-sfx-device-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let t = Tree {
+            entries: vec![
+                entry(None, b"CON", EntryNode::Dir),
+                entry(Some(0), b"x:y", EntryNode::File(0)),
+                entry(None, b" ", EntryNode::File(0)),
+            ],
+            ..Tree::default()
+        };
+        assert_eq!(extract(Value::Tree(Box::new(t), vec![b"c".to_vec()]), &d), Ok(2));
+        assert_eq!(std::fs::read(d.join("_CON/x_y")).unwrap(), b"c");
+        assert_eq!(std::fs::read(d.join("_")).unwrap(), b"c");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn names_stay_in_their_directory() {
         for (name, want) in [
