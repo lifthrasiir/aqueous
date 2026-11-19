@@ -564,7 +564,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "sqlite-recons",
         version: 2,
-        sha512_256: hex("4b544507f2459700d9b1e2683f3366dc2230166e8c8461f4d166f4ec90f71347"),
+        sha512_256: hex("15a52d9007119161297531bbdc3f85c90b8c6639a351cc82e71b69c0c813bbf3"),
         block: include_bytes!("../wasm/sqlite-recons.block"),
     },
     Known {

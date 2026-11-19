@@ -383,70 +383,33 @@ fn sort_runs(n: usize, same: impl Fn(usize, usize) -> bool, full: impl Fn(&u32, 
     }
 }
 
-/// Sorts `ix` (which comes in ascending order) by `k`, keeping ties in order: LSD radix
-/// sort over the bytes that vary, in `tk` and `ti` (of the same room).
-fn radix_sort(k: &mut Vec<u128>, ix: &mut Vec<u32>, tk: &mut Vec<u128>, ti: &mut Vec<u32>) {
-    let n = k.len();
-    let k0 = k.first().copied().unwrap_or(0);
-    let diff = k.iter().fold(0u128, |a, &x| a | (x ^ k0));
-    let (mut bytes, mut nb) = ([0u32; 16], 0);
-    for b in (0..16).filter(|b| (diff >> (8 * b)) as u8 != 0) {
-        bytes[nb] = b;
-        nb += 1;
-    }
-    if n < 512 || nb > 10 {
-        // (by key and row: the rows come in order, each of its key)
-        ix.sort_unstable_by_key(|&r| (k[r as usize], r));
-        tk.clear();
-        tk.extend(ix.iter().map(|&r| k[r as usize]));
-        std::mem::swap(k, tk);
-        return;
-    }
+/// Sorts `ix` (which comes in ascending order) by `k`, keeping ties in order, and `k` with it
+/// (by way of `tk`). Keys of more than 12 varying bytes only come here: a radix sort over that
+/// many bytes is no faster than comparing.
+fn sort_keys(k: &mut Vec<u128>, ix: &mut [u32], tk: &mut Vec<u128>) {
+    // (by key and row: the rows come in order, each of its key)
+    ix.sort_unstable_by_key(|&r| (k[r as usize], r));
     tk.clear();
-    tk.resize(n, 0);
-    ti.clear();
-    ti.resize(n, 0);
-    for &b in &bytes[..nb] {
-        let mut cnt = [0usize; 257];
-        for &x in k.iter() {
-            cnt[(x >> (8 * b)) as u8 as usize + 1] += 1;
-        }
-        for i in 0..256 {
-            cnt[i + 1] += cnt[i];
-        }
-        for (&x, &i) in k.iter().zip(ix.iter()) {
-            let d = (x >> (8 * b)) as u8 as usize;
-            tk[cnt[d]] = x;
-            ti[cnt[d]] = i;
-            cnt[d] += 1;
-        }
-        std::mem::swap(k, tk);
-        std::mem::swap(ix, ti);
-    }
+    tk.extend(ix.iter().map(|&r| k[r as usize]));
+    std::mem::swap(k, tk);
 }
 
-/// The buffers [`order_in`] works in, for `n` rows: two of keys, two of rows.
+/// The buffers [`order_in`] works in, for `n` rows: two of keys, one of rows.
 pub struct OrderBufs {
     a: Vec<u128>,
     b: Vec<u128>,
     ix: Vec<u32>,
-    ti: Vec<u32>,
 }
 
 impl OrderBufs {
     pub fn with_capacity(n: usize) -> Self {
-        OrderBufs {
-            a: Vec::with_capacity(n),
-            b: Vec::with_capacity(n),
-            ix: Vec::with_capacity(n),
-            ti: Vec::with_capacity(n),
-        }
+        OrderBufs { a: Vec::with_capacity(n), b: Vec::with_capacity(n), ix: Vec::with_capacity(n) }
     }
 
     /// Bytes of [`aqr_api::stack`] that [`OrderBufs::with_capacity`] takes.
     pub fn plan(n: usize) -> u64 {
         use aqr_api::stack::block;
-        2 * block(16 * n as u64) + 2 * block(4 * n as u64)
+        2 * block(16 * n as u64) + block(4 * n as u64)
     }
 }
 
@@ -545,7 +508,7 @@ pub fn order_in(keys: &Keys, key: &Key, bufs: &mut OrderBufs, out: &mut Vec<u32>
         nb += 1;
     }
     let compact = |x: u128| bytes[..nb].iter().fold(0u128, |a, &b| (a << 8) | ((x >> (8 * b)) as u8) as u128);
-    let OrderBufs { a, b, ix, ti } = bufs;
+    let OrderBufs { a, b, ix } = bufs;
     if nb <= 12 {
         a.clear();
         a.extend((0..n).map(|r| (compact(prefix(r)) << 32) | r as u128));
@@ -556,7 +519,7 @@ pub fn order_in(keys: &Keys, key: &Key, bufs: &mut OrderBufs, out: &mut Vec<u32>
         a.extend((0..n).map(prefix));
         ix.clear();
         ix.extend(0..n as u32);
-        radix_sort(a, ix, b, ti);
+        sort_keys(a, ix, b);
         sort_runs(n, |i, j| a[i] == a[j], full, ix);
         out.clear();
         out.extend_from_slice(ix);
