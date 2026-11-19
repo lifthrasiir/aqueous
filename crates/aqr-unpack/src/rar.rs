@@ -151,7 +151,7 @@ impl<'d> Listing<'d> {
                     match names {
                         None => self.notes.push((lax(), build::outside(&shown))),
                         Some(names) => {
-                            if let Err(e) = self.b.add(&names, Some(EntryNode::Link(target)), x) {
+                            if let (_, Some(e)) = self.b.add_once(&names, EntryNode::Link(target), x) {
                                 self.notes.push((lax(), e));
                             }
                         }
@@ -189,7 +189,7 @@ impl<'d> Listing<'d> {
                         },
                     }
                     let Some(names) = names.filter(|n| !n.is_empty()) else { continue };
-                    if let Err(e) = self.b.add(&names, Some(EntryNode::File(c.unwrap())), h.extra) {
+                    if let (_, Some(e)) = self.b.add_once(&names, EntryNode::File(c.unwrap()), h.extra) {
                         self.notes.push((lax(), e));
                     }
                     continue;

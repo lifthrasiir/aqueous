@@ -22,8 +22,32 @@ fn unpack_format(f: Format) -> aqr_unpack::Format {
     }
 }
 
-/// `tree` written as `f` and read back: the archive's entries and the contents by entry.
+/// `tree` written as `f` and read back: the archive's entries and the contents by entry (and
+/// nothing told).
 fn round(f: Format, tree: &Tree, files: &Files, o: &Options) -> std::io::Result<(Tree, BTreeMap<usize, Vec<u8>>)> {
+    let (t, contents, notes) = round_told(f, tree, files, o)?;
+    assert!(notes.is_empty(), "{f:?}: {notes:?}");
+    Ok((t, contents))
+}
+
+/// What the reader tells.
+#[derive(Default)]
+struct Told(Kept, std::sync::Mutex<Vec<String>>);
+
+impl aqr_unpack::Sink for Told {
+    fn entries(&self, t: &Tree, new: &[usize]) -> Result<(), String> {
+        self.0.entries(t, new)
+    }
+    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
+        self.0.content(c, d)
+    }
+    fn note(&self, n: &str) {
+        self.1.lock().unwrap().push(n.to_string());
+    }
+}
+
+/// [`round`], and what the reader told.
+fn round_told(f: Format, tree: &Tree, files: &Files, o: &Options) -> std::io::Result<(Tree, Contents, Vec<String>)> {
     let mut out = Cursor::new(Vec::new());
     let w = aqr_pack::write(f, tree, files, o, &mut out, &|_| {})?;
     let out = out.into_inner();
@@ -45,12 +69,16 @@ fn round(f: Format, tree: &Tree, files: &Files, o: &Options) -> std::io::Result<
                 &|_| {},
             )
             .unwrap();
-        return Ok((Tree::default(), BTreeMap::from([(0, data)])));
+        return Ok((Tree::default(), BTreeMap::from([(0, data)]), Vec::new()));
     }
-    let kept = Kept::default();
-    let done = opened.unpack(o.threads, &kept).unwrap();
-    Ok((done.tree, kept.0.into_inner().unwrap()))
+    let told = Told::default();
+    let done = opened.unpack(o.threads, &told).unwrap();
+    let notes = told.1.into_inner().unwrap();
+    assert_eq!(done.skipped, notes.len());
+    Ok((done.tree, told.0.0.into_inner().unwrap(), notes))
 }
+
+type Contents = BTreeMap<usize, Vec<u8>>;
 
 fn file_tree(names: &[&[u8]]) -> Tree {
     let entries = names.iter().map(|n| entry(None, n, EntryNode::File(0), Extra::default())).collect();
@@ -153,7 +181,8 @@ fn passphrases() {
 }
 
 /// Two entries of one name, or of names differing in case only (which a case-folding file
-/// system takes for one): both are listed, each with its own content.
+/// system takes for one): both are written, each with its own content; read back, those of one
+/// name give the later, the earlier told left out (but in tar, where the later is an update).
 #[test]
 fn colliding_names() {
     let files = Files(vec![b"first".to_vec(), b"second".to_vec()]);
@@ -169,7 +198,11 @@ fn colliding_names() {
             for d in &files.0 {
                 assert!(out.windows(d.len()).any(|w| w == &d[..]), "{f:?} {names:?}: {d:?} lost");
             }
-            let (got, contents) = round(f, &tree, &files, &o).unwrap();
+            let (got, contents, notes) = round_told(f, &tree, &files, &o).unwrap();
+            // (of one name: the later kept; but for tar's update, the earlier told left out)
+            let again = names[0] == names[1] && !matches!(f, Format::Tar(_));
+            let want: &[&str] = if again { &["same: given again, the earlier left out"] } else { &[] };
+            assert_eq!(notes, want, "{f:?} {names:?}");
             if names[0] != names[1] {
                 assert_eq!(got.entries.len(), 2, "{f:?} {names:?}");
                 let mut data: Vec<_> = contents.into_values().collect();

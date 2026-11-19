@@ -316,10 +316,15 @@ impl<'d> Listing<'d> {
             }
             EntryNode::File(c)
         };
-        if let Err(e) = self.b.add(&names, Some(node), x) {
-            self.notes.push((lax(), e));
-        }
+        self.put(&names, node, x);
         Ok(())
+    }
+
+    /// A file or link of `names` added ([`Builder::add_once`]), what it tells told.
+    fn put(&mut self, names: &[&[u8]], node: EntryNode, x: Extra) {
+        if let (_, Some(note)) = self.b.add_once(names, node, x) {
+            self.notes.push((names.iter().map(|n| n.to_vec()).collect(), note));
+        }
     }
 
     pub fn units(&self) -> Vec<String> {
@@ -357,9 +362,7 @@ impl<'d> Listing<'d> {
                     0 => self.empty.push(c),
                     _ => self.units.push(u),
                 }
-                if let Err(e) = self.b.add(&names, Some(EntryNode::File(c)), x) {
-                    self.notes.push((names.iter().map(|n| n.to_vec()).collect(), e));
-                }
+                self.put(&names, EntryNode::File(c), x);
             }
         }
         ok

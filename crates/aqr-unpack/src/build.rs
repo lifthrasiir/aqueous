@@ -306,6 +306,20 @@ impl Builder {
         }
     }
 
+    /// [`Builder::add`] of a file or link of a format whose entries are not meant to be given
+    /// again (all but tar, whose members appended update those before): the entry, and what to
+    /// tell, an error's or of one of the name given before (left out, the later kept).
+    pub fn add_once(&mut self, names: &[&[u8]], node: EntryNode, extra: Extra) -> (Option<usize>, Option<String>) {
+        let before = self.tree.entries.len();
+        match self.add(names, Some(node), extra) {
+            Ok(Some(i)) if i < before => {
+                (Some(i), Some(format!("{}: given again, the earlier left out", shown(names))))
+            }
+            Ok(i) => (i, None),
+            Err(e) => (None, Some(e)),
+        }
+    }
+
     fn push(&mut self, key: (Option<usize>, Vec<u8>), node: EntryNode, extra: Extra) -> usize {
         let i = self.tree.entries.len();
         self.tree.entries.push(Entry { parent: key.0, name: key.1.clone(), node, extra });

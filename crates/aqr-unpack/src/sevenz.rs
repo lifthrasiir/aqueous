@@ -375,18 +375,21 @@ impl<'d> Listing<'d> {
                 EntryNode::File(c)
             };
             let link = matches!(node, EntryNode::Link(_));
-            let r = match (dir, names.is_empty()) {
-                (true, true) => self.b.add(&[], None, x),
-                _ => self.b.add(&names, Some(node), x),
+            let (i, note) = match (dir, names.is_empty()) {
+                (true, true) => (None, self.b.add(&[], None, x).err()),
+                (true, false) => match self.b.add(&names, Some(node), x) {
+                    Ok(i) => (i, None),
+                    Err(e) => (None, Some(e)),
+                },
+                (false, _) => self.b.add_once(&names, node, x),
             };
-            match r {
-                Ok(Some(i)) if link => {
-                    let (f, k) = sub.unwrap();
-                    self.units[f].links = true;
-                    self.links.push((f, k, i));
-                }
-                Ok(_) => {}
-                Err(e) => self.notes.push((lax(), e)),
+            if let (Some(i), true) = (i, link) {
+                let (f, k) = sub.unwrap();
+                self.units[f].links = true;
+                self.links.push((f, k, i));
+            }
+            if let Some(e) = note {
+                self.notes.push((lax(), e));
             }
         }
         for u in &mut self.units {

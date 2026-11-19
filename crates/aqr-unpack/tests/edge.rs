@@ -429,14 +429,17 @@ fn central_offsets() {
     assert!(case("local name past the end", Format::Zip, &z).is_err());
 }
 
-/// The same path twice (ZIP): the later one kept as tar's, no panic; with a directory and a
-/// file of one name, and names holding a zero byte (left out, told).
+/// The same path twice (ZIP, where it is not meant as tar's update): the later one kept, the
+/// earlier left out and told; with a directory and a file of one name, and names holding a zero
+/// byte (left out, told).
 #[test]
 fn zip_names() {
     let es = [E::stored("a", b"first"), E::stored("a", b"second"), E::stored("b/", b""), E::stored("b", b"file")];
     let o = case("duplicates", Format::Zip, &zip_of(&es, false)).unwrap();
-    assert!(o.files.get("a").is_some_and(|v| v == b"second" || v == b"first"), "{:?}", o.files);
+    assert_eq!(o.files.get("a").map(|v| &v[..]), Some(&b"second"[..]), "{:?}", o.files);
     assert!(o.done.tree.entries.len() <= 3, "{} entries", o.done.tree.entries.len());
+    assert!(o.notes.iter().any(|n| n == "a: given again, the earlier left out"), "{:?}", o.notes);
+    assert_eq!(o.done.skipped, 2, "{:?}", o.notes);
     let es = [E::stored("a\0b", b"x"), E::stored("c/\0", b"y"), E::stored("ok", b"z")];
     let o = case("nul", Format::Zip, &zip_of(&es, false)).unwrap();
     assert_eq!(o.files.keys().collect::<Vec<_>>(), ["ok"]);
@@ -891,8 +894,8 @@ fn sevenz_streams_and_files_disagree() {
     assert!(r.is_err(), "{:?}", r.map(|o| o.files));
 }
 
-/// The same path in two folders: the later one's (a name cannot hold a zero byte in 7z: it
-/// ends the name); a path reaching out left out, told.
+/// The same path in two folders: the later one's, the earlier left out, told (a name cannot hold
+/// a zero byte in 7z: it ends the name); a path reaching out left out, told.
 #[test]
 fn sevenz_duplicates_and_outside() {
     let es = [F::copy(b"first"), F::copy(b"second"), F::copy(b"out"), F::copy(b"ok")];
@@ -901,7 +904,8 @@ fn sevenz_duplicates_and_outside() {
     assert_eq!(o.files["a"], b"second");
     assert_eq!(o.files["ok"], b"ok");
     assert_eq!(o.files.len(), 2);
-    assert_eq!(o.done.skipped, 1, "{:?}", o.notes);
+    assert!(o.notes.iter().any(|n| n == "a: given again, the earlier left out"), "{:?}", o.notes);
+    assert_eq!(o.done.skipped, 2, "{:?}", o.notes);
 }
 
 /// Folders telling more output than any stream of their coder could make: an error, and no

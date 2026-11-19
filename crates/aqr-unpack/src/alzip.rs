@@ -322,7 +322,10 @@ impl<'d> Listing<'d> {
                         self.units.push(Unit { pieces, files, name: String::new(), left });
                     }
                     match names {
-                        Some(n) => self.b.add(&n, Some(EntryNode::File(c.unwrap())), h.extra),
+                        Some(n) => match self.b.add_once(&n, EntryNode::File(c.unwrap()), h.extra) {
+                            (_, Some(e)) => Err(e),
+                            (i, None) => Ok(i),
+                        },
                         None => continue,
                     }
                 }
