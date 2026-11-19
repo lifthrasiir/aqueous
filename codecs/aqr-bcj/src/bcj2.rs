@@ -165,7 +165,8 @@ fn walk(data: &[u8], rc: &[u8], mut main: impl FnMut(u8), mut target: impl FnMut
 pub fn decode(s: &Streams, rc: &[u8], size: usize) -> Result<Vec<u8>> {
     let mut rc = Rc::new(Slice { d: rc, pos: 0 }).ok_or(Error("bad range coder"))?;
     let mut probs = fresh_probs();
-    let mut out = Vec::with_capacity(size);
+    // (the data is no longer than the streams together: a size past them fails below)
+    let mut out = Vec::with_capacity(size.min(s.main.len() + s.call.len() + s.jump.len()));
     let (mut m, mut c, mut j) = (0, 0, 0);
     let mut prev = 0u8;
     while out.len() < size {
