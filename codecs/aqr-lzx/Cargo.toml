@@ -17,6 +17,7 @@ aqr-lzma = { path = "../aqr-lzma", default-features = false }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [dev-dependencies]
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 memmap2 = "0.9"
 sha1 = { version = "0.10", default-features = false }
 

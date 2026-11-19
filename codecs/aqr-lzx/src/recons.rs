@@ -1388,7 +1388,11 @@ pub struct Split {
 /// Splits a stream of chunks: None where a chunk does not read whole, or is not [`CHUNK`]
 /// bytes of data (but the last).
 pub fn split(chunks: &[(&[u8], usize)]) -> Result<Split> {
-    let mut data = vec![0; data_len(chunks)];
+    // (before anything is allocated: the lengths are the container's claim)
+    if chunks.iter().any(|c| c.1 == 0 || c.1 > CHUNK) {
+        return Err(Error("chunks of another size"));
+    }
+    let mut data = aqr_common::mem::try_zeroed(data_len(chunks)).ok_or(Error("data too long"))?;
     let parses = read_into(chunks, &mut data)?;
     let mut enc = Enc::with(ArithEncoder::new(Vec::new()));
     walk(&mut enc, &data, &parses)?;
@@ -1397,7 +1401,7 @@ pub fn split(chunks: &[(&[u8], usize)]) -> Result<Split> {
 
 /// Bytes of the data of a stream of chunks.
 pub fn data_len(chunks: &[(&[u8], usize)]) -> usize {
-    chunks.iter().map(|c| c.1).sum()
+    chunks.iter().fold(0usize, |a, c| a.saturating_add(c.1))
 }
 
 /// [`split`] with the data written into `data` (of [`data_len`] bytes), as where a container
@@ -1599,7 +1603,8 @@ pub fn join_stream(
 /// The data and record of stream `src` of `v` (CAB's) of `n` bytes of data. None where it does
 /// not read whole.
 pub fn split_stream(src: &[u8], n: usize, v: Variant) -> Result<Split> {
-    let mut data = Vec::with_capacity(n);
+    let mut data = Vec::new();
+    data.try_reserve_exact(n).map_err(|_| Error("data too long"))?;
     let (record, cost) = split_stream_to(src, n, v, &mut data)?;
     Ok(Split { data, record, cost })
 }

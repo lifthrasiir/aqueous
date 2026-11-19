@@ -563,6 +563,11 @@ impl<'a> StreamReader<'a> {
             let hi = r.bits(16);
             e8 = Some(hi << 16 | r.bits(16));
         }
+        // (the length is the container's claim: reserved fallibly)
+        let mut data = Vec::new();
+        if !v.cab {
+            data.try_reserve_exact(n).ok()?;
+        }
         Some(StreamReader {
             src,
             n,
@@ -572,7 +577,7 @@ impl<'a> StreamReader<'a> {
             reps: REPS,
             end_bits: 0,
             frame_end: if v.cab { FRAME.min(n) } else { usize::MAX },
-            data: Vec::with_capacity(if v.cab { 0 } else { n }),
+            data,
             base: 0,
             e8,
             ends: None,
