@@ -157,7 +157,7 @@ fn archived_sizes_beyond_the_output() {
 /// whole (progressive).
 #[test]
 fn archived_sizes_beyond_the_output_whole() {
-    let Some(f) = formula::encode(PROGRESSIVE, 0) else { return };
+    let f = formula::encode(PROGRESSIVE, 0).expect("the progressive fixture is coded");
     let (a, ins) = inputs(&f);
     let (progressive, sizes) = module::params(&a.params).unwrap();
     assert!(progressive);
