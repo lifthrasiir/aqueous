@@ -126,3 +126,91 @@ fn hash_table_with_unreachable_slots_ends() {
     let t = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("hash_table hangs");
     assert!(t.is_none());
 }
+
+#[global_allocator]
+static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 30);
+
+/// Every damage of the inputs of `build` (the file without its tables, the NULs, the length,
+/// the start) ends in a file or an error, within a time, with no allocation the data cannot hold.
+#[test]
+fn build_of_damaged_inputs() {
+    use std::time::Duration;
+    for big in [false, true] {
+        let d = mo_file(&catalog(), big, 11, 0);
+        let (rest, start, nuls) = mo::split(&d).unwrap();
+        let t = Duration::from_secs(10);
+        aqr_testkit::damaged(&rest, 64, 64, t, |r| {
+            let _ = mo::build(r, start, &nuls, d.len());
+            let _ = mo::build(r, start, &nuls, r.len() + 3 * 8 * 7 + 44);
+        });
+        aqr_testkit::damaged(&nuls, 64, 64, t, |n| {
+            let _ = mo::build(&rest, start, n, d.len());
+        });
+        for s in [0, 1, 27, 28, start - 1, start + 1, d.len(), usize::MAX, u32::MAX as usize] {
+            let _ = mo::build(&rest, s, &nuls, d.len());
+        }
+        for len in [0, 1, 28, d.len() - 1, d.len() + 1, u32::MAX as usize, usize::MAX] {
+            assert!(len == d.len() || mo::build(&rest, start, &nuls, len).is_err());
+        }
+        // the whole file damaged: what encode takes, it rebuilds
+        aqr_testkit::damaged(&d, 64, 64, t, |x| {
+            if let Some(f) = formula::encode(x, 1) {
+                assert!(eval(&f).unwrap() == x);
+            }
+            let _ = formula::extent(x);
+        });
+    }
+}
+
+/// Duplicate originals (the hash table of a catalogue msgfmt would refuse still has to be
+/// reproduced or not taken), and keys of a context (`CTX\x04id`).
+#[test]
+fn duplicates_and_contexts() {
+    let dup: Vec<(&[u8], &[u8])> = vec![(b"a", b"x"), (b"a", b"y"), (b"b", b"z")];
+    for hash in [0, 7] {
+        let d = mo_file(&dup, false, hash, 0);
+        if let Some(f) = formula::encode(&d, 1) {
+            assert!(eval(&f).unwrap() == d);
+        }
+    }
+    let ctx: Vec<(&[u8], &[u8])> =
+        vec![(b"menu\x04Open", b"A"), (b"dialog\x04Open", b"B"), (b"Open", b"C"), (b"\x04", b"D"), (b"\x04\x04", b"E")];
+    for big in [false, true] {
+        for hash in [0, 11, 13] {
+            let d = mo_file(&ctx, big, hash, 0);
+            let f = formula::encode(&d, 1).unwrap();
+            assert!(eval(&f).unwrap() == d);
+        }
+    }
+    // empty strings only; translations empty
+    let e: Vec<(&[u8], &[u8])> = vec![(b"", b""), (b"k", b"")];
+    let d = mo_file(&e, false, 5, 0);
+    assert!(eval(&formula::encode(&d, 1).unwrap()).unwrap() == d);
+}
+
+/// Hash tables of size 0, 1, 2 (too small for the probing's step, `size - 2`) and 3.
+#[test]
+fn hash_table_tiny_sizes() {
+    let none: [&[u8]; 0] = [];
+    let one: [&[u8]; 1] = [b"a"];
+    for size in 0..=3 {
+        for keys in [&none[..], &one[..]] {
+            let r = std::panic::catch_unwind(|| mo::hash_table(keys.iter(), size));
+            let r = r.unwrap_or_else(|_| panic!("size {size}, {} keys panics", keys.len()));
+            if size < 3 || keys.len() >= size {
+                assert!(r.is_none() || (keys.is_empty() && size > 0), "size {size}");
+            }
+        }
+    }
+    assert_eq!(mo::hash_table(one.iter(), 3).unwrap().iter().filter(|&&v| v == 1).count(), 1);
+    // headers of such sizes are not taken
+    for size in [1usize, 2] {
+        let mut d = mo_file(&catalog(), false, 11, 0);
+        d[20..24].copy_from_slice(&(size as u32).to_le_bytes());
+        assert!(formula::encode(&d, 1).is_none());
+    }
+    let mut d = mo_file(&[], false, 0, 0);
+    d[20..24].copy_from_slice(&2u32.to_le_bytes());
+    d.resize(d.len() + 8, 0);
+    assert!(formula::encode(&d, 1).is_none());
+}

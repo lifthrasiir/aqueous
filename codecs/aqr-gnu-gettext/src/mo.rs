@@ -100,7 +100,8 @@ pub fn hash(s: &[u8]) -> u32 {
 /// the slot holding its index plus 1. None where the table cannot hold them (or the probing, bounded
 /// by the size, finds no free slot).
 pub fn hash_table(keys: impl ExactSizeIterator<Item = impl AsRef<[u8]>>, size: usize) -> Option<Vec<u32>> {
-    if keys.len() >= size {
+    // (the probing steps by 1 plus the hash modulo size - 2: no such step in a table under 3)
+    if size < 3 || keys.len() >= size {
         return None;
     }
     let mut t = vec![0u32; size];
