@@ -12,6 +12,7 @@ aqr-disk = { path = "../aqr-disk" }
 aqr-archive = { path = "../../crates/aqr-archive" }
 aqr-formula = { path = "../../crates/aqr-formula" }
 zstd.workspace = true
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

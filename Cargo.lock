@@ -1110,6 +1110,7 @@ dependencies = [
  "aqr-archive",
  "aqr-disk",
  "aqr-formula",
+ "aqr-testkit",
  "zstd",
 ]
 
