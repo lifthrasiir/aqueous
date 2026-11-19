@@ -884,9 +884,13 @@ impl<'a> Head<'a> {
 
 /// The file of `len` bytes from the module's inputs ([`INPUTS`], FORMAT.md §3).
 pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
-    let mut o = Out { b: vec![0; len], taken: Vec::new() };
     let mut raw = Raw::of(inputs)?;
     let h = Head::read(&mut raw[s::HEAD])?;
+    // (the header tells the file's size: the length asked for is not reserved before it agrees)
+    if le32(h.header, 0x20)? as usize != len {
+        return Err(corrupt());
+    }
+    let mut o = Out { b: vec![0; len], taken: Vec::new() };
     let items = items(h.map);
     // (the header, the map and each section put, at most)
     o.taken.reserve_exact(TAKES + items.len());
@@ -1106,9 +1110,10 @@ pub fn decode(inputs: &[&[u8]], len: usize) -> Result<Vec<u8>> {
 /// and entries, and the sections it takes.
 const TAKES: usize = 3 + 10;
 
-/// The bytes the class data of item `d` may take: to the next section, else the end.
+/// The bytes the class data of item `d` may take: to the next section, else the end (never
+/// past it: a map's offsets are not trusted).
 fn class_data_room(items: &[Item], d: Item, len: usize) -> usize {
-    let next = items.iter().filter(|e| e.off > d.off).map(|e| e.off as usize).min().unwrap_or(len);
+    let next = items.iter().filter(|e| e.off > d.off).map(|e| e.off as usize).min().unwrap_or(len).min(len);
     next.saturating_sub(d.off as usize)
 }
 

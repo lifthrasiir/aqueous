@@ -473,6 +473,7 @@ dependencies = [
  "aqr-archive",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "sha1",
  "zstd",
 ]

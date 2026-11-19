@@ -18,6 +18,7 @@ sha1 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 zstd.workspace = true
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target

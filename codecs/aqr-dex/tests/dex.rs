@@ -10,6 +10,10 @@ use aqr_dex::dex::{self, mode, s};
 use aqr_dex::{encode, formula};
 use aqr_formula::{Apply, Formula};
 use sha1::{Digest, Sha1};
+use std::time::Duration;
+
+#[global_allocator]
+static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 30);
 
 fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
@@ -532,5 +536,60 @@ fn corrupt() {
         if let Ok(m) = formula::decode(&[], &refs, d.len() as u64) {
             assert_eq!(m.len(), d.len());
         }
+    }
+}
+
+/// The files are some kilobytes: what damaged input reserves stays far below this.
+const SMALL: usize = 1 << 24;
+
+/// A length no file has (the archive declares it, the module must not trust it): refused
+/// before the file's room is reserved.
+#[test]
+fn huge_lengths() {
+    let d = write(3, Shape::default());
+    let st = check(&d);
+    let refs: Vec<&[u8]> = st.iter().map(|v| v.as_slice()).collect();
+    for len in [u64::MAX, 1 << 62, 1 << 40, 1 << 33, d.len() as u64 * 1000, d.len() as u64 + 1, d.len() as u64 - 1, 0] {
+        aqr_testkit::case(&format!("length {len}"));
+        let r = formula::decode(&[], &refs, len);
+        assert!(r.is_err(), "length {len}");
+        assert!(aqr_testkit::most() < SMALL, "length {len}: {} bytes reserved", aqr_testkit::most());
+    }
+    assert_eq!(formula::decode(&[], &refs, d.len() as u64).unwrap(), d);
+    assert!(formula::decode(&[0], &refs, d.len() as u64).is_err(), "params");
+}
+
+/// Every damage of the module's inputs: an error, or a file of the length, and no large
+/// reservation (counts of the map and the headers are not trusted before they are checked).
+#[test]
+fn damaged_streams() {
+    for seed in [3, 8] {
+        let d = write(seed, Shape { code_order: true, data_order: true, ..Shape::default() });
+        let st = encode::split(&d).unwrap();
+        for k in 0..st.len() {
+            aqr_testkit::damaged(&st[k], 150, 64, Duration::from_secs(30), |v| {
+                let mut bad = st.clone();
+                bad[k] = v.to_vec();
+                let refs: Vec<&[u8]> = bad.iter().map(|v| v.as_slice()).collect();
+                if let Ok(m) = formula::decode(&[], &refs, d.len() as u64) {
+                    assert_eq!(m.len(), d.len());
+                }
+                assert!(aqr_testkit::most() < SMALL, "{} bytes reserved", aqr_testkit::most());
+            });
+        }
+    }
+}
+
+/// Every damage of a DEX file: not taken, or taken and rebuilt bit for bit.
+#[test]
+fn damaged_files() {
+    for seed in [2, 5] {
+        let d = write(seed, Shape { code_order: true, ..Shape::default() });
+        aqr_testkit::damaged(&d, 400, 0x80, Duration::from_secs(30), |v| {
+            if let Some(f) = formula::encode(v, 1) {
+                assert!(eval(&f).unwrap() == v, "not the file");
+            }
+            assert!(aqr_testkit::most() < SMALL, "{} bytes reserved", aqr_testkit::most());
+        });
     }
 }
