@@ -28,3 +28,4 @@ path = "examples/parse5.rs"
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }

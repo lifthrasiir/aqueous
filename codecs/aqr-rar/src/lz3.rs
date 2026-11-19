@@ -303,8 +303,9 @@ impl Decoder3 {
         let base = self.out.len();
         let want = base.checked_add(size).ok_or_else(corrupt)?;
         self.want = want;
-        // (a symbol of a bit gives 4100 bytes at most)
-        self.out.reserve(size.min(packed.len().saturating_mul(8 * 4100)));
+        // (a symbol of a bit gives 4100 bytes at most: a hint that a lying size may not hold, then the
+        // output grows with what the data gives)
+        let _ = self.out.try_reserve(size.min(packed.len().saturating_mul(8 * 4100)));
         let buf = padded(packed);
         let mut r = BitReader::new(&buf, 0);
         let mut st = Stream::default();
