@@ -162,3 +162,20 @@ fn threads_same_streams() {
         }
     }
 }
+
+/// An index of two integer columns that differ in more than 12 bytes of their prefix (random
+/// 64-bit values, with ties) is ordered by the sort of whole keys, as the decoder orders it.
+#[test]
+fn wide_integer_index() {
+    let sql = "
+CREATE TABLE w(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c TEXT);
+CREATE INDEX w_ab ON w(a, b);
+CREATE INDEX w_ba ON w(b DESC, a);
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2500)
+INSERT INTO w(a, b, c) SELECT random(), random(), 'row' || i FROM n;
+INSERT INTO w(a, b, c) SELECT a, b, 'again' || id FROM w WHERE id % 9 = 0;
+INSERT INTO w(a, b, c) SELECT a, -b, c FROM w WHERE id % 50 = 0;
+";
+    let db = build("wide", sql);
+    check("wide", &db);
+}
