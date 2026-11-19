@@ -868,6 +868,11 @@ pub fn decode_sized(params: &[u8], streams: &[&[u8]], len: usize) -> Result<Vec<
 /// open.
 pub fn decode_plan(params: &[u8], kinds: &[u8], inlinee_ids: usize, len: u64) -> Option<u64> {
     use aqr_api::stack::block;
+    // (a file's streams are of at most 2^32 blocks of 2^16 bytes: of more than that none is one, and
+    // a declared length near 2^64 would overflow the sums)
+    if len > 1 << 48 {
+        return None;
+    }
     let most = most_open(params, kinds).ok()?;
     Some(
         block(READER_BYTES * NUM_STREAMS as u64)

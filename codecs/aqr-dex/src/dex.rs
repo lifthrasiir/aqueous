@@ -1125,6 +1125,11 @@ fn class_data_room(items: &[Item], d: Item, len: usize) -> usize {
 /// items used and a class's window of them, the classes' data and their ranks).
 pub fn decode_plan(sections: &[u8], len: u64) -> Option<u64> {
     use aqr_api::stack::block;
+    // (a file's offsets are 32 bits: of more than 4 GiB none is one, and a declared length near 2^64
+    // would overflow the sums)
+    if len > u32::MAX as u64 {
+        return None;
+    }
     let mut r = R::new(sections);
     let mut lens = [0usize; MOST_GROUP];
     for n in &mut lens[..INPUTS[0].len() - 1] {

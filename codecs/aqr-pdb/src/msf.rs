@@ -240,6 +240,10 @@ pub fn decode_plan(layout: &[u8], len: u64) -> Option<u64> {
     let block_size = 1u32 << r.get().ok().filter(|l| (9..=16).contains(l))?;
     // (the free page map, the blocks, a field unknown, the directory's map)
     let (_, blocks, _, _) = (r.u32().ok()?, r.u32().ok()? as u64, r.u32().ok()?, r.u32().ok()?);
+    // (the file is its blocks, as [`decode`] checks: a length declared past them has no plan)
+    if blocks * block_size as u64 != len {
+        return None;
+    }
     let ns = r.get().ok()?;
     let mut total = 0;
     for _ in 0..ns {

@@ -3875,13 +3875,17 @@ fn rar5_plans_hold() {
         assert!(module_applications_hold(&format!("rar5 {t}"), &f, "rar5-recons", &rar_run) > 0, "{t}");
     }
     type Case = (&'static str, bool, Vec<usize>, usize, usize, bool);
-    let cases: [Case; 6] = [
+    let cases: [Case; 8] = [
         ("blocks and filters", false, vec![60000], 80, 100, false),
         ("version 1, tables otherwise", true, vec![100000], 300, 80, true),
         ("many files", false, vec![700; 80], 1, 100, true),
         ("past the rings", false, vec![300000], 10, 20000, false),
         ("small", false, vec![3], 0, 1, false),
         ("small files", true, vec![5, 1, 9], 1, 3, false),
+        // (each file's output reserved on the solid group's before: a reserve that doubles the
+        // capacity past the plan's)
+        ("growing files", false, vec![1000, 3000, 9000, 30000, 100000, 120000], 2, 400, true),
+        ("large", false, vec![3_000_000], 5, 5000, false),
     ];
     let mut rng = aqr_common::rng::Rng::new(5);
     for (what, v1, sizes, filters, most, every) in cases {
@@ -3893,7 +3897,7 @@ fn rar5_plans_hold() {
         // (more than the 64 holes that the stack would trap past: blocks, filters, files)
         let start = aqr_rar::recons5::start_of(&sp.record, sp.data.len()).unwrap();
         eprintln!("rar5 {what}: {} blocks, {} filters, {} files", start.blocks, start.filters, sizes.len());
-        if what != "small" && what != "small files" && what != "past the rings" {
+        if !["small", "small files", "past the rings", "growing files", "large"].contains(&what) {
             assert!(start.blocks > 64 && (start.filters > 64 || sizes.len() > 64), "{what}");
         }
         let mut f = Formula::default();
@@ -4160,6 +4164,11 @@ fn rar3_plans_hold() {
         ),
         ("past the rings", vec![file(vec![lz(300000, 20000)], true, &[])]),
         ("small", vec![file(vec![lz(3, 1)], true, &[])]),
+        (
+            "growing files",
+            [1000, 3000, 9000, 30000, 100000, 120000].iter().map(|&n| file(vec![lz(n, 300)], true, &[])).collect(),
+        ),
+        ("large", vec![file(vec![lz(3_000_000, 5000)], true, &[])]),
     ];
     let mut rng = aqr_common::rng::Rng::new(9);
     for (what, files) in cases {
@@ -6773,4 +6782,662 @@ fn xsv_plans_hold() {
         };
         plans_hold_in_parts(&format!("xsv {t}"), &f, &d);
     }
+}
+
+/// The texture modules' plans hold on textures that code to almost nothing: one block repeated
+/// over a large surface (zeros; a block of a flat colour), where the blocks coded are few and the
+/// stripes' tasks all find the same.
+#[test]
+fn tex_uniform_plans_hold() {
+    use aqr_tex::layout::{Format, Layout};
+    // (ASTC's void extent: a flat colour; a legal block)
+    let void = [0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
+    let cases: [(&str, Format, u32, u32, &[u8], aqr_formula::Module); 8] = [
+        ("bc7 zeros", Format::Bc7, 8192, 8192, &[0; 16], aqr_tex::formula::MODULE_BC7),
+        ("bc7 flat", Format::Bc7, 4096, 4096, &[0x40; 16], aqr_tex::formula::MODULE_BC7),
+        ("bc1 zeros", Format::Bc1, 8192, 8192, &[0; 8], aqr_tex::formula::MODULE),
+        ("bc5 flat", Format::Bc5, 4096, 4096, &[0x77; 16], aqr_tex::formula::MODULE),
+        ("bc6h zeros", Format::Bc6h { signed: false }, 4096, 4096, &[0; 16], aqr_tex::formula::MODULE_BC6H),
+        ("etc2 zeros", Format::Etc2, 4096, 4096, &[0; 16], aqr_tex::formula::MODULE_ETC),
+        ("astc 12x12 zeros", Format::Astc { w: 12, h: 12 }, 4104, 4104, &[0; 16], aqr_tex::formula::MODULE_ASTC),
+        ("astc 12x12 void", Format::Astc { w: 12, h: 12 }, 4104, 4104, &void, aqr_tex::formula::MODULE_ASTC),
+    ];
+    for (what, format, width, height, block, module) in cases {
+        let l = Layout { format, width, height, mips: 1, layers: 1 };
+        let blocks: Vec<u8> = block.iter().copied().cycle().take(l.len() as usize).collect();
+        let (main, apart, _) = aqr_tex::texture::encode_any(&l, &blocks, 4);
+        let mut f = Formula::default();
+        let inputs = vec![f.push("bcn/coded", main), f.push("bcn/stripes", apart)];
+        f.root = Node::apply(module, l.to_bytes(), inputs, l.len());
+        plan_holds(&format!("tex {what}"), f, &blocks);
+    }
+}
+
+/// DEX files written here (a copy of aqr-dex's tests' writer: no Android tools needed): strings,
+/// prototypes, fields, methods, classes with their data and code, laid out as `Shape` says.
+mod dex_gen {
+    use aqr_common::rng::Rng;
+
+    /// The SHA-1 of `d` (FIPS 180-4).
+    fn sha1(d: &[u8]) -> [u8; 20] {
+        let mut h: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
+        let mut m = d.to_vec();
+        m.push(0x80);
+        while m.len() % 64 != 56 {
+            m.push(0);
+        }
+        m.extend_from_slice(&(d.len() as u64 * 8).to_be_bytes());
+        for chunk in m.chunks(64) {
+            let mut w = [0u32; 80];
+            for (i, b) in chunk.chunks(4).enumerate() {
+                w[i] = u32::from_be_bytes(b.try_into().unwrap());
+            }
+            for i in 16..80 {
+                w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+            }
+            let [mut a, mut b, mut c, mut dd, mut e] = h;
+            for (i, &wi) in w.iter().enumerate() {
+                let (f, k) = match i / 20 {
+                    0 => ((b & c) | (!b & dd), 0x5a827999),
+                    1 => (b ^ c ^ dd, 0x6ed9eba1),
+                    2 => ((b & c) | (b & dd) | (c & dd), 0x8f1bbcdc),
+                    _ => (b ^ c ^ dd, 0xca62c1d6),
+                };
+                let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wi);
+                (e, dd, c, b, a) = (dd, c, b.rotate_left(30), a, t);
+            }
+            for (x, y) in h.iter_mut().zip([a, b, c, dd, e]) {
+                *x = x.wrapping_add(y);
+            }
+        }
+        let mut out = [0u8; 20];
+        for (o, x) in out.chunks_mut(4).zip(h) {
+            o.copy_from_slice(&x.to_be_bytes());
+        }
+        out
+    }
+
+    /// How a file is written apart from its contents.
+    #[derive(Default, Clone, Copy)]
+    pub struct Shape {
+        /// Code items of neighbouring classes swapped.
+        pub code_order: bool,
+        /// The data of two classes swapped in its section.
+        pub data_order: bool,
+        /// A LEB128 of a class's data in two bytes where one would do.
+        pub long_leb: bool,
+        /// The checksum and the signature wrong.
+        pub bad_sums: bool,
+        /// A section of a type the format does not have, and bytes not zero between sections.
+        pub unknown: bool,
+    }
+
+    fn uleb(out: &mut Vec<u8>, mut v: u32) {
+        while v >= 0x80 {
+            out.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    fn sleb(out: &mut Vec<u8>, mut v: i32) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && b & 0x40 == 0) || (v == -1 && b & 0x40 != 0) {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    fn pad4(d: &mut Vec<u8>, fill: u8) {
+        while !d.len().is_multiple_of(4) {
+            d.push(fill);
+        }
+    }
+
+    fn shorty(desc: &str) -> char {
+        match desc.as_bytes()[0] {
+            b'[' => 'L',
+            c => c as char,
+        }
+    }
+
+    /// An instruction array: instructions of any opcode with any fields (a `nop` with a zero high
+    /// byte), and now and then a payload of each kind at the end.
+    fn instructions(rng: &mut Rng) -> Vec<u16> {
+        let mut u = Vec::new();
+        for _ in 0..rng.below(12) {
+            let op = 1 + rng.below(255) as u16;
+            let (n, _, _) = aqr_dex::code::format(op as u8);
+            u.push(op | (rng.u64() as u16) << 8);
+            for _ in 1..n {
+                // (small values mostly, as indices and registers are)
+                u.push(if rng.below(2) == 0 { rng.below(8) as u16 } else { rng.u64() as u16 });
+            }
+        }
+        if rng.below(2) == 0 {
+            u.push(0);
+        }
+        match rng.below(4) {
+            0 => {
+                let n = rng.below(4) as u16;
+                u.extend([0x0100, n, 7, 0]);
+                u.extend((0..2 * n).map(|_| rng.u64() as u16));
+            }
+            1 => {
+                let n = rng.below(4) as u16;
+                u.extend([0x0200, n]);
+                u.extend((0..4 * n).map(|_| rng.u64() as u16));
+            }
+            2 => {
+                let (w, n) = (1 + rng.below(4) as u16, rng.below(5) as u16);
+                u.extend([0x0300, w, n, 0]);
+                u.extend((0..(w * n).div_ceil(2)).map(|_| rng.u64() as u16));
+            }
+            _ => {}
+        }
+        if u.is_empty() {
+            u.push(0x000e);
+        }
+        u
+    }
+
+    /// A DEX file of classes made from `seed`.
+    pub fn write(seed: u64, shape: Shape) -> Vec<u8> {
+        let mut rng = Rng::new(seed);
+        let classes = 3 + rng.below(12) as usize;
+        let mut descs: Vec<String> =
+            ["V", "I", "J", "Z", "Ljava/lang/Object;", "[I"].iter().map(|s| s.to_string()).collect();
+        for k in 0..classes {
+            descs.push(format!("La/C{k};"));
+        }
+        descs.push("[La/C0;".into());
+        // Prototypes: a return type and up to three parameters, as descriptors.
+        let mut protos: Vec<(usize, Vec<usize>)> = (0..4 + rng.below(10))
+            .map(|_| {
+                let ret = rng.below(descs.len() as u64) as usize;
+                let params = (0..rng.below(4)).map(|_| 1 + rng.below(descs.len() as u64 - 1) as usize).collect();
+                (ret, params)
+            })
+            .collect();
+        let names = ["<init>", "run", "x", "\u{e9}t\u{e9}", "\u{d55c}\u{ae00}", "\u{1f600}", "value", "A.java"];
+        let mut strings: Vec<Vec<u8>> = descs.iter().map(|d| d.as_bytes().to_vec()).collect();
+        for (r, p) in &protos {
+            strings.push(
+                std::iter::once(&descs[*r]).chain(p.iter().map(|&t| &descs[t])).map(|d| shorty(d) as u8).collect(),
+            );
+        }
+        let mut name_bytes = Vec::new();
+        for n in names {
+            // (MUTF-8: characters past U+FFFF as their surrogates, three bytes each)
+            let mut b = Vec::new();
+            for c in n.encode_utf16() {
+                match c {
+                    0..0x80 => b.push(c as u8),
+                    0x80..0x800 => b.extend([0xc0 | (c >> 6) as u8, 0x80 | (c & 0x3f) as u8]),
+                    _ => b.extend([0xe0 | (c >> 12) as u8, 0x80 | (c >> 6 & 0x3f) as u8, 0x80 | (c & 0x3f) as u8]),
+                }
+            }
+            name_bytes.push(b.clone());
+            strings.push(b);
+        }
+        strings.sort();
+        strings.dedup();
+        let sidx = |s: &[u8]| strings.iter().position(|t| t == s).unwrap() as u32;
+        let mut types: Vec<u32> = descs.iter().map(|d| sidx(d.as_bytes())).collect();
+        types.sort();
+        let tidx = |d: &str| types.iter().position(|&t| t == sidx(d.as_bytes())).unwrap() as u16;
+        let mut proto_rows: Vec<(u32, u32, Vec<u16>)> = protos
+            .drain(..)
+            .map(|(r, p)| {
+                let sh: Vec<u8> =
+                    std::iter::once(&descs[r]).chain(p.iter().map(|&t| &descs[t])).map(|d| shorty(d) as u8).collect();
+                (sidx(&sh), tidx(&descs[r]) as u32, p.iter().map(|&t| tidx(&descs[t])).collect())
+            })
+            .collect();
+        proto_rows.sort_by(|a, b| (a.1, &a.2).cmp(&(b.1, &b.2)));
+        proto_rows.dedup_by(|a, b| (a.1, &a.2) == (b.1, &b.2));
+        let class_t: Vec<u16> = (0..classes).map(|k| tidx(&format!("La/C{k};"))).collect();
+        let name_ids: Vec<u32> = name_bytes.iter().map(|b| sidx(b)).collect();
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        for &c in &class_t {
+            for _ in 0..rng.below(4) {
+                fields.push((
+                    c,
+                    1 + rng.below(types.len() as u64 - 1) as u16,
+                    name_ids[rng.below(name_ids.len() as u64) as usize],
+                ));
+            }
+            for _ in 0..rng.below(6) {
+                methods.push((
+                    c,
+                    rng.below(proto_rows.len() as u64) as u16,
+                    name_ids[rng.below(name_ids.len() as u64) as usize],
+                ));
+            }
+        }
+        for t in [&mut fields, &mut methods] {
+            t.sort_by_key(|&(c, x, n)| (c, n, x));
+            t.dedup();
+        }
+
+        // Type lists: the prototypes' parameters and the classes' interfaces.
+        let ifaces: Vec<Vec<u16>> = (0..classes)
+            .map(|_| (0..rng.below(3)).map(|_| class_t[rng.below(classes as u64) as usize]).collect())
+            .collect();
+        let mut lists: Vec<Vec<u16>> =
+            proto_rows.iter().map(|p| p.2.clone()).chain(ifaces.iter().cloned()).filter(|l| !l.is_empty()).collect();
+        lists.sort();
+        lists.dedup();
+
+        // The data section: code items, type lists, string data, classes' data; then the map.
+        let header_len = 0x70;
+        let ids_len = 4 * strings.len()
+            + 4 * types.len()
+            + 12 * proto_rows.len()
+            + 8 * fields.len()
+            + 8 * methods.len()
+            + 32 * classes;
+        let mut d = vec![0u8; header_len + ids_len];
+        let data_off = d.len();
+        // Each class's methods, direct then virtual, with code or none.
+        let mut class_methods: Vec<Vec<(u32, u32, Option<usize>)>> = vec![Vec::new(); classes];
+        let mut code_items = Vec::new();
+        for (k, &c) in class_t.iter().enumerate() {
+            for (i, m) in methods.iter().enumerate().filter(|(_, m)| m.0 == c) {
+                let _ = m;
+                let has_code = rng.below(5) != 0;
+                class_methods[k].push((
+                    i as u32,
+                    if rng.below(2) == 0 { 1 } else { 0x10001 },
+                    has_code.then(|| {
+                        code_items.push(k);
+                        code_items.len() - 1
+                    }),
+                ));
+            }
+        }
+        let mut order: Vec<usize> = (0..code_items.len()).collect();
+        if shape.code_order {
+            for i in (1..order.len()).step_by(3) {
+                order.swap(i - 1, i);
+            }
+        }
+        let mut code_off = vec![0u32; code_items.len()];
+        let code_start = d.len();
+        for &j in &order {
+            pad4(&mut d, 0);
+            code_off[j] = d.len() as u32;
+            let units = instructions(&mut rng);
+            let insns = units.len() as u32;
+            let tries = (rng.below(3) == 0) as u16;
+            for v in [1 + rng.below(8) as u16, rng.below(3) as u16, rng.below(3) as u16, tries] {
+                d.extend_from_slice(&v.to_le_bytes());
+            }
+            d.extend_from_slice(&0u32.to_le_bytes());
+            d.extend_from_slice(&insns.to_le_bytes());
+            for u in &units {
+                d.extend_from_slice(&u.to_le_bytes());
+            }
+            if tries > 0 {
+                if insns % 2 == 1 {
+                    d.extend_from_slice(&[0, 0]);
+                }
+                d.extend_from_slice(&0u32.to_le_bytes());
+                d.extend_from_slice(&(insns as u16).to_le_bytes());
+                d.extend_from_slice(&1u16.to_le_bytes());
+                uleb(&mut d, 1);
+                let size = rng.below(3) as i32 - 1;
+                sleb(&mut d, size);
+                for _ in 0..size.unsigned_abs() {
+                    uleb(&mut d, class_t[0] as u32);
+                    uleb(&mut d, rng.below(insns as u64) as u32);
+                }
+                if size <= 0 {
+                    uleb(&mut d, 0);
+                }
+            }
+        }
+        let code_end = d.len();
+        if shape.unknown {
+            d.extend_from_slice(&[0xee; 3]);
+        }
+        pad4(&mut d, 0);
+        let lists_start = d.len();
+        let mut list_off = Vec::new();
+        for l in &lists {
+            pad4(&mut d, 0);
+            list_off.push(d.len() as u32);
+            d.extend_from_slice(&(l.len() as u32).to_le_bytes());
+            for t in l {
+                d.extend_from_slice(&t.to_le_bytes());
+            }
+        }
+        let list_of = |l: &[u16]| if l.is_empty() { 0 } else { list_off[lists.iter().position(|x| x == l).unwrap()] };
+        let strings_start = d.len();
+        let mut string_off = Vec::new();
+        for s in &strings {
+            string_off.push(d.len() as u32);
+            uleb(&mut d, s.iter().filter(|&&b| b & 0xc0 != 0x80).count() as u32);
+            d.extend_from_slice(s);
+            d.push(0);
+        }
+        let unknown_start = d.len();
+        if shape.unknown {
+            d.extend_from_slice(b"\x01\x02unknown section");
+        }
+        let data_start = d.len();
+        let mut data_order: Vec<usize> = (0..classes).filter(|&k| !class_methods[k].is_empty() || k % 2 == 0).collect();
+        let with_data = data_order.clone();
+        if shape.data_order && data_order.len() >= 3 {
+            data_order.swap(0, 2);
+        }
+        let mut class_data_off = vec![0u32; classes];
+        for (n, &k) in data_order.iter().enumerate() {
+            class_data_off[k] = d.len() as u32;
+            let cf: Vec<usize> = (0..fields.len()).filter(|&i| fields[i].0 == class_t[k]).collect();
+            let (st, inst) = cf.split_at(cf.len() / 2);
+            let ms = &class_methods[k];
+            let (direct, virt) = ms.split_at(ms.len() / 2);
+            if shape.long_leb && n == 0 {
+                d.extend_from_slice(&[st.len() as u8 | 0x80, 0]);
+            } else {
+                uleb(&mut d, st.len() as u32);
+            }
+            for v in [inst.len(), direct.len(), virt.len()] {
+                uleb(&mut d, v as u32);
+            }
+            for list in [st, inst] {
+                let mut prev = 0;
+                for &i in list {
+                    uleb(&mut d, i as u32 - prev);
+                    uleb(&mut d, 8);
+                    prev = i as u32;
+                }
+            }
+            for list in [direct, virt] {
+                let mut prev = 0;
+                for &(i, flags, code) in list {
+                    uleb(&mut d, i - prev);
+                    uleb(&mut d, flags);
+                    uleb(&mut d, code.map_or(0, |j| code_off[j]));
+                    prev = i;
+                }
+            }
+        }
+        let data_end = d.len();
+        pad4(&mut d, 0);
+        let map_off = d.len();
+
+        // The ids.
+        let mut p = header_len;
+        let mut put = |d: &mut Vec<u8>, b: &[u8]| {
+            d[p..p + b.len()].copy_from_slice(b);
+            p += b.len();
+        };
+        let string_ids = header_len;
+        for o in &string_off {
+            put(&mut d, &o.to_le_bytes());
+        }
+        let type_ids = string_ids + 4 * strings.len();
+        for t in &types {
+            put(&mut d, &t.to_le_bytes());
+        }
+        let proto_ids = type_ids + 4 * types.len();
+        for (sh, r, params) in &proto_rows {
+            for v in [*sh, *r, list_of(params)] {
+                put(&mut d, &v.to_le_bytes());
+            }
+        }
+        let field_ids = proto_ids + 12 * proto_rows.len();
+        let method_ids = field_ids + 8 * fields.len();
+        for &(c, x, n) in fields.iter().chain(&methods) {
+            put(&mut d, &c.to_le_bytes());
+            put(&mut d, &x.to_le_bytes());
+            put(&mut d, &n.to_le_bytes());
+        }
+        let class_defs = method_ids + 8 * methods.len();
+        let source = sidx(b"A.java");
+        for k in 0..classes {
+            let sup = if k == 0 { u32::MAX } else { tidx("Ljava/lang/Object;") as u32 };
+            let src = if k % 3 == 2 { u32::MAX } else { source };
+            for v in [class_t[k] as u32, 1, sup, list_of(&ifaces[k]), src, 0, class_data_off[k], 0] {
+                put(&mut d, &v.to_le_bytes());
+            }
+        }
+        assert!(with_data.iter().all(|&k| class_data_off[k] != 0));
+
+        // The map.
+        let mut map: Vec<(u16, u32, u32)> = vec![
+            (0x0000, 1, 0),
+            (0x0001, strings.len() as u32, string_ids as u32),
+            (0x0002, types.len() as u32, type_ids as u32),
+            (0x0003, proto_rows.len() as u32, proto_ids as u32),
+            (0x0004, fields.len() as u32, field_ids as u32),
+            (0x0005, methods.len() as u32, method_ids as u32),
+            (0x0006, classes as u32, class_defs as u32),
+            (0x2001, code_items.len() as u32, code_start as u32),
+            (0x1001, lists.len() as u32, lists_start as u32),
+            (0x2002, strings.len() as u32, strings_start as u32),
+            (0x2000, data_order.len() as u32, data_start as u32),
+            (0x1000, 1, map_off as u32),
+        ];
+        if shape.unknown {
+            map.push((0x7777, 1, unknown_start as u32));
+        }
+        map.retain(|e| e.1 > 0);
+        map.sort_by_key(|e| e.2);
+        let _ = (code_end, data_end);
+        d.extend_from_slice(&(map.len() as u32).to_le_bytes());
+        for (t, n, o) in &map {
+            d.extend_from_slice(&t.to_le_bytes());
+            d.extend_from_slice(&[0, 0]);
+            d.extend_from_slice(&n.to_le_bytes());
+            d.extend_from_slice(&o.to_le_bytes());
+        }
+
+        // The header.
+        let len = d.len() as u32;
+        d[..8].copy_from_slice(b"dex\n035\0");
+        let fields_h = [
+            len,
+            0x70,
+            0x12345678,
+            0,
+            0,
+            map_off as u32,
+            strings.len() as u32,
+            string_ids as u32,
+            types.len() as u32,
+            type_ids as u32,
+            proto_rows.len() as u32,
+            proto_ids as u32,
+            fields.len() as u32,
+            if fields.is_empty() { 0 } else { field_ids as u32 },
+            methods.len() as u32,
+            if methods.is_empty() { 0 } else { method_ids as u32 },
+            classes as u32,
+            class_defs as u32,
+            len - data_off as u32,
+            data_off as u32,
+        ];
+        for (i, v) in fields_h.iter().enumerate() {
+            d[0x20 + 4 * i..0x24 + 4 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        let sig = sha1(&d[32..]);
+        d[12..32].copy_from_slice(&sig);
+        let sum = aqr_common::adler32::hash(&d[12..]);
+        d[8..12].copy_from_slice(&sum.to_le_bytes());
+        if shape.bad_sums {
+            d[8] ^= 1;
+            d[20] ^= 1;
+        }
+        d
+    }
+}
+
+/// dex-recons lays its memory out as a stack, its limit its plan, whatever the map says: files of
+/// every layout, and files whose map is damaged (counts of items far past the file, offsets that
+/// overlap, repeat or point past the end, types twice, an item of no size; the map's own count
+/// large): taken and rebuilt within the plan, or not taken.
+#[test]
+fn dex_plans_hold() {
+    use dex_gen::{Shape, write};
+    fn le(d: &[u8], at: usize) -> usize {
+        u32::from_le_bytes(d[at..at + 4].try_into().unwrap()) as usize
+    }
+    fn put(d: &mut [u8], at: usize, v: u32) {
+        d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let mut taken = 0;
+    let mut check = |what: String, d: Vec<u8>| {
+        let Some(f) = aqr_dex::formula::encode(&d, 1) else { return };
+        assert!(f.eval(&Native::default()).is_ok_and(|n| n == d), "{what}: not rebuilt natively");
+        taken += 1;
+        plan_holds(&format!("dex {what}"), f, &d);
+    };
+    for (k, shape) in [
+        Shape::default(),
+        Shape { code_order: true, data_order: true, ..Shape::default() },
+        Shape { long_leb: true, bad_sums: true, unknown: true, ..Shape::default() },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for seed in [1, 4, 9] {
+            let d = write(seed, shape);
+            check(format!("shape {k} seed {seed}"), d.clone());
+            let map = le(&d, 0x34);
+            let n = le(&d, map);
+            // (the damages of the item `i` of the map: its size, its offset, its type)
+            for i in 0..n.min(6) {
+                let item = map + 4 + 12 * i;
+                for (what, at, v) in [
+                    ("count huge", item + 4, u32::MAX),
+                    ("count past the file", item + 4, d.len() as u32),
+                    ("offset past the end", item + 8, u32::MAX),
+                    ("offset at the map", item + 8, map as u32),
+                    ("offset zero", item + 8, 0),
+                    ("type of another", item, 0x2002),
+                    ("type of code", item, 0x2001),
+                    ("count zero", item + 4, 0),
+                ] {
+                    let mut b = d.clone();
+                    put(&mut b, at, v);
+                    check(format!("shape {k} seed {seed} item {i} {what}"), b);
+                }
+            }
+            // (items repeated, the map's count past its room, a map of one item, a map past the end)
+            let mut b = d.clone();
+            if n >= 3 {
+                let (x, y) = (map + 4, map + 4 + 12 * 2);
+                let item: Vec<u8> = b[x..x + 12].to_vec();
+                b[y..y + 12].copy_from_slice(&item);
+            }
+            check(format!("shape {k} seed {seed} item twice"), b);
+            for (what, v) in [("count huge", u32::MAX), ("count one", 1), ("count past", n as u32 + 40)] {
+                let mut b = d.clone();
+                put(&mut b, map, v);
+                check(format!("shape {k} seed {seed} map {what}"), b);
+            }
+            let mut b = d.clone();
+            put(&mut b, 0x34, d.len() as u32 - 8);
+            check(format!("shape {k} seed {seed} map at the end"), b);
+            let mut b = d.clone();
+            put(&mut b, 0x34, 0);
+            check(format!("shape {k} seed {seed} no map"), b);
+        }
+    }
+    eprintln!("dex: {taken} files taken");
+    assert!(taken > 9, "damaged files taken: {taken}");
+}
+
+/// The plans of dex-recons, arsc-recons and pdb-msf, asked of the sizes a hostile archive declares
+/// (the file's length up to 2^64 - 1; counts, sizes and blocks of the streams past any file): an
+/// answer or none, never a panic (overflow checks are on) or a loop.
+#[test]
+fn declared_sizes_plans_are_answered() {
+    use aqr_common::varint;
+    const LENS: [u64; 7] = [0, 1, 1 << 20, u32::MAX as u64, 1 << 40, u64::MAX - 15, u64::MAX];
+    // dex: real sections, files of every length declared
+    let d = dex_gen::write(3, dex_gen::Shape::default());
+    let f = aqr_dex::formula::encode(&d, 1).expect("taken");
+    let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+    let mut answered = 0;
+    for len in LENS {
+        answered += aqr_dex::module::plan(0, &lens, inputs[0], len).is_some() as usize;
+    }
+    assert!(answered > 0, "dex: a plan for no length");
+    // arsc: heads of types declaring entries and chunks past the file
+    let mut heads = Vec::new();
+    for (each, count) in [(u32::MAX / 300, 300usize), (0x7fff_fff0, 2), (u32::MAX - 3, 1)] {
+        let mut head = Vec::new();
+        head.extend_from_slice(&aqr_arsc::arsc::ty::TABLE.to_le_bytes());
+        head.extend_from_slice(&8u16.to_le_bytes());
+        head.extend_from_slice(&u32::MAX.to_le_bytes());
+        head.push(aqr_arsc::arsc::mode::CONTAINER);
+        for k in 0..count {
+            head.extend_from_slice(&aqr_arsc::arsc::ty::TYPE.to_le_bytes());
+            head.extend_from_slice(&20u16.to_le_bytes());
+            head.extend_from_slice(&each.to_le_bytes());
+            head.extend_from_slice(&[(k % 256) as u8, 0, 0, 0]);
+            head.extend_from_slice(&(each / 4).to_le_bytes());
+            head.extend_from_slice(&[0; 4]);
+            head.push(aqr_arsc::arsc::mode::TYPE);
+        }
+        heads.push(head);
+    }
+    for head in heads {
+        let mut st = vec![Vec::new(); aqr_arsc::arsc::s::N];
+        st[aqr_arsc::arsc::s::HEAD] = head;
+        let inputs = aqr_arsc::arsc::pack(&st);
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+        for len in LENS {
+            let _ = aqr_arsc::module::plan(0, &lens, &inputs[0], len);
+        }
+    }
+    // pdb-msf: a real layout, and layouts of blocks and streams past any file
+    let streams: Vec<Option<Vec<u8>>> =
+        (0..40).map(|k| Some((0..(k * 997) % 9000).map(|i| i as u8).collect())).collect();
+    let file = msf_file(512, &streams, true, 0x5a);
+    let inputs = aqr_pdb::msf::encode(&file).expect("taken");
+    let mut layouts = vec![(inputs[1].clone(), file.len() as u64)];
+    for (log, blocks, ns, size) in
+        [(16u64, u32::MAX as u64, 1000u64, 0xffff_fffe_u64), (9, 7, 10_000, 5), (9, 1, u64::MAX, 1)]
+    {
+        let mut l = Vec::new();
+        for v in [log, 0, blocks, 0, 0, ns] {
+            varint::put(&mut l, v);
+        }
+        for _ in 0..ns.min(1000) {
+            varint::put(&mut l, size);
+        }
+        layouts.push((l, blocks << log));
+    }
+    let mut answered = 0;
+    for (layout, exact) in &layouts {
+        for len in LENS.into_iter().chain([*exact]) {
+            answered += aqr_pdb::module::msf_plan(&[0, layout.len() as u64, 0], layout, len).is_some() as usize;
+        }
+    }
+    assert!(answered > 0, "pdb: a plan for no layout");
+    // pdb-symbols: real streams, files of every length declared
+    let whole = [pdb_module(0, 300, 5, 1000, 100)];
+    let info = |&(_, symbols, c13): &(Vec<u8>, usize, usize)| aqr_pdb::dbi::Module { stream: 0, symbols, c11: 0, c13 };
+    let parts: Vec<(&[u8], aqr_pdb::dbi::Module)> = whole.iter().map(|w| (&w.0[..], info(w))).collect();
+    let (params, st) = aqr_pdb::symbols::encode(&parts).expect("taken");
+    let packed: Vec<Vec<u8>> = (aqr_pdb::symbols::INPUTS.iter())
+        .map(|(_, which)| aqr_pdb::pack(&which.iter().map(|&k| &st[k][..]).collect::<Vec<_>>()))
+        .collect();
+    let lens: Vec<u64> = packed.iter().map(|i| i.len() as u64).collect();
+    let mut answered = 0;
+    for len in LENS.into_iter().chain([whole[0].0.len() as u64]) {
+        answered += aqr_pdb::module::symbols_plan(&params, &lens, &packed[0], &packed[4], len).is_some() as usize;
+    }
+    assert!(answered > 0, "pdb-symbols: a plan for no length");
 }
