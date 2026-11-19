@@ -119,3 +119,53 @@ fn archive_declaring_less_fails_alike() {
         assert_eq!(n, w, "{limit} {task}");
     }
 }
+
+/// An application declares one task limit for each class of tasks its module has, or none (its
+/// memory limit then of the instance and its tasks together): one declaring more or fewer is
+/// invalid natively as it is as WebAssembly, whatever its plan.
+#[test]
+fn task_limits_counted_alike() {
+    // (bcj-delta: no class of tasks)
+    let m = aqr_bcj::formula::DELTA;
+    let data: Vec<u8> = (0..5000u32).map(|i| ((i * 7) >> 3) as u8).collect();
+    let n = data.len() as u64;
+    let plan = aqr_decompress::needed_by(m, &[2], &[], &[n], &[n], &Vec::<&[u8]>::new()).unwrap().unwrap();
+    assert!(plan.tasks.is_empty(), "{plan:?}");
+    for tasks in [vec![1 << 30], vec![NO_LIMIT, NO_LIMIT]] {
+        for limit in [plan.instance, NO_LIMIT] {
+            let (nat, wasm) = both(m, &[2], &[&data], &[n], limit, &tasks);
+            assert_eq!(kind(&wasm), "invalid", "{tasks:?} {limit}: {wasm:?}");
+            assert_eq!(nat, wasm, "{tasks:?} {limit}");
+        }
+    }
+    // (flate-set: a class of tasks, its limits of none, or of two classes)
+    use aqr_archive::{Encoder, Level};
+    use aqr_formula::{Formula, Node};
+    let text: Vec<u8> = (0..20_000).flat_map(|i| format!("line {} of {}\n", i % 211, i % 17).into_bytes()).collect();
+    let raw = aqr_flate::zlib::compress(&text, aqr_flate::zlib::Params { level: 6, ..Default::default() }).unwrap();
+    let (data, record) = aqr_flate::deconstruct(&raw).unwrap();
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(aqr_decompress::wasm_of);
+    for (limit, tasks) in [(NO_LIMIT, vec![]), (64 << 20, vec![]), (64 << 20, vec![16 << 20, 16 << 20])] {
+        let mut f = Formula::default();
+        let (d, r) = (f.push("raw", data.clone()), f.push("flate/record", record.clone()));
+        let index = f.push("flate/index", aqr_flate::module::index(&[(data.len(), record.len(), raw.len())]));
+        let mut a = aqr_flate::formula::apply(
+            aqr_flate::DEFAULT_PROFILE,
+            d,
+            r,
+            index,
+            raw.len() as u64,
+            aqr_flate::formula::Derived::None,
+        )
+        .unwrap();
+        (a.memory_limit, a.task_limits) = (limit, tasks.clone());
+        f.root = Node::Apply(Box::new(a));
+        let c = enc.encode(&f, None).unwrap();
+        let (n, w) = (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
+        // (none: the memory limit is of the instance and its tasks together)
+        if !tasks.is_empty() {
+            assert!(matches!(w, Err(Failure::Invalid(_))), "{limit} {tasks:?}: {:?}", w.map(drop));
+        }
+        assert_eq!(n, w, "{limit} {tasks:?}");
+    }
+}

@@ -959,10 +959,10 @@ impl<'a> NativeLoaded<'a> {
 
     /// Whether the application is within the memory limit and task limits it declares, which the
     /// Wasm host enforces and native code does not: its plan (what a Wasm instance would need
-    /// at most, [`needed_by`]) against them. The earlier Apply (`NO_LIMIT` and no task limits, of
-    /// the modules of releases) has none to enforce. A plan that cannot be worked out is
-    /// `Unknown`: the module's bytes are at hand, and WebAssembly enforces the limits whatever
-    /// the plan says.
+    /// at most, [`needed_by`]) against them. A plan that cannot be worked out, or limits not one
+    /// for each class of tasks of the plan (invalid, as WebAssembly tells: the earlier Apply of
+    /// no task limits is of the modules of releases, never run natively), is `Unknown`: the
+    /// module's bytes are at hand, and WebAssembly enforces the limits whatever the plan says.
     #[allow(clippy::too_many_arguments)]
     fn verdict(
         &self,
@@ -974,13 +974,11 @@ impl<'a> NativeLoaded<'a> {
         memory_limit: u64,
         task_limits: &[u64],
     ) -> Verdict {
-        if memory_limit == aqr_formula::NO_LIMIT && task_limits.is_empty() {
-            return Verdict::Within;
-        }
         #[cfg(feature = "wasm")]
         {
             let resources: Vec<u64> = resources.iter().map(|r| r.len() as u64).collect();
             match needed_by(self.module, params, &resources, inputs, sizes, contents) {
+                Ok(Some(p)) if p.tasks.len() != task_limits.len() => Verdict::Unknown,
                 Ok(Some(p)) => {
                     let tasks = p.tasks.iter().zip(task_limits).all(|(&n, &l)| n <= l);
                     if p.instance <= memory_limit && tasks { Verdict::Within } else { Verdict::Over }
