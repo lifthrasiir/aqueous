@@ -1737,6 +1737,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-testkit"
+version = "0.1.0"
+
+[[package]]
 name = "aqr-tex"
 version = "0.1.0"
 dependencies = [
