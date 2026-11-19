@@ -91,6 +91,8 @@ aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wa
 # (the tests run modules by Wasmtime, linked)
 aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wasmtime", "sandbox"] }
 aqr-7z = { path = "../../codecs/aqr-7z" }
+aqr-alz = { path = "../../codecs/aqr-alz" }
+aqr-egg = { path = "../../codecs/aqr-egg" }
 aqr-exe = { path = "../../codecs/aqr-exe" }
 aqr-prores = { path = "../../codecs/aqr-prores", features = ["synth"] }
 aqr-testkit = { path = "../aqr-testkit" }

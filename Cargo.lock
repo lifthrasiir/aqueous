@@ -380,6 +380,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-7z",
  "aqr-ac3",
+ "aqr-alz",
  "aqr-api",
  "aqr-archive",
  "aqr-arsc",
@@ -395,6 +396,7 @@ dependencies = [
  "aqr-dex",
  "aqr-div3",
  "aqr-dwarf",
+ "aqr-egg",
  "aqr-exe",
  "aqr-fasta",
  "aqr-fits",

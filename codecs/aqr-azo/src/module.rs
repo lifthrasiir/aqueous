@@ -15,7 +15,9 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     }
     let streams = aqr_common::streams::cut(data, records, index, corrupt)?;
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out = Vec::with_capacity(len);
+    // (the length is the formula's claim: no more is asked of the allocator than it can give)
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| corrupt())?;
     // (each written onto the output in turn, its blocks side by side natively: a stream's blocks
     // are its work, of 512 KiB each)
     for &(data, record) in &streams {

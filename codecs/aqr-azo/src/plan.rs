@@ -31,7 +31,9 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, files: [&[u
     let mut m = Sim::new(initial);
     m.take(whole(params.len() as u64, &[], inputs));
     m.take(wasm::STREAM * streams.len() as u64);
-    m.take(len);
+    // (a length no memory can hold takes more than any bound, whatever it adds up to: kept from
+    // overflowing)
+    m.take(len.min(1 << 62));
     for (data, record) in streams {
         let (x86, blocks, sizes) = block_sizes(data, record).ok()?;
         // (the stream's blocks, held while they are written)

@@ -36,7 +36,7 @@ pub fn decode(initial: u64, params: &[u8], inputs: &[u64], len: u64, [records, i
     let mut m = Sim::new(initial);
     m.take(whole(params.len() as u64, &[], inputs));
     m.take(wasm::STREAM * streams.len() as u64);
-    m.take(len + SLACK as u64);
+    m.take(len.checked_add(SLACK as u64)?);
     // (the match finder, made once for the streams: its heads and links, then itself)
     for n in MF_HEAP {
         m.take(n);
