@@ -41,6 +41,8 @@ static UNDO: Mutex<Option<Undo>> = Mutex::new(None);
 /// Whether the output being written is ended in two steps ([`graceful`]), and whether its end
 /// was requested.
 static GRACEFUL: AtomicBool = AtomicBool::new(false);
+/// Whether an extraction is what is being written ([`extracting`]).
+static EXTRACTING: AtomicBool = AtomicBool::new(false);
 static REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Makes output `path` by `make` (creating it) and has it removed where the process stops,
@@ -66,7 +68,15 @@ pub fn graceful() -> &'static AtomicBool {
 pub fn extracting() -> (Guard, &'static AtomicBool) {
     imp::install();
     GRACEFUL.store(true, Ordering::SeqCst);
+    EXTRACTING.store(true, Ordering::SeqCst);
     (Guard(()), &REQUESTED)
+}
+
+/// Whether an extraction is being written (and ends in two steps: nothing is cut off in the
+/// middle of a file). A frontend's `cancel` or gone then requests its end as `finish` does
+/// ([`request`]), as the files it was writing are removed that way and not otherwise.
+pub fn is_extracting() -> bool {
+    EXTRACTING.load(Ordering::SeqCst)
 }
 
 /// Requests that the output being written be ended as it is (a frontend's `finish`): where it
@@ -75,6 +85,8 @@ pub fn request(code: i32) {
     if GRACEFUL.load(Ordering::SeqCst) {
         REQUESTED.store(true, Ordering::SeqCst);
     } else {
+        // (the frontend told it is, as it is where it asks for it)
+        crate::ipc::tell(serde_json::json!({"event": "stopped"}));
         now(code);
     }
 }
@@ -156,6 +168,7 @@ impl Drop for Guard {
         imp::set(None);
         UNDO.lock().unwrap_or_else(|e| e.into_inner()).take();
         GRACEFUL.store(false, Ordering::SeqCst);
+        EXTRACTING.store(false, Ordering::SeqCst);
     }
 }
 

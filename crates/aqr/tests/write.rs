@@ -851,3 +851,294 @@ fn damaged_files_named() {
     }
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// `aqr --ipc args` in `dir`, greeted: the child and the lines it tells (JSON), through a channel.
+#[cfg(unix)]
+fn ipc_start(
+    dir: &Path,
+    args: &[&str],
+    answers: &[&str],
+) -> (std::process::Child, std::sync::mpsc::Receiver<serde_json::Value>) {
+    use std::io::{BufRead, BufReader, Write};
+    let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .current_dir(dir)
+        .arg("--ipc")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    writeln!(c.stdin.as_mut().unwrap(), r#"{{"hello":1,"answers":{}}}"#, serde_json::json!(answers)).unwrap();
+    let out = c.stdout.take().unwrap();
+    let (to, from) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for l in BufReader::new(out).lines() {
+            let Ok(l) = l else { return };
+            if to.send(serde_json::from_str(&l).unwrap()).is_err() {
+                return;
+            }
+        }
+    });
+    (c, from)
+}
+
+#[cfg(unix)]
+fn ipc_send(c: &mut std::process::Child, bytes: &[u8]) {
+    use std::io::Write;
+    let i = c.stdin.as_mut().unwrap();
+    // (the process may be done and gone already)
+    _ = i.write_all(bytes).and_then(|_| i.flush());
+}
+
+/// out/5: a frontend (`--ipc`) ending an extraction (`-d`) by `finish`, by `cancel` and by
+/// closing standard input, once the first file is being written: the process ends with exit code
+/// 130 and one `stopped` event (or is done, with `end`, where it was quicker), and no file
+/// under its name holds part of its contents.
+#[cfg(unix)]
+#[test]
+fn ipc_extraction_ended() {
+    let d = scratch("out5");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    for i in 0..4 {
+        fs::write(src.join(format!("big{i}.txt")), text(i, 1000).repeat(40_000)).unwrap();
+    }
+    let all = files(&src);
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    for how in ["finish", "cancel", "eof"] {
+        let _ = fs::remove_dir_all(d.join("x"));
+        let (mut c, rx) = ipc_start(&d, &["-d", "-o", "x", "a.aqr"], &[]);
+        assert_eq!(rx.recv().unwrap()["hello"], 1);
+        assert_eq!(rx.recv().unwrap()["event"], "begin");
+        let start = std::time::Instant::now();
+        while walk_len(&d.join("x")) == 0 && start.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        match how {
+            "finish" => ipc_send(&mut c, b"{\"control\":\"finish\"}\n"),
+            "cancel" => ipc_send(&mut c, b"{\"control\":\"cancel\"}\n"),
+            _ => drop(c.stdin.take()),
+        }
+        let rest: Vec<_> = rx.iter().filter(|v| v["event"] != "progress").collect();
+        let code = c.wait().unwrap().code();
+        let stopped = rest.iter().filter(|v| v["event"] == "stopped").count();
+        match code {
+            Some(130) => assert_eq!(stopped, 1, "{how}: {rest:?}"),
+            Some(0) => assert!(stopped == 0 && rest.iter().any(|v| v["event"] == "end"), "{how}: {rest:?}"),
+            c => panic!("{how}: {c:?} {rest:?}"),
+        }
+        let got = if d.join("x").exists() { files(&d.join("x")) } else { Vec::new() };
+        assert!(
+            got.iter().all(|f| all.contains(f)),
+            "{how}: a file in part: {:?}",
+            got.iter().map(|f| (&f.0, f.1.len())).collect::<Vec<_>>()
+        );
+        if code == Some(0) {
+            assert_eq!(got, all);
+        }
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
+
+fn walk_len(d: &Path) -> usize {
+    fs::read_dir(d).map(|r| r.count()).unwrap_or(0)
+}
+
+/// The next event of `rx` that is not `progress`, within ten seconds.
+#[cfg(unix)]
+fn next_event(rx: &std::sync::mpsc::Receiver<serde_json::Value>) -> serde_json::Value {
+    loop {
+        let v = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("an event");
+        if v["event"] != "progress" {
+            return v;
+        }
+    }
+}
+
+/// An archive `a.aqr` of two files, and a directory `x` there already holding `old`.
+#[cfg(unix)]
+fn archive_and_directory(d: &Path) -> Vec<(String, Vec<u8>)> {
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), text(1, 3000)).unwrap();
+    fs::write(src.join("b.txt"), text(2, 3000)).unwrap();
+    ok(d, &["-q", "-o", "a.aqr", "src"]);
+    fs::create_dir_all(d.join("x")).unwrap();
+    fs::write(d.join("x/old"), b"old").unwrap();
+    files(&src)
+}
+
+/// out/5: lines the frontend sends that are not text (nor JSON, nor known) are ignored, the
+/// reader going on (a question open is answered after them); the question answered `true` is
+/// written over.
+#[cfg(unix)]
+#[test]
+fn ipc_ignores_unreadable_lines() {
+    let d = scratch("out5-lines");
+    let want = archive_and_directory(&d);
+    let (mut c, rx) = ipc_start(&d, &["-d", "-f", "-o", "x", "a.aqr"], &["overwrite"]);
+    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    assert_eq!(next_event(&rx)["event"], "begin");
+    for line in [
+        &b"\xff\xfe\xfd\n"[..],
+        b"{{{\n",
+        b"\n",
+        b"{\"control\":\"dance\"}\n",
+        b"{\"answer\":\"x\"}\n",
+        b"[1,2]\n",
+        b"\xc3\x28\n",
+    ] {
+        ipc_send(&mut c, line);
+    }
+    let end = next_event(&rx);
+    assert_eq!(end["event"], "end", "{end}");
+    assert!(c.wait().unwrap().success());
+    assert_eq!(files(&d.join("x")).iter().filter(|f| want.iter().any(|w| w.0 == f.0 && w.1 == f.1)).count(), 2);
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// out/5: the frontend gone (standard input closed), or cancelling, with the overwrite question
+/// open: the process ends with exit code 130 and `stopped`, and what is there is left as it was.
+#[cfg(unix)]
+#[test]
+fn ipc_gone_with_a_question_open() {
+    let d = scratch("out5-ask");
+    archive_and_directory(&d);
+    for how in ["eof", "cancel", "finish"] {
+        let (mut c, rx) = ipc_start(&d, &["-d", "-o", "x", "a.aqr"], &["overwrite"]);
+        assert_eq!(rx.recv().unwrap()["hello"], 1);
+        // (the question comes before the work begins, or after: either way, open)
+        let mut q = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        if q["event"] == "begin" {
+            q = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        }
+        assert_eq!((q["kind"].as_str(), q["path"].as_str()), (Some("overwrite"), Some("x")), "{q}");
+        match how {
+            "eof" => drop(c.stdin.take()),
+            "cancel" => ipc_send(&mut c, b"{\"control\":\"cancel\"}\n"),
+            _ => ipc_send(&mut c, b"{\"control\":\"finish\"}\n"),
+        }
+        let rest: Vec<_> = rx.iter().filter(|v| v["event"] != "progress").collect();
+        assert_eq!(c.wait().unwrap().code(), Some(130), "{how}: {rest:?}");
+        assert_eq!(rest.iter().filter(|v| v["event"] == "stopped").count(), 1, "{how}: {rest:?}");
+        assert_eq!(files(&d.join("x")), [("old".to_string(), b"old".to_vec())], "{how}");
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// out/5: paths of non-ASCII characters and spaces told as they are (in JSON) and written.
+#[cfg(unix)]
+#[test]
+fn ipc_non_ascii_paths() {
+    let d = scratch("out5-names");
+    let src = d.join("원본 폴더");
+    fs::create_dir_all(src.join("하위")).unwrap();
+    fs::write(src.join("하위/한글 \u{1F600}.txt"), text(1, 2000)).unwrap();
+    fs::write(src.join("é.txt"), text(2, 2000)).unwrap();
+    let want = files(&src);
+    let (mut c, rx) = ipc_start(&d, &["-c", "-o", "압축 파일.aqr", "원본 폴더"], &[]);
+    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    let (begin, end) = (next_event(&rx), next_event(&rx));
+    assert_eq!(begin["output"], "압축 파일.aqr");
+    assert_eq!((end["event"].as_str(), end["files"].as_u64()), (Some("end"), Some(2)), "{end}");
+    assert!(c.wait().unwrap().success());
+    let (mut c, rx) = ipc_start(&d, &["-d", "-o", "출력 폴더", "압축 파일.aqr"], &[]);
+    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    let (begin, end) = (next_event(&rx), next_event(&rx));
+    assert_eq!(begin["output"], "출력 폴더");
+    assert_eq!(end["event"], "end", "{end}");
+    assert!(c.wait().unwrap().success());
+    assert_eq!(files(&d.join("출력 폴더")), want);
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// out/5: a session's requests that are wrong are answered by an error (or ignored where they
+/// are not requests), the session going on to answer a right one; a `begin` without arguments
+/// ends it with an error, and the frontend gone before `begin` ends it as stopped.
+#[cfg(unix)]
+#[test]
+fn session_wrong_requests() {
+    let d = scratch("out5-session");
+    fs::create_dir_all(d.join("src")).unwrap();
+    fs::write(d.join("src/a.txt"), b"aaaa").unwrap();
+    let start = || {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
+            .arg("--session")
+            .current_dir(&d)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        ipc_send(&mut c, b"{\"hello\":1,\"answers\":[]}\n");
+        c
+    };
+    let events = |c: &mut std::process::Child| {
+        use std::io::{BufRead, BufReader};
+        let out = c.stdout.take().unwrap();
+        let (to, from) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for l in BufReader::new(out).lines().map_while(Result::ok) {
+                if to.send(serde_json::from_str::<serde_json::Value>(&l).unwrap()).is_err() {
+                    return;
+                }
+            }
+        });
+        from
+    };
+    let mut c = start();
+    let rx = events(&mut c);
+    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    for (req, error) in [
+        (&br#"{"control":"inventory","id":1}"#[..], "without args"),
+        (br#"{"control":"inventory","id":2,"args":[1,{"a":2}]}"#, "strings"),
+        (br#"{"control":"inventory","id":3,"args":["--nope"]}"#, "unknown option"),
+        (br#"{"control":"inventory","id":4,"args":["-c"]}"#, "no input"),
+        (b"{\"control\":\"inventory\",\"id\":5,\"args\":[\"-c\",\"--\",\"a\\u0000b\"]}", "NUL"),
+    ] {
+        ipc_send(&mut c, req);
+        ipc_send(&mut c, b"\n");
+        let v = next_event(&rx);
+        assert!(v["event"] == "inventory" && v["done"] == true, "{v}");
+        assert!(v["error"].as_str().is_some_and(|e| e.contains(error)), "{error}: {v}");
+        assert_eq!(v["id"], req_id(req), "{v}");
+    }
+    // (not requests: ignored)
+    for junk in [&b"{\"control\":\"dance\",\"id\":6}\n"[..], b"{{{\n", b"\xff\xfe\n", b"{\"control\":7}\n"] {
+        ipc_send(&mut c, junk);
+    }
+    ipc_send(&mut c, br#"{"control":"inventory","id":9,"args":["-c","--","src"]}"#);
+    ipc_send(&mut c, b"\n");
+    let v = next_event(&rx);
+    assert_eq!(
+        (v["id"].as_u64(), v["files"].as_u64(), &v["done"]),
+        (Some(9), Some(1), &serde_json::json!(true)),
+        "{v}"
+    );
+    // a begin of no args ends the session
+    ipc_send(&mut c, b"{\"control\":\"begin\"}\n");
+    // (standard input kept open: `wait` would close it, the frontend gone)
+    let _stdin = c.stdin.take();
+    let status = c.wait().unwrap();
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut c.stderr.take().unwrap(), &mut err).unwrap();
+    assert_eq!(status.code(), Some(1), "{err}");
+    assert!(err.contains("a request without args"), "{err}");
+    // the frontend gone before it begins
+    let mut c = start();
+    let rx = events(&mut c);
+    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    drop(c.stdin.take());
+    let rest: Vec<_> = rx.iter().collect();
+    assert_eq!(c.wait().unwrap().code(), Some(130));
+    assert!(rest.iter().any(|v| v["event"] == "stopped"), "{rest:?}");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[cfg(unix)]
+fn req_id(req: &[u8]) -> u64 {
+    let s = String::from_utf8_lossy(req);
+    let at = s.find("\"id\":").unwrap() + 5;
+    s[at..].split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap()
+}

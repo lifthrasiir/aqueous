@@ -32,7 +32,9 @@
 //! - `{"event":"error","message":...}`: the failure that the program ends with.
 //! - `{"event":"stopped"}`: stopped as the frontend asked; the output being written removed
 //!   ([`crate::stop`]). Of an archive ended as it was (`finish`, or a signal), `"kept"` too:
-//!   `{"files", "bytes"}` it holds, or null where nothing was kept.
+//!   `{"files", "bytes"}` it holds, or null where nothing was kept. Of an extraction, `cancel`
+//!   (and standard input closed) end it as `finish` does: the files written whole are kept, the
+//!   one being written removed.
 //!
 //! Where the options leave something open that the frontend answers, it is asked, and the work
 //! that asks waits for the answer (the threads at other work go on):
@@ -149,7 +151,12 @@ pub fn requests() -> Option<mpsc::Receiver<Value>> {
 fn read() {
     let ipc = IPC.get().expect("started");
     for line in std::io::stdin().lines() {
-        let Ok(line) = line else { break };
+        let line = match line {
+            Ok(line) => line,
+            // (a line that is not text is not understood: ignored, as others are)
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+            Err(_) => break,
+        };
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if let Some(id) = v["answer"].as_u64() {
             if let Some(to) = ipc.waiting.lock().unwrap().remove(&id) {
@@ -164,6 +171,14 @@ fn read() {
         } else if v["control"] == FINISH {
             // (where nothing is to be ended as it is, cancelled)
             crate::stop::request(STOPPED);
+        }
+    }
+    // (an extraction ended as it is, the file being written removed: the writer tells `stopped`
+    // and ends the process, as for `finish`)
+    if crate::stop::is_extracting() {
+        crate::stop::request(STOPPED);
+        loop {
+            std::thread::park();
         }
     }
     send(&json!({"event": "stopped"}));
