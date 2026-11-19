@@ -450,7 +450,7 @@ pub fn split(input: &[u8], limit: usize, threads: usize) -> Result<Split> {
         }
     }
     // each block's data (the filter undone) and, where it is coded, its record
-    let made = aqr_common::pool::par_map(st.blocks.len(), threads, |i| {
+    let made: Vec<_> = aqr_common::pool::par_map(st.blocks.len(), threads, |i| {
         let b = &st.blocks[i];
         let code = &input[b.code.clone()];
         if b.stored() {
@@ -467,10 +467,12 @@ pub fn split(input: &[u8], limit: usize, threads: usize) -> Result<Split> {
     });
     let mut record = vec![st.x86 as u8];
     varint::put(&mut record, size as u64);
+    // (reserved once every block has decoded: the sizes claimed are no reason to)
+    let made = made.into_iter().collect::<Result<Vec<_>>>()?;
     let mut data = Vec::with_capacity(total);
     for (b, m) in st.blocks.iter().zip(made) {
         // (a stored block's data is its code, but where the filter is undone)
-        match m? {
+        match m {
             (d, None) => {
                 record.push(1);
                 data.extend_from_slice(d.as_deref().unwrap_or(&input[b.code.clone()]));

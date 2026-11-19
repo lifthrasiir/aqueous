@@ -528,7 +528,9 @@ pub struct Block {
 /// Decodes the code of a block of `size` bytes of data with `model`.
 pub fn decode_block(code: &[u8], size: usize, model: &mut Model) -> Result<Block> {
     let mut c = Decoder::new(code);
-    let mut data = Vec::with_capacity(size);
+    // (the size is the header's claim: reserved where it can be, else the block is no block)
+    let mut data = Vec::new();
+    data.try_reserve_exact(size).map_err(|_| Error("block too large"))?;
     let mut tokens = Vec::new();
     if size > 0 {
         data.push(model.literal(&mut c, 0, 0));
