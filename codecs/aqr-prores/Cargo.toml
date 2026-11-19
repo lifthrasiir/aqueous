@@ -22,6 +22,7 @@ memchr = "2"
 memmap2 = "0.9"
 rayon = "1.12.0"
 zstd.workspace = true
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
 # directory.
