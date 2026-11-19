@@ -221,3 +221,48 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A module that is not a part module says so; a runner of no registry knows no registered
+    /// modules; a part input is empty where its length is.
+    #[test]
+    fn defaults() {
+        struct Whole;
+        impl Loaded for Whole {
+            fn apply(
+                &self,
+                _: &[u8],
+                _: &[Resource],
+                _: &[&[u8]],
+                _: &[u64],
+                _: u64,
+                _: &[u64],
+            ) -> Decoded<Vec<Vec<u8>>> {
+                Ok(vec![])
+            }
+        }
+        let w = Whole;
+        assert!(!w.is_part() && !w.is_part_of(&[1, 2]));
+        let r = w.apply_part(&[], &[], &mut [], &mut [], &[], 0, &[]);
+        assert_eq!(r, resource("not a part module"));
+        assert!(matches!(NoModules.registered(&[0; 32]), Err(Failure::Resource(_))));
+        assert!(matches!(NoModules.load(b"\0asm"), Err(Failure::Resource(_))));
+
+        struct Sized(u64);
+        impl PartIn for Sized {
+            fn len(&self) -> u64 {
+                self.0
+            }
+            fn pull(&mut self, _: u64, _: &mut dyn FnMut(&[u8])) -> Decoded<()> {
+                Ok(())
+            }
+        }
+        assert!(Sized(0).is_empty() && !Sized(3).is_empty());
+        // (the failures told)
+        assert_eq!(Failure::Invalid("x".into()).to_string(), "invalid archive: x");
+        assert_eq!(Failure::Resource("x".into()).to_string(), "resource failure: x");
+    }
+}

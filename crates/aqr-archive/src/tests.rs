@@ -1992,6 +1992,112 @@ fn shared_blocks_hashed_past_a_split() {
     assert!(open(&bad, &NoModules).unwrap().hashed(&Untold, &|_| None, 1).is_err());
 }
 
+/// What the verification learns: applications' outputs by their keys.
+#[derive(Default)]
+struct Learned(Mutex<HashMap<u128, Vec<crate::chash::Ch>>>);
+
+impl crate::chash::Records for Learned {
+    fn outputs(&self, key: u128) -> Option<Vec<crate::chash::Ch>> {
+        self.0.lock().unwrap().get(&key).cloned()
+    }
+
+    fn learn(&self, key: u128, outputs: &[crate::chash::Ch]) {
+        self.0.lock().unwrap().insert(key, outputs.to_vec());
+    }
+}
+
+/// A formula of applications, a Split of one, packed items, concatenations and a patch, and the
+/// bytes it makes.
+fn mixed() -> (Formula, Vec<u8>) {
+    let noise = aqr_common::rng::noise(10_000);
+    let mut target = noise[..6000].to_vec();
+    target[100..200].fill(1);
+    let mut f = Formula::default();
+    f.push("a", noise.clone());
+    f.push("b", b"0123456789abcdef".repeat(20));
+    let patch = f.push_as("d", Kind::Compressed, aqr_formula::patch::make(&noise[..6000], &target, 3).unwrap());
+    let rev = |s: usize, start: u64, len: u64| Node::apply(REV, vec![1, 2, 3], vec![Node::slice(s, start, len)], len);
+    let [r0, r1] = <[Node; 2]>::try_from(f.split_node(rev(0, 500, 10), vec![4, 6])).unwrap();
+    f.root = Node::concat([
+        rev(0, 0, 300),
+        Node::pack([Node::slice(1, 0, 7), rev(1, 3, 100)]),
+        r1,
+        Node::patch(Node::slice(0, 0, 6000), patch, 6000),
+        r0,
+        rev(0, 4000, 700),
+    ]);
+    let want = f.eval(&|_: &aqr_formula::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+    (f, want)
+}
+
+/// The hash of an output made of applications, a Split of one, packed items, concatenations and a
+/// patch, worked out as evaluated (the values made ahead on threads, as they are on one), is that
+/// of the bytes decoded; what it learns of the applications tells the same.
+#[test]
+fn hashed_evaluating_ahead() {
+    use crate::chash::Ch;
+    let (f, want) = mixed();
+    let c = encode(&f, Some(checksum(&want)), Level::Zstd(3)).unwrap();
+    assert!(decode(&c, &natives()).unwrap() == want);
+    let identify = |w: &[u8]| Some(format!("{:?}", Ch::of(w)));
+    let hash = |records: &Learned, runner: &dyn crate::Runner, threads| {
+        let hashed = open(&c, runner).unwrap().hashed(records, &identify, threads).unwrap();
+        let hashed = hashed.expect("hashes told");
+        assert_eq!(hashed.len(), 1);
+        hashed[0].0
+    };
+    let serial = Learned::default();
+    assert_eq!(hash(&serial, &natives(), 1), Ch::of(&want));
+    assert!(!serial.0.lock().unwrap().is_empty());
+    let ahead = Learned::default();
+    assert_eq!(hash(&ahead, &natives(), 4), Ch::of(&want));
+    assert_eq!(*serial.0.lock().unwrap(), *ahead.0.lock().unwrap());
+    // (told by the records now)
+    assert_eq!(hash(&ahead, &natives(), 4), Ch::of(&want));
+    assert_eq!(hash(&ahead, &natives(), 1), Ch::of(&want));
+}
+
+/// An archive of no tree is listed as one file ([`Archive::listing`]): its leaves' outputs
+/// concatenated (equal ones as a count, no more than a few kinds told), or the one output of a
+/// formula of all kinds of instructions.
+#[test]
+fn listed_without_a_tree() {
+    let (f, want) = mixed();
+    let c = encode(&f, Some(checksum(&want)), Level::Zstd(3)).unwrap();
+    let names = |w: &[u8]| stand_in_name(w).map(String::from);
+    let l = open(&c, &natives()).unwrap().listing(&names).unwrap();
+    assert_eq!(l.len(), 1);
+    assert_eq!(l[0].size, want.len() as u64);
+    assert!(l[0].formula.starts_with("cat("), "{}", l[0].formula);
+    assert!(l[0].formula.contains("rev"), "{}", l[0].formula);
+    assert!(l[0].nodes > 8 && l[0].data > 0 && l[0].overhead > 0, "{l:?}");
+
+    // leaves of several kinds, the first three equal, then more than are told
+    let slice = [1, 0, 0, 0, SLICE, 0, 0, 3];
+    let leaves: [&[u8]; 7] = [
+        &slice,
+        &slice,
+        &slice,
+        &[0, 0, 0, LITERAL, 2, b'a', b'b'],
+        &[1, 0, 0, 0, SLICE, 0, 0, 1, SLICE, 0, 1, 1, CONCAT, 2],
+        &[1, 0, 0, 0, SLICE, 0, 0, 1, SLICE, 0, 1, 1, PACK, 2],
+        &[1, 0, 0, 0, SLICE, 0, 0, 3, SPLIT, 2, 1, 2, CONCAT, 2],
+    ];
+    let c = archive(|out| {
+        for d in leaves {
+            formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
+        }
+        content_block(out, false, &[b"xyzabcdef"], None);
+    });
+    let got = decode(&c, &NoModules).unwrap();
+    let l = open(&c, &NoModules).unwrap().listing(&names).unwrap();
+    assert_eq!(l.len(), 1);
+    assert_eq!(l[0].size, got.len() as u64);
+    let shown = &l[0].formula;
+    assert!(shown.starts_with("cat(slice x3, lit, cat(slice x2), pack(slice x2)"), "{shown}");
+    assert!(shown.ends_with(", ...)"), "{shown}");
+}
+
 /// The evaluation tells how far it is: nothing at first, then each block decoded and each
 /// leaf evaluated, up to all the data blocks' bytes and all the outputs'.
 #[test]

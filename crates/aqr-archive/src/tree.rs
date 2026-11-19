@@ -2265,6 +2265,54 @@ mod tests {
         assert!(extras(&many, 0).is_err());
     }
 
+    /// The keys of a map of more than are compared at once are sorted, by kind and then by value:
+    /// keys of every kind, nested ones and floats among them, all told apart, and each of them
+    /// found where given twice.
+    #[test]
+    fn optional_metadata_keys_of_all_kinds() {
+        let keys: Vec<&[u8]> = vec![
+            &[0x01],
+            &[0x20],
+            &[0x41, 0x00],
+            &[0x42, 0x00, 0x01],
+            &[0x61, b'a'],
+            &[0x61, b'b'],
+            &[0x80],
+            &[0x81, 0x01],
+            &[0x82, 0x01, 0x02],
+            &[0x82, 0x01, 0x03],
+            &[0xa1, 0x01, 0x02],
+            &[0xa1, 0x01, 0x03],
+            &[0xc1, 0x01],
+            &[0xc1, 0x02],
+            &[0xc2, 0x01],
+            &[0xf4],
+            &[0xf5],
+            &[0xf6],
+            &[0xf9, 0x3c, 0x00],
+            &[0xf9, 0x40, 0x00],
+            &[0xfb, 0x3f, 0xf0, 0, 0, 0, 0, 0, 0],
+        ];
+        assert!(keys.len() > FEW_KEYS);
+        let map = |keys: &[&[u8]]| {
+            let mut m = vec![0xb8, keys.len() as u8];
+            keys.iter().for_each(|k| m.extend(k.iter().chain(&[0])));
+            m
+        };
+        assert!(extras(&map(&keys), 0).is_ok());
+        let mut rev = keys.clone();
+        rev.reverse();
+        assert!(extras(&map(&rev), 0).is_ok());
+        // each key given twice (at the end), including a nested array of another length coding
+        for (i, k) in keys.iter().enumerate() {
+            let twice: Vec<&[u8]> = keys.iter().copied().chain([*k]).collect();
+            assert!(extras(&map(&twice), 0).is_err(), "key {i} twice");
+        }
+        // an array of an indefinite length is the same key as the definite one
+        let twice: Vec<&[u8]> = keys.iter().copied().chain([&[0x9f, 0x01, 0x02, 0xff][..]]).collect();
+        assert!(extras(&map(&twice), 0).is_err());
+    }
+
     #[test]
     fn optional_metadata_big_maps() {
         // maps of many keys (a map's value, the top map, an entry extra) read in time, their

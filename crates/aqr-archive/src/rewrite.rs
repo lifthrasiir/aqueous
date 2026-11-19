@@ -744,6 +744,42 @@ mod tests {
         assert_eq!(files, [want[0].clone(), want[2].clone()]);
     }
 
+    /// The Slice instructions of formula data are found past every other instruction, whatever its
+    /// operands (an application's lists and old form, checksums), and where they are: the bytes of
+    /// the start; data of a reserved opcode, a cut checksum or a block not listed is not read.
+    #[test]
+    fn slices_past_every_opcode() {
+        use super::super::{
+            APPLY, APPLY_OLD, CHECKSUM, CONCAT, LITERAL, MODULE_BYTES, NOP, PACK, PATCH, RESOURCE_BYTES, SLICE, SPLIT,
+            SWAP,
+        };
+        let d: Vec<u8> = [
+            // (a resource list and a module list, empty; then each instruction)
+            &[0, 0, NOP, LITERAL, 2, b'a', b'b', MODULE_BYTES, 0, 1, RESOURCE_BYTES, 0, 2, SWAP, 1, CONCAT, 2][..],
+            &[PACK, 3, PATCH, 5, SLICE, 1, 130, 1, 20],
+            // an application: module, resources (two), params (three bytes), memory limit, task limits (two),
+            // inputs, outputs (two)
+            &[APPLY, 0, 2, 0, 1, 3, 9, 9, 9, 7, 2, 4, 5, 1, 2, 6, 8],
+            // the old form (no task limits)
+            &[APPLY_OLD, 0, 0, 0, 7, 1, 1, 6],
+            &[SPLIT, 2, 3, 4, SLICE, 0, 0, 0],
+            &[CHECKSUM, 1, 2, 3, 4, 5, 6, 7, 8, SLICE, 1, 5, 6],
+        ]
+        .concat();
+        let got = slices(&d, 0, 2).unwrap();
+        let view: Vec<(usize, u64, u64)> = got.iter().map(|s| (s.block, s.start, s.len)).collect();
+        assert_eq!(view, [(1, 130, 20), (0, 0, 0), (1, 5, 6)]);
+        // (the start of the first, as two bytes of a varint)
+        assert_eq!(&d[got[0].at.clone()], &[130, 1]);
+        assert_eq!(d[got[2].at.clone()], [5]);
+        // a block past those listed, a reserved opcode, a checksum cut short
+        assert!(slices(&[0, 0, SLICE, 2, 0, 0], 0, 2).is_err());
+        assert!(slices(&[0, 0, 0x7f], 0, 2).is_err());
+        assert!(slices(&[0, 0, CHECKSUM, 1, 2, 3], 0, 2).is_err());
+        // a literal cut short
+        assert!(slices(&[0, 0, LITERAL, 9, 1], 0, 2).is_err());
+    }
+
     /// Nothing left, and contents not of the archive, are errors.
     #[test]
     fn refused() {
