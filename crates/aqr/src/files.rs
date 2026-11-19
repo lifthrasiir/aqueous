@@ -22,6 +22,10 @@ pub(crate) fn part_of(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// The most of an archive's footer (and its padding) kept in memory to be written back as an
+/// append is cancelled.
+const FOOTER_RESTORE: u64 = 16 << 20;
+
 /// The archive `out` appended to, as [`append::Opened::prior`] found it, of what `g` holds (to be
 /// appended), committed as it is written (once as it ends, with `--atomic`): what became of it,
 /// its length and overhead those of what was added (the archive's growth, as the summary tells
@@ -37,6 +41,18 @@ pub(crate) fn appended(
 ) -> Result<aqr_compress::Report, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", out.display());
     let file = &p.file;
+    let end = p.at.end;
+    // (a cancelled append is cut back to `end`, the footer it makes a spacer block of, or cuts
+    // off where it is written over, written back: the archive as it was)
+    let footer_at = p.at.start + p.footer.start as u64;
+    let footer = (end - footer_at <= FOOTER_RESTORE).then(|| {
+        let mut f = file;
+        let mut bytes = vec![0; (end - footer_at) as usize];
+        std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(footer_at))
+            .and_then(|_| std::io::Read::read_exact(&mut f, &mut bytes))
+            .and_then(|()| Ok((std::sync::Arc::new(file.try_clone()?), footer_at, bytes)))
+    });
+    let restore = footer.and_then(Result::ok);
     // (a footer across a sector of the file written over, from where it starts)
     if !p.kill {
         if a.verbose {
@@ -44,14 +60,13 @@ pub(crate) fn appended(
         }
         file.set_len(p.at.start + p.footer.start as u64).map_err(|e| err(&exit::seen(e)))?;
     }
-    let end = p.at.end;
-    let _undo = stop::undo_by(stop::Undo::Truncate(out.to_owned(), end));
+    let _undo = stop::undo_by(stop::Undo::Truncate(out.to_owned(), end, restore));
     let mut f = file;
     std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0)).map_err(|e| err(&exit::seen(e)))?;
     let from =
         aqr_compress::Appending { footer: p.footer, metadata: p.metadata, link_groups: p.link_groups, kill: p.kill };
     let placed = std::sync::atomic::AtomicBool::new(true);
-    let w = std::io::BufWriter::with_capacity(8 << 20, file);
+    let w = std::io::BufWriter::with_capacity(8 << 20, Held(file));
     let mut o = FileOut { w, commits: true, once: a.atomic, base: p.at.start, place: None, placed: &placed };
     // (failing, what was written after the last commit is left, cut off by the next append)
     let mut r =
@@ -112,7 +127,7 @@ pub(crate) fn stopped_tree(
 /// ([`aqr_compress::Output`]): `part`, placed at its output at its first commit ([`place`],
 /// [`stop::placed`]), as `placed` then tells.
 pub(crate) struct FileOut<'f> {
-    pub(crate) w: std::io::BufWriter<&'f fs::File>,
+    pub(crate) w: std::io::BufWriter<Held<'f>>,
     /// Whether it is committed as it is written, once as it ends (an archive appended to with
     /// `--atomic`), and where the archive starts in the file.
     pub(crate) commits: bool,
@@ -122,6 +137,19 @@ pub(crate) struct FileOut<'f> {
     /// in place (an archive appended to).
     pub(crate) place: Option<(PathBuf, PathBuf, bool)>,
     pub(crate) placed: &'f std::sync::atomic::AtomicBool,
+}
+
+/// A file written to as [`stop::held`] has it: not as the process is stopped and the output undone.
+pub(crate) struct Held<'f>(pub(crate) &'f fs::File);
+
+impl Write for Held<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        stop::held(|| (&*self.0).write(buf))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Write for FileOut<'_> {
@@ -153,7 +181,7 @@ impl aqr_compress::Output for FileOut<'_> {
 
     fn sync(&mut self) -> std::io::Result<()> {
         self.w.flush()?;
-        sync_file(self.w.get_ref())?;
+        sync_file(self.w.get_ref().0)?;
         if self.commits
             && let Some((part, out, force)) = &self.place
             && !self.placed.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -166,7 +194,7 @@ impl aqr_compress::Output for FileOut<'_> {
 
     fn patch(&mut self, at: u64, bytes: &[u8]) -> std::io::Result<()> {
         self.w.flush()?;
-        write_at(self.w.get_ref(), self.base + at, bytes)
+        stop::held(|| write_at(self.w.get_ref().0, self.base + at, bytes))
     }
 }
 

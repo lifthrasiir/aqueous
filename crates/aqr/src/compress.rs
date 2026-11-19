@@ -513,7 +513,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
         }
         None => write_placing(out, force, |file, part| match &sealing {
             None => {
-                let w = std::io::BufWriter::with_capacity(8 << 20, &*file);
+                let w = std::io::BufWriter::with_capacity(8 << 20, crate::files::Held(&*file));
                 let place = Some((part.to_owned(), out.to_owned(), force));
                 let mut o = FileOut { w, commits: !a.atomic, once: false, base: 0, place, placed: &placed };
                 let r = viewed(a, &view, |tell| {

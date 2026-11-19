@@ -208,7 +208,6 @@ fn signalled(dir: &Path, args: &[&str], when: &dyn Fn() -> bool, signals: &[&str
 
 /// write/3: an append cancelled by a frontend (`--ipc`'s cancel, or its standard input closed) is
 /// stopped, and the archive appended to is not removed: it holds what it did before.
-#[cfg(unix)]
 #[test]
 fn ipc_append_cancelled() {
     use std::io::{BufRead, BufReader, Write};

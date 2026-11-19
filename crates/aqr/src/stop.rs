@@ -32,8 +32,10 @@ static GATE: Mutex<()> = Mutex::new(());
 pub enum Undo {
     /// Removed, as it was made.
     Remove(PathBuf),
-    /// Cut back to its length before (an archive appended to).
-    Truncate(PathBuf, u64),
+    /// Cut back to its length before (an archive appended to), and the bytes it had from an
+    /// offset written back (its footer: a commit makes it a spacer block, zeroed), through the
+    /// file as the process holds it open (locked against the writing of any other).
+    Truncate(PathBuf, u64, Option<(std::sync::Arc<std::fs::File>, u64, Vec<u8>)>),
 }
 
 static UNDO: Mutex<Option<Undo>> = Mutex::new(None);
@@ -53,6 +55,14 @@ pub fn create<T>(path: &Path, make: impl FnOnce() -> std::io::Result<T>) -> std:
     imp::set(Some(path));
     *UNDO.lock().unwrap_or_else(|e| e.into_inner()) = Some(Undo::Remove(path.to_owned()));
     Ok((t, Guard(())))
+}
+
+/// Runs `f`, a write to the output, not while [`now`] undoes it nor after: a write begun before
+/// it is waited for, a later one waits for good (the process is ended meanwhile), so that a
+/// thread writing never puts bytes where the output was cut back.
+pub fn held<T>(f: impl FnOnce() -> T) -> T {
+    let _gate = GATE.lock().unwrap_or_else(|e| e.into_inner());
+    f()
 }
 
 /// Has the output being written ended in two steps (module docs) until the guard of
@@ -140,9 +150,12 @@ pub fn now(code: i32) -> ! {
     match UNDO.lock().unwrap_or_else(|e| e.into_inner()).take() {
         // (open as it is, but shared for deletion on Windows: gone once the process is)
         Some(Undo::Remove(p)) => _ = std::fs::remove_file(p),
-        Some(Undo::Truncate(p, len)) => {
+        Some(Undo::Truncate(p, len, restore)) => {
             if let Ok(f) = std::fs::OpenOptions::new().write(true).open(p) {
                 _ = f.set_len(len);
+                if let Some((held, at, bytes)) = restore {
+                    _ = aqr_common::fsio::write_all_at(&held, &bytes, at);
+                }
                 _ = f.sync_all();
             }
         }
