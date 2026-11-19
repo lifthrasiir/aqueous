@@ -993,6 +993,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-raw",
+ "aqr-testkit",
  "memchr",
 ]
 
@@ -1341,6 +1342,7 @@ dependencies = [
  "aqr-archive",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "xxhash-rust",
 ]
 
@@ -1418,6 +1420,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-raw",
+ "aqr-testkit",
  "memchr",
 ]
 
@@ -1904,6 +1907,7 @@ dependencies = [
  "aqr-archive",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "aqr-vorbis",
 ]
 
