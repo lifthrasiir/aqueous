@@ -374,7 +374,7 @@ pub(crate) fn sqlite_zstd(d: &[u8], threads: usize) -> Option<Formula> {
 aqr_common::zopt! {
     /// Whether the estimate of the heap turns inputs down ([`fits`]); off (`-Z test:no-estimate`),
     /// everything fits, to see the limit hold as it runs.
-    static ESTIMATE: Opt<bool> =
+    pub(crate) static ESTIMATE: Opt<bool> =
         Opt::flag("test:estimate", true, "inputs turned down by their heap's estimate (off: to see the limit hold as it runs)");
 }
 

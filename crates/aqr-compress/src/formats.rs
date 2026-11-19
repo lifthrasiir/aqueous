@@ -107,7 +107,7 @@ fn format_names() -> Vec<&'static str> {
 aqr_common::zopt! {
     /// The heap each format's recompressor takes at most for each byte of its input
     /// ([`Spec::heap`]), where another is tried.
-    static HEAP: Family<f64> = Family::new(
+    pub(crate) static HEAP: Family<f64> = Family::new(
         "heap:FORMAT",
         format_names,
         "as formats.rs has it",

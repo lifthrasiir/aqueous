@@ -471,6 +471,12 @@ mod tests {
             "codecs/aqr-zip/tests/data/infozip-stream.zip",
             "codecs/aqr-snappy/tests/data/table-mul.ldb",
             "codecs/aqr-ogg/tests/data/chained.ogg",
+            "codecs/aqr-rar/tests/data/r4_m3.rar",
+            "codecs/aqr-7z/tests/data/copy.7z",
+            "codecs/aqr-mszip/tests/data/fixed.cab",
+            "codecs/aqr-alz/tests/data/normal.alz",
+            "codecs/aqr-egg/tests/data/small_kor.egg",
+            "codecs/aqr-lzma/tests/data/blocks.xz",
         ] {
             data.extend(std::fs::read(format!("{root}/{f}")).unwrap());
         }
@@ -646,5 +652,139 @@ mod tests {
             d[at] = v;
             assert_eq!(detect(&d), None, "byte {at}");
         }
+    }
+
+    /// A cpio archive of one member and the trailer, in each form.
+    fn cpio(form: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (name, body) in [("a.txt", &b"hello"[..]), ("TRAILER!!!", &b""[..])] {
+            let nul = name.len() + 1;
+            match form {
+                "newc" | "crc" => {
+                    out.extend(if form == "newc" { b"070701" } else { b"070702" });
+                    for v in [1u32, 0o100644, 0, 0, 1, 0, body.len() as u32, 0, 0, 0, 0, nul as u32, 0] {
+                        out.extend(format!("{v:08x}").bytes());
+                    }
+                    out.extend(name.bytes());
+                    out.push(0);
+                    out.resize(out.len().next_multiple_of(4), 0);
+                    out.extend(body);
+                    out.resize(out.len().next_multiple_of(4), 0);
+                }
+                "odc" => {
+                    out.extend(b"070707");
+                    for (w, v) in [(6, 1u64), (6, 1), (6, 0o100644), (6, 0), (6, 0), (6, 1), (6, 0), (11, 0)] {
+                        out.extend(format!("{v:0w$o}").bytes());
+                    }
+                    out.extend(format!("{nul:06o}{:011o}", body.len()).bytes());
+                    out.extend(name.bytes());
+                    out.push(0);
+                    out.extend(body);
+                }
+                _ => {
+                    let le = form == "le";
+                    let w = |out: &mut Vec<u8>, v: u16| out.extend(if le { v.to_le_bytes() } else { v.to_be_bytes() });
+                    w(&mut out, 0o070707);
+                    for v in [1u16, 1, 0o100644, 0, 0, 1, 0, 0, 0, nul as u16, 0, body.len() as u16] {
+                        w(&mut out, v);
+                    }
+                    out.extend(name.bytes());
+                    out.push(0);
+                    out.resize(out.len() + out.len() % 2, 0);
+                    out.extend(body);
+                    out.resize(out.len() + out.len() % 2, 0);
+                }
+            }
+        }
+        out
+    }
+
+    /// The forms of cpio: each is the format at the start; those of ASCII are found in other
+    /// data (their magic is of 6 bytes), the binary ones not.
+    #[test]
+    fn cpio_magics() {
+        for (form, anywhere) in [("newc", true), ("crc", true), ("odc", true), ("le", false), ("be", false)] {
+            let d = cpio(form);
+            assert_eq!(detect(&d), Some(Format::Cpio), "{form}");
+            assert_eq!(starts(&d), anywhere.then_some(Format::Cpio), "{form} in other data");
+            // a magic with a header cut short, or a name that does not end in a NUL
+            let name = d.windows(5).position(|w| w == b"a.txt").unwrap();
+            for cut in [3, 6, 20, 25, name, name + 5] {
+                assert_eq!(detect(&d[..cut]), None, "{form} cut at {cut}");
+            }
+            assert_eq!(detect(&d[..name + 6]), Some(Format::Cpio), "{form} cut after the name");
+        }
+        // (the 7-digit "07070" of another thing)
+        assert_eq!(detect(b"0707070707070707070707070707"), None);
+        let mut d = cpio("newc");
+        d[6 + 8 * 11..6 + 8 * 12].copy_from_slice(b"00000000");
+        assert_eq!(detect(&d), None, "a name of no length");
+    }
+
+    /// A git pack and a Quake pak both start with `PACK`: the pack by its trailer, the other by
+    /// a directory that fits the file; neither takes the other's.
+    #[test]
+    fn git_pack_or_quake_pak() {
+        let fixture =
+            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../codecs/aqr-git/tests/data/small.pack")).unwrap();
+        assert_eq!(detect(&fixture), Some(Format::GitPack));
+        // a Quake pak of one file: its directory at 12, one entry of 56 bytes of name, offset, size
+        let body = b"quake data";
+        let mut pak = b"PACK".to_vec();
+        pak.extend(((12 + body.len()) as u32).to_le_bytes());
+        pak.extend(64u32.to_le_bytes());
+        pak.extend(body);
+        let mut name = b"maps/e1m1.bsp".to_vec();
+        name.resize(56, 0);
+        pak.extend(name);
+        pak.extend(12u32.to_le_bytes());
+        pak.extend((body.len() as u32).to_le_bytes());
+        assert_eq!(detect(&pak), Some(Format::QuakePak));
+        // (cut, so that its directory is past the end, it is neither)
+        assert_eq!(detect(&pak[..pak.len() - 1]), None);
+        assert_eq!(detect(&pak[..11]), None);
+        // (a git pack is told by its header and its object count, not by its trailer, which the
+        // recompressor checks)
+        let mut bad = fixture.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert_eq!(detect(&bad), Some(Format::GitPack));
+    }
+
+    /// Lines of text are JSON lines where they are, a table where fields are separated alike on
+    /// each line, else text; text too short is nothing.
+    #[test]
+    fn jsonl_xsv_text() {
+        let jsonl: String =
+            (0..600).map(|i| format!("{{\"id\":{i},\"name\":\"item {}\",\"ok\":true}}\n", i * 7)).collect();
+        assert_eq!(detect(jsonl.as_bytes()), Some(Format::Jsonl));
+        let csv: String = (0..1500).map(|i| format!("{i},item {},{}.5\n", i * 7, i % 11)).collect();
+        assert_eq!(detect(csv.as_bytes()), Some(Format::Xsv));
+        let prose: String = (0..6000)
+            .map(|i| {
+                format!(
+                    "This is line {i} of some prose {}which is no table but words.
+",
+                    "and so on ".repeat(i % 5)
+                )
+            })
+            .collect();
+        let min = aqr_wrt::formula::MIN_LEN;
+        assert!(prose.len() > min);
+        assert_eq!(detect(prose.as_bytes()), Some(Format::Text));
+        assert_eq!(detect(&prose.as_bytes()[..min]), Some(Format::Text));
+        assert_eq!(detect(&prose.as_bytes()[..min - 1]), None);
+        // (JSON lines cut into fields at its commas would be a table too: the lines first)
+        assert!(aqr_xsv::formula::starts(jsonl.as_bytes()) || detect(jsonl.as_bytes()) == Some(Format::Jsonl));
+        // the least length of each: 16 KiB
+        let lines = jsonl.as_bytes();
+        assert_ne!(detect(&lines[..aqr_jsonl::formula::MIN_LEN - 1]), Some(Format::Jsonl));
+        assert_eq!(detect(&lines[..aqr_jsonl::formula::MIN_LEN]), Some(Format::Jsonl));
+        // told from the start: a line broken further on is the recompressor's to turn down
+        let mut broken = jsonl.clone().into_bytes();
+        broken[jsonl.len() / 2] = b'#';
+        assert_eq!(detect(&broken), Some(Format::Jsonl));
+        // (too short, none; binary, none)
+        assert_eq!(detect(b"{\"a\":1}\n"), None);
+        assert_eq!(detect(&aqr_common::rng::noise(5000)), None);
     }
 }

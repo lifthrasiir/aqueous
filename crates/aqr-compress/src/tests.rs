@@ -2339,3 +2339,58 @@ fn regions_panic_falls_back() {
     // (the parts not told, the pixels were looked into)
     assert!(TRIED.with(|t| t.borrow().contains(&Format::Mp3)));
 }
+
+/// An input fits where its estimate of heap (the format's bytes of heap for each of its bytes)
+/// is at most the limit: the input of exactly the limit's worth does, a byte more does not; a
+/// format of no heap takes any input, one of no room takes none that is not empty.
+#[test]
+fn fits_at_the_boundary() {
+    for format in Format::ALL {
+        let h = format.heap();
+        if h == 0.0 {
+            assert!(fits_within(format, usize::MAX, 0), "{}", format.name());
+            assert!(fits_within(format, 0, 0));
+            continue;
+        }
+        // (a limit the heap per byte divides, to the byte)
+        let n = 1000;
+        let limit = (h * n as f64) as u64;
+        if limit as f64 != h * n as f64 {
+            continue;
+        }
+        assert!(fits_within(format, n, limit), "{}: {n} bytes of {h} each", format.name());
+        assert!(!fits_within(format, n + 1, limit), "{}: {} bytes of {h} each", format.name(), n + 1);
+        assert!(fits_within(format, 0, 0) && !fits_within(format, 1, 0));
+        assert!(fits_within(format, 0, limit) && !fits_within(format, usize::MAX, limit));
+    }
+    assert!(Format::ALL.iter().any(|f| f.heap() > 0.0));
+}
+
+/// `-Z heap:FORMAT` changes what a format's inputs are turned down by (that of its name alone),
+/// `-Z test:estimate=off` turns nobody down; an input turned down is kept as it is.
+#[test]
+fn heap_option_turns_inputs_down() {
+    let text: Vec<u8> = (0..30013).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+    let mut z = flate2::GzBuilder::new().filename("t.txt").write(Vec::new(), flate2::Compression::new(6));
+    std::io::Write::write_all(&mut z, &text).unwrap();
+    let gz = z.finish().unwrap();
+    let opt = Options { smaller: false, ..Options::default() };
+    let made = |d: &[u8]| {
+        let f = recompress(d, &opt);
+        assert!(f.eval(&Native::default()).is_ok_and(|b| b == d));
+        f.applies().len()
+    };
+    assert!(made(&gz) > 0);
+    {
+        // (more heap than any limit)
+        let _h = crate::formats::HEAP.set_here("gzip", 1e12);
+        assert!(!fits(Format::Gzip, gz.len()));
+        assert_eq!(made(&gz), 0, "kept as it is");
+        let _e = crate::recompressors::ESTIMATE.set_here(false);
+        assert!(fits(Format::Gzip, gz.len()), "no estimate, everything fits");
+    }
+    assert!(fits(Format::Gzip, gz.len()) && made(&gz) > 0);
+    // (a format of no heap given some turns its inputs down by it)
+    let _h = crate::formats::HEAP.set_here("text", 1e12);
+    assert!(!fits(Format::Text, 1) && fits(Format::Gzip, 1));
+}

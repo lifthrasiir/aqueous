@@ -1677,6 +1677,8 @@ fn sqlite_zstd_whole() {
         sql += &format!("insert into t values({i}, x'{}', x'{}');\n", hex(&z), hex(&small));
     }
     let db = sqlite_db_of(&sql);
+    // (told from a plain database by its blobs)
+    assert_eq!(aqr_compress::detect(&db), Some(aqr_compress::Format::SqliteZstd));
     let f = roundtrip(&db, &all());
     assert_eq!(modules(&f), [aqr_decompress::ZSTD_FRAMES.name]);
     // (one of plain blobs is aqr-sqlite's)
@@ -1685,6 +1687,7 @@ fn sqlite_zstd_whole() {
         with recursive n(i) as (select 1 union all select i + 1 from n where i < 300)
         insert into t select i, randomblob(1000) from n;",
     );
+    assert_eq!(aqr_compress::detect(&plain), Some(aqr_compress::Format::Sqlite));
     assert!(!modules(&roundtrip(&plain, &all())).contains(&aqr_decompress::ZSTD_FRAMES.name));
 }
 
