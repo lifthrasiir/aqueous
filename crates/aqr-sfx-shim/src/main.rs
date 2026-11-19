@@ -5,8 +5,8 @@
 //! other, so the stub links no codecs and no Wasmtime; the apply logic is in [`aqr_sfx`].
 //!
 //! What follows the stub's image in its file (`aqr --format sfx`, the stub packed by UPX) is a
-//! bundle of blobs ([`aqr_sfx::bundle`]), if any, then the archive, which runs to the end of the
-//! file. A stub with the blobs merged into it (`aqr-ld merge`) has no bundle; where no archive
+//! bundle of blobs ([`aqr_sfx::bundle`]), if any, then the archive, which other bytes may follow
+//! (a signature: the archive is located, spec "Locating an archive"). A stub with the blobs merged into it (`aqr-ld merge`) has no bundle; where no archive
 //! opens right after the image, the stub scans itself from the end for the last place a valid
 //! archive begins, by the archive's header magic.
 //!
@@ -38,15 +38,19 @@ fn run() -> Result<(), String> {
         at += n;
     }
 
-    // the appended archive runs to the end of the file, right after the image (and the bundle);
-    // else find where it begins by its header magic, scanning from the end and taking the last
-    // place a valid archive opens
-    let archive = match aqr_archive::open(&bytes[at..], &runner) {
-        Ok(a) => a,
-        Err(_) => (0..=bytes.len().saturating_sub(HEADER_MAGIC.len()))
+    // the appended archive starts right after the image (and the bundle), and may be followed by
+    // other bytes (a signature); else find where it begins by its header magic, scanning from the
+    // end and taking the last place a valid archive opens
+    let opened = |x: usize| {
+        let d = &bytes[x..];
+        aqr_archive::open(&d[aqr_archive::locate(d).filter(|r| r.start == 0)?], &runner).ok()
+    };
+    let archive = match opened(at) {
+        Some(a) => a,
+        None => (0..=bytes.len().saturating_sub(HEADER_MAGIC.len()))
             .rev()
             .filter(|&x| bytes[x..].starts_with(&HEADER_MAGIC))
-            .find_map(|x| aqr_archive::open(&bytes[x..], &runner).ok())
+            .find_map(opened)
             .ok_or("no Aqueous archive is appended to this stub")?,
     };
 

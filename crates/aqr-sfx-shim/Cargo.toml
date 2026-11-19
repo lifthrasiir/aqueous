@@ -12,3 +12,6 @@ path = "src/main.rs"
 [dependencies]
 aqr-sfx = { path = "../aqr-sfx" }
 aqr-archive = { path = "../aqr-archive" }
+
+[dev-dependencies]
+aqr-formula = { path = "../aqr-formula" }
