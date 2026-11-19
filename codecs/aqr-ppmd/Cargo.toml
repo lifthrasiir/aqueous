@@ -10,3 +10,4 @@ aqr-formula = { path = "../../crates/aqr-formula" }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
