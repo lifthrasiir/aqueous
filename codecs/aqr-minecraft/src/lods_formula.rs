@@ -25,9 +25,9 @@ pub const COLUMNS: [u16; 8] = [5, 15, 16, 17, 18, 6, 7, 8];
 aqr_common::zopt! {
     /// What the pool may hold at once (blobs of children to come, quadrants kept, parents' blobs to
     /// put), within the bound of an application (256 MiB compressing).
-    static HELD: Opt<usize> = Opt::size("mc:lods-held", 96 << 20, "bytes the LOD pool may hold at once");
+    pub static HELD: Opt<usize> = Opt::size("mc:lods-held", 96 << 20, "bytes the LOD pool may hold at once");
     /// The pool at most, within the bound of an application (256 MiB compressing).
-    static POOL: Opt<usize> = Opt::size("mc:lods-pool", 160 << 20, "bytes the LOD pool may hold at most");
+    pub static POOL: Opt<usize> = Opt::size("mc:lods-pool", 160 << 20, "bytes the LOD pool may hold at most");
     /// Contents made and checked at once, about: their bytes.
     static BATCH: Opt<usize> = Opt::size("mc:lods-batch", 64 << 20, "bytes of LOD contents made and checked at once");
     /// Rows of `FullData` collected in parallel by one task.
@@ -634,4 +634,113 @@ fn simulate(rows: &[Row], facts: &[Facts], roles: &[Role], taken: &aqr_zstd::for
         }
     }
     pool
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row of contents `first..=last`, its eight blobs of `len` bytes.
+    fn row(key: [i64; 3], first: usize, last: usize, len: u64) -> Row {
+        Row { key, frames: [0; 8], first, last, lens: [len; 8] }
+    }
+
+    /// A tree of 6 rows: 1..=4 the children of 0, and 0 the child of 5 (which has no other child
+    /// kept: its other quadrants are stored).
+    fn tree() -> (Vec<Row>, Vec<Facts>, Vec<Role>, Vec<Option<usize>>) {
+        let mut rows: Vec<Row> =
+            (0..4).map(|i| row([0, i / 2, i % 2], i as usize * 8, i as usize * 8 + 7, 100)).collect();
+        rows.insert(0, row([1, 0, 0], 40, 47, 300));
+        rows.push(row([2, 0, 0], 60, 67, 500));
+        let facts = vec![Facts { quadrant: 50, exact: true, ..Facts::default() }; rows.len()];
+        let mut roles = vec![Role::Observed; rows.len()];
+        roles[0] = Role::Derived { sources: [Some(1), Some(2), Some(3), Some(4)], child: true };
+        roles[5] = Role::Derived { sources: [Some(0), None, None, None], child: false };
+        let mut parent_of = vec![None; rows.len()];
+        for c in 1..=4 {
+            parent_of[c] = Some(0);
+        }
+        parent_of[0] = Some(5);
+        (rows, facts, roles, parent_of)
+    }
+
+    /// The most the spans of `roles` hold at once.
+    fn most_held(rows: &[Row], facts: &[Facts], roles: &[Role], parent_of: &[Option<usize>]) -> u64 {
+        let spans = spans(rows, facts, roles, parent_of);
+        spans
+            .iter()
+            .map(|s| {
+                spans.iter().filter(|t| t.from <= s.from && s.from < t.to.max(t.from + 1)).map(|t| t.bytes).sum::<u64>()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn child_let_go_gives_its_quadrant_stored() {
+        let (_, _, mut roles, parent_of) = tree();
+        let mut changed = Vec::new();
+        let_go(&mut roles, &parent_of, 1, &mut changed);
+        assert_eq!(roles[1], Role::Plain);
+        assert_eq!(roles[0], Role::Derived { sources: [None, Some(2), Some(3), Some(4)], child: true });
+        assert_eq!(changed, [1]);
+        // the last child kept let go: the parent is made no more, and its own parent, which had
+        // no quadrant of a child left, either
+        for c in 2..=4 {
+            let_go(&mut roles, &parent_of, c, &mut changed);
+        }
+        assert_eq!(&roles[..5], [Role::Plain; 5]);
+        assert_eq!(roles[5], Role::Plain);
+        // a parent whose own roles are kept as a child: let go keeps it derived
+        let (_, _, mut roles, parent_of) = tree();
+        let_go(&mut roles, &parent_of, 0, &mut changed);
+        assert_eq!(roles[0], Role::Derived { sources: [Some(1), Some(2), Some(3), Some(4)], child: false });
+        assert_eq!(roles[5], Role::Plain);
+    }
+
+    #[test]
+    fn parent_unmade_lets_its_children_go() {
+        let (_, _, mut roles, parent_of) = tree();
+        let mut changed = Vec::new();
+        unmake(&mut roles, &parent_of, 0, &mut changed);
+        assert_eq!(&roles[..5], [Role::Plain; 5]);
+        assert_eq!(roles[5], Role::Plain);
+        changed.sort();
+        changed.dedup();
+        assert_eq!(changed, [0, 1, 2, 3, 4, 5]);
+        // not a parent: nothing to do
+        let before = roles.clone();
+        unmake(&mut roles, &parent_of, 3, &mut changed);
+        assert_eq!(roles, before);
+    }
+
+    #[test]
+    fn settle_holds_the_budget() {
+        let (rows, facts, roles, parent_of) = tree();
+        let all = most_held(&rows, &facts, &roles, &parent_of);
+        assert!(all > 1000, "{all}");
+        // room enough: nothing lowered
+        let mut r = roles.clone();
+        settle(&rows, &facts, &mut r, &parent_of, all);
+        assert_eq!(r, roles);
+        // less and less room: what is held fits, and less stays derived
+        let derived = |r: &[Role]| r.iter().filter(|r| matches!(r, Role::Derived { .. })).count();
+        let mut last = derived(&roles);
+        for budget in [all - 1, all * 3 / 4, all / 2, all / 4, 400, 100, 0] {
+            let mut r = roles.clone();
+            settle(&rows, &facts, &mut r, &parent_of, budget);
+            assert!(most_held(&rows, &facts, &r, &parent_of) <= budget.max(0), "budget {budget}: {r:?}");
+            let d = derived(&r);
+            assert!(d <= last, "budget {budget}");
+            last = d;
+        }
+        // no room at all: nothing made
+        let mut r = roles.clone();
+        settle(&rows, &facts, &mut r, &parent_of, 0);
+        assert!(
+            r.iter().all(|r| matches!(r, Role::Plain)
+                || matches!(r, Role::Derived { sources, .. } if sources.iter().all(Option::is_none))),
+            "{r:?}"
+        );
+    }
 }

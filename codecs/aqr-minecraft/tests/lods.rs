@@ -43,3 +43,45 @@ fn parents_made_of_their_children() {
         }
     }
 }
+
+/// The formula's pool held to less than the children and parents need at once: children are let go
+/// (their quadrants stored instead) and parents made no more, as the budget shrinks; whatever is
+/// left still makes the file again, and less is derived the less the pool may hold.
+#[test]
+fn pool_held_down() {
+    use aqr_minecraft::lods_formula::{HELD, MODULE, POOL};
+    let db = dh_db::database(8);
+    let blobs = aqr_sqlite::blobs::blobs(&db, 8, &|h| h.starts_with(&aqr_zstd::MAGIC)).unwrap();
+    let mut stored = Vec::new();
+    for held in [usize::MAX >> 1, 100_000, 70_000, 1000] {
+        let _g = HELD.set_here(held);
+        let Some(f) = aqr_minecraft::lods_formula::encode(&db, &blobs, 1) else {
+            // (nothing left to derive: no parent keeps a child)
+            assert!(held <= 60_000, "{held}");
+            stored.push(None);
+            continue;
+        };
+        let Node::Apply(z) = &f.root else { panic!("zstd-frames") };
+        let Node::Apply(l) = &z.inputs[3] else { panic!("dh-lods") };
+        assert_eq!(l.module, MODULE);
+        let li: Vec<&[u8]> = l.inputs.iter().map(|i| slice(&f, i)).collect();
+        for threads in [1, 3] {
+            let contents = aqr_minecraft::lods::decode(&l.params, &li, l.len, threads).unwrap();
+            let mut zi: Vec<&[u8]> = z.inputs[..3].iter().map(|i| slice(&f, i)).collect();
+            zi.push(&contents);
+            assert!(aqr_zstd::frames::decode(&z.params, &zi, z.len, 2).unwrap() == db, "{held}");
+        }
+        stored.push(Some(li[1].len()));
+    }
+    let made: Vec<usize> = stored.iter().flatten().copied().collect();
+    assert!(made.len() >= 2, "{stored:?}");
+    // (a smaller pool stores no less)
+    assert!(made.windows(2).all(|w| w[0] <= w[1]), "{stored:?}");
+    assert!(made.last() > made.first(), "{stored:?}");
+    // a pool that what is held cannot fit: the budget halved to the least
+    let _g = (HELD.set_here(usize::MAX >> 1), POOL.set_here(1000));
+    if let Some(f) = aqr_minecraft::lods_formula::encode(&db, &blobs, 1) {
+        let Node::Apply(z) = &f.root else { panic!("zstd-frames") };
+        assert!(z.len as usize == db.len());
+    }
+}
