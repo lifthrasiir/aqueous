@@ -14,6 +14,7 @@ aqr-xpress = { path = "../aqr-xpress" }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # (file systems to read the containers' disks with)
 aqr-ext = { path = "../aqr-ext" }

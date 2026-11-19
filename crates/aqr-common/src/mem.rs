@@ -152,6 +152,20 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+/// A vector of `n` zero bytes, or None where the heap does not hold it (where `vec![0; n]`
+/// aborts the process): for a length an input declares, before anything checks it. Its pages
+/// come zeroed from the system, untouched until written.
+pub fn try_zeroed(n: usize) -> Option<Vec<u8>> {
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    let l = Layout::array::<u8>(n).ok()?;
+    // SAFETY: a layout of `n > 0` bytes; the block is of `n` initialised (zero) bytes, of the
+    // global allocator as a vector's are
+    let p = unsafe { std::alloc::alloc_zeroed(l) };
+    (!p.is_null()).then(|| unsafe { Vec::from_raw_parts(p, n, n) })
+}
+
 /// Starts a peak measurement; returns the bytes in use now.
 pub fn peak_reset() -> usize {
     let c = CUR.load(Relaxed);

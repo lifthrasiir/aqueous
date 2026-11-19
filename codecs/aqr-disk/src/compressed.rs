@@ -113,7 +113,8 @@ pub fn unpack(s: &[u8], how: &Compressed) -> Option<Unpacked> {
         }
         Compressed::Opaque { .. } => return None,
     };
-    let mut data = vec![0; aqr_lzx::recons::data_len(&chunks)];
+    // (the length the chunks declare, reserved where the heap holds it: else not taken)
+    let mut data = aqr_common::mem::try_zeroed(aqr_lzx::recons::data_len(&chunks))?;
     let (mut streams, mut at) = (Vec::new(), 0);
     let most = if by == By::Lzx { STREAM_DATA.get() } else { XPRESS_STREAM_DATA.get() };
     for c in chunks.chunks((most / chunk).max(1)) {
