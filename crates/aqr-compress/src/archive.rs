@@ -1872,7 +1872,9 @@ fn analyze(
     }
     f.root = Node::Concat(slices);
     // (the files that the frames of a Zstandard file hold, taken from them)
-    crate::zst::share(&mut f, &files.iter().map(|f| (f.len, f.hash)).collect::<Vec<_>>(), crate::zst::bound(opt));
+    // (a bug of it keeps the files as they are)
+    let (hashes, bound) = (files.iter().map(|f| (f.len, f.hash)).collect::<Vec<_>>(), crate::zst::bound(opt));
+    crate::caught("zstd-share", files.iter().map(|f| f.len).sum(), || crate::zst::share(&mut f, &hashes, bound));
 
     // nested a format deeper, so that the files are as deep as a file alone is
     let nopt = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
@@ -1886,7 +1888,11 @@ fn analyze(
     if crate::inflated::on(opt) {
         f.streams.iter_mut().for_each(|s| s.data.share());
         let files: Vec<Bytes> = f.streams.iter().map(|s| s.data.clone()).collect();
-        cx.bodies = Some(std::sync::Arc::new(crate::inflated::Bodies::of(&files, raw, opt.threads)));
+        // (a bug of it finds none: the files are made as they would be above level 3)
+        let found = crate::caught("inflated", files.iter().map(|f| f.len()).sum(), || {
+            crate::inflated::Bodies::of(&files, raw, opt.threads)
+        });
+        cx.bodies = Some(std::sync::Arc::new(found.unwrap_or_default()));
     }
     let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     // (nothing to tell where nothing is recompressed)

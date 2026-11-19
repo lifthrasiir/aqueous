@@ -242,7 +242,8 @@ pub(crate) fn sets(
         };
         out.push(Set { f: set, members });
     }
-    out.extend(crate::git::sets(f, children, opt));
+    // (a bug of it leaves the packs and their indexes as they are)
+    out.extend(crate::caught("git-sets", f.len() as usize, || crate::git::sets(f, children, opt)).unwrap_or_default());
     out
 }
 

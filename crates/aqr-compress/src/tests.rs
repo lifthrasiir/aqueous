@@ -94,6 +94,17 @@ const HOG_LIMIT: u64 = 16 << 20;
 /// The recompressor of a format, given data of a length, panics ([`panics`]), on any thread.
 static PANICS: std::sync::Mutex<Vec<(Format, usize)>> = std::sync::Mutex::new(Vec::new());
 
+/// The recompression named so (a format's name, or a step's: [`caught`]), of data of the length,
+/// panics, on any thread.
+static NAMED_PANICS: std::sync::Mutex<Vec<(&'static str, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// Panics where `what`, of `bytes` bytes, is told to ([`NAMED_PANICS`], [`caught`]).
+pub(crate) fn bug(what: &'static str, bytes: usize) {
+    if NAMED_PANICS.lock().unwrap().contains(&(what, bytes)) {
+        panic!("a bug of the recompressor");
+    }
+}
+
 /// Held by the tests that look at [`fallbacks`], of the process: one at a time.
 pub(crate) static FALLBACKS_SEEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2175,4 +2186,156 @@ fn scan_budget() {
     };
     assert_eq!(found(&data(1)), 1);
     assert_eq!(found(&data(3)), 0);
+}
+
+/// `files` (name, data) archived as a tree, given back as they were.
+fn tree_given_back(files: &[(&str, &[u8])], opt: &Options) -> Archived {
+    let tree = aqr_archive::Tree {
+        entries: files
+            .iter()
+            .enumerate()
+            .map(|(c, (name, _))| aqr_archive::Entry {
+                parent: None,
+                name: name.as_bytes().to_vec(),
+                node: aqr_archive::EntryNode::File(c),
+                extra: Default::default(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let inputs: Vec<Input> = files.iter().map(|&(name, data)| Input { name: name.as_bytes(), data }).collect();
+    let a = compress_tree(&tree, &inputs, opt);
+    let aqr_archive::Value::Tree(_, got) = aqr_decompress::decompress_value(&a.archive, 1).unwrap() else {
+        panic!("a tree")
+    };
+    assert_eq!(got.len(), files.len());
+    for ((name, data), got) in files.iter().zip(&got) {
+        assert!(got == data, "{name} given back");
+    }
+    a
+}
+
+/// `files` archived with `what` of `bytes` bytes panicking: given back all the same; what
+/// [`fallbacks`] told of the panics of `what`.
+fn panicking(what: &'static str, bytes: usize, files: &[(&str, &[u8])], opt: &Options) -> (Archived, Vec<Fallback>) {
+    let _seen = FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = fallbacks();
+    NAMED_PANICS.lock().unwrap().push((what, bytes));
+    let a = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree_given_back(files, opt)));
+    NAMED_PANICS.lock().unwrap().clear();
+    let told: Vec<_> = fallbacks().into_iter().filter(|f| f.panicked && f.module == what).collect();
+    (a.unwrap_or_else(|_| panic!("{what}: the archive aborted by the panic")), told)
+}
+
+/// A panic of the step that takes the files of a Zstandard file's frames (it is no recompressor
+/// of a file) gives the files up, not the archive: they are archived as they are.
+#[test]
+fn zstd_share_panic_falls_back() {
+    let text = babble(20_000);
+    let zst = zstd::bulk::compress(&text, 3).unwrap();
+    let files: [(&str, &[u8]); 2] = [("g.txt", &text), ("g.txt.zst", &zst)];
+    let opt = Options { threads: 2, ..Options::default() };
+    // (the files taken from the frames cost next to nothing)
+    let ok = tree_given_back(&files, &opt);
+    let (a, told) = panicking("zstd-share", text.len() + zst.len(), &files, &opt);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].message == "a bug of the recompressor" && !told[0].heap);
+    assert!(a.archive.len() > ok.archive.len() + zst.len() / 2, "{} against {}", a.archive.len(), ok.archive.len());
+}
+
+/// A panic of the search for the files that hold the data of DEFLATE streams (below level 4)
+/// loses the sharing, not the archive.
+#[test]
+fn inflated_panic_falls_back() {
+    let text = babble(20_000);
+    let mut z = flate2::GzBuilder::new().filename("g.txt").write(Vec::new(), flate2::Compression::new(6));
+    std::io::Write::write_all(&mut z, &text).unwrap();
+    let gz = z.finish().unwrap();
+    let files: [(&str, &[u8]); 2] = [("g.txt", &text), ("g.txt.gz", &gz)];
+    let opt = Options { threads: 2, level: Level::LOW, ..Options::default() };
+    let ok = tree_given_back(&files, &opt);
+    let (a, told) = panicking("inflated", text.len() + gz.len(), &files, &opt);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(a.archive.len() > ok.archive.len() + gz.len() / 2, "{} against {}", a.archive.len(), ok.archive.len());
+}
+
+/// A panic of the packs' sets (a pack with its indexes) falls back to the files alone.
+#[test]
+fn git_sets_panic_falls_back() {
+    let fixture = |ext: &str| {
+        std::fs::read(format!("{}/../../codecs/aqr-git/tests/data/small.{ext}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    };
+    let (idx, pack, rev) = (fixture("idx"), fixture("pack"), fixture("rev"));
+    let files: [(&str, &[u8]); 3] = [("p.idx", &idx), ("p.pack", &pack), ("p.rev", &rev)];
+    let opt = Options { threads: 2, smaller: false, ..Options::default() };
+    let ok = tree_given_back(&files, &opt);
+    assert!(ok.report.files.iter().any(|f| f.modules.iter().any(|m| m.name == "git-pack-index-recons")));
+    let (a, told) = panicking("git-sets", idx.len() + pack.len() + rev.len(), &files, &opt);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(!a.report.files.iter().any(|f| f.modules.iter().any(|m| m.name == "git-pack-index-recons")));
+    // (the pack alone still recompressed)
+    assert!(a.report.files[1].modules.iter().any(|m| m.name == "git-pack-recons"));
+}
+
+/// A panic of the recompressor of PNG files in a set gives the set up, each file as alone.
+#[test]
+fn png_set_panic_falls_back() {
+    let files =
+        [variant(200, 150, None), variant(200, 150, Some((20, 30, 40, 50))), variant(200, 150, Some((90, 10, 30, 90)))];
+    let d = stored_zip(&[("a.png", &files[0]), ("b.png", &files[1]), ("c.png", &files[2])]);
+    let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
+    let ok = tree_given_back(&[("z.zip", &d)], &opt);
+    assert!(ok.report.files[0].modules.iter().any(|m| m.name == "png-set"), "{:?}", ok.report.files[0].modules);
+    let (a, told) = panicking("png-set", files.iter().map(Vec::len).sum(), &[("z.zip", &d)], &opt);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(!a.report.files[0].modules.iter().any(|m| m.name == "png-set"));
+}
+
+/// A panic of the recompressor of a member of a container (not of the container) keeps the
+/// member as it is, the container still recompressed.
+#[test]
+fn member_panic_falls_back() {
+    let text = babble(20_000);
+    let mut z = flate2::GzBuilder::new().filename("t.txt").write(Vec::new(), flate2::Compression::new(6));
+    std::io::Write::write_all(&mut z, &text).unwrap();
+    let gz = z.finish().unwrap();
+    let zip = stored_zip(&[("t.txt.gz", &gz), ("n.txt", &babble(300))]);
+    let opt = Options { threads: 2, smaller: false, ..Options::default() };
+    let ok = tree_given_back(&[("m.zip", &zip)], &opt);
+    let modules = |a: &Archived| a.report.files[0].modules.iter().map(|m| m.name).collect::<Vec<_>>();
+    assert!(modules(&ok).contains(&"zip-recons") && modules(&ok).contains(&"flate-set"), "{:?}", modules(&ok));
+    let (a, told) = panicking("gzip", gz.len(), &[("m.zip", &zip)], &opt);
+    // (once for the member's own formula, once for a scan of the container's data)
+    assert!(!told.is_empty() && told.iter().all(|t| t.bytes == gz.len() as u64), "{told:?}");
+    assert!(modules(&a).contains(&"zip-recons"), "{:?}", modules(&a));
+}
+
+/// A panic of the recompressor that tells the parts of a file (aqr-psd's regions) leaves the
+/// file to the scan as a file whose parts are not told: nothing is lost.
+#[test]
+fn regions_panic_falls_back() {
+    let (w, h) = (256, 64);
+    let mp3 = |d: &mut [u8], at: usize| {
+        for at in [at, at + 500] {
+            d[at..at + 4].copy_from_slice(&[0xff, 0xf3, 0x04, 0xc4]);
+        }
+    };
+    let mut image = aqr_common::rng::noise(6 * w * h);
+    mp3(&mut image, 1000);
+    let d = psd_file(w as u32, h as u32, &[], &[], &[&[0, 0][..], &image].concat());
+    let _seen = FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = fallbacks();
+    // (the file as the scan cuts it: the bytes of the image counted)
+    NAMED_PANICS.lock().unwrap().push(("psd", extent(Format::Psd, &d).unwrap()));
+    let opt = Options { smaller: false, ..Options::default() };
+    TRIED.with(|t| t.borrow_mut().clear());
+    let f = std::panic::catch_unwind(|| recompress(&d, &opt));
+    NAMED_PANICS.lock().unwrap().clear();
+    let f = f.expect("the panic caught");
+    assert!(f.eval(&Native::default()).is_ok_and(|b| b == d));
+    let told: Vec<_> = fallbacks().into_iter().filter(|f| f.panicked && f.module == "psd").collect();
+    // (the recompression and the regions: both)
+    assert_eq!(told.len(), 2, "{told:?}");
+    // (the parts not told, the pixels were looked into)
+    assert!(TRIED.with(|t| t.borrow().contains(&Format::Mp3)));
 }

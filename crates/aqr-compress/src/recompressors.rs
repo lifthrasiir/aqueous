@@ -126,7 +126,11 @@ pub(crate) fn attempted(format: Format, d: &[u8], make: impl FnOnce() -> Option<
 /// where it panicked, which is told ([`memory::panicked`]) as a bug of the recompressor, the data
 /// kept as it is.
 pub(crate) fn caught<R>(what: &'static str, bytes: usize, f: impl FnOnce() -> R) -> Option<R> {
-    match catch_unwind(AssertUnwindSafe(f)) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        tests::bug(what, bytes);
+        f()
+    })) {
         Ok(r) => Some(r),
         Err(p) => {
             let message = match p.downcast::<String>() {
