@@ -883,7 +883,7 @@ fn flate_set_same_as_wasm() {
         })
         .collect();
     for set in [&[0][..], &[1], &[0, 2], &[2, 1, 0]] {
-        for derived in [Derived::None, Derived::Zip, Derived::Gzip, Derived::ZipBefore] {
+        for derived in [Derived::None, Derived::Zip, Derived::Gzip, Derived::ZipBefore, Derived::Zlib] {
             let mut f = Formula::default();
             let data = f.push("raw", set.iter().flat_map(|&i| parts[i].0.clone()).collect::<Vec<u8>>());
             let records = f.push("flate/record", set.iter().flat_map(|&i| parts[i].1.clone()).collect::<Vec<u8>>());
@@ -960,7 +960,7 @@ fn flate_plans_hold() {
                 .collect();
         let raws: Vec<Vec<u8>> = parts.iter().map(|(d, r, _)| aqr_flate::reconstruct(d, r).unwrap()).collect();
         for set in [&[0][..], &[1], &[0, 3, 4], &[3, 1, 0, 2], &[2], &[5], &[6], &[7, 3]] {
-            for derived in [Derived::None, Derived::Zip, Derived::ZipBefore] {
+            for derived in [Derived::None, Derived::Zip, Derived::ZipBefore, Derived::Zlib, Derived::Gzip] {
                 let mut f = Formula::default();
                 let data = f.push("raw", set.iter().flat_map(|&i| parts[i].0.clone()).collect::<Vec<u8>>());
                 let records = f.push("flate/record", set.iter().flat_map(|&i| parts[i].1.clone()).collect::<Vec<u8>>());
@@ -1133,15 +1133,35 @@ fn png_file_of(
     let channels = [1, 0, 3, 1, 2, 0, 4][color as usize];
     let bpp = (channels * depth as usize).div_ceil(8);
     let p = aqr_flate::zlib::Params { level: 6, ..Default::default() };
+    // (the rows of a pass of `pw` pixels: below 8 bits a pixel, bytes holding several pixels)
+    let rows_of = |pw: usize, ph: usize, seed: u32| match depth < 8 || color == 4 {
+        true => {
+            // (smooth rows with a little noise, as image data of other depths)
+            let n = (pw * channels * depth as usize).div_ceil(8);
+            let mut x = seed;
+            (0..ph)
+                .flat_map(|y| {
+                    let row: Vec<u8> = (0..n)
+                        .map(|i| {
+                            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                            (((i * 3 + y * 5) as u32 + seed) / 4 % 251 + (x >> 8) % 7) as u8
+                        })
+                        .collect();
+                    std::iter::once((y % 5) as u8).chain(row)
+                })
+                .collect()
+        }
+        false => png_rows(pw, ph, bpp, seed),
+    };
     let data = |seed: u32| {
         let rows = match interlace {
-            false => png_rows(w as usize, h as usize, bpp, seed),
+            false => rows_of(w as usize, h as usize, seed),
             true => [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
                 .iter()
                 .filter_map(|&(x0, y0, dx, dy)| {
                     let (pw, ph) =
                         ((w as usize).saturating_sub(x0).div_ceil(dx), (h as usize).saturating_sub(y0).div_ceil(dy));
-                    (pw > 0 && ph > 0).then(|| png_rows(pw, ph, bpp, seed))
+                    (pw > 0 && ph > 0).then(|| rows_of(pw, ph, seed))
                 })
                 .flatten()
                 .collect(),
@@ -1156,6 +1176,10 @@ fn png_file_of(
     let mut ihdr = [w.to_be_bytes(), h.to_be_bytes()].concat();
     ihdr.extend_from_slice(&[depth, color, 0, 0, interlace as u8]);
     png_chunk(&mut out, b"IHDR", &ihdr);
+    if color == 3 {
+        let palette: Vec<u8> = (0..3usize << depth).map(|i| (i * 37 % 251) as u8).collect();
+        png_chunk(&mut out, b"PLTE", &palette);
+    }
     let mut seq = 0u32;
     let fctl =
         |seq: u32| [&seq.to_be_bytes()[..], &w.to_be_bytes(), &h.to_be_bytes(), &[0; 8], &[0, 1, 0, 10, 0, 0]].concat();
@@ -1202,6 +1226,17 @@ fn png_plans_hold() {
         ("large", png_file(1400, 1100, 8, 2, false, 1 << 16, 0)),
         ("apng", png_file(160, 120, 8, 6, false, 1 << 20, 3)),
         ("apng of many", png_file(160, 120, 8, 6, false, 1 << 20, 11)),
+        // (below 8 bits: rows of several pixels a byte; palettes; gray with alpha)
+        ("gray1", png_file(1203, 400, 1, 0, false, 1 << 20, 0)),
+        ("gray2 interlaced", png_file(603, 291, 2, 0, true, 4096, 0)),
+        ("gray4", png_file(501, 277, 4, 0, false, 1 << 20, 0)),
+        ("palette1", png_file(1203, 400, 1, 3, false, 1 << 20, 0)),
+        ("palette2 interlaced", png_file(533, 291, 2, 3, true, 4096, 0)),
+        ("palette4", png_file(501, 277, 4, 3, false, 1000, 0)),
+        ("palette8", png_file(257, 131, 8, 3, false, 1 << 20, 0)),
+        ("gray-alpha8", png_file(200, 150, 8, 4, false, 1 << 20, 0)),
+        ("gray-alpha16 interlaced", png_file(131, 97, 16, 4, true, 8192, 0)),
+        ("palette4 apng", png_file(301, 177, 4, 3, false, 1 << 20, 3)),
     ];
     for (what, d) in files {
         let f = aqr_png::formula::encode(&d, 1).unwrap_or_else(|| panic!("{what}"));
