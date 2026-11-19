@@ -330,3 +330,44 @@ impl Ustar<'_> {
         b
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file of 8 GiB and more, large ids, a time out of ustar's range: pax records of them,
+    /// before the ustar header (whose own size is then of what base-256 holds).
+    #[test]
+    fn pax_for_large_sizes() {
+        let it = Item { path: b"big".to_vec(), utf8: true, entry: 0, kind: Kind::File(0) };
+        let x = Extra { uid: Some(1 << 33), gid: Some(5), mtime: Some(Time::new(1 << 40, 0)), ..Extra::default() };
+        for size in [octal_max(11), octal_max(11) + 1, 9 << 30, u64::MAX >> 1] {
+            let h = header(&it, &x, None, size, &mut Vec::new());
+            assert_eq!(h.len() % BLOCK, 0);
+            let pax = &h[BLOCK..h.len() - BLOCK];
+            let text = String::from_utf8_lossy(pax);
+            assert_eq!(h[156], b'x', "{size}");
+            assert_eq!(text.contains(&format!(" size={size}\n")), size > octal_max(11), "{size}: {text}");
+            assert!(text.contains(" uid=8589934592\n") && text.contains(&format!(" mtime={}\n", 1u64 << 40)), "{text}");
+            // (the records' lengths count themselves)
+            let mut rest = pax;
+            let mut n = 0;
+            while !rest.is_empty() && rest[0] != 0 {
+                let sp = rest.iter().position(|&b| b == b' ').unwrap();
+                let len: usize = std::str::from_utf8(&rest[..sp]).unwrap().parse().unwrap();
+                assert_eq!(rest[len - 1], b'\n');
+                rest = &rest[len..];
+                n += 1;
+            }
+            assert!(n >= 2);
+            // the ustar header's size, in octal where it fits, else in base 256
+            let field = &h[h.len() - BLOCK + 124..h.len() - BLOCK + 136];
+            if size > octal_max(11) {
+                assert_eq!(field[0] & 0x80, 0x80);
+                assert_eq!(u64::from_be_bytes(field[4..12].try_into().unwrap()), size);
+            } else {
+                assert_eq!(u64::from_str_radix(std::str::from_utf8(&field[..11]).unwrap(), 8).unwrap(), size);
+            }
+        }
+    }
+}

@@ -94,6 +94,13 @@ pub fn write(t: &Tree, c: &dyn Contents, o: &Options, w: &mut dyn Write, tell: &
             it.path.push(b'/');
         }
     }
+    // (a name's length is 16 bits in the headers: cut, it would make a damaged archive)
+    if let Some(it) = items.iter().find(|it| it.path.len() > 0xffff) {
+        return Err(io::Error::other(format!(
+            "ZIP: the name of {}: too long",
+            String::from_utf8_lossy(&it.path[..64])
+        )));
+    }
     let level = o.level_of(Format::Zip);
     let size = |it: &Item| it.size(c);
     let total: u64 = items.iter().map(size).sum();
@@ -339,4 +346,85 @@ fn central(it: &Item, x: &Extra, w: &Written1) -> Vec<u8> {
     h.extend(&it.path);
     h.extend(extra);
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(path: &[u8]) -> Item {
+        Item { path: path.to_vec(), utf8: true, entry: 0, kind: Kind::File(0) }
+    }
+
+    fn u16_at(b: &[u8], i: usize) -> u16 {
+        u16::from_le_bytes(b[i..i + 2].try_into().unwrap())
+    }
+
+    fn u32_at(b: &[u8], i: usize) -> u32 {
+        u32::from_le_bytes(b[i..i + 4].try_into().unwrap())
+    }
+
+    fn u64_at(b: &[u8], i: usize) -> u64 {
+        u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
+    }
+
+    /// The Zip64 field (0x0001) of the extra fields of a header, as its payload.
+    fn zip64(extra: &[u8]) -> Option<&[u8]> {
+        let mut i = 0;
+        while i + 4 <= extra.len() {
+            let (id, n) = (u16_at(extra, i), u16_at(extra, i + 2) as usize);
+            if id == zipf::ZIP64 {
+                return Some(&extra[i + 4..i + 4 + n]);
+            }
+            i += 4 + n;
+        }
+        None
+    }
+
+    /// Files of 4 GiB and more (their sizes and offset), as the headers say them: the 32-bit
+    /// fields all ones and the true values in the Zip64 field, in the order the format has.
+    #[test]
+    fn zip64_headers() {
+        let x = Extra::default();
+        let it = item(b"big");
+        for (size, clen, offset) in [
+            (0xffff_fffeu64, 0xffff_fffeu64, 0u64),
+            (0xffff_ffff, 10, 0),
+            (5 << 30, 3 << 30, 0),
+            (10, 10, 0xffff_ffff),
+            (10, 10, 6 << 30),
+            (7 << 30, 5, 9 << 30),
+        ] {
+            let w = Written1 { item: 0, body: (0x1234_5678, DEFLATED, size, clen), aes: None, offset };
+            let c = central(&it, &x, &w);
+            let (nl, el) = (u16_at(&c, 28) as usize, u16_at(&c, 30) as usize);
+            assert_eq!(c.len(), 46 + nl + el);
+            for (v, at) in [(size, 24), (clen, 20), (offset, 42)] {
+                let want = if v >= 0xffff_ffff { 0xffff_ffff } else { v as u32 };
+                assert_eq!(u32_at(&c, at), want, "{size} {clen} {offset}");
+            }
+            // (the field: uncompressed size, compressed size, offset, those that need it)
+            let canon: Vec<u64> = [size, clen, offset].into_iter().filter(|&v| v >= 0xffff_ffff).collect();
+            match zip64(&c[46 + nl..]) {
+                None => assert!(canon.is_empty()),
+                Some(z) => {
+                    assert_eq!(z.len(), 8 * canon.len());
+                    assert_eq!((0..canon.len()).map(|i| u64_at(z, 8 * i)).collect::<Vec<_>>(), canon);
+                }
+            }
+            let big = !canon.is_empty();
+            assert_eq!(u16_at(&c, 6), if big { NEEDS_ZIP64 } else { NEEDS }, "version needed");
+
+            // the local header, whose Zip64 field has both sizes
+            let b = Body { crc: 0x1234_5678, method: DEFLATED, size, data: Data::Of(Vec::new()), aes: None };
+            let l = local(&it, &x, &b);
+            let (nl, el) = (u16_at(&l, 26) as usize, u16_at(&l, 28) as usize);
+            let z = zip64(&l[30 + nl..30 + nl + el]).unwrap_or(&[]);
+            assert_eq!(z.len() == 16, size >= 0xffff_ffff, "{size}");
+            if z.len() == 16 {
+                assert_eq!((u64_at(z, 0), u64_at(z, 8)), (size, 0));
+                assert_eq!((u32_at(&l, 18), u32_at(&l, 22)), (0xffff_ffff, 0xffff_ffff));
+            }
+        }
+    }
 }
