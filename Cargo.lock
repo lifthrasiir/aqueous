@@ -995,6 +995,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "flate-zoo",
  "rayon",
 ]

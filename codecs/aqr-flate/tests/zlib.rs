@@ -541,3 +541,165 @@ fn followed_emulations_carry_on() {
         }
     }
 }
+
+/// Text with repeats of every distance, `n` bytes: matches reaching back across the window.
+fn repeating(n: usize, seed: u32) -> Vec<u8> {
+    let mut lcg = seed;
+    let mut v: Vec<u8> = Vec::with_capacity(n);
+    while v.len() < n {
+        lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        let r = (lcg >> 8) as usize;
+        if v.len() > 300 && !r.is_multiple_of(3) {
+            let dist = 1 + r % v.len().min(40_000);
+            let len = 3 + (r >> 5) % 40;
+            for _ in 0..len {
+                let b = v[v.len() - dist];
+                v.push(b);
+            }
+        } else {
+            v.extend(format!("{} ", r % 1000).bytes());
+        }
+    }
+    v.truncate(n);
+    v
+}
+
+/// Input sizes around the window's slides (`wsize` bytes: zlib moves the window once the
+/// lookahead passes `wsize + wsize - MIN_LOOKAHEAD`) are written as zlib writes them.
+#[test]
+fn zlib_compress_across_window_slides() {
+    use aqr_flate::zlib::{Params, Strategy};
+    let zlib = flate_zoo::backend("zlib").unwrap();
+    let mut failures = vec![];
+    for wbits in [9u8, 10, 12, 15] {
+        let w = 1usize << wbits;
+        for level in [1u8, 3, 4, 6, 9] {
+            let enc = flate_zoo::Encoder::new(zlib)
+                .set("level", level as i64)
+                .and_then(|e| e.set("wbits", wbits as i64))
+                .unwrap();
+            let p = Params {
+                level,
+                strategy: Strategy::Default,
+                wbits,
+                mem: 8,
+            };
+            for n in [
+                w - 1,
+                w,
+                w + 1,
+                2 * w - 262,
+                2 * w - 261,
+                2 * w,
+                2 * w + 1,
+                3 * w - 262,
+                3 * w,
+                4 * w + 3,
+            ] {
+                let input = repeating(n, n as u32 ^ 0x55);
+                if aqr_flate::zlib::compress(&input, p) != Some(enc.compress(&input).unwrap()) {
+                    failures.push(format!("{p} on {n} bytes"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Buffers of any size for each `deflate()` call (`inbuf`, `outbuf`) make no difference to a
+/// level's tokens, and the streams of level 0 (stored blocks sized after the buffers) are made
+/// again from their record.
+#[test]
+fn zlib_with_buffers_of_each_call() {
+    use aqr_flate::zlib::{Params, Strategy};
+    let zlib = flate_zoo::backend("zlib").unwrap();
+    let input = repeating(150_000, 3);
+    let mut failures = vec![];
+    for level in 0..=9i64 {
+        for (inbuf, outbuf) in [
+            (0, 0),
+            (4096, 0),
+            (0, 4096),
+            (1000, 777),
+            (65536, 65536),
+            (7, 100_000),
+        ] {
+            let enc = flate_zoo::Encoder::new(zlib)
+                .set("level", level)
+                .and_then(|e| e.set("inbuf", inbuf))
+                .and_then(|e| e.set("outbuf", outbuf))
+                .unwrap();
+            let raw = enc.compress(&input).unwrap();
+            if level > 0 {
+                let p = Params {
+                    level: level as u8,
+                    strategy: Strategy::Default,
+                    wbits: 15,
+                    mem: 8,
+                };
+                if aqr_flate::zlib::compress(&input, p) != Some(raw.clone()) {
+                    failures.push(format!("{enc}: emulation differs"));
+                }
+            }
+            match aqr_flate::deconstruct(&raw) {
+                Ok((data, meta)) => {
+                    if data != input
+                        || aqr_flate::reconstruct(&data, &meta).ok().as_ref() != Some(&raw)
+                    {
+                        failures.push(format!("{enc}: not made again"));
+                    }
+                }
+                Err(e) => failures.push(format!("{enc}: {e}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A stream of more data than `max_data` (0 included) is refused with `Limit`, and one of
+/// exactly that much is not.
+#[test]
+fn max_data_boundaries() {
+    use aqr_flate::{Error, Options};
+    let input = repeating(5000, 9);
+    let raw = "zlib:level=6"
+        .parse::<flate_zoo::Encoder>()
+        .unwrap()
+        .compress(&input)
+        .unwrap();
+    let empty = "zlib:level=6"
+        .parse::<flate_zoo::Encoder>()
+        .unwrap()
+        .compress(b"")
+        .unwrap();
+    for profile in [0, aqr_flate::DEFAULT_PROFILE, aqr_flate::ADAPTIVE] {
+        for (max, want_err) in [
+            (0, true),
+            (1, true),
+            (4999, true),
+            (5000, false),
+            (5001, false),
+        ] {
+            let opts = Options {
+                max_data: max,
+                ..Options::for_profile(profile).unwrap()
+            };
+            let r = aqr_flate::deconstruct_with(&raw, &opts);
+            match (r, want_err) {
+                (Err(Error::Limit), true) => {}
+                (Ok((d, m)), false) => assert_eq!(aqr_flate::reconstruct(&d, &m).unwrap(), raw),
+                (r, _) => panic!(
+                    "profile {profile}, max_data {max}: {:?}",
+                    r.map(|x| x.0.len())
+                ),
+            }
+        }
+        let opts = Options {
+            max_data: 0,
+            ..Options::for_profile(profile).unwrap()
+        };
+        let (d, m) = aqr_flate::deconstruct_with(&empty, &opts).unwrap();
+        assert!(d.is_empty());
+        assert_eq!(aqr_flate::reconstruct(&d, &m).unwrap(), empty);
+    }
+}

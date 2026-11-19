@@ -245,9 +245,15 @@ fn too_many_blocks_are_not_deconstructed() {
     }
     let last = (n - 1) * 10;
     raw[last / 8] |= 1 << (last % 8);
-    if let Ok((data, meta)) = aqr_flate::deconstruct(&raw) {
-        assert!(aqr_flate::reconstruct(&data, &meta).unwrap() == raw);
-    }
+    // (refused: the Err is what the test is for, not a stream that would have to come back)
+    assert!(
+        matches!(
+            aqr_flate::deconstruct(&raw),
+            Err(aqr_flate::Error::Invalid(_))
+        ),
+        "{:?}",
+        aqr_flate::deconstruct(&raw).map(|x| x.0.len())
+    );
 }
 
 #[test]

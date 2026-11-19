@@ -68,6 +68,7 @@ fn part_as_whole() {
             Derived::None,
             Derived::Zip,
             Derived::Gzip,
+            Derived::Zlib,
             Derived::ZipBefore,
         ] {
             let len = set
@@ -120,4 +121,54 @@ fn before_with_given_crc() {
     assert_eq!(try_index(bad), (None, None));
     // (a single large stream with no index: no CRC-32)
     assert_eq!(try_index(Vec::new()), (None, None));
+}
+
+/// Damaged inputs of flate-set (the data, the records, the index) fail or succeed alike whole
+/// and as a part, with the same output where they succeed: never a panic.
+#[test]
+fn damaged_set_inputs_are_alike() {
+    let text: Vec<u8> = (0..3000)
+        .flat_map(|i| format!("{} {}\n", i % 977, i % 13).into_bytes())
+        .collect();
+    let z = "zlib:level=6".parse::<flate_zoo::Encoder>().unwrap();
+    let parts: Vec<(Vec<u8>, Vec<u8>, usize)> = [&text[..700], &text[..9000]]
+        .iter()
+        .map(|d| {
+            let raw = z.compress(d).unwrap();
+            let (data, record) = aqr_flate::deconstruct(&raw).unwrap();
+            (data, record, raw.len())
+        })
+        .collect();
+    let res = aqr_flate::formula::resources(aqr_flate::DEFAULT_PROFILE).unwrap();
+    let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();
+    let data: Vec<u8> = parts.iter().flat_map(|p| p.0.clone()).collect();
+    let records: Vec<u8> = parts.iter().flat_map(|p| p.1.clone()).collect();
+    let lens: Vec<_> = parts.iter().map(|p| (p.0.len(), p.1.len(), p.2)).collect();
+    let idx = index(&lens);
+    let derived = Derived::Zip;
+    let len: u64 = parts.iter().map(|p| (p.2 + derived.bytes()) as u64).sum();
+    let run = |inputs: [&[u8]; 3], len: u64| {
+        let whole = decode(&derived.params(), &res, &inputs, len, 1).ok();
+        let part = aqr_api::emu::apply(&entry(), &inputs, &res, &derived.params(), &[len])
+            .ok()
+            .map(|mut p| p.pop().unwrap());
+        assert!(
+            whole == part,
+            "whole {:?} part {:?}",
+            whole.map(|w| w.len()),
+            part.map(|p| p.len())
+        );
+    };
+    run([&data, &records, &idx], len);
+    for (which, input) in [&data, &records, &idx].into_iter().enumerate() {
+        aqr_testkit::damaged(input, 24, 12, std::time::Duration::from_secs(30), |v| {
+            let mut inputs = [&data[..], &records[..], &idx[..]];
+            inputs[which] = v;
+            run(inputs, len);
+        });
+    }
+    // (the declared output length wrong either way)
+    for l in [0, len - 1, len + 1, len + 20] {
+        run([&data, &records, &idx], l);
+    }
 }
