@@ -1,23 +1,7 @@
-use aqr_bundle::packs::{doom_wad, hl_wad, quake_wad};
+mod common;
 
-fn wad(magic: &[u8; 4], lumps: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut data = Vec::new();
-    let mut dir = Vec::new();
-    for (n, b) in lumps {
-        dir.extend_from_slice(&(12 + data.len() as u32).to_le_bytes());
-        dir.extend_from_slice(&(b.len() as u32).to_le_bytes());
-        let mut name = [0u8; 8];
-        name[..n.len()].copy_from_slice(n.as_bytes());
-        dir.extend_from_slice(&name);
-        data.extend_from_slice(b);
-    }
-    let mut out = magic.to_vec();
-    out.extend_from_slice(&(lumps.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(12 + data.len() as u32).to_le_bytes());
-    out.extend(data);
-    out.extend(dir);
-    out
-}
+use aqr_bundle::packs::{doom_wad, hl_wad, quake_wad};
+use common::wad;
 
 type Lump<'a> = (&'a str, u8, u8, &'a [u8], u32);
 
