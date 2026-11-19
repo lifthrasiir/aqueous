@@ -629,3 +629,92 @@ fn contents_by_kind() {
     assert!(data(&f, &fa.inputs[0]) == data(&plain, &pa.inputs[0]));
     assert!(plain.streams.len() == 6 && f.streams[2..6] == plain.streams[2..6]);
 }
+
+/// `extent` of an archive alone, with a trailer, with the comment cut, zip64, and of two
+/// archives one after another.
+#[test]
+fn extent_of_archives() {
+    use aqr_zip::zip::extent;
+    let mut z = archive(entries());
+    let alone = z.bytes();
+    assert_eq!(extent(&alone), Some(alone.len()));
+    // data after the end record is not the archive's
+    z.suffix = b"trailing garbage".to_vec();
+    assert_eq!(extent(&z.bytes()), Some(alone.len()));
+    // a comment: part of the end record
+    z.suffix.clear();
+    z.comment = b"a comment".to_vec();
+    let with = z.bytes();
+    assert_eq!(extent(&with), Some(with.len()));
+    // a comment running past the data ends with it
+    for cut in 1..=z.comment.len() {
+        assert_eq!(extent(&with[..with.len() - cut]), Some(with.len() - cut), "cut {cut}");
+    }
+    // zip64 end record and locator: the whole archive, with or without a trailer
+    z.comment.clear();
+    z.end64 = true;
+    let d64 = z.bytes();
+    assert_eq!(extent(&d64), Some(d64.len()));
+    z.suffix = b"PK tail".to_vec();
+    assert_eq!(extent(&z.bytes()), Some(d64.len()));
+    // archive after archive: the first, and the second at its offset
+    let second = archive(entries()[..3].to_vec()).bytes();
+    let two = [alone.clone(), second.clone()].concat();
+    assert_eq!(extent(&two), Some(alone.len()));
+    assert_eq!(extent(&two[alone.len()..]), Some(second.len()));
+    // not an archive
+    assert_eq!(extent(b""), None);
+    assert_eq!(extent(b"PK\x03"), None);
+    assert_eq!(extent(&text(500)), None);
+    // cut anywhere: never more than the data, never a panic
+    for n in (0..alone.len()).step_by(7) {
+        if let Some(e) = extent(&alone[..n]) {
+            assert!(e <= n, "{n}");
+        }
+    }
+}
+
+/// A body kept as it is, twice: the second is the first again, so long as it is `SAME_MIN`
+/// (16) bytes; Deflate64 (method 9) bodies are kept, and may be the same too.
+#[test]
+fn same_bodies() {
+    let mk = |n: usize, method: u16| Entry { method, body: Some(noise(n)), ..entry("x", text(100)) };
+    for (n, same) in [(15, false), (16, true), (17, true)] {
+        let es = vec![mk(n, 99), mk(n, 99)];
+        let b = roundtrip(&archive(es).bytes());
+        assert_eq!(count(&b, Body::Same), same as usize, "{n}: {b:?}");
+    }
+    // the same body under another method is still the same bytes
+    let b = roundtrip(&archive(vec![mk(300, 99), mk(300, 9), mk(300, 9)]).bytes());
+    assert_eq!(b[0], Body::Kept);
+    assert_eq!(count(&b, Body::Same), 2, "{b:?}");
+    assert_eq!(count(&b, Body::Deflated), 0);
+    // a Deflate64 body alone is kept
+    let b = roundtrip(&archive(vec![mk(300, 9)]).bytes());
+    assert_eq!(b, [Body::Kept]);
+}
+
+/// Local headers of sizes 0xFFFFFFFF and no zip64 field (with or without one in the central
+/// directory): rebuilt all the same.
+#[test]
+fn local_sizes_without_zip64() {
+    let d = archive(entries()).bytes();
+    let locals: Vec<usize> = d.windows(4).enumerate().filter(|(_, w)| *w == b"PK\x03\x04").map(|(i, _)| i).collect();
+    let centrals: Vec<usize> = d.windows(4).enumerate().filter(|(_, w)| *w == b"PK\x01\x02").map(|(i, _)| i).collect();
+    for which in 0..3 {
+        let mut e = d.clone();
+        for &p in &locals {
+            if which != 1 {
+                e[p + 18..p + 26].fill(0xff);
+            } else {
+                e[p + 18..p + 22].fill(0xff);
+            }
+        }
+        if which == 2 {
+            for &p in &centrals {
+                e[p + 20..p + 28].fill(0xff);
+            }
+        }
+        roundtrip(&e);
+    }
+}
