@@ -72,7 +72,8 @@ fn block_size_code(c: u8) -> usize {
 /// Parses a frame header at `d[p..]`. Returns (header length without CRC-8, block size,
 /// channel assignment, sample size).
 pub fn parse_header(d: &[u8], p: usize, si_bps: u32) -> Option<(usize, usize, u8, u32)> {
-    let h = d.get(p..p + 16.min(d.len() - p))?;
+    let h = d.get(p..)?;
+    let h = &h[..h.len().min(16)];
     if h.len() < 6 || h[0] != 0xff || h[1] & 0xfe != 0xf8 {
         return None;
     }
