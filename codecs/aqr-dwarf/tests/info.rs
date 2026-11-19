@@ -1,6 +1,15 @@
 //! `.debug_info` of units made here, of most forms, rebuilt by `dwarf-info`.
 
+use std::time::Duration;
+
 use aqr_dwarf::info::{INPUTS, NUM_STREAMS, decode, encode};
+
+#[global_allocator]
+static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 30);
+
+/// What damaged input reserves stays far below this.
+const SMALL: usize = 1 << 24;
+const LIMIT: Duration = Duration::from_secs(30);
 
 fn uleb(out: &mut Vec<u8>, mut v: u64) {
     loop {
@@ -329,5 +338,233 @@ fn corrupt_inputs() {
             s[k][i] ^= 1 << (seed % 8);
             let _ = run(&s, d.len());
         }
+    }
+}
+
+/// `encode` takes `d` and then decodes to it, or does not take it: never a panic, and nothing
+/// large reserved. Whether it was taken.
+fn invariant(d: &[u8], abbrev: &[u8], strs: &[u8]) -> bool {
+    aqr_testkit::reset();
+    let r = encode(d, abbrev, strs);
+    assert!(aqr_testkit::most() < SMALL, "{} bytes reserved", aqr_testkit::most());
+    let Some((params, st)) = r else { return false };
+    let inputs: Vec<&[u8]> = [abbrev, strs].into_iter().chain(st.iter().map(|s| &s[..])).collect();
+    assert!(decode(&params, &inputs, d.len() as u64).unwrap() == d, "taken, not rebuilt");
+    true
+}
+
+/// Whether `d` is coded as units (none kept as it is), by `encode`; it also must round-trip.
+fn coded(d: &[u8], abbrev: &[u8], strs: &[u8]) -> bool {
+    aqr_testkit::reset();
+    let r = encode(d, abbrev, strs);
+    let Some((params, st)) = r else { return false };
+    let inputs: Vec<&[u8]> = [abbrev, strs].into_iter().chain(st.iter().map(|s| &s[..])).collect();
+    assert!(decode(&params, &inputs, d.len() as u64).unwrap() == d, "taken, not rebuilt");
+    let raw = aqr_dwarf::info::STREAM_NAMES.iter().position(|&n| n == "raw").unwrap();
+    st[raw].is_empty()
+}
+
+/// A unit of `version` (2 to 4) with a header of address size `addr`, of the DIEs `body`.
+fn unit_v(version: u16, addr: u8, body: &[u8]) -> Vec<u8> {
+    let mut u = vec![0, 0, 0, 0];
+    u.extend_from_slice(&version.to_le_bytes());
+    u.extend_from_slice(&[0, 0, 0, 0, addr]);
+    u.extend_from_slice(body);
+    let len = (u.len() - 4) as u32;
+    u[..4].copy_from_slice(&len.to_le_bytes());
+    u
+}
+
+#[test]
+fn versions_2_and_3() {
+    // (the reference form of the unit's own section: an offset in 3 and 4, an address in 2)
+    let abbrev =
+        abbrev_table(&[(1, 0x11, true, &[(NAME, STRP), (LOW_PC, ADDR)]), (2, 0x0d, false, &[(TYPE, REF_ADDR)])]);
+    let (strs, _) = strings(2);
+    for (version, addr, refsize) in [(2, 8, 8), (2, 4, 4), (3, 8, 4), (3, 4, 4), (4, 8, 4)] {
+        let mut body = vec![1];
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&vec![0x10; addr as usize]);
+        for i in 0..20u8 {
+            body.push(2);
+            body.extend_from_slice(&vec![i; refsize]);
+        }
+        body.push(0);
+        assert!(coded(&unit_v(version, addr, &body), &abbrev, &strs), "v{version} addr {addr}");
+    }
+    // other versions are kept as they are
+    for version in [0, 1, 6, 0xffff] {
+        let u = unit_v(version, 8, &[0]);
+        assert!(!coded(&u, &abbrev, &strs), "v{version}");
+    }
+    // an address size that no machine has
+    for addr in [0, 1, 2, 3, 5, 16, 255] {
+        invariant(&unit_v(4, addr, &[1, 0, 0, 0, 0]), &abbrev, &strs);
+    }
+}
+
+#[test]
+fn units_of_64_bits_and_odd_lengths() {
+    let (strs, _) = strings(2);
+    let abbrev = abbrev_table(&[(1, 0x11, false, &[(NAME, STRP)])]);
+    // DWARF64: 0xffffffff, a length of 8 bytes, and offsets of 8 bytes
+    let mut u = vec![0xff; 4];
+    u.extend_from_slice(&(2u64 + 8 + 1 + 1 + 8).to_le_bytes());
+    u.extend_from_slice(&[4, 0]);
+    u.extend_from_slice(&0u64.to_le_bytes());
+    u.push(8);
+    u.push(1);
+    u.extend_from_slice(&0u64.to_le_bytes());
+    invariant(&u, &abbrev, &strs);
+    // lengths of the reserved range, past the section, zero, and units cut short
+    for len in [0u32, 1, 6, 7, 0xffff_fff0, 0xffff_fffe, 0xffff_ffff, 0x7fff_ffff] {
+        let mut u = unit_v(4, 8, &[1, 0, 0, 0, 0, 0]);
+        u[..4].copy_from_slice(&len.to_le_bytes());
+        invariant(&u, &abbrev, &strs);
+    }
+    let u = unit_v(4, 8, &[1, 0, 0, 0, 0, 0]);
+    for cut in 0..u.len() {
+        invariant(&u[..cut], &abbrev, &strs);
+    }
+    // two units, the second cut
+    let two = [u.clone(), u.clone()].concat();
+    assert!(invariant(&two, &abbrev, &strs));
+    for cut in u.len()..two.len() {
+        invariant(&two[..cut], &abbrev, &strs);
+    }
+    invariant(&[], &abbrev, &strs);
+}
+
+/// A version 5 unit of `unit_type`, its header's extra bytes `extra`, of `body`.
+fn unit5(unit_type: u8, extra: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut u = vec![0, 0, 0, 0, 5, 0, unit_type, 8, 0, 0, 0, 0];
+    u.extend_from_slice(extra);
+    u.extend_from_slice(body);
+    let len = (u.len() - 4) as u32;
+    u[..4].copy_from_slice(&len.to_le_bytes());
+    u
+}
+
+#[test]
+fn unit_types_of_version_5() {
+    let abbrev = abbrev_table(&[(1, 0x11, true, &[(NAME, STRX1), (LOW_PC, ADDR)]), (2, 0x34, false, &[(NAME, STRX1)])]);
+    let mut body = vec![1, 0];
+    body.extend_from_slice(&0x4000u64.to_le_bytes());
+    for i in 1..30u8 {
+        body.extend_from_slice(&[2, i]);
+    }
+    body.push(0);
+    // (compile, type, partial, skeleton, split compile, split type, and types that do not exist)
+    for (t, extra) in [(1u8, 0), (2, 12), (3, 0), (4, 8), (5, 8), (6, 12), (0, 0), (7, 0), (0x80, 0), (0xff, 8)] {
+        let u = unit5(t, &vec![0x5a; extra], &body);
+        let taken = coded(&u, &abbrev, &[]);
+        assert_eq!(taken, (1..=6).contains(&t), "unit type {t}");
+        // the header cut inside its extra bytes
+        for cut in 12..12 + extra {
+            invariant(&u[..cut], &abbrev, &[]);
+        }
+    }
+    // extra bytes of a unit type that has none, as if of another
+    invariant(&unit5(1, &[0; 12], &body), &abbrev, &[]);
+    // an address size of 3
+    let mut bad = unit5(1, &[], &body);
+    bad[7] = 3;
+    invariant(&bad, &abbrev, &[]);
+}
+
+#[test]
+fn abbreviation_tables() {
+    let (strs, _) = strings(4);
+    let unit = |code: u8| unit_v(4, 8, &[code, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    // duplicate codes, codes that start at 0 and skip, a code of 2^16 and of 2^40, the table
+    // unterminated or cut inside an entry
+    let dup = abbrev_table(&[(1, 0x11, false, &[(NAME, STRP)]), (1, 0x11, false, &[(NAME, DATA4)])]);
+    let skip = abbrev_table(&[(5, 0x11, false, &[(NAME, STRP)])]);
+    let high = abbrev_table(&[(1 << 16, 0x11, false, &[(NAME, STRP)])]);
+    let higher = abbrev_table(&[(1 << 16 | 1, 0x11, false, &[(NAME, STRP)])]);
+    let huge = abbrev_table(&[(1 << 40, 0x11, false, &[(NAME, STRP)])]);
+    let zero = abbrev_table(&[(0, 0x11, false, &[(NAME, STRP)])]);
+    let ok = abbrev_table(&[(1, 0x11, false, &[(NAME, STRP)])]);
+    for (t, code) in [(&dup, 1u8), (&skip, 5), (&high, 0x80), (&higher, 0x81), (&huge, 0x80), (&zero, 0), (&ok, 1)] {
+        let body = unit(code);
+        invariant(&body, t, &strs);
+        for cut in 0..t.len() {
+            invariant(&body, &t[..cut], &strs);
+        }
+    }
+    // an attribute of an unknown form, and forms in a loop (indirect)
+    for form in [0u64, 0x7f, 0x1f01, 0x20, 0x2d, 1 << 40, INDIRECT] {
+        let t = abbrev_table(&[(1, 0x11, false, &[(NAME, form), (LOW_PC, form)])]);
+        invariant(&unit(1), &t, &strs);
+    }
+    // a table of very many attributes, and units naming offsets all over the table (each its
+    // own table to parse)
+    let attrs: Vec<(u64, u64)> = (0..5000).map(|i| (0x2000 + i, DATA1)).collect();
+    let t = abbrev_table(&[(1, 0x11, false, &attrs)]);
+    invariant(&unit(1), &t, &strs);
+    let mut many = Vec::new();
+    for off in 0..t.len().min(2000) {
+        let mut u = unit_v(4, 8, &[1, 0, 0, 0, 0, 0]);
+        u[6..10].copy_from_slice(&(off as u32).to_le_bytes());
+        many.extend_from_slice(&u);
+    }
+    aqr_testkit::within(LIMIT, || invariant(&many, &t, &strs)).unwrap();
+}
+
+#[test]
+fn forms_past_their_data() {
+    let (strs, _) = strings(4);
+    // each form's value cut short by the end of the unit
+    let forms = (0..0x2du64).chain([0x1f01, 0x1f02]);
+    for form in forms {
+        let t = abbrev_table(&[(1, 0x11, false, &[(NAME, form)]), (2, 0x34, false, &[(NAME, form)])]);
+        for fill in [0u8, 0x7f, 0x80, 0xff] {
+            for n in 0..14 {
+                let mut body = vec![1];
+                body.extend_from_slice(&vec![fill; n]);
+                invariant(&unit_v(4, 8, &body), &t, &strs);
+                invariant(&unit5(1, &[], &body), &t, &strs);
+            }
+        }
+    }
+}
+
+#[test]
+fn damaged_info() {
+    let (d, abbrev, strs) = section(2);
+    aqr_testkit::damaged(&d, 300, 64, LIMIT, |v| {
+        invariant(v, &abbrev, &strs);
+    });
+    aqr_testkit::damaged(&abbrev, 300, 64, LIMIT, |v| {
+        invariant(&d, v, &strs);
+    });
+    aqr_testkit::damaged(&strs, 100, 8, LIMIT, |v| {
+        invariant(&d, &abbrev, v);
+    });
+}
+
+#[test]
+fn damaged_streams() {
+    let (d, abbrev, strs) = section(2);
+    let (params, st) = round_trip(&d, &abbrev, &strs);
+    let run = |params: &[u8], st: &[Vec<u8>], len: u64| {
+        let inputs: Vec<&[u8]> = [&abbrev[..], &strs[..]].into_iter().chain(st.iter().map(|s| &s[..])).collect();
+        aqr_testkit::reset();
+        if let Ok(o) = decode(params, &inputs, len) {
+            assert_eq!(o.len() as u64, len);
+        }
+        assert!(aqr_testkit::most() < SMALL, "{} bytes reserved", aqr_testkit::most());
+    };
+    aqr_testkit::damaged(&params, 100, 64, LIMIT, |v| run(v, &st, d.len() as u64));
+    for k in 0..st.len() {
+        aqr_testkit::damaged(&st[k], 100, 32, LIMIT, |v| {
+            let mut s = st.clone();
+            s[k] = v.to_vec();
+            run(&params, &s, d.len() as u64);
+        });
+    }
+    for len in [0, 1, u64::MAX, 1 << 40, 1 << 33, d.len() as u64 * 100] {
+        aqr_testkit::case(&format!("length {len}"));
+        run(&params, &st, len);
     }
 }

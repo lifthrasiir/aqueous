@@ -168,3 +168,44 @@ fn plan_takes_the_params_decode_takes() {
     longer.push(0);
     assert_eq!(plan(&longer), None);
 }
+
+/// Every damage of the table, of `.debug_str` and of the streams: not taken, or rebuilt bit for
+/// bit; and decoding what is damaged, an error or a table of the length.
+#[test]
+fn damaged_inputs() {
+    use std::time::Duration;
+    let limit = Duration::from_secs(30);
+    let names: Vec<String> = (0..40).map(|i| format!("name{i}")).collect();
+    let (strs, at) = strings(&names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let entries: Vec<_> = at.iter().map(|&s| (s, vec![(s, vec![]), (s + 5, vec![])])).collect();
+    let t = table(&strs, &entries, 7, &[]);
+    aqr_testkit::damaged(&t, 400, 64, limit, |v| {
+        if let Some((params, st)) = encode(v, &strs) {
+            let inputs: Vec<&[u8]> = [&strs[..]].into_iter().chain(st.iter().map(|s| &s[..])).collect();
+            assert!(decode(&params, &inputs, v.len() as u64).unwrap() == v);
+        }
+    });
+    aqr_testkit::damaged(&strs, 100, 8, limit, |v| {
+        if let Some((params, st)) = encode(&t, v) {
+            let inputs: Vec<&[u8]> = [v].into_iter().chain(st.iter().map(|s| &s[..])).collect();
+            assert!(decode(&params, &inputs, t.len() as u64).unwrap() == t);
+        }
+    });
+    let (params, st) = round_trip(&strs, &t);
+    for k in 0..st.len() {
+        aqr_testkit::damaged(&st[k], 100, 32, limit, |v| {
+            let mut s = st.clone();
+            s[k] = v.to_vec();
+            let inputs: Vec<&[u8]> = [&strs[..]].into_iter().chain(s.iter().map(|s| &s[..])).collect();
+            if let Ok(o) = decode(&params, &inputs, t.len() as u64) {
+                assert_eq!(o.len(), t.len());
+            }
+        });
+    }
+    aqr_testkit::damaged(&params, 100, 64, limit, |v| {
+        let inputs: Vec<&[u8]> = [&strs[..]].into_iter().chain(st.iter().map(|s| &s[..])).collect();
+        if let Ok(o) = decode(v, &inputs, t.len() as u64) {
+            assert_eq!(o.len(), t.len());
+        }
+    });
+}

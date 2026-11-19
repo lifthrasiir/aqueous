@@ -1177,7 +1177,8 @@ fn decode_as(sh: Shape, inputs: &[&[u8]], len: u64) -> Result<(Vec<u8>, usize)> 
     if streams.len() != NUM_STREAMS {
         return Err(corrupt());
     }
-    let len = usize::try_from(len).map_err(|_| corrupt())?;
+    // (the DIEs start at 32 bits)
+    let len = usize::try_from(len).ok().filter(|&l| l <= u32::MAX as usize).ok_or_else(corrupt)?;
     // (a string, a DIE, a DIE open and a reference after take a byte of the input or the output at
     // least: the vectors are made at the room they end at, but not above that)
     if sh.strings > strs.len() || sh.dies > len || sh.depth > len || sh.fixups > len {
@@ -1188,7 +1189,8 @@ fn decode_as(sh: Shape, inputs: &[&[u8]], len: u64) -> Result<(Vec<u8>, usize)> 
     let strs = string_starts(strs, sh.strings).ok_or_else(corrupt)?;
     let (_counts, tables) = Counts::new(inputs)?;
     let mut s = State::new();
-    let mut out = Vec::with_capacity(len);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| corrupt())?;
     // the start of each DIE decoded, the references to those not yet, and of each DIE whose
     // children are open, its sibling to derive where they close
     let mut dies = Vec::<u32>::with_capacity(sh.dies);
