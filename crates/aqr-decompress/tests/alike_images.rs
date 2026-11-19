@@ -4,50 +4,16 @@
 
 #![cfg(feature = "wasm")]
 
+mod common;
+
+use common::fail_alike;
+
 #[path = "../../../codecs/aqr-clip/tests/common/mod.rs"]
 mod clip_files;
 
 use std::time::Duration;
 
 use aqr_formula::{Formula, Node};
-
-/// As the helper `common::fail_alike` (every stream of `f` damaged in turn, decoded natively and as
-/// Wasm), but a failure in both counts as alike whatever each says (the messages differ: a
-/// trap's text against the module's own).
-fn fail_alike(name: &str, f: &Formula, per: usize, head: usize, limit: Duration) {
-    use aqr_archive::{Encoder, Level};
-    use aqr_decompress::{Native, Wasm, wasm_of};
-    let enc = Encoder::new(Level::Zstd(1)).with_modules(wasm_of);
-    let mut bad = Vec::new();
-    for k in 0..f.streams.len() {
-        let d = f.streams[k].data.to_vec();
-        for x in aqr_testkit::damages(d.len(), per, head) {
-            let mut g = f.clone();
-            g.streams[k].data = x.apply(&d).into();
-            let Ok(c) = enc.encode(&g, None) else { continue };
-            let what = format!("{name}: stream {k} ({}), {x}", f.streams[k].class);
-            match aqr_testkit::within(limit, || {
-                (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm))
-            }) {
-                Err(e) => bad.push(format!("{what}: {e}")),
-                Ok((Ok(n), Ok(w))) if n != w => bad.push(format!("{what}: other bytes natively and as Wasm")),
-                Ok((Ok(_), Err(e))) => bad.push(format!("{what}: decoded natively, {e} as Wasm")),
-                Ok((Err(e), Ok(_))) => bad.push(format!("{what}: {e} natively, decoded as Wasm")),
-                Ok(_) => {}
-            }
-        }
-    }
-    assert!(
-        bad.is_empty(),
-        "{} cases not alike:
-{}",
-        bad.len(),
-        bad.join(
-            "
-"
-        )
-    );
-}
 
 const LIMIT: Duration = Duration::from_secs(30);
 

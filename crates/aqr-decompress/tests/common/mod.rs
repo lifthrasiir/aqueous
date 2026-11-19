@@ -9,7 +9,7 @@ use aqr_formula::Formula;
 /// Formula `f` (of an archive's applications) with each of its streams damaged in every way of
 /// aqr-testkit's `damages` (at about `per` places each, and every place of its first `head`
 /// bytes), each archived with the modules aqr-modules built: natively and as WebAssembly, each
-/// decodes to the same bytes or fails in both, within `limit`. The cases that do not are told
+/// decodes to the same bytes or fails in both (each telling its own failure), within `limit`. The cases that do not are told
 /// all together.
 pub fn fail_alike(name: &str, f: &Formula, per: usize, head: usize, limit: Duration) {
     let enc = Encoder::new(Level::Zstd(1)).with_modules(wasm_of);
@@ -21,10 +21,15 @@ pub fn fail_alike(name: &str, f: &Formula, per: usize, head: usize, limit: Durat
             g.streams[k].data = x.apply(&d).into();
             let Ok(c) = enc.encode(&g, None) else { continue };
             let what = format!("{name}: stream {k} ({}), {x}", f.streams[k].class);
-            match aqr_testkit::within(limit, || (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm))) {
+            match aqr_testkit::within(limit, || {
+                (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm))
+            }) {
                 Err(e) => bad.push(format!("{what}: {e}")),
-                Ok((n, w)) if n.is_ok() != w.is_ok() => bad.push(format!("{what}: {:?} natively, {:?} as Wasm", n.err(), w.err())),
-                Ok((n, w)) if n != w => bad.push(format!("{what}: other bytes natively and as Wasm")),
+                Ok((n, w)) if n.is_ok() != w.is_ok() => {
+                    bad.push(format!("{what}: {:?} natively, {:?} as Wasm", n.err(), w.err()))
+                }
+                // (failures in both: alike, whatever each tells)
+                Ok((Ok(n), Ok(w))) if n != w => bad.push(format!("{what}: other bytes natively and as Wasm")),
                 Ok(_) => {}
             }
         }

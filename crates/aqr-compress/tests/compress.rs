@@ -1611,7 +1611,11 @@ fn bvx_past_expansion() {
 fn sqlite_db(sql: &str) -> Vec<u8> {
     let path = std::env::temp_dir().join(format!("aqr-compress-test-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let out = std::process::Command::new("sqlite3").arg(&path).arg(sql).output().expect("the sqlite3 tool, which these tests need");
+    let out = std::process::Command::new("sqlite3")
+        .arg(&path)
+        .arg(sql)
+        .output()
+        .expect("the sqlite3 tool, which these tests need");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let d = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
