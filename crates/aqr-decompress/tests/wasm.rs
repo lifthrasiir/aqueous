@@ -6792,7 +6792,8 @@ fn tex_uniform_plans_hold() {
     use aqr_tex::layout::{Format, Layout};
     // (ASTC's void extent: a flat colour; a legal block)
     let void = [0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
-    let cases: [(&str, Format, u32, u32, &[u8], aqr_formula::Module); 8] = [
+    type Case<'a> = (&'a str, Format, u32, u32, &'a [u8], aqr_formula::Module);
+    let cases: [Case; 8] = [
         ("bc7 zeros", Format::Bc7, 8192, 8192, &[0; 16], aqr_tex::formula::MODULE_BC7),
         ("bc7 flat", Format::Bc7, 4096, 4096, &[0x40; 16], aqr_tex::formula::MODULE_BC7),
         ("bc1 zeros", Format::Bc1, 8192, 8192, &[0; 8], aqr_tex::formula::MODULE),
@@ -7580,4 +7581,124 @@ fn exe_cil_plans_hold() {
         taken += 1;
     }
     assert!(taken >= 5, "taken: {taken}");
+}
+
+/// A safetensors file of tensors `(dtype, bytes)`, each of weights as a trained model's (a bell
+/// curve, a different scale each) in the dtype, of the bytes given (a multiple of the element).
+fn safetensors_of(tensors: &[(&str, usize)]) -> Vec<u8> {
+    let mut x = 0x2545_f491u32;
+    let mut bell = move || {
+        let mut s = 0.0f32;
+        for _ in 0..4 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            s += (x >> 8) as f32 / (1 << 24) as f32 - 0.5;
+        }
+        s * 0.05
+    };
+    let (mut head, mut body) = (String::from("{"), Vec::new());
+    for (i, &(ty, len)) in tensors.iter().enumerate() {
+        let w = match ty {
+            "F32" => 4,
+            "F16" | "BF16" => 2,
+            _ => 1,
+        };
+        let start = body.len();
+        for _ in 0..len / w {
+            let v = bell();
+            match ty {
+                "F32" => body.extend_from_slice(&v.to_le_bytes()),
+                "BF16" => body.extend_from_slice(&((v.to_bits() >> 16) as u16).to_le_bytes()),
+                "F16" => {
+                    // (a half's bits of a float of this range: exponent rebiased, 10 bits of mantissa)
+                    let b = v.to_bits();
+                    let e = ((b >> 23) & 0xff) as i32 - 127 + 15;
+                    let h = if e <= 0 { 0 } else { ((b >> 16) & 0x8000) | ((e as u32) << 10) | ((b >> 13) & 0x3ff) };
+                    body.extend_from_slice(&(h as u16).to_le_bytes());
+                }
+                _ => body.push((v * 1000.0) as i8 as u8),
+            }
+        }
+        if i > 0 {
+            head.push(',');
+        }
+        head += &format!(r#""t{i}":{{"dtype":"{ty}","shape":[{}],"data_offsets":[{start},{}]}}"#, len / w, body.len());
+    }
+    head.push('}');
+    while head.len() % 8 != 0 {
+        head.push(' ');
+    }
+    let mut out = (head.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(head.as_bytes());
+    out.extend(body);
+    out
+}
+
+/// tensors-recons takes the plan of its params alone at the real segment of 16 MiB: a tensor
+/// crossing the boundary (floats of 2 and 4 bytes, a byte type), one ending on it and one cut a
+/// byte or an element on either side, each in several applications.
+#[test]
+fn tensors_plans_hold_across_segments() {
+    const MIB: usize = 1 << 20;
+    // (a segment is about 16 MiB: the least applications of each)
+    type Case<'a> = (&'a str, Vec<(&'a str, usize)>, usize);
+    let cases: [Case; 4] = [
+        ("crossing", vec![("BF16", 10 * MIB), ("F32", 10 * MIB), ("F16", 3 * MIB)], 2),
+        ("ending on it", vec![("F32", 16 * MIB), ("BF16", MIB)], 2),
+        ("an element past", vec![("BF16", 16 * MIB + 2), ("F32", 4)], 1),
+        ("bytes", vec![("I8", 16 * MIB - 1), ("F16", 40), ("I8", 17 * MIB)], 2),
+    ];
+    for (what, tensors, least) in cases {
+        let d = safetensors_of(&tensors);
+        let f = aqr_tensors::formula::encode(&d, 2).unwrap_or_else(|| panic!("{what}: not taken"));
+        let applied = applications_hold(&format!("tensors {what}"), &f, &d, |_| 0);
+        assert!(applied >= least, "{what}: {applied} applications");
+    }
+}
+
+/// div3-recons takes the plan of the picture's size on frames a real encoder wrote (ffmpeg's
+/// `msmpeg4` with the tag `DIV3`: an I frame, then P frames with motion vectors) of 1920x1080 and
+/// 4096x4096, flat and of a test pattern. Skipped where ffmpeg is not on the PATH.
+#[test]
+fn div3_real_frames_plan_holds() {
+    use std::process::{Command, Stdio};
+    let scratch = [r"F:\Scratch", "/tmp"].into_iter().map(std::path::PathBuf::from).find(|p| p.is_dir());
+    let dir = scratch.unwrap_or_else(std::env::temp_dir).join(format!("aqr-div3-plan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut made = 0;
+    for (size, src) in [
+        ("1920x1080", "color=c=gray"),
+        ("1920x1080", "testsrc"),
+        ("4096x4096", "color=c=gray"),
+        ("4096x4096", "testsrc"),
+    ] {
+        let path = dir.join("x.avi");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("{src}{}s={size}:r=25", if src.contains('=') { ":" } else { "=" }),
+                "-frames:v",
+                "5",
+            ])
+            .args(["-c:v", "msmpeg4", "-vtag", "DIV3", "-an"])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .status();
+        if !status.is_ok_and(|s| s.success()) {
+            eprintln!("div3 real frames: no ffmpeg that writes DivX 3: skipped");
+            break;
+        }
+        let file = std::fs::read(&path).unwrap();
+        let f = aqr_div3::formula::encode_unchecked(&file, 1).expect("a formula");
+        plan_holds(&format!("div3 real {src} {size}"), f, &file);
+        made += 1;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!("div3 real frames: {made} files");
 }
