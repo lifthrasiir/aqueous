@@ -60,3 +60,74 @@ fn junk_and_cuts() {
         roundtrip(&name, &two);
     }
 }
+
+/// A coder recording the symbols and raw bits it is given; with `ROLLBACK` it takes the
+/// one-pass path of the encoder (`encode_granule`), without it the two-pass path that the
+/// training's counter takes (`code_granule`).
+struct Recorder<const ROLLBACK: bool> {
+    syms: Vec<(usize, u32)>,
+    raw: Vec<(u32, u32)>,
+}
+
+struct RecorderLocal(*mut Vec<(usize, u32)>, *mut Vec<(u32, u32)>);
+
+impl aqr_mp3::model::Sym for RecorderLocal {
+    fn sym(&mut self, ctx: usize, s: u32) -> u32 {
+        // SAFETY: the pointers are of the recorder's vectors, which outlive the local.
+        unsafe { (*self.0).push((ctx, s)) };
+        s
+    }
+    fn raw(&mut self, n: u32, v: u32) -> u32 {
+        // SAFETY: as above.
+        unsafe { (*self.1).push((n, if n >= 32 { v } else { v & ((1 << n) - 1) })) };
+        v
+    }
+}
+
+impl<const ROLLBACK: bool> aqr_mp3::model::Coder for Recorder<ROLLBACK> {
+    type L = RecorderLocal;
+    fn local(&mut self) -> RecorderLocal {
+        RecorderLocal(&mut self.syms, &mut self.raw)
+    }
+    fn put_back(&mut self, _l: RecorderLocal) {}
+    const ROLLBACK: bool = ROLLBACK;
+    fn save(&self) -> [u64; 4] {
+        [self.syms.len() as u64, self.raw.len() as u64, 0, 0]
+    }
+    fn restore(&mut self, s: [u64; 4]) {
+        self.syms.truncate(s[0] as usize);
+        self.raw.truncate(s[1] as usize);
+    }
+}
+
+/// The counting coder of the training (a coder without rollback: the two-pass path) sees the
+/// same symbols in the same contexts as the encoder's one-pass path.
+#[test]
+fn counting_coder_agrees_with_one_pass() {
+    use aqr_mp3::model::{Counter, N_CTX};
+    for (name, d) in files() {
+        let mut counter = Counter::new();
+        codec::count(&d, &mut counter);
+        let mut two = Recorder::<false> { syms: Vec::new(), raw: Vec::new() };
+        codec::count(&d, &mut two);
+        let mut one = Recorder::<true> { syms: Vec::new(), raw: Vec::new() };
+        codec::count(&d, &mut one);
+        assert!(!two.syms.is_empty(), "{name}: nothing counted");
+        assert_eq!(one.syms, two.syms, "{name}: symbols");
+        // (the raw bits are grouped differently by the two paths, but are as many)
+        let bits = |r: &[(u32, u32)]| r.iter().map(|&(n, _)| n as u64).sum::<u64>();
+        assert_eq!(bits(&one.raw), bits(&two.raw), "{name}: raw bits");
+        let mut by_ctx = vec![Vec::new(); N_CTX];
+        for &(c, s) in &two.syms {
+            let v: &mut Vec<u64> = &mut by_ctx[c];
+            if v.len() <= s as usize {
+                v.resize(s as usize + 1, 0);
+            }
+            v[s as usize] += 1;
+        }
+        for (c, (got, want)) in counter.counts.iter().zip(&by_ctx).enumerate() {
+            assert_eq!(&got[..want.len()], &want[..], "{name}: counts of context {c}");
+            assert!(got[want.len()..].iter().all(|&n| n == 0), "{name}: context {c}");
+        }
+    }
+}

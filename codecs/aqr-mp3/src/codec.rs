@@ -1030,3 +1030,54 @@ pub(crate) fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8]) -
     a.write(fr, fr.frames.len(), 0, r_out)?;
     Ok(a.out)
 }
+
+#[cfg(all(test, feature = "encode"))]
+mod tests {
+    use super::*;
+
+    /// The uniform model (the fallback where no built-in model is shipped) is valid, one table
+    /// for each alphabet size, and survives its file form's uncompressed round trip.
+    #[test]
+    fn uniform_model_parses() {
+        let m = Model::uniform();
+        let raw = m.to_raw();
+        let back = Model::parse(&raw).expect("valid");
+        assert_eq!(back.map, m.map);
+        assert_eq!(back.tables, m.tables);
+        let mut sizes: Vec<usize> = (0..model::N_CTX).map(model::alphabet).collect();
+        sizes.sort();
+        sizes.dedup();
+        assert_eq!(m.tables.len(), sizes.len());
+        for (c, &t) in m.map.iter().enumerate() {
+            let f = &m.tables[t as usize];
+            assert_eq!(f.len(), model::alphabet(c));
+            assert_eq!(f.iter().map(|&x| x as u32).sum::<u32>(), rans::PROB_SCALE);
+            assert!(f.iter().all(|&x| x > 0));
+        }
+        assert!(tables_from(&raw).is_some());
+    }
+
+    /// Invalid model files are refused by both readers.
+    #[test]
+    fn invalid_models_are_refused() {
+        let raw = Model::uniform().to_raw();
+        let bad = |raw: &[u8]| {
+            assert!(Model::parse(raw).is_none());
+            assert!(tables_from(raw).is_none());
+        };
+        bad(&raw[..raw.len() - 1]); // odd length
+        bad(&raw[..2 * model::N_CTX]); // no tables
+        bad(&raw[..raw.len() - 2]); // the last table cut short
+        let mut m = raw.clone();
+        m[0..2].copy_from_slice(&((model::N_CTX + 1) as u16).to_le_bytes()); // more tables than contexts
+        bad(&m);
+        let mut m = raw.clone();
+        let last = m.len() - 2;
+        m[last..].copy_from_slice(&0u16.to_le_bytes()); // a zero frequency
+        bad(&m);
+        let mut m = raw.clone();
+        m[2] ^= 1; // a context of another alphabet's table
+        assert!(Model::parse(&m).is_none());
+        assert!(Model::parse(&[]).is_none());
+    }
+}
