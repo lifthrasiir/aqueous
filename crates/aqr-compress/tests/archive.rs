@@ -646,6 +646,28 @@ fn inflated_below_level_4() {
     }
 }
 
+/// Files whose streams, put solid, come to the bound of a block (16 MiB by default), a byte
+/// past it, and one stream a byte past it alone: each archived and given back.
+#[test]
+fn solid_at_block_bound() {
+    const BOUND: usize = 16 << 20;
+    assert_eq!(Options::default().block, BOUND);
+    // (bytes of a few values, which compress but are of no format)
+    let data = |n: usize, seed: u64| -> Vec<u8> {
+        noise(n, seed).into_iter().map(|b| b"\x01\x02\x03\x05"[(b & 3) as usize]).collect()
+    };
+    for sizes in
+        [&[BOUND / 2, BOUND / 2][..], &[BOUND / 2, BOUND / 2 + 1], &[BOUND / 2 - 1, 1, BOUND / 2], &[BOUND + 1]]
+    {
+        let files: Vec<(String, Vec<u8>)> =
+            sizes.iter().enumerate().map(|(k, &n)| (format!("a/f{k}.bin"), data(n, k as u64 + 1))).collect();
+        let files: Vec<(&str, Vec<u8>)> = files.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+        let (c, _) = archived(&files, &Options::default());
+        let total: usize = sizes.iter().sum();
+        assert!(c.len() < total / 3, "{sizes:?}: {} bytes", c.len());
+    }
+}
+
 /// `n` bytes at random from `seed`, which do not compress.
 fn noise(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed;

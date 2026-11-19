@@ -3211,7 +3211,8 @@ a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <d
         The memory limit applies to the total size of the memories of the application's instance on its own,
         and the |c|-th task limit (from 0) to that of each [=unit=] of [=class=] |c| on its own:
         the memories of the [=task=] for a class that is not a [=gang class=],
-        and the memories of the tasks of the [=gang=] and the messages queued in the [=channels=] of the gang for a [=gang class=].
+        and the memories of the tasks of the [=gang=] and the messages queued in the [=channels=] of the gang for a [=gang class=],
+        each message counting its length in bytes and at least 1 (so that a queue of empty messages is bounded too).
         An implementation MAY return a [=resource failure=] here, before it instantiates |module|, if the memory limit
         and the sum of the task limits (a [=concurrency=] of 1 for each class, the least it can choose)
         exceed what the implementation has, which is implementation-defined, but only for an application whose [=minimal bound=] is over 512 MiB (see below).

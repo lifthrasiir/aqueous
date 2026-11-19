@@ -17,18 +17,14 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
 ## Left
 
 ### Coverage not reached
-- Native vs Wasm on damaged inputs: FLAC's synthetic frames (codecs/aqr-flac/tests/edge.rs:
-  variable block size, verbatim, right/side), Vorbis over 2 MiB and packets of 0xFFFF bytes or
-  more, Wwise's `mod_packets == false` and its other chunks (aqr-wwise is no dependency of
+- Native vs Wasm on damaged inputs: Vorbis over 2 MiB and packets of 0xFFFF bytes or more,
+  Wwise's `mod_packets == false` and its other chunks (aqr-wwise is no dependency of
   aqr-decompress), tensors' lying headers and pickles; 7z only of lzma2, BCJ2 and Delta, AZO
   only of a short stream (time).
-- Plans of a length near 2^64: x86, arm64, Mach-O, pe-reloc and the other codecs' decode_plan
-  functions (`declared_sizes_plans_are_answered` in tests/wasm.rs is where to add them).
 - Past 4 GiB: only level 0 (stored) of ZIP and 7z (aqr-pack's Contents are held in memory);
   SQLite's lock-byte page only of 4096-byte pages.
 - aqr-pdb: a real PDB of several type modules; aqr-hdf5's superblocks 1 and 2 beyond
   `superblocks()`; whole-file DWARF (`.dwo` sections kept) through aqr-compress.
-- aqr-wasm's `count_past_section_end` asserts no panic only, not the fallback's output.
 - aqr-bundle: compressed payloads (unity-bundle's LZ4/LZO blocks, unreal's chunks) are not
   damaged deeply (the builders make stored blocks).
 - aqr-exe through aqr-compress: the CIL, Inno and NSIS paths (inputs of 12-24 KiB); a Mach-O
@@ -36,10 +32,8 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
   read (e_shnum 0 taken as it is): a feature, if wanted.
 - aqr-wasmrt's interpreter path (wasm/interp.rs, the SFX's interpreter blob) has no test in
   aqr-decompress: the host's fixes reach aqr.exe and the SFX once the pack is rebuilt.
-- aqr-compress: a solid stream at the archive's 16 MiB bound.
-- Windows: `locked_archive` (crates/aqr/tests/write.rs) is of Unix only (Windows' lock is
-  mandatory: a second process must hold it); case-colliding names from a directory need one
-  made case-sensitive (`fsutil file setCaseSensitiveInfo`).
+- Windows: case-colliding names from a directory need one made case-sensitive (`fsutil file
+  setCaseSensitiveInfo`).
 - A real crash between an append's writes is not simulated (the op log's replay cuts at each).
 
 ### Known limits, pinned
@@ -56,11 +50,9 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
 - aqr-unpack keeps the last of two ZIP entries of one name (aqr-pack writes both).
 
 ### Housekeeping
-- tests/wasm.rs holds copies of aqr-dex's writer and of a CIL section writer: a `synth` module
-  of each crate would share them.
-- The tests of damaged log streams print `aqr_log: corrupt input` on standard output: find
-  what prints it.
-- The spec could say that a message counts at least one byte toward a gang's limit.
+- tests/wasm.rs holds copies of aqr-dex's writer and of a CIL section writer: a
+  `tests/common/synth.rs` of each crate, taken by `#[path]` (as aqr-flac's is by
+  tests/alike_misc.rs), would share them.
 - The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs
   pack.py).
 - The wwise pad-byte heuristic (wem.rs) is unchecked on real `.wem` files (none in the corpus).

@@ -524,15 +524,20 @@ pub fn from_split_form(d: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// A code section whose function count runs past the section's end is not split.
+    /// A code section whose function count runs past the section's end is not split: kept whole
+    /// (flagged 1 in the skeleton, its bytes in `SECTIONS`), and joined back as it was.
     #[test]
     fn count_past_section_end() {
         for (count, size) in [(&[0x80u8, 0x01][..], 1u8), (&[0xff, 0xff, 0x03], 2), (&[0x05], 1)] {
             let mut m = HEADER.to_vec();
             m.extend_from_slice(&[CODE_SECTION, size]);
-            m.extend_from_slice(count);
-            m.extend_from_slice(&[0, 0]);
-            let _ = split(&m);
+            m.extend(count.iter().chain(&[0, 0]).take(size as usize));
+            let st = split(&m).expect("split");
+            let body = &m[HEADER.len() + 2..HEADER.len() + 2 + size as usize];
+            assert_eq!(st[SECTIONS], body, "{count:x?}: the section kept whole");
+            assert_eq!(st[SKELETON][HEADER.len()..HEADER.len() + 3], [CODE_SECTION, 1, size], "{count:x?}");
+            let ins = st.each_ref().map(|v| &v[..]);
+            assert_eq!(join(ins, m.len() as u64).as_deref(), Some(&m[..]), "{count:x?}");
         }
     }
 }

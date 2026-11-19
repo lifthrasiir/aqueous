@@ -117,8 +117,7 @@ fn footer_across_a_sector() {
 }
 
 /// write/3: an archive another process holds the lock of is not appended to nor edited, and is
-/// left as it is.
-#[cfg(unix)]
+/// left as it is. (Windows' lock is mandatory, so the archive is compared once it is let go.)
 #[test]
 fn locked_archive() {
     let d = scratch("locked");
@@ -133,9 +132,9 @@ fn locked_archive() {
     for args in cases {
         let o = aqr(&d, args);
         assert!(!o.status.success() && stderr(&o).contains("being written by another"), "{args:?}: {}", stderr(&o));
-        assert_eq!(fs::read(d.join("a.aqr")).unwrap(), before, "{args:?}");
     }
     drop(held);
+    assert_eq!(fs::read(d.join("a.aqr")).unwrap(), before);
     ok(&d, &["-q", "-a", "a.aqr", "src"]);
     fs::remove_dir_all(&d).unwrap();
 }

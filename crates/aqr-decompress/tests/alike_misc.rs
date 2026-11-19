@@ -58,6 +58,35 @@ fn flac_alike() {
     }
 }
 
+#[path = "../../../codecs/aqr-flac/tests/common/synth.rs"]
+mod flac_synth;
+
+/// FLAC's synthetic frames that the fixtures have none of: of a variable block size, verbatim
+/// and constant subframes, the side channels (left/side, right/side, mid/side), escaped
+/// partitions and LPC with wasted bits.
+#[test]
+fn flac_synthetic_alike() {
+    use flac_synth::{Hdr, Sub, file};
+    let mut variable = Hdr::new(8, 0, 4);
+    variable.variable = true;
+    variable.number = 1 << 30;
+    let extremes = |top: i64| Sub::Verbatim((0..256).map(|i| if i % 2 == 0 { top } else { -top - 1 }).collect());
+    let lpc = Sub::Pred { order: 8, lpc: Some((12, 9)), method: 1, porder: 2, escape: None, k: 4, wasted: 2 };
+    let escaped = Sub::Pred { order: 2, lpc: None, method: 0, porder: 1, escape: Some(9), k: 0, wasted: 0 };
+    let cases = [
+        ("variable", file(&variable, 16, 1, &[Sub::fixed(2, 0)], 6)),
+        ("verbatim", file(&Hdr::new(8, 1, 4), 16, 2, &[extremes(32767), Sub::Constant(-5)], 4)),
+        ("left/side", file(&Hdr::new(8, 8, 4), 16, 2, &[Sub::fixed(1, 0), extremes(32768)], 4)),
+        ("right/side", file(&Hdr::new(8, 9, 4), 16, 2, &[extremes(32768), Sub::fixed(2, 1)], 4)),
+        ("mid/side", file(&Hdr::new(8, 10, 4), 16, 2, &[Sub::fixed(3, 2), extremes(32768)], 4)),
+        ("lpc, escaped", file(&Hdr::new(9, 1, 6), 24, 2, &[lpc, escaped], 4)),
+    ];
+    for (name, d) in cases {
+        let f = aqr_flac::formula::encode(&d, 1).unwrap_or_else(|| panic!("flac {name}: not coded"));
+        alike("flac-recons", &format!("flac {name}"), &f);
+    }
+}
+
 #[test]
 fn ogg_alike() {
     for name in ["ffmpeg-stereo.ogg", "opus.opus"] {
