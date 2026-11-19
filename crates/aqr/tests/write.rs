@@ -294,7 +294,7 @@ fn inputs_changing_while_archived() {
                     "grow" => fs::write(&last, text(299, 90_000)).unwrap(),
                     "same-size" => fs::write(&last, text(298, 40_000)).unwrap(),
                     "delete" => fs::remove_file(&last).unwrap(),
-                    _ => fs::set_permissions(&last, fs::Permissions::from_mode(0)).unwrap(),
+                    _ => fs::set_permissions(&last, fs::Permissions::from_mode(0o000)).unwrap(),
                 }
                 true
             },
@@ -608,10 +608,10 @@ fn names_and_times_roundtrip() {
     let mut made = 0;
     for (i, n) in names.iter().enumerate() {
         let p = src.join(OsStr::from_bytes(n));
-        if let Some(parent) = p.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                continue;
-            }
+        if let Some(parent) = p.parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            continue;
         }
         if fs::write(&p, text(i as u64, 2000 + i * 100)).is_ok() {
             made += 1;

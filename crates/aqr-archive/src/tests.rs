@@ -2996,9 +2996,7 @@ fn malformed_metadata() {
     m.files[0].0 = 3;
     bad(&m, "a field out of range");
     // fields over their bounds: offsets past `prev`, a dictionary of none
-    for (f, want) in [(Meta { modules: vec![101], ..base.clone() }, "a field out of range")] {
-        bad(&f, want);
-    }
+    bad(&Meta { modules: vec![101], ..base.clone() }, "a field out of range");
     let mut m = base.clone();
     (m.dictionaries, m.files[0].2) = (vec![5], 2);
     bad(&m, "a field out of range");

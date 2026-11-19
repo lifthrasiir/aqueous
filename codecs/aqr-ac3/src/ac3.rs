@@ -68,8 +68,8 @@ static TABLES: [[u16; 256]; 8] = {
 
 /// The register `crc` after `d` is shifted in, eight bytes at a time through the tables.
 fn crc_run(mut crc: u16, d: &[u8]) -> u16 {
-    let mut words = d.chunks_exact(8);
-    for w in &mut words {
+    let (words, rest) = d.as_chunks::<8>();
+    for w in words {
         let a = crc ^ u16::from_be_bytes([w[0], w[1]]);
         crc = TABLES[7][(a >> 8) as usize]
             ^ TABLES[6][(a & 0xFF) as usize]
@@ -80,7 +80,7 @@ fn crc_run(mut crc: u16, d: &[u8]) -> u16 {
             ^ TABLES[1][w[6] as usize]
             ^ TABLES[0][w[7] as usize];
     }
-    words.remainder().iter().fold(crc, |c, &b| c << 8 ^ TABLES[0][(c >> 8) as usize ^ b as usize])
+    rest.iter().fold(crc, |c, &b| c << 8 ^ TABLES[0][(c >> 8) as usize ^ b as usize])
 }
 
 fn crc16(d: &[u8]) -> u16 {

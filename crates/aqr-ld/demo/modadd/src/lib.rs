@@ -1,7 +1,9 @@
 //! A trivial no_std module for the PE-merge validation: out[i] = in[i] + 7.
-#![no_std]
-#![no_main]
+// (no_std where built as pemerge-test.sh does, with panic=abort; with std otherwise, as the
+// workspace's checks and tests build it)
+#![cfg_attr(panic = "abort", no_std)]
 
+#[cfg(panic = "abort")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}

@@ -792,8 +792,7 @@ pub fn advance(a: &mut Scale, ea: &[i32], b: Option<(&mut Scale, &[i32])>) {
 #[cfg(test)]
 #[test]
 fn set_scale_from_zero_to_largest() {
-    let mut l = Lms::default();
-    l.h = [-5; TAPS];
+    let mut l = Lms { h: [-5; TAPS], ..Default::default() };
     l.h[1] = 1000;
     l.set_scale(&Scale { avg: 1 << 31, pend: 0 });
     assert_eq!(l.h[0], -1);

@@ -67,7 +67,7 @@ fn a_stream_cut_short_is_past_its_end() {
 fn zeros_past_the_end_are_counted() {
     // eight bytes decode as many bits as asked, but not unnoticed (three are past it at once: the
     // decoder starts by reading four)
-    let mut dec = Decoder::new(SliceSource::new(&[0u8, 0, 0]));
+    let dec = Decoder::new(SliceSource::new(&[0u8, 0, 0]));
     assert!(dec.past_end());
     let data = [0u8; 8];
     let mut dec = Decoder::new(SliceSource::new(&data));

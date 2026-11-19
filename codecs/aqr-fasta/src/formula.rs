@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn degenerate_files() {
         let mut cases: Vec<Vec<u8>> = Vec::new();
-        for c in [b'A', b'a', b'N', b'n', b'R'] {
+        for c in *b"AaNnR" {
             let mut d = b">x\n".to_vec();
             for _ in 0..4000 {
                 d.extend(std::iter::repeat_n(c, 60));

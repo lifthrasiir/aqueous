@@ -2043,7 +2043,7 @@ pub(crate) fn limits_of<M: crate::Modules + Sync>(
     f: &aqr_formula::Formula,
     m: &M,
     order: &[&aqr_formula::Apply],
-    limit: &dyn Fn(&aqr_formula::Apply, &[u64], &dyn aqr_formula::Contents) -> Option<aqr_formula::Plan>,
+    limit: &crate::evaluate::Limit<'_>,
 ) -> aqr_formula::Result<Vec<Option<aqr_formula::Plan>>> {
     with_formula(f, m, |ev| {
         let g = ev.g;

@@ -3,6 +3,10 @@
 
 use aqr_formula::{Apply, Contents, Error, Formula, Node, Of, Plan, Result, Shared};
 
+/// What gives an application's plan ([`Evaluate::plans`]): of the application, its outputs'
+/// sizes and its inputs, None where it gives none.
+pub type Limit<'a> = dyn Fn(&Apply, &[u64], &dyn Contents) -> Option<Plan> + 'a;
+
 /// A [`Formula`] evaluated, and the memory limits of its applications measured and declared.
 pub trait Evaluate {
     /// The output, with every module run by `m`. Fails on slices out of their stream, on
@@ -24,21 +28,13 @@ pub trait Evaluate {
     /// decoder has them (one output of an application split) and its inputs, which are made (by
     /// `m`) only as `limit` reads them, without setting anything: None where it gives none or an
     /// input asked for cannot be made.
-    fn plans<M: Modules + Sync>(
-        &self,
-        m: &M,
-        limit: &dyn Fn(&Apply, &[u64], &dyn Contents) -> Option<Plan>,
-    ) -> Result<Vec<(&Apply, Option<Plan>)>>;
+    fn plans<M: Modules + Sync>(&self, m: &M, limit: &Limit<'_>) -> Result<Vec<(&Apply, Option<Plan>)>>;
 
     /// Sets every application's memory limit ([`Apply::memory_limit`]) and task limits to what
     /// `limit` gives of it, its outputs' sizes (as [`Evaluate::plans`]) and its inputs, which are
     /// made (by `m`) only as `limit` reads them. Fails where it gives none, or an input asked for
     /// cannot be made.
-    fn declare_memory<M: Modules + Sync>(
-        &mut self,
-        m: &M,
-        limit: &dyn Fn(&Apply, &[u64], &dyn Contents) -> Option<Plan>,
-    ) -> Result<()>;
+    fn declare_memory<M: Modules + Sync>(&mut self, m: &M, limit: &Limit<'_>) -> Result<()>;
 }
 
 impl Evaluate for Formula {
@@ -55,21 +51,13 @@ impl Evaluate for Formula {
         crate::eval::eval_formula(self, m, Some(part), threads).map(drop)
     }
 
-    fn plans<M: Modules + Sync>(
-        &self,
-        m: &M,
-        limit: &dyn Fn(&Apply, &[u64], &dyn Contents) -> Option<Plan>,
-    ) -> Result<Vec<(&Apply, Option<Plan>)>> {
+    fn plans<M: Modules + Sync>(&self, m: &M, limit: &Limit<'_>) -> Result<Vec<(&Apply, Option<Plan>)>> {
         let applies = self.applies();
         let limits = crate::eval::limits_of(self, m, &applies, limit)?;
         Ok(applies.into_iter().zip(limits).collect())
     }
 
-    fn declare_memory<M: Modules + Sync>(
-        &mut self,
-        m: &M,
-        limit: &dyn Fn(&Apply, &[u64], &dyn Contents) -> Option<Plan>,
-    ) -> Result<()> {
+    fn declare_memory<M: Modules + Sync>(&mut self, m: &M, limit: &Limit<'_>) -> Result<()> {
         fn visit<'f>(n: &'f Node, out: &mut Vec<&'f Apply>) {
             match n {
                 Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| visit(n, out)),

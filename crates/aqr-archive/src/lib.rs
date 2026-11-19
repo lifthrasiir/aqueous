@@ -66,7 +66,7 @@ use blocks::*;
 pub use compress::*;
 pub use emit::*;
 pub use encoder::*;
-pub use evaluate::{Evaluate, Modules};
+pub use evaluate::{Evaluate, Limit, Modules};
 pub use level::*;
 pub use listing::{Applied, Listed};
 pub use locate::{block_at, footer_of, locate, trim};
