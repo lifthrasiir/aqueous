@@ -27,8 +27,8 @@ fn le32(b: &[u8], at: usize) -> usize {
 fn fletcher(b: &[u8]) -> u64 {
     const M: u64 = 0xffff_ffff;
     let (mut s1, mut s2) = (0u64, 0u64);
-    for w in b[8..].chunks_exact(4) {
-        s1 += u32::from_le_bytes(w.try_into().unwrap()) as u64;
+    for w in b[8..].as_chunks::<4>().0 {
+        s1 += u32::from_le_bytes(*w) as u64;
         s2 += s1;
     }
     let (s1, s2) = (s1 % M, s2 % M);
