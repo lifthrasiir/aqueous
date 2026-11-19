@@ -1077,6 +1077,7 @@ dependencies = [
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
+ "aqr-testkit",
  "zstd",
 ]
 

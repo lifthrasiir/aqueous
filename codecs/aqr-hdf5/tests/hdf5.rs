@@ -126,3 +126,31 @@ fn float_plan_of_huge_params() {
     assert!(aqr_hdf5::module::float_plan(&p(1 << 61).to_bytes(), &[0, 0, 0], 0).is_none());
     assert!(aqr_hdf5::module::float_plan(&p(1 << 10).to_bytes(), &[0, 0, 0], 8 << 10).is_some());
 }
+
+/// A v1 B-tree node whose children are all itself (the chunk index of `wave` in `sb0.h5` moved
+/// to the end of the file, a node of 65535 children above the leaves): the walk ends at once,
+/// the nodes past the depth turned down before their entries are read and the budget of nodes
+/// bounding the rest.
+#[test]
+fn tree_of_itself() {
+    let mut d = data("sb0.h5");
+    let (at, index) = (d.len(), 939);
+    assert_eq!(&d[index..index + 8], &1400u64.to_le_bytes(), "the chunk index of wave");
+    assert_eq!(&d[40..48], &(at as u64).to_le_bytes(), "the end of the file");
+    d[index..index + 8].copy_from_slice(&(at as u64).to_le_bytes());
+    let n = u16::MAX;
+    d.extend_from_slice(b"TREE");
+    d.extend_from_slice(&n.to_le_bytes());
+    d.extend_from_slice(&[0xff; 16]);
+    // (the keys of a chunk of rank 1: its size, its mask, two offsets; then its child)
+    for _ in 0..n {
+        d.extend_from_slice(&[0; 24]);
+        d.extend_from_slice(&(at as u64).to_le_bytes());
+    }
+    d.extend_from_slice(&[0; 24]);
+    let end = d.len() as u64;
+    d[40..48].copy_from_slice(&end.to_le_bytes());
+    let t = std::time::Duration::from_secs(5);
+    aqr_testkit::within(t, || hdf5::parse(&d)).unwrap();
+    aqr_testkit::within(t, || roundtrip(&d, &Options::default())).unwrap();
+}
