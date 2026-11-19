@@ -5,8 +5,9 @@
 //! (after a stub, say). Bytes after it are those of an append not committed, cut off (even where
 //! they end with a commit written whole: it was not committed); bytes after it that are not
 //! blocks are not taken away, and the archive is not appended to.
-//! An encrypted archive is not appended to (its nonces would be used again), nor one of a single
-//! file, nor one of a size hint block (to be written over).
+//! An encrypted archive is not appended to (its nonces would be used again), nor one of mirror
+//! blocks (what is appended would go unmirrored), nor one of a single file, nor one of a size
+//! hint block (to be written over).
 //!
 //! The entries of the inputs are compared with the archive's tree, merged, by path: a file is
 //! taken again where it is not there, is there of another kind, size or modification time (as
@@ -76,6 +77,11 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
         let a = &c[at.clone()];
         let (footer, metadata) = aqr_archive::footer_of(a).ok_or_else(|| err(&"no footer"))?;
         let metadata = metadata.ok_or_else(|| err(&"an archive of a single file, not of paths"))?;
+        // (what is written after the mirror blocks would be unmirrored, or the footer's mirror kept stale)
+        let m = aqr_archive::mirror::check(a);
+        if !m.mirrors.is_empty() || m.broken > 0 {
+            return Err(err(&"an archive of mirror blocks (-A) is not appended to nor edited in place"));
+        }
         if aqr_archive::block_at(a, aqr_archive::HEADER_MAGIC.len()).is_some_and(|(ty, _)| ty == 4) {
             return Err(err(&"an archive of a size hint block is not appended to"));
         }
