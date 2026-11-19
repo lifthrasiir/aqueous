@@ -88,9 +88,11 @@ pub fn parse(d: &[u8]) -> Option<File> {
         if data > BLOCK_MAX || stream > data || stream == 0 {
             return None;
         }
-        p += 4
-            * ((flags & (ADLER32_D | CRC32_D) != 0) as usize
-                + (flags & (ADLER32_C | CRC32_C) != 0 && stream < data) as usize);
+        // (a checksum of each kind set, of the data and, where it is compressed, of the stream)
+        p += 4 * ((flags & ADLER32_D != 0) as usize + (flags & CRC32_D != 0) as usize);
+        if stream < data {
+            p += 4 * ((flags & ADLER32_C != 0) as usize + (flags & CRC32_C != 0) as usize);
+        }
         blocks.push(Block { at: p, data, stream });
         p += stream;
     }

@@ -1272,6 +1272,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "zstd",
 ]
 
@@ -1283,6 +1284,7 @@ dependencies = [
  "aqr-archive",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
 ]
 
 [[package]]
@@ -1293,6 +1295,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-lzma",
+ "aqr-testkit",
  "memmap2",
  "sha1",
 ]
