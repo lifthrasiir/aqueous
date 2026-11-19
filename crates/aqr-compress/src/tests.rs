@@ -2439,3 +2439,58 @@ fn git_indexes_of_one_pack() {
         assert_eq!(sets(&a), [[0, 1]], "a reverse index of {len} bytes");
     }
 }
+
+/// An HDF5 file's deflated chunks are tried at the adaptive profile (zlib predicted exactly);
+/// where that takes more memory than an application may, the profile asked for, and where
+/// that does not fit either, the file is kept as it is. Bounds of this fixture (sb0.h5).
+#[test]
+fn hdf5_profile_falls_back_to_the_bound() {
+    let d = std::fs::read(format!("{}/../../codecs/aqr-hdf5/tests/data/sb0.h5", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let made = |bound: u64| {
+        let opt = Options { smaller: false, application_bound: Some(bound), ..Options::default() };
+        let f = recompress(&d, &opt);
+        assert!(f.eval(&Native::default()).is_ok_and(|x| x == d), "given back at {bound}");
+        let profiles: Vec<u16> = f
+            .streams
+            .iter()
+            .filter(|s| s.class == "flate/record")
+            .map(|s| aqr_flate::record_profile(&s.data).unwrap())
+            .collect();
+        (f.applies().len(), profiles)
+    };
+    let (n, profiles) = made(4 << 20);
+    assert!(n > 0 && profiles.iter().all(|&p| p == aqr_flate::ADAPTIVE), "{profiles:?}");
+    let (n, profiles) = made(3 << 20);
+    assert!(n > 0 && !profiles.is_empty() && profiles.iter().all(|&p| p < aqr_flate::ADAPTIVE), "{profiles:?}");
+    assert_eq!(made(1 << 20).0, 0, "kept as it is");
+}
+
+/// The choice between aqr-log, aqr-xsv and the text path, at the boundaries: aqr-xsv where it
+/// is no larger than aqr-log (equal too); aqr-log where its streams are at most the percent of
+/// the text path's (exactly that too); else aqr-xsv where it takes the text, else none.
+#[test]
+fn table_choice_at_the_boundaries() {
+    let pick = |log, x, text, xsv, percent| pick_table(log, x, || text, xsv, percent);
+    // (equal sizes: aqr-xsv)
+    assert_eq!(pick(Some(100), Some(100), 1000, true, 100), Some(Format::Xsv));
+    assert_eq!(pick(Some(100), Some(99), 1000, true, 100), Some(Format::Xsv));
+    assert_eq!(pick(Some(100), Some(101), 1000, true, 100), Some(Format::Log));
+    // (a table xsv does not take, or that it codes to nothing)
+    assert_eq!(pick(Some(100), None, 1000, true, 100), Some(Format::Log));
+    assert_eq!(pick(Some(100), None, 1000, false, 100), Some(Format::Log));
+    // (aqr-log at exactly its percent of the text path's, not a byte over)
+    assert_eq!(pick(Some(100), Some(101), 100, true, 100), Some(Format::Log));
+    assert_eq!(pick(Some(101), Some(102), 100, true, 100), Some(Format::Xsv));
+    assert_eq!(pick(Some(101), None, 100, false, 100), None);
+    assert_eq!(pick(Some(120), Some(121), 100, false, 120), Some(Format::Log));
+    assert_eq!(pick(Some(121), None, 100, false, 120), None);
+    assert_eq!(pick(Some(0), Some(1), 0, true, 100), Some(Format::Log));
+    // (aqr-log turning the text down: aqr-xsv, or the text path)
+    assert_eq!(pick(None, Some(5), 10, true, 100), Some(Format::Xsv));
+    assert_eq!(pick(None, None, 10, true, 100), Some(Format::Xsv));
+    assert_eq!(pick(None, None, 10, false, 100), None);
+    // (the text's size asked for only where it is needed)
+    let asked = std::cell::Cell::new(false);
+    let _ = pick_table(Some(10), Some(5), || asked.replace(true) as usize, true, 100);
+    assert!(!asked.get());
+}

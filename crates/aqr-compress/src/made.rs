@@ -264,9 +264,21 @@ fn log_or_table(d: &[u8], xsv: bool) -> Option<Format> {
     let coded = |f: Formula| f.streams.iter().map(|s| z(&s.data)).sum::<usize>();
     let log = aqr_log::formula::encode(s, 1).map(coded);
     let x = xsv.then(|| aqr_xsv::formula::encode(s, 1).map(coded)).flatten();
+    pick_table(log, x, || z(s), xsv, LOG_PERCENT.get())
+}
+
+/// [`log_or_table`]'s choice, of the sizes of the sample's streams by aqr-log (`log`) and by
+/// aqr-xsv (`x`), and of the sample itself (`text`, worked out where it is asked for), at `percent`.
+pub(crate) fn pick_table(
+    log: Option<usize>,
+    x: Option<usize>,
+    text: impl FnOnce() -> usize,
+    xsv: bool,
+    percent: usize,
+) -> Option<Format> {
     match log {
         Some(log) if x.is_some_and(|x| x <= log) => Some(Format::Xsv),
-        Some(log) if log * 100 <= z(s) * LOG_PERCENT.get() => Some(Format::Log),
+        Some(log) if log * 100 <= text() * percent => Some(Format::Log),
         _ => xsv.then_some(Format::Xsv),
     }
 }

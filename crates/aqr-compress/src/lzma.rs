@@ -161,6 +161,8 @@ pub(crate) fn apply(f: &mut Formula, threads: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// liblzma's `.lzma` files decode by `lzma-decode` to their data, and not to another length.
     #[test]
     fn decodes() {
@@ -176,5 +178,69 @@ mod tests {
             assert!(out == d[..n], "{n}");
             assert!(aqr_lzma::module::decode_alone(&[], &[&c], n as u64 + 1).is_err(), "{n}");
         }
+    }
+
+    /// The groups of `-Z lzma` are filled to their size exactly and no more; a slice larger than
+    /// the size is a group alone; a group that LZMA saves less than 1/32 of is left as it was;
+    /// whatever the groups, the formula gives the streams back.
+    #[test]
+    fn group_boundaries() {
+        use aqr_archive::Evaluate;
+        let text = |n: usize, seed: usize| -> Vec<u8> {
+            (0..n)
+                .flat_map(|i| {
+                    format!(
+                        "line {} of the text {seed}
+",
+                        (i + seed) % 97
+                    )
+                    .into_bytes()
+                })
+                .take(n)
+                .collect::<Vec<_>>()
+        };
+        let noise = |n: usize, seed: u64| aqr_common::rng::Rng::new(seed).bytes(n);
+        let run = |streams: &[Vec<u8>], group: usize| {
+            let (_l, _g) = (super::LZMA.set_here(true), super::GROUP.set_here(group));
+            let mut f = Formula::default();
+            let parts: Vec<Node> = streams.iter().map(|d| f.push("raw", d.clone())).collect();
+            f.root = Node::Concat(parts);
+            let made = super::apply(&mut f, 1);
+            let want: Vec<u8> = streams.concat();
+            assert!(f.eval(&aqr_decompress::Native::default()).is_ok_and(|b| b == want), "given back");
+            let sizes: Vec<Vec<u64>> = f.shared.iter().map(|s| s.sizes.clone()).collect();
+            (made, sizes)
+        };
+        let streams = [text(6000, 1), text(4000, 2), text(3000, 3), text(10_000, 4), text(15_000, 5)];
+        // (the first two fill a group of 10000 exactly, the third is alone, the others over it or
+        // exactly it: each alone)
+        let (made, mut sizes) = run(&streams, 10_000);
+        assert!(made);
+        sizes.sort();
+        assert_eq!(sizes, [vec![3000], vec![6000, 4000], vec![10_000], vec![15_000]]);
+        // one byte under: the first two part (the second and third fit together)
+        let (_, mut sizes) = run(&streams, 9_999);
+        sizes.sort();
+        assert_eq!(sizes, [vec![4000, 3000], vec![6000], vec![10_000], vec![15_000]]);
+        // all in one group of their sum, and a byte less
+        let sum = streams.iter().map(Vec::len).sum::<usize>();
+        assert_eq!(run(&streams, sum).1, [vec![6000, 4000, 3000, 10_000, 15_000]]);
+        assert_eq!(run(&streams, sum - 1).1.len(), 2);
+        // a group of 1 byte: every slice alone (a stream of one byte is not saved: left)
+        let (made, sizes) = run(&streams, 1);
+        assert!(made && sizes.len() == 5);
+        // the group size 0 is 1
+        assert_eq!(run(&streams, 0).1.len(), 5);
+        // noise is not saved 1/32: left as it was
+        let (made, sizes) = run(&[noise(20_000, 1), noise(5_000, 2)], 1 << 20);
+        assert!(!made && sizes.is_empty());
+        // a group of noise beside text: its own group (of both, where the text saves enough)
+        let (_, sizes) = run(&[noise(20_000, 3), text(40_000, 7)], 20_000);
+        assert_eq!(sizes, [vec![40_000]]);
+        let (_, sizes) = run(&[text(10_000, 1), noise(100, 4)], 10_100);
+        assert_eq!(sizes, [vec![10_000, 100]]);
+        // no streams, or empty ones
+        assert_eq!(run(&[], 100), (false, vec![]));
+        assert_eq!(run(&[vec![], vec![]], 100), (false, vec![]));
     }
 }
