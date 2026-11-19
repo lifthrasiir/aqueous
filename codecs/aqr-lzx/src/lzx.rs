@@ -821,9 +821,11 @@ impl BlockWriter {
     /// Moves the stream's start `shift` bytes on (a multiple of [`FRAME`], at most the bytes
     /// before the next block): `data` of the blocks after it starts there.
     pub fn slide(&mut self, shift: usize) {
-        self.at -= shift;
+        // (where the block written last ends: before the start where the parse slides past what it wrote; the
+        // blocks after bring it back, as they are of the data after the start)
+        self.at = self.at.wrapping_sub(shift);
         self.n -= shift;
-        self.frame_end -= shift;
+        self.frame_end = self.frame_end.wrapping_sub(shift);
     }
 
     /// [`BlockWriter::block`], `flush` called with the writer whenever [`FLUSH`] bytes or more

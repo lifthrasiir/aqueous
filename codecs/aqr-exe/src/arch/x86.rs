@@ -1096,7 +1096,7 @@ fn encode_core(
 
     let code_len = input.len();
     let code_start = origin;
-    let code_end = origin + code_len as u64;
+    let code_end = origin.wrapping_add(code_len as u64);
     // (a field told of, at `at` of `n` bytes)
     let field = |st: &mut EncodedStreams, at: u64, v: u64, n: usize| {
         if let Some(r) = fields.as_ref().and_then(|f| f.take(at, v, n, is64, code_end)) {
@@ -1143,7 +1143,7 @@ fn encode_core(
                     st.put8(ST_PAD, padding.len() as u8);
                     st.copy(ST_PAD, padding);
                 }
-                origin += pad_size as u64;
+                origin = origin.wrapping_add(pad_size as u64);
 
                 pad = false;
                 continue;
@@ -1167,17 +1167,17 @@ fn encode_core(
                     for range in range_chunks(i / 4, 0x100) {
                         // (each table a step, as the decoder reads them)
                         if let Some(c) = counts.as_mut().filter(|_| range.start > 0) {
-                            c.step(&mut st, origin + (range.start * 4) as u64);
+                            c.step(&mut st, origin.wrapping_add((range.start * 4) as u64));
                         }
                         st.jumptab((range.len() - 1) as u8);
                         for j in range {
                             let addr = to_u32(&code[j * 4..j * 4 + 4]);
-                            field(&mut st, origin + (j * 4) as u64, addr as u64, 4);
+                            field(&mut st, origin.wrapping_add((j * 4) as u64), addr as u64, 4);
                             st.call32(call_idx(addr as u64), addr);
                         }
                     }
                     code = &code[i..];
-                    origin += i as u64;
+                    origin = origin.wrapping_add(i as u64);
                     continue;
                 }
             } else if origin.is_multiple_of(8) {
@@ -1198,7 +1198,7 @@ fn encode_core(
                     for range in range_chunks(i / 8, 0x100) {
                         // (each table a step, as the decoder reads them)
                         if let Some(c) = counts.as_mut().filter(|_| range.start > 0) {
-                            c.step(&mut st, origin + (range.start * 8) as u64);
+                            c.step(&mut st, origin.wrapping_add((range.start * 8) as u64));
                         }
                         st.jumptab((range.len() - 1) as u8);
                         for j in range {
@@ -1206,7 +1206,7 @@ fn encode_core(
                         }
                     }
                     code = &code[i..];
-                    origin += i as u64;
+                    origin = origin.wrapping_add(i as u64);
                     continue;
                 }
             }
@@ -1300,12 +1300,13 @@ fn encode_core(
             let copy_abs = |n: usize, streams: &mut EncodedStreams, st: usize| {
                 let mut b = [0u8; 8];
                 b[..n].copy_from_slice(&code[i.get()..i.get() + n]);
-                field(streams, origin + i.get() as u64, u64::from_le_bytes(b), n);
+                field(streams, origin.wrapping_add(i.get() as u64), u64::from_le_bytes(b), n);
                 copy(n, streams, st);
             };
 
-            let rel_to_abs =
-                |addr: u32, delta: usize| (origin + (i.get() + delta) as u64).wrapping_add(addr as i32 as u64);
+            let rel_to_abs = |addr: u32, delta: usize| {
+                (origin.wrapping_add((i.get() + delta) as u64)).wrapping_add(addr as i32 as u64)
+            };
 
             let mut flags = opcodes.class(op, map, is64);
 
@@ -1324,7 +1325,7 @@ fn encode_core(
                     prefixes |= 1 << prefix_hash(op);
                     st.op(map, op);
                     code = &code[1..];
-                    origin += 1;
+                    origin = origin.wrapping_add(1);
                     continue;
                 }
             } else if op3_followed(flags) {
@@ -1345,7 +1346,7 @@ fn encode_core(
                 // Do NOT commit the current position if this instruction is invalid.
                 st.op_esc(code[0]);
                 code = &code[1..];
-                origin += 1;
+                origin = origin.wrapping_add(1);
                 continue;
             }
 
@@ -1414,7 +1415,7 @@ fn encode_core(
                     0 if addr16 && base == 6 => copy(16 / 8, &mut st, ST_ADDR16), // [disp16]
                     0 if addr16 => {}
                     0 if base == 5 => {
-                        let at = origin + i.get() as u64;
+                        let at = origin.wrapping_add(i.get() as u64);
                         let addr = fetch32();
                         if is64 {
                             // [eip+disp32] or [rip+disp32]
@@ -1439,13 +1440,14 @@ fn encode_core(
             match flags {
                 J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_JUMP16),
                 J4 if op != OP_CALLN && counts.is_some() => {
-                    let (field, next) = (origin + i.get() as u64, origin + (i.get() + 4) as u64);
+                    let (field, next) =
+                        (origin.wrapping_add(i.get() as u64), origin.wrapping_add((i.get() + 4) as u64));
                     let target = rel_to_abs(fetch32(), 0);
                     let c = counts.as_mut().unwrap().jump(&st, ST_JUMPN, 0, field, target, next);
                     st.put8(ST_JUMPN, c.unwrap_or(COUNT_ESC));
                 }
                 J4 => {
-                    let at = origin + i.get() as u64;
+                    let at = origin.wrapping_add(i.get() as u64);
                     let target = rel_to_abs(fetch32(), 0);
                     let kind = if op == OP_CALLN { Ref::Call } else { Ref::Jump };
                     let target = hook(kind, at, target);
@@ -1474,7 +1476,7 @@ fn encode_core(
                 JA => copy_abs(32 / 8, &mut st, ST_AJUMP32),
                 J1 if counts.is_some() => {
                     let rel = fetch8();
-                    let next = origin + i.get() as u64;
+                    let next = origin.wrapping_add(i.get() as u64);
                     let target = next.wrapping_add(rel as i8 as u64);
                     match counts.as_mut().unwrap().jump(&st, ST_JUMP8, rel, next - 1, target, next) {
                         Some(c) => st.put8(ST_JUMP8, c),
@@ -1502,7 +1504,7 @@ fn encode_core(
 
             let i = i.get();
             code = &code[i..];
-            origin += i as u64;
+            origin = origin.wrapping_add(i as u64);
         }
         code.len()
     };
@@ -1917,13 +1919,13 @@ pub fn decode_core<S: Src, K: Sink>(
         }
         if_trace_decode! {
             println!();
-            print!("{:06X}: ", origin + code.len() as u64);
+            print!("{:06X}: ", origin.wrapping_add(code.len() as u64));
         }
 
         if pad {
             match src.read8(ST_PAD)? {
                 PAD_NONE => {}
-                PAD_FILL => code.fill(pad_fill_len(origin + code.len() as u64), 0xcc),
+                PAD_FILL => code.fill(pad_fill_len(origin.wrapping_add(code.len() as u64)), 0xcc),
                 PAD_INT3 => code.push(0xcc),
                 PAD_BYTES => loop {
                     let pad_size = src.read8(ST_PAD)?;
@@ -2066,7 +2068,8 @@ pub fn decode_core<S: Src, K: Sink>(
 
         pad = pad_followed(op);
 
-        let abs_to_rel = |addr: u64, len: usize, delta: usize| addr.wrapping_sub(origin + (len + delta) as u64);
+        let abs_to_rel =
+            |addr: u64, len: usize, delta: usize| addr.wrapping_sub(origin.wrapping_add((len + delta) as u64));
 
         // ModR/M present
         if has_modrm(flags) {

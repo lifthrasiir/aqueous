@@ -405,7 +405,7 @@ pub fn find(b: &[u8], lo: usize, hi: usize, threads: usize) -> Vec<Table> {
     for t in tables {
         if let Some((p, count)) = merged.as_mut()
             && p.k == t.k
-            && (t.start - p.start).is_multiple_of(t.k)
+            && t.start.abs_diff(p.start).is_multiple_of(t.k)
             && t.start <= p.end + t.k
         {
             p.end = p.end.max(t.end);

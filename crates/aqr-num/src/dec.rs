@@ -588,7 +588,7 @@ pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32, tmp: &mut 
         return general::parse_gen(t, p, prev_scale, exp3, tmp);
     }
     let ex = t.iter().position(|&c| c == b'e' || c == b'E');
-    let ex3 = ex.map_or(exp3, |i| t.len() - i - 2 == 3 && matches!(t[i + 1], b'+' | b'-'));
+    let ex3 = ex.map_or(exp3, |i| t.len() == i + 5 && matches!(t[i + 1], b'+' | b'-'));
     let f = match r {
         R_GEN | R_SCI => p | if ex3 { G_EXP3 } else { 0 },
         _ => 0,

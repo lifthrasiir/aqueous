@@ -421,7 +421,7 @@ fn filters_same_as_wasm() {
 /// natively and as WebAssembly alike, streamed as an archive is written out.
 #[test]
 fn delta_streamed() {
-    let d: Vec<u8> = (0..1_000_003u32).map(|i| (i * i / 7) as u8).collect();
+    let d: Vec<u8> = (0..1_000_003u32).map(|i| (i.wrapping_mul(i) / 7) as u8).collect();
     let mut want = d.clone();
     aqr_bcj::delta::encode(&mut want, 4);
     let mut f = Formula::default();
@@ -3368,7 +3368,7 @@ fn raster16_plan_holds() {
         let mut d = Vec::with_capacity(fmt.len().unwrap());
         for y in 0..height {
             for x in 0..width * channels {
-                d.extend_from_slice(&(((x + 2 * y) * 37 + (x * y) % 11) as u16 * 13).to_be_bytes());
+                d.extend_from_slice(&(((x + 2 * y) * 37 + (x * y) % 11) as u16).wrapping_mul(13).to_be_bytes());
             }
             d.extend(std::iter::repeat_n(0x5a, pad));
         }
@@ -3404,7 +3404,7 @@ fn raster_bands_plans_hold() {
     let mut d = Vec::with_capacity(fmt.len().unwrap());
     for y in 0..height {
         for x in 0..width * channels {
-            d.extend_from_slice(&(((x + 2 * y) * 37 + (x * y) % 11) as u16 * 13).to_le_bytes());
+            d.extend_from_slice(&(((x + 2 * y) * 37 + (x * y) % 11) as u16).wrapping_mul(13).to_le_bytes());
         }
         d.extend(std::iter::repeat_n(0x5a, pad));
     }

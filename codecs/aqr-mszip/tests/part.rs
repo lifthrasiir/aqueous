@@ -39,7 +39,7 @@ fn noise(n: usize, seed: &mut u64) -> Vec<u8> {
 
 /// Text of about `n` bytes.
 fn text(n: usize, seed: u64) -> Vec<u8> {
-    (0..n / 12 + 1).flat_map(|i| format!("w{:05} {:03}\n", (i as u64 * seed) % 9973, i % 211).into_bytes()).collect()
+    (0..n / 12 + 1).flat_map(|i| format!("w{:05} {:03}\n", (i as u64).wrapping_mul(seed) % 9973, i % 211).into_bytes()).collect()
 }
 
 /// A MSZIP block (with its signature) of a DEFLATE stream of `data`: stored (a final block of its

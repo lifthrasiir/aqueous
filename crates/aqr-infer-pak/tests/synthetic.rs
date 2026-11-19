@@ -154,7 +154,7 @@ fn template() {
 fn seeds() {
     let mut missed = Vec::new();
     for seed in 1..=16u64 {
-        let mut rng = Rng(seed * 0x9e37_79b9_7f4a_7c15);
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let n = 20 + rng.below(400) as usize;
         let p = pak(&mut rng, n);
         let files = [File { name: "s.pak".into(), data: &p }];

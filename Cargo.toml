@@ -53,6 +53,7 @@ debug = true
 # tests are slow otherwise, and incremental. The timings (`--ignored` tests) still want `-r`.
 [profile.release-test]
 inherits = "release"
+overflow-checks = true
 incremental = true
 debug = "line-tables-only"
 

@@ -48,7 +48,9 @@ impl State {
         let e = if n >= 8 { n as i32 - 16 } else { n as i32 };
         let s = (pred + e * self.delta).clamp(-32768, 32767);
         (self.s2, self.s1) = (self.s1, s);
-        self.delta = ((ADAPT[n as usize] * self.delta) >> 8).clamp(DELTA_MIN, DELTA_MAX);
+        // (of 32 bits, wrapping where a delta past 2^21 grows: only streams no encoder made come there, and they
+        // decode alike everywhere)
+        self.delta = (ADAPT[n as usize].wrapping_mul(self.delta) >> 8).clamp(DELTA_MIN, DELTA_MAX);
     }
 }
 

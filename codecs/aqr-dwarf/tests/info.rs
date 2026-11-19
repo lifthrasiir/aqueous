@@ -183,7 +183,7 @@ fn unit4(start: usize, n: usize, str_at: &[u32], first: usize, prev_type: Option
             let t = prev_type.unwrap_or(start as u32 + types[0]);
             u.extend_from_slice(&t.to_le_bytes());
             uleb(&mut u, DATA4);
-            u.extend_from_slice(&((sub - start) as u32 + 7).to_le_bytes());
+            u.extend_from_slice(&(sub.wrapping_sub(start) as u32).wrapping_add(7).to_le_bytes());
             u.extend_from_slice(&[3, 1, 2, 3]);
             u.extend_from_slice(&(s as u32 * 16).to_le_bytes());
         }

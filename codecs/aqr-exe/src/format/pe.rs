@@ -414,8 +414,8 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
     /// `clr` points to; `None` where there are none, or one is not within the stored data of
     /// a section.
     fn ready_to_run_code(&mut self, clr: &[u8]) -> Option<Vec<(u32, u64, usize)>> {
-        let (_, funcs_rva, funcs_size) = self.ready_to_run(clr)?.into_iter().find(|s| s.0 == 102)?; // READYTORUN_SECTION_RUNTIME_FUNCTIONS
-        // RUNTIME_FUNCTION of x86-64: begin, end, unwind data
+        // READYTORUN_SECTION_RUNTIME_FUNCTIONS; RUNTIME_FUNCTION of x86-64: begin, end, unwind data
+        let (_, funcs_rva, funcs_size) = self.ready_to_run(clr)?.into_iter().find(|s| s.0 == 102)?;
         let funcs = self.read(funcs_rva, funcs_size / 12 * 12)?;
         let mut funcs: Vec<(u32, u32)> =
             funcs.as_chunks::<12>().0.iter().map(|f| (to_u32(&f[0..4]), to_u32(&f[4..8]))).collect();

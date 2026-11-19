@@ -1075,7 +1075,7 @@ fn dwarf(n: usize) -> [Vec<u8>; 3] {
         info.push(3);
         info.extend_from_slice(&name.to_le_bytes());
         info.extend_from_slice(&types[i % 2].to_le_bytes());
-        info.extend_from_slice(&(10 + 3 * i as u16).to_le_bytes());
+        info.extend_from_slice(&(i as u16).wrapping_mul(3).wrapping_add(10).to_le_bytes());
     }
     info.push(0);
     let len = (info.len() - 4) as u32;

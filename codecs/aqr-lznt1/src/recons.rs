@@ -672,7 +672,8 @@ impl Walker {
                     setter += 1;
                     o >= woff
                 });
-                setter -= 1;
+                // (none where the offset is no setter: then `found` is false, and the rank is not told)
+                setter = setter.wrapping_sub(1);
             }
             if chosen {
             } else if side.bit(&mut c.is_setter[fx], found, Cat::Off) {
