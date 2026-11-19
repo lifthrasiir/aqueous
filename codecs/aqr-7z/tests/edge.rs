@@ -376,3 +376,55 @@ fn options_limit() {
     assert!(formula::encode_with(&d, &Options { limit: 99, ..Options::default() }).is_none());
     assert!(formula::encode_with(&d, &Options { limit: 100, ..Options::default() }).is_some());
 }
+
+/// A folder of a branch converter over a stored stream: `x` is what the converter's coder reads.
+fn filter_folder(id: &[u8], x: &[u8]) -> Vec<u8> {
+    let mut s = pack_info(&[x.len() as u64]);
+    s.extend([7, 11, 1, 0, 2]);
+    // the filter (1 in, 1 out), then a stored coder; in 0 from out 1; packed: in 1
+    s.push(id.len() as u8);
+    s.extend(id);
+    s.extend([0x01, 0]);
+    s.extend([0, 1]);
+    s.push(12);
+    number(&mut s, x.len() as u64);
+    number(&mut s, x.len() as u64);
+    s.push(0);
+    s.extend([8, 0]);
+    plain(x, &s, &["a"])
+}
+
+/// A branch converter over any stream of bytes: each is a bijection (aqr-bcj's tests), so the
+/// formula applies its module (`Made::Apart` of a chain is not met by data) and is exact.
+#[test]
+fn filter_over_any_stream() {
+    let mut x = 0x2468_ace1u32;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x
+    };
+    let (mut apart, mut chained) = (0, 0);
+    for i in 0..400 {
+        let ids: [&[u8]; 8] =
+            [&[3, 3, 1, 3], &[3, 3, 2, 5], &[3, 3, 4, 1], &[3, 3, 5, 1], &[3, 3, 7, 1], &[3, 3, 8, 5], &[0xa], &[0xb]];
+        let id = ids[i % ids.len()];
+        let n = 16 + next() as usize % 48;
+        let x: Vec<u8> = (0..n)
+            .map(|_| if next() % 3 == 0 { [0xe8, 0xe9, 0, 0xff][next() as usize % 4] } else { next() as u8 })
+            .collect();
+        let d = filter_folder(id, &x);
+        let Some(f) = formula::encode(&d, 1) else { continue };
+        assert!(eval(&f).unwrap() == d, "{i}");
+        // (the filter's module is applied only where its encoding gives the stream back)
+        if !format!("{:?}", f.root).contains("bcj-") {
+            apart += 1;
+        } else {
+            chained += 1;
+        }
+    }
+    eprintln!("{apart} apart, {chained} chained");
+    assert_eq!(apart, 0, "a stream that did not round-trip");
+    assert_eq!(chained, 400);
+}

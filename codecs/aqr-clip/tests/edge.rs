@@ -205,3 +205,40 @@ fn damaged_streams() {
         });
     }
 }
+
+/// A skeleton whose tile's stream size is huge, with the length of the file made to match: the
+/// inputs cannot hold the tile, so the decoder fails without reserving the file first.
+#[test]
+fn huge_stream_size_with_a_matching_length() {
+    let z = aqr_clip::zlib::deflate(&tile(Layout::One, 1)).unwrap();
+    let file = file_of(&[Block::Tile(Layout::One, z.clone())]);
+    let f = check(&file);
+    // (the offsets of the first block: see header_and_number_edges)
+    let delta = |big: u32| big as u64 - z.len() as u64;
+    for big in [0xF000_0000u32, 0x7FFF_FFF0, u32::MAX - 100] {
+        aqr_testkit::case(&format!("size {big:#x}"));
+        let r = f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+            let mut s = inputs[0].to_vec();
+            let add = |s: &mut Vec<u8>, at: usize, wide: bool| {
+                if wide {
+                    let v = u64::from_be_bytes(s[at..at + 8].try_into().unwrap()) + delta(big);
+                    s[at..at + 8].copy_from_slice(&v.to_be_bytes());
+                } else {
+                    let v = u32::from_be_bytes(s[at..at + 4].try_into().unwrap()) as u64 + delta(big);
+                    s[at..at + 4].copy_from_slice(&(v as u32).to_be_bytes());
+                }
+            };
+            add(&mut s, 88, true);
+            add(&mut s, 144, true);
+            add(&mut s, 152, false);
+            add(&mut s, 218, false);
+            s[222..226].copy_from_slice(&big.to_le_bytes());
+            let mut ins = inputs.to_vec();
+            ins[0] = &s;
+            let mut b = a.clone();
+            b.len = a.len + delta(big);
+            formula::apply(&b, &ins, 2).map_err(aqr_formula::Error::new)
+        });
+        assert!(r.is_err(), "{big:#x}");
+    }
+}

@@ -457,7 +457,12 @@ pub fn parse(per: usize, skeleton: &[u8], index: &[u8], database: usize, tiles: 
                 kept += n;
                 pos += n;
             }
-            Piece::Tile(_, n) => {
+            Piece::Tile(l, n) => {
+                // (zlib's output is at most its input and a little: no stream is longer, and
+                // the file's length, reserved before the tiles are made, is not a claim of it)
+                if n > l.bytes() + l.bytes() / 64 + 64 {
+                    return Err(invalid("a tile's stream"));
+                }
                 let d = srcs[t];
                 if d == seen {
                     places[d] = (pos, n);
