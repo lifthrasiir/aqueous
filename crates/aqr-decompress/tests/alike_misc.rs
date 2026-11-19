@@ -59,7 +59,7 @@ fn alike_with(name: &str, f: &Formula, per: usize, head: usize) {
 /// [`alike_with`] of `f`, which applies the module `module` (else the test checks nothing).
 fn alike(module: &str, name: &str, f: &Formula) {
     assert!(f.applies().iter().any(|a| a.module.name == module), "{name}: no application of {module}");
-    alike_with(name, f, 5, 3);
+    alike_with(name, f, 12, 4);
 }
 
 /// The application `k` of module `name` in `f` as the root of a copy of it.
