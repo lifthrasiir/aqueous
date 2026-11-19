@@ -7401,6 +7401,21 @@ fn declared_sizes_plans_are_answered() {
             let _ = aqr_arsc::module::plan(0, &lens, &inputs[0], len);
         }
     }
+    // exe CIL: a real section, lengths declared
+    {
+        use aqr_exe::arch::cil;
+        let (d, meta) = cil_gen::section(0, 6, true, b"#~", 1);
+        let st = cil::encode(&d, cil_gen::ORIGIN, meta).expect("taken");
+        let streams = st.streams();
+        let lens: Vec<u64> = streams.iter().map(|s| s.len() as u64).collect();
+        let three = [&streams[cil::META][..], &streams[cil::BODYPOS][..], &streams[cil::TOKT][..]];
+        let answered: usize = LENS
+            .into_iter()
+            .chain([d.len() as u64])
+            .map(|len| aqr_exe::module::cil_plan(8, &lens, three, len).is_some() as usize)
+            .sum();
+        assert!(answered > 0, "cil: a plan for no length");
+    }
     // pdb-msf: a real layout, and layouts of blocks and streams past any file
     let streams: Vec<Option<Vec<u8>>> =
         (0..40).map(|k| Some((0..(k * 997) % 9000).map(|i| i as u8).collect())).collect();
@@ -7440,4 +7455,129 @@ fn declared_sizes_plans_are_answered() {
         answered += aqr_pdb::module::symbols_plan(&params, &lens, &packed[0], &packed[4], len).is_some() as usize;
     }
     assert!(answered > 0, "pdb-symbols: a plan for no length");
+}
+
+/// Sections of CLR metadata written here (a copy of alike_misc.rs' writer).
+mod cil_gen {
+    pub const ORIGIN: u32 = 0x2000;
+
+    fn le32(v: u32) -> [u8; 4] {
+        v.to_le_bytes()
+    }
+
+    /// A section of metadata (root at `meta`, after `head` bytes of method bodies): tables of the
+    /// `heap_sizes` flags (bit 0, 1, 2: 4-byte indices to #Strings, #GUID, #Blob), a MethodDef
+    /// table of `rows` rows (each RVA that of the body when `bodies`), the stream `#~` named
+    /// `tables_name` ("#~", or "#-" for an uncompressed one), and a fat method body with `eh_fat`
+    /// exception clauses where >0 (the fat form 0x41 of a section's flags).
+    pub fn section(heap_sizes: u8, rows: u32, bodies: bool, tables_name: &[u8], eh_fat: usize) -> (Vec<u8>, usize) {
+        let idx = |bit: u8| if heap_sizes & bit != 0 { 4 } else { 2 };
+        let (s, g, b) = (idx(1), idx(2), idx(4));
+        let mut head = vec![0u8; 0x40];
+        // a tiny body at 0x10 (ldstr, call, ret), a fat one at 0x20 with its exception table
+        let code_a = [0x72, 1, 0, 0, 0x70, 0x28, 2, 0, 0, 0x0a, 0x2a];
+        head[0x10] = (code_a.len() << 2 | 2) as u8;
+        head[0x11..0x11 + code_a.len()].copy_from_slice(&code_a);
+        let mut fat = vec![0u8; 12];
+        let code_b = [0x16u8, 0x2a];
+        fat[0..2].copy_from_slice(&(0x3003u16 | if eh_fat > 0 { 8 } else { 0 }).to_le_bytes());
+        fat[2..4].copy_from_slice(&8u16.to_le_bytes());
+        fat[4..8].copy_from_slice(&le32(code_b.len() as u32));
+        fat[8..12].copy_from_slice(&le32(0x1100_0001));
+        fat.extend(code_b);
+        if eh_fat > 0 {
+            while !fat.len().is_multiple_of(4) {
+                fat.push(0);
+            }
+            let size = 4 + 24 * eh_fat;
+            fat.extend([0x41, size as u8, (size >> 8) as u8, (size >> 16) as u8]);
+            for i in 0..eh_fat {
+                let v = [i as u32 % 2, 0, 1, 1, 1, 0x0100_0001];
+                fat.extend(v.iter().flat_map(|x| x.to_le_bytes()));
+            }
+        }
+        head.splice(0x20..0x20, fat.iter().copied());
+        let head_len = head.len().next_multiple_of(4);
+        head.resize(head_len, 0);
+
+        let mut tables = vec![0, 0, 0, 0, 2, 0, heap_sizes, 1];
+        tables.extend(((1u64 << 0) | (1 << 6)).to_le_bytes());
+        tables.extend(0u64.to_le_bytes());
+        tables.extend(le32(1).into_iter().chain(le32(rows)));
+        // Module: generation, name, mvid, encid, encbaseid
+        tables.extend([0, 0]);
+        tables.extend(&le32(1)[..s]);
+        tables.extend(&le32(1)[..g]);
+        tables.extend(&le32(0)[..g]);
+        tables.extend(&le32(0)[..g]);
+        // MethodDef: RVA, impl flags, flags, name, signature, param list
+        for i in 0..rows {
+            let rva = if bodies { ORIGIN + if i % 2 == 0 { 0x10 } else { 0x20 } } else { 0 };
+            tables.extend(le32(rva));
+            tables.extend([0u8, 0, 0x86, 0]);
+            tables.extend(&le32(1 + i % 3)[..s]);
+            tables.extend(&le32(1)[..b]);
+            tables.extend(1u16.to_le_bytes());
+        }
+        while tables.len() % 4 != 0 {
+            tables.push(0);
+        }
+        let names: [&[u8]; 5] = [tables_name, b"#Strings", b"#US", b"#GUID", b"#Blob"];
+        let heaps: [&[u8]; 5] = [&tables, b"\0Foo\0Bar\0Baz\0", b"\0\x05h\0i\0\0\0", &[0x5a; 16], b"\0\x03abc\0\0\0"];
+        let mut m = Vec::new();
+        m.extend(b"BSJB");
+        m.extend([1, 0, 1, 0, 0, 0, 0, 0]);
+        m.extend(le32(12));
+        m.extend(b"v4.0.30319\0\0");
+        m.extend([0, 0, 5, 0]);
+        let header_len = m.len() + names.iter().map(|n| 8 + ((n.len() + 4) & !3)).sum::<usize>();
+        let mut at = header_len;
+        for (name, h) in names.iter().zip(heaps) {
+            m.extend(le32(at as u32));
+            m.extend(le32(h.len() as u32));
+            m.extend(*name);
+            m.extend(vec![0; ((name.len() + 4) & !3) - name.len()]);
+            at += h.len();
+        }
+        for h in heaps {
+            m.extend(h);
+        }
+        let meta = head.len();
+        let mut d = head;
+        d.extend(m);
+        (d, meta)
+    }
+}
+
+/// exe-recons/cil lays its memory out as a stack, its limit its plan: of sections of metadata with
+/// heap indices of 2 and of 4 bytes, tables of many rows (past 65535 too), fat bodies with
+/// exception clauses, no bodies, the uncompressed `#-`.
+#[test]
+fn exe_cil_plans_hold() {
+    use aqr_exe::arch::cil;
+    use cil_gen::{ORIGIN, section};
+    let mut taken = 0;
+    for (what, heap_sizes, rows, bodies, name, eh) in [
+        ("small heaps", 0u8, 6u32, true, &b"#~"[..], 0usize),
+        ("big heaps", 7, 6, true, b"#~", 2),
+        ("no bodies", 1, 6, false, b"#~", 0),
+        ("many rows", 0, 300, true, b"#~", 1),
+        ("rows past 65535", 0, 70_000, true, b"#~", 1),
+        ("rows past 65535, big heaps", 7, 70_000, false, b"#~", 3),
+        ("#-", 0, 6, true, b"#-", 0),
+        ("#- many", 5, 2000, true, b"#-", 2),
+        ("many exception clauses", 0, 6, true, b"#~", 200),
+    ] {
+        let (d, meta) = section(heap_sizes, rows, bodies, name, eh);
+        let Some(st) = cil::encode(&d, ORIGIN, meta) else { continue };
+        let mut f = Formula::default();
+        let inputs: Vec<Node> = std::iter::zip(st.streams(), cil::STREAM_NAMES)
+            .map(|(s, n)| f.push(format!("cil/{n}"), s.clone()))
+            .collect();
+        let params = [ORIGIN.to_le_bytes(), (meta as u32).to_le_bytes()].concat();
+        f.root = Node::apply(aqr_decompress::CIL, params, inputs, d.len() as u64);
+        plan_holds(&format!("cil {what}"), f, &d);
+        taken += 1;
+    }
+    assert!(taken >= 5, "taken: {taken}");
 }

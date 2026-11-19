@@ -730,6 +730,11 @@ mod decode {
     /// largest table's rows).
     pub fn decode_plan(meta: &[u8], bodypos: &[u8], tokt: &[u8], len: u64) -> Option<u64> {
         use aqr_api::stack::block;
+        // (a section's size is 32 bits: a length declared past it has no plan, and one near 2^64 would
+        // overflow the sums)
+        if len > u32::MAX as u64 {
+            return None;
+        }
         let nbodies = bodypos.iter().filter(|&&b| b < 0x80).count() as u64;
         let (root_len, streams) = parse_root(meta)?;
         let n = streams.len() as u64;
