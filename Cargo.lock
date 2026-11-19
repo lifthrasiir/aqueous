@@ -1536,6 +1536,7 @@ name = "aqr-ole"
 version = "0.1.0"
 dependencies = [
  "aqr-disk",
+ "aqr-testkit",
 ]
 
 [[package]]

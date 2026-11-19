@@ -125,14 +125,17 @@ impl Sectors<'_> {
     }
 }
 
-/// The file allocation table: the FAT sectors the header (109 of them) and the DIFAT chain list.
+/// The file allocation table: the FAT sectors the header (109 of them) and the DIFAT chain list,
+/// at most as many as the file has sectors (the counts of the header told no further).
 fn fat(d: &dyn Image, h: Header) -> Option<Vec<u32>> {
     let b = d.get(0..512)?;
+    let sectors = d.len().saturating_sub(h.sector) / h.sector;
     let mut listed: Vec<u32> = (0..109).map(|i| le32(&b, 76 + 4 * i)).collect();
     // the DIFAT's sectors: the numbers of FAT sectors, and the next DIFAT sector at the end
     let per = h.sector / 4 - 1;
     let (mut next, mut seen) = (h.difat_start, 0u32);
-    while next <= MAX_SECTOR && seen < h.difat_sectors && listed.len() < FAT_BYTES / 4 {
+    let difat = (h.difat_sectors as usize).min(sectors);
+    while next <= MAX_SECTOR && (seen as usize) < difat && listed.len() < FAT_BYTES / 4 {
         let a = h.sector_at(next)?;
         let s = d.get(a..a.checked_add(h.sector)?)?;
         listed.extend((0..per).map(|i| le32(&s, 4 * i)));
@@ -140,7 +143,7 @@ fn fat(d: &dyn Image, h: Header) -> Option<Vec<u32>> {
         seen += 1;
     }
     let mut fat = Vec::new();
-    for n in listed.into_iter().filter(|&n| n <= MAX_SECTOR).take(h.fat_sectors as usize) {
+    for n in listed.into_iter().filter(|&n| n <= MAX_SECTOR).take((h.fat_sectors as usize).min(sectors)) {
         if fat.len() * 4 >= FAT_BYTES {
             break;
         }
@@ -257,6 +260,9 @@ pub fn files(d: &dyn Image) -> Vec<File> {
 
 #[cfg(test)]
 mod tests {
+    #[global_allocator]
+    static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(1 << 30);
+
     use super::*;
     use aqr_disk::Plain;
 
@@ -392,6 +398,26 @@ mod tests {
         d[1024 + 128 + 120..1024 + 128 + 124].copy_from_slice(&u32::MAX.to_le_bytes());
         let files = files_of(&d);
         assert!(files.iter().all(|f| f.extents.len() <= 128), "{}", files[0].extents.len());
+    }
+
+    /// A DIFAT of a sector listing itself as the next, each listing FAT sector 0 (and the header
+    /// claiming 2^32 - 1 FAT sectors and DIFAT sectors): the FAT is of the sectors the file has,
+    /// not a list grown to its bound from a file of a few kilobytes.
+    #[test]
+    fn a_difat_of_itself_is_bounded() {
+        let (mut d, _, _) = made();
+        let n = (d.len() / 512 - 1) as u32;
+        let mut difat = vec![0u8; 512];
+        difat[508..].copy_from_slice(&n.to_le_bytes());
+        d.extend(difat);
+        d[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
+        d[68..72].copy_from_slice(&n.to_le_bytes());
+        d[72..76].copy_from_slice(&u32::MAX.to_le_bytes());
+        d[76..76 + 109 * 4].fill(0);
+        aqr_testkit::case("a DIFAT of itself");
+        let files = files_of(&d);
+        assert!(aqr_testkit::most() < 1 << 20, "{} bytes at once for a file of {}", aqr_testkit::most(), d.len());
+        assert_eq!(files.len(), 2);
     }
 
     fn files_of(d: &[u8]) -> Vec<File> {
