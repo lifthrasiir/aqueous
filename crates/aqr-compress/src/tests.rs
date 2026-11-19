@@ -2394,3 +2394,48 @@ fn heap_option_turns_inputs_down() {
     let _h = crate::formats::HEAP.set_here("text", 1e12);
     assert!(!fits(Format::Text, 1) && fits(Format::Gzip, 1));
 }
+
+/// Of two indexes of one pack the first is the pack's, the other is archived as it is; an index
+/// or a reverse index shorter than two ids (its trailer's checksums) is not looked at.
+#[test]
+fn git_indexes_of_one_pack() {
+    let fixture = |ext: &str| {
+        std::fs::read(format!("{}/../../codecs/aqr-git/tests/data/small.{ext}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    };
+    let (idx, pack, rev) = (fixture("idx"), fixture("pack"), fixture("rev"));
+    let opt = Options { threads: 2, smaller: false, ..Options::default() };
+    // (the sets, each its members sorted)
+    let sets = |a: &Archived| -> Vec<Vec<usize>> {
+        a.report
+            .sets
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.sort_unstable();
+                s
+            })
+            .collect()
+    };
+    // (a copy of the index with another checksum of its own: the same pack's trailer)
+    let mut twin = idx.clone();
+    *twin.last_mut().unwrap() ^= 1;
+    let a = tree_given_back(&[("a.idx", &idx), ("b.idx", &twin), ("p.pack", &pack)], &opt);
+    assert_eq!(sets(&a), [[0, 2]], "the first index is the pack's");
+    // (and where the first is not the pack's, as its ids do not read, the other is not tried)
+    let a = tree_given_back(&[("a.idx", &twin), ("b.idx", &idx), ("p.pack", &pack)], &opt);
+    assert!(sets(&a).is_empty());
+    // the reverse index likewise
+    let mut rev2 = rev.clone();
+    *rev2.last_mut().unwrap() ^= 1;
+    let a = tree_given_back(&[("p.idx", &idx), ("p.pack", &pack), ("a.rev", &rev), ("b.rev", &rev2)], &opt);
+    assert_eq!(sets(&a), [[0, 1, 2]]);
+    // shorter than 2 ids: no index (nor panic), whatever follows the magic
+    for len in [0, 4, 8, 39, 40, 41, 100] {
+        let short = &idx[..len.min(idx.len())];
+        let a = tree_given_back(&[("p.idx", short), ("p.pack", &pack)], &opt);
+        assert!(sets(&a).is_empty(), "an index of {len} bytes");
+        let short = &rev[..len.min(rev.len())];
+        let a = tree_given_back(&[("p.idx", &idx), ("p.pack", &pack), ("p.rev", short)], &opt);
+        assert_eq!(sets(&a), [[0, 1]], "a reverse index of {len} bytes");
+    }
+}

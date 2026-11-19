@@ -117,3 +117,111 @@ pub(crate) fn share(f: &mut Formula, files: &[(usize, u128)], bound: u64) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aqr_archive::Evaluate;
+
+    fn text(n: usize, seed: usize) -> Vec<u8> {
+        (0..n).flat_map(|i| format!("line {} of the text {seed}\n", (i + seed) * 7 % 1000).into_bytes()).collect()
+    }
+
+    /// A batch's formula of `files`: each all of a stream of its own, their lengths and hashes.
+    fn batch(files: &[&[u8]]) -> (Formula, Vec<(usize, u128)>) {
+        let mut f = Formula::default();
+        let parts: Vec<Node> = files.iter().map(|d| f.push("raw", d.to_vec())).collect();
+        f.root = Node::Concat(parts);
+        (f, files.iter().map(|d| (d.len(), xxhash_rust::xxh3::xxh3_128(d))).collect())
+    }
+
+    /// Whether the files of the formula are taken (no longer a slice of their stream).
+    fn taken(f: &Formula) -> Vec<bool> {
+        let Node::Concat(parts) = &f.root else { panic!("parts") };
+        parts.iter().map(|p| !matches!(p, Node::Slice { start: 0, .. })).collect()
+    }
+
+    fn frames(parts: &[&[u8]]) -> Vec<u8> {
+        parts.iter().flat_map(|p| zstd::bulk::compress(p, 3).unwrap()).collect()
+    }
+
+    /// The files that are the content of frames are taken from them; one of the same content
+    /// as another is taken once; the frames themselves and files of other content are not.
+    #[test]
+    fn content_taken_once() {
+        let content = text(20_000, 1);
+        let z = frames(&[&content]);
+        let other = text(20_000, 2);
+        let (mut f, files) = batch(&[&content, &z, &other, &content]);
+        share(&mut f, &files, u64::MAX);
+        // (the first of the two equal files is taken, the other is its copy)
+        assert_eq!(taken(&f), [true, false, false, false]);
+        // without frames, or of data that is not
+        let (mut f, files) = batch(&[&content, &other]);
+        share(&mut f, &files, u64::MAX);
+        assert_eq!(taken(&f), [false, false]);
+        // an empty file, and a frame file of no file's content
+        let (mut f, files) = batch(&[b"", &z]);
+        share(&mut f, &files, u64::MAX);
+        assert_eq!(taken(&f), [false, false]);
+    }
+
+    /// Frames of more content than the bound give nothing; of frames some within it, a file is
+    /// taken only where all the frames it spans are.
+    #[test]
+    fn content_over_the_bound() {
+        let (a, b) = (text(5_000, 3), text(30_000, 4));
+        let whole = [a.clone(), b.clone()].concat();
+        let z = frames(&[&a, &b]);
+        let run = |bound| {
+            let (mut f, files) = batch(&[&whole, &z, &a, &b]);
+            share(&mut f, &files, bound);
+            taken(&f)
+        };
+        // (the whole is the content of the frames; a and b are pieces of it, taken only as members
+        // of a tar archive, which they are not)
+        assert_eq!(run(u64::MAX), [true, false, false, false]);
+        let ends = a.len() as u64;
+        assert_eq!(run(ends), [false; 4], "the second frame is over the bound: the whole is not within");
+        assert_eq!(run(a.len() as u64 - 1), [false; 4], "all the frames are over it");
+        assert_eq!(run(b.len() as u64), run(u64::MAX), "frames of exactly the bound's content");
+        assert_eq!(run(b.len() as u64 - 1), [false; 4]);
+        assert!(frames_of(&z, a.len() as u64 - 1).is_none());
+        assert!(frames_of(&z, a.len() as u64).is_some());
+    }
+
+    fn frames_of(d: &[u8], bound: u64) -> Option<aqr_zstd::Frames> {
+        super::frames(d, bound)
+    }
+
+    /// `content` decodes the frames within [`CONTENT_MAX`] bytes, exactly.
+    #[test]
+    fn content_within_the_most() {
+        let c = text(10_000, 5);
+        let z = frames(&[&c[..c.len() / 2], &c[c.len() / 2..]]);
+        assert!(content(&z, u64::MAX).is_some_and(|d| d == c));
+        {
+            let _m = CONTENT_MAX.set_here(c.len());
+            assert!(content(&z, u64::MAX).is_some_and(|d| d == c));
+        }
+        let _m = CONTENT_MAX.set_here(c.len() - 1);
+        assert!(content(&z, u64::MAX).is_none());
+        // (a bound under each frame's content: none taken)
+        assert!(content(&z, 1).is_none());
+    }
+
+    /// Frames that do not decode (cut, damaged in a block, a header of no content) give nothing
+    /// and cost no panic; the files stay as they are.
+    #[test]
+    fn frames_that_do_not_decode() {
+        let content = text(20_000, 6);
+        let z = frames(&[&content]);
+        aqr_testkit::damaged(&z, 64, 40, std::time::Duration::from_secs(30), |z| {
+            let (mut f, files) = batch(&[&content, z]);
+            share(&mut f, &files, u64::MAX);
+            // (taken or not, the files evaluate to themselves)
+            let back = f.eval(&aqr_decompress::Native::default()).unwrap();
+            assert!(back == [&content[..], z].concat());
+        });
+    }
+}
