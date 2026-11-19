@@ -939,6 +939,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-api",
  "aqr-common",
+ "aqr-testkit",
  "sha1",
  "sha2",
  "zstd",

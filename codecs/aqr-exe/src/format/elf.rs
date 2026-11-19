@@ -138,8 +138,9 @@ fn header(d: &[u8]) -> Option<Header> {
         if shnum == 0 {
             shnum = usize::try_from(word(d, wide, s0.checked_add(if wide { 32 } else { 20 })?)?).ok()?;
         }
+        // (sh_link: sh_info is the one that follows it)
         if shstrndx == 0xffff {
-            shstrndx = u32le(d, s0.checked_add(if wide { 44 } else { 28 })?)? as usize;
+            shstrndx = u32le(d, s0.checked_add(if wide { 40 } else { 24 })?)? as usize;
         }
     }
     Some(Header { wide, kind, machine, phoff, phentsize, phnum, shoff, shentsize, shnum, shstrndx })

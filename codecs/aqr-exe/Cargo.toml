@@ -19,6 +19,7 @@ sha2 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false, features = ["asm"] }
 
 [dev-dependencies]
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 zstd = { workspace = true, features = ["zstdmt"] }
 
 [lints.rust]
