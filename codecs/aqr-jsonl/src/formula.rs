@@ -1059,4 +1059,88 @@ mod tests {
             let _ = decode(&a.params, &inputs, s.len() as u64, 1);
         }
     }
+
+    #[test]
+    fn wide_arrays() {
+        // arrays of more elements than a path keeps children for (the last shared), of lengths
+        // that vary around MAX_WIDTH, tuples of different sizes and arrays of arrays
+        let mut s = String::new();
+        for i in 0..400u64 {
+            let n = [63, 64, 65, 200, 1, 0][(i % 6) as usize];
+            let xs: Vec<String> = (0..n).map(|k| format!("{}", (i * 31 + k * 7) % 1000)).collect();
+            let ys: Vec<String> = (0..n).map(|k| format!("[{k},\"s{k}\"]")).collect();
+            s += &format!(
+                "{{\"i\":{i},\"xs\":[{}],\"ys\":[{}]}}
+",
+                xs.join(","),
+                ys.join(",")
+            );
+        }
+        for st in STYLES {
+            roundtrip(s.as_bytes(), st);
+        }
+        // the same in one line: a path over MAX_WIDTH wide at once
+        let one = format!(
+            "{{\"a\":[{}]}}
+",
+            (0..1000).map(|k| k.to_string()).collect::<Vec<_>>().join(", ")
+        );
+        roundtrip(one.repeat(30).as_bytes(), Style::default());
+    }
+
+    #[test]
+    fn delta_at_extremes() {
+        // differences that overflow i64 (wrapping: the module wraps alike)
+        let vals = [i64::MAX, i64::MIN, 0, i64::MIN + 1, i64::MAX - 1, -1, i64::MAX, i64::MIN];
+        let mut s = String::new();
+        for i in 0..2000 {
+            s += &format!(
+                "{{\"n\":{},\"m\":{}}}
+",
+                vals[i % vals.len()],
+                vals[(i * 3 + i / 8) % vals.len()]
+            );
+        }
+        roundtrip(s.as_bytes(), Style::default());
+        // a steady climb to the maximum: the delta wins, then it wraps
+        let mut s = String::new();
+        for i in 0..2000i64 {
+            s += &format!(
+                "{{\"n\":{}}}
+",
+                i64::MAX - 10000 + i * 5
+            );
+        }
+        s += "{\"n\":-9223372036854775808}
+{\"n\":9223372036854775807}
+";
+        let f = roundtrip(s.as_bytes(), Style::default());
+        assert!(path_flags(&f).iter().any(|&(fl, _)| fl & F_DELTA != 0), "{:?}", path_flags(&f));
+    }
+
+    #[test]
+    fn damaged_streams() {
+        let s = "{\"a\":[1,2.5,\"x\"],\"b\":{\"c\":null,\"d\":-7}}
+[true,false]
+raw
+"
+        .repeat(6);
+        let f = roundtrip(s.as_bytes(), Style::default());
+        let Node::Apply(a) = &f.root else { panic!() };
+        for (k, st) in f.streams.iter().enumerate() {
+            if st.data.is_empty() {
+                continue;
+            }
+            aqr_testkit::damaged(&st.data, 40, 64, std::time::Duration::from_secs(20), |v| {
+                let inputs: Vec<&[u8]> =
+                    f.streams.iter().enumerate().map(|(i, s)| if i == k { v } else { &s.data[..] }).collect();
+                let _ = decode(&a.params, &inputs, s.len() as u64, 1);
+            });
+        }
+        // damaged params
+        aqr_testkit::damaged(&a.params, 40, 64, std::time::Duration::from_secs(20), |v| {
+            let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+            let _ = decode(v, &inputs, s.len() as u64, 1);
+        });
+    }
 }

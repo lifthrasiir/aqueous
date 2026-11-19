@@ -18,6 +18,9 @@ aqr-num = { path = "../../crates/aqr-num" }
 memchr = { version = "2", optional = true }
 zstd = { workspace = true, optional = true }
 
+[dev-dependencies]
+aqr-testkit = { path = "../../crates/aqr-testkit" }
+
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
 
