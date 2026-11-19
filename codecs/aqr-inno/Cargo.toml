@@ -9,6 +9,9 @@ publish = false
 aqr-lzma = { path = "../aqr-lzma" }
 crc32fast = "1.5"
 
+[dev-dependencies]
+aqr-testkit = { path = "../../crates/aqr-testkit" }
+
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
 

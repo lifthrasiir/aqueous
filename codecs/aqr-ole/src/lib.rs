@@ -27,7 +27,7 @@ const NO_STREAM: u32 = 0xffff_ffff;
 /// Largest sector number of data (past it are the marks of the DIFAT, the FAT and the chain's end).
 const MAX_SECTOR: u32 = 0xffff_fffa;
 
-/// Deepest directory read, from the root.
+/// Deepest storage read, from the root.
 const DEPTH: usize = 256;
 
 /// Most entries read of the directory.
@@ -233,9 +233,10 @@ pub fn files(d: &dyn Image) -> Vec<File> {
         if !seen.insert(id) {
             continue;
         }
-        // (the siblings at this level, then the entry's children below it)
+        // (the siblings at this level, then the entry's children below it; a list of siblings is
+        // no deeper for being a list: each entry is read once, loops end there)
         for sibling in [e.left, e.right].into_iter().filter(|&s| s != NO_STREAM) {
-            stack.push((sibling, path.clone(), depth + 1));
+            stack.push((sibling, path.clone(), depth));
         }
         let mut here = path;
         if !here.is_empty() {
