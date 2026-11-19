@@ -131,10 +131,17 @@ pub fn build(data: &[u8], header: &[u8], index: &[u8], len: u64) -> Result<Vec<u
     let head: [u8; PREFIX] = *index.get(at..).and_then(|r| r.first_chunk()).ok_or_else(corrupt)?;
     let rest = &index[at + PREFIX..];
 
-    // (reserved for what the inputs hold, not the length claimed: the rest grows as it is written)
+    // (the length claimed, of one block as the plan has it: not past what the inputs can give, a
+    // hole of the header of 2 bytes filled with a number or a hash of 64 hex digits, a list of
+    // blocks' hashes with one quoted for each byte of data at most; nor past what the heap holds)
+    let most = (header.len().saturating_mul(40))
+        .saturating_add(data.len().saturating_mul(68))
+        .saturating_add(PREFIX);
+    if len > most {
+        return Err(corrupt());
+    }
     let mut out = Vec::new();
-    out.try_reserve_exact(len.min(data.len().saturating_add(header.len()).saturating_add(index.len())))
-        .map_err(|_| Error("out of memory"))?;
+    out.try_reserve_exact(len).map_err(|_| Error("out of memory"))?;
     out.extend_from_slice(&[0; PREFIX]);
     let mut next = bodies.iter();
     // the current body, and its hash where known
