@@ -80,7 +80,8 @@ fn paginate(packets: &[Vec<u8>], serial: u32, per: usize, granule: &mut dyn FnMu
         let len: usize = values.iter().map(|&v| v as usize).sum();
         let last = ends.iter().rposition(|&e| e > at && e <= at + n);
         let g = last.map_or(u64::MAX, &mut *granule);
-        let kind = (at > 0 && lacing[at - 1] == 255) as u8 | (seq == 0) as u8 * 2 | (at + n == lacing.len()) as u8 * 4;
+        let kind =
+            (at > 0 && lacing[at - 1] == 255) as u8 | ((seq == 0) as u8 * 2) | ((at + n == lacing.len()) as u8 * 4);
         page::write(&mut out, kind, g, serial, seq, values, &body[byte..byte + len]);
         (at, byte, seq) = (at + n, byte + len, seq + 1);
     }
@@ -148,7 +149,7 @@ fn vorbis_file(headers: &[Vec<u8>], audio: &[Vec<u8>]) -> Vec<u8> {
     for (i, p) in all.iter().enumerate() {
         page::write(
             &mut out,
-            p.kind & !2 | (i == 0) as u8 * 2,
+            p.kind & !2 | ((i == 0) as u8 * 2),
             p.granule,
             p.serial,
             i as u32,
