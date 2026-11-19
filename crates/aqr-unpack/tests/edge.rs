@@ -1010,3 +1010,14 @@ fn sevenz_damaged() {
     c.truncate(c.len() - 1);
     assert!(sz_case("cut", &c).is_err());
 }
+
+/// Two entries of one name (as aqr-pack's ZIP writer may store them): the reader keeps the
+/// last, one file in the tree.
+#[test]
+fn zip_duplicate_keeps_last() {
+    let es = [E::stored("a", b"first"), E::stored("a", b"second"), E::stored("z", b"other")];
+    let o = case("duplicate keeps last", Format::Zip, &zip_of(&es, false)).unwrap();
+    assert_eq!(o.files.get("a").map(Vec::as_slice), Some(&b"second"[..]), "{:?}", o.files);
+    assert_eq!(o.files.len(), 2, "{:?}", o.files);
+    assert_eq!(o.done.tree.entries.len(), 2);
+}
