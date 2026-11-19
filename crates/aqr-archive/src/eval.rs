@@ -123,12 +123,12 @@ impl<'p, 'a> Graph<'p, 'a> {
                 }
                 Insn::Concat(n) => {
                     let parts = stack.split_off(stack.len() - n);
-                    let len = parts.iter().map(|&v| g.len(v)).sum();
+                    let Some(len) = g.sum(&parts, 0) else { return invalid("a length past 2^64") };
                     stack.push(g.push(Op::Concat(parts), len));
                 }
                 Insn::Pack(n) => {
                     let parts = stack.split_off(stack.len() - n);
-                    let len = packed::header_len(n) + parts.iter().map(|&v| g.len(v)).sum::<u64>();
+                    let Some(len) = g.sum(&parts, packed::header_len(n)) else { return invalid("a length past 2^64") };
                     stack.push(g.push(Op::Pack(parts), len));
                 }
                 Insn::Split(ref sizes) => {
@@ -139,6 +139,9 @@ impl<'p, 'a> Graph<'p, 'a> {
                     // slices and literals cut where they are (a block's slices counted first, as
                     // any is let go of once pulled)
                     match g.ops[x.node] {
+                        Op::Slice { start, .. } if start.checked_add(g.len(x)).is_none() => {
+                            return invalid("a slice past 2^64");
+                        }
                         Op::Slice { block, start, .. } if !g.sums.contains_key(&x) => {
                             match sizes.len() {
                                 0 => blocks.release(block),
@@ -200,6 +203,11 @@ impl<'p, 'a> Graph<'p, 'a> {
             Op::Split(_, sizes, _) => sizes[v.out],
             _ => self.lens[v.node],
         }
+    }
+
+    /// The lengths of `parts` and `base`, added up: None past 2^64 (lengths an archive tells).
+    fn sum(&self, parts: &[Val], base: u64) -> Option<u64> {
+        parts.iter().try_fold(base, |n, &v| n.checked_add(self.len(v)))
     }
 }
 
@@ -1884,12 +1892,14 @@ impl<'f> Graph<'f, 'f> {
             }
             Node::Concat(ns) => {
                 let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<aqr_formula::Result<Vec<_>>>()?;
-                let len = items.iter().map(|&v| self.len(v)).sum();
+                let len = self.sum(&items, 0).ok_or_else(|| Error::new("a length past 2^64"))?;
                 self.push(Op::Concat(items), len)
             }
             Node::Pack(ns) => {
                 let items = ns.iter().map(|n| self.node(f, n, outputs)).collect::<aqr_formula::Result<Vec<_>>>()?;
-                let len = packed::header_len(items.len()) + items.iter().map(|&v| self.len(v)).sum::<u64>();
+                let len = self
+                    .sum(&items, packed::header_len(items.len()))
+                    .ok_or_else(|| Error::new("a length past 2^64"))?;
                 self.push(Op::Pack(items), len)
             }
             Node::Apply(a) => {

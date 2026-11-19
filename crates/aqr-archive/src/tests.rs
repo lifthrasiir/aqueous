@@ -2213,6 +2213,28 @@ fn decode_errors() {
     assert_eq!(decode(&bad, &natives()), invalid("output checksum mismatch"));
 }
 
+/// Lengths a formula adds up past 2^64 (slices of 2^63 bytes concatenated or packed, a slice
+/// starting near the end of the numbers split): invalid, not a sum wrapped.
+#[test]
+fn lengths_past_the_numbers() {
+    let big = 1u64 << 63;
+    for insn in [CONCAT, PACK] {
+        let mut d = vec![1, 0, 0, 0];
+        for _ in 0..2 {
+            d.extend_from_slice(&[SLICE, 0, 0]);
+            varint::put(&mut d, big);
+        }
+        d.extend_from_slice(&[insn, 2]);
+        let r = decode(&formula(&d, &[b"abc"]), &natives());
+        assert!(matches!(r, Err(Failure::Invalid(_))), "{insn}: {r:?}");
+    }
+    let mut d = vec![1, 0, 0, 0, SLICE, 0];
+    varint::put(&mut d, u64::MAX - 1);
+    d.extend_from_slice(&[3, SPLIT, 2, 1, 2, CONCAT, 2]);
+    let r = decode(&formula(&d, &[b"abc"]), &natives());
+    assert!(matches!(r, Err(Failure::Invalid(_))), "split: {r:?}");
+}
+
 /// Applications by hand: the numbers of inputs and the declared sizes.
 #[test]
 fn applications() {
