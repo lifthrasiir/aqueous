@@ -574,3 +574,39 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Priors fitted to counts, written as text and read again, are what the counts say (the
+    /// first context at its frequency, a rare one kept off 0 and 1, the unseen at a half),
+    /// under the comment lines that head them.
+    #[test]
+    fn priors_text_round_trips() {
+        let mut seen = vec![[0u32, 0u32]; NUM];
+        seen[FLAG] = [1000, 250];
+        seen[FLAG + 1] = [50, 0];
+        seen[FLAG + 2] = [50, 50];
+        let text = priors_text(&seen, 12, "fitted to\ntwo streams");
+        assert!(
+            text.starts_with("# fitted to\n# two streams\nctx "),
+            "{text}"
+        );
+        let p = parse_priors(&text).unwrap();
+        let near = |got: u16, want: f64| {
+            (got as f64 - want * PROB_ONE as f64).abs() < 0.002 * PROB_ONE as f64
+        };
+        assert!(near(p.p1[FLAG], 250.4 / 1000.8), "{}", p.p1[FLAG]);
+        assert!(p.p1[FLAG + 1] >= 1 && near(p.p1[FLAG + 1], 0.4 / 50.8));
+        assert!(p.p1[FLAG + 2] <= (PROB_ONE - 1) as u16 && near(p.p1[FLAG + 2], 50.4 / 50.8));
+        assert_eq!((p.n[FLAG], p.n[FLAG + 1]), (12, 12));
+        // (not seen: uninformed)
+        assert_eq!((p.p1[FLAG + 3], p.n[FLAG + 3]), ((PROB_ONE / 2) as u16, 0));
+        assert_eq!(uninformed().p1, parse_priors("").unwrap().p1);
+        let past = format!("ctx {NUM} 5 5");
+        for bad in ["ctx 1 2", &past, "what", "ctx 1 x 5", "ctx 1 5 300"] {
+            assert!(parse_priors(bad).is_err(), "{bad}");
+        }
+    }
+}

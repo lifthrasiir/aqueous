@@ -3267,6 +3267,79 @@ mod tests {
             .collect()
     }
 
+    /// An error crosses a task as its kind (and a parameter's message): the stream cut short, a
+    /// message not kept, and an unknown kind or a cut message is not read.
+    #[test]
+    fn errors_across_tasks() {
+        use aqr_common::wire::Wire;
+        let round = |e: &Error| {
+            let mut b = Vec::new();
+            e.put(&mut b);
+            let mut rest = &b[..];
+            let got = Error::get(&mut rest);
+            assert!(rest.is_empty());
+            got
+        };
+        assert_eq!(round(&Error::Truncated), Some(Error::Truncated));
+        assert_eq!(round(&Error::Corrupt), Some(Error::Corrupt));
+        assert_eq!(round(&Error::Inconsistent), Some(Error::Inconsistent));
+        assert_eq!(round(&Error::Limit), Some(Error::Limit));
+        assert_eq!(
+            round(&Error::Param("a bad one".into())),
+            Some(Error::Param("a bad one".into()))
+        );
+        assert_eq!(
+            round(&Error::Invalid("lost")),
+            Some(Error::Invalid("(in a task)"))
+        );
+        assert_eq!(Error::get(&mut &[6u8][..]), None);
+        assert_eq!(Error::get(&mut &[][..]), None);
+        assert_eq!(Error::get(&mut &[4u8, 9, b'x'][..]), None);
+    }
+
+    /// What the record of a stream will take is estimated the same whether the stream is parsed in
+    /// segments as it is read (the chunks it keeps) or whole (the chunks worked out of its tokens
+    /// as those are), and by about what it takes.
+    #[test]
+    fn estimate_of_chunks() {
+        let mut text = Vec::new();
+        for i in 0..40_000u32 {
+            text.extend(
+                format!(
+                    "line {i}: {} of the text\n",
+                    i.wrapping_mul(2654435761) >> 20
+                )
+                .bytes(),
+            );
+        }
+        // (a level zlib does not emulate by default: the record has corrections to cost)
+        let raw = "zlib:level=3"
+            .parse::<flate_zoo::Encoder>()
+            .unwrap()
+            .compress(&text)
+            .unwrap();
+        let by = |verify: bool| {
+            let opts = Options {
+                verify,
+                threads: 1,
+                ..Options::for_profile(0).unwrap()
+            };
+            let parsed = Parsed::new(&raw, &opts).unwrap();
+            let est = parsed.estimate(&opts).unwrap();
+            let (_, record, _) = parsed.deconstruct(&opts, &Default::default()).unwrap();
+            (est, record.len())
+        };
+        let (streamed, whole) = (by(false), by(true));
+        assert_eq!(streamed.1, whole.1);
+        assert_eq!(streamed.0, whole.0, "{streamed:?} {whole:?}");
+        assert!(
+            streamed.0 > 0
+                && streamed.0 < 4 * streamed.1 + 1000
+                && streamed.1 < 4 * streamed.0 + 1000,
+            "{streamed:?}"
+        );
+    }
+
     /// Segments coded with zlib emulation's predictions taken from the detection's emulation,
     /// or from an earlier coding (with another rule), or by a new emulation for each segment
     /// from its own checkpoint, are coded as with a new emulation coded one segment after
