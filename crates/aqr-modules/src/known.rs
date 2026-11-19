@@ -6,7 +6,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "ac3-recons",
         version: 1,
-        sha512_256: hex("98565735e9c79206d3b3038e4cab75504131fab3d4d407e49ad2202bf8d5cef7"),
+        sha512_256: hex("1f613a74727f1421548c56de928734349e969122906dca85bdcef5fe4f64f800"),
         block: include_bytes!("../wasm/ac3-recons.block"),
     },
     Known {
@@ -30,7 +30,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "azo-recons",
         version: 1,
-        sha512_256: hex("3810380b147efa2fb94a8d32deb9464b9202c831e68e941f2e0ab48acc17a2b9"),
+        sha512_256: hex("0155e78151348970a5bf809be7685d4de8f6af6ffd847ae69d6cc6bf7bb9751e"),
         block: include_bytes!("../wasm/azo-recons.block"),
     },
     Known {
@@ -162,7 +162,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "clip-recons",
         version: 3,
-        sha512_256: hex("e1418304b9be0937b93f727229ed2d51e8fc22f0d549637f764a326cb63e87b8"),
+        sha512_256: hex("259582d64eeaafa73b0ca6dd27c28935c6f16437560b183e9521c476a1e9ee8c"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
@@ -180,7 +180,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "div3-recons",
         version: 3,
-        sha512_256: hex("972a124aa040ec188131893de2899fe43b008716d426214250813f71616f1c76"),
+        sha512_256: hex("6fbdd0db3fc1f3ec68b0545ac44489e287078a835a8b6210af75d06d78fe74cc"),
         block: include_bytes!("../wasm/div3-recons.block"),
     },
     Known {
@@ -282,7 +282,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "flac-recons",
         version: 5,
-        sha512_256: hex("ff919a0955fc9353059af53847f1f84b803b4115e6812fc51111eda80a2599fc"),
+        sha512_256: hex("aa97573c837535f13116bac13bf4c0351fede25ffef24be8e8f83c1aecb9362f"),
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
@@ -450,7 +450,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "pcm-recons",
         version: 2,
-        sha512_256: hex("2d4f76cfc71cacaf918b3f94dc59527b9b1b7303e0d69b4a97c98d3107af8ce3"),
+        sha512_256: hex("f6639cae18cdc3f4852f7e85174cd685c2eb5e087eb6d49bfa4cbf7de1a51971"),
         block: include_bytes!("../wasm/pcm-recons.block"),
     },
     Known {
