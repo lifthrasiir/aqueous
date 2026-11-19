@@ -1439,6 +1439,13 @@ fn take_end(chan: &mut Chan, send: bool, st: &State) -> wasmtime::Result<()> {
     }
 }
 
+/// What a message queued counts for toward its limit: its bytes, and at least one (a queue of
+/// empty messages holds memory of its own, and would grow with no end under a channel's
+/// capacity of the greatest number).
+fn queued(msg: &[u8]) -> u64 {
+    (msg.len() as u64).max(1)
+}
+
 /// The host function `f`.
 fn host(store: &mut Store<State>, f: HostFn) -> Func {
     let part = |c: &Caller<'_, State>, name: &str| match c.data().task {
@@ -1574,6 +1581,11 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                     }
                     regions.push((dst as u64, b.to_vec()));
                 }
+                // (the task's memory has the module's maximum: regions reaching past it fit no memory)
+                let end = regions.iter().map(|(d, b)| d + b.len() as u64).max().unwrap_or(0);
+                if let Some(max) = c.data().c.0.working.1.filter(|&max| end.div_ceil(65536) > max) {
+                    return violation(format!("aqr_spawn's regions to {end} past the memory's maximum of {max} pages"));
+                }
                 spawn(&mut c, class as u32 as usize, Start::Regions(Arc::new(regions)), arg as u32, n as u32)
             },
         ),
@@ -1676,8 +1688,8 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                         }
                         let m = msg.take().unwrap();
                         match &chan.owner {
-                            Some(o) => o.unit.message(&app, m.len() as u64, 0)?,
-                            None => app.account(m.len() as u64, 0)?,
+                            Some(o) => o.unit.message(&app, queued(&m), 0)?,
+                            None => app.account(queued(&m), 0)?,
                         }
                         chan.msgs.push_back(m);
                         waiting.append(&mut chan.receiving);
@@ -1710,8 +1722,8 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                         }
                         let m = chan.msgs.pop_front().unwrap();
                         match &chan.owner {
-                            Some(o) => o.unit.message(&app, 0, m.len() as u64)?,
-                            None => app.account(0, m.len() as u64)?,
+                            Some(o) => o.unit.message(&app, 0, queued(&m))?,
+                            None => app.account(0, queued(&m))?,
                         }
                         waiting.append(&mut chan.sending);
                         Ok(Some(Ok(m)))

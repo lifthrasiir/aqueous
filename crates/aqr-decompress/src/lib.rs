@@ -44,6 +44,10 @@ pub mod sandbox {
                 None => self.sandbox.load(wasm),
             }
         }
+
+        fn registered(&self, hash: &[u8; 32]) -> aqr_archive::Decoded<Vec<u8>> {
+            crate::registered_module(hash)
+        }
     }
 }
 #[cfg(feature = "wasm")]
