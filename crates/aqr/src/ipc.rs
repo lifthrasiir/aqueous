@@ -61,8 +61,11 @@
 //! The frontend may send `{"control":"cancel"}` at any time, or `{"control":"finish"}`: an
 //! archive being written then ended as it is, of the files written (committed: [`crate::stop`]);
 //! anything else cancelled as `cancel` does. Closing this program's standard
-//! input cancels as well, so that it never outlives a frontend gone. What it does not know of
-//! what it reads, it ignores.
+//! input cancels as well, so that it never outlives a frontend gone. A cancel between archives
+//! (after one's `end` or `skipped`, before the next `begin`) stops the next archive as it
+//! begins, the ones done left as they are: where none is left, the program ends as it would
+//! have (a frontend closing its end once told `end`). What it does not know of what it reads,
+//! it ignores.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -89,6 +92,44 @@ pub struct Ipc {
 }
 
 static IPC: OnceLock<Ipc> = OnceLock::new();
+
+/// Between archives ([`between`]: one's `end` or `skipped` told, the next not begun), and
+/// whether the frontend cancelled (or went) then, for the next to stop as it begins.
+struct Pause {
+    between: bool,
+    cancelled: bool,
+}
+
+static PAUSE: Mutex<Pause> = Mutex::new(Pause { between: false, cancelled: false });
+
+/// Tells the frontend `v`, the `end` or `skipped` of an archive: from then until the next
+/// [`begin`], a cancel stops the next archive, not this one.
+pub fn between(v: Value) {
+    if IPC.get().is_some() {
+        // (before it is told: the frontend may close its end as soon as it is)
+        PAUSE.lock().unwrap().between = true;
+        send(&v);
+    }
+}
+
+/// The next archive's work begun: stopped now where the frontend cancelled between archives.
+fn resume() {
+    let mut p = PAUSE.lock().unwrap();
+    if p.cancelled {
+        send(&json!({"event": "stopped"}));
+        crate::stop::now(STOPPED);
+    }
+    p.between = false;
+}
+
+/// Tells the frontend `v`, the `begin` of an archive, or stops where it cancelled between
+/// archives.
+pub fn begin(v: Value) {
+    if IPC.get().is_some() {
+        resume();
+        send(&v);
+    }
+}
 
 /// The frontend, where there is one (`--ipc`).
 pub fn get() -> Option<&'static Ipc> {
@@ -173,6 +214,14 @@ fn read() {
             crate::stop::request(STOPPED);
         }
     }
+    // (between archives: the next one stopped as it begins, if any)
+    {
+        let mut p = PAUSE.lock().unwrap();
+        if p.between {
+            p.cancelled = true;
+            return;
+        }
+    }
     // (an extraction ended as it is, the file being written removed: the writer tells `stopped`
     // and ends the process, as for `finish`)
     if crate::stop::is_extracting() {
@@ -197,6 +246,9 @@ impl Ipc {
         if !self.answers(kind) {
             return None;
         }
+        // (of the next archive's work, where asked between archives: begun, as a cancel would leave
+        // the question unanswered)
+        resume();
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (to, answer) = mpsc::channel();
         self.waiting.lock().unwrap().insert(id, to);

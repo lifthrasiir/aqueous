@@ -1056,6 +1056,33 @@ fn ipc_non_ascii_paths() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// out/5: the frontend closing its end once told `end` (as `Child::wait` does), the process still
+/// there (`test:linger`): what was done is kept, the process ends as it would have, no `stopped`
+/// told. (The reader took it for a cancel: 130 and the extraction told stopped, the archive made
+/// removed.)
+#[cfg(unix)]
+#[test]
+fn ipc_closed_after_the_end() {
+    let d = scratch("out5-closed");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), text(1, 2000)).unwrap();
+    let want = files(&src);
+    for args in [&["-c", "-o", "a.aqr", "src"][..], &["-d", "-o", "x", "a.aqr"]] {
+        let args: Vec<_> = ["-Z", "test:linger=300"].iter().chain(args).copied().collect();
+        let (mut c, rx) = ipc_start(&d, &args, &[]);
+        assert_eq!(rx.recv().unwrap()["hello"], 1);
+        let (begin, end) = (next_event(&rx), next_event(&rx));
+        assert_eq!((begin["event"].as_str(), end["event"].as_str()), (Some("begin"), Some("end")), "{args:?}: {end}");
+        drop(c.stdin.take());
+        let rest: Vec<_> = rx.iter().collect();
+        assert_eq!(c.wait().unwrap().code(), Some(0), "{args:?}: {rest:?}");
+        assert!(rest.is_empty(), "{args:?}: {rest:?}");
+    }
+    assert_eq!(files(&d.join("x")), want);
+    fs::remove_dir_all(&d).unwrap();
+}
+
 /// out/5: a session's requests that are wrong are answered by an error (or ignored where they
 /// are not requests), the session going on to answer a right one; a `begin` without arguments
 /// ends it with an error, and the frontend gone before `begin` ends it as stopped.
