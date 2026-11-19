@@ -823,7 +823,11 @@ fn salvage_unnamed(
             if let Some(dir) = into {
                 let name = if several { format!("leaf-{}-{}", i + 1, k + 1) } else { format!("leaf-{}", i + 1) };
                 let p = dir.join(name);
-                if let Err(e) = fs::File::create_new(&p).and_then(|mut f| f.write_all(d)) {
+                let written = fs::File::create_new(&p).and_then(|mut f| {
+                    // (a leaf of part of its bytes is not left)
+                    f.write_all(d).inspect_err(|_| _ = fs::remove_file(&p))
+                });
+                if let Err(e) = written {
                     got.lock().unwrap().2.get_or_insert(format!("{}: {e}", p.display()));
                     return Err(Failure::Resource(e.to_string()));
                 }

@@ -657,3 +657,40 @@ fn names_and_times_roundtrip() {
     assert!(stderr(&o).contains("nothing to append"), "{}", stderr(&o));
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// out/2: a write failing while extracting (a full disk) fails the run, names the file, and
+/// leaves no file of part of its contents under its name; what was written whole stays.
+#[cfg(unix)]
+#[test]
+fn extraction_write_fails() {
+    let d = scratch("out2");
+    let src = d.join("src");
+    fs::create_dir_all(src.join("sub")).unwrap();
+    fs::write(src.join("a-small.txt"), text(1, 2000)).unwrap();
+    fs::write(src.join("sub/big.txt"), text(2, 200_000)).unwrap();
+    fs::write(src.join("z-small.txt"), text(3, 2000)).unwrap();
+    let all = files(&src);
+    ok(&d, &["-q", "-o", "a.aqr", "src"]);
+    for extra in [&[][..], &["-T", "1"], &["-f"], &["-B", "10K"]] {
+        let _ = fs::remove_dir_all(d.join("x"));
+        let args: Vec<&str> = ["-d", "-o", "x"].into_iter().chain(extra.iter().copied()).chain(["a.aqr"]).collect();
+        let o = limited(&d, 50, &args);
+        let e = stderr(&o);
+        assert_eq!(o.status.code(), Some(1), "{extra:?}: {e}");
+        assert!(e.contains("x/sub/big.txt") && e.contains("File too large"), "{extra:?}: {e}");
+        let got = files(&d.join("x"));
+        assert!(
+            got.iter().all(|f| all.contains(f)),
+            "{extra:?}: a file in part: {:?}",
+            got.iter().map(|f| (&f.0, f.1.len())).collect::<Vec<_>>()
+        );
+        assert!(!got.iter().any(|f| f.0 == "sub/big.txt"), "{extra:?}");
+        assert!(got.iter().all(|f| !f.0.ends_with(".part")));
+    }
+    // a single file's archive, written by --part
+    ok(&d, &["-q", "-o", "big.aqr", "src/sub/big.txt"]);
+    let o = limited(&d, 50, &["-d", "-o", "big.out", "big.aqr"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("big.out")));
+    fs::remove_dir_all(&d).unwrap();
+}

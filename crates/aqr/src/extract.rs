@@ -730,7 +730,7 @@ impl<'a> Extractor<'a> {
                 Some(x) => {
                     self.clear(s.top.as_deref(), p)?;
                     let f = create(p, self.force.load(Relaxed))?;
-                    crate::sparse::write_all(&f, &d).map_err(|e| err(p, e))?;
+                    crate::sparse::write_all(&f, &d).map_err(|e| unwritten(p, e))?;
                     self.ap.apply_file(&f, p, x)?;
                     drop(f);
                     s.applied[i].store(true, Relaxed);
@@ -738,7 +738,7 @@ impl<'a> Extractor<'a> {
                 // (the file made empty already)
                 None => {
                     let f = fs::OpenOptions::new().write(true).open(p).map_err(|e| err(p, e))?;
-                    crate::sparse::write_all(&f, &d).map_err(|e| err(p, e))?;
+                    crate::sparse::write_all(&f, &d).map_err(|e| unwritten(p, e))?;
                 }
             }
         }
@@ -1167,6 +1167,13 @@ enum Key {
 /// The entries of a tree by their directory and the keys of their names ([`Name`]): those that
 /// some file system takes as one name, together.
 type ByName = HashMap<(Option<usize>, Key), Vec<usize>>;
+
+/// The error of a file `path` whose contents could not be written (the disk full): the file
+/// removed, as a file of part of its contents is not to stay under its name as if it were whole.
+fn unwritten(path: &Path, e: std::io::Error) -> String {
+    let _ = fs::remove_file(path);
+    err(path, e)
+}
 
 /// Adds entry `j` of `parent` and name `n` to `m`.
 fn by_name_add(m: &mut ByName, parent: Option<usize>, n: Name, j: usize) {
