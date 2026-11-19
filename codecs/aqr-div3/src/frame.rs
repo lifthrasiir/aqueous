@@ -60,6 +60,8 @@ struct Syntax {
 pub struct Codec {
     model: Model,
     syn: Syntax,
+    /// What a frame's walk keeps of the picture.
+    scratch: Vec<u8>,
 }
 
 // Element ids, the top byte of a context.
@@ -161,6 +163,27 @@ struct Geom {
     mbh: usize,
 }
 
+impl Geom {
+    /// Bytes of what the walk of a frame keeps of the picture, whatever its kind: an I frame's
+    /// flags of the blocks (and a border), a P frame's kinds and vectors of the macroblocks.
+    fn scratch(&self) -> usize {
+        ((self.mbw * 2 + 2) * (self.mbh * 2 + 2)).max(2 * self.mbw * self.mbh)
+    }
+}
+
+/// Bytes (of blocks on the stack, [`aqr_api::stack::block`]) that a [`Codec`] of a picture of `width` by `height`
+/// takes beyond its model, in the order it does: the trees of its VLCs, then what a frame's walk keeps of the picture
+/// (one block for every kind of frame, of the most any keeps).
+pub(crate) fn codec_bytes(width: usize, height: usize) -> [u64; 2] {
+    let block = aqr_api::stack::block;
+    let s = Syntax::new(0, 0);
+    let vlcs = (s.dc.iter().chain([&s.cbp_i, &s.mb_p]).chain(&s.mv))
+        .chain(s.intra.iter().chain(&s.inter).map(|a| &a.vlc))
+        .map(|v| block(v.bytes() as u64))
+        .sum();
+    [vlcs, block(Geom { mbw: width.div_ceil(16), mbh: height.div_ceil(16) }.scratch() as u64)]
+}
+
 impl Syntax {
     fn new(width: usize, height: usize) -> Syntax {
         let a = |v: &'static [(u32, u8, u16)], i: &'static [(u8, u8, u8)]| AcTab::new(v, i);
@@ -180,17 +203,24 @@ impl Syntax {
         }
     }
 
-    /// Walks a frame: returns its kind. The two header bits tell which syntax follows.
-    fn walk<I: Io>(&self, io: &mut I) -> R<FrameKind> {
+    /// What a frame's walk keeps of the picture ([`Geom::scratch`]).
+    fn scratch(&self) -> Vec<u8> {
+        vec![0; Geom { mbw: self.w.div_ceil(16), mbh: self.h.div_ceil(16) }.scratch()]
+    }
+
+    /// Walks a frame, keeping what it does of the picture in `scratch` ([`Syntax::scratch`]): returns its kind. The
+    /// two header bits tell which syntax follows.
+    fn walk<I: Io>(&self, io: &mut I, scratch: &mut [u8]) -> R<FrameKind> {
         let g = Geom { mbw: self.w.div_ceil(16), mbh: self.h.div_ceil(16) };
+        scratch.fill(0);
         let kind = io.raw(2)?;
         let k = match kind {
             0 => {
-                self.walk_i(io, &g)?;
+                self.walk_i(io, &g, scratch)?;
                 FrameKind::I
             }
             1 => {
-                self.walk_p(io, &g)?;
+                self.walk_p(io, &g, scratch)?;
                 FrameKind::P
             }
             _ => return Err(FrameError::Parse),
@@ -208,14 +238,14 @@ impl Syntax {
 
     // (the blocks of a macroblock by index, as the syntax has them)
     #[allow(clippy::needless_range_loop)]
-    fn walk_i<I: Io>(&self, io: &mut I, g: &Geom) -> R<()> {
+    fn walk_i<I: Io>(&self, io: &mut I, g: &Geom, scratch: &mut [u8]) -> R<()> {
         io.raw(5)?; // q
         io.raw(5)?; // slice code
         let rlc = d012(io)? as usize;
         let rl = d012(io)? as usize;
         let dc = io.raw(1)? as usize;
         let stride = g.mbw * 2 + 2;
-        let mut flags = vec![0u8; stride * (g.mbh * 2 + 2)];
+        let flags = &mut scratch[..stride * (g.mbh * 2 + 2)];
         for my in 0..g.mbh {
             for mx in 0..g.mbw {
                 let sym = io.vlc(&self.cbp_i, E_CBPI)? as u32;
@@ -255,7 +285,7 @@ impl Syntax {
         Ok(())
     }
 
-    fn walk_p<I: Io>(&self, io: &mut I, g: &Geom) -> R<()> {
+    fn walk_p<I: Io>(&self, io: &mut I, g: &Geom, scratch: &mut [u8]) -> R<()> {
         io.raw(5)?; // q
         let use_skip = io.raw(1)?;
         let rl = d012(io)? as usize;
@@ -264,8 +294,7 @@ impl Syntax {
         let mvtab: &Vlc = &self.mv[mvt];
         let mvvec: &'static [(i8, i8)] = if mvt == 0 { &MV0_VEC } else { &MV1_VEC };
         // Per macroblock: 0 skipped, 1 inter, 2 intra; and whether its vector is zero.
-        let mut kind = vec![0u8; g.mbw * g.mbh];
-        let mut mvz = vec![0u8; g.mbw * g.mbh];
+        let (kind, mvz) = scratch[..2 * g.mbw * g.mbh].split_at_mut(g.mbw * g.mbh);
         for my in 0..g.mbh {
             for mx in 0..g.mbw {
                 let at = my * g.mbw + mx;
@@ -323,7 +352,11 @@ impl Syntax {
 
 impl Codec {
     pub fn new(width: usize, height: usize) -> Codec {
-        Codec { model: Model::new(MODEL_BITS), syn: Syntax::new(width, height) }
+        // (in the order of the plan, `codec_bytes`)
+        let model = Model::new(MODEL_BITS);
+        let syn = Syntax::new(width, height);
+        let scratch = syn.scratch();
+        Codec { model, syn, scratch }
     }
 
     /// Forgets what the model has learned (the start of a chunk), in place.
@@ -334,7 +367,7 @@ impl Codec {
     /// Whether the frame can be coded: it must parse and leave only a short tail.
     pub fn check(&self, data: &[u8]) -> bool {
         let mut c = Check { r: BitReader::new(data) };
-        self.syn.walk(&mut c).is_ok()
+        self.syn.walk(&mut c, &mut self.syn.scratch()).is_ok()
     }
 
     /// Codes a frame: a flag, then the elements (or the bytes, if the frame does not parse).
@@ -348,7 +381,7 @@ impl Codec {
             return None;
         }
         let mut e = Enc { r: BitReader::new(data), rc, m: &mut self.model };
-        self.syn.walk(&mut e).ok()
+        self.syn.walk(&mut e, &mut self.scratch).ok()
     }
 
     /// Decodes a frame of `len` bytes into `out` (its capacity is used: reserve `len` + 8 bytes to take no more).
@@ -363,7 +396,7 @@ impl Codec {
             return Ok(out);
         }
         let mut d = Dec { w: BitWriter::with_vec(out), total: len * 8, rc, m: &mut self.model };
-        self.syn.walk(&mut d)?;
+        self.syn.walk(&mut d, &mut self.scratch)?;
         let bits = d.w.bits();
         if bits != len * 8 {
             return Err(FrameError::Parse);

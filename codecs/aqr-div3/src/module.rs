@@ -20,18 +20,21 @@ const BUF: usize = 16 << 10;
 
 /// The memory plan of `div3-recons` as a part module ([`aqr_api::stack`]): what [`decode_part`] takes beyond
 /// its initial memory (`initial` bytes) at most, whatever the inputs: the model and the frame (not where the frames are
-/// `kept`), and four buffers.
-pub fn plan(initial: u64, kept: bool) -> u64 {
+/// kept: width and height 0), with the trees of its VLCs and what a frame's walk keeps of the picture of `width` by
+/// `height`, and four buffers. None where the params are not two sizes.
+pub fn plan(initial: u64, params: &[u8]) -> Option<u64> {
+    let (w, h) = dims(params).ok()?;
     let mut m = aqr_api::stack::Sim::new(initial);
-    if !kept {
+    if !kept(params) {
         m.take(Model::bytes(MODEL_BITS));
+        crate::frame::codec_bytes(w, h).into_iter().for_each(|n| m.take(n));
         m.take(FRAME_MAX as u64 + 8);
     }
     m.take(BUF as u64);
     m.take(BUF as u64);
     m.take(BUF as u64);
     m.take(BUF as u64);
-    m.plan()
+    Some(m.plan())
 }
 
 /// The file of `size` bytes from the coded frames (or those kept, where `width` and `height` are 0), the skeleton,

@@ -180,7 +180,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "div3-recons",
         version: 3,
-        sha512_256: hex("d2c3baf856662ca52cbe404df409f02af5435b5f671d6334636f52a7e3aacf62"),
+        sha512_256: hex("d717646aa3c6c2cf08556b979e86574d26d1dd9e7814ef96a709d781ce6ff9e8"),
         block: include_bytes!("../wasm/div3-recons.block"),
     },
     Known {

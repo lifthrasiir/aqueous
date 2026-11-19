@@ -33,7 +33,7 @@ pub const MODULE: Module = Module::new("div3-recons", 3).with_plan(memory);
 
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let &[_, _, _, _] = u.inputs else { return None };
-    Some(crate::module::plan(u.initial(), crate::module::kept(u.params)))
+    crate::module::plan(u.initial(), u.params)
 }
 
 /// The video of an AVI file: whether it is DivX 3, its size, where its frames are, and where its audio chunks are.

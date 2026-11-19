@@ -39,6 +39,11 @@ impl Vlc {
         }
         Vlc { trie }
     }
+
+    /// Bytes of its tree's block on the heap.
+    pub fn bytes(&self) -> usize {
+        self.trie.capacity() * core::mem::size_of::<[i32; 2]>()
+    }
 }
 
 pub trait Io {

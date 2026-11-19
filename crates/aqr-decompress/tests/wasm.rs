@@ -3194,12 +3194,12 @@ fn div3_plan_holds() {
         v.extend_from_slice(body);
         v
     }
-    let avi = |handler: &[u8; 4], frames: &[Vec<u8>]| {
+    let avi = |handler: &[u8; 4], w: u32, h: u32, frames: &[Vec<u8>]| {
         let mut strh = b"vids".to_vec();
         strh.extend_from_slice(handler);
         strh.extend_from_slice(&[0; 48]);
         let mut strf = Vec::new();
-        for v in [40u32, 64, 48, 0x0018_0001, u32::from_le_bytes(*b"DIV3")] {
+        for v in [40u32, w, h, 0x0018_0001, u32::from_le_bytes(*b"DIV3")] {
             strf.extend_from_slice(&v.to_le_bytes());
         }
         strf.extend_from_slice(&[0; 20]);
@@ -3217,12 +3217,12 @@ fn div3_plan_holds() {
         v.extend(body);
         v
     };
-    // (skipped frames: all-skip P frames of a 64x48 picture, which parse; noise that does not)
-    let p_skip = |q: u8| {
+    // (skipped frames: all-skip P frames of a picture of `mbs` macroblocks, which parse; noise that does not)
+    let p_skip = |q: u8, mbs: usize| {
         let mut bits = vec![0u8, 1];
         bits.extend((0..5).rev().map(|i| q >> i & 1));
         bits.extend([1, 0, 0, 0, 1]); // use_skip, rl 0, dc 0, mv 1
-        bits.extend([1; 12]); // twelve skipped macroblocks
+        bits.extend(std::iter::repeat_n(1, mbs)); // every macroblock skipped
         let mut out = vec![0u8; bits.len().div_ceil(8)];
         for (i, b) in bits.iter().enumerate() {
             out[i / 8] |= b << (7 - i % 8);
@@ -3231,15 +3231,23 @@ fn div3_plan_holds() {
     };
     for n in [8usize, 400] {
         let frames: Vec<Vec<u8>> = (0..n)
-            .map(|i| if i % 5 == 4 { aqr_common::rng::noise(97 + i) } else { p_skip(2 + (i % 3) as u8) })
+            .map(|i| if i % 5 == 4 { aqr_common::rng::noise(97 + i) } else { p_skip(2 + (i % 3) as u8, 12) })
             .collect();
         for handler in [b"div3", b"XVID"] {
-            let file = avi(handler, &frames);
+            let file = avi(handler, 64, 48, &frames);
             let f = aqr_div3::formula::encode_unchecked(&file, 1).expect("a formula");
             let Node::Apply(a) = &f.root else { panic!("an application") };
             assert_eq!(aqr_div3::module::kept(&a.params), handler == b"XVID");
             plan_holds(&format!("div3 {} {n}", String::from_utf8_lossy(handler)), f, &file);
         }
+    }
+    // (pictures of many macroblocks: what a frame's walk keeps of each of them grows with the picture)
+    for (w, h) in [(1920u32, 1080u32), (4096, 4096)] {
+        let mbs = (w.div_ceil(16) * h.div_ceil(16)) as usize;
+        let frames: Vec<Vec<u8>> = (0..6).map(|i| p_skip(2 + i as u8, mbs)).collect();
+        let file = avi(b"div3", w, h, &frames);
+        let f = aqr_div3::formula::encode_unchecked(&file, 1).expect("a formula");
+        plan_holds(&format!("div3 {w}x{h}"), f, &file);
     }
 }
 
