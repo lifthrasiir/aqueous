@@ -746,4 +746,333 @@ aqr: not there
             .take(r#"{"event":"progress","decompressed":[10,10],"evaluated":[5,10]}"#);
         assert!((job.share() - 0.65).abs() < 1e-9);
     }
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn verbs_name_the_archive() {
+        for verb in [Verb::Compress, Verb::Extract, Verb::Test] {
+            let (plain, named) = (verb.doing(""), verb.doing("a.aqr"));
+            assert!(!plain.is_empty() && !plain.contains("a.aqr"), "{plain}");
+            assert!(named.contains("a.aqr"), "{named}");
+            let (plain, named) = (verb.failed(""), verb.failed("a.aqr"));
+            assert!(!plain.is_empty() && !plain.contains("a.aqr"), "{plain}");
+            assert!(named.contains("a.aqr"), "{named}");
+        }
+        assert_ne!(Verb::Compress.doing(""), Verb::Extract.doing(""));
+        assert_ne!(Verb::Extract.failed("x"), Verb::Test.failed("x"));
+    }
+
+    /// `aqr()` takes `AQR` first (the only test touching the variable).
+    #[test]
+    fn aqr_found() {
+        // SAFETY: no other test reads or writes the environment.
+        unsafe { std::env::set_var("AQR", "/some/where/aqr-x") };
+        assert_eq!(aqr(), Path::new("/some/where/aqr-x"));
+        unsafe { std::env::remove_var("AQR") };
+        // else beside this program (not there in a test's directory) or the bare name
+        let found = aqr();
+        let name = format!("aqr{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(found.file_name().unwrap().to_string_lossy(), name);
+    }
+
+    #[test]
+    fn commands() {
+        let a = Path::new("aqr");
+        let (cmd, count) = command(a, Verb::Compress, paths(&["d/b", "d/a"]), true, "zip");
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "--ipc", "-c", "-P", "--format", "zip", "-o", "d/d.zip", "--", "d/a", "d/b"
+            ]
+        );
+        assert_eq!(count, 1);
+        let (cmd, count) = command(a, Verb::Compress, paths(&["d/a"]), false, "aqr");
+        assert_eq!(args_of(&cmd), ["--ipc", "-c", "--", "d/a"]);
+        assert_eq!(count, 1);
+        let (cmd, count) = command(a, Verb::Extract, paths(&["x.aqr", "y.aqr"]), false, "aqr");
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "--ipc",
+                "-d",
+                "--each",
+                "--auto-dir",
+                "--",
+                "x.aqr",
+                "y.aqr"
+            ]
+        );
+        assert_eq!(count, 2);
+        let (cmd, count) = command(a, Verb::Test, paths(&["x.aqr"]), false, "aqr");
+        assert_eq!(args_of(&cmd), ["--ipc", "-K", "--each", "--", "x.aqr"]);
+        assert_eq!(count, 1);
+        // the folder is the name of the archive of several; none: "Archive"
+        assert_eq!(
+            archive_of(&paths(&["/p/q/a", "/p/q/b"]), "aqr"),
+            Path::new("/p/q/q.aqr")
+        );
+        assert_eq!(archive_of(&paths(&["/a"]), "7z"), Path::new("/Archive.7z"));
+        let cmd = session_command(a, None);
+        assert_eq!(args_of(&cmd), ["--session"]);
+        assert!(cmd.get_current_dir().is_none());
+        let dir = std::env::temp_dir();
+        assert_eq!(
+            session_command(a, Some(&dir)).get_current_dir(),
+            Some(dir.as_path())
+        );
+        assert!(
+            session_command(a, Some(Path::new("/no/such/dir")))
+                .get_current_dir()
+                .is_none()
+        );
+        let (cmd, _) = command(a, Verb::Test, vec![dir.join("x.aqr")], false, "aqr");
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+        let (cmd, _) = command_at(
+            a,
+            &dir.join("x.aqr"),
+            &Point {
+                number: 2,
+                shown: String::new(),
+                label: String::new(),
+            },
+            &dir,
+        );
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+    }
+
+    /// A stand-in `aqr` (a shell script) in `dir`, writing `body`.
+    #[cfg(unix)]
+    fn fake_aqr(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("aqr-fake");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("aqr-ipc-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn points_and_tag_run_aqr() {
+        let d = scratch("run");
+        let ok = fake_aqr(
+            &d,
+            r#"case "$1" in
+--history) echo '{"points":[{"number":1,"shown":"t","label":"l"}]}' ;;
+--tag) echo "aqr: noise" >&2; echo "aqr: tagged $2" >&2 ;;
+esac"#,
+        );
+        let got = points(&ok, Path::new("x.aqr")).unwrap();
+        assert_eq!(
+            got,
+            [Point {
+                number: 1,
+                shown: "t".into(),
+                label: "l".into()
+            }]
+        );
+        assert_eq!(tag(&ok, Path::new("x.aqr"), "v1").unwrap(), "tagged v1");
+        let bad = fake_aqr(&d, "echo 'aqr: no such archive' >&2; exit 2");
+        assert_eq!(
+            points(&bad, Path::new("x.aqr")).unwrap_err(),
+            "no such archive"
+        );
+        assert_eq!(
+            tag(&bad, Path::new("x.aqr"), "v1").unwrap_err(),
+            "no such archive"
+        );
+        // not run at all
+        let gone = d.join("nothing-here");
+        assert!(
+            points(&gone, Path::new("x.aqr"))
+                .unwrap_err()
+                .contains("nothing-here")
+        );
+        assert!(tag(&gone, Path::new("x.aqr"), "v1").is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The threads' side of a [`Job`]: what is told, the questions answered and sent to `aqr`.
+    #[test]
+    fn job_reads_and_sends() {
+        let job = Job::new(Verb::Compress, 1, None);
+        let out = "{\"event\":\"begin\",\"inputs\":[\"a\"],\"output\":\"a.aqr\"}\n\
+                   {\"event\":\"output\",\"output\":\"b.aqr\"}\n\
+                   {\"event\":\"stopped\"}\n";
+        job.read_out(out.as_bytes());
+        {
+            let s = job.state.lock().unwrap();
+            assert!(s.eof && s.stopped);
+            assert_eq!(s.output.as_deref(), Some(Path::new("b.aqr")));
+        }
+        // the log keeps the last LOG lines
+        let err: String = (0..LOG + 5).map(|i| format!("line {i}\n")).collect();
+        job.read_err(err.as_bytes());
+        let s = job.state.lock().unwrap();
+        assert_eq!(s.log.len(), LOG);
+        assert_eq!(s.log.front().unwrap(), "line 5");
+        assert_eq!(s.log.back().unwrap(), &format!("line {}", LOG + 4));
+        drop(s);
+        // no input: sending and closing do nothing
+        job.cancel();
+        job.finish();
+        job.begin(&[]);
+        job.request_inventory(1, &[]);
+        job.answer(&json!({"ask": 3}), json!("x"));
+        job.close();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_sends_to_a_process() {
+        let d = scratch("send");
+        let out = d.join("got");
+        let cat = fake_aqr(&d, &format!("cat > '{}'", out.display()));
+        let mut child = Command::new(&cat).stdin(Stdio::piped()).spawn().unwrap();
+        let job = Job::new(Verb::Extract, 1, child.stdin.take());
+        job.request_inventory(7, &["x".into()]);
+        job.begin(&["-c".into()]);
+        job.answer(&json!({"ask": 3}), json!("pw"));
+        job.cancel();
+        job.finish();
+        job.close();
+        child.wait().unwrap();
+        let lines: Vec<Value> = std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            lines[0],
+            json!({"hello": VERSION, "answers": ["overwrite", "passphrase"]})
+        );
+        assert_eq!(
+            lines[1],
+            json!({"control": "inventory", "id": 7, "args": ["x"]})
+        );
+        assert_eq!(lines[2], json!({"control": "begin", "args": ["-c"]}));
+        assert_eq!(lines[3], json!({"answer": 3, "value": "pw"}));
+        assert_eq!(lines[4], json!({"control": CANCEL}));
+        assert_eq!(lines[5], json!({"control": FINISH}));
+        assert_eq!(lines.len(), 6);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn share_of_compression() {
+        let job = Job::new(Verb::Compress, 1, None);
+        let set = |p: &str| job.state.lock().unwrap().take(p);
+        set(r#"{"event":"progress","probe":[1,2],"analysis":[1,2],"compression":[0,0]}"#);
+        assert!((job.share() - (0.025 + 0.325)).abs() < 1e-9);
+        // no probe to do: counted as done; more than the whole is capped
+        set(r#"{"event":"progress","probe":[0,0],"analysis":[4,2],"compression":[1,1]}"#);
+        assert!((job.share() - 1.0).abs() < 1e-9);
+    }
+
+    #[cfg(unix)]
+    fn status(code: i32) -> std::process::ExitStatus {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {code}"))
+            .status()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn outcomes() {
+        let mut s = State::default();
+        // a success of a compression: nothing to tell
+        assert!(matches!(
+            outcome(Verb::Compress, 1, &s, Some(status(0)), "a"),
+            Outcome::Done
+        ));
+        // not ended at all, and ended badly (with the log)
+        match outcome(Verb::Compress, 1, &s, None, "a") {
+            Outcome::Failed { main, text, log } => {
+                assert_eq!(main, Verb::Compress.failed("a"));
+                assert_eq!(text, aqr_l10n::common::did_not_end());
+                assert!(log.is_none());
+            }
+            _ => panic!("not failed"),
+        }
+        s.log.push_back("first".into());
+        s.log.push_back("second".into());
+        match outcome(Verb::Extract, 1, &s, Some(status(3)), "a") {
+            Outcome::Failed { text, log, .. } => {
+                assert_eq!(text, aqr_l10n::common::ended_with(status(3)));
+                assert_eq!(log.as_deref(), Some("first\nsecond"));
+            }
+            _ => panic!("not failed"),
+        }
+        // aqr's own error comes first; stopped and cancelled are silent
+        s.error = Some("broken".into());
+        match outcome(Verb::Extract, 1, &s, Some(status(0)), "a") {
+            Outcome::Failed { text, .. } => assert_eq!(text, "broken"),
+            _ => panic!("not failed"),
+        }
+        s.stopped = true;
+        assert!(matches!(
+            outcome(Verb::Extract, 1, &s, None, "a"),
+            Outcome::Silent
+        ));
+        s.stopped = false;
+        s.cancelled = true;
+        assert!(matches!(
+            outcome(Verb::Extract, 1, &s, None, "a"),
+            Outcome::Silent
+        ));
+        // tests all intact: one archive named, or counted, with a line each
+        let mut s = State::default();
+        s.ended.push((
+            "a.aqr".into(),
+            json!({"files": 1, "read": 10, "written": 20, "seconds": 1.0}),
+        ));
+        match outcome(Verb::Test, 1, &s, Some(status(0)), "a.aqr") {
+            Outcome::Tested { main, text } => {
+                assert_eq!(main, aqr_l10n::common::intact("a.aqr"));
+                assert_eq!(text, tested("a.aqr", &s.ended[0].1, false));
+            }
+            _ => panic!("not tested"),
+        }
+        s.ended.push(("b.aqr".into(), json!({"files": 2})));
+        match outcome(Verb::Test, 2, &s, Some(status(0)), "b.aqr") {
+            Outcome::Tested { main, text } => {
+                assert_eq!(main, aqr_l10n::common::all_intact(2));
+                assert_eq!(text.lines().count(), 2);
+                assert!(text.lines().nth(1).unwrap().contains("b.aqr"));
+            }
+            _ => panic!("not tested"),
+        }
+    }
+
+    #[test]
+    fn names_shown() {
+        assert_eq!(file_name(Path::new("a/b.txt")), "b.txt");
+        assert_eq!(file_name(Path::new("/")), "/");
+        assert_eq!(done(&json!({"k": [1, 4]}), "k"), 0.25);
+        assert_eq!(done(&json!({}), "k"), 0.0);
+        let mut s = State::default();
+        assert_eq!(s.name(), "");
+        s.take(r#"{"event":"end"}"#);
+        assert_eq!(s.ended[0].0, "");
+        s.take(r#"{"event":"error"}"#);
+        assert_eq!(s.error.as_deref(), Some(""));
+        s.take(r#"{"event":"mystery"}"#);
+    }
 }
