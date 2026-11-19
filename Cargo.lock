@@ -1739,6 +1739,7 @@ dependencies = [
  "aqr-formula",
  "aqr-ima",
  "aqr-msadpcm",
+ "aqr-testkit",
 ]
 
 [[package]]

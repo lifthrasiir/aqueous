@@ -351,6 +351,9 @@ pub fn tiff_extent(d: &[u8]) -> Option<usize> {
                 end = end.max(t.u32(e.at).map_or(d.len(), |at| at.saturating_add(len)));
             }
             if [330, 34665, 34853, 40965].contains(&e.tag) {
+                // (no more than the IFDs that will be followed: of a million offsets in each
+                // of a thousand IFDs the list would be of gigabytes)
+                let e = TiffEntry { count: e.count.min(TIFF_IFDS), ..e };
                 todo.extend(t.values(e).unwrap_or_default());
             }
         }
@@ -453,7 +456,7 @@ fn raster16_found(name: &'static str, d: &[u8], f: raster16::Format, start: usiz
 /// of undefined length (sequences) before the pixel data are not taken.
 fn dicom(d: &[u8]) -> Option<Found> {
     // the data set's start and whether it is of explicit VRs
-    let (mut p, explicit) = if d.get(128..132)? == b"DICM" {
+    let (mut p, explicit) = if d.get(128..132) == Some(b"DICM") {
         // the file meta information, explicit VR little-endian, its group length first
         if d.get(132..136)? != [2, 0, 0, 0] || d.get(136..138)? != b"UL" {
             return None;

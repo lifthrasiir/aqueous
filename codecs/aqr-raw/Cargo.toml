@@ -21,3 +21,4 @@ aqr-msadpcm = { path = "../aqr-msadpcm", optional = true }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
