@@ -9,17 +9,17 @@ encode = []
 decode = []
 
 [dependencies]
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-sha1 = { version = "0.10", default-features = false }
-sha2 = { version = "0.10", default-features = false }
+aqr-common.workspace = true
+aqr-api = { workspace = true, features = ["alloc"] }
+sha1.workspace = true
+sha2.workspace = true
 
 # (ARMv8's SHA-2 instructions, which sha2 takes only with "asm"; x86's SHA-NI it takes as it is)
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-sha2 = { version = "0.10", default-features = false, features = ["asm"] }
+sha2 = { workspace = true, features = ["asm"] }
 
 [dev-dependencies]
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true
 zstd = { workspace = true, features = ["zstdmt"] }
 
 [lints.rust]

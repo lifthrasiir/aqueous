@@ -6,9 +6,9 @@ description = "Blobs (native libraries digested by aqr-ld): their format, and pl
 publish = false
 
 [dependencies]
-aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"], optional = true }
-aqr-formula = { path = "../aqr-formula", optional = true }
-aqr-archive = { path = "../aqr-archive", optional = true }
+aqr-api = { workspace = true, features = ["alloc"], optional = true }
+aqr-formula = { workspace = true, optional = true }
+aqr-archive = { workspace = true, optional = true }
 
 [features]
 # The interpreter blob's client (`interp`): what runs modules through it.

@@ -12,17 +12,17 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-sqlite", "dep:aqr-psd", "dep:aqr-raw"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-flate = { path = "../aqr-flate", default-features = false }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-aqr-psd = { path = "../aqr-psd", optional = true }
-aqr-raw = { path = "../aqr-raw", optional = true }
-aqr-sqlite = { path = "../aqr-sqlite", optional = true }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+aqr-flate.workspace = true
+aqr-formula = { workspace = true, optional = true }
+aqr-psd = { workspace = true, default-features = true, optional = true }
+aqr-raw = { workspace = true, default-features = true, optional = true }
+aqr-sqlite = { workspace = true, default-features = true, optional = true }
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-archive.workspace = true
+aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, examples/aqr-clip.rs, after the crate),
 # so that names do not collide in the workspace's target directory.

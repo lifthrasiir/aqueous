@@ -16,6 +16,10 @@ members = [
 exclude = ["third_party", "codecs/aqr-flate/bench", "codecs/aqr-png/bench"]
 
 [workspace.dependencies]
+# Every version and path of the members' dependencies (generated aqr-dll-* aside). Default features
+# are off where a member takes a crate without them; the members that want them say
+# `default-features = true`.
+
 # DEFLATE encoders for aqr-flate's training and the tests of aqr-flate, aqr-png and aqr-pdf. The
 # backends here work with MSVC as well; the crates add the others for
 # `cfg(not(target_env = "msvc"))`: zlib-ng, zlib-chromium, libslz, cryptopp, go, gzip, infozip and
@@ -29,6 +33,190 @@ flate-zoo = { version = "1.0.0", default-features = false, features = [
 # zstd without its default features, so that no crate brings them back: `legacy` (the decoders of
 # the formats before 1.0, which Aqueous never reads) is off; `zdict_builder` is aqr-formula's.
 zstd = { version = "0.13", default-features = false }
+
+aes = "0.8"
+block2 = "0.6"
+cbc = "0.1"
+chacha20 = "0.9"
+chacha20poly1305 = { version = "0.10", default-features = false }
+crc-fast = { version = "1.10", default-features = false, features = ["std"] }
+crc32fast = "1.5"
+ctr = "0.9"
+embed-resource = "3"
+encoding_rs = "0.8"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+getrandom = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+inventory = "0.3"
+libc = "0.2"
+liblzma = { version = "0.4", default-features = false }
+memchr = "2"
+memmap2 = "0.9"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSActionCell",
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSCell",
+    "NSControl",
+    "NSParagraphStyle",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    "NSResponder",
+    "NSSecureTextField",
+    "NSRunningApplication",
+    "NSScrollView",
+    "NSTableColumn",
+    "NSTableHeaderView",
+    "NSTableView",
+    "NSText",
+    "NSTextField",
+    "NSTextFieldCell",
+    "NSTextView",
+    "NSUserInterfaceItemIdentification",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSBundle",
+    "NSDate",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSIndexSet",
+    "NSNotification",
+    "NSObject",
+    "NSProgress",
+    "NSString",
+    "NSThread",
+    "NSTimer",
+    "NSURL",
+    "NSValue",
+] }
+pbkdf2 = "0.12"
+rayon = "1.12"
+scrypt = { version = "0.11", default-features = false }
+serde_json = "1"
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+simd-adler32 = "0.3"
+toml = "1"
+unicode-normalization = "0.1"
+walrus = "0.27"
+# aqr-ld takes the version walrus does.
+wasmparser = "0.258"
+wasmtime = { version = "49", default-features = false, features = [
+    "cranelift", "runtime", "std", "parallel-compilation", "async",
+] }
+wat = "1"
+windows-sys = "0.61"
+xxhash-rust = "0.8"
+zmij = "1"
+
+# The workspace's own crates.
+aqr-7z = { path = "codecs/aqr-7z" }
+aqr-ac3 = { path = "codecs/aqr-ac3", default-features = false }
+aqr-alz = { path = "codecs/aqr-alz" }
+aqr-apfs = { path = "codecs/aqr-apfs" }
+aqr-api = { path = "crates/aqr-api", default-features = false }
+aqr-archive = { path = "crates/aqr-archive" }
+aqr-arsc = { path = "codecs/aqr-arsc", default-features = false }
+aqr-asar = { path = "codecs/aqr-asar", default-features = false }
+aqr-azo = { path = "codecs/aqr-azo", default-features = false }
+aqr-b2t = { path = "codecs/aqr-b2t", default-features = false }
+aqr-bcj = { path = "codecs/aqr-bcj", default-features = false }
+aqr-blob = { path = "crates/aqr-blob" }
+aqr-bundle = { path = "codecs/aqr-bundle", default-features = false }
+aqr-bvx = { path = "codecs/aqr-bvx", default-features = false }
+aqr-bz2 = { path = "codecs/aqr-bz2", default-features = false }
+aqr-clip = { path = "codecs/aqr-clip", default-features = false }
+aqr-common = { path = "crates/aqr-common" }
+aqr-compress = { path = "crates/aqr-compress" }
+aqr-decompress = { path = "crates/aqr-decompress" }
+aqr-dex = { path = "codecs/aqr-dex", default-features = false }
+aqr-disk = { path = "codecs/aqr-disk" }
+aqr-div3 = { path = "codecs/aqr-div3", default-features = false }
+aqr-dwarf = { path = "codecs/aqr-dwarf", default-features = false }
+aqr-egg = { path = "codecs/aqr-egg" }
+aqr-exe = { path = "codecs/aqr-exe", default-features = false }
+aqr-ext = { path = "codecs/aqr-ext" }
+aqr-fasta = { path = "codecs/aqr-fasta", default-features = false }
+aqr-fat = { path = "codecs/aqr-fat" }
+aqr-fits = { path = "codecs/aqr-fits", default-features = false }
+aqr-flac = { path = "codecs/aqr-flac", default-features = false }
+aqr-flate = { path = "codecs/aqr-flate", default-features = false }
+aqr-foreign = { path = "crates/aqr-foreign" }
+aqr-formula = { path = "crates/aqr-formula" }
+aqr-fsb = { path = "codecs/aqr-fsb" }
+aqr-gif = { path = "codecs/aqr-gif", default-features = false }
+aqr-git = { path = "codecs/aqr-git", default-features = false }
+aqr-gnu-gettext = { path = "codecs/aqr-gnu-gettext", default-features = false }
+aqr-hdf5 = { path = "codecs/aqr-hdf5", default-features = false }
+aqr-hfs = { path = "codecs/aqr-hfs" }
+aqr-ima = { path = "codecs/aqr-ima", default-features = false }
+aqr-infer-recs = { path = "codecs/aqr-infer-recs", default-features = false }
+aqr-inno = { path = "codecs/aqr-inno" }
+aqr-ipc = { path = "crates/aqr-ipc" }
+aqr-isc = { path = "codecs/aqr-isc" }
+aqr-iso = { path = "codecs/aqr-iso" }
+aqr-jpeg = { path = "codecs/aqr-jpeg", default-features = false }
+aqr-jsonl = { path = "codecs/aqr-jsonl", default-features = false }
+aqr-l10n = { path = "crates/aqr-l10n" }
+aqr-ld = { path = "crates/aqr-ld" }
+aqr-lha = { path = "codecs/aqr-lha", default-features = false }
+aqr-log = { path = "codecs/aqr-log", default-features = false }
+aqr-lz4 = { path = "codecs/aqr-lz4", default-features = false }
+aqr-lzma = { path = "codecs/aqr-lzma", default-features = false }
+aqr-lznt1 = { path = "codecs/aqr-lznt1", default-features = false }
+aqr-lzo = { path = "codecs/aqr-lzo", default-features = false }
+aqr-lzx = { path = "codecs/aqr-lzx", default-features = false }
+aqr-minecraft = { path = "codecs/aqr-minecraft", default-features = false }
+aqr-mkv = { path = "codecs/aqr-mkv" }
+aqr-modules = { path = "crates/aqr-modules" }
+aqr-mp3 = { path = "codecs/aqr-mp3", default-features = false }
+aqr-msadpcm = { path = "codecs/aqr-msadpcm", default-features = false }
+aqr-mszip = { path = "codecs/aqr-mszip", default-features = false }
+aqr-native = { path = "crates/aqr-native" }
+aqr-ntfs = { path = "codecs/aqr-ntfs" }
+aqr-num = { path = "crates/aqr-num" }
+aqr-obj = { path = "codecs/aqr-obj", default-features = false }
+aqr-ogg = { path = "codecs/aqr-ogg", default-features = false }
+aqr-ole = { path = "codecs/aqr-ole" }
+aqr-pack = { path = "crates/aqr-pack" }
+aqr-pdb = { path = "codecs/aqr-pdb", default-features = false }
+aqr-pdf = { path = "codecs/aqr-pdf", default-features = false }
+aqr-png = { path = "codecs/aqr-png", default-features = false }
+aqr-ppmd = { path = "codecs/aqr-ppmd" }
+aqr-prores = { path = "codecs/aqr-prores", default-features = false }
+aqr-psd = { path = "codecs/aqr-psd", default-features = false }
+aqr-rar = { path = "codecs/aqr-rar", default-features = false }
+aqr-raw = { path = "codecs/aqr-raw", default-features = false }
+aqr-sfx = { path = "crates/aqr-sfx" }
+aqr-snappy = { path = "codecs/aqr-snappy", default-features = false }
+aqr-sqlite = { path = "codecs/aqr-sqlite", default-features = false }
+aqr-tensors = { path = "codecs/aqr-tensors", default-features = false }
+aqr-testkit = { path = "crates/aqr-testkit" }
+aqr-tex = { path = "codecs/aqr-tex", default-features = false }
+aqr-unpack = { path = "crates/aqr-unpack" }
+aqr-version = { path = "crates/aqr-version" }
+aqr-vorbis = { path = "codecs/aqr-vorbis", default-features = false }
+aqr-walk = { path = "crates/aqr-walk" }
+aqr-wasm = { path = "codecs/aqr-wasm", default-features = false }
+aqr-wasmrt = { path = "crates/aqr-wasmrt", default-features = false }
+aqr-wim = { path = "codecs/aqr-wim" }
+aqr-wrt = { path = "codecs/aqr-wrt", default-features = false }
+aqr-wwise = { path = "codecs/aqr-wwise" }
+aqr-xpress = { path = "codecs/aqr-xpress", default-features = false }
+aqr-xsv = { path = "codecs/aqr-xsv", default-features = false }
+aqr-zip = { path = "codecs/aqr-zip", default-features = false }
+aqr-zstd = { path = "codecs/aqr-zstd", default-features = false }
 
 # Thin-local LTO and 16 codegen units (Cargo's defaults) rather than fat LTO and one unit: on an
 # M4 the build of `aqr` from scratch 148 -> 73 s, after touching aqr-flate 113 -> 20 s, after

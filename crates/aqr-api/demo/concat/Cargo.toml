@@ -9,4 +9,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The location of a panic is logged, which e2e.mjs checks.
-aqr-api = { path = "../..", features = ["panic-location"] }
+aqr-api = { workspace = true, default-features = true, features = ["panic-location"] }

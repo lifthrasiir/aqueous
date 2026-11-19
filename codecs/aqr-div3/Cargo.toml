@@ -11,12 +11,12 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-ac3", "aqr-ac3/encode", "dep:aqr-mp3"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-walk = { path = "../../crates/aqr-walk" }
-aqr-ac3 = { path = "../aqr-ac3", default-features = false, optional = true }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-aqr-mp3 = { path = "../aqr-mp3", optional = true }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+aqr-walk.workspace = true
+aqr-ac3 = { workspace = true, optional = true }
+aqr-formula = { workspace = true, optional = true }
+aqr-mp3 = { workspace = true, default-features = true, optional = true }
 
 [[example]]
 name = "aqr-div3-check"
@@ -27,5 +27,5 @@ name = "aqr-div3-speed"
 path = "examples/speed.rs"
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-archive.workspace = true
+aqr-testkit.workspace = true

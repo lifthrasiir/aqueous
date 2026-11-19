@@ -6,59 +6,15 @@ description = "Aqueous in Finder: Quick Actions and .aqr files, their progress o
 publish = false
 
 [dependencies]
-aqr-ipc = { path = "../aqr-ipc" }
-aqr-l10n = { path = "../aqr-l10n" }
-serde_json = "1"
+aqr-ipc.workspace = true
+aqr-l10n.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6"
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = [
-    "std",
-    "block2",
-    "NSArray",
-    "NSBundle",
-    "NSDate",
-    "NSDictionary",
-    "NSEnumerator",
-    "NSError",
-    "NSIndexSet",
-    "NSNotification",
-    "NSObject",
-    "NSProgress",
-    "NSString",
-    "NSThread",
-    "NSTimer",
-    "NSURL",
-    "NSValue",
-] }
-objc2-app-kit = { version = "0.3", default-features = false, features = [
-    "std",
-    "objc2-core-foundation",
-    "NSActionCell",
-    "NSAlert",
-    "NSApplication",
-    "NSButton",
-    "NSCell",
-    "NSControl",
-    "NSParagraphStyle",
-    "NSPasteboard",
-    "NSPasteboardItem",
-    "NSResponder",
-    "NSSecureTextField",
-    "NSRunningApplication",
-    "NSScrollView",
-    "NSTableColumn",
-    "NSTableHeaderView",
-    "NSTableView",
-    "NSText",
-    "NSTextField",
-    "NSTextFieldCell",
-    "NSTextView",
-    "NSUserInterfaceItemIdentification",
-    "NSView",
-    "NSWindow",
-] }
+block2.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
 
 [[bin]]
 name = "aqr-mac"

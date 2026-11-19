@@ -6,18 +6,18 @@ description = "What archives of other formats keep alike, both ways: their encry
 publish = false
 
 [dependencies]
-aes = "0.8"
-aqr-archive = { path = "../aqr-archive" }
-cbc = "0.1"
-ctr = "0.9"
-encoding_rs = "0.8"
-hmac = "0.12"
-pbkdf2 = "0.12"
-sha1 = "0.10"
-sha2 = "0.10"
+aes.workspace = true
+aqr-archive.workspace = true
+cbc.workspace = true
+ctr.workspace = true
+encoding_rs.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+sha1 = { workspace = true, default-features = true }
+sha2 = { workspace = true, default-features = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Time"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Time"] }

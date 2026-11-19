@@ -6,15 +6,15 @@ description = "WIM files taken apart into their resources' data, LZX chunks rebu
 publish = false
 
 [dependencies]
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula" }
-aqr-lzx = { path = "../aqr-lzx" }
+aqr-common.workspace = true
+aqr-formula.workspace = true
+aqr-lzx = { workspace = true, default-features = true }
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-decompress = { path = "../../crates/aqr-decompress" }
-memmap2 = "0.9"
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-archive.workspace = true
+aqr-decompress.workspace = true
+memmap2.workspace = true
+aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

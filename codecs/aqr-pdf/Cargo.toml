@@ -14,26 +14,26 @@ encode = [
 ]
 
 [dependencies]
-aes = { version = "0.8", optional = true }
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-aqr-flate = { path = "../aqr-flate", default-features = false }
-aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
-aqr-png = { path = "../aqr-png", default-features = false }
-aqr-raw = { path = "../aqr-raw", default-features = false }
-memchr = "2"
-sha2 = { version = "0.10", optional = true }
+aes = { workspace = true, optional = true }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+aqr-formula = { workspace = true, optional = true }
+aqr-flate.workspace = true
+aqr-jpeg.workspace = true
+aqr-png.workspace = true
+aqr-raw.workspace = true
+memchr.workspace = true
+sha2 = { workspace = true, default-features = true, optional = true }
 zstd = { workspace = true, optional = true }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-rayon = { version = "1.12", optional = true }
+xxhash-rust = { workspace = true, features = ["xxh3"] }
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aes = "0.8"
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-archive.workspace = true
+aes.workspace = true
+aqr-testkit.workspace = true
 flate-zoo.workspace = true
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+flate2.workspace = true
 
 # flate-zoo's backends that do not work with MSVC (the root Cargo.toml has why).
 [target.'cfg(not(target_env = "msvc"))'.dev-dependencies]

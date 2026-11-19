@@ -6,12 +6,12 @@ description = "FAT12, FAT16, FAT32 and exFAT volumes read into their files, file
 publish = false
 
 [dependencies]
-aqr-disk = { path = "../aqr-disk" }
+aqr-disk.workspace = true
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-formula = { path = "../../crates/aqr-formula" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-archive.workspace = true
+aqr-formula.workspace = true
+aqr-testkit.workspace = true
 zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

@@ -6,16 +6,16 @@ description = "Directories of unknown archive formats (game paks) inferred: tabl
 publish = false
 
 [dependencies]
-aqr-common = { path = "../aqr-common" }
-aqr-lz4 = { path = "../../codecs/aqr-lz4", default-features = false }
-aqr-lzo = { path = "../../codecs/aqr-lzo", default-features = false }
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+aqr-common.workspace = true
+aqr-lz4.workspace = true
+aqr-lzo.workspace = true
+flate2.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
-memmap2 = "0.9"
+memmap2.workspace = true
 # (the registry of `-Z`, for the examples)
-aqr-common = { path = "../aqr-common", features = ["registry"] }
+aqr-common = { workspace = true, features = ["registry"] }
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
 # directory.

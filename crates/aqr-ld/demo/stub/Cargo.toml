@@ -9,4 +9,4 @@ name = "aqr-pemerge-stub"
 path = "src/main.rs"
 
 [dependencies]
-aqr-blob = { path = "../../../aqr-blob" }
+aqr-blob.workspace = true

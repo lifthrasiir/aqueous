@@ -16,20 +16,20 @@ sandbox = ["wasm"]
 wasmtime = ["wasm", "dep:wasmtime"]
 
 [dependencies]
-aqr-api = { path = "../aqr-api" }
-aqr-blob = { path = "../aqr-blob", features = ["runner"], optional = true }
-aqr-common = { path = "../aqr-common" }
-aqr-formula = { path = "../aqr-formula" }
-aqr-archive = { path = "../aqr-archive" }
-sha2 = "0.10"
-wasmparser = { version = "0.258", optional = true }
-wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation", "async"] }
+aqr-api = { workspace = true, default-features = true }
+aqr-blob = { workspace = true, features = ["runner"], optional = true }
+aqr-common.workspace = true
+aqr-formula.workspace = true
+aqr-archive.workspace = true
+sha2 = { workspace = true, default-features = true }
+wasmparser = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", optional = true, features = [
+windows-sys = { workspace = true, optional = true, features = [
     "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Security",

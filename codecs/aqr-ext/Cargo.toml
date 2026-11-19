@@ -6,13 +6,13 @@ description = "ext2, ext3 and ext4 volumes read into their files, a file system 
 publish = false
 
 [dependencies]
-aqr-disk = { path = "../aqr-disk" }
+aqr-disk.workspace = true
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-archive.workspace = true
+aqr-formula.workspace = true
 zstd.workspace = true
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

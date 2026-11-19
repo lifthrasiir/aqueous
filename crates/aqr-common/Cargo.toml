@@ -18,17 +18,17 @@ rayon = ["dep:rayon"]
 
 [dependencies]
 zstd = { workspace = true, optional = true }
-rayon = { version = "1.12", optional = true }
+rayon = { workspace = true, optional = true }
 
 # Tasks for `pool::par_map_apart` (in the modules of aqr-modules).
 [target.'cfg(target_family = "wasm")'.dependencies]
-aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
+aqr-api = { workspace = true, features = ["alloc"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-crc32fast = "1.5"
+crc32fast.workspace = true
 # (the developer options of `zopt`, registered by the crates that read them)
-inventory = "0.3"
-simd-adler32 = "0.3"
+inventory.workspace = true
+simd-adler32.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true

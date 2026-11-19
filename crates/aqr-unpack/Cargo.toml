@@ -6,22 +6,22 @@ description = "Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and the co
 publish = false
 
 [dependencies]
-aqr-7z = { path = "../../codecs/aqr-7z" }
-aqr-alz = { path = "../../codecs/aqr-alz" }
-aqr-azo = { path = "../../codecs/aqr-azo" }
-aqr-bcj = { path = "../../codecs/aqr-bcj" }
-aqr-bz2 = { path = "../../codecs/aqr-bz2" }
-aqr-common = { path = "../aqr-common" }
-aqr-egg = { path = "../../codecs/aqr-egg" }
-aqr-flate = { path = "../../codecs/aqr-flate" }
-aqr-foreign = { path = "../aqr-foreign" }
-aqr-archive = { path = "../aqr-archive" }
-aqr-lzma = { path = "../../codecs/aqr-lzma" }
-aqr-rar = { path = "../../codecs/aqr-rar", default-features = false }
-aqr-zip = { path = "../../codecs/aqr-zip" }
-encoding_rs = "0.8"
-sha2 = "0.10"
+aqr-7z.workspace = true
+aqr-alz.workspace = true
+aqr-azo = { workspace = true, default-features = true }
+aqr-bcj = { workspace = true, default-features = true }
+aqr-bz2 = { workspace = true, default-features = true }
+aqr-common.workspace = true
+aqr-egg.workspace = true
+aqr-flate = { workspace = true, default-features = true }
+aqr-foreign.workspace = true
+aqr-archive.workspace = true
+aqr-lzma = { workspace = true, default-features = true }
+aqr-rar.workspace = true
+aqr-zip = { workspace = true, default-features = true }
+encoding_rs.workspace = true
+sha2 = { workspace = true, default-features = true }
 zstd.workspace = true
 
 [dev-dependencies]
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true

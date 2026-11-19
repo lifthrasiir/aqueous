@@ -13,16 +13,16 @@ encode = ["dep:aqr-formula", "dep:aqr-raw"]
 
 [dependencies]
 # Tasks for the stripes of a texture (`texture`) in the module of aqr-modules; its plan.
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-aqr-raw = { path = "../aqr-raw", optional = true }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+aqr-formula = { workspace = true, optional = true }
+aqr-raw = { workspace = true, default-features = true, optional = true }
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
-aqr-formula = { path = "../../crates/aqr-formula" }
-aqr-raw = { path = "../aqr-raw" }
+aqr-archive.workspace = true
+aqr-testkit.workspace = true
+aqr-formula.workspace = true
+aqr-raw = { workspace = true, default-features = true }
 zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

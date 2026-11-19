@@ -11,15 +11,15 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:xxhash-rust", "dep:zstd"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-xxhash-rust = { version = "0.8", features = ["xxh3"], optional = true }
+aqr-api.workspace = true
+aqr-common.workspace = true
+aqr-formula = { workspace = true, optional = true }
+xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
-aqr-formula = { path = "../../crates/aqr-formula" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-formula.workspace = true
+aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

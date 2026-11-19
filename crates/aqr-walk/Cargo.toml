@@ -6,8 +6,8 @@ description = "A syntax walked once for both directions: elements read from the 
 publish = false
 
 [dependencies]
-aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
+aqr-api = { workspace = true, features = ["alloc"] }
 
 # (natively, the tables of chunks)
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-aqr-common = { path = "../aqr-common" }
+aqr-common.workspace = true

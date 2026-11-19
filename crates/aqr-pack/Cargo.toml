@@ -6,22 +6,22 @@ description = "A tree written as an archive of another format (ZIP, 7z, ALZ, EGG
 publish = false
 
 [dependencies]
-aqr-7z = { path = "../../codecs/aqr-7z" }
-aqr-alz = { path = "../../codecs/aqr-alz" }
-aqr-bz2 = { path = "../../codecs/aqr-bz2", default-features = false }
-aqr-common = { path = "../aqr-common" }
-aqr-egg = { path = "../../codecs/aqr-egg" }
-aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
-aqr-foreign = { path = "../aqr-foreign" }
-aqr-formula = { path = "../aqr-formula" }
-aqr-archive = { path = "../aqr-archive" }
-aqr-zip = { path = "../../codecs/aqr-zip" }
-encoding_rs = "0.8"
-getrandom = "0.4"
+aqr-7z.workspace = true
+aqr-alz.workspace = true
+aqr-bz2.workspace = true
+aqr-common.workspace = true
+aqr-egg.workspace = true
+aqr-flate.workspace = true
+aqr-foreign.workspace = true
+aqr-formula.workspace = true
+aqr-archive.workspace = true
+aqr-zip = { workspace = true, default-features = true }
+encoding_rs.workspace = true
+getrandom.workspace = true
 # XZ Utils' liblzma (0BSD), built from its source here (not the system's), as a black box
-liblzma = { version = "0.4", default-features = false, features = ["static", "parallel"] }
+liblzma = { workspace = true, features = ["static", "parallel"] }
 zstd = { workspace = true, features = ["zstdmt"] }
 
 [dev-dependencies]
-aqr-unpack = { path = "../aqr-unpack" }
-memmap2 = "0.9"
+aqr-unpack.workspace = true
+memmap2.workspace = true

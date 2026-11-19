@@ -11,18 +11,18 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-common"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common", optional = true }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-aqr-walk = { path = "../../crates/aqr-walk" }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common = { workspace = true, optional = true }
+aqr-formula = { workspace = true, optional = true }
+aqr-walk.workspace = true
 
 # (natively, the threads of `native`)
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-aqr-common = { path = "../../crates/aqr-common" }
+aqr-common.workspace = true
 
 [[example]]
 name = "aqr-ac3-check"
 path = "examples/check.rs"
 
 [dev-dependencies]
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true

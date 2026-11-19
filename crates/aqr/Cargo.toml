@@ -6,36 +6,36 @@ description = "Command-line tools over the aqr-* recompressors and Aqueous archi
 publish = false
 
 [dependencies]
-aqr-common = { path = "../aqr-common", features = ["registry"] }
-aqr-compress = { path = "../aqr-compress" }
-aqr-decompress = { path = "../aqr-decompress" }
-aqr-foreign = { path = "../aqr-foreign" }
-aqr-formula = { path = "../aqr-formula" }
-aqr-archive = { path = "../aqr-archive" }
-aqr-ipc = { path = "../aqr-ipc" }
-aqr-l10n = { path = "../aqr-l10n" }
-aqr-ld = { path = "../aqr-ld" }
-aqr-modules = { path = "../aqr-modules" }
-aqr-pack = { path = "../aqr-pack" }
-aqr-sfx = { path = "../aqr-sfx", features = ["encode", "xz"] }
-aqr-unpack = { path = "../aqr-unpack" }
-memmap2 = "0.9"
-serde_json = "1"
-unicode-normalization = "0.1"
+aqr-common = { workspace = true, features = ["registry"] }
+aqr-compress.workspace = true
+aqr-decompress.workspace = true
+aqr-foreign.workspace = true
+aqr-formula.workspace = true
+aqr-archive.workspace = true
+aqr-ipc.workspace = true
+aqr-l10n.workspace = true
+aqr-ld.workspace = true
+aqr-modules.workspace = true
+aqr-pack.workspace = true
+aqr-sfx = { workspace = true, features = ["encode", "xz"] }
+aqr-unpack.workspace = true
+memmap2.workspace = true
+serde_json.workspace = true
+unicode-normalization.workspace = true
 zstd.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_LibraryLoader"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_LibraryLoader"] }
 
 [dev-dependencies]
-encoding_rs = "0.8"
+encoding_rs.workspace = true
 
 [build-dependencies]
-aqr-version = { path = "../aqr-version" }
-embed-resource = "3"
+aqr-version.workspace = true
+embed-resource.workspace = true
 
 [[bin]]
 name = "aqr"

@@ -11,67 +11,67 @@ wasm = []
 
 # Natively, the library is only the modules built; the recompressors are for the Wasm modules.
 [target.'cfg(target_family = "wasm")'.dependencies]
-aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
-aqr-asar = { path = "../../codecs/aqr-asar", default-features = false }
-aqr-b2t = { path = "../../codecs/aqr-b2t", default-features = false }
-aqr-bundle = { path = "../../codecs/aqr-bundle", default-features = false }
-aqr-bvx = { path = "../../codecs/aqr-bvx", default-features = false }
-aqr-bz2 = { path = "../../codecs/aqr-bz2", default-features = false }
-aqr-clip = { path = "../../codecs/aqr-clip", default-features = false }
-aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
-aqr-arsc = { path = "../../codecs/aqr-arsc", default-features = false }
-aqr-dex = { path = "../../codecs/aqr-dex", default-features = false }
-aqr-dwarf = { path = "../../codecs/aqr-dwarf", default-features = false }
-aqr-pdb = { path = "../../codecs/aqr-pdb", default-features = false }
-aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
-aqr-tensors = { path = "../../codecs/aqr-tensors", default-features = false }
-aqr-gif = { path = "../../codecs/aqr-gif", default-features = false }
-aqr-prores = { path = "../../codecs/aqr-prores", default-features = false }
-aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = false }
-aqr-vorbis = { path = "../../codecs/aqr-vorbis", default-features = false }
-aqr-ogg = { path = "../../codecs/aqr-ogg", default-features = false }
-aqr-ima = { path = "../../codecs/aqr-ima", default-features = false }
-aqr-msadpcm = { path = "../../codecs/aqr-msadpcm", default-features = false }
-aqr-fits = { path = "../../codecs/aqr-fits", default-features = false }
-aqr-hdf5 = { path = "../../codecs/aqr-hdf5", default-features = false }
-aqr-flac = { path = "../../codecs/aqr-flac", default-features = false }
-aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
-aqr-git = { path = "../../codecs/aqr-git", default-features = false }
-aqr-minecraft = { path = "../../codecs/aqr-minecraft", default-features = false }
-aqr-zstd = { path = "../../codecs/aqr-zstd", default-features = false }
-aqr-infer-recs = { path = "../../codecs/aqr-infer-recs", default-features = false }
-aqr-jpeg = { path = "../../codecs/aqr-jpeg", default-features = false }
-aqr-lz4 = { path = "../../codecs/aqr-lz4", default-features = false }
-aqr-bcj = { path = "../../codecs/aqr-bcj", default-features = false }
-aqr-lzma = { path = "../../codecs/aqr-lzma", default-features = false }
-aqr-lzo = { path = "../../codecs/aqr-lzo", default-features = false }
-aqr-azo = { path = "../../codecs/aqr-azo", default-features = false }
-aqr-lha = { path = "../../codecs/aqr-lha", default-features = false }
-aqr-rar = { path = "../../codecs/aqr-rar", default-features = false }
-aqr-lzx = { path = "../../codecs/aqr-lzx", default-features = false }
-aqr-xpress = { path = "../../codecs/aqr-xpress", default-features = false }
-aqr-lznt1 = { path = "../../codecs/aqr-lznt1", default-features = false }
-aqr-mp3 = { path = "../../codecs/aqr-mp3", default-features = false }
-aqr-ac3 = { path = "../../codecs/aqr-ac3", default-features = false }
-aqr-div3 = { path = "../../codecs/aqr-div3", default-features = false }
-aqr-mszip = { path = "../../codecs/aqr-mszip", default-features = false }
-aqr-obj = { path = "../../codecs/aqr-obj", default-features = false }
-aqr-pdf = { path = "../../codecs/aqr-pdf", default-features = false }
-aqr-png = { path = "../../codecs/aqr-png", default-features = false }
-aqr-psd = { path = "../../codecs/aqr-psd", default-features = false }
-aqr-raw = { path = "../../codecs/aqr-raw", default-features = false }
-aqr-snappy = { path = "../../codecs/aqr-snappy", default-features = false }
-aqr-sqlite = { path = "../../codecs/aqr-sqlite", default-features = false }
-aqr-tex = { path = "../../codecs/aqr-tex", default-features = false }
-aqr-wrt = { path = "../../codecs/aqr-wrt", default-features = false }
-aqr-wasm = { path = "../../codecs/aqr-wasm", default-features = false }
-aqr-xsv = { path = "../../codecs/aqr-xsv", default-features = false }
-aqr-jsonl = { path = "../../codecs/aqr-jsonl", default-features = false }
-aqr-log = { path = "../../codecs/aqr-log", default-features = false }
-aqr-zip = { path = "../../codecs/aqr-zip", default-features = false }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-asar.workspace = true
+aqr-b2t.workspace = true
+aqr-bundle.workspace = true
+aqr-bvx.workspace = true
+aqr-bz2.workspace = true
+aqr-clip.workspace = true
+aqr-exe = { workspace = true, features = ["decode"] }
+aqr-arsc.workspace = true
+aqr-dex.workspace = true
+aqr-dwarf.workspace = true
+aqr-pdb.workspace = true
+aqr-fasta.workspace = true
+aqr-tensors.workspace = true
+aqr-gif.workspace = true
+aqr-prores.workspace = true
+aqr-gnu-gettext.workspace = true
+aqr-vorbis.workspace = true
+aqr-ogg.workspace = true
+aqr-ima.workspace = true
+aqr-msadpcm.workspace = true
+aqr-fits.workspace = true
+aqr-hdf5.workspace = true
+aqr-flac.workspace = true
+aqr-flate.workspace = true
+aqr-git.workspace = true
+aqr-minecraft.workspace = true
+aqr-zstd.workspace = true
+aqr-infer-recs.workspace = true
+aqr-jpeg.workspace = true
+aqr-lz4.workspace = true
+aqr-bcj.workspace = true
+aqr-lzma.workspace = true
+aqr-lzo.workspace = true
+aqr-azo.workspace = true
+aqr-lha.workspace = true
+aqr-rar.workspace = true
+aqr-lzx.workspace = true
+aqr-xpress.workspace = true
+aqr-lznt1.workspace = true
+aqr-mp3.workspace = true
+aqr-ac3.workspace = true
+aqr-div3.workspace = true
+aqr-mszip.workspace = true
+aqr-obj.workspace = true
+aqr-pdf.workspace = true
+aqr-png.workspace = true
+aqr-psd.workspace = true
+aqr-raw.workspace = true
+aqr-snappy.workspace = true
+aqr-sqlite.workspace = true
+aqr-tex.workspace = true
+aqr-wrt.workspace = true
+aqr-wasm.workspace = true
+aqr-xsv.workspace = true
+aqr-jsonl.workspace = true
+aqr-log.workspace = true
+aqr-zip.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-sha2 = "0.10"
+sha2 = { workspace = true, default-features = true }
 
 # A binary per module, named after it ('/' as '-').
 

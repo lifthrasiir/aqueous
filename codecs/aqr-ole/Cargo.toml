@@ -6,10 +6,10 @@ description = "OLE compound files (Windows Installer packages, Office 97-2003 an
 publish = false
 
 [dependencies]
-aqr-disk = { path = "../aqr-disk" }
+aqr-disk.workspace = true
 
 [dev-dependencies]
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

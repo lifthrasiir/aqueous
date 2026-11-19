@@ -6,7 +6,7 @@ description = "The frontends' messages (aqr-win, aqr-win-install, aqr-mac) in th
 publish = false
 
 [build-dependencies]
-toml = "1"
+toml.workspace = true
 
 [[bin]]
 name = "aqr-l10n"

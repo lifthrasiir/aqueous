@@ -15,4 +15,4 @@ panic-location = ["panic-handler"]
 alloc = []
 
 [dev-dependencies]
-aqr-formula = { path = "../aqr-formula" }
+aqr-formula.workspace = true

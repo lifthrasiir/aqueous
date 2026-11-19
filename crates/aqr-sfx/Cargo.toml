@@ -6,15 +6,15 @@ description = "The self-extracting apply logic: runs an archive's modules throug
 publish = false
 
 [dependencies]
-aqr-common = { path = "../aqr-common" }
-aqr-api = { path = "../aqr-api", default-features = false }
-aqr-blob = { path = "../aqr-blob", features = ["runner"] }
-aqr-formula = { path = "../aqr-formula" }
-aqr-archive = { path = "../aqr-archive" }
-aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
+aqr-common.workspace = true
+aqr-api.workspace = true
+aqr-blob = { workspace = true, features = ["runner"] }
+aqr-formula.workspace = true
+aqr-archive.workspace = true
+aqr-exe = { workspace = true, features = ["decode"] }
 zstd.workspace = true
 # (XZ Utils' liblzma, as aqr-pack builds it: the pack aqr carries, `xz`)
-liblzma = { version = "0.4", default-features = false, features = ["static"], optional = true }
+liblzma = { workspace = true, features = ["static"], optional = true }
 
 [features]
 # Making bundles of blobs (`bundle::pack`), for aqr; the stub only unpacks them.

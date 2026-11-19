@@ -6,11 +6,11 @@ description = "Inno Setup installers: the LZMA streams of their file data found 
 publish = false
 
 [dependencies]
-aqr-lzma = { path = "../aqr-lzma" }
-crc32fast = "1.5"
+aqr-lzma = { workspace = true, default-features = true }
+crc32fast.workspace = true
 
 [dev-dependencies]
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

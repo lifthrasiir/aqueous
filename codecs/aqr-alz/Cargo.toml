@@ -6,10 +6,10 @@ description = "ALZ archives (ALZip's) taken apart into their files' contents, DE
 publish = false
 
 [dependencies]
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula" }
-aqr-flate = { path = "../aqr-flate" }
-aqr-bz2 = { path = "../aqr-bz2" }
+aqr-common.workspace = true
+aqr-formula.workspace = true
+aqr-flate = { workspace = true, default-features = true }
+aqr-bz2 = { workspace = true, default-features = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
@@ -19,5 +19,5 @@ name = "aqr-alz-check"
 path = "examples/check.rs"
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-archive.workspace = true
+aqr-testkit.workspace = true

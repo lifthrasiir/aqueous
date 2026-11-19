@@ -9,21 +9,21 @@ default = ["encode"]
 encode = ["dep:aqr-formula"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-memchr = "2"
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+memchr.workspace = true
+aqr-formula = { workspace = true, optional = true }
 
 # (in WebAssembly, `par` runs in order on the calling thread)
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-aqr-common = { path = "../../crates/aqr-common", features = ["rayon"] }
-rayon = "1.12.0"
+aqr-common = { workspace = true, features = ["rayon"] }
+rayon.workspace = true
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-archive.workspace = true
 # (the registry of `-Z`, for tests/regress.rs)
-aqr-common = { path = "../../crates/aqr-common", features = ["registry"] }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-common = { workspace = true, features = ["registry"] }
+aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, examples/aqr-jpeg.rs, after the crate),
 # so that names do not collide in the workspace's target directory.

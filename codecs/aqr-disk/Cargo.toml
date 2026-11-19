@@ -6,17 +6,17 @@ description = "Disk images taken apart into the contents of their files and the 
 publish = false
 
 [dependencies]
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula" }
-aqr-lznt1 = { path = "../aqr-lznt1" }
-aqr-lzx = { path = "../aqr-lzx" }
-aqr-xpress = { path = "../aqr-xpress" }
+aqr-common.workspace = true
+aqr-formula.workspace = true
+aqr-lznt1 = { workspace = true, default-features = true }
+aqr-lzx = { workspace = true, default-features = true }
+aqr-xpress = { workspace = true, default-features = true }
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+aqr-archive.workspace = true
+aqr-testkit.workspace = true
+flate2.workspace = true
 # (file systems to read the containers' disks with)
-aqr-ext = { path = "../aqr-ext" }
-aqr-ntfs = { path = "../aqr-ntfs" }
+aqr-ext.workspace = true
+aqr-ntfs.workspace = true
 zstd.workspace = true

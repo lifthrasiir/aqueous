@@ -11,13 +11,13 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:flate2", "dep:zstd", "dep:aqr-sqlite", "aqr-zstd/encode"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-flate = { path = "../aqr-flate", default-features = false }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-aqr-zstd = { path = "../aqr-zstd", default-features = false }
-aqr-sqlite = { path = "../aqr-sqlite", optional = true }
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+aqr-flate.workspace = true
+aqr-formula = { workspace = true, optional = true }
+aqr-zstd.workspace = true
+aqr-sqlite = { workspace = true, default-features = true, optional = true }
+flate2 = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
@@ -29,8 +29,8 @@ path = "src/main.rs"
 required-features = ["encode"]
 
 [dev-dependencies]
-aqr-sqlite = { path = "../aqr-sqlite" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-sqlite = { workspace = true, default-features = true }
+aqr-testkit.workspace = true
 
 [[example]]
 name = "dhcheck"

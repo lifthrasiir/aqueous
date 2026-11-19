@@ -10,8 +10,8 @@ name = "aqr-sfx-shim"
 path = "src/main.rs"
 
 [dependencies]
-aqr-sfx = { path = "../aqr-sfx" }
-aqr-archive = { path = "../aqr-archive" }
+aqr-sfx.workspace = true
+aqr-archive.workspace = true
 
 [dev-dependencies]
-aqr-formula = { path = "../aqr-formula" }
+aqr-formula.workspace = true

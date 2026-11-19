@@ -6,8 +6,8 @@ description = "PPMd var. J files taken apart into their header and their data, w
 publish = false
 
 [dependencies]
-aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-formula.workspace = true
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-archive.workspace = true
+aqr-testkit.workspace = true

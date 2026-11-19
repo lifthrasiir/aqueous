@@ -6,12 +6,12 @@ description = "An installer of aqr.exe and aqr-win.exe for the user, carrying th
 publish = false
 
 [dependencies]
-aqr-l10n = { path = "../aqr-l10n" }
-aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
+aqr-l10n.workspace = true
+aqr-exe = { workspace = true, features = ["decode"] }
 zstd.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
     "Win32_UI_Controls",
@@ -19,9 +19,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [build-dependencies]
-aqr-exe = { path = "../../codecs/aqr-exe" }
-aqr-version = { path = "../aqr-version" }
-embed-resource = "3"
+aqr-exe = { workspace = true, default-features = true }
+aqr-version.workspace = true
+embed-resource.workspace = true
 zstd.workspace = true
 
 [[bin]]

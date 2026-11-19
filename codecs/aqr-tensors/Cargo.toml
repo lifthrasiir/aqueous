@@ -11,11 +11,11 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "dep:aqr-archive"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+aqr-formula = { workspace = true, optional = true }
 # (the size of the archive's blocks, for bounding a formula)
-aqr-archive = { path = "../../crates/aqr-archive", optional = true }
+aqr-archive = { workspace = true, optional = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
@@ -25,7 +25,7 @@ name = "aqr-tensors-bench"
 path = "examples/bench.rs"
 
 [dev-dependencies]
-aqr-formula = { path = "../../crates/aqr-formula" }
-memmap2 = "0.9"
+aqr-formula.workspace = true
+memmap2.workspace = true
 zstd.workspace = true
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true

@@ -11,14 +11,14 @@ default = ["encode"]
 encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-raw/encode"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false, features = ["alloc"] }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
-aqr-flate = { path = "../aqr-flate", default-features = false }
-aqr-raw = { path = "../aqr-raw", default-features = false }
+aqr-api = { workspace = true, features = ["alloc"] }
+aqr-common.workspace = true
+aqr-formula = { workspace = true, optional = true }
+aqr-flate.workspace = true
+aqr-raw.workspace = true
 
 [dev-dependencies]
-aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-archive.workspace = true
 flate-zoo.workspace = true
 
 # flate-zoo's backends that do not work with MSVC (the root Cargo.toml has why).

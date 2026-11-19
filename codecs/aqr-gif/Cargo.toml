@@ -11,9 +11,9 @@ default = ["encode"]
 encode = ["dep:aqr-formula"]
 
 [dependencies]
-aqr-api = { path = "../../crates/aqr-api", default-features = false }
-aqr-common = { path = "../../crates/aqr-common" }
-aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-api.workspace = true
+aqr-common.workspace = true
+aqr-formula = { workspace = true, optional = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
@@ -23,4 +23,4 @@ name = "aqr-gif-check"
 path = "examples/check.rs"
 
 [dev-dependencies]
-aqr-testkit = { path = "../../crates/aqr-testkit" }
+aqr-testkit.workspace = true

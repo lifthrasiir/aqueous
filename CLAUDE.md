@@ -169,7 +169,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   middleware's or tool's (`godot-pck`, `unity-assets`, `unreal-upk`, `wwise-bnk`, `cri-awb`,
   `bethesda-ba2`, …: `packs/mod.rs`'s `packs!`); aqr-compress's `siblings.rs` plans the files of no
   header taken apart by others archived along (a VPK's archives, Unity's `.resS`). `aqr-flate` underlies everything that uses DEFLATE. The workspace
-  takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
+  takes both directories by glob, so a new crate needs no entry in `members`; the versions and
+  paths of the members' dependencies are all in the root's `[workspace.dependencies]` (a crate
+  that others take gets an entry there), the members saying `NAME.workspace = true` (adding
+  `features`, `optional`, or `default-features = true` where the root turns them off).
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
   of slow measurements).
 - flate-zoo (DEFLATE encoders for aqr-flate's training and tests) comes from crates.io: the root

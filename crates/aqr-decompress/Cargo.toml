@@ -16,89 +16,89 @@ sandbox = ["wasm", "aqr-wasmrt/sandbox"]
 wasmtime = ["wasm", "aqr-wasmrt/wasmtime"]
 
 [dependencies]
-aqr-api = { path = "../aqr-api" }
-aqr-common = { path = "../aqr-common" }
-aqr-formula = { path = "../aqr-formula" }
-aqr-archive = { path = "../aqr-archive" }
-aqr-modules = { path = "../aqr-modules" }
-aqr-native = { path = "../aqr-native" }
-aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false }
-sha2 = "0.10"
-aqr-asar = { path = "../../codecs/aqr-asar" }
-aqr-b2t = { path = "../../codecs/aqr-b2t" }
-aqr-bundle = { path = "../../codecs/aqr-bundle" }
-aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
-aqr-flate = { path = "../../codecs/aqr-flate" }
-aqr-arsc = { path = "../../codecs/aqr-arsc" }
-aqr-dex = { path = "../../codecs/aqr-dex" }
-aqr-dwarf = { path = "../../codecs/aqr-dwarf" }
-aqr-pdb = { path = "../../codecs/aqr-pdb" }
-aqr-fasta = { path = "../../codecs/aqr-fasta" }
-aqr-tensors = { path = "../../codecs/aqr-tensors" }
-aqr-wasm = { path = "../../codecs/aqr-wasm" }
-aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
-aqr-vorbis = { path = "../../codecs/aqr-vorbis" }
-aqr-ogg = { path = "../../codecs/aqr-ogg" }
-aqr-ima = { path = "../../codecs/aqr-ima" }
-aqr-msadpcm = { path = "../../codecs/aqr-msadpcm" }
-aqr-fits = { path = "../../codecs/aqr-fits" }
-aqr-hdf5 = { path = "../../codecs/aqr-hdf5" }
-aqr-git = { path = "../../codecs/aqr-git" }
-aqr-minecraft = { path = "../../codecs/aqr-minecraft" }
-aqr-zstd = { path = "../../codecs/aqr-zstd" }
-aqr-flac = { path = "../../codecs/aqr-flac" }
-aqr-jpeg = { path = "../../codecs/aqr-jpeg" }
-aqr-lz4 = { path = "../../codecs/aqr-lz4" }
-aqr-bcj = { path = "../../codecs/aqr-bcj" }
-aqr-lzma = { path = "../../codecs/aqr-lzma" }
-aqr-lzo = { path = "../../codecs/aqr-lzo" }
-aqr-azo = { path = "../../codecs/aqr-azo" }
-aqr-lha = { path = "../../codecs/aqr-lha" }
-aqr-rar = { path = "../../codecs/aqr-rar" }
-aqr-bvx = { path = "../../codecs/aqr-bvx" }
-aqr-bz2 = { path = "../../codecs/aqr-bz2" }
-aqr-gif = { path = "../../codecs/aqr-gif" }
-aqr-prores = { path = "../../codecs/aqr-prores" }
-aqr-lzx = { path = "../../codecs/aqr-lzx" }
-aqr-xpress = { path = "../../codecs/aqr-xpress" }
-aqr-lznt1 = { path = "../../codecs/aqr-lznt1" }
-aqr-mszip = { path = "../../codecs/aqr-mszip" }
-aqr-mp3 = { path = "../../codecs/aqr-mp3" }
-aqr-pdf = { path = "../../codecs/aqr-pdf" }
-aqr-png = { path = "../../codecs/aqr-png" }
-aqr-psd = { path = "../../codecs/aqr-psd" }
-aqr-clip = { path = "../../codecs/aqr-clip" }
-aqr-obj = { path = "../../codecs/aqr-obj" }
-aqr-xsv = { path = "../../codecs/aqr-xsv" }
-aqr-jsonl = { path = "../../codecs/aqr-jsonl" }
-aqr-log = { path = "../../codecs/aqr-log" }
-aqr-raw = { path = "../../codecs/aqr-raw" }
-aqr-infer-recs = { path = "../../codecs/aqr-infer-recs" }
-aqr-ac3 = { path = "../../codecs/aqr-ac3" }
-aqr-walk = { path = "../aqr-walk" }
-aqr-div3 = { path = "../../codecs/aqr-div3" }
-aqr-snappy = { path = "../../codecs/aqr-snappy" }
-aqr-zip = { path = "../../codecs/aqr-zip" }
-aqr-sqlite = { path = "../../codecs/aqr-sqlite" }
-aqr-tex = { path = "../../codecs/aqr-tex" }
-aqr-wrt = { path = "../../codecs/aqr-wrt" }
+aqr-api = { workspace = true, default-features = true }
+aqr-common.workspace = true
+aqr-formula.workspace = true
+aqr-archive.workspace = true
+aqr-modules.workspace = true
+aqr-native.workspace = true
+aqr-wasmrt.workspace = true
+sha2 = { workspace = true, default-features = true }
+aqr-asar = { workspace = true, default-features = true }
+aqr-b2t = { workspace = true, default-features = true }
+aqr-bundle = { workspace = true, default-features = true }
+aqr-exe = { workspace = true, features = ["decode"] }
+aqr-flate = { workspace = true, default-features = true }
+aqr-arsc = { workspace = true, default-features = true }
+aqr-dex = { workspace = true, default-features = true }
+aqr-dwarf = { workspace = true, default-features = true }
+aqr-pdb = { workspace = true, default-features = true }
+aqr-fasta = { workspace = true, default-features = true }
+aqr-tensors = { workspace = true, default-features = true }
+aqr-wasm = { workspace = true, default-features = true }
+aqr-gnu-gettext = { workspace = true, default-features = true }
+aqr-vorbis = { workspace = true, default-features = true }
+aqr-ogg = { workspace = true, default-features = true }
+aqr-ima = { workspace = true, default-features = true }
+aqr-msadpcm = { workspace = true, default-features = true }
+aqr-fits = { workspace = true, default-features = true }
+aqr-hdf5 = { workspace = true, default-features = true }
+aqr-git = { workspace = true, default-features = true }
+aqr-minecraft = { workspace = true, default-features = true }
+aqr-zstd = { workspace = true, default-features = true }
+aqr-flac = { workspace = true, default-features = true }
+aqr-jpeg = { workspace = true, default-features = true }
+aqr-lz4 = { workspace = true, default-features = true }
+aqr-bcj = { workspace = true, default-features = true }
+aqr-lzma = { workspace = true, default-features = true }
+aqr-lzo = { workspace = true, default-features = true }
+aqr-azo = { workspace = true, default-features = true }
+aqr-lha = { workspace = true, default-features = true }
+aqr-rar = { workspace = true, default-features = true }
+aqr-bvx = { workspace = true, default-features = true }
+aqr-bz2 = { workspace = true, default-features = true }
+aqr-gif = { workspace = true, default-features = true }
+aqr-prores = { workspace = true, default-features = true }
+aqr-lzx = { workspace = true, default-features = true }
+aqr-xpress = { workspace = true, default-features = true }
+aqr-lznt1 = { workspace = true, default-features = true }
+aqr-mszip = { workspace = true, default-features = true }
+aqr-mp3 = { workspace = true, default-features = true }
+aqr-pdf = { workspace = true, default-features = true }
+aqr-png = { workspace = true, default-features = true }
+aqr-psd = { workspace = true, default-features = true }
+aqr-clip = { workspace = true, default-features = true }
+aqr-obj = { workspace = true, default-features = true }
+aqr-xsv = { workspace = true, default-features = true }
+aqr-jsonl = { workspace = true, default-features = true }
+aqr-log = { workspace = true, default-features = true }
+aqr-raw = { workspace = true, default-features = true }
+aqr-infer-recs = { workspace = true, default-features = true }
+aqr-ac3 = { workspace = true, default-features = true }
+aqr-walk.workspace = true
+aqr-div3 = { workspace = true, default-features = true }
+aqr-snappy = { workspace = true, default-features = true }
+aqr-zip = { workspace = true, default-features = true }
+aqr-sqlite = { workspace = true, default-features = true }
+aqr-tex = { workspace = true, default-features = true }
+aqr-wrt = { workspace = true, default-features = true }
 
 # (Wasmtime, where the interpreter blob does not run: but on Windows x86-64)
 [target.'cfg(not(all(windows, target_arch = "x86_64")))'.dependencies]
-aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wasmtime"] }
+aqr-wasmrt = { workspace = true, features = ["wasmtime"] }
 
 [dev-dependencies]
 # (the tests run modules by Wasmtime, linked)
-aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wasmtime", "sandbox"] }
-aqr-7z = { path = "../../codecs/aqr-7z" }
-aqr-alz = { path = "../../codecs/aqr-alz" }
-aqr-egg = { path = "../../codecs/aqr-egg" }
-aqr-exe = { path = "../../codecs/aqr-exe" }
-aqr-prores = { path = "../../codecs/aqr-prores", features = ["synth"] }
-aqr-testkit = { path = "../aqr-testkit" }
-wat = "1"
+aqr-wasmrt = { workspace = true, features = ["wasmtime", "sandbox"] }
+aqr-7z.workspace = true
+aqr-alz.workspace = true
+aqr-egg.workspace = true
+aqr-exe = { workspace = true, default-features = true }
+aqr-prores = { workspace = true, default-features = true, features = ["synth"] }
+aqr-testkit.workspace = true
+wat.workspace = true
 # (`.lzma` files for lzma-decode, as aqr-compress's `-Z lzma` makes them)
-liblzma = { version = "0.4", default-features = false, features = ["static", "parallel"] }
+liblzma = { workspace = true, features = ["static", "parallel"] }
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
 # directory.

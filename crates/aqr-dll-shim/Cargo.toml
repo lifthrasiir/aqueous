@@ -6,16 +6,16 @@ description = "Applies the modules built as native libraries (aqr-dll) to applic
 publish = false
 
 [dependencies]
-aqr-api = { path = "../aqr-api", default-features = false }
-aqr-decompress = { path = "../aqr-decompress" }
-aqr-formula = { path = "../aqr-formula" }
-aqr-archive = { path = "../aqr-archive" }
-aqr-modules = { path = "../aqr-modules" }
-sha2 = "0.10"
+aqr-api.workspace = true
+aqr-decompress.workspace = true
+aqr-formula.workspace = true
+aqr-archive.workspace = true
+aqr-modules.workspace = true
+sha2 = { workspace = true, default-features = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
-aqr-blob = { path = "../aqr-blob" }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+aqr-blob.workspace = true

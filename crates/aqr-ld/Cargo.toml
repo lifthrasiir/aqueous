@@ -6,6 +6,7 @@ description = "Linker wrapper turning the aqr_api imports of a Wasm module into 
 publish = false
 
 [dependencies]
-aqr-blob = { path = "../aqr-blob" }
-walrus = "0.27"
+aqr-blob.workspace = true
+walrus.workspace = true
+# walrus's version (the workspace's is newer), so that one copy is built.
 wasmparser = "0.245"
