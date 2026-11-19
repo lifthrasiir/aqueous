@@ -17,6 +17,7 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

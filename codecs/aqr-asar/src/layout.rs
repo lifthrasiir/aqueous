@@ -131,7 +131,10 @@ pub fn build(data: &[u8], header: &[u8], index: &[u8], len: u64) -> Result<Vec<u
     let head: [u8; PREFIX] = *index.get(at..).and_then(|r| r.first_chunk()).ok_or_else(corrupt)?;
     let rest = &index[at + PREFIX..];
 
-    let mut out = Vec::with_capacity(len);
+    // (reserved for what the inputs hold, not the length claimed: the rest grows as it is written)
+    let mut out = Vec::new();
+    out.try_reserve_exact(len.min(data.len().saturating_add(header.len()).saturating_add(index.len())))
+        .map_err(|_| Error("out of memory"))?;
     out.extend_from_slice(&[0; PREFIX]);
     let mut next = bodies.iter();
     // the current body, and its hash where known

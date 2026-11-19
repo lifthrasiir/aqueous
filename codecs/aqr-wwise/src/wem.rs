@@ -61,6 +61,11 @@ pub fn parse(d: &[u8]) -> Result<Wem, Error> {
             _ => {}
         }
         at = r.end;
+        // a chunk of odd size is padded by a byte (RIFF), if what follows reads as a tag
+        let tag_at = |p: usize| d.get(p..p + 4).is_some_and(|t| t.iter().all(|b| (0x20..0x7f).contains(b)));
+        if size & 1 == 1 && !tag_at(at) && tag_at(at + 1) {
+            at += 1;
+        }
     }
     let fmt = fmt.ok_or("no fmt")?;
     let f = &d[fmt.clone()];

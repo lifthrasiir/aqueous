@@ -171,6 +171,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-testkit",
  "sha2",
  "zstd",
 ]
