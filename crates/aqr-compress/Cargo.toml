@@ -89,6 +89,7 @@ libc = "0.2"
 # (the tests run modules by Wasmtime, linked)
 aqr-wasmrt = { path = "../aqr-wasmrt", default-features = false, features = ["wasmtime"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
