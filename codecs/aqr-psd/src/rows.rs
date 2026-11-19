@@ -75,6 +75,11 @@ impl<'a> PlaneRows<'a> {
             Compression::Rle => {
                 let cb = if psb { 4 } else { 2 };
                 let Some(counts) = data.get(..rows * cb) else { return err("RLE counts truncated") };
+                // A row of `w` bytes takes at least `w / 64` of encoded ones (a repeat of 128 in
+                // 2): a width the data cannot hold is no plane, and not a room to make.
+                if (w.div_ceil(64) as u64).saturating_mul(h as u64) > (data.len() - rows * cb) as u64 {
+                    return err("RLE data too short");
+                }
                 let mut pos = rows * cb;
                 for i in 0..plane * h {
                     pos += count(counts, cb, i);

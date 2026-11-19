@@ -22,6 +22,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 # Tools are named <crate>-<tool> (the crate's own one, examples/aqr-psd.rs, after the crate),
 # so that names do not collide in the workspace's target directory.

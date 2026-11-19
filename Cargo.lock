@@ -1664,6 +1664,7 @@ dependencies = [
  "aqr-formula",
  "aqr-jpeg",
  "aqr-png",
+ "aqr-testkit",
  "xxhash-rust",
 ]
 
