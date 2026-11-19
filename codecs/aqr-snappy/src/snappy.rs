@@ -37,7 +37,9 @@ pub fn decode(src: &[u8], max: usize) -> Result<Vec<u8>> {
     if n > max {
         return Err(Error("stream longer than allowed"));
     }
-    let mut out = Vec::with_capacity(n);
+    // (a claimed length is not reserved beyond what the stream can make: a 3-byte copy of 64
+    // bytes is the largest ratio, 22 times)
+    let mut out = Vec::with_capacity(n.min(src.len().saturating_mul(22)));
     while p < src.len() {
         let tag = src[p];
         p += 1;

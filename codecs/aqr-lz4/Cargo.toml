@@ -18,6 +18,7 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 
 [dev-dependencies]
 aqr-archive = { path = "../../crates/aqr-archive" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 zstd.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
