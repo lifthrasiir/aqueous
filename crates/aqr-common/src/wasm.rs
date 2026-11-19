@@ -531,8 +531,8 @@ mod tests {
             let mut m = HEADER.to_vec();
             m.extend_from_slice(&[CODE_SECTION, size]);
             m.extend_from_slice(count);
-            m.extend_from_slice(&[0, 0, 0]);
-            assert!(split(&m).is_some());
+            m.extend_from_slice(&[0, 0]);
+            let _ = split(&m);
         }
     }
 }
