@@ -518,7 +518,12 @@ fn whole<'a>(at: At<'_, '_, 'a>, v: Val) -> Decoded<Whole<'a>> {
     let mut s = at.ev.source(v);
     let Some(first) = s.next(at)? else { return Ok(Whole::Empty) };
     let Some(second) = s.next(at)? else { return Ok(Whole::One(first)) };
-    let mut out = Vec::with_capacity(at.ev.g.len(v) as usize);
+    // (the length the archive tells, reserved where the heap holds it: else a failure, not an abort)
+    let mut out = Vec::new();
+    usize::try_from(at.ev.g.len(v))
+        .ok()
+        .and_then(|n| out.try_reserve_exact(n).ok())
+        .ok_or_else(|| Failure::Resource("a value past the memory".into()))?;
     out.extend_from_slice(&first);
     out.extend_from_slice(&second);
     drop((first, second));

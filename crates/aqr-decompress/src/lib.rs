@@ -684,9 +684,11 @@ pub fn needed_by(
     let windows = windows_of(m);
     let fit = |n: u64, window: Option<u64>| n.div_ceil(PAGE).min(window.unwrap_or(u64::MAX)).saturating_mul(PAGE);
     let window = |output: bool, i: usize| windows.iter().find(|w| (w.0, w.1 as usize) == (output, i)).map(|w| w.2);
-    let imported: u64 = [&[params.len() as u64][..], resources].concat().iter().map(|&n| fit(n, None)).sum::<u64>()
-        + inputs.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))).sum::<u64>()
-        + outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))).sum::<u64>();
+    // (of lengths an archive tells: past 2^64, as much as there is)
+    let imported: u64 = ([&[params.len() as u64][..], resources].concat().iter().map(|&n| fit(n, None)))
+        .chain(inputs.iter().enumerate().map(|(k, &n)| fit(n, window(false, k))))
+        .chain(outputs.iter().enumerate().map(|(j, &n)| fit(n, window(true, j))))
+        .fold(0, u64::saturating_add);
     // (a plan is what the module takes at most: no room)
     Ok(Some(Plan { instance: imported.saturating_add(plan.instance), tasks: plan.tasks }))
 }

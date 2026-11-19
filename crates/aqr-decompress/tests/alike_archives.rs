@@ -4,7 +4,11 @@
 
 #![cfg(feature = "wasm")]
 
+mod common;
+
 use std::time::Duration;
+
+use common::fail_alike;
 
 use aqr_archive::{Encoder, Level};
 use aqr_decompress::{Native, Wasm, wasm_of};
@@ -139,10 +143,10 @@ fn lzx_lying_length() {
     LIES.iter().for_each(|&len| lying_alike("lzx", lzx(), len, false));
 }
 
-/// As WebAssembly, the host allocates the output of the length declared (aqr-wasmrt's
-/// `apply_with`: `vec![0; s]`) and aborts where the system refuses it.
+/// As WebAssembly, the host allocates the outputs of the lengths declared (aqr-wasmrt's
+/// `apply_with`), and the evaluation a value it gathers whole (aqr-archive's `whole`): where the
+/// system refuses them, a failure, not an abort.
 #[test]
-#[ignore = "until aqr-wasmrt refuses an output it cannot allocate"]
 fn lying_lengths_as_wasm() {
     for len in LIES {
         lying_alike("azo", azo(), len, true);
@@ -151,6 +155,7 @@ fn lying_lengths_as_wasm() {
         lying_alike("lzx", lzx(), len, true);
     }
 }
+
 #[test]
 fn alz_alike() {
     for t in ["normal", "bzip2"] {
@@ -250,36 +255,9 @@ fn asar_alike() {
     fail_alike("asar", &f, 8, 8, LIMIT);
 }
 
-/// [`common::fail_alike`]'s check, but with two failures alike whatever their messages (the
-/// helper tells those apart: its `n != w` compares the errors too).
-fn fail_alike(name: &str, f: &Formula, per: usize, head: usize, limit: Duration) {
-    let enc = Encoder::new(Level::Zstd(1)).with_modules(wasm_of);
-    let mut bad = Vec::new();
-    for k in 0..f.streams.len() {
-        let d = f.streams[k].data.to_vec();
-        for x in aqr_testkit::damages(d.len(), per, head) {
-            let mut g = f.clone();
-            g.streams[k].data = x.apply(&d).into();
-            let Ok(c) = enc.encode(&g, None) else { continue };
-            let what = format!("{name}: stream {k} ({}), {x}", f.streams[k].class);
-            let both = || (aqr_archive::decode(&c, &Native::default()), aqr_archive::decode(&c, &Wasm));
-            match aqr_testkit::within(limit, both) {
-                Err(e) => bad.push(format!("{what}: {e}")),
-                Ok((n, w)) if n.is_ok() != w.is_ok() => {
-                    bad.push(format!("{what}: {:?} natively, {:?} as Wasm", n.err(), w.err()))
-                }
-                Ok((Ok(n), Ok(w))) if n != w => bad.push(format!("{what}: other bytes natively and as Wasm")),
-                Ok(_) => {}
-            }
-        }
-    }
-    assert!(bad.is_empty(), "{} cases not alike:\n{}", bad.len(), bad.join("\n"));
-}
-
 /// A length of u64::MAX: the plan of `azo-recons` takes it (its inputs, outputs and plan summed
-/// by `needed_by` overflow: aqr-decompress's lib.rs).
+/// by `needed_by` saturating).
 #[test]
-#[ignore = "until needed_by's sum of the memories saturates (aqr-decompress's lib.rs)"]
 fn lying_length_max() {
     lying_alike("azo", azo(), u64::MAX, false);
     lying_alike("xpress", xpress(), u64::MAX, false);

@@ -1106,8 +1106,12 @@ impl Shared {
     ) -> Decoded<Vec<Vec<u8>>> {
         // (checked, as `apply_into` is, by the caller that is not `apply`: here again, cheaply)
         self.check(params, resources, &lens(inputs), sizes, b.memory_limit, b.task_limits)?;
-        // (zeroed by the system as they are written, as a copy out of the memories would be)
-        let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();
+        // (zeroed by the system as they are written, as a copy out of the memories would be; where
+        // the heap does not hold the sizes declared, a failure of resources, not an abort)
+        let mut outs: Vec<Vec<u8>> = (sizes.iter())
+            .map(|&s| usize::try_from(s).ok().and_then(aqr_common::mem::try_zeroed))
+            .collect::<Option<_>>()
+            .ok_or_else(|| Failure::Resource("outputs past the memory".into()))?;
         let mut bufs: Vec<&mut [u8]> = outs.iter_mut().map(|o| &mut o[..]).collect();
         self.run(params, resources, inputs, &mut bufs, b)?;
         Ok(outs)
