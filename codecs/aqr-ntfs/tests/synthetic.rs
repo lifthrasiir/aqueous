@@ -5,6 +5,7 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 use aqr_archive::Evaluate;
+use std::ops::Range;
 
 const CLUSTER: usize = 4096;
 const RECORD: usize = 1024;
@@ -107,6 +108,12 @@ fn record(base: u64, directory: bool, attrs: &[Vec<u8>]) -> Vec<u8> {
 /// extension record 25; record 19 `a.txt` with a stream `s`; record 20 `init.bin`, initialized to
 /// 5000 of its 8192 bytes. Each cluster of data is filled with its number.
 fn volume() -> Vec<u8> {
+    volume_with(&[(6, 2)], Vec::new())
+}
+
+/// `volume`, the MFT's first record giving its first 24 records as `runs`, and `more` records
+/// (the numbers below 24 are free from 21 on) added.
+fn volume_with(runs: &[(u64, u64)], more: Vec<(usize, Vec<u8>)>) -> Vec<u8> {
     let mut d = vec![0u8; 64 * CLUSTER];
     for (c, chunk) in d.chunks_mut(CLUSTER).enumerate() {
         chunk.fill(c as u8);
@@ -123,7 +130,7 @@ fn volume() -> Vec<u8> {
     b[64] = 0xf6;
     b[510..512].copy_from_slice(&[0x55, 0xaa]);
     let mut records: Vec<(usize, Vec<u8>)> = vec![
-        (0, record(0, false, &[file_name(5, "$MFT"), data("", 0, &[(6, 2)], 32 * RECORD as u64, 32 * RECORD as u64)])),
+        (0, record(0, false, &[file_name(5, "$MFT"), data("", 0, runs, 32 * RECORD as u64, 32 * RECORD as u64)])),
         (5, record(0, true, &[file_name(5, ".")])),
         (16, record(0, true, &[file_name(5, "docs")])),
         (
@@ -139,6 +146,7 @@ fn volume() -> Vec<u8> {
         (20, record(0, false, &[file_name(5, "init.bin"), data("", 0, &[(2, 52)], 8192, 5000)])),
         (25, record(17 | 1 << 48, false, &[data("", 2, &[(1, 34), (2, 40)], 0, 0)])),
     ];
+    records.extend(more);
     for (i, r) in records.drain(..) {
         let at = match i {
             ..24 => 2 * CLUSTER + i * RECORD,
@@ -186,4 +194,47 @@ fn fixups_checked() {
     let files = aqr_ntfs::files(&aqr_disk::Plain(&d));
     assert!(files.iter().all(|f| f.name != b"a.txt:s"));
     assert_eq!(files.len(), 2);
+}
+
+/// The files of `d` by name, with their extents.
+fn found(d: &[u8]) -> Vec<(String, Vec<Range<usize>>)> {
+    let mut files: Vec<_> = aqr_ntfs::files(&aqr_disk::Plain(d))
+        .into_iter()
+        .map(|f| (String::from_utf8(f.name).unwrap(), f.extents))
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+/// The MFT in runs of one cluster each (a fragmented one): the same files.
+#[test]
+fn fragmented_mft() {
+    let mft = [(1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7)];
+    assert_eq!(found(&volume_with(&mft, Vec::new())), found(&volume()));
+}
+
+/// Files whose parents are each other, or themselves, have no path and are not found, and what
+/// else there is is.
+#[test]
+fn parent_cycles() {
+    let one = |parent: u64, name: &str, at: u64| {
+        record(0, false, &[file_name(parent, name), data("", 0, &[(1, at)], 100, 100)])
+    };
+    let more = vec![(21, one(22, "x", 55)), (22, one(21, "y", 56)), (23, one(23, "z", 57))];
+    let files = found(&volume_with(&[(6, 2)], more));
+    let names: Vec<&str> = files.iter().map(|f| &f.0[..]).collect();
+    assert_eq!(names, ["a.txt:s", "docs/big.bin", "init.bin"]);
+}
+
+/// An extension record before its base record: its runs go to the base's file as if after it.
+#[test]
+fn extension_before_base() {
+    let more = vec![
+        (21, record(22 | 1 << 48, false, &[data("", 1, &[(2, 61)], 0, 0)])),
+        (22, record(0, false, &[file_name(5, "ooo.bin"), data("", 0, &[(1, 60)], 3 * 4096 - 10, 3 * 4096 - 10)])),
+    ];
+    let files = found(&volume_with(&[(6, 2)], more));
+    let c = |n: usize| n * CLUSTER;
+    let f = files.iter().find(|f| f.0 == "ooo.bin").expect("ooo.bin");
+    assert_eq!(f.1, [c(60)..c(63) - 10]);
 }

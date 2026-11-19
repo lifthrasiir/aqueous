@@ -436,7 +436,8 @@ pub fn files(d: &dyn Image) -> Vec<File> {
 /// Where the MFT's bytes are: its runs in order, the bytes of each and where they start in the
 /// image (None of a hole).
 struct MftMap {
-    spans: Vec<(u64, Option<u64>)>,
+    /// The first byte of each run in the MFT (increasing, for the search), its bytes and where it starts.
+    spans: Vec<(u64, u64, Option<u64>)>,
     /// The VCN after the last run.
     end: u64,
 }
@@ -445,18 +446,14 @@ impl MftMap {
     fn of(pieces: &[(u64, Vec<Run>)], cluster: u64) -> MftMap {
         let mut pieces: Vec<&(u64, Vec<Run>)> = pieces.iter().collect();
         pieces.sort_by_key(|p| p.0);
-        let mut spans = Vec::new();
-        let mut vcn = 0u64;
+        let mut map = MftMap { spans: Vec::new(), end: 0 };
         for (start, runs) in pieces {
-            if *start != vcn {
+            if *start != map.end {
                 break;
             }
-            for &(n, lcn) in runs {
-                vcn = vcn.saturating_add(n);
-                spans.push((n.saturating_mul(cluster), lcn.and_then(|l| l.checked_mul(cluster))));
-            }
+            map.extend(*start, runs, cluster);
         }
-        MftMap { spans, end: vcn }
+        map
     }
 
     /// The runs of the piece from `vcn` added, where it starts where the runs end.
@@ -465,8 +462,9 @@ impl MftMap {
             return;
         }
         for &(n, lcn) in runs {
+            let start = self.spans.last().map_or(0, |s| s.0.saturating_add(s.1));
             self.end = self.end.saturating_add(n);
-            self.spans.push((n.saturating_mul(cluster), lcn.and_then(|l| l.checked_mul(cluster))));
+            self.spans.push((start, n.saturating_mul(cluster), lcn.and_then(|l| l.checked_mul(cluster))));
         }
     }
 
@@ -474,8 +472,9 @@ impl MftMap {
     fn record(&self, d: &dyn Image, i: usize, len: usize) -> Option<Vec<u8>> {
         let (mut at, mut left) = ((i as u64).checked_mul(len as u64)?, len as u64);
         let mut out = Vec::with_capacity(len);
-        let mut start = 0u64;
-        for &(n, lcn) in &self.spans {
+        // (the runs are searched for the first byte: a fragmented MFT is no square of its records)
+        let first = self.spans.partition_point(|&(start, n, _)| start.saturating_add(n) <= at);
+        for &(start, n, lcn) in &self.spans[first..] {
             if left == 0 {
                 break;
             }
@@ -486,7 +485,6 @@ impl MftMap {
                 out.extend_from_slice(&d.get(a..b)?);
                 (at, left) = (at + take, left - take);
             }
-            start = start.saturating_add(n);
         }
         (left == 0).then_some(out)
     }

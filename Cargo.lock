@@ -1535,6 +1535,7 @@ dependencies = [
  "aqr-decompress",
  "aqr-disk",
  "aqr-formula",
+ "aqr-testkit",
  "zstd",
 ]
 
