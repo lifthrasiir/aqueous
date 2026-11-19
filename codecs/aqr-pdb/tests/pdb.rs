@@ -900,3 +900,49 @@ fn symbols_and_types_damaged() {
         assert!(aqr_testkit::most() < 1 << 28, "{} bytes reserved", aqr_testkit::most());
     });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Big blocks, and a file of everything at once
+
+/// A file of block size `bs` with the type streams (2, 4 and their hash streams 5, 6) and
+/// `n` modules (streams from 7), the DBI naming them.
+fn whole_pdb(bs: usize, n: u32, shuffle: bool) -> Vec<u8> {
+    let (tpi, tpi_hash) = type_streams(&type_records(300), 5, 1, true);
+    let (ipi, ipi_hash) = type_streams(&id_records(700), 6, 1, true);
+    let mods: Vec<Vec<u8>> = (0..n).map(module).collect();
+    let refs: Vec<(u16, usize)> = mods.iter().enumerate().map(|(k, m)| (7 + k as u16, m.len())).collect();
+    let mut streams = vec![
+        Some(vec![0; 60]),
+        Some(b"pdb info".to_vec()),
+        Some(tpi),
+        Some(dbi(&refs)),
+        Some(ipi),
+        Some(tpi_hash),
+        Some(ipi_hash),
+    ];
+    for m in &mods {
+        let mut s = m.clone();
+        s.extend_from_slice(&[0, 0, 0, 0]);
+        streams.push(Some(s));
+    }
+    msf_file(bs, &streams, shuffle, 0x5a)
+}
+
+#[test]
+fn big_blocks_whole_file() {
+    for (bs, shuffle) in [(65536usize, false), (65536, true), (32768, true)] {
+        let d = whole_pdb(bs, 450, shuffle);
+        let f = aqr_pdb::formula::encode(&d, 1).expect("taken");
+        let modules: Vec<_> = f.applies().iter().map(|a| a.module.name).collect();
+        assert_eq!(modules, ["pdb-msf", "pdb-symbols", "pdb-types"], "{bs}");
+        assert_eq!(f.eval(&Native).unwrap(), d, "{bs}");
+    }
+}
+
+#[test]
+fn big_blocks_whole_file_damaged() {
+    let d = whole_pdb(65536, 300, true);
+    // (the first blocks hold the superblock and the directory: damage there and in the streams)
+    aqr_testkit::damaged(&d[..3 * 65536 + 4096], 60, 200, LIMIT, taken_or_not);
+    aqr_testkit::damaged(&d, 12, 40, LIMIT, taken_or_not);
+}

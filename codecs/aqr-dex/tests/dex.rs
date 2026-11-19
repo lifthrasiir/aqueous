@@ -593,3 +593,58 @@ fn damaged_files() {
         });
     }
 }
+
+/// Map items made debug info or encoded array items of counts the file cannot hold (the counts
+/// size the lists of offsets): not taken, or rebuilt bit for bit, reserving little.
+#[test]
+fn lying_item_counts() {
+    for seed in [2, 5] {
+        let d = write(seed, Shape { code_order: true, ..Shape::default() });
+        let map = dex::le32(&d, 0x34).unwrap() as usize;
+        let n = dex::le32(&d, map).unwrap() as usize;
+        for i in 0..n {
+            let at = map + 4 + 12 * i;
+            for ty in [dex::ty::DEBUG_INFO, dex::ty::ENCODED_ARRAY, dex::ty::CODE, dex::ty::TYPE_LIST] {
+                for count in [u32::MAX, 1 << 31, 1 << 24, d.len() as u32 + 1, 0] {
+                    let mut v = d.clone();
+                    v[at..at + 2].copy_from_slice(&ty.to_le_bytes());
+                    v[at + 4..at + 8].copy_from_slice(&count.to_le_bytes());
+                    aqr_testkit::case(&format!("seed {seed} item {i} type {ty:#x} count {count:#x}"));
+                    if let Some(f) = formula::encode(&v, 1) {
+                        assert!(eval(&f).unwrap() == v, "not the file");
+                    }
+                    assert!(aqr_testkit::most() < SMALL, "{} bytes reserved", aqr_testkit::most());
+                }
+            }
+        }
+    }
+}
+
+/// The same counts in the head stream the module decodes from (the items' counts as the encoder
+/// wrote them): an error or a file of the length, reserving little.
+#[test]
+fn lying_item_counts_decoded() {
+    let d = write(3, Shape { code_order: true, data_order: true, ..Shape::default() });
+    let st = encode::split(&d).unwrap();
+    let head = streams(&st)[s::HEAD];
+    let count = dex::le32(head, dex::HEADER + 1).unwrap() as usize;
+    for i in 0..count {
+        let at = dex::HEADER + 5 + 12 * i;
+        for ty in [dex::ty::DEBUG_INFO, dex::ty::ENCODED_ARRAY] {
+            for c in [u32::MAX, 1 << 31, 1 << 24] {
+                let mut h = head.to_vec();
+                h[at..at + 2].copy_from_slice(&ty.to_le_bytes());
+                h[at + 4..at + 8].copy_from_slice(&c.to_le_bytes());
+                let mut ins = streams(&st).iter().map(|x| x.to_vec()).collect::<Vec<_>>();
+                ins[s::HEAD] = h;
+                let packed = dex::pack(&dex::St(ins));
+                let refs: Vec<&[u8]> = packed.iter().map(|v| v.as_slice()).collect();
+                aqr_testkit::case(&format!("head item {i} type {ty:#x} count {c:#x}"));
+                if let Ok(m) = formula::decode(&[], &refs, d.len() as u64) {
+                    assert_eq!(m.len(), d.len());
+                }
+                assert!(aqr_testkit::most() < SMALL, "{} bytes reserved", aqr_testkit::most());
+            }
+        }
+    }
+}

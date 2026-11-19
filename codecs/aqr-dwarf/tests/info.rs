@@ -568,3 +568,80 @@ fn damaged_streams() {
         run(&params, &st, len);
     }
 }
+
+/// A DWARF64 unit (offsets of 8 bytes) of a DIE of the abbreviation 1 and a string offset.
+fn unit64(version: u16, name: u64) -> Vec<u8> {
+    let mut u = vec![0xff; 4];
+    let mut rest = Vec::new();
+    rest.extend_from_slice(&version.to_le_bytes());
+    if version >= 5 {
+        rest.extend_from_slice(&[1, 8]);
+        rest.extend_from_slice(&0u64.to_le_bytes());
+    } else {
+        rest.extend_from_slice(&0u64.to_le_bytes());
+        rest.push(8);
+    }
+    rest.push(1);
+    rest.extend_from_slice(&name.to_le_bytes());
+    u.extend_from_slice(&(rest.len() as u64).to_le_bytes());
+    u.extend(rest);
+    u
+}
+
+/// DWARF64 units are kept as they are (the raw stream holds them whole) among units coded, and
+/// round-trip alone and with others around them.
+#[test]
+fn dwarf64_units_are_kept_raw() {
+    let raw = aqr_dwarf::info::STREAM_NAMES.iter().position(|&n| n == "raw").unwrap();
+    let (strs, _) = strings(4);
+    let abbrev = abbrev_table(&[(1, 0x11, false, &[(NAME, STRP)])]);
+    for version in [3u16, 4, 5] {
+        let big = unit64(version, 3);
+        // (a unit of 32 bits, of version 4, naming string 5 of the same table)
+        let small = unit_v(4, 8, &[1, 5, 0, 0, 0]);
+        for d in [
+            [big.clone(), big.clone()].concat(),
+            [small.clone(), big.clone()].concat(),
+            [big.clone(), small.clone()].concat(),
+            [small.clone(), big.clone(), small.clone()].concat(),
+        ] {
+            let (params, streams) = encode(&d, &abbrev, &strs).expect("taken");
+            let inputs: Vec<&[u8]> =
+                [&abbrev[..], &strs[..]].into_iter().chain(streams.iter().map(|s| &s[..])).collect();
+            assert_eq!(decode(&params, &inputs, d.len() as u64).unwrap(), d, "version {version}");
+            assert!(streams[raw].len() >= big.len(), "version {version}: the 64-bit unit is raw");
+        }
+        // a lone 64-bit unit is taken and kept whole
+        let (params, streams) = encode(&big, &abbrev, &strs).expect("taken as it is");
+        assert_eq!(streams[raw], big, "version {version}");
+        let inputs: Vec<&[u8]> = [&abbrev[..], &strs[..]].into_iter().chain(streams.iter().map(|s| &s[..])).collect();
+        assert_eq!(decode(&params, &inputs, big.len() as u64).unwrap(), big);
+    }
+}
+
+/// Split units (skeleton and split compile and type units of version 5, and the split compile
+/// units of the `.dwo` sections' kind in version 4 that carry no unit type) round-trip, coded or
+/// kept; sections named `.dwo` are not DWARF sections of this crate (kept as the container's).
+#[test]
+fn split_units_round_trip() {
+    let abbrev = abbrev_table(&[(1, 0x11, true, &[(NAME, STRX1)]), (2, 0x34, false, &[(NAME, STRX1)])]);
+    let body = [1, 0, 2, 1, 2, 2, 0];
+    for t in [4u8, 5, 6] {
+        let u = unit5(t, &[0x11; 12][..if t == 6 { 12 } else { 8 }], &body);
+        let d = [u.clone(), u.clone(), u].concat();
+        assert!(invariant(&d, &abbrev, &[]), "unit type {t}");
+    }
+    // version 4 split units: DW_AT_GNU_dwo_id in the unit's DIE, no unit type
+    let abbrev4 = abbrev_table(&[(1, 0x11, false, &[(0x2131, 0x07)])]);
+    let mut u = vec![1];
+    u.extend_from_slice(&0x0123_4567_89ab_cdefu64.to_le_bytes());
+    let u = unit_v(4, 8, &u);
+    let d = [u.clone(), u.clone()].concat();
+    assert!(invariant(&d, &abbrev4, &[]));
+    for name in
+        [&b".debug_info.dwo"[..], b".debug_abbrev.dwo", b".debug_str.dwo", b"__debug_info.dwo", b".debug_cu_index"]
+    {
+        assert!(aqr_dwarf::Section::by_name(name).is_none(), "{}", String::from_utf8_lossy(name));
+    }
+    assert_eq!(aqr_dwarf::Section::by_name(b".debug_info"), Some(aqr_dwarf::Section::Info));
+}
