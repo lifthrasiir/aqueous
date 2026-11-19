@@ -55,6 +55,21 @@ fn u32le(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(at..at + 4)?.try_into().ok()?))
 }
 
+/// Where the contents of the top-level list of type `kind` (`hdrl`, `movi`) start in the RIFF file `d`: its chunks are
+/// walked, so that the type's four letters in a string of the headers are not taken for it (if the walk finds none,
+/// the first place of the four letters).
+fn list_at(d: &[u8], kind: &[u8; 4]) -> Option<usize> {
+    let mut pos = 12;
+    while pos + 12 <= d.len() {
+        let sz = u32le(d, pos + 4)? as usize;
+        if &d[pos..pos + 4] == b"LIST" && &d[pos + 8..pos + 12] == kind {
+            return Some(pos + 12);
+        }
+        pos += 8 + sz + (sz & 1);
+    }
+    Some(d.windows(4).position(|w| w == kind)? + 4)
+}
+
 /// The streams of an AVI file's header list: the index of the first video stream with whether it is DivX 3 and its
 /// width and height (0 where it is not DivX 3), and the index of the first audio stream with its format tag.
 struct Streams {
@@ -68,7 +83,7 @@ fn streams(d: &[u8]) -> Option<Streams> {
     }
     let mut out = Streams { video: None, audio: None };
     let mut index = 0usize;
-    let mut pos = d.windows(4).position(|w| w == b"hdrl")? + 4;
+    let mut pos = list_at(d, b"hdrl")?;
     let end = pos + u32le(d, pos - 8)? as usize;
     // (is video, is DivX 3, is audio) of the stream being read
     let mut cur: Option<(bool, bool, bool)> = None;
@@ -99,7 +114,7 @@ fn streams(d: &[u8]) -> Option<Streams> {
                 Some((true, true, _)) if out.video.is_none() => {
                     let w = u32le(d, pos + 12)? as i32;
                     let h = u32le(d, pos + 16)? as i32;
-                    if w <= 0 || h == 0 || w > 4096 || h.abs() > 4096 {
+                    if w <= 0 || h == 0 || w > 4096 || h.unsigned_abs() > 4096 {
                         return None;
                     }
                     out.video = Some((index, true, w as u16, h.unsigned_abs() as u16));
@@ -137,7 +152,7 @@ pub fn video(d: &[u8]) -> Option<Video> {
     let tag = |i: usize, kind: &[u8; 2]| [b'0' + (i / 10) as u8, b'0' + (i % 10) as u8, kind[0], kind[1]];
     let vtag = tag(vi, b"dc");
     let atag = s.audio.map(|(i, _)| tag(i, b"wb"));
-    let mut pos = d.windows(4).position(|w| w == b"movi")? + 4;
+    let mut pos = list_at(d, b"movi")?;
     let (mut frames, mut audio) = (Vec::new(), Vec::new());
     while pos + 8 <= d.len() {
         let (id, sz) = (&d[pos..pos + 4], u32le(d, pos + 4)? as usize);

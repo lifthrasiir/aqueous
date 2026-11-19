@@ -9,6 +9,10 @@ use aqr_walk::chunks;
 use crate::module::{FRAME_MAX, dims, kept};
 use crate::{Codec, Decoder, Error, Result, SliceSource, corrupt};
 
+/// The most bytes reserved for a chunk's output before it is decoded (the layout's lengths may be anything up to
+/// `FRAME_MAX` for each of its frames).
+const OUT_RESERVE: usize = 64 << 20;
+
 /// The module `div3-recons` on whole inputs, natively: the chunks of frames decoded at once on `threads`, then the file
 /// put together from the skeleton, the frames and the audio.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
@@ -22,6 +26,11 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         let tag = varint::get(layout, &mut pos).map_err(|_| corrupt())?;
         items.push((gap as usize, (tag >> 1) as usize, tag & 1 == 1));
     }
+    // what the layout places is no more than the file (before anything is decoded)
+    let placed = items.iter().try_fold(0u64, |a, &(gap, n, _)| a.checked_add(gap as u64)?.checked_add(n as u64));
+    if placed.is_none_or(|p| p > len) {
+        return Err(corrupt());
+    }
     // the table of chunks (the frames kept: one chunk of them all, as they are)
     let mut pos = 0;
     let kept = kept(params);
@@ -34,6 +43,10 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let mut chunks = Vec::new();
     let mut at = pos;
     for &(frames, bytes) in &table {
+        // (the encoder makes no chunk of no frames or of no bytes, and each starts a model afresh)
+        if frames == 0 || bytes == 0 {
+            return Err(corrupt());
+        }
         let (frames, bytes) = (frames as usize, bytes as usize);
         let l: Vec<usize> = lens.by_ref().take(frames).collect();
         if l.len() != frames || l.iter().any(|&n| n > FRAME_MAX) {
@@ -55,7 +68,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         let (range, l) = &chunks[i];
         let mut codec = Codec::new(w, h);
         let mut rc = Decoder::new(SliceSource::new(&coded[range.clone()]));
-        let mut out = Vec::with_capacity(l.iter().sum());
+        let mut out = Vec::with_capacity(l.iter().sum::<usize>().min(OUT_RESERVE));
         let mut frame = Vec::with_capacity(FRAME_MAX + 8);
         for &n in l {
             frame = codec.decode(&mut rc, n, frame).map_err(|_| corrupt())?;

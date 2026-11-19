@@ -93,6 +93,10 @@ pub fn run(
                     cod.borrow_mut().skip_rest();
                 }
                 let (frames, bytes) = chunks.next().ok_or_else(corrupt)?;
+                // (the encoder makes no chunk of no frames or of no bytes, and each starts a model afresh)
+                if frames == 0 || bytes == 0 {
+                    return Err(corrupt());
+                }
                 cod.borrow_mut().limit(bytes);
                 codec.reset();
                 dec = Some(Decoder::new(&cod));

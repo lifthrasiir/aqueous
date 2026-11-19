@@ -506,6 +506,7 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-mp3",
+ "aqr-testkit",
  "aqr-walk",
 ]
 
