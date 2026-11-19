@@ -90,21 +90,15 @@ pub fn aqr() -> PathBuf {
         return p.into();
     }
     let name = format!("aqr{}", std::env::consts::EXE_SUFFIX);
-    let beside = std::env::current_exe()
-        .ok()
-        .map(|e| e.with_file_name(&name));
-    beside
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| name.into())
+    let beside = std::env::current_exe().ok().map(|e| e.with_file_name(&name));
+    beside.filter(|p| p.is_file()).unwrap_or_else(|| name.into())
 }
 
 /// The archive of several `paths` (of a folder, as a file manager gives them) in `format` (its
 /// extension): named after the folder, in it.
 pub fn archive_of(paths: &[PathBuf], format: &str) -> PathBuf {
     let dir = paths[0].parent().unwrap_or(Path::new("."));
-    let name = dir
-        .file_name()
-        .map_or_else(|| "Archive".into(), |n| n.to_string_lossy().into_owned());
+    let name = dir.file_name().map_or_else(|| "Archive".into(), |n| n.to_string_lossy().into_owned());
     dir.join(format!("{name}.{format}"))
 }
 
@@ -112,13 +106,7 @@ pub fn archive_of(paths: &[PathBuf], format: &str) -> PathBuf {
 /// empty; sorted here) with `--ipc`, its standard streams piped (`-P` where `encrypt`;
 /// compressing, into an archive of `format`, `aqr` or another that `aqr --format` takes); and
 /// the number of archives it makes or decodes.
-pub fn command(
-    aqr: &Path,
-    verb: Verb,
-    mut paths: Vec<PathBuf>,
-    encrypt: bool,
-    format: &str,
-) -> (Command, usize) {
+pub fn command(aqr: &Path, verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool, format: &str) -> (Command, usize) {
     paths.sort();
     let mut cmd = aqr_command(aqr);
     cmd.arg("--ipc").arg(verb.flag());
@@ -147,9 +135,7 @@ pub fn command(
     if let Some(dir) = paths[0].parent().filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     (cmd, count)
 }
 
@@ -172,9 +158,7 @@ pub fn session_command(aqr: &Path, dir: Option<&Path>) -> Command {
     if let Some(dir) = dir.filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
 }
 
@@ -245,11 +229,7 @@ pub fn tag(aqr: &Path, archive: &Path, label: &str) -> Result<String, String> {
 /// The last line of `aqr`'s standard error, without its `aqr: `.
 fn last_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
-    let line = text
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
+    let line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
     line.strip_prefix("aqr: ").unwrap_or(line).to_owned()
 }
 
@@ -257,20 +237,12 @@ fn last_line(stderr: &[u8]) -> String {
 /// its name without the extension, the label in parentheses (the number where it has none); what
 /// a file name cannot hold is `_`.
 pub fn version_folder(archive: &Path, point: &Point) -> PathBuf {
-    let stem = archive
-        .file_stem()
-        .map_or_else(|| "Archive".into(), |s| s.to_string_lossy().into_owned());
+    let stem = archive.file_stem().map_or_else(|| "Archive".into(), |s| s.to_string_lossy().into_owned());
     let label: String = point
         .label
         .trim()
         .chars()
-        .map(|c| {
-            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
-                '_'
-            } else {
-                c
-            }
-        })
+        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
         .collect();
     let label = label.trim_end_matches(['.', ' ']);
     let label = match label.is_empty() {
@@ -284,20 +256,11 @@ pub fn version_folder(archive: &Path, point: &Point) -> PathBuf {
 /// standard streams piped: one archive, as [`command`] has it.
 pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Command, usize) {
     let mut cmd = aqr_command(aqr);
-    cmd.arg("--ipc")
-        .arg("-d")
-        .arg("--at")
-        .arg(format!("#{}", point.number))
-        .arg("-o")
-        .arg(into)
-        .arg("--")
-        .arg(archive);
+    cmd.arg("--ipc").arg("-d").arg("--at").arg(format!("#{}", point.number)).arg("-o").arg(into).arg("--").arg(archive);
     if let Some(dir) = archive.parent().filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     (cmd, 1)
 }
 
@@ -370,11 +333,7 @@ impl State {
     /// The name of the archive at work, as shown: its input, or its output where it has several
     /// inputs; empty before any has begun.
     pub fn name(&self) -> String {
-        let shown = if self.inputs.len() == 1 {
-            self.input()
-        } else {
-            self.output.as_deref()
-        };
+        let shown = if self.inputs.len() == 1 { self.input() } else { self.output.as_deref() };
         shown.map(file_name).unwrap_or_default()
     }
 
@@ -391,12 +350,7 @@ impl State {
         match v["event"].as_str() {
             Some("begin") => {
                 self.begun += 1;
-                self.inputs = v["inputs"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(path)
-                    .collect();
+                self.inputs = v["inputs"].as_array().into_iter().flatten().filter_map(path).collect();
                 self.output = path(&v["output"]);
                 self.since = Some(Instant::now());
                 self.progress = None;
@@ -430,12 +384,7 @@ impl Job {
     /// The job of `aqr` reading `input` (the [`command`] of `verb` making or decoding `count`
     /// archives), told the frontend's hello: it answers both kinds of question ([`ask`]).
     pub fn new(verb: Verb, count: usize, input: Option<ChildStdin>) -> Job {
-        let job = Job {
-            verb,
-            count,
-            state: Mutex::default(),
-            input: Mutex::new(input),
-        };
+        let job = Job { verb, count, state: Mutex::default(), input: Mutex::new(input) };
         job.send(&json!({"hello": VERSION, "answers": [ask::OVERWRITE, ask::PASSPHRASE]}));
         job
     }
@@ -509,39 +458,23 @@ impl Job {
         match self.verb {
             // (the analysis, recompressing, takes the most time mostly)
             Verb::Compress => {
-                let probe = if p["probe"][1].as_u64() == Some(0) {
-                    1.0
-                } else {
-                    done(p, "probe")
-                };
+                let probe = if p["probe"][1].as_u64() == Some(0) { 1.0 } else { done(p, "probe") };
                 0.05 * probe + 0.65 * done(p, "analysis") + 0.3 * done(p, "compression")
             }
-            Verb::Extract | Verb::Test => {
-                0.3 * done(p, "decompressed") + 0.7 * done(p, "evaluated")
-            }
+            Verb::Extract | Verb::Test => 0.3 * done(p, "decompressed") + 0.7 * done(p, "evaluated"),
         }
     }
 }
 
 /// The share done of `k` (`[done, total]`) of `progress` event `p`, 0 where it tells none.
 pub fn done(p: &Value, k: &str) -> f64 {
-    let (done, total) = (
-        p[k][0].as_f64().unwrap_or(0.0),
-        p[k][1].as_f64().unwrap_or(0.0),
-    );
-    if total > 0.0 {
-        (done / total).min(1.0)
-    } else {
-        0.0
-    }
+    let (done, total) = (p[k][0].as_f64().unwrap_or(0.0), p[k][1].as_f64().unwrap_or(0.0));
+    if total > 0.0 { (done / total).min(1.0) } else { 0.0 }
 }
 
 /// The name of the file at `path`, as shown.
 pub fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    )
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// What an `end` event `e` of a test of archive `name` tells (the name too, where `named`).
@@ -551,20 +484,12 @@ fn tested(name: &str, e: &Value, named: bool) -> String {
     let archive = aqr_l10n::size(e["read"].as_u64().unwrap_or(0) as f64);
     let time = aqr_l10n::duration(e["seconds"].as_f64().unwrap_or(0.0), 1);
     let text = aqr_l10n::common::tested(files, bytes, archive, time);
-    if named {
-        aqr_l10n::common::named(name, text)
-    } else {
-        text
-    }
+    if named { aqr_l10n::common::named(name, text) } else { text }
 }
 
 /// What is told of `count` archives (`name` the last, where one) all tested intact.
 fn intact(name: &str, count: usize) -> String {
-    if count == 1 {
-        aqr_l10n::common::intact(name)
-    } else {
-        aqr_l10n::common::all_intact(count as u64)
-    }
+    if count == 1 { aqr_l10n::common::intact(name) } else { aqr_l10n::common::all_intact(count as u64) }
 }
 
 /// What failed of the job, ended with `status` (`None`: unknown), where it did: `aqr`'s error,
@@ -585,11 +510,7 @@ pub enum Outcome {
     Silent,
     /// It failed: what happened, in what `aqr` told of it, and the last lines of its standard
     /// error where it said any.
-    Failed {
-        main: String,
-        text: String,
-        log: Option<String>,
-    },
+    Failed { main: String, text: String, log: Option<String> },
     /// A test found all intact.
     Tested { main: String, text: String },
     /// Done, with nothing to tell.
@@ -598,35 +519,18 @@ pub enum Outcome {
 
 /// The [`Outcome`] of the job whose [`State`] is `s`; `name` is the archive it names in what it
 /// tells.
-pub fn outcome(
-    verb: Verb,
-    count: usize,
-    s: &State,
-    status: Option<std::process::ExitStatus>,
-    name: &str,
-) -> Outcome {
+pub fn outcome(verb: Verb, count: usize, s: &State, status: Option<std::process::ExitStatus>, name: &str) -> Outcome {
     if s.stopped || s.cancelled {
         return Outcome::Silent;
     }
     if let Some(text) = failure(s, status) {
         let log: Vec<&str> = s.log.iter().map(String::as_str).collect();
         let log = log.join("\n");
-        return Outcome::Failed {
-            main: verb.failed(name),
-            text,
-            log: (!log.is_empty()).then_some(log),
-        };
+        return Outcome::Failed { main: verb.failed(name), text, log: (!log.is_empty()).then_some(log) };
     }
     if verb == Verb::Test {
-        let lines: Vec<String> = s
-            .ended
-            .iter()
-            .map(|(n, e)| tested(n, e, count > 1))
-            .collect();
-        return Outcome::Tested {
-            main: intact(name, count),
-            text: lines.join("\n"),
-        };
+        let lines: Vec<String> = s.ended.iter().map(|(n, e)| tested(n, e, count > 1)).collect();
+        return Outcome::Tested { main: intact(name, count), text: lines.join("\n") };
     }
     Outcome::Done
 }
@@ -655,31 +559,16 @@ mod tests {
         assert_eq!(s.name(), "xy.aqr");
         assert_eq!(s.input(), Some(Path::new("x")));
         assert!(s.progress.is_none());
-        s.take(
-            r#"{"event":"inventory","id":4,"files":12,"bytes":300,"walked":false,"done":false}"#,
-        );
+        s.take(r#"{"event":"inventory","id":4,"files":12,"bytes":300,"walked":false,"done":false}"#);
         assert_eq!(
             s.inventory,
-            Some(Inventory {
-                id: 4,
-                files: 12,
-                bytes: 300,
-                walked: false,
-                done: false,
-                error: None
-            })
+            Some(Inventory { id: 4, files: 12, bytes: 300, walked: false, done: false, error: None })
         );
         s.take(r#"{"event":"inventory","id":4,"error":"no way","done":true}"#);
-        assert_eq!(
-            s.inventory.as_ref().unwrap().error.as_deref(),
-            Some("no way")
-        );
+        assert_eq!(s.inventory.as_ref().unwrap().error.as_deref(), Some("no way"));
         assert_eq!(s.ended.len(), 1);
         assert_eq!(s.ended[0].0, "a.aqr");
-        assert_eq!(
-            tested(&s.ended[0].0, &s.ended[0].1, true),
-            "a.aqr: 3 files, 2.0 KB, in 100 B (0.5 s)"
-        );
+        assert_eq!(tested(&s.ended[0].0, &s.ended[0].1, true), "a.aqr: 3 files, 2.0 KB, in 100 B (0.5 s)");
         assert_eq!(s.questions.len(), 1);
         assert_eq!(s.skipped, [PathBuf::from("d/xy.aqr")]);
         assert_eq!(s.error.as_deref(), Some("no"));
@@ -691,39 +580,16 @@ mod tests {
         let points = parse_points(line).unwrap();
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].row(), "#1  2026-11-01 12:00:00  first");
-        assert!(
-            parse_points(r#"{"archive":"a.aqr","points":[]}"#)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(parse_points(r#"{"archive":"a.aqr","points":[]}"#).unwrap().is_empty());
         assert!(parse_points("nothing").is_err() && parse_points("{}").is_err());
         let a = Path::new("d/backup.aqr");
         assert_eq!(version_folder(a, &points[0]), Path::new("d/backup (first)"));
         assert_eq!(version_folder(a, &points[1]), Path::new("d/backup (#2)"));
-        let odd = Point {
-            number: 3,
-            shown: String::new(),
-            label: " a/b:c? 2026. ".into(),
-        };
+        let odd = Point { number: 3, shown: String::new(), label: " a/b:c? 2026. ".into() };
         assert_eq!(version_folder(a, &odd), Path::new("d/backup (a_b_c_ 2026)"));
         let (cmd, count) = command_at(Path::new("aqr"), a, &points[0], Path::new("d/out"));
-        let args: Vec<_> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "--ipc",
-                "-d",
-                "--at",
-                "#1",
-                "-o",
-                "d/out",
-                "--",
-                "d/backup.aqr"
-            ]
-        );
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--ipc", "-d", "--at", "#1", "-o", "d/out", "--", "d/backup.aqr"]);
         assert_eq!(count, 1);
         assert_eq!(
             last_line(
@@ -740,17 +606,12 @@ aqr: not there
     fn share_of_progress() {
         let job = Job::new(Verb::Extract, 1, None);
         assert_eq!(job.share(), 0.0);
-        job.state
-            .lock()
-            .unwrap()
-            .take(r#"{"event":"progress","decompressed":[10,10],"evaluated":[5,10]}"#);
+        job.state.lock().unwrap().take(r#"{"event":"progress","decompressed":[10,10],"evaluated":[5,10]}"#);
         assert!((job.share() - 0.65).abs() < 1e-9);
     }
 
     fn args_of(cmd: &Command) -> Vec<String> {
-        cmd.get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect()
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
@@ -788,64 +649,30 @@ aqr: not there
     fn commands() {
         let a = Path::new("aqr");
         let (cmd, count) = command(a, Verb::Compress, paths(&["d/b", "d/a"]), true, "zip");
-        assert_eq!(
-            args_of(&cmd),
-            [
-                "--ipc", "-c", "-P", "--format", "zip", "-o", "d/d.zip", "--", "d/a", "d/b"
-            ]
-        );
+        assert_eq!(args_of(&cmd), ["--ipc", "-c", "-P", "--format", "zip", "-o", "d/d.zip", "--", "d/a", "d/b"]);
         assert_eq!(count, 1);
         let (cmd, count) = command(a, Verb::Compress, paths(&["d/a"]), false, "aqr");
         assert_eq!(args_of(&cmd), ["--ipc", "-c", "--", "d/a"]);
         assert_eq!(count, 1);
         let (cmd, count) = command(a, Verb::Extract, paths(&["x.aqr", "y.aqr"]), false, "aqr");
-        assert_eq!(
-            args_of(&cmd),
-            [
-                "--ipc",
-                "-d",
-                "--each",
-                "--auto-dir",
-                "--",
-                "x.aqr",
-                "y.aqr"
-            ]
-        );
+        assert_eq!(args_of(&cmd), ["--ipc", "-d", "--each", "--auto-dir", "--", "x.aqr", "y.aqr"]);
         assert_eq!(count, 2);
         let (cmd, count) = command(a, Verb::Test, paths(&["x.aqr"]), false, "aqr");
         assert_eq!(args_of(&cmd), ["--ipc", "-K", "--each", "--", "x.aqr"]);
         assert_eq!(count, 1);
         // the folder is the name of the archive of several; none: "Archive"
-        assert_eq!(
-            archive_of(&paths(&["/p/q/a", "/p/q/b"]), "aqr"),
-            Path::new("/p/q/q.aqr")
-        );
+        assert_eq!(archive_of(&paths(&["/p/q/a", "/p/q/b"]), "aqr"), Path::new("/p/q/q.aqr"));
         assert_eq!(archive_of(&paths(&["/a"]), "7z"), Path::new("/Archive.7z"));
         let cmd = session_command(a, None);
         assert_eq!(args_of(&cmd), ["--session"]);
         assert!(cmd.get_current_dir().is_none());
         let dir = std::env::temp_dir();
-        assert_eq!(
-            session_command(a, Some(&dir)).get_current_dir(),
-            Some(dir.as_path())
-        );
-        assert!(
-            session_command(a, Some(Path::new("/no/such/dir")))
-                .get_current_dir()
-                .is_none()
-        );
+        assert_eq!(session_command(a, Some(&dir)).get_current_dir(), Some(dir.as_path()));
+        assert!(session_command(a, Some(Path::new("/no/such/dir"))).get_current_dir().is_none());
         let (cmd, _) = command(a, Verb::Test, vec![dir.join("x.aqr")], false, "aqr");
         assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
-        let (cmd, _) = command_at(
-            a,
-            &dir.join("x.aqr"),
-            &Point {
-                number: 2,
-                shown: String::new(),
-                label: String::new(),
-            },
-            &dir,
-        );
+        let (cmd, _) =
+            command_at(a, &dir.join("x.aqr"), &Point { number: 2, shown: String::new(), label: String::new() }, &dir);
         assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
     }
 
@@ -878,31 +705,14 @@ aqr: not there
 esac"#,
         );
         let got = points(&ok, Path::new("x.aqr")).unwrap();
-        assert_eq!(
-            got,
-            [Point {
-                number: 1,
-                shown: "t".into(),
-                label: "l".into()
-            }]
-        );
+        assert_eq!(got, [Point { number: 1, shown: "t".into(), label: "l".into() }]);
         assert_eq!(tag(&ok, Path::new("x.aqr"), "v1").unwrap(), "tagged v1");
         let bad = fake_aqr(&d, "echo 'aqr: no such archive' >&2; exit 2");
-        assert_eq!(
-            points(&bad, Path::new("x.aqr")).unwrap_err(),
-            "no such archive"
-        );
-        assert_eq!(
-            tag(&bad, Path::new("x.aqr"), "v1").unwrap_err(),
-            "no such archive"
-        );
+        assert_eq!(points(&bad, Path::new("x.aqr")).unwrap_err(), "no such archive");
+        assert_eq!(tag(&bad, Path::new("x.aqr"), "v1").unwrap_err(), "no such archive");
         // not run at all
         let gone = d.join("nothing-here");
-        assert!(
-            points(&gone, Path::new("x.aqr"))
-                .unwrap_err()
-                .contains("nothing-here")
-        );
+        assert!(points(&gone, Path::new("x.aqr")).unwrap_err().contains("nothing-here"));
         assert!(tag(&gone, Path::new("x.aqr"), "v1").is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -952,19 +762,10 @@ esac"#,
         job.finish();
         job.close();
         child.wait().unwrap();
-        let lines: Vec<Value> = std::fs::read_to_string(&out)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(
-            lines[0],
-            json!({"hello": VERSION, "answers": ["overwrite", "passphrase"]})
-        );
-        assert_eq!(
-            lines[1],
-            json!({"control": "inventory", "id": 7, "args": ["x"]})
-        );
+        let lines: Vec<Value> =
+            std::fs::read_to_string(&out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines[0], json!({"hello": VERSION, "answers": ["overwrite", "passphrase"]}));
+        assert_eq!(lines[1], json!({"control": "inventory", "id": 7, "args": ["x"]}));
         assert_eq!(lines[2], json!({"control": "begin", "args": ["-c"]}));
         assert_eq!(lines[3], json!({"answer": 3, "value": "pw"}));
         assert_eq!(lines[4], json!({"control": CANCEL}));
@@ -986,11 +787,7 @@ esac"#,
 
     #[cfg(unix)]
     fn status(code: i32) -> std::process::ExitStatus {
-        Command::new("sh")
-            .arg("-c")
-            .arg(format!("exit {code}"))
-            .status()
-            .unwrap()
+        Command::new("sh").arg("-c").arg(format!("exit {code}")).status().unwrap()
     }
 
     #[cfg(unix)]
@@ -998,10 +795,7 @@ esac"#,
     fn outcomes() {
         let mut s = State::default();
         // a success of a compression: nothing to tell
-        assert!(matches!(
-            outcome(Verb::Compress, 1, &s, Some(status(0)), "a"),
-            Outcome::Done
-        ));
+        assert!(matches!(outcome(Verb::Compress, 1, &s, Some(status(0)), "a"), Outcome::Done));
         // not ended at all, and ended badly (with the log)
         match outcome(Verb::Compress, 1, &s, None, "a") {
             Outcome::Failed { main, text, log } => {
@@ -1027,22 +821,13 @@ esac"#,
             _ => panic!("not failed"),
         }
         s.stopped = true;
-        assert!(matches!(
-            outcome(Verb::Extract, 1, &s, None, "a"),
-            Outcome::Silent
-        ));
+        assert!(matches!(outcome(Verb::Extract, 1, &s, None, "a"), Outcome::Silent));
         s.stopped = false;
         s.cancelled = true;
-        assert!(matches!(
-            outcome(Verb::Extract, 1, &s, None, "a"),
-            Outcome::Silent
-        ));
+        assert!(matches!(outcome(Verb::Extract, 1, &s, None, "a"), Outcome::Silent));
         // tests all intact: one archive named, or counted, with a line each
         let mut s = State::default();
-        s.ended.push((
-            "a.aqr".into(),
-            json!({"files": 1, "read": 10, "written": 20, "seconds": 1.0}),
-        ));
+        s.ended.push(("a.aqr".into(), json!({"files": 1, "read": 10, "written": 20, "seconds": 1.0})));
         match outcome(Verb::Test, 1, &s, Some(status(0)), "a.aqr") {
             Outcome::Tested { main, text } => {
                 assert_eq!(main, aqr_l10n::common::intact("a.aqr"));
