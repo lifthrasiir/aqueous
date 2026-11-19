@@ -8,6 +8,8 @@ use aqr_bundle::packs::{self, Pack};
 use aqr_formula::{Formula, Kind};
 use aqr_testkit::Refusing;
 
+pub const LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[global_allocator]
 static ALLOC: Refusing = Refusing(1 << 30);
 
@@ -175,4 +177,13 @@ pub fn wad(magic: &[u8; 4], lumps: &[(&str, &[u8])]) -> Vec<u8> {
     out.extend(data);
     out.extend(dir);
     out
+}
+
+/// `check` of `pack` on `d` damaged in every way `aqr_testkit::damages` lists (`per` places for
+/// each way, the first `head` bytes all): each must end in a read that is right, or none.
+pub fn damaged_pack(pack: Pack, d: &[u8], per: usize, head: usize) {
+    assert!(check(pack, d), "{} reads its valid pack", pack.name());
+    aqr_testkit::damaged(d, per, head, LIMIT, |v| {
+        check(pack, v);
+    });
 }

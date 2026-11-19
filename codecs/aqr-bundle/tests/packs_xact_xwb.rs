@@ -1,3 +1,5 @@
+mod common;
+
 use aqr_archive::Evaluate;
 use aqr_bundle::packs::xact_xwb::{files, starts};
 
@@ -127,4 +129,18 @@ fn adpcm_waves() {
     assert!(f.streams[1].class == "xact-xwb/rest");
     let pcm = [Wave { format: 1 << 2 | 44100 << 5, data: noise(1000) }];
     assert!(encode_with(&bank(&pcm, None, 4), |_| aqr_formula::Kind::Unknown).is_none());
+}
+
+#[test]
+fn damaged_banks() {
+    use aqr_bundle::packs::Pack;
+    let waves = vec![
+        Wave { format: 0, data: vec![1; 100] },
+        Wave { format: 2, data: vec![2; 37] },
+        Wave { format: 3, data: vec![3; 64] },
+        Wave { format: 1, data: vec![4; 5] },
+    ];
+    for (compact, align) in [(None, 4), (Some(1), 16)] {
+        common::damaged_pack(Pack::XactXwb, &bank(&waves, compact, align), 80, 200);
+    }
 }

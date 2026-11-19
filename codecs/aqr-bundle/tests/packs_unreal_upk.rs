@@ -1,5 +1,7 @@
 //! unreal_upk on packages written here from the format's description.
 
+mod common;
+
 use aqr_bundle::packs::unreal_upk::{files, starts};
 use aqr_disk::Compressed;
 
@@ -335,4 +337,23 @@ fn lzo_blocks_of_chunks() {
     zlib.extend_from_slice(&chunk(0x20000, &[(lzo, 0x400)]));
     assert_eq!(lzo_blocks(&zlib), None);
     assert_eq!(lzo_blocks(&package(868).0), None);
+}
+
+#[test]
+fn damaged_packages() {
+    for version in [500, 623, 868, 893] {
+        common::damaged_pack(aqr_bundle::packs::Pack::UnrealUpk, &package(version).0, 100, 400);
+    }
+    let zlib: &[u8] = &[0x78, 0x9c, 3, 0, 0, 0, 0, 1];
+    let chunks = [chunk(0x20000, &[(zlib, 0x20000), (zlib, 100)]), chunk(0x20000, &[(zlib, 0x400)])];
+    let c = |k: usize, at: usize| [0x100 * k as i32, 0x20000, at as i32, chunks[k].len() as i32];
+    let (mut d, s) = summary(868, 1, &[c(0, 0), c(1, 0)]);
+    let first = d.len() + 8;
+    put(&mut d, s.chunks + 8, first);
+    put(&mut d, s.chunks + 24, first + chunks[0].len());
+    d.extend_from_slice(&[0; 8]);
+    for c in &chunks {
+        d.extend_from_slice(c);
+    }
+    common::damaged_pack(aqr_bundle::packs::Pack::UnrealUpk, &d, 100, 400);
 }

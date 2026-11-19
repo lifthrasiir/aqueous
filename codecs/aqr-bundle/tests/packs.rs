@@ -310,3 +310,15 @@ fn not_packs() {
     }
     assert_eq!(packs::detect(b"GDPC\x09\0\0\0 not a pack"), None);
 }
+
+/// Unity's bundles and Unreal's paks damaged anywhere in their headers and directories.
+#[test]
+fn damaged_bundles_and_paks() {
+    let c = contents();
+    for lz4 in [false, true] {
+        common::damaged_pack(Pack::UnityBundle, &unity(&c, lz4), 60, 160);
+    }
+    for version in [3, 8, 11] {
+        common::damaged_pack(Pack::UnrealPak, &unreal(version, &c), 60, 120);
+    }
+}

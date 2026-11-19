@@ -1,5 +1,7 @@
 //! Packs written from the formats' descriptions: AFS2, ACB (@UTF), CPK, AFS.
 
+mod common;
+
 use aqr_bundle::packs::*;
 
 // ---- builders
@@ -502,4 +504,16 @@ fn damaged_packs_do_not_panic() {
             }
         }
     }
+}
+
+/// Every CRI reader's pack damaged anywhere in its tables, and the formula still rebuilding what
+/// is read.
+#[test]
+fn damaged_packs_rebuild() {
+    let awb = afs2(&[(0, hca(40)), (1, hca(9))], 4, 4, 0x20);
+    common::damaged_pack(Pack::CriAcb, &acb(awb.clone()), 60, 400);
+    common::damaged_pack(Pack::CriAwb, &awb, 60, 200);
+    common::damaged_pack(Pack::CriCpk, &cpk(&items(), true, false), 60, 400);
+    common::damaged_pack(Pack::CriCpk, &cpk(&items(), false, true), 60, 400);
+    common::damaged_pack(Pack::CriAfs, &afs(&[hca(50), b"data".to_vec()], Some(&["a", "b"])), 60, 200);
 }

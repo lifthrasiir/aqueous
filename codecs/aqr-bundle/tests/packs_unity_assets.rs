@@ -1,3 +1,5 @@
+mod common;
+
 use aqr_archive::Evaluate;
 use aqr_bundle::packs::unity_assets::{files, starts};
 
@@ -400,4 +402,23 @@ fn streamed_offset_overflow() {
     };
     assert_eq!(streamed(&wide(100, 0), b"a.resS").len(), 1);
     assert!(streamed(&wide(u32::MAX - 5, u32::MAX), b"a.resS").is_empty());
+}
+
+/// Serialized files and the bundle of one, damaged anywhere in their metadata.
+#[test]
+fn damaged_files_and_bundles() {
+    use aqr_bundle::packs::Pack;
+    for (v, big, trees) in [(9, false, true), (17, false, true), (21, false, false), (22, true, true)] {
+        let (b, _) = build(v, big, trees, OBJECTS);
+        common::damaged_pack(Pack::UnityAssets, &b, 60, 300);
+    }
+    let blocks = bc1(64, 32, 7);
+    let n = blocks.len() as u32;
+    let path = "archive:/CAB-0123/CAB-0123.resS";
+    let obj = texture2d(64, 32, 10, 7, n, &[], Some((16, n, path)));
+    let (cab, _) = build(21, false, true, &[(1, 1, b"GameObject"), (2, 28, &obj)]);
+    let mut ress = vec![0x44u8; 16];
+    ress.extend(&blocks);
+    let d = bundle(&[("CAB-0123", &cab), ("CAB-0123.resS", &ress)]);
+    common::damaged_pack(Pack::UnityBundle, &d, 60, 400);
 }

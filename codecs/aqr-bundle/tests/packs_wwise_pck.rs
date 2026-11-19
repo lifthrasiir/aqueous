@@ -1,3 +1,5 @@
+mod common;
+
 use aqr_bundle::packs::wwise_pck::{files, starts};
 
 fn u(n: usize) -> [u8; 4] {
@@ -129,4 +131,15 @@ fn truncated_and_foreign() {
     }
     assert!(files(b"AKPK").is_none());
     assert!(files(&[0; 200]).is_none());
+}
+
+#[test]
+fn damaged_packages() {
+    use aqr_bundle::packs::Pack;
+    let banks = [e(1, 1, 30, 0), e(2, 16, 50, 0)];
+    let sounds = [e(100, 2048, 70, 0), e(100, 2048, 90, 1), e(101, 1, 3, 9)];
+    let ext = [e(1 << 40, 4, 12, 0)];
+    for externals in [None, Some(&ext[..])] {
+        common::damaged_pack(Pack::WwisePck, &package(&banks, &sounds, externals), 80, 200);
+    }
 }

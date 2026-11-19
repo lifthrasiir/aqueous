@@ -1,6 +1,8 @@
 //! xna_xnb on files written here from XNA's content format: textures (Color and DXT1, with
 //! mipmaps), a sprite font's texture, a sound's samples; their formulas given back.
 
+mod common;
+
 use aqr_archive::Evaluate;
 use aqr_bundle::packs::unity_assets::{Pixels, Raw};
 use aqr_bundle::packs::xna_xnb::{Asset, asset, encode_with, files, starts};
@@ -124,4 +126,14 @@ fn not_taken() {
     }
     d[5] |= 0x80;
     assert!(asset(&d).is_none());
+}
+
+#[test]
+fn damaged_files() {
+    let mut o = vec![1];
+    o.extend(texture(0, 64, 32, &[64 * 32 * 4, 32 * 16 * 4, 16 * 8 * 4]));
+    common::damaged_pack(aqr_bundle::packs::Pack::XnaXnb, &xnb(&["Texture2DReader"], &o), 100, 200);
+    let mut o = vec![1];
+    o.extend(texture(4, 30, 18, &[8 * 5 * 8, 4 * 3 * 8]));
+    common::damaged_pack(aqr_bundle::packs::Pack::XnaXnb, &xnb(&["Texture2DReader"], &o), 100, 200);
 }

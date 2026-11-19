@@ -1,3 +1,5 @@
+mod common;
+
 use aqr_bundle::packs::kirikiri_xp3::{files, starts};
 
 const MAGIC: &[u8; 11] = b"XP3\r\n \n\x1a\x8b\x67\x01";
@@ -123,4 +125,11 @@ fn cut_and_not_a_pack() {
     }
     assert!(!starts(b"junk"));
     assert!(files(b"junk").is_none());
+}
+
+#[test]
+fn damaged_archives() {
+    for (z, cushion) in [(false, false), (true, true)] {
+        common::damaged_pack(aqr_bundle::packs::Pack::KirikiriXp3, &pack(z, cushion), 80, 200);
+    }
 }

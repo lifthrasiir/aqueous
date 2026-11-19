@@ -1,3 +1,5 @@
+mod common;
+
 use aqr_bundle::packs::sony_psarc::{files, starts};
 use aqr_disk::Compressed;
 
@@ -121,4 +123,24 @@ fn cut_and_not_a_pack() {
     }
     assert!(!starts(b"junk"));
     assert!(files(b"junk").is_none());
+}
+
+#[test]
+fn damaged_archives() {
+    let big: Vec<u8> = (0..300).map(|i| i as u8).collect();
+    let manifest = b"/dir/a.bin
+
+b.txt
+c.dat
+";
+    for (method, block) in [(b"zlib", 128), (b"lzma", 65536)] {
+        let m = if method == b"zlib" {
+            F { size: manifest.len() as u64, blocks: vec![zlib_stored(manifest)] }
+        } else {
+            stored(manifest, block)
+        };
+        let fs =
+            [m, stored(&big, block), F { size: 5, blocks: vec![zlib_stored(b"hello")] }, F { size: 0, blocks: vec![] }];
+        common::damaged_pack(aqr_bundle::packs::Pack::SonyPsarc, &pack(method, block, &fs), 80, 200);
+    }
 }

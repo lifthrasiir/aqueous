@@ -1,3 +1,5 @@
+mod common;
+
 use aqr_bundle::packs::renpy_rpa::{files, starts};
 
 pub fn zlib_stored(data: &[u8]) -> Vec<u8> {
@@ -133,4 +135,13 @@ fn cut_and_not_a_pack() {
     v.resize(32, 0);
     v.extend_from_slice(&zlib_stored(b"\x80\x02N."));
     assert!(files(&v).is_none());
+}
+
+#[test]
+fn damaged_archives() {
+    let items: [(&str, &[u8], Option<&str>); 3] =
+        [("images/a.png", b"\x89PNG....", None), ("script.rpyc", b"RENPY RPC2", Some("pre")), ("b.ogg", b"OggS", None)];
+    for (key, py3) in [(Some(0x42424242), false), (Some(0x1234567), true), (None, true)] {
+        common::damaged_pack(aqr_bundle::packs::Pack::RenpyRpa, &pack(&items, key, py3), 80, 200);
+    }
 }
