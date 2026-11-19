@@ -30,6 +30,7 @@ required-features = ["encode"]
 
 [dev-dependencies]
 aqr-sqlite = { path = "../aqr-sqlite" }
+aqr-testkit = { path = "../../crates/aqr-testkit" }
 
 [[example]]
 name = "dhcheck"

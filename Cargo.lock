@@ -1347,6 +1347,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-sqlite",
+ "aqr-testkit",
  "aqr-zstd",
  "flate2",
  "zstd",
