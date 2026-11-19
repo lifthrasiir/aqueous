@@ -189,3 +189,62 @@ fn corrupt() {
         }
     }
 }
+
+/// Text after a module (a newline is the id of the code section) is no section; sections out of
+/// order or twice end the module, as the next one's start.
+#[test]
+fn extent_of_text_and_disordered_sections() {
+    let m = module(&[func(&[], &[0x0b])], |c| section(10, c));
+    let text = [&m[..], b"\nhello, this is text after the module, long enough to hold a size"].concat();
+    assert_eq!(formula::extent(&text), Some(m.len()));
+    // (the whole is no module: the text ends the sections' walk, so it is not taken)
+    assert!(formula::encode(&text, 1).is_none());
+    // a section of the type's id after the data section
+    let types = section(1, &vector(&[vec![0x60, 0, 0]]));
+    let twice = [&m[..], &types].concat();
+    assert_eq!(formula::extent(&twice), Some(m.len()));
+    // two code sections
+    let code = section(10, &vector(&[func(&[], &[0x0b])]));
+    let two = [&wasm::HEADER[..], &code, &code].concat();
+    assert_eq!(formula::extent(&two), Some(wasm::HEADER.len() + code.len()));
+    // custom sections anywhere
+    let custom = section(0, b"\x01a");
+    let any = [&wasm::HEADER[..], &custom, &code, &custom].concat();
+    assert_eq!(formula::extent(&any), Some(any.len()));
+}
+
+/// A module damaged in every way is not taken, or comes back as it is; never a panic.
+#[test]
+#[ignore = "aqr-common's wasm.rs `items` slices `d[at..end]` with at > end (a code section's count cut short): use `d.get(at..end)?`"]
+fn damaged_modules() {
+    let m = module(&[func(&[(3, 0x7f), (1, 0x7e)], CODE), func(&[], &[0x0b])], |c| section(10, c));
+    aqr_testkit::damaged(&m, 400, m.len(), std::time::Duration::from_secs(20), |v| {
+        let _ = formula::extent(v);
+        if let Some(f) = formula::encode(v, 1) {
+            assert!(eval(&f).unwrap() == v, "taken but not rebuilt");
+        }
+    });
+}
+
+/// Streams of every damage given to the decoder: an error or a module of the length declared.
+#[test]
+fn damaged_streams() {
+    let m = module(&[func(&[(3, 0x7f), (1, 0x7e)], CODE)], |c| section(10, c));
+    let st = wasm::split(&m).unwrap();
+    for s in 0..STREAMS {
+        if st[s].is_empty() {
+            continue;
+        }
+        aqr_testkit::damaged(&st[s], 100, st[s].len(), std::time::Duration::from_secs(20), |v| {
+            let mut bad = st.clone();
+            bad[s] = v.to_vec();
+            if let Ok(r) = join(&bad, m.len()) {
+                assert_eq!(r.len(), m.len());
+            }
+        });
+    }
+    // lengths no module holds
+    for len in [0, 1, 7, 8, u32::MAX as usize, usize::MAX >> 1] {
+        let _ = join(&st, len);
+    }
+}

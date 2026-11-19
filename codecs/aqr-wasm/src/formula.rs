@@ -21,18 +21,30 @@ pub fn starts(d: &[u8]) -> bool {
 }
 
 /// The bytes of the Wasm module at the start of `d` (found in other data): its sections while
-/// their ids are those of the binary format (to 13, the tag section) and they end within `d`.
+/// their ids are those of the binary format (to 13, the tag section), in the order the format
+/// gives (custom sections anywhere) and each once, and they end within `d`.
 pub fn extent(d: &[u8]) -> Option<usize> {
     if !starts(d) {
         return None;
     }
+    // (the place of each id in the order: the tag section (13) comes after memory, the data
+    // count (12) before code)
+    const ORDER: [u8; 14] = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 11, 6];
     let mut at = wasm::HEADER.len();
-    while d.get(at).is_some_and(|&id| id <= 13) {
+    let mut last = 0;
+    while let Some(&id) = d.get(at).filter(|&&id| id <= 13) {
+        let rank = ORDER[id as usize];
+        if id != 0 && rank <= last {
+            break;
+        }
         let mut p = at + 1;
         let Ok(size) = aqr_common::varint::get(d, &mut p) else { break };
         match usize::try_from(size).ok().and_then(|n| p.checked_add(n)).filter(|&e| e <= d.len() && p - at <= 6) {
             Some(end) => at = end,
             None => break,
+        }
+        if id != 0 {
+            last = rank;
         }
     }
     Some(at)
