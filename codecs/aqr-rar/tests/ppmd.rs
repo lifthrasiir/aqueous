@@ -397,8 +397,9 @@ fn rar_fixtures() {
 
 /// Every archive in `$AQR_RAR_PPMD_DIR` (made with `rar a -ma4 -mc<order>:<MB>t+`), if set.
 #[test]
+#[ignore = "needs AQR_RAR_PPMD_DIR, a directory of archives"]
 fn rar_more() {
-    let Some(dir) = std::env::var_os("AQR_RAR_PPMD_DIR") else { return };
+    let dir = std::env::var_os("AQR_RAR_PPMD_DIR").expect("AQR_RAR_PPMD_DIR");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
     paths.retain(|p| p.extension().is_some_and(|x| x == "rar"));
     paths.sort();

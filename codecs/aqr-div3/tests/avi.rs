@@ -59,8 +59,9 @@ fn avi_of(handler: &[u8; 4], tag: u16, w: u32, h: u32, frames: &[&[u8]], sound: 
 }
 
 #[test]
+#[ignore = "needs AQR_DIV3_AVI, a DivX 3 AVI"]
 fn roundtrip_real_frames() {
-    let Ok(path) = std::env::var("AQR_DIV3_AVI") else { return };
+    let path = std::env::var("AQR_DIV3_AVI").expect("AQR_DIV3_AVI");
     let src = std::fs::read(path).unwrap();
     let v = formula::video(&src).expect("a DivX 3 AVI");
     let frames: Vec<&[u8]> = v.frames.iter().take(300).map(|r| &src[r.clone()]).collect();

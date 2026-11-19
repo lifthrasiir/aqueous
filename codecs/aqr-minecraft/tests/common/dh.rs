@@ -60,9 +60,8 @@ fn sections_of(cols: Vec<Vec<Point>>, seed: &mut u64) -> Section {
 }
 
 /// A database of the level-0 sections of `n` by `n` and their parents up to the level of one
-/// section (`n` a power of two), its rows in the order of their levels, then of x and z; None
-/// without the sqlite3 tool.
-pub fn database(n: i64) -> Option<Vec<u8>> {
+/// section (`n` a power of two), its rows in the order of their levels, then of x and z.
+pub fn database(n: i64) -> Vec<u8> {
     let mut states = States::default();
     let ids: Vec<u32> = STATES.iter().map(|s| states.id(s)).collect();
     states.opaque[ids[3] as usize] = true;
@@ -132,11 +131,11 @@ pub fn database(n: i64) -> Option<Vec<u8>> {
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()?;
+        .expect("the sqlite3 tool, which these tests need");
     c.stdin.take().unwrap().write_all(sql.as_bytes()).unwrap();
     let out = c.wait_with_output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let d = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    Some(d)
+    d
 }

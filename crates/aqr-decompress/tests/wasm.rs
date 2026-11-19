@@ -3245,8 +3245,8 @@ fn div3_plan_holds() {
 
 /// ac3-recons lays its memory out as a stack, its limit its plan (constant: the model, a record's buffer, the input's
 /// buffer, a block's state): AC-3 syncframes made from noise by the encoder's own rules are not available, so the stream
-/// is frames of a real file where AQR_DIV3_AVI names one, and bytes between frames otherwise: rebuilt as WebAssembly
-/// within the limit of its plan alone, the working memory that of the plan to the page.
+/// is bytes between frames here and frames of a real file in `ac3_frames_plan_holds`: rebuilt as WebAssembly within the
+/// limit of its plan alone, the working memory that of the plan to the page.
 #[test]
 fn ac3_plan_holds() {
     let mut f = Formula::default();
@@ -3258,15 +3258,19 @@ fn ac3_plan_holds() {
     let input = f.push(aqr_ac3::formula::CODED, coded);
     f.root = Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], data.len() as u64);
     plan_holds("ac3 runs", f, &data);
-    if let Ok(path) = std::env::var("AQR_DIV3_AVI") {
-        let src = std::fs::read(path).unwrap();
-        let v = aqr_div3::formula::video(&src).unwrap();
-        let audio: Vec<u8> = v.audio.iter().take(120).flat_map(|r| src[r.clone()].iter().copied()).collect();
-        let mut f = Formula::default();
-        let input = f.push(aqr_ac3::formula::CODED, aqr_ac3::formula::encode_always(&audio, 1));
-        f.root = Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], audio.len() as u64);
-        plan_holds("ac3 frames", f, &audio);
-    }
+}
+
+/// `ac3_plan_holds` of the AC-3 frames of the AVI file AQR_DIV3_AVI names.
+#[test]
+#[ignore = "needs AQR_DIV3_AVI, a DivX 3 AVI of AC-3 sound"]
+fn ac3_frames_plan_holds() {
+    let src = std::fs::read(std::env::var("AQR_DIV3_AVI").expect("AQR_DIV3_AVI")).unwrap();
+    let v = aqr_div3::formula::video(&src).unwrap();
+    let audio: Vec<u8> = v.audio.iter().take(120).flat_map(|r| src[r.clone()].iter().copied()).collect();
+    let mut f = Formula::default();
+    let input = f.push(aqr_ac3::formula::CODED, aqr_ac3::formula::encode_always(&audio, 1));
+    f.root = Node::apply(aqr_ac3::formula::MODULE, vec![], vec![input], audio.len() as u64);
+    plan_holds("ac3 frames", f, &audio);
 }
 
 /// wasm-recons, gnu-gettext-recons and ima-recons lay their memory out as stacks, their limits
@@ -6602,7 +6606,7 @@ mod dh_db;
 #[test]
 fn dh_lods_plans_hold() {
     for n in [2, 4] {
-        let Some(db) = dh_db::database(n) else { return };
+        let db = dh_db::database(n);
         let blobs = aqr_sqlite::blobs::blobs(&db, 8, &|h| h.starts_with(&aqr_zstd::MAGIC)).unwrap();
         let f = aqr_minecraft::lods_formula::encode(&db, &blobs, 2).expect("taken");
         // (the application of dh-lods alone, its contents the output)

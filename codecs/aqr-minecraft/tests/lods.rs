@@ -17,7 +17,7 @@ fn slice<'a>(f: &'a aqr_formula::Formula, n: &Node) -> &'a [u8] {
 #[test]
 fn parents_made_of_their_children() {
     for n in [2, 4] {
-        let Some(db) = dh_db::database(n) else { return };
+        let db = dh_db::database(n);
         let blobs = aqr_sqlite::blobs::blobs(&db, 8, &|h| h.starts_with(&aqr_zstd::MAGIC)).unwrap();
         let f = aqr_minecraft::lods_formula::encode(&db, &blobs, 2).expect("taken");
         let Node::Apply(z) = &f.root else { panic!("zstd-frames") };

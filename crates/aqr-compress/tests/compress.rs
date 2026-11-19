@@ -1593,15 +1593,15 @@ fn bvx_past_expansion() {
     assert_eq!(modules(&roundtrip(&d, &Options { expansion: 1 << 20, ..all9() })), [BVX.name]);
 }
 
-/// A database made by the sqlite3 tool from `sql` (None without it).
-fn sqlite_db(sql: &str) -> Option<Vec<u8>> {
+/// A database made by the sqlite3 tool from `sql`.
+fn sqlite_db(sql: &str) -> Vec<u8> {
     let path = std::env::temp_dir().join(format!("aqr-compress-test-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let out = std::process::Command::new("sqlite3").arg(&path).arg(sql).output().ok()?;
+    let out = std::process::Command::new("sqlite3").arg(&path).arg(sql).output().expect("the sqlite3 tool, which these tests need");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let d = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    Some(d)
+    d
 }
 
 #[path = "../../../codecs/aqr-clip/tests/common/mod.rs"]
@@ -1626,15 +1626,14 @@ fn sqlite_whole() {
     let sql = "create table t(a integer primary key, b text);
         with recursive n(i) as (select 1 union all select i + 1 from n where i < 3000)
         insert into t select i, 'row ' || i || ' of the table, with some text' from n;";
-    let Some(db) = sqlite_db(sql) else { return };
+    let db = sqlite_db(sql);
     assert_eq!(modules(&roundtrip(&db, &all())), [SQLITE.name]);
     // a database is a whole file: not looked for in the middle of data
     assert!(formats(&roundtrip(&[&b"some data before "[..], &db].concat(), &all())).is_empty());
 }
 
-/// A database made by the sqlite3 tool of `sql` given on its standard input (None without the
-/// tool).
-fn sqlite_db_of(sql: &str) -> Option<Vec<u8>> {
+/// A database made by the sqlite3 tool of `sql` given on its standard input.
+fn sqlite_db_of(sql: &str) -> Vec<u8> {
     let path = std::env::temp_dir().join(format!("aqr-compress-test-in-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let mut c = std::process::Command::new("sqlite3")
@@ -1642,13 +1641,13 @@ fn sqlite_db_of(sql: &str) -> Option<Vec<u8>> {
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()?;
+        .expect("the sqlite3 tool, which these tests need");
     c.stdin.take().unwrap().write_all(sql.as_bytes()).unwrap();
     let out = c.wait_with_output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let d = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    Some(d)
+    d
 }
 
 /// A database whose blobs are frames of libzstd at level 3 (as Distant Horizons' are), in pages
@@ -1663,7 +1662,7 @@ fn sqlite_zstd_whole() {
         let small = aqr_zstd::compress::compress(&content[..300], 3).unwrap();
         sql += &format!("insert into t values({i}, x'{}', x'{}');\n", hex(&z), hex(&small));
     }
-    let Some(db) = sqlite_db_of(&sql) else { return };
+    let db = sqlite_db_of(&sql);
     let f = roundtrip(&db, &all());
     assert_eq!(modules(&f), [aqr_decompress::ZSTD_FRAMES.name]);
     // (one of plain blobs is aqr-sqlite's)
@@ -1672,7 +1671,7 @@ fn sqlite_zstd_whole() {
         with recursive n(i) as (select 1 union all select i + 1 from n where i < 300)
         insert into t select i, randomblob(1000) from n;",
     );
-    assert!(!modules(&roundtrip(&plain.unwrap(), &all())).contains(&aqr_decompress::ZSTD_FRAMES.name));
+    assert!(!modules(&roundtrip(&plain, &all())).contains(&aqr_decompress::ZSTD_FRAMES.name));
 }
 
 /// Distant Horizons' databases made up (aqr-minecraft's tests').
@@ -1683,7 +1682,7 @@ mod dh_db;
 /// makes, its parents' of their children.
 #[test]
 fn distant_horizons_whole() {
-    let Some(db) = dh_db::database(4) else { return };
+    let db = dh_db::database(4);
     let f = roundtrip(&db, &all());
     let m = modules(&f);
     assert!(m.contains(&aqr_decompress::ZSTD_FRAMES.name) && m.contains(&aqr_decompress::DH_LODS.name), "{m:?}");

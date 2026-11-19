@@ -32,9 +32,7 @@ INSERT INTO t(a, b, c, d, e)
 #[test]
 fn page_sizes_and_indexes() {
     for ps in [512, 1024, 4096, 65536] {
-        let Some(db) = build(&format!("ps{ps}"), &format!("PRAGMA page_size={ps};{SCHEMA}")) else {
-            return;
-        };
+        let db = build(&format!("ps{ps}"), &format!("PRAGMA page_size={ps};{SCHEMA}"));
         let c = check(&format!("ps{ps}"), &db);
         assert!(c * 5 < db.len(), "page size {ps}: {c} of {}", db.len());
     }
@@ -49,12 +47,10 @@ fn overflow_churn_freelist() {
          DELETE FROM t WHERE id % 3 = 0;
          INSERT INTO t(a, b) SELECT a + 1, b FROM t WHERE id % 17 = 0;"
     );
-    if let Some(db) = build("churn", &sql) {
-        check("churn", &db);
-    }
-    if let Some(db) = build("secure", &format!("PRAGMA secure_delete=1;{sql}")) {
-        check("secure", &db);
-    }
+    let db = build("churn", &sql);
+    check("churn", &db);
+    let db = build("secure", &format!("PRAGMA secure_delete=1;{sql}"));
+    check("secure", &db);
 }
 
 #[test]
@@ -83,9 +79,8 @@ fn autovacuum_encodings_without_rowid() {
         ("vacuumed", format!("{SCHEMA} DELETE FROM t WHERE id % 2 = 0; VACUUM;")),
     ];
     for (name, sql) in cases {
-        if let Some(db) = build(name, &sql) {
-            check(name, &db);
-        }
+        let db = build(name, &sql);
+        check(name, &db);
     }
 }
 
@@ -106,12 +101,11 @@ fn non_databases() {
     h.extend_from_slice(&[0x10, 0, 1, 1, 0, 64, 32, 32]);
     h.resize(8192, 0xab);
     cases.push(h);
-    if let Some(db) = build("cut", SCHEMA) {
-        cases.push(db[..db.len() - 1000].to_vec());
-        let mut odd = db.clone();
-        odd.extend_from_slice(b"trailing junk");
-        cases.push(odd);
-    }
+    let db = build("cut", SCHEMA);
+    cases.push(db[..db.len() - 1000].to_vec());
+    let mut odd = db;
+    odd.extend_from_slice(b"trailing junk");
+    cases.push(odd);
     for v in cases {
         // Whatever there is no formula for, nothing panics; the rest round-trips.
         if let Some(f) = formula::encode(&v, 1) {
@@ -123,7 +117,7 @@ fn non_databases() {
 #[test]
 fn verification_catches_differences() {
     use aqr_sqlite::transform::{self, S_BYTES, S_FILL};
-    let Some(db) = build("verify", SCHEMA) else { return };
+    let db = build("verify", SCHEMA);
     let enc = transform::encode(&db).unwrap();
     assert!(transform::verify(&enc.geom, &db, &enc.streams).is_some());
     for s in [S_FILL, S_BYTES] {
@@ -152,10 +146,7 @@ fn threads_same_streams() {
     );
     let mut dbs = Vec::new();
     for (name, sql) in [("thr", sql.as_str()), ("thr_small", "CREATE TABLE e(x);"), ("thr_s", SCHEMA)] {
-        dbs.extend(build(name, sql).map(|d| (name, d)));
-    }
-    if dbs.is_empty() {
-        return;
+        dbs.push((name, build(name, sql)));
     }
     for (name, db) in &dbs {
         for verify in [true, false] {

@@ -13,15 +13,15 @@ fn tmpdir() -> PathBuf {
     d
 }
 
-/// Runs `sql` in a new database, returns its bytes (None without a sqlite3 binary).
-pub fn build(name: &str, sql: &str) -> Option<Vec<u8>> {
+/// Runs `sql` in a new database, returns its bytes.
+pub fn build(name: &str, sql: &str) -> Vec<u8> {
     let path = tmpdir().join(format!("{name}.db"));
     let _ = std::fs::remove_file(&path);
-    let out = Command::new("sqlite3").arg(&path).arg(sql).output().ok()?;
+    let out = Command::new("sqlite3").arg(&path).arg(sql).output().expect("the sqlite3 tool, which these tests need");
     assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
     let v = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    Some(v)
+    v
 }
 
 pub fn eval(f: &Formula, threads: usize) -> Result<Vec<u8>, Error> {

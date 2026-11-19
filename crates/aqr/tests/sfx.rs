@@ -53,19 +53,15 @@ fn prose(n: usize) -> Vec<u8> {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-/// Makes `out` (`--format sfx`) of `inputs` in `dir`; `false` where this aqr carries no stub.
-fn made(dir: &Path, inputs: &[&str], out: &str) -> bool {
+/// Makes `out` (`--format sfx`) of `inputs` in `dir` (the aqr tested carrying the pack).
+fn made(dir: &Path, inputs: &[&str], out: &str) {
     let mut args = vec!["-c", "--format", "sfx", "-o", out];
     args.extend_from_slice(inputs);
     let o = aqr_in(dir, &args);
     let err = String::from_utf8_lossy(&o.stderr);
-    if !o.status.success() && err.contains("carries no blobs") {
-        eprintln!("skipped: {err}");
-        return false;
-    }
-    assert!(o.status.success(), "aqr {args:?}: {err}");
+    let pack = "(the pack: crates/aqr-sfx/pack.py, which `cargo aqr` runs, or AQR_SFX_PACK)";
+    assert!(o.status.success(), "aqr {args:?}: {err} {pack}");
     assert!(err.contains("self-extracting"), "{err}");
-    true
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -83,9 +79,7 @@ fn sfx_of_a_directory() {
     fs::write(d.join("in/a.txt"), prose(200_000)).unwrap();
     fs::write(d.join("in/sub/b.bin"), (0..5000u32).map(|i| (i * 31 % 251) as u8).collect::<Vec<_>>()).unwrap();
     fs::write(d.join("in/sub/empty"), b"").unwrap();
-    if !made(&d, &["in"], "in.exe") {
-        return;
-    }
+    made(&d, &["in"], "in.exe");
     run(&d, "in.exe", "out");
     for f in ["a.txt", "sub/b.bin", "sub/empty"] {
         assert!(fs::read(d.join("in").join(f)).unwrap() == fs::read(d.join("out").join(f)).unwrap(), "{f}");
@@ -99,9 +93,7 @@ fn sfx_of_a_directory() {
 fn sfx_of_a_file() {
     let d = scratch("file");
     fs::write(d.join("a.txt"), prose(100_000)).unwrap();
-    if !made(&d, &["a.txt"], "a.exe") {
-        return;
-    }
+    made(&d, &["a.txt"], "a.exe");
     run(&d, "a.exe", "out");
     assert!(fs::read(d.join("a.txt")).unwrap() == fs::read(d.join("out/a.txt")).unwrap());
     fs::remove_dir_all(&d).unwrap();

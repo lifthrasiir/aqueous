@@ -47,15 +47,14 @@ fn databases() {
         ("empty", "CREATE TABLE e(x);".to_string()),
     ];
     for (name, sql) in cases {
-        if let Some(db) = build(name, &sql) {
-            check(name, &db);
-        }
+        let db = build(name, &sql);
+        check(name, &db);
     }
 }
 
 #[test]
 fn tail_and_formats() {
-    let Some(db) = build("tail", SCHEMA) else { return };
+    let db = build("tail", SCHEMA);
     // Trailing bytes after the last page, and a header that claims an older schema format.
     let mut odd = db.clone();
     odd.extend_from_slice(b"trailing junk");
@@ -80,9 +79,8 @@ fn not_coded() {
     h.extend_from_slice(&[0x10, 0, 1, 1, 0, 64, 32, 32]);
     h.resize(8192, 0xab);
     let mut cases = vec![vec![], b"SQLite format 3\0".to_vec(), vec![0; 100], vec![7; 5000], noise, h];
-    if let Some(db) = build("cut", SCHEMA) {
-        cases.push(db[..db.len() - 1000].to_vec());
-    }
+    let db = build("cut", SCHEMA);
+    cases.push(db[..db.len() - 1000].to_vec());
     for v in &cases {
         // Where there is no formula, nothing panics; where there is, it rebuilds the input.
         if let Some(f) = formula::encode(v, 1) {
@@ -95,7 +93,7 @@ fn not_coded() {
 
 #[test]
 fn corrupted_modules() {
-    let Some(db) = build("corrupt", SCHEMA) else { return };
+    let db = build("corrupt", SCHEMA);
     let f = formula::encode(&db, 1).unwrap();
     let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     let params = match &f.root {
