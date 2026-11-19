@@ -96,7 +96,7 @@ static PANICS: std::sync::Mutex<Vec<(Format, usize)>> = std::sync::Mutex::new(Ve
 
 /// The recompression named so (a format's name, or a step's: [`caught`]), of data of the length,
 /// panics, on any thread.
-static NAMED_PANICS: std::sync::Mutex<Vec<(&'static str, usize)>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static NAMED_PANICS: std::sync::Mutex<Vec<(&'static str, usize)>> = std::sync::Mutex::new(Vec::new());
 
 /// Panics where `what`, of `bytes` bytes, is told to ([`NAMED_PANICS`], [`caught`]).
 pub(crate) fn bug(what: &'static str, bytes: usize) {

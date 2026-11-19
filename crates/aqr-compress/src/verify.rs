@@ -370,7 +370,12 @@ impl Prevalidator {
         let eval = move || {
             let _s = aqr_common::trace::span("prevalidate");
             let mut m = Memo::default();
-            evaluate(j.0, threads, &mut m);
+            // (a bug of a module's code leaves its outputs out, whoever runs it: the archive is
+            // decoded instead)
+            let bytes = j.0.0.len() as usize;
+            if crate::caught("prevalidate", bytes, || evaluate(j.0, threads, &mut m)).is_none() {
+                return;
+            }
             let mut memo = memo.lock().unwrap();
             memo.0.extend(m.0);
             memo.1.extend(m.1);
@@ -476,4 +481,51 @@ fn top(n: &Node) -> Vec<(usize, Range<usize>)> {
         p += len;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Options, recompress};
+
+    /// A panic of a module run beforehand (a bug of the module's native code) is not the
+    /// archive's: when no worker is free and the formula is evaluated by whoever submitted it, it
+    /// leaves the formula out of the memo, the archive verified by decoding it instead.
+    #[test]
+    fn evaluation_panic_inline() {
+        let text: Vec<u8> = (0..30013)
+            .flat_map(|i| {
+                format!(
+                    "line {} of the text
+",
+                    i * 7 % 1000
+                )
+                .into_bytes()
+            })
+            .collect();
+        let mut z = flate2::GzBuilder::new().filename("t.txt").write(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let gz = z.finish().unwrap();
+        let f = Arc::new(recompress(&gz, &Options { smaller: false, ..Options::default() }));
+        assert!(!f.applies().is_empty());
+        let _seen = crate::tests::FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = crate::fallbacks();
+        let run = |panicking: bool| {
+            if panicking {
+                crate::tests::NAMED_PANICS.lock().unwrap().push(("prevalidate", f.len() as usize));
+            }
+            // (every worker taken: none is free, the evaluation is the submitter's)
+            let workers = aqr_common::pool::reserve(usize::MAX);
+            let pre = Prevalidator::spawn(1, &[&gz]);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pre.submit(f.clone(), &gz)));
+            drop(workers);
+            crate::tests::NAMED_PANICS.lock().unwrap().clear();
+            r.expect("no panic out of the submit");
+            pre.finish().0.len()
+        };
+        assert!(run(false) > 0, "recorded");
+        assert_eq!(run(true), 0);
+        let told: Vec<_> = crate::fallbacks().into_iter().filter(|f| f.panicked && f.module == "prevalidate").collect();
+        assert_eq!(told.len(), 1, "{told:?}");
+    }
 }
