@@ -123,6 +123,12 @@ pub const OPTIONS: &[Opt] = &[
     opt(Some('f'), Some("force"), Value::None, "overwrite outputs"),
     opt(None, Some("rm"), Value::None, "remove the inputs once archived, or archives once extracted"),
     opt(Some('p'), Some("preserve"), Value::None, "keep and apply the metadata not commonly kept too"),
+    opt(
+        None,
+        Some("mark"),
+        Value::Of(|| of(&["propagate", "always", "keep", "never"])),
+        "the marks of files from elsewhere",
+    ),
     opt(Some('q'), Some("quiet"), Value::None, "log nothing but errors"),
     opt(Some('v'), Some("verbose"), Value::None, "log each file archived"),
     many(None, Some("stats"), Value::OptionalFile, "tell what stands out; FILE.json or FILE.html"),

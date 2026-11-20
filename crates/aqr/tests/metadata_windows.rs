@@ -192,3 +192,66 @@ fn mark_of_the_web_carried() {
     unreadonly(&d);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// `--mark`: extracting, the archive's mark given (`propagate`, the default), the marks stored
+/// kept alone (`keep`), none at all (`never`), or a mark of the Internet's zone even of an
+/// archive of none (`always`); compressing, the marks of the files stored (`keep`) or not
+/// (`never`), the others refused.
+#[test]
+fn mark_option() {
+    let d = scratch("mark-option");
+    let src = source(&d);
+    let (plain, marked) = (d.join("plain.aqr"), d.join("marked.aqr"));
+    aqr(&["-c".as_ref(), "-o".as_ref(), plain.as_os_str(), src.as_os_str()]);
+    fs::copy(&plain, &marked).unwrap();
+    let archive_mark = "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.com/src.aqr\r\n";
+    fs::write(stream(&marked, "Zone.Identifier"), archive_mark).unwrap();
+    let stored = "[ZoneTransfer]\r\nZoneId=3\r\n";
+    let zone = |p: &Path| fs::read_to_string(stream(p, "Zone.Identifier")).ok();
+    let extract = |archive: &Path, how: &str, out: &str| -> PathBuf {
+        let out = d.join(out);
+        aqr(&["-d".as_ref(), format!("--mark={how}").as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
+        out
+    };
+    // (`a` and its hard link `hard` have a mark of their own, `ro` and `sub/s` none)
+    let files = ["a", "hard", "ro", "sub/s"];
+    let out = extract(&marked, "keep", "keep");
+    for (p, want) in files.iter().zip([Some(stored), Some(stored), None, None]) {
+        assert_eq!(zone(&out.join(p)).as_deref(), want, "keep: {p}");
+    }
+    let out = extract(&marked, "propagate", "propagate");
+    for p in files {
+        assert_eq!(zone(&out.join(p)).as_deref(), Some(archive_mark), "propagate: {p}");
+    }
+    let out = extract(&marked, "never", "never");
+    for p in files {
+        assert_eq!(zone(&out.join(p)), None, "never: {p}");
+    }
+    let out = extract(&plain, "always", "always-plain");
+    for p in files {
+        assert_eq!(zone(&out.join(p)).as_deref(), Some("[ZoneTransfer]\r\nZoneId=3\r\n"), "always: {p}");
+    }
+    let out = extract(&marked, "always", "always-marked");
+    for p in files {
+        assert_eq!(zone(&out.join(p)).as_deref(), Some(archive_mark), "always, of a marked archive: {p}");
+    }
+    // compressing: the marks not stored
+    let unmarked = d.join("unmarked.aqr");
+    aqr(&["-c".as_ref(), "--mark=never".as_ref(), "-o".as_ref(), unmarked.as_os_str(), src.as_os_str()]);
+    let out = extract(&unmarked, "keep", "unmarked");
+    for p in files {
+        assert_eq!(zone(&out.join(p)), None, "compressed with --mark=never: {p}");
+    }
+    assert_eq!(fs::read_to_string(out.join("a")).unwrap(), "hello");
+    for how in ["always", "propagate", "sometimes"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+            .args(["-c", &format!("--mark={how}"), "-o"])
+            .arg(d.join(format!("{how}.aqr")))
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(!o.status.success(), "-c --mark={how} taken");
+    }
+    unreadonly(&d);
+    fs::remove_dir_all(&d).unwrap();
+}

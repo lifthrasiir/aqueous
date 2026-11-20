@@ -227,3 +227,47 @@ fn quarantine_carried() {
     Command::new("chmod").args(["-R", "u+w"]).arg(&d).status().unwrap();
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// `--mark` of quarantines: extracting, the archive's (`propagate`), the stored alone (`keep`),
+/// none (`never`), or one made for an archive of none (`always`); compressing, none stored
+/// (`never`).
+#[cfg(target_os = "macos")]
+#[test]
+fn quarantine_option() {
+    let d = scratch("quarantine-option");
+    let src = source(&d);
+    let stored = b"0081;00000000;aqr;";
+    set_xattr(&src.join("sub/s"), "com.apple.quarantine", stored);
+    let (plain, marked) = (d.join("plain.aqr"), d.join("marked.aqr"));
+    aqr(&["-c".as_ref(), "-o".as_ref(), plain.as_os_str(), src.as_os_str()]);
+    fs::copy(&plain, &marked).unwrap();
+    let mark = b"0083;00000000;Safari;";
+    set_xattr(&marked, "com.apple.quarantine", mark);
+    let q = |p: &Path| xattr(p, "com.apple.quarantine");
+    let extract = |archive: &Path, how: &str, out: &str| -> PathBuf {
+        let out = d.join(out);
+        aqr(&["-d".as_ref(), format!("--mark={how}").as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
+        out
+    };
+    let out = extract(&marked, "keep", "keep");
+    assert_eq!(q(&out.join("a")), None);
+    assert_eq!(q(&out.join("sub/s")).as_deref(), Some(&stored[..]));
+    let out = extract(&marked, "never", "never");
+    for p in ["a", "sub", "sub/s"] {
+        assert_eq!(q(&out.join(p)), None, "never: {p}");
+    }
+    let out = extract(&marked, "propagate", "propagate");
+    assert_eq!(q(&out.join("sub/s")).as_deref(), Some(&mark[..]));
+    let out = extract(&plain, "always", "always");
+    for p in ["a", "sub/s"] {
+        let got = q(&out.join(p)).unwrap_or_default();
+        assert!(got.starts_with(b"0081;") && got.ends_with(b";aqr;"), "always: {p}: {got:?}");
+    }
+    let unmarked = d.join("unmarked.aqr");
+    aqr(&["-c".as_ref(), "--mark=never".as_ref(), "-o".as_ref(), unmarked.as_os_str(), src.as_os_str()]);
+    let out = extract(&unmarked, "keep", "unmarked");
+    assert_eq!(q(&out.join("sub/s")), None);
+    assert_eq!(xattr(&out.join("a"), "user.aqr").as_deref(), Some(&b"value"[..]), "other attributes kept");
+    Command::new("chmod").args(["-R", "u+w"]).arg(&d).status().unwrap();
+    fs::remove_dir_all(&d).unwrap();
+}

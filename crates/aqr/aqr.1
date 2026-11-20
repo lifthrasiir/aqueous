@@ -281,6 +281,22 @@ what changed meanwhile is kept and told.
 Keep and apply the metadata not commonly kept too: access, status change and backup
 times; extracting, ownership, flags only the superuser can change, set-user-ID and
 set-group-ID bits, FIFOs and devices.
+.It Fl -mark Ar when
+The marks of files come from elsewhere (Windows' Zone.Identifier stream, macOS'
+com.apple.quarantine attribute), which have the system ask before running them.
+Extracting:
+.Cm propagate
+(the default: the archive's mark given to every file, over any stored; of an archive of
+none, those stored),
+.Cm always
+(the archive's, else one of the Internet's zone),
+.Cm keep
+(those stored alone) or
+.Cm never .
+Compressing:
+.Cm keep
+(the default: the files' marks stored) or
+.Cm never .
 .It Fl q , Fl -quiet
 Log nothing but errors.
 .It Fl v , Fl -verbose

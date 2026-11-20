@@ -122,12 +122,14 @@ pub(crate) fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_un
                 })
                 .map_err(std::io::Error::other)
             })?;
-            meta::Applier::new(false, a.quiet).marking(input).mark(&to.named, meta::Kind::File);
+            meta::Applier::new(false, a.quiet)
+                .marking(input, a.mark.unwrap_or_default())
+                .mark(&to.named, meta::Kind::File);
             n
         };
         (1, n, None, 0, (!a.test).then(|| to.named.clone()))
     } else {
-        let ap = meta::Applier::new(a.preserve, a.quiet).marking(input);
+        let ap = meta::Applier::new(a.preserve, a.quiet).marking(input, a.mark.unwrap_or_default());
         let r = ticking(a, &view, || -> Result<_, String> {
             let x = match place {
                 None => None,

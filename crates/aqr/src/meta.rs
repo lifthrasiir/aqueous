@@ -39,6 +39,8 @@ pub struct Reader {
     /// (nothing of Windows read but where asked)
     #[cfg_attr(windows, allow(dead_code))]
     pub privileged: bool,
+    /// `--mark=never`: the files' marks ([`Mark`]) not read.
+    pub unmarked: bool,
     #[cfg(unix)]
     users: HashMap<u32, Option<Arc<[u8]>>>,
     #[cfg(unix)]
@@ -136,7 +138,10 @@ impl Reader {
             x.uname = self.users.entry(m.uid()).or_insert_with(|| os::user_name(m.uid()).map(Into::into)).clone();
             x.gname = self.groups.entry(m.gid()).or_insert_with(|| os::group_name(m.gid()).map(Into::into)).clone();
             match &s.xattrs {
-                Ok(a) => x.xattrs = a.iter().map(|(n, v)| (n[..].into(), v[..].into())).collect(),
+                Ok(a) => {
+                    let a = a.iter().filter(|(n, _)| !(self.unmarked && Mark::is(n)));
+                    x.xattrs = a.map(|(n, v)| (n[..].into(), v[..].into())).collect()
+                }
                 Err(e) => warn(format!("{}: extended attributes not read: {e}", path.display())),
             }
         }
@@ -170,7 +175,7 @@ impl Reader {
                 x.win_link_type = Some(m.file_type().is_symlink_dir() as u8);
             } else {
                 match &s.streams {
-                    Ok(f) => forks = f.clone(),
+                    Ok(f) => forks = f.iter().filter(|f| !(self.unmarked && Mark::is(&f.name))).cloned().collect(),
                     Err(e) => warn(format!("{}: alternate data streams not read: {e}", path.display())),
                 }
             }
@@ -345,6 +350,8 @@ pub struct Applier {
     pub quiet: bool,
     /// The mark of the archive extracted, given to what is extracted ([`Mark`]).
     mark: Option<Mark>,
+    /// `--mark=never`: no mark written, not even those of the archive's entries.
+    unmarked: bool,
     /// The names of the attributes not written for not being asked to (`-p`), told once each.
     #[cfg(unix)]
     held: std::sync::Mutex<Vec<Vec<u8>>>,
@@ -356,14 +363,20 @@ impl Applier {
             privileged,
             quiet,
             mark: None,
+            unmarked: false,
             #[cfg(unix)]
             held: Default::default(),
         }
     }
 
-    /// The applier giving what it applies to the mark of `archive` too, where it has one.
-    pub fn marking(mut self, archive: &Path) -> Applier {
-        self.mark = Mark::of(archive);
+    /// The applier marking what it applies as `marks` has it ([`Marks`]), of `archive`.
+    pub fn marking(mut self, archive: &Path, marks: Marks) -> Applier {
+        self.mark = match marks {
+            Marks::Propagate => Mark::of(archive),
+            Marks::Always => Mark::of(archive).or_else(Mark::internet),
+            Marks::Keep | Marks::Never => None,
+        };
+        self.unmarked = marks == Marks::Never;
         self
     }
 
@@ -402,6 +415,9 @@ impl Applier {
 
     /// Writes fork `name` of `data` to `path`, a `kind` (told where it cannot be written).
     pub fn fork(&self, path: &Path, kind: Kind, name: &[u8], data: &[u8]) {
+        if self.unmarked && Mark::is(name) {
+            return;
+        }
         #[cfg(unix)]
         if os::fork_xattr(kind, name).is_some_and(|n| !self.may_write(path, n, "fork")) {
             return;
@@ -437,7 +453,9 @@ impl Applier {
             let forks: Vec<&[u8]> = x.forks.iter().filter_map(|f| os::fork_xattr(kind, &f.0)).collect();
             for (name, value) in &x.xattrs {
                 let shown = String::from_utf8_lossy(name);
-                if forks.contains(&&name[..]) {
+                if self.unmarked && Mark::is(name) {
+                    continue;
+                } else if forks.contains(&&name[..]) {
                     self.tell(path, &format!("extended attribute {shown} not written: a fork of the same name"));
                 } else if self.may_write(path, name, "extended attribute")
                     && let Err(e) = os::set_xattr(path, name, value)
@@ -509,6 +527,42 @@ impl Applier {
     }
 }
 
+/// How files are marked as come from elsewhere ([`Mark`]), by `--mark`. Extracting: the
+/// archive's mark given to them, over the marks stored (`Propagate`, the default; of an archive of
+/// none, the marks stored); a mark always (`Always`: the archive's, else one of the Internet's
+/// zone); the marks stored alone (`Keep`); none at all (`Never`). Compressing, the files' marks
+/// stored (`Keep`, the default) or not (`Never`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Marks {
+    Always,
+    Never,
+    #[default]
+    Propagate,
+    Keep,
+}
+
+impl Marks {
+    pub fn parse(s: &str) -> Result<Marks, String> {
+        Ok(match s {
+            "always" => Marks::Always,
+            "never" => Marks::Never,
+            "propagate" => Marks::Propagate,
+            "keep" => Marks::Keep,
+            _ => return Err(format!("--mark takes always, never, propagate or keep: {s}")),
+        })
+    }
+
+    /// Its name, as `--mark` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Marks::Always => "always",
+            Marks::Never => "never",
+            Marks::Propagate => "propagate",
+            Marks::Keep => "keep",
+        }
+    }
+}
+
 /// What marks a file as come from elsewhere, as a download: Windows' mark of the web (the stream
 /// `Zone.Identifier`), macOS' quarantine (the attribute `com.apple.quarantine`). The archive's
 /// is given to what is extracted of it (the files on Windows, all but links on macOS), so that
@@ -537,6 +591,29 @@ impl Mark {
         #[cfg(not(any(windows, target_os = "macos")))]
         let m = None;
         m.map(Mark)
+    }
+
+    /// Whether a fork or an extended attribute of `name` is the mark (a stream's name of any case,
+    /// as NTFS takes it).
+    pub fn is(name: &[u8]) -> bool {
+        #[cfg(windows)]
+        return name.eq_ignore_ascii_case(Mark::NAME.as_bytes());
+        #[cfg(not(windows))]
+        return name == Mark::NAME.as_bytes();
+    }
+
+    /// A mark of the Internet's zone, for `--mark=always` of an archive of none: on macOS a
+    /// quarantine of now, of no agent's but aqr's (`flags;time;agent;`, as `0081` a download).
+    pub fn internet() -> Option<Mark> {
+        #[cfg(windows)]
+        return Some(Mark(b"[ZoneTransfer]\r\nZoneId=3\r\n".to_vec()));
+        #[cfg(target_os = "macos")]
+        {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            Some(Mark(format!("0081;{now:08x};aqr;").into_bytes()))
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        None
     }
 
     /// Gives `path`, a `kind`, this mark.

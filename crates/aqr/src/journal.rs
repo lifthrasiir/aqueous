@@ -457,7 +457,7 @@ fn compare(
         None => (quick(whole), "the archive now".to_string()),
     };
     let mapper = crate::Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
-    let mut g = crate::Gathered::new(mapper, a.preserve);
+    let mut g = crate::Gathered::new(mapper, a.preserve).unmarked(a.mark == Some(crate::meta::Marks::Never));
     crate::gather_listed(a, crate::Inputs::of(a).from(1), &mut g)?;
     if !a.quiet {
         g.skipped.iter().for_each(|s| eprintln!("skipped {s}"));

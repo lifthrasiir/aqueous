@@ -163,6 +163,11 @@
 //!   set-user-ID and set-group-ID bits, FIFOs and devices, and the backup times. An archive of
 //!   a single file has no metadata. On Linux, the inputs are read without updating their access
 //!   times where this process may (`O_NOATIME`: files it owns).
+//! - What marks a file as come from elsewhere (Windows' `Zone.Identifier`, macOS' quarantine:
+//!   [`meta::Mark`]) by `--mark WHEN` ([`meta::Marks`]): extracting, the archive's given to every
+//!   file over those stored (`propagate`, the default), the archive's or one of the Internet's
+//!   zone (`always`), those stored alone (`keep`) or none (`never`); compressing, the files' stored
+//!   (`keep`, the default) or not (`never`).
 //! - `-f` overwrites outputs. Extracting, what is where an entry goes is taken away for it
 //!   (a link itself, never followed), a directory with what is under it only where it is in
 //!   the directory extracted into and holds neither the archive nor the current directory
@@ -391,6 +396,10 @@ Output:
       --rm              remove the inputs once archived, or archives once extracted
                         (what changed meanwhile kept, as directories not left empty)
   -p, --preserve        keep and apply the metadata not commonly kept too
+      --mark WHEN       the marks of files from elsewhere (Zone.Identifier, quarantine):
+                        extracting, propagate (the default: the archive's over the files'),
+                        always (the archive's, else the Internet's), keep (the files') or
+                        never; compressing, keep (the default) or never
   -q, --quiet           log nothing but errors
   -v, --verbose         log each file archived
       --stats[=FILE]    tell what stands out after each archive; FILE.json or FILE.html

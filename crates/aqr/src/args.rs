@@ -48,6 +48,8 @@ pub(crate) struct Args {
     pub(crate) dereference: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
     pub(crate) preserve: bool,
+    /// `--mark WHEN`: how the files are marked as come from elsewhere ([`meta::Marks`]).
+    pub(crate) mark: Option<meta::Marks>,
     pub(crate) quiet: bool,
     /// Logging each file archived.
     pub(crate) verbose: bool,
@@ -221,6 +223,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         compact: false,
         dereference: false,
         preserve: false,
+        mark: None,
         quiet: false,
         verbose: false,
         opt: Options { threads: 0, ..Options::default() },
@@ -315,6 +318,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "-s" | "--sync" => (a.append, a.sync) = (true, true),
             "-L" | "--dereference" => a.dereference = true,
             "-p" | "--preserve" => a.preserve = true,
+            "--mark" => a.mark = Some(meta::Marks::parse(&text(value("--mark")?))?),
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
             "-T" | "--threads" => a.opt.threads = text(value("-T")?).parse().map_err(|_| "-T takes a number")?,
@@ -400,6 +404,14 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         if inline.is_some() {
             return Err(format!("{s} takes no value"));
         }
+    }
+    // (compressing, there is no archive's mark to give, nor one to make)
+    if !a.decompress
+        && !a.list
+        && !a.info
+        && let Some(m @ (meta::Marks::Always | meta::Marks::Propagate)) = a.mark
+    {
+        return Err(format!("--mark={} is for extracting: compressing, keep or never", m.name()));
     }
     match aqr_common::zopt::apply(&zopts)? {
         aqr_common::zopt::Applied::Set => {

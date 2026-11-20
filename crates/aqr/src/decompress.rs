@@ -512,7 +512,9 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
                     (Err(e), None) => Err(std::io::Error::other(e.to_string())),
                 }
             })?;
-            meta::Applier::new(false, a.quiet).marking(input).mark(&to.named, meta::Kind::File);
+            meta::Applier::new(false, a.quiet)
+                .marking(input, a.mark.unwrap_or_default())
+                .mark(&to.named, meta::Kind::File);
             (1, n, Some(to.named.clone()))
         }
         Some(t) if a.test => {
@@ -567,7 +569,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             (n.into_inner(), total.into_inner(), None)
         }
         Some(t) => {
-            let ap = meta::Applier::new(a.preserve, a.quiet).marking(input);
+            let ap = meta::Applier::new(a.preserve, a.quiet).marking(input, a.mark.unwrap_or_default());
             let r = ticking(a, &*view, || {
                 let x =
                     extract::Extractor::new(place.unwrap(), force, a.links, &ap, &seen, a.select.clone(), &a.names)?

@@ -186,6 +186,12 @@ impl Gathered {
         }
     }
 
+    /// The gathering storing no marks of the files where `unmarked` (`--mark=never`).
+    pub(crate) fn unmarked(mut self, unmarked: bool) -> Gathered {
+        self.reader.unmarked = unmarked;
+        self
+    }
+
     /// The link groups of the files of an inode, where there are more than one of it: numbered
     /// from 0, in the order their inodes were first found.
     pub(crate) fn link_groups(&mut self) {
@@ -374,7 +380,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
         };
         let name = os_bytes(input.as_os_str());
         let kind = kind_by_name(&name);
-        let mut g = Gathered::new(mapper, a.preserve);
+        let mut g = Gathered::new(mapper, a.preserve).unmarked(a.mark == Some(meta::Marks::Never));
         g.contents.push((input.clone(), name, d.len() as u64));
         let view = view::View::new(&g, bars(), false);
         // (of the kind its name tells, as a file in an archive of many; written as it is made)
@@ -438,7 +444,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
         return Ok(a.rm.then(|| Gone::of(input, &m)).into_iter().collect());
     }
 
-    let mut g = Gathered::new(mapper, a.preserve);
+    let mut g = Gathered::new(mapper, a.preserve).unmarked(a.mark == Some(meta::Marks::Never));
     g.gone = a.rm.then(Vec::new);
     g.itself = opened.as_ref().and_then(|_| fs::canonicalize(out).ok());
     let gathering = aqr_common::trace::span("gather");
@@ -598,7 +604,7 @@ fn pack_into(
     };
     let inputs = Inputs { renames: &renames, ..inputs };
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
-    let mut g = Gathered::new(mapper, a.preserve);
+    let mut g = Gathered::new(mapper, a.preserve).unmarked(a.mark == Some(meta::Marks::Never));
     g.gone = a.rm.then(Vec::new);
     if let Some(cached) = session::cached(a, inputs) {
         g = cached;
