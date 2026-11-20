@@ -4,7 +4,10 @@ rt = "test --profile release-test"
 # The release `aqr`, built unless a binary of the same sources is kept, then run with the
 # arguments; `cargo aqr +` lists the kept binaries, `cargo aqr +<id> …` runs one
 # (crates/aqr-bincache).
-aqr = "run -q -p aqr-bincache --"
+aqr = "run -q -p aqr-bincache -- aqr"
+# `aqr-win` (Windows) the same way, the kept `aqr` of the working copy beside it: `cargo aqr-win
+# --register` points Explorer's verbs at the pair (pinned in the cache, never evicted).
+aqr-win = "run -q -p aqr-bincache -- aqr-win"
 # The release's Windows binaries (`cargo +NIGHTLY win7 -p aqr -p aqr-win`, NIGHTLY the toolchain
 # of nightly-toolchain): std built for the target (tier 3) of Windows 7 on, the C runtime linked
 # statically (no redistributable to install). What newer systems add is looked up as it runs;

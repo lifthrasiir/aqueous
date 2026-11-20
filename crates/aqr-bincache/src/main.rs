@@ -1,27 +1,37 @@
-//! `cargo aqr` (an alias in `.cargo/config.toml`): builds and runs the release `aqr`, keeping each
-//! binary built by a key over everything it was built from.
+//! `cargo aqr` and `cargo aqr-win` (aliases in `.cargo/config.toml`, the program's name the first
+//! argument): builds and runs the release binary of a program, keeping each binary built by a key
+//! over everything it was built from.
 //!
-//! - `cargo aqr <args>…` runs the binary of the working copy, building it first (`cargo build -r
-//!   -p aqr`) unless one with the same key is kept.
-//! - `cargo aqr +` lists the kept binaries: id, when built, when last used, commit.
-//! - `cargo aqr +<id> <args>…` runs the kept binary whose id starts with `<id>`.
+//! - `cargo PROGRAM <args>…` runs the binary of the working copy, building it first (`cargo build
+//!   -r -p PROGRAM`) unless one with the same key is kept.
+//! - `cargo PROGRAM +` lists the program's kept binaries: id, when built, when last used, commit.
+//! - `cargo PROGRAM +<id> <args>…` runs the kept binary whose id starts with `<id>`.
+//!
+//! The programs are those of [`PROGRAMS`]: `aqr`, and `aqr-win` (Windows), which runs the `aqr`
+//! beside it: its kept binary has the kept `aqr` of the working copy beside it (a hard link, else
+//! a copy), the key of that `aqr` in its own, so `cargo aqr-win --register` points Explorer's
+//! verbs at a pair that stays as it is. A binary run with the arguments that tell the system of
+//! it (`--register`) is pinned, never evicted, until it is run with those that take it back
+//! (`--unregister`; `cache/pinned/PROGRAM`).
 //!
 //! The key is a git hash over the toolchain (`rustc -vV`), the environment that changes the build
-//! (`RUSTFLAGS`, `CARGO_PROFILE_*`, …, `$CARGO_HOME/config.toml`) and the git blob id of every
-//! file in a manifest. A manifest is the dep-info of a build (`target/release/aqr.d`: the sources
-//! of the workspace's crates, `include_bytes!`ed files among them) with the `Cargo.toml`s of
-//! their crates, the root `Cargo.toml`, `Cargo.lock` (for registry crates) and
-//! `.cargo/config.toml`. A lookup tries each kept manifest: if every file in one is unchanged, so
-//! is the set of files the build reads, the way ccache's manifests work.
+//! (`RUSTFLAGS`, `CARGO_PROFILE_*`, …, `$CARGO_HOME/config.toml`), the program (and the keys of
+//! those beside it) and the git blob id of every file in a manifest. A manifest is the dep-info
+//! of a build (`target/release/PROGRAM.d`: the sources of the workspace's crates,
+//! `include_bytes!`ed files among them) with the `Cargo.toml`s of their crates, the root
+//! `Cargo.toml`, `Cargo.lock` (for registry crates) and `.cargo/config.toml`. A lookup tries each
+//! kept manifest: if every file in one is unchanged, so is the set of files the build reads, the
+//! way ccache's manifests work.
 //!
 //! The binaries are in `crates/aqr-bincache/cache/` (gitignored), the `AQR_BINCACHE_MAX` (16)
-//! least recently used ones kept. Debug info is not kept: on macOS it stays in `target/`'s object
-//! files, so backtraces of a kept binary lose their lines once `target/` is cleaned.
+//! least recently used ones of all programs kept (and the pinned ones). Debug info is not kept:
+//! on macOS it stays in `target/`'s object files, so backtraces of a kept binary lose their lines
+//! once `target/` is cleaned.
 //!
-//! Before the binary of the working copy is looked up, the Wasm modules and the SFX pack are made
-//! again where what they are made of changed ([`modules`]: build.py and pack.py run as needed).
-//! The pack is no part of aqr's build: the binary kept has it written in (Windows x86-64:
-//! [`modules::embed`]), its `pack.id` in the manifest (`-` where there is no pack).
+//! Before the binary of `aqr` is looked up, the Wasm modules and the SFX pack are made again where
+//! what they are made of changed ([`modules`]: build.py and pack.py run as needed). The pack is no
+//! part of aqr's build: the binary kept has it written in (Windows x86-64: [`modules::embed`]),
+//! its `pack.id` in the manifest (`-` where there is no pack).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -35,16 +45,61 @@ mod modules;
 
 type Result<T> = std::result::Result<T, String>;
 
-const EXE: &str = std::env::consts::EXE_SUFFIX;
+/// A program kept: the binary of its package of the same name.
+struct Program {
+    name: &'static str,
+    /// Of the Wasm modules and the SFX pack ([`modules`]): they are made again before it is looked
+    /// up, and the pack is written into the binary kept.
+    modules: bool,
+    /// The programs whose kept binaries go beside it (it runs them as the ones beside itself).
+    beside: &'static [&'static str],
+    /// The first argument of a run that, where it succeeds, pins the binary run (what the system
+    /// was told of it: aqr-win's verbs in the registry), and that of one unpinning it.
+    pin: Option<(&'static str, &'static str)>,
+}
+
+const PROGRAMS: &[Program] = &[
+    Program { name: "aqr", modules: true, beside: &[], pin: None },
+    Program { name: "aqr-win", modules: false, beside: &["aqr"], pin: Some(("--register", "--unregister")) },
+];
+
+fn program(name: &str) -> Result<&'static Program> {
+    PROGRAMS.iter().find(|p| p.name == name).ok_or_else(|| {
+        let names: Vec<&str> = PROGRAMS.iter().map(|p| p.name).collect();
+        format!("usage: aqr-bincache {} [+[ID]] ARGS…", names.join("|"))
+    })
+}
+
+/// The file name of a program's binary.
+fn exe(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The binary of a program to run, and its key where it is kept.
+struct Built {
+    exe: PathBuf,
+    key: Option<String>,
+}
+
+/// A kept binary of a program beside another's.
+struct Beside {
+    name: &'static str,
+    key: String,
+    exe: PathBuf,
+}
 
 fn main() -> ExitCode {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let result = match args.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix('+')) {
-        Some("") if args.len() == 1 => list(),
-        Some("") => Err("usage: cargo aqr +".into()),
-        Some(id) => find(id).and_then(|dir| run(&dir.join(format!("aqr{EXE}")), &args[1..])),
-        None => current().and_then(|exe| run(&exe, &args)),
-    };
+    let mut args = std::env::args_os().skip(1);
+    let name = args.next().unwrap_or_default();
+    let args: Vec<OsString> = args.collect();
+    let result = program(&name.to_string_lossy()).and_then(|p| {
+        match args.first().and_then(|a| a.to_str()).and_then(|a| a.strip_prefix('+')) {
+            Some("") if args.len() == 1 => list(p),
+            Some("") => Err(format!("usage: cargo {} +", p.name)),
+            Some(id) => find(p, id).and_then(|dir| run(p, &dir.join(exe(p.name)), &args[1..])),
+            None => current(p).and_then(|built| run(p, &built.exe, &args)),
+        }
+    });
     match result {
         Ok(code) => code,
         Err(msg) => {
@@ -69,53 +124,97 @@ fn target() -> PathBuf {
 }
 
 /// The kept binary of the working copy, built and kept first if there is none (the one built,
-/// with the pack, where it is not kept).
-fn current() -> Result<PathBuf> {
-    modules::refresh()?;
-    let manifests = manifests()?;
-    let env = environment()?;
-    let blobs = blobs(manifests.values().flatten())?;
-    for paths in manifests.values() {
-        let dir = cache().join("bin").join(key(&env, paths, &blobs)?);
-        if dir.join("info").exists() {
-            return Ok(dir.join(format!("aqr{EXE}")));
-        }
+/// with the pack, where it is not kept), those beside it first.
+fn current(p: &Program) -> Result<Built> {
+    if p.modules {
+        modules::refresh()?;
     }
-    build(&env)
+    let mut beside = Vec::new();
+    for &name in p.beside {
+        let built = current(program(name)?)?;
+        let key = built.key.ok_or_else(|| format!("{name} was not kept, and {} needs it beside it", p.name))?;
+        beside.push(Beside { name, key, exe: built.exe });
+    }
+    let env = environment()? + &program_env(p, &beside);
+    if let Some(key) = kept(&env)? {
+        return Ok(Built { exe: cache().join("bin").join(&key).join(exe(p.name)), key: Some(key) });
+    }
+    build(p, &env, &beside)
 }
 
-/// Builds aqr and keeps it, giving the binary to run.
-fn build(env: &str) -> Result<PathBuf> {
+/// The key of the kept binary of the working copy, where there is one (nothing built or made).
+fn current_key(p: &Program) -> Result<Option<String>> {
+    let mut beside = Vec::new();
+    for &name in p.beside {
+        let Some(key) = current_key(program(name)?)? else { return Ok(None) };
+        beside.push(Beside { name, key, exe: PathBuf::new() });
+    }
+    kept(&(environment()? + &program_env(p, &beside)))
+}
+
+/// The key of a kept binary of the environment `env` whose manifest's files are as they are.
+fn kept(env: &str) -> Result<Option<String>> {
+    let manifests = manifests()?;
+    let blobs = blobs(manifests.values().flatten())?;
+    for paths in manifests.values() {
+        let key = key(env, paths, &blobs)?;
+        if cache().join("bin").join(&key).join("info").exists() {
+            return Ok(Some(key));
+        }
+    }
+    Ok(None)
+}
+
+/// What the key has of the program besides [`environment`]: nothing for `aqr` (its keys as they
+/// were before there were other programs).
+fn program_env(p: &Program, beside: &[Beside]) -> String {
+    if p.name == "aqr" {
+        return String::new();
+    }
+    let mut text = format!("program={}\n", p.name);
+    for b in beside {
+        text += &format!("beside {}={}\n", b.name, b.key);
+    }
+    text
+}
+
+/// Builds the program and keeps it with those beside it, giving the binary to run.
+fn build(p: &Program, env: &str, beside: &[Beside]) -> Result<Built> {
     let start = SystemTime::now();
     let cargo = std::env::var_os("CARGO").unwrap_or("cargo".into());
     let status = Command::new(cargo)
         .current_dir(root())
-        .args(["build", "-r", "-p", "aqr", "--bin", "aqr"])
+        .args(["build", "-r", "-p", p.name, "--bin", p.name])
         .status()
         .map_err(|e| format!("cargo: {e}"))?;
     if !status.success() {
         return Err("cargo build failed".into());
     }
-    let exe = target().join(format!("aqr{EXE}"));
-    // (the pack written into a copy in the target directory, the one run where the binary is not
-    // kept: a file just written in the cache, which a sync client such as Dropbox may be reading,
-    // is not opened for the update)
-    let packed = target().join(format!("aqr-packed{EXE}"));
-    fs::copy(&exe, &packed).map_err(|e| format!("{}: {e}", exe.display()))?;
-    modules::embed(&packed)?;
-    let mut paths = dep_info(&target().join("aqr.d"))?;
-    paths.extend(modules::pack_id());
-    let built = target().parent().map_or_else(target, Path::to_path_buf);
-    if let Some(path) = changed_since(&paths, &root(), &built, start) {
+    let mut built = target().join(exe(p.name));
+    let mut paths = dep_info(&target().join(format!("{}.d", p.name)))?;
+    if p.modules {
+        // (the pack written into a copy in the target directory, the one run where the binary is
+        // not kept: a file just written in the cache, which a sync client such as Dropbox may be
+        // reading, is not opened for the update)
+        let packed = target().join(exe(&format!("{}-packed", p.name)));
+        fs::copy(&built, &packed).map_err(|e| format!("{}: {e}", built.display()))?;
+        modules::embed(&packed)?;
+        paths.extend(modules::pack_id());
+        built = packed;
+    }
+    let unkept = || unkept(p, &built, beside).map(|exe| Built { exe, key: None });
+    let made = target().parent().map_or_else(target, Path::to_path_buf);
+    if let Some(path) = changed_since(&paths, &root(), &made, start) {
         eprintln!("aqr-bincache: {path} changed during the build; running the binary without keeping it");
-        return Ok(packed);
+        return unkept();
     }
     let blobs = blobs(&paths)?;
     let key = key(env, &paths, &blobs)?;
     let bin = cache().join("bin");
     let dir = bin.join(&key);
+    let kept = || Built { exe: dir.join(exe(p.name)), key: Some(key.clone()) };
     if dir.join("info").exists() {
-        return Ok(dir.join(format!("aqr{EXE}")));
+        return Ok(kept());
     }
     let text: String = paths.iter().map(|p| format!("{p}\n")).collect();
     let manifest = hash(text.as_bytes())?;
@@ -129,18 +228,43 @@ fn build(env: &str) -> Result<PathBuf> {
         fs::write(tmp.join("manifest"), &text).map_err(|e| e.to_string())?;
         fs::rename(tmp.join("manifest"), &dest).map_err(|e| e.to_string())?;
     }
-    fs::copy(&packed, tmp.join(format!("aqr{EXE}"))).map_err(|e| format!("{}: {e}", packed.display()))?;
-    let info = format!("created={}\nmanifest={manifest}\n{}", now(), commit(&paths, &blobs)?);
+    fs::copy(&built, tmp.join(exe(p.name))).map_err(|e| format!("{}: {e}", built.display()))?;
+    let mut info = format!("created={}\nmanifest={manifest}\nprogram={}\n", now(), p.name);
+    for b in beside {
+        link_or_copy(&b.exe, &tmp.join(exe(b.name)))?;
+        info += &format!("beside.{}={}\n", b.name, b.key);
+    }
+    info += &commit(&paths, &blobs)?;
     fs::write(tmp.join("info"), info).map_err(|e| e.to_string())?;
-    let kept = keep(&tmp, &dir, KEEP_WAITS, |from, to| fs::rename(from, to));
+    let moved = keep(&tmp, &dir, KEEP_WAITS, |from, to| fs::rename(from, to));
     evict()?;
-    Ok(match kept {
-        Ok(dir) => dir.join(format!("aqr{EXE}")),
+    match moved {
+        Ok(_) => Ok(kept()),
         Err(e) => {
             eprintln!("aqr-bincache: {} not kept ({e}); running the binary without keeping it", dir.display());
-            packed
+            unkept()
         }
-    })
+    }
+}
+
+/// The binary `built` of `p` to run where it is not kept: itself, or where others go beside it,
+/// a copy beside copies of theirs (in `target/release/PROGRAM-unkept/`).
+fn unkept(p: &Program, built: &Path, beside: &[Beside]) -> Result<PathBuf> {
+    if beside.is_empty() {
+        return Ok(built.to_path_buf());
+    }
+    let dir = target().join(format!("{}-unkept", p.name));
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let all = std::iter::once((built, p.name)).chain(beside.iter().map(|b| (b.exe.as_path(), b.name)));
+    for (from, name) in all {
+        fs::copy(from, dir.join(exe(name))).map_err(|e| format!("{} to {}: {e}", from.display(), dir.display()))?;
+    }
+    Ok(dir.join(exe(p.name)))
+}
+
+/// A hard link to `from` at `to`, else a copy (another volume, a file system of no links).
+fn link_or_copy(from: &Path, to: &Path) -> Result<()> {
+    fs::hard_link(from, to).or_else(|_| fs::copy(from, to).map(drop)).map_err(|e| format!("{}: {e}", from.display()))
 }
 
 /// The first of `paths` (relative to `root`, or absolute) modified since `start`, but those under
@@ -359,6 +483,8 @@ fn manifests() -> Result<BTreeMap<String, BTreeSet<String>>> {
 
 struct Entry {
     key: String,
+    /// The program (`aqr` where the info has none, as those kept before there were others).
+    program: String,
     dir: PathBuf,
     info: BTreeMap<String, String>,
     used: SystemTime,
@@ -370,49 +496,53 @@ fn entries() -> Vec<Entry> {
         .flatten()
         .filter_map(|e| {
             let text = fs::read_to_string(e.path().join("info")).ok()?;
-            let info = text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.into(), v.into())).collect();
+            let info: BTreeMap<String, String> =
+                text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.into(), v.into())).collect();
             let used = fs::metadata(e.path().join("used")).or_else(|_| fs::metadata(e.path().join("info")));
             let used = used.and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
-            Some(Entry { key: e.file_name().to_string_lossy().into_owned(), dir: e.path(), info, used })
+            let program = info.get("program").map_or("aqr", String::as_str).to_string();
+            Some(Entry { key: e.file_name().to_string_lossy().into_owned(), program, dir: e.path(), info, used })
         })
         .collect();
     entries.sort_by_key(|e| std::cmp::Reverse(e.info.get("created").and_then(|c| c.parse::<u64>().ok())));
     entries
 }
 
-fn find(id: &str) -> Result<PathBuf> {
-    let found: Vec<Entry> = entries().into_iter().filter(|e| e.key.starts_with(id)).collect();
+/// The kept binaries of a program.
+fn entries_of(p: &Program) -> Vec<Entry> {
+    entries().into_iter().filter(|e| e.program == p.name).collect()
+}
+
+fn find(p: &Program, id: &str) -> Result<PathBuf> {
+    let found: Vec<Entry> = entries_of(p).into_iter().filter(|e| e.key.starts_with(id)).collect();
     match &found[..] {
         [entry] => Ok(entry.dir.clone()),
-        [] => Err(format!("no kept binary +{id} (cargo aqr + lists them)")),
+        [] => Err(format!("no kept binary +{id} of {} (cargo {} + lists them)", p.name, p.name)),
         _ => Err(format!("+{id} is ambiguous")),
     }
 }
 
-fn list() -> Result<ExitCode> {
-    let entries = entries();
-    let current = (|| {
-        let manifests = manifests()?;
-        let env = environment()?;
-        let blobs = blobs(manifests.values().flatten())?;
-        manifests.values().map(|paths| key(&env, paths, &blobs)).collect::<Result<BTreeSet<_>>>()
-    })()?;
+fn list(p: &Program) -> Result<ExitCode> {
+    let entries = entries_of(p);
+    let current = current_key(p)?;
+    let pinned = pinned();
     let mut out = std::io::stdout().lock();
     let written = (|| {
         for e in &entries {
             let get = |k: &str| e.info.get(k).map_or("", String::as_str);
             let created = get("created").parse().unwrap_or(0);
             let used = e.used.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let mark = if current.contains(&e.key) { '*' } else { ' ' };
+            let mark = if current.as_ref() == Some(&e.key) { '*' } else { ' ' };
+            let pin = if pinned.contains(&e.key) { "  (pinned)" } else { "" };
             let dirty = if get("dirty") == "1" { "+" } else { " " };
             writeln!(
                 out,
-                "{mark} {}  {}  used {}  {}{dirty} {}",
+                "{mark} {}  {}  used {}  {}{dirty} {}{pin}",
                 &e.key[..12],
                 local_time(created),
                 local_time(used),
                 get("commit"),
-                get("subject")
+                get("subject"),
             )?;
         }
         if entries.is_empty() {
@@ -430,13 +560,21 @@ fn list() -> Result<ExitCode> {
 /// How old a `tmp-*` directory of the cache is (by its modification) once it is no build's.
 const STALE: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The keys of the pinned binaries (`cache/pinned/PROGRAM`: the key of the program's).
+fn pinned() -> BTreeSet<String> {
+    let Ok(dir) = fs::read_dir(cache().join("pinned")) else { return BTreeSet::new() };
+    dir.flatten().filter_map(|e| fs::read_to_string(e.path()).ok()).map(|k| k.trim().to_string()).collect()
+}
+
 fn evict() -> Result<()> {
     let max = std::env::var("AQR_BINCACHE_MAX").ok().and_then(|m| m.parse().ok()).unwrap_or(16);
-    let mut entries = entries();
+    let pinned = pinned();
+    let (mut entries, kept): (Vec<Entry>, Vec<Entry>) = entries().into_iter().partition(|e| !pinned.contains(&e.key));
     entries.sort_by_key(|e| std::cmp::Reverse(e.used));
     for e in entries.drain(max.min(entries.len())..) {
         let _ = fs::remove_dir_all(&e.dir);
     }
+    entries.extend(kept);
     // binaries made but not kept (their removal failed), but those of builds going on
     let stale = |m: fs::Metadata| m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > STALE);
     for entry in fs::read_dir(cache()).map_err(|e| e.to_string())?.flatten() {
@@ -467,25 +605,42 @@ fn local_time(secs: u64) -> String {
     out.map_or_else(|| secs.to_string(), |o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-/// Runs `exe` (a kept binary, marked used, or the one just built) with `args`.
-fn run(exe: &Path, args: &[OsString]) -> Result<ExitCode> {
+/// Runs `exe` (a kept binary of `p`, marked used, or the one just built) with `args`, pinning or
+/// unpinning it where they are those of [`Program::pin`] and it succeeds.
+fn run(p: &Program, exe: &Path, args: &[OsString]) -> Result<ExitCode> {
     let dir = exe.parent().unwrap_or(exe);
-    if dir.join("info").exists() {
+    let kept = dir.join("info").exists();
+    if kept {
         let used = fs::File::options().create(true).append(true).open(dir.join("used"));
         let _ = used.and_then(|f| f.set_modified(SystemTime::now()));
     }
     let mut cmd = Command::new(exe);
     cmd.args(args);
+    let first = args.first().and_then(|a| a.to_str());
+    let pin = p.pin.and_then(|(pin, unpin)| [(pin, true), (unpin, false)].into_iter().find(|&(a, _)| Some(a) == first));
     #[cfg(unix)]
-    {
+    if pin.is_none() {
         use std::os::unix::process::CommandExt;
-        Err(format!("{}: {}", exe.display(), cmd.exec()))
+        return Err(format!("{}: {}", exe.display(), cmd.exec()));
     }
-    #[cfg(not(unix))]
-    {
-        let status = cmd.status().map_err(|e| format!("{}: {e}", exe.display()))?;
-        Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+    let status = cmd.status().map_err(|e| format!("{}: {e}", exe.display()))?;
+    if let Some((arg, pinning)) = pin.filter(|_| status.success()) {
+        let file = cache().join("pinned").join(p.name);
+        let done = match (pinning, kept) {
+            (true, true) => fs::create_dir_all(cache().join("pinned"))
+                .and_then(|()| fs::write(&file, dir.file_name().unwrap_or_default().as_encoded_bytes())),
+            (true, false) => {
+                eprintln!("aqr-bincache: {} {arg} with a binary not kept: not pinned", p.name);
+                Ok(())
+            }
+            (false, _) => fs::remove_file(&file).or_else(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(e),
+            }),
+        };
+        done.map_err(|e| format!("{}: {e}", file.display()))?;
     }
+    Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
 }
 
 #[cfg(test)]

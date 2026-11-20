@@ -76,7 +76,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     by the release workflow) or `git describe`'s, as `env!("AQR_VERSION")` and Windows' `VERSIONINFO`.
   - `aqr-walk` — one syntax walked for coding, decoding and a dry parse (`Io`), the range coder and
     the hashed model of aqr-div3 and aqr-ac3 (their coding is specified in its README).
-  - `aqr-bincache` — `cargo aqr`: the release `aqr` built and kept by a hash of its sources.
+  - `aqr-bincache` — `cargo aqr`, `cargo aqr-win`: the release `aqr` (and `aqr-win`, with the
+    kept `aqr` beside it) built and kept by a hash of its sources.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper; aqr-ld also
     (`src/pemerge.rs`) has `blob`, which digests a module library into a blob (just the bytes and
     facts a merge needs: image from the first section, no PE headers/`.reloc`/header gap, dead
@@ -201,7 +202,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   `crates/aqr-modules/build.py` (and pack.py) first where what the modules are made of changed
   (`src/modules.rs`; `AQR_BINCACHE_MODULES=0` skips it).
   `cargo aqr +` lists the kept binaries; `cargo aqr +<id> <args>…` runs an earlier one, e.g. as
-  the "before" of a comparison.
+  the "before" of a comparison. `cargo aqr-win <args>…` does the same for aqr-win, the kept
+  `aqr` beside it: `cargo aqr-win --register` puts Explorer's verbs on the development build
+  (that binary pinned in the cache until `--unregister`).
 - Format with `cargo fmt` (the root's `rustfmt.toml`: width 120).
 - Cache the results of measurements taking over a minute in `cache/`.
 - Measure peak memory (`/usr/bin/time -l`) on runs over big inputs.
