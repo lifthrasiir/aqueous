@@ -649,7 +649,9 @@ aqr: not there
     fn commands() {
         let a = Path::new("aqr");
         let (cmd, count) = command(a, Verb::Compress, paths(&["d/b", "d/a"]), true, "zip");
-        assert_eq!(args_of(&cmd), ["--ipc", "-c", "-P", "--format", "zip", "-o", "d/d.zip", "--", "d/a", "d/b"]);
+        // (the archive's path joined by the system's separator: `d\d.zip` on Windows)
+        let archive = Path::new("d").join("d.zip").to_string_lossy().into_owned();
+        assert_eq!(args_of(&cmd), ["--ipc", "-c", "-P", "--format", "zip", "-o", &archive, "--", "d/a", "d/b"]);
         assert_eq!(count, 1);
         let (cmd, count) = command(a, Verb::Compress, paths(&["d/a"]), false, "aqr");
         assert_eq!(args_of(&cmd), ["--ipc", "-c", "--", "d/a"]);
