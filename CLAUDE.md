@@ -188,7 +188,12 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   `cargo test --workspace` once ran over 12 minutes). Timings (`--ignored` tests) still want
   `-r`. Test the crates you changed rather than the whole workspace; for the archive encoder
   and decoder that is aqr-archive, aqr-compress and aqr-decompress. Stream long output with
-  `rg --line-buffered` rather than through `sort`, which hides progress.
+  `rg --line-buffered` rather than through `sort`, which hides progress. `cargo nextest run
+  --cargo-profile release-test …` (no doctests) runs the tests of all binaries at once, about 3
+  times as fast over many packages. CI (`.github/workflows/test.yml`, Linux) tests what
+  `scripts/affected-crates.py BASE` selects: the packages changed and those depending on them.
+  A test reading another package's files names them by a relative path in its source
+  (`"../../codecs/aqr-jpeg/tests/data/…"`), or the script misses it.
 - **Build and run the release `aqr` only through `cargo aqr <args>…`** (crates/aqr-bincache),
   never `cargo build -p aqr`, `cargo run -p aqr` or `target/release/aqr` directly: it builds
   as needed and keeps each binary by a hash of its sources, so a rebuild for a source tree

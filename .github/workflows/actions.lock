@@ -16,6 +16,9 @@ workflows:
         - 'actions/deploy-pages@v5.0.1'
         - 'actions/setup-python@v7.1.0'
         - 'actions/upload-pages-artifact@v5.0.0'
+    '.github/workflows/test.yml':
+        - 'actions/checkout@v7.0.1'
+        - 'swatinem/rust-cache@v2.9.3'
     '.github/workflows/zizmor.yml':
         - 'actions/checkout@v7.0.1'
         - 'zizmorcore/zizmor-action@v0.8.1'

@@ -1,0 +1,104 @@
+name: test
+
+# The tests (cargo-nextest, .config/nextest.toml's profile ci, at the profile release-test) on
+# Linux x86-64, of the packages a change can affect: scripts/affected-crates.py takes the changed
+# files from the merge base (the commit before the push, or the pull request's base) and adds the
+# packages depending on theirs. The scheduled runs, by hand and of a push of no base known (a new
+# branch, a force push) test the whole workspace (but aqr-dll's dylibs, whose tests do not build).
+# Doctests are not run (5 in the workspace; building them took longer than the tests of most
+# packages).
+#
+# Measured on an M4 (10 cores), 2026-11-20: building every test from nothing 270 s (2170 CPU
+# seconds), the tests 216 s through nextest (700 s through cargo test, one binary at a time). The
+# median commit of 150 affected 19 packages and 57% of the tests' CPU time: aqr-decompress (40% by
+# itself) depends on nearly every codec. A runner has 4 cores; in a Linux VM of 4 (aarch64, 8 GiB),
+# the whole workspace took 5 min 20 s to build and 392 s to test, its target 4.5 GB.
+#
+# The external dependencies are cached (rust-cache), saved only by the runs on main of the whole
+# workspace (a run of fewer packages would save what it built alone, under the key of
+# Cargo.lock, for every run after it); the workspace's crates are built every time (Cargo tells
+# them fresh by their files' times, which a checkout resets).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # (all the tests, and main's cache saved again)
+  schedule:
+    - cron: '41 19 * * 2,6'
+
+permissions: {}
+
+concurrency:
+  group: test-${{ github.ref }}
+  # (a push to main is never cancelled: the run of the next push tests what it changed alone)
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # (no build is kept from one run to the next but the dependencies')
+  CARGO_INCREMENTAL: '0'
+  # No debug information: on Linux each test binary carries its own, and that of the C libraries
+  # (built with -g) and std, 85-90% of its bytes (aqr's tests, 253 MB); the 368 binaries of the
+  # workspace filled 18 GB before they were all built, more than a runner has free. The symbols
+  # are kept, for the backtraces.
+  CARGO_PROFILE_RELEASE_TEST_DEBUG: '0'
+  CARGO_PROFILE_RELEASE_TEST_STRIP: debuginfo
+  # cargo-nextest (github.com/nextest-rs/nextest's release, checked by its SHA-256)
+  NEXTEST_VERSION: 0.9.152
+  NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          # (the base of the changes)
+          fetch-depth: 0
+      - run: rustup toolchain install
+      - name: Select the packages
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          case "$EVENT" in
+            push) base=$BEFORE ;;
+            pull_request) base=$PR_BASE ;;
+            *) base= ;;
+          esac
+          if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            python3 scripts/affected-crates.py "$base" HEAD > selection
+          else
+            printf '%s\n' --workspace '--exclude=aqr-dll*' > selection
+          fi
+          cat selection
+          if [ -s selection ]; then echo "TEST=1" >> "$GITHUB_ENV"; fi
+          if grep -qx -- --workspace selection; then echo "WHOLE=1" >> "$GITHUB_ENV"; fi
+      - uses: Swatinem/rust-cache@v2.9.3
+        if: env.TEST
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && env.WHOLE == '1' }}
+      # (the programs the tests run that a runner lacks: sqlite3 makes the databases of
+      # aqr-sqlite's, aqr-clip's and aqr-minecraft's tests, ffmpeg the DivX 3 frames of
+      # aqr-decompress's)
+      - if: env.TEST
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends sqlite3 ffmpeg
+      - if: env.TEST
+        run: |
+          curl -sSfLo nextest.tar.gz "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$NEXTEST_SHA256 *nextest.tar.gz" | sha256sum -c -
+          tar -xzf nextest.tar.gz -C "$HOME/.cargo/bin"
+          rm nextest.tar.gz
+      - if: env.TEST
+        run: |
+          mapfile -t args < selection
+          cargo nextest run --profile ci --cargo-profile release-test --locked "${args[@]}"

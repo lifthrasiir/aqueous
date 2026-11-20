@@ -1,0 +1,11 @@
+# cargo-nextest (nexte.st): the tests of every binary run at once, each in its own process.
+# `cargo nextest run --cargo-profile release-test ...` runs what `cargo rt` does (but the
+# doctests), 3.2 times as fast: the workspace's on an M4, 700 -> 216 s (the long tests of one
+# binary, aqr-decompress's wasm, no longer run alone after the others).
+
+[profile.ci]
+# (every failure told, not the first alone)
+fail-fast = false
+# (a test taking over 2 min is told; past 20 min it is stopped and fails)
+slow-timeout = { period = "120s", terminate-after = 10 }
+failure-output = "immediate-final"
