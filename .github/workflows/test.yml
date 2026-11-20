@@ -153,6 +153,13 @@ jobs:
           echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
       - env:
           ARGS: ${{ needs.select.outputs.args }}
+          OS: ${{ matrix.os }}
         run: |
           mapfile -t args <<< "$ARGS"
-          cargo nextest run --profile ci --cargo-profile release-test --locked "${args[@]}"
+          run=(cargo nextest run --profile ci --cargo-profile release-test --locked "${args[@]}")
+          "${run[@]}" --no-run
+          # The tests run Git's programs on Windows (as in Git Bash), not the system's: System32's
+          # tar (bsdtar) takes names by the system's code page and skips a UTF-8 name out of it
+          # (aqr-pack's tar round_trip). Only after the build: Git's link.exe is not MSVC's.
+          if [ "$OS" = windows ]; then PATH="/usr/bin:$PATH"; fi
+          "${run[@]}"
