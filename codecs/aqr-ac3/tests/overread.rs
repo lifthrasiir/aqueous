@@ -94,13 +94,40 @@ fn the_checksum_is_the_bitwise_one() {
 #[test]
 fn the_checksum_is_fast() {
     // dense false syncwords are the worst case of the records: a checksum of a large frame at each
-    let data: Vec<u8> = std::iter::repeat_n([0x0B, 0x77, 0, 0, 0x65], 4 << 20).flatten().collect();
-    let t = Instant::now();
-    let n = stream::records(&data).len();
-    let dt = t.elapsed();
+    let data: Vec<u8> = std::iter::repeat_n([0x0B, 0x77, 0, 0, 0x65], 1 << 20).flatten().collect();
+    // what the records must check at least: the first checksum (of 5/8 of the frame) at each
+    // syncword with room for its frame
+    let checked: usize = (0..data.len())
+        .filter_map(|p| aqr_ac3::frame_len(&data[p..]).filter(|n| p + n <= data.len()))
+        .map(|n| ((n / 4) + (n / 16)) * 2 - 2)
+        .sum();
+    // timed against the checksum's speed here, not a speed of its own (8.8 MB/s on an M4, 4.9 on
+    // a runner of CI running other tests at once): the fastest of a few runs of each
+    let fastest = |f: &dyn Fn()| {
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let block: Vec<u8> = (0..32u32 << 20).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    let crc = fastest(&|| {
+        std::hint::black_box(crc16_of(std::hint::black_box(&block)));
+    });
+    let expected = crc.mul_f64(checked as f64 / block.len() as f64);
+    let dt = fastest(&|| {
+        std::hint::black_box(stream::records(std::hint::black_box(&data)));
+    });
     let mbps = data.len() as f64 / 1e6 / dt.as_secs_f64();
-    eprintln!("{} bytes of false syncwords: {dt:?}, {mbps:.1} MB/s, {n} records", data.len());
-    assert!(mbps > 5.0, "{mbps:.1} MB/s");
+    eprintln!(
+        "{} bytes of false syncwords: {dt:?} ({mbps:.1} MB/s), {checked} bytes checksummed: {expected:?}",
+        data.len()
+    );
+    // (the bitwise checksum is 4 times as slow or more: the_checksum_runs_at_the_tables_speed)
+    assert!(dt < expected * 3, "{dt:?} against {expected:?} of checksums");
 }
 
 #[test]
