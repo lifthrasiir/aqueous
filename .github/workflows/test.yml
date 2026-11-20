@@ -14,7 +14,8 @@ name: test
 # median commit of 150 affected 19 packages and 57% of the tests' CPU time: aqr-decompress (40% by
 # itself) depends on nearly every codec. A runner has 4 cores; in a Linux VM of 4 (aarch64, 8 GiB),
 # the whole workspace took 5 min 20 s to build and 392 s to test, its target 4.5 GB; on Windows
-# (16 cores) 226 s to build and 772 s through cargo test, its target 7.3 GB.
+# (16 cores) 226 s to build and 772 s through cargo test, its target 7.3 GB. On ubuntu-latest
+# (2026-11-20, nothing cached) 12 min 42 s to build and 1102 s to test: 32 min in all.
 #
 # The external dependencies are cached (rust-cache), saved only by the runs on main of the whole
 # workspace (a run of fewer packages would save what it built alone, under the key of
@@ -60,7 +61,7 @@ jobs:
     outputs:
       args: ${{ steps.select.outputs.args }}
       whole: ${{ steps.select.outputs.whole }}
-      os: ${{ steps.select.outputs.os }}
+      matrix: ${{ steps.select.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -88,10 +89,15 @@ jobs:
           cat selection
           { echo 'args<<EOF'; cat selection; echo EOF; } >> "$GITHUB_OUTPUT"
           if grep -qx -- --workspace selection; then echo "whole=1" >> "$GITHUB_OUTPUT"; fi
-          # macOS only by schedule and by hand: the tests are run there as the code is written
+          # The systems, each with its runner and its cargo-nextest (and the SHA-256 of that):
+          # macOS only by schedule and by hand, as the tests are run there as the code is written.
+          # (Written whole here: a matrix's `include` adds a job of each entry matching no value.)
+          linux='{"os":"linux","runner":"ubuntu-latest","nextest":"x86_64-unknown-linux-gnu","sha256":"d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"}'
+          windows='{"os":"windows","runner":"windows-latest","nextest":"x86_64-pc-windows-msvc","sha256":"0384fc89a5a547d4fd5e183fcc101d31dba2837feafd8e64d5ea003a0ddb1941"}'
+          macos='{"os":"macos","runner":"macos-latest","nextest":"universal-apple-darwin","sha256":"2fadf57df4243e691f088ee3bff4f4ab9af16da0c95a1db84b5cb1685e098a76"}'
           case "$EVENT" in
-            schedule | workflow_dispatch) echo 'os=["linux","windows","macos"]' ;;
-            *) echo 'os=["linux","windows"]' ;;
+            schedule | workflow_dispatch) echo "matrix=[$linux,$windows,$macos]" ;;
+            *) echo "matrix=[$linux,$windows]" ;;
           esac >> "$GITHUB_OUTPUT"
 
   test:
@@ -100,20 +106,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.select.outputs.os) }}
-        include:
-          - os: linux
-            runner: ubuntu-latest
-            nextest: x86_64-unknown-linux-gnu
-            nextest-sha256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
-          - os: windows
-            runner: windows-latest
-            nextest: x86_64-pc-windows-msvc
-            nextest-sha256: 0384fc89a5a547d4fd5e183fcc101d31dba2837feafd8e64d5ea003a0ddb1941
-          - os: macos
-            runner: macos-latest
-            nextest: universal-apple-darwin
-            nextest-sha256: 2fadf57df4243e691f088ee3bff4f4ab9af16da0c95a1db84b5cb1685e098a76
+        include: ${{ fromJSON(needs.select.outputs.matrix) }}
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     permissions:
@@ -144,13 +138,19 @@ jobs:
         run: brew install --quiet ffmpeg
       - env:
           TARGET: ${{ matrix.nextest }}
-          SHA256: ${{ matrix.nextest-sha256 }}
+          SHA256: ${{ matrix.sha256 }}
         run: |
           f=cargo-nextest-$NEXTEST_VERSION-$TARGET.tar.gz
           curl -sSfLo "$f" "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/$f"
-          echo "$SHA256 *$f" | shasum -a 256 -c -
-          tar -xzf "$f" -C "$HOME/.cargo/bin"
-          rm "$f"
+          # (sha256sum on Linux and in Git Bash, shasum on macOS)
+          if command -v sha256sum > /dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
+          echo "$SHA256 *$f" | "${sum[@]}" -c -
+          # (a directory of its own on the PATH: macOS's rustup has no ~/.cargo/bin)
+          # (extracted where it is: GNU tar may take `D:\...` for a host's path)
+          mkdir -p "$RUNNER_TEMP/nextest"
+          mv "$f" "$RUNNER_TEMP/nextest/"
+          (cd "$RUNNER_TEMP/nextest" && tar -xzf "$f" && rm "$f")
+          echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
       - env:
           ARGS: ${{ needs.select.outputs.args }}
         run: |
