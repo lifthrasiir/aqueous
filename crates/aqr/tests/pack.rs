@@ -153,6 +153,34 @@ fn checked_by(tool: &str, args: &[&str], file: &Path) -> bool {
     true
 }
 
+/// What tells more of tar failing on `file` (its compressor's `tool`, if any): the versions of
+/// tar and of the tool, the tool's path, and what the tool does decompressing the file itself
+/// (as tar runs it for a filter it does not have).
+fn told(check: Option<(&str, &str)>, file: &Path) -> String {
+    let run = |cmd: &str, args: &[&str]| match Command::new(cmd).args(args).output() {
+        Ok(o) => format!(
+            "{} {}{}",
+            o.status,
+            String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or(""),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => e.to_string(),
+    };
+    let mut s = format!("\n  tar --version: {}", run("tar", &["--version"]));
+    if let Some((tool, _)) = check {
+        s += &format!("\n  {tool}: {}", run("sh", &["-c", &format!("command -v {tool}")]));
+        s += &format!("\n  {tool} --version: {}", run(tool, &["--version"]));
+        match Command::new(tool).arg("-dc").arg(file).output() {
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                s += &format!("\n  {tool} -dc: {}, {} bytes, {}", o.status, o.stdout.len(), err.trim());
+            }
+            Err(e) => s += &format!("\n  {tool} -dc: {e}"),
+        }
+    }
+    s
+}
+
 #[test]
 fn tar_under_each_compressor() {
     let d = scratch("tar");
@@ -178,7 +206,7 @@ fn tar_under_each_compressor() {
             let x = d.join(format!("by-tar-{ext}"));
             fs::create_dir(&x).unwrap();
             let o = Command::new("tar").arg("-xf").arg(&a).arg("-C").arg(&x).output().unwrap();
-            assert!(o.status.success(), "tar -xf {ext}: {}", String::from_utf8_lossy(&o.stderr));
+            assert!(o.status.success(), "tar -xf {ext}: {}{}", String::from_utf8_lossy(&o.stderr), told(check, &a));
             // (by the paths of the files, as macOS may have the names in another normal form)
             for (name, want) in files(&src).into_iter().filter(|f| !f.0.ends_with('/')) {
                 let got = fs::read(x.join("src").join(&name)).unwrap();
