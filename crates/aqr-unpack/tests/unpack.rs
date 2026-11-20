@@ -330,7 +330,16 @@ fn damage_fails() {
 /// link of RAR5's left out (told).
 #[test]
 fn rar_trees() {
+    // RAR 3.x's times are MS-DOS's, local: the archive was made in Seoul (UTC+9), and its times are
+    // read as the same date and time of day here, whatever the time zone of the test
+    let seoul = |secs: i64, nanos: u32| {
+        let (y, mo, d, h, mi, s) = Time::new(secs + 9 * 3600, 0).civil();
+        let here = aqr_foreign::time::local_secs((y as i32, mo, d, h, mi, s)).unwrap();
+        Some(Time::new(here, nanos))
+    };
     for (name, hard) in [("tree-rar5.rar", true), ("tree-rar4.rar", false)] {
+        let time =
+            |secs, nanos| if name == "tree-rar5.rar" { Some(Time::new(secs, nanos)) } else { seoul(secs, nanos) };
         let (done, r) = unpack(Format::Rar, &data(name)).unwrap();
         let notes = r.notes.lock().unwrap().clone();
         assert_eq!(done.skipped, hard as usize, "{name}: {notes:?}");
@@ -338,10 +347,10 @@ fn rar_trees() {
         let l = listing(&done, &r);
         let get = |p: &str| l.get(p).unwrap_or_else(|| panic!("{name}: {p} not in {:?}", l.keys()));
         assert_eq!(get("dir").0, Node::Dir, "{name}");
-        assert_eq!(get("dir").1.mtime, at(1_400_000_000), "{name}");
+        assert_eq!(get("dir").1.mtime, time(1_400_000_000, 0), "{name}");
         assert_eq!(get("dir/file.txt").0, Node::File(text()), "{name}");
         let x = &get("dir/file.txt").1;
-        assert_eq!(x.mtime, Some(Time::new(1_500_000_001, 250_000_000)), "{name}");
+        assert_eq!(x.mtime, time(1_500_000_001, 250_000_000), "{name}");
         assert_eq!(x.mode, Some(0o644), "{name}");
         assert_eq!(get("dir/ro.txt").0, Node::File(b"read only\n".to_vec()), "{name}");
         assert_eq!(get("dir/ro.txt").1.mode, Some(0o444), "{name}");
