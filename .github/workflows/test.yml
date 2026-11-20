@@ -1,18 +1,20 @@
 name: test
 
-# The tests (cargo-nextest, .config/nextest.toml's profile ci, at the profile release-test) on
-# Linux x86-64, of the packages a change can affect: scripts/affected-crates.py takes the changed
-# files from the merge base (the commit before the push, or the pull request's base) and adds the
-# packages depending on theirs. The scheduled runs, by hand and of a push of no base known (a new
-# branch, a force push) test the whole workspace (but aqr-dll's dylibs, whose tests do not build).
-# Doctests are not run (5 in the workspace; building them took longer than the tests of most
-# packages).
+# The tests (cargo-nextest, .config/nextest.toml's profile ci, at the profile release-test) of the
+# packages a change can affect, on Linux and Windows (x86-64), and by schedule and by hand on
+# macOS (arm64, where the tests are run as the code is written): scripts/affected-crates.py takes
+# the changed files from the merge base (the commit before the push, or the pull request's base)
+# and adds the packages depending on theirs. The scheduled runs, by hand and of a push of no base
+# known (a new branch, a force push) test the whole workspace (but aqr-dll's dylibs, whose tests
+# do not build). Doctests are not run (5 in the workspace; building them took longer than the
+# tests of most packages).
 #
 # Measured on an M4 (10 cores), 2026-11-20: building every test from nothing 270 s (2170 CPU
 # seconds), the tests 216 s through nextest (700 s through cargo test, one binary at a time). The
 # median commit of 150 affected 19 packages and 57% of the tests' CPU time: aqr-decompress (40% by
 # itself) depends on nearly every codec. A runner has 4 cores; in a Linux VM of 4 (aarch64, 8 GiB),
-# the whole workspace took 5 min 20 s to build and 392 s to test, its target 4.5 GB.
+# the whole workspace took 5 min 20 s to build and 392 s to test, its target 4.5 GB; on Windows
+# (16 cores) 226 s to build and 772 s through cargo test, its target 7.3 GB.
 #
 # The external dependencies are cached (rust-cache), saved only by the runs on main of the whole
 # workspace (a run of fewer packages would save what it built alone, under the key of
@@ -45,24 +47,29 @@ env:
   # are kept, for the backtraces.
   CARGO_PROFILE_RELEASE_TEST_DEBUG: '0'
   CARGO_PROFILE_RELEASE_TEST_STRIP: debuginfo
-  # cargo-nextest (github.com/nextest-rs/nextest's release, checked by its SHA-256)
+  # cargo-nextest (github.com/nextest-rs/nextest's release, checked by its SHA-256: the matrix's)
   NEXTEST_VERSION: 0.9.152
-  NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
 
 jobs:
-  test:
+  # The packages to test, as the arguments of cargo (one a line; none: nothing to test), and the
+  # systems to test them on.
+  select:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
     permissions:
       contents: read
+    outputs:
+      args: ${{ steps.select.outputs.args }}
+      whole: ${{ steps.select.outputs.whole }}
+      os: ${{ steps.select.outputs.os }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           # (the base of the changes)
           fetch-depth: 0
-      - run: rustup toolchain install
-      - name: Select the packages
+      # (cargo metadata, for the packages' dependencies)
+      - run: rustup toolchain install --profile minimal
+      - id: select
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
@@ -79,26 +86,73 @@ jobs:
             printf '%s\n' --workspace '--exclude=aqr-dll*' > selection
           fi
           cat selection
-          if [ -s selection ]; then echo "TEST=1" >> "$GITHUB_ENV"; fi
-          if grep -qx -- --workspace selection; then echo "WHOLE=1" >> "$GITHUB_ENV"; fi
-      - uses: Swatinem/rust-cache@v2.9.3
-        if: env.TEST
+          { echo 'args<<EOF'; cat selection; echo EOF; } >> "$GITHUB_OUTPUT"
+          if grep -qx -- --workspace selection; then echo "whole=1" >> "$GITHUB_OUTPUT"; fi
+          # macOS only by schedule and by hand: the tests are run there as the code is written
+          case "$EVENT" in
+            schedule | workflow_dispatch) echo 'os=["linux","windows","macos"]' ;;
+            *) echo 'os=["linux","windows"]' ;;
+          esac >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: select
+    if: needs.select.outputs.args != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.select.outputs.os) }}
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            nextest: x86_64-unknown-linux-gnu
+            nextest-sha256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
+          - os: windows
+            runner: windows-latest
+            nextest: x86_64-pc-windows-msvc
+            nextest-sha256: 0384fc89a5a547d4fd5e183fcc101d31dba2837feafd8e64d5ea003a0ddb1941
+          - os: macos
+            runner: macos-latest
+            nextest: universal-apple-darwin
+            nextest-sha256: 2fadf57df4243e691f088ee3bff4f4ab9af16da0c95a1db84b5cb1685e098a76
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' && env.WHOLE == '1' }}
-      # (the programs the tests run that a runner lacks: sqlite3 makes the databases of
-      # aqr-sqlite's, aqr-clip's and aqr-minecraft's tests, ffmpeg the DivX 3 frames of
-      # aqr-decompress's)
-      - if: env.TEST
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && needs.select.outputs.whole == '1' }}
+      # The programs the tests run that a runner lacks: sqlite3 makes the databases of aqr-sqlite's,
+      # aqr-clip's and aqr-minecraft's tests, ffmpeg the DivX 3 frames of aqr-decompress's (macOS
+      # has sqlite3).
+      - if: matrix.os == 'linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends sqlite3 ffmpeg
-      - if: env.TEST
+      - if: matrix.os == 'windows'
+        run: choco install -y --no-progress sqlite ffmpeg
+      - if: matrix.os == 'macos'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install --quiet ffmpeg
+      - env:
+          TARGET: ${{ matrix.nextest }}
+          SHA256: ${{ matrix.nextest-sha256 }}
         run: |
-          curl -sSfLo nextest.tar.gz "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          echo "$NEXTEST_SHA256 *nextest.tar.gz" | sha256sum -c -
-          tar -xzf nextest.tar.gz -C "$HOME/.cargo/bin"
-          rm nextest.tar.gz
-      - if: env.TEST
+          f=cargo-nextest-$NEXTEST_VERSION-$TARGET.tar.gz
+          curl -sSfLo "$f" "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/$f"
+          echo "$SHA256 *$f" | shasum -a 256 -c -
+          tar -xzf "$f" -C "$HOME/.cargo/bin"
+          rm "$f"
+      - env:
+          ARGS: ${{ needs.select.outputs.args }}
         run: |
-          mapfile -t args < selection
+          mapfile -t args <<< "$ARGS"
           cargo nextest run --profile ci --cargo-profile release-test --locked "${args[@]}"
