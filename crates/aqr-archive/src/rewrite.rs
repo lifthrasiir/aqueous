@@ -18,8 +18,9 @@
 //! Each segment's metadata block is made again: the entries whose contents are of it, at their
 //! paths in the tree, with the directories on the way (of no extra, which keeps theirs); the
 //! entries of no content (directories, links, ...) in the last. No tombstone is left. The
-//! metadata this crate does not read ([`Extra`]) would be lost, so an archive having any is not
-//! written again.
+//! entries' extension keys are carried as they are ([`Extra::extensions`]); the metadata this
+//! crate does not read (a comment, ZIP's extra fields, members of no meaning known, and the
+//! archive-wide extension keys) would be lost, so an archive having any is not written again.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -354,7 +355,8 @@ pub fn rewrite_as(
 }
 
 /// Fails where archive `c` has metadata that [`Extra`] does not hold (a comment, ZIP's extra
-/// fields, members of no meaning known), which writing it again would lose.
+/// fields, members of no meaning known, archive-wide extension keys), which writing it again
+/// would lose.
 fn unknown_metadata(c: &[u8], journal: bool) -> Result<()> {
     let i = inspect::inspect(c, false, &|_| None, None).map_err(|f| Error::new(f.to_string()))?;
     let known = |name: Option<&str>| name.is_some_and(|n| !matches!(n, "comment" | "zip-extras"));
@@ -368,7 +370,8 @@ fn unknown_metadata(c: &[u8], journal: bool) -> Result<()> {
         }
         for e in &s.entries {
             let members = e.members.iter().flatten();
-            if let Some(m) = members.into_iter().find(|m| !known(m.key.and_then(super::entry_key_name))) {
+            if let Some(m) = members.into_iter().find(|m| !m.extension && !known(m.key.and_then(super::entry_key_name)))
+            {
                 return Err(Error::new(format!("metadata not kept in writing it again: {}", m.key_text)));
             }
         }
@@ -724,6 +727,27 @@ mod tests {
         assert_eq!(by_name(b"w"), (None, want[1].clone(), Some(0o601)));
         assert_eq!(by_name(b"z"), (Some(b"d".to_vec()), want[2].clone(), Some(0o602)));
         assert_eq!(got.entries.len(), 3);
+    }
+
+    /// The extension keys of the entries kept, written again as they are; archive-wide ones
+    /// still refused.
+    #[test]
+    fn extension_keys_kept() {
+        let (c, _) = grouped();
+        let mut t = open(&c, &natives()).unwrap().tree().unwrap().clone();
+        let y = t.entries.iter().position(|e| e.name == b"y").unwrap();
+        let key: Vec<super::super::tree::Extension> =
+            vec![(b"org.example.k"[..].into(), [0x82, 0x01, 0x02][..].into())];
+        t.entries[y].extra.extensions = key.clone();
+        let (with_key, _) = written(&c, &t);
+        let x = t.entries.iter().position(|e| e.name == b"x").unwrap();
+        let mut u = open(&with_key, &natives()).unwrap().tree().unwrap().clone();
+        assert_eq!(u.entries[y].extra.extensions, key);
+        u.entries.remove(x);
+        let (out, _) = written(&with_key, &u);
+        let Ok(Value::Tree(got, _)) = decode_value(&out, &natives()) else { panic!() };
+        let e = got.entries.iter().find(|e| e.name == b"y").unwrap();
+        assert_eq!((&e.extra.extensions, e.extra.mode), (&key, Some(0o601)));
     }
 
     /// The second leaf taken away: the stream solid with the first made again of the bytes the

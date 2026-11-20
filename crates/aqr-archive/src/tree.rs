@@ -73,6 +73,10 @@ impl EntryNode {
 /// the same as they are read).
 pub type Xattr = (Arc<[u8]>, Arc<[u8]>);
 
+/// An extension key (spec, "Extension keys"): the key's text and its value as it is encoded (one
+/// CBOR data item).
+pub type Extension = (Arc<[u8]>, Arc<[u8]>);
+
 /// What an entry has of the optional metadata, as far as this crate knows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extra {
@@ -101,6 +105,8 @@ pub struct Extra {
     pub gname: Option<Arc<[u8]>>,
     /// `mac-flags` ([`MAC_FLAGS_ALLOWED`]).
     pub mac_flags: Option<u32>,
+    /// Extension keys, carried as they are, in the order read.
+    pub extensions: Vec<Extension>,
 }
 
 impl Extra {
@@ -323,6 +329,16 @@ fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
         || x.mac_flags.is_some_and(|f| f & !MAC_FLAGS_ALLOWED != 0)
     {
         return Err("attributes or flags not allowed");
+    }
+    let mut keys = std::collections::HashSet::new();
+    for (k, v) in &x.extensions {
+        if std::str::from_utf8(k).is_err() || !keys.insert(&k[..]) {
+            return Err("an extension key not UTF-8, or given twice");
+        }
+        let mut at = 0;
+        if skip(v, &mut at, 3).is_err() || at != v.len() {
+            return Err("an extension key's value not one CBOR data item");
+        }
     }
     fn names<'a>(mut n: impl Iterator<Item = &'a [u8]>) -> bool {
         let mut seen = std::collections::HashSet::new();
@@ -840,6 +856,12 @@ fn extra(out: &mut Vec<u8>, e: &Extra, fork_at: &dyn Fn(usize) -> [u64; 3]) {
         key(&mut m, MAC_FLAGS);
         head(&mut m, 0, f as u64);
     }
+    for (k, v) in &e.extensions {
+        n += 1;
+        head(&mut m, 3, k.len() as u64);
+        m.extend_from_slice(k);
+        m.extend_from_slice(v);
+    }
     head(out, 5, n);
     out.extend_from_slice(&m);
 }
@@ -1292,11 +1314,24 @@ fn item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Decoded<Cbor<'a>> {
 
 /// Reads a pair of a map at `depth` of `n` pairs ([`count`]) at `*at` of `d`.
 fn pair<'a>(d: &'a [u8], at: &mut usize, depth: usize, n: Option<usize>) -> Decoded<(Cbor<'a>, Cbor<'a>)> {
+    pair_at(d, at, depth, n).map(|(k, v, _)| (k, v))
+}
+
+/// [`pair`], and where its value's bytes are.
+#[allow(clippy::type_complexity)]
+fn pair_at<'a>(
+    d: &'a [u8],
+    at: &mut usize,
+    depth: usize,
+    n: Option<usize>,
+) -> Decoded<(Cbor<'a>, Cbor<'a>, std::ops::Range<usize>)> {
     let k = item(d, at, depth + 1)?;
     if n.is_none() && d.get(*at) == Some(&0xff) {
         return invalid("bad CBOR in the optional metadata");
     }
-    Ok((k, item(d, at, depth + 1)?))
+    let start = *at;
+    let v = item(d, at, depth + 1)?;
+    Ok((k, v, start..*at))
 }
 
 /// A fork as `forks` refers to it: the relative offset of its leaf block, its output and its
@@ -1428,9 +1463,11 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
                     let m = count(d, at, arg)?;
                     members.clear();
                     while !ended(d, &mut at, m, members.len()) {
-                        let (k, v) = pair(d, &mut at, 2, m)?;
-                        if let Cbor::Int(k) = k {
-                            member(x, f, &mut shared, k, v)?;
+                        let (k, v, value) = pair_at(d, &mut at, 2, m)?;
+                        match &k {
+                            Cbor::Int(k) => member(x, f, &mut shared, *k, v)?,
+                            Cbor::Text(name) => x.extensions.push((name[..].into(), d[value].into())),
+                            _ => {}
                         }
                         add_key(&mut members, k)?;
                     }
@@ -1633,6 +1670,8 @@ fn time(t: &Cbor) -> Option<Time> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub key: Option<i128>,
+    /// Whether its key is a text string: an extension key (spec, "Extension keys").
+    pub extension: bool,
     pub key_text: String,
     pub value: String,
     /// The value's text, where it is an `aqr-text` (of a comment, say).
@@ -1659,6 +1698,7 @@ pub(crate) fn members(d: &[u8], n: usize, cut: Option<usize>) -> Decoded<(Vec<Me
         let k1 = *at;
         let v = item(d, at, 1)?;
         let key = if let Cbor::Int(v) = k { Some(v) } else { None };
+        let extension = matches!(k, Cbor::Text(_));
         let value = diagnostic(&d[k1..*at], cut);
         let fields = match &v {
             Cbor::Map(m) => m
@@ -1671,7 +1711,7 @@ pub(crate) fn members(d: &[u8], n: usize, cut: Option<usize>) -> Decoded<(Vec<Me
             _ => None,
         };
         let text = aqr_text(v).ok().map(Cow::into_owned);
-        Ok((Member { key, key_text: diagnostic(&d[k0..k1], cut), value, text, fields }, k))
+        Ok((Member { key, extension, key_text: diagnostic(&d[k0..k1], cut), value, text, fields }, k))
     };
     let mut at = 0;
     let (major, _, arg) = head_of(d, &mut at)?;
@@ -2143,6 +2183,42 @@ mod tests {
         assert_eq!(Time::new(-62_135_596_801, 0).civil(), (0, 12, 31, 23, 59, 59));
         let x = Extra { mtime: Some(Time { zone: Zone::Local, ..day }), atime: Some(day), ..Extra::default() };
         assert_eq!(*x.instants(), Extra { atime: Some(day), ..Extra::default() });
+    }
+
+    /// Extension keys (spec, "Extension keys") read as they are encoded, an indefinite text key
+    /// and a value of nested and indefinite items among them, and written again as read; a value
+    /// not one data item, a key twice or not UTF-8, not written.
+    #[test]
+    fn extension_keys() {
+        // {-3: 5, "org.example.a": [_ 1, {2: h'00'}], (_ "x", "y"): "z"}
+        let d = [
+            &[0xa1, 0x21, 0x81, 0xa3, 0x22, 0x05, 0x6d][..],
+            b"org.example.a",
+            &[0x9f, 0x01, 0xa1, 0x02, 0x41, 0x00, 0xff, 0x7f, 0x61, b'x', 0x61, b'y', 0xff, 0x61, b'z'],
+        ]
+        .concat();
+        let (got, _) = extras(&d, 1).unwrap();
+        let want: Vec<Extension> = vec![
+            (b"org.example.a"[..].into(), [0x9f, 0x01, 0xa1, 0x02, 0x41, 0x00, 0xff][..].into()),
+            (b"xy"[..].into(), [0x61, b'z'][..].into()),
+        ];
+        assert_eq!((got[0].mtime, &got[0].extensions), (Some(Time { unit: 1_000_000_000, ..Time::new(5, 0) }), &want));
+        let mut t = Tree { root: got[0].clone(), ..Tree::default() };
+        t.entries.push(Entry { parent: None, name: b"a".to_vec(), node: EntryNode::Dir, extra: got[0].clone() });
+        assert!(check(&t, 0).is_ok());
+        let c = optional(&t, &[0], &|_| unreachable!(), Status::None, &[]);
+        assert_eq!(extras(&c, 1).unwrap().0, [got[0].clone(), got[0].clone()]);
+        // (the indefinite key written as a definite one, the value as it was)
+        assert!(c.windows(4).any(|w| w == [0x62, b'x', b'y', 0x61]));
+        for bad in [
+            vec![(b"k"[..].into(), [0x01, 0x02][..].into())],
+            vec![(b"k"[..].into(), [0x82, 0x01][..].into())],
+            vec![(b"k"[..].into(), [0x01][..].into()), (b"k"[..].into(), [0x02][..].into())],
+            vec![(b"\xff"[..].into(), [0x01][..].into())],
+        ] {
+            t.entries[0].extra.extensions = bad;
+            assert!(check(&t, 0).is_err());
+        }
     }
 
     #[test]

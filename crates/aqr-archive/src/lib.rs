@@ -80,7 +80,7 @@ pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter
 pub use slices::*;
 pub use stand_in::*;
 pub use tree::{
-    Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Member, Status, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone,
+    Entry, EntryNode, Extension, Extra, MAC_FLAGS_ALLOWED, Member, Status, Time, Tree, WIN_ATTRS_ALLOWED, Xattr, Zone,
     archive_key_name, diagnostic, entry_key_name, name_bytes, name_from,
 };
 

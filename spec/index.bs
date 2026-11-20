@@ -4955,6 +4955,7 @@ aqr-opt-metadata = {
   aqr-journal
 
     * $$aqr-opt-metadata-member  ; For future extensions
+    * aqr-extension-member
 }
 
 $$aqr-opt-metadata-member = ()  ; No extension is defined by this specification
@@ -4971,9 +4972,12 @@ aqr-entry-extra = {
   aqr-entry-zip
 
     * $$aqr-entry-extra-member  ; For future extensions
+    * aqr-extension-member
 }
 
 $$aqr-entry-extra-member = ()  ; No extension is defined by this specification
+
+aqr-extension-member = (tstr => any)  ; Extension keys
 
 ; Key -8 is reserved for access control lists.
 </pre>
@@ -4989,6 +4993,33 @@ Keys from -60 to -69 are specific to Windows, -70 to -79 to Unix, -80 to -89 to 
 Keys from -100 are specific to the formats an entry was converted from.
 Key -8 is reserved for access control lists in a future version of this specification,
 and a compressor MUST NOT use it.
+
+<h3 id=extension-keys>Extension keys</h3>
+
+Integer keys of `aqr-opt-metadata` and `aqr-entry-extra` are reserved for this specification,
+and a compressor MUST NOT use an integer key that this specification does not define.
+A text string key of either map is an <dfn>extension key</dfn>:
+it holds metadata that a program defines for its own use, outside this specification.
+
+* The name of an extension key SHOULD begin with a domain name that its definer controls,
+    its labels in reverse order, followed by a period: for example, `org.example.archiver.origin`.
+    Its value can be any CBOR data item.
+* An [=extension key=] MUST NOT change the meaning of anything this specification defines.
+    A decompressor that ignores every extension key still reads the archive correctly.
+* An extension key describes the entry it is in (or, at the top level, the archive) and its content.
+    It MUST NOT depend on how the archive is laid out, such as its blocks, segments or offsets,
+    so that it still holds when the archive is written again with the same entries and contents.
+* A decompressor MUST NOT reject an archive because of an extension key it does not know.
+* A program that writes an archive again from another (compacting it, or moving its entries)
+    SHOULD keep the extension keys of each entry whose content and metadata it keeps.
+    It MUST drop those of an entry whose content it changes, unless it knows the key,
+    because an extension key can tell something about the content that no longer holds.
+
+<div class=note>
+  [=Extension keys=] are merged across segments like the other members ([[#segment-interpretation]]):
+  an entry extra replaces the earlier one as a whole, extension keys included,
+  and a top-level extension key replaces the same key of earlier segments.
+</div>
 
 <h3 id=timestamps>Timestamps</h3>
 
@@ -5320,7 +5351,7 @@ aqr-journal-time = uint  ; Milliseconds since 1970-01-01T00:00:00Z, leap seconds
 </pre>
 
 Each key is the time of a <dfn>journal point</dfn> and its value is the label of the point, which may be empty.
-The state of a journal point in the `journal` of a segment is the result of [=interpret an archive|interpreting=] the archive
+The state of a [=journal point=] in the `journal` of a segment is the result of [=interpret an archive|interpreting=] the archive
 cut after that segment, i.e. with the segments after it removed.
 Several points of a segment therefore name the same state,
 as when a writing found nothing to change and added a segment of no entries to name the state again.

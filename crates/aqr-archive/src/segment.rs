@@ -1403,6 +1403,7 @@ mod tests {
             uname: Some(b"\xc1"[..].into()),
             gname: Some("스태프".as_bytes().into()),
             mac_flags: Some(0x8000),
+            extensions: vec![(b"org.example.x"[..].into(), [0xa1, 0x01, 0x40][..].into())],
         };
         tree.entries[11].extra.mode = Some(0o600);
         tree.entries[9].extra.win_link_type = Some(1);
