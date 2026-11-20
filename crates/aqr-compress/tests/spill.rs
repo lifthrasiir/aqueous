@@ -56,7 +56,11 @@ fn tar(files: &[Vec<u8>]) -> Vec<u8> {
 #[test]
 fn spilled() {
     let d = tar(&(0..4).map(|i| gzip(&text(8 << 20, i))).collect::<Vec<_>>());
-    let opt = Options { threads: 4, ..Options::default() };
+    // (on one thread: on 4, the peaks are of what the threads hold at once, as they happen to run,
+    // each of a choice of aqr-log or aqr-xsv on a sample of its file (up to 2 MiB, encoded both
+    // ways) besides: 57-78 MB spilling and 98-115 MB not, on an M4, which failed the bound below
+    // on CI's Windows runner)
+    let opt = Options { threads: 1, ..Options::default() };
     let (heap, heap_used) = peak(|| aqr_compress::compress(&d, &opt));
     let path = std::env::temp_dir().join(format!("aqr-compress-spilled-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
@@ -65,7 +69,7 @@ fn spilled() {
     println!("peak {:.1} MB, {:.1} MB spilling", heap_used as f64 / 1e6, spilled_used as f64 / 1e6);
     assert!(spilled == heap);
     assert!(aqr_decompress::decompress(&spilled, 1).unwrap() == d);
-    // (52–53 MB, and 97–110 MB without: the data of the files before held as the next is made)
+    // (26.0 MB, and 39.8 MB without: the data of the files before held as the next is made)
     assert!(spilled_used + (8 << 20) < heap_used, "{spilled_used} spilling, {heap_used} not");
     assert!(std::fs::read_dir(&path).unwrap().next().is_none());
     std::fs::remove_dir(&path).unwrap();
