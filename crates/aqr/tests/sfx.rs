@@ -39,90 +39,92 @@ fn aqr_in(dir: &Path, args: &[&str]) -> Output {
     Command::new(aqr()).current_dir(dir).args(args).output().unwrap()
 }
 
+/// What needs the pack (Windows x86-64): the tests are here, so that a run without it (CI's:
+/// the release workflow builds the pack and tries an SFX of it) can leave them out by their
+/// path (`packed::`, .config/nextest.toml).
 #[cfg(all(windows, target_arch = "x86_64"))]
-/// Text of words (which aqr-wrt recompresses, so that the archive has a module).
-fn prose(n: usize) -> Vec<u8> {
-    let words = ["the", "archive", "of", "files", "written", "out", "again", "when", "run", "and", "kept"];
-    let mut t = Vec::new();
-    let mut x = 7u32;
-    while t.len() < n {
-        x = x.wrapping_mul(1103515245).wrapping_add(12345);
-        t.extend_from_slice(words[(x >> 16) as usize % words.len()].as_bytes());
-        t.push(if x.is_multiple_of(13) { b'\n' } else { b' ' });
+mod packed {
+    use super::*;
+
+    /// Text of words (which aqr-wrt recompresses, so that the archive has a module).
+    fn prose(n: usize) -> Vec<u8> {
+        let words = ["the", "archive", "of", "files", "written", "out", "again", "when", "run", "and", "kept"];
+        let mut t = Vec::new();
+        let mut x = 7u32;
+        while t.len() < n {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            t.extend_from_slice(words[(x >> 16) as usize % words.len()].as_bytes());
+            t.push(if x.is_multiple_of(13) { b'\n' } else { b' ' });
+        }
+        t
     }
-    t
-}
 
-#[cfg(all(windows, target_arch = "x86_64"))]
-/// Makes `out` (`--format sfx`) of `inputs` in `dir` (the aqr tested carrying the pack).
-fn made(dir: &Path, inputs: &[&str], out: &str) {
-    let mut args = vec!["-c", "--format", "sfx", "-o", out];
-    args.extend_from_slice(inputs);
-    let o = aqr_in(dir, &args);
-    let err = String::from_utf8_lossy(&o.stderr);
-    let pack = "(the pack: crates/aqr-sfx/pack.py, which `cargo aqr` runs, or AQR_SFX_PACK)";
-    assert!(o.status.success(), "aqr {args:?}: {err} {pack}");
-    assert!(err.contains("self-extracting"), "{err}");
-}
-
-#[cfg(all(windows, target_arch = "x86_64"))]
-/// Runs self-extracting program `exe` in `dir`, writing the files under `to`.
-fn run(dir: &Path, exe: &str, to: &str) {
-    let o = Command::new(dir.join(exe)).current_dir(dir).arg(to).output().unwrap();
-    assert!(o.status.success(), "{exe}: {}", String::from_utf8_lossy(&o.stderr));
-}
-
-#[cfg(all(windows, target_arch = "x86_64"))]
-#[test]
-fn sfx_of_a_directory() {
-    let d = scratch("dir");
-    fs::create_dir_all(d.join("in/sub")).unwrap();
-    fs::write(d.join("in/a.txt"), prose(200_000)).unwrap();
-    fs::write(d.join("in/sub/b.bin"), (0..5000u32).map(|i| (i * 31 % 251) as u8).collect::<Vec<_>>()).unwrap();
-    fs::write(d.join("in/sub/empty"), b"").unwrap();
-    made(&d, &["in"], "in.exe");
-    run(&d, "in.exe", "out");
-    for f in ["a.txt", "sub/b.bin", "sub/empty"] {
-        assert!(fs::read(d.join("in").join(f)).unwrap() == fs::read(d.join("out").join(f)).unwrap(), "{f}");
+    /// Makes `out` (`--format sfx`) of `inputs` in `dir` (the aqr tested carrying the pack).
+    fn made(dir: &Path, inputs: &[&str], out: &str) {
+        let mut args = vec!["-c", "--format", "sfx", "-o", out];
+        args.extend_from_slice(inputs);
+        let o = aqr_in(dir, &args);
+        let err = String::from_utf8_lossy(&o.stderr);
+        let pack = "(the pack: crates/aqr-sfx/pack.py, which `cargo aqr` runs, or AQR_SFX_PACK)";
+        assert!(o.status.success(), "aqr {args:?}: {err} {pack}");
+        assert!(err.contains("self-extracting"), "{err}");
     }
-    fs::remove_dir_all(&d).unwrap();
-}
 
-/// A single file is in the program by its name (not as an archive of a single file, which has none).
-#[cfg(all(windows, target_arch = "x86_64"))]
-#[test]
-fn sfx_of_a_file() {
-    let d = scratch("file");
-    fs::write(d.join("a.txt"), prose(100_000)).unwrap();
-    made(&d, &["a.txt"], "a.exe");
-    run(&d, "a.exe", "out");
-    assert!(fs::read(d.join("a.txt")).unwrap() == fs::read(d.join("out/a.txt")).unwrap());
-    fs::remove_dir_all(&d).unwrap();
-}
+    /// Runs self-extracting program `exe` in `dir`, writing the files under `to`.
+    fn run(dir: &Path, exe: &str, to: &str) {
+        let o = Command::new(dir.join(exe)).current_dir(dir).arg(to).output().unwrap();
+        assert!(o.status.success(), "{exe}: {}", String::from_utf8_lossy(&o.stderr));
+    }
 
-/// The modules run as WebAssembly (`-Z wasm`) by the interpreter blob of the pack, as aqr.exe
-/// links no Wasmtime: an archive of a module (aqr-wrt's) tested and extracted as it was.
-#[cfg(all(windows, target_arch = "x86_64"))]
-#[test]
-fn wasm_through_the_interpreter() {
-    let d = scratch("interp");
-    fs::create_dir_all(d.join("in")).unwrap();
-    fs::write(d.join("in/a.txt"), prose(300_000)).unwrap();
-    fs::write(d.join("in/b.txt"), prose(5_000)).unwrap();
-    let o = aqr_in(&d, &["-c", "-q", "-o", "a.aqr", "in"]);
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    let pack = "(the pack: crates/aqr-sfx/pack.py, which `cargo aqr` runs, or AQR_SFX_PACK)";
-    for args in [&["-K", "-Z", "wasm", "a.aqr"][..], &["-d", "-q", "-Z", "wasm", "-o", "out", "a.aqr"]] {
-        let o = aqr_in(&d, args);
-        assert!(o.status.success(), "aqr {args:?}: {} {pack}", String::from_utf8_lossy(&o.stderr));
+    #[test]
+    fn sfx_of_a_directory() {
+        let d = scratch("dir");
+        fs::create_dir_all(d.join("in/sub")).unwrap();
+        fs::write(d.join("in/a.txt"), prose(200_000)).unwrap();
+        fs::write(d.join("in/sub/b.bin"), (0..5000u32).map(|i| (i * 31 % 251) as u8).collect::<Vec<_>>()).unwrap();
+        fs::write(d.join("in/sub/empty"), b"").unwrap();
+        made(&d, &["in"], "in.exe");
+        run(&d, "in.exe", "out");
+        for f in ["a.txt", "sub/b.bin", "sub/empty"] {
+            assert!(fs::read(d.join("in").join(f)).unwrap() == fs::read(d.join("out").join(f)).unwrap(), "{f}");
+        }
+        fs::remove_dir_all(&d).unwrap();
     }
-    for f in ["a.txt", "b.txt"] {
-        assert!(fs::read(d.join("in").join(f)).unwrap() == fs::read(d.join("out").join(f)).unwrap(), "{f}");
+
+    /// A single file is in the program by its name (not as an archive of a single file, which has none).
+    #[test]
+    fn sfx_of_a_file() {
+        let d = scratch("file");
+        fs::write(d.join("a.txt"), prose(100_000)).unwrap();
+        made(&d, &["a.txt"], "a.exe");
+        run(&d, "a.exe", "out");
+        assert!(fs::read(d.join("a.txt")).unwrap() == fs::read(d.join("out/a.txt")).unwrap());
+        fs::remove_dir_all(&d).unwrap();
     }
-    // (and a module it ran: the archive of text has aqr-wrt's)
-    let list = String::from_utf8_lossy(&aqr_in(&d, &["-t", "-v", "a.aqr"]).stdout).into_owned();
-    assert!(list.contains("wrt"), "{list}");
-    fs::remove_dir_all(&d).unwrap();
+
+    /// The modules run as WebAssembly (`-Z wasm`) by the interpreter blob of the pack, as aqr.exe
+    /// links no Wasmtime: an archive of a module (aqr-wrt's) tested and extracted as it was.
+    #[test]
+    fn wasm_through_the_interpreter() {
+        let d = scratch("interp");
+        fs::create_dir_all(d.join("in")).unwrap();
+        fs::write(d.join("in/a.txt"), prose(300_000)).unwrap();
+        fs::write(d.join("in/b.txt"), prose(5_000)).unwrap();
+        let o = aqr_in(&d, &["-c", "-q", "-o", "a.aqr", "in"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let pack = "(the pack: crates/aqr-sfx/pack.py, which `cargo aqr` runs, or AQR_SFX_PACK)";
+        for args in [&["-K", "-Z", "wasm", "a.aqr"][..], &["-d", "-q", "-Z", "wasm", "-o", "out", "a.aqr"]] {
+            let o = aqr_in(&d, args);
+            assert!(o.status.success(), "aqr {args:?}: {} {pack}", String::from_utf8_lossy(&o.stderr));
+        }
+        for f in ["a.txt", "b.txt"] {
+            assert!(fs::read(d.join("in").join(f)).unwrap() == fs::read(d.join("out").join(f)).unwrap(), "{f}");
+        }
+        // (and a module it ran: the archive of text has aqr-wrt's)
+        let list = String::from_utf8_lossy(&aqr_in(&d, &["-t", "-v", "a.aqr"]).stdout).into_owned();
+        assert!(list.contains("wrt"), "{list}");
+        fs::remove_dir_all(&d).unwrap();
+    }
 }
 
 #[test]

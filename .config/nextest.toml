@@ -9,7 +9,7 @@ fail-fast = false
 # (a test taking over 2 min is told; past 20 min it is stopped and fails)
 slow-timeout = { period = "120s", terminate-after = 10 }
 failure-output = "immediate-final"
-# Not run: the self-extracting programs of aqr's tests/sfx.rs (Windows), which need the pack of
-# crates/aqr-sfx/pack.py (target/aqr-sfx/), built only by the release workflow, which tries an
-# SFX made of it.
-default-filter = "not (package(aqr) & binary(sfx) & test(/^sfx_of_a_/))"
+# Not run: what needs the pack of crates/aqr-sfx/pack.py (target/aqr-sfx/), the tests of the
+# module `packed` of aqr's tests/sfx.rs (Windows): built only by the release workflow, which tries
+# `-Z wasm` and an SFX of it.
+default-filter = "not (binary_id(aqr::sfx) & test(/^packed::/))"
