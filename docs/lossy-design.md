@@ -177,11 +177,11 @@ aqr-entry-lossy = (
 - 사용자 정의 키는 아카이브의 배치(블록, 구간, 오프셋)에 기대지 않는다(MUST NOT). 그래야 `--compact`처럼 내용과
   메타데이터를 그대로 두고 다시 쓰는 프로그램이 모르는 키를 옮겨도 맞다. 내용을 바꾸는 프로그램은 모르는 키를
   버린다. 손실 표시의 원본 크기와 해시가 그 예로, 내용이 바뀌면 더는 맞지 않는다.
-- aqr-archive는 항목의 사용자 정의 키를 `tree::Extra::extensions`에 키의 텍스트와 값의 CBOR 바이트로 담아 그대로
-  다시 쓴다. 따라서 `--compact`와 `--move`가 그 키를 옮긴다. 다음은 아직 다시 쓸 때 잃으므로, 지금처럼 다시 쓰기를
-  거부한다.
-  - 최상위(아카이브 전체)의 사용자 정의 키. 담을 자리가 `SegmentWriter`에 없다.
-  - `comment`(-6)와 `zip-extras`(-100). 같은 방법으로 옮길 수 있다.
+- aqr-archive는 사용자 정의 키를 키의 텍스트와 값의 CBOR 바이트로 담아 그대로 다시 쓴다. 항목의 키는
+  `tree::Extra::extensions`에, 최상위의 키는 `tree::ArchiveExtra`에 담는다. `ArchiveExtra`는 `archive-comment`도 담으며
+  구간마다 있고(`SegmentWriter::set_archive_extra`), 읽을 때는 명세대로 구간들을 병합한다(나중 구간의 같은 키가
+  대체한다). `--compact`와 `--move`는 이것들과 `comment`, `zip-extras`를 옮긴다. 다시 쓰기를 거부하는 것은 뜻을 모르는
+  정수 키뿐이다. 장래 명세가 배치에 기대는 키를 정할 수 있기 때문이다.
 
 ## 5. 대상 포맷
 

@@ -18,9 +18,10 @@
 //! Each segment's metadata block is made again: the entries whose contents are of it, at their
 //! paths in the tree, with the directories on the way (of no extra, which keeps theirs); the
 //! entries of no content (directories, links, ...) in the last. No tombstone is left. The
-//! entries' extension keys are carried as they are ([`Extra::extensions`]); the metadata this
-//! crate does not read (a comment, ZIP's extra fields, members of no meaning known, and the
-//! archive-wide extension keys) would be lost, so an archive having any is not written again.
+//! archive-wide members (an `archive-comment`, extension keys) of the segments merged go in the
+//! last of them. Extension keys are carried as they are ([`Extra::extensions`]); members of
+//! integer keys of no meaning known would be lost, so an archive having any is not written
+//! again.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -107,7 +108,7 @@ pub fn rewrite_as(
         History::Keep { from, since } => Some((from, since)),
         _ => None,
     };
-    let (blocks, tree, ..) = opened(c, false, false, keeping.map(|k| k.0)).map_err(fail)?;
+    let (blocks, tree, _, _, mut archive) = opened(c, false, false, keeping.map(|k| k.0)).map_err(fail)?;
     let (own, refs) = tree.ok_or_else(|| Error::new("an archive of a single file, not of paths"))?;
     // (the segments before the first point kept, as one state; and each segment as it is told)
     let mut infos: Vec<SegmentInfo> = Vec::new();
@@ -343,6 +344,13 @@ pub fn rewrite_as(
             Some(_) => (outs[n - base].status, std::mem::take(&mut outs[n - base].journal)),
         };
         w.set_journal(journal)?;
+        // (the archive-wide members: those of the state, merged, in its last segment; as they were,
+        // after it)
+        match n.cmp(&(base - 1)) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => w.set_archive_extra(std::mem::take(&mut archive))?,
+            std::cmp::Ordering::Greater => w.set_archive_extra(infos[outs[n - base].s].archive.clone())?,
+        }
         let end = match n + 1 == total {
             false => w.close_as(&enc, &st, &contents, status)?,
             true => w.finish_as(&enc, &st, &contents, status)?.0,
@@ -354,23 +362,26 @@ pub fn rewrite_as(
     Ok(r)
 }
 
-/// Fails where archive `c` has metadata that [`Extra`] does not hold (a comment, ZIP's extra
-/// fields, members of no meaning known, archive-wide extension keys), which writing it again
-/// would lose.
+/// Fails where archive `c` has metadata that [`Extra`] and [`ArchiveExtra`](super::tree::ArchiveExtra)
+/// do not hold (members of integer keys of no meaning known, as a later version of the spec may
+/// give them), which writing it again would lose.
 fn unknown_metadata(c: &[u8], journal: bool) -> Result<()> {
     let i = inspect::inspect(c, false, &|_| None, None).map_err(|f| Error::new(f.to_string()))?;
-    let known = |name: Option<&str>| name.is_some_and(|n| !matches!(n, "comment" | "zip-extras"));
     for s in &i.segments {
         let named = |m: &super::tree::Member| m.key.and_then(super::archive_key_name);
         if !journal && s.archive_extra.iter().any(|m| named(m) == Some("journal")) {
             return Err(Error::new("the journal's points would be lost in writing it again"));
         }
-        if let Some(m) = s.archive_extra.iter().find(|m| !matches!(named(m), Some("segment-status" | "journal"))) {
+        let kept = |m: &super::tree::Member| {
+            m.extension || matches!(named(m), Some("segment-status" | "journal" | "archive-comment"))
+        };
+        if let Some(m) = s.archive_extra.iter().find(|m| !kept(m)) {
             return Err(Error::new(format!("archive-wide metadata not kept in writing it again: {}", m.key_text)));
         }
         for e in &s.entries {
             let members = e.members.iter().flatten();
-            if let Some(m) = members.into_iter().find(|m| !m.extension && !known(m.key.and_then(super::entry_key_name)))
+            if let Some(m) =
+                members.into_iter().find(|m| !m.extension && m.key.and_then(super::entry_key_name).is_none())
             {
                 return Err(Error::new(format!("metadata not kept in writing it again: {}", m.key_text)));
             }
@@ -399,6 +410,7 @@ fn names_again(seg: &super::Segmented, told: &SegmentInfo) -> bool {
         && t.refs.is_empty()
         && t.tree.root == Extra::default()
         && !t.given.iter().any(|&g| g)
+        && told.archive.is_empty()
         && told.status == Status::Complete
 }
 
@@ -748,6 +760,61 @@ mod tests {
         let Ok(Value::Tree(got, _)) = decode_value(&out, &natives()) else { panic!() };
         let e = got.entries.iter().find(|e| e.name == b"y").unwrap();
         assert_eq!((&e.extra.extensions, e.extra.mode), (&key, Some(0o601)));
+    }
+
+    /// Archive-wide members (`archive-comment`, extension keys) of the segments merged into one
+    /// segment, each the latest of its key; entries' comments and ZIP extra fields kept.
+    #[test]
+    fn comments_and_archive_wide_kept() {
+        use super::super::tree::ArchiveExtra;
+        let ext = |k: &str, v: u8| -> super::super::tree::Extension { (k.as_bytes().into(), [v][..].into()) };
+        let archive = [
+            ArchiveExtra { comment: Some(b"one"[..].into()), extensions: vec![ext("org.example.k", 1), ext("j", 0)] },
+            ArchiveExtra { comment: None, extensions: vec![ext("org.example.k", 2)] },
+            ArchiveExtra::default(),
+        ];
+        let mut f = Formula::default();
+        let names = ["a", "b", "c"];
+        let lits: Vec<Node> = names.iter().map(|n| f.push(*n, n.repeat(500).into_bytes())).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut c = SegmentWriter::header().to_vec();
+        for (k, a) in archive.iter().enumerate() {
+            let b = w.batch(&enc, &f, &[Leaf { outputs: vec![lits[k].clone()], sums: vec![None] }]).unwrap();
+            w.commit(&b);
+            c.extend_from_slice(b.blocks());
+            let extra = Extra {
+                comment: Some(format!("file {k}").into_bytes().into()),
+                zip_extras: vec![(0x7075, vec![k as u8][..].into()), (-1 - 0x7075, Vec::new().into())],
+                ..Extra::default()
+            };
+            let entry = Entry { parent: None, name: names[k].into(), node: EntryNode::File(0), extra };
+            let t = Tree { root: Extra::default(), entries: vec![entry] };
+            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 500 }];
+            w.set_archive_extra(a.clone()).unwrap();
+            match k {
+                2 => c.extend_from_slice(&w.finish_as(&enc, &t, &contents, Status::Complete).unwrap().0),
+                _ => c.extend_from_slice(&w.close_as(&enc, &t, &contents, Status::None).unwrap()),
+            }
+        }
+        let merged =
+            ArchiveExtra { comment: Some(b"one"[..].into()), extensions: vec![ext("org.example.k", 2), ext("j", 0)] };
+        assert_eq!(opened(&c, false, false, None).unwrap().4, merged);
+        // (the first file taken away: the segments of the others written again, the second
+        // telling what the three told)
+        let mut t = open(&c, &natives()).unwrap().tree().unwrap().clone();
+        t.entries.retain(|e| e.name != b"a");
+        let (out, r) = written(&c, &t);
+        assert_eq!(r.segments, (2, 3));
+        assert_eq!(opened(&out, false, false, None).unwrap().4, merged);
+        let mut infos = Vec::new();
+        opened_with(&out, false, false, None, Some(&mut infos)).unwrap();
+        assert_eq!((infos[0].archive.is_empty(), &infos[1].archive), (true, &merged));
+        let got = open(&out, &natives()).unwrap().tree().unwrap().clone();
+        for (e, k) in got.entries.iter().zip(1..) {
+            assert_eq!(e.extra.comment.as_deref(), Some(format!("file {k}").as_bytes()));
+            assert_eq!(e.extra.zip_extras, [(0x7075, vec![k as u8][..].into()), (-1 - 0x7075, Vec::new().into())]);
+        }
     }
 
     /// The second leaf taken away: the stream solid with the first made again of the bytes the

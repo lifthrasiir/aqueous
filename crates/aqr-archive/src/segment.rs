@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use aqr_common::varint;
 
 use super::dict::Candidate;
-use super::tree::{self, FileParam, Status, Tree};
+use super::tree::{self, ArchiveExtra, FileParam, Status, Tree};
 use super::{
     CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, Out, STORED, SWAP, always_compressed, block, block_of,
     block_ranges, checksum_of, dictionary_block, dictionary_stand_in, footer, footer_with, formula_block, key_how,
@@ -112,6 +112,8 @@ pub struct SegmentWriter {
     pad: bool,
     /// The journal points the next metadata block tells ([`SegmentWriter::set_journal`]).
     journal: Vec<(u64, String)>,
+    /// The archive-wide members of the next metadata block ([`SegmentWriter::set_archive_extra`]).
+    archive: ArchiveExtra,
 }
 
 /// The blocks of a batch of leaves, to write after those before ([`SegmentWriter::commit`]).
@@ -246,6 +248,7 @@ impl SegmentWriter {
             live: None,
             pad: false,
             journal: Vec::new(),
+            archive: ArchiveExtra::default(),
         }
     }
 
@@ -281,6 +284,15 @@ impl SegmentWriter {
             return Err(Error::new("a time repeated in the journal"));
         }
         self.journal = points;
+        Ok(())
+    }
+
+    /// Has the metadata block of the segment being written tell `archive` (an `archive-comment`,
+    /// extension keys), taken as [`SegmentWriter::set_journal`]'s points are. Segments merged, a
+    /// later segment's member replaces the one of its key (spec, "Interpreting an archive").
+    pub fn set_archive_extra(&mut self, archive: ArchiveExtra) -> Result<()> {
+        archive.check().map_err(Error::new)?;
+        self.archive = archive;
         Ok(())
     }
 
@@ -444,6 +456,7 @@ impl SegmentWriter {
         }
         let out = self.metadata_block(enc, t, contents, usize::MAX, 0, status)?;
         self.journal.clear();
+        self.archive = ArchiveExtra::default();
         self.prev = self.at;
         self.at += out.len();
         self.segment_at = self.at;
@@ -794,6 +807,7 @@ impl SegmentWriter {
             moved(self.prev),
             status,
             &self.journal,
+            &self.archive,
             &modules,
             &resources,
             &dictionaries,
@@ -1389,6 +1403,7 @@ mod tests {
             mtime: t(1_700_000_000, 5),
             atime: t(1 << 40, 0),
             arctime: t(0, 1),
+            comment: Some("설명".as_bytes().into()),
             link_group: Some(-1 << 64),
             xattrs: vec![
                 (b"com.apple.quarantine"[..].into(), b"0081;"[..].into()),
@@ -1403,6 +1418,7 @@ mod tests {
             uname: Some(b"\xc1"[..].into()),
             gname: Some("스태프".as_bytes().into()),
             mac_flags: Some(0x8000),
+            zip_extras: vec![(0x7075, b"\x01uv"[..].into()), (-1 - 0xcafe, Vec::new().into())],
             extensions: vec![(b"org.example.x"[..].into(), [0xa1, 0x01, 0x40][..].into())],
         };
         tree.entries[11].extra.mode = Some(0o600);

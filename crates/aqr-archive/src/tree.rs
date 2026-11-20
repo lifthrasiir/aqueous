@@ -77,6 +77,40 @@ pub type Xattr = (Arc<[u8]>, Arc<[u8]>);
 /// CBOR data item).
 pub type Extension = (Arc<[u8]>, Arc<[u8]>);
 
+/// What the top-level map of a segment's optional metadata has but its entries' extras,
+/// `segment-status` and `journal`, as far as this crate knows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchiveExtra {
+    /// `archive-comment` (as `aqr-text`'s bytes).
+    pub comment: Option<Arc<[u8]>>,
+    /// Extension keys, carried as they are, in the order read.
+    pub extensions: Vec<Extension>,
+}
+
+impl ArchiveExtra {
+    pub fn is_empty(&self) -> bool {
+        *self == ArchiveExtra::default()
+    }
+
+    /// `later`'s members merged into these, as the segments' are (spec, "Interpreting an
+    /// archive"): each replacing the one of its key.
+    pub fn merge(&mut self, later: ArchiveExtra) {
+        if later.comment.is_some() {
+            self.comment = later.comment;
+        }
+        for (k, v) in later.extensions {
+            match self.extensions.iter_mut().find(|e| e.0 == k) {
+                Some(e) => e.1 = v,
+                None => self.extensions.push((k, v)),
+            }
+        }
+    }
+
+    pub(crate) fn check(&self) -> Result<(), &'static str> {
+        check_extensions(&self.extensions)
+    }
+}
+
 /// What an entry has of the optional metadata, as far as this crate knows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extra {
@@ -85,6 +119,8 @@ pub struct Extra {
     pub mtime: Option<Time>,
     pub atime: Option<Time>,
     pub arctime: Option<Time>,
+    /// `comment` (as `aqr-text`'s bytes).
+    pub comment: Option<Arc<[u8]>>,
     /// `link-group` (of files alone).
     pub link_group: Option<i128>,
     /// `xattrs`.
@@ -105,6 +141,9 @@ pub struct Extra {
     pub gname: Option<Arc<[u8]>>,
     /// `mac-flags` ([`MAC_FLAGS_ALLOWED`]).
     pub mac_flags: Option<u32>,
+    /// `zip-extras`: each extra field's key (the header ID, or -1 less it of the central header)
+    /// and data, in the order read.
+    pub zip_extras: Vec<(i32, Arc<[u8]>)>,
     /// Extension keys, carried as they are, in the order read.
     pub extensions: Vec<Extension>,
 }
@@ -315,6 +354,22 @@ pub(crate) fn check(t: &Tree, contents: usize) -> Result<(), String> {
     check_extra(&t.root, contents).map_err(|m| format!("the root of {m}"))
 }
 
+/// Checks that extension keys `x` are of UTF-8 keys, each once, and values of one CBOR data item
+/// each.
+fn check_extensions(x: &[Extension]) -> Result<(), &'static str> {
+    let mut keys = std::collections::HashSet::new();
+    for (k, v) in x {
+        if std::str::from_utf8(k).is_err() || !keys.insert(&k[..]) {
+            return Err("an extension key not UTF-8, or given twice");
+        }
+        let mut at = 0;
+        if skip(v, &mut at, 3).is_err() || at != v.len() {
+            return Err("an extension key's value not one CBOR data item");
+        }
+    }
+    Ok(())
+}
+
 fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
     if x.mode.is_some_and(|m| m > 0o7777) {
         return Err("a mode beyond its permissions");
@@ -330,16 +385,13 @@ fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
     {
         return Err("attributes or flags not allowed");
     }
-    let mut keys = std::collections::HashSet::new();
-    for (k, v) in &x.extensions {
-        if std::str::from_utf8(k).is_err() || !keys.insert(&k[..]) {
-            return Err("an extension key not UTF-8, or given twice");
-        }
-        let mut at = 0;
-        if skip(v, &mut at, 3).is_err() || at != v.len() {
-            return Err("an extension key's value not one CBOR data item");
+    let mut ids = std::collections::HashSet::new();
+    for (k, v) in &x.zip_extras {
+        if !(ZIP_EXTRA_KEYS).contains(k) || v.len() > ZIP_EXTRA_MAX || !ids.insert(k) {
+            return Err("a ZIP extra field of a bad key or size, or given twice");
         }
     }
+    check_extensions(&x.extensions)?;
     fn names<'a>(mut n: impl Iterator<Item = &'a [u8]>) -> bool {
         let mut seen = std::collections::HashSet::new();
         n.all(|n| !n.is_empty() && seen.insert(n))
@@ -360,6 +412,7 @@ pub(crate) struct SegmentInfo {
     pub tree: SegmentTree,
     pub status: Status,
     pub journal: Journal,
+    pub archive: ArchiveExtra,
 }
 
 /// The tree of a segment as its metadata block tells it (spec, "Interpreting a segment"), before
@@ -639,6 +692,7 @@ pub(crate) fn metadata(
     prev: usize,
     status: Status,
     journal: &[(u64, String)],
+    archive: &ArchiveExtra,
     modules: &[usize],
     resources: &[usize],
     dictionaries: &[usize],
@@ -689,7 +743,7 @@ pub(crate) fn metadata(
         let p = contents[c];
         [(at - p.leaf) as u64, p.output, p.size]
     };
-    let opt = optional(t, &order, &fork_at, status, journal);
+    let opt = optional(t, &order, &fork_at, status, journal, archive);
 
     let mut m = Vec::new();
     varint::put(&mut m, prev);
@@ -747,15 +801,21 @@ fn optional(
     fork_at: &dyn Fn(usize) -> [u64; 3],
     status: Status,
     journal: &[(u64, String)],
+    archive: &ArchiveExtra,
 ) -> Vec<u8> {
     let extras: Vec<&Extra> = std::iter::once(&t.root).chain(order.iter().map(|&i| &t.entries[i].extra)).collect();
     let last = extras.iter().rposition(|e| !e.is_empty());
     let told = status != Status::None;
-    if last.is_none() && !told && journal.is_empty() {
+    if last.is_none() && !told && journal.is_empty() && archive.is_empty() {
         return Vec::new();
     }
     let mut c = Vec::new();
-    head(&mut c, 5, last.is_some() as u64 + told as u64 + !journal.is_empty() as u64);
+    let members = last.is_some() as u64 + told as u64 + !journal.is_empty() as u64;
+    head(&mut c, 5, members + archive.comment.is_some() as u64 + archive.extensions.len() as u64);
+    if let Some(comment) = &archive.comment {
+        int(&mut c, ARCHIVE_COMMENT);
+        text(&mut c, comment);
+    }
     if let Some(last) = last {
         int(&mut c, ENTRY_EXTRAS);
         head(&mut c, 4, last as u64 + 1);
@@ -793,6 +853,7 @@ fn optional(
             c.extend_from_slice(label.as_bytes());
         }
     }
+    extensions(&mut c, &archive.extensions);
     c
 }
 
@@ -810,6 +871,10 @@ fn extra(out: &mut Vec<u8>, e: &Extra, fork_at: &dyn Fn(usize) -> [u64; 3]) {
             key(&mut m, k);
             time_of(&mut m, t);
         }
+    }
+    if let Some(c) = &e.comment {
+        key(&mut m, COMMENT);
+        text(&mut m, c);
     }
     if let Some(g) = e.link_group {
         key(&mut m, LINK_GROUP);
@@ -856,14 +921,28 @@ fn extra(out: &mut Vec<u8>, e: &Extra, fork_at: &dyn Fn(usize) -> [u64; 3]) {
         key(&mut m, MAC_FLAGS);
         head(&mut m, 0, f as u64);
     }
-    for (k, v) in &e.extensions {
-        n += 1;
-        head(&mut m, 3, k.len() as u64);
-        m.extend_from_slice(k);
-        m.extend_from_slice(v);
+    if !e.zip_extras.is_empty() {
+        key(&mut m, ZIP_EXTRAS);
+        head(&mut m, 5, e.zip_extras.len() as u64);
+        for (k, v) in &e.zip_extras {
+            int(&mut m, *k as i128);
+            head(&mut m, 2, v.len() as u64);
+            m.extend_from_slice(v);
+        }
     }
+    n += extensions(&mut m, &e.extensions);
     head(out, 5, n);
     out.extend_from_slice(&m);
+}
+
+/// Appends extension keys `x` (their values as they are), and returns how many.
+fn extensions(out: &mut Vec<u8>, x: &[Extension]) -> u64 {
+    for (k, v) in x {
+        head(out, 3, k.len() as u64);
+        out.extend_from_slice(k);
+        out.extend_from_slice(v);
+    }
+    x.len() as u64
 }
 
 /// An `aqr-time` of `t`, at the precision of nanoseconds (that of the file systems whose times
@@ -914,6 +993,7 @@ fn text(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
+const ARCHIVE_COMMENT: i128 = -1;
 const ENTRY_EXTRAS: i128 = -2;
 const SEGMENT_STATUS: i128 = -3;
 const JOURNAL: i128 = -4;
@@ -924,6 +1004,7 @@ const CTIME: i128 = -2;
 const MTIME: i128 = -3;
 const ATIME: i128 = -4;
 const ARCTIME: i128 = -5;
+const COMMENT: i128 = -6;
 const LINK_GROUP: i128 = -7;
 const XATTRS: i128 = -10;
 const FORKS: i128 = -50;
@@ -935,6 +1016,11 @@ const UNIX_GID: i128 = -72;
 const UNIX_UNAME: i128 = -73;
 const UNIX_GNAME: i128 = -74;
 const MAC_FLAGS: i128 = -80;
+const ZIP_EXTRAS: i128 = -100;
+/// The keys of `zip-extras`: header IDs of the local header, and -1 less those of the central.
+const ZIP_EXTRA_KEYS: std::ops::RangeInclusive<i32> = -65536..=65535;
+/// The most bytes of an extra field's data in `zip-extras`.
+const ZIP_EXTRA_MAX: usize = 65531;
 const NULL: u8 = 0xf6;
 const TRUE: u8 = 0xf5;
 const TAG_WTF8: u64 = 273;
@@ -1385,7 +1471,7 @@ fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)
 
 /// The extras of [`extras`] and their forks, whether each has an entry extra (a map, not null
 /// nor left out), and the segment's `segment-status`.
-type Extras = (Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>, Status, Journal);
+type Extras = (Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>, Vec<bool>, Status, Journal, ArchiveExtra);
 
 /// [`extras`], and whether each has an entry extra (a map, not null nor left out), and the
 /// segment's `segment-status`. Of the entries `wanted` tells (by number from the root, where it
@@ -1398,8 +1484,9 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
     let mut given = vec![false; n + 1];
     let mut status = Status::None;
     let mut journal = Journal::new();
+    let mut archive = ArchiveExtra::default();
     if d.is_empty() {
-        return Ok((out, forks, given, status, journal));
+        return Ok((out, forks, given, status, journal, archive));
     }
     // Walked rather than read whole: the entry-extras an entry at a time, each a member at a
     // time (read whole, those of an archive of many entries took most of opening it).
@@ -1420,6 +1507,8 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
         let entry_extras = k == Cbor::Int(ENTRY_EXTRAS);
         let told = k == Cbor::Int(SEGMENT_STATUS);
         let points = k == Cbor::Int(JOURNAL);
+        let comment = k == Cbor::Int(ARCHIVE_COMMENT);
+        let extension: Option<Arc<[u8]>> = if let Cbor::Text(n) = &k { Some(n.as_ref().into()) } else { None };
         add_key(&mut keys, k)?;
         if told {
             status = status_of(item(d, &mut at, 1)?)?;
@@ -1430,7 +1519,13 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
             continue;
         }
         if !entry_extras {
-            item(d, &mut at, 1)?;
+            let start = at;
+            let v = item(d, &mut at, 1)?;
+            if comment {
+                archive.comment = Some(aqr_text(v)?.as_ref().into());
+            } else if let Some(k) = extension {
+                archive.extensions.push((k, d[start..at].into()));
+            }
             continue;
         }
         let (major, _, arg) = head_of(d, &mut at)?;
@@ -1481,7 +1576,7 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
     if at != d.len() {
         return invalid("bytes after the optional metadata");
     }
-    Ok((out, forks, given, status, journal))
+    Ok((out, forks, given, status, journal, archive))
 }
 
 /// The `journal` of value `v`: times to labels, in the order of the times.
@@ -1557,6 +1652,7 @@ fn member<'a>(
         MTIME => x.mtime = time(&v),
         ATIME => x.atime = time(&v),
         ARCTIME => x.arctime = time(&v),
+        COMMENT => x.comment = Some(aqr_text(v)?.as_ref().into()),
         LINK_GROUP => match v {
             Cbor::Int(g) => x.link_group = Some(g),
             _ => return invalid("a bad link-group"),
@@ -1603,6 +1699,19 @@ fn member<'a>(
             f if f & !MAC_FLAGS_ALLOWED == 0 => x.mac_flags = Some(f),
             _ => return invalid("mac-flags of bits not allowed"),
         },
+        ZIP_EXTRAS => {
+            let Cbor::Map(m) = v else { return invalid("zip-extras not a map") };
+            for (k, v) in m.pairs() {
+                match (k, v) {
+                    (Cbor::Int(k), Cbor::Bytes(b))
+                        if i32::try_from(k).is_ok_and(|k| ZIP_EXTRA_KEYS.contains(&k)) && b.len() <= ZIP_EXTRA_MAX =>
+                    {
+                        x.zip_extras.push((k as i32, b.as_ref().into()))
+                    }
+                    _ => return invalid("a bad ZIP extra field"),
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -1763,7 +1872,7 @@ pub fn entry_key_name(k: i128) -> Option<&'static str> {
         MTIME => "mtime",
         ATIME => "atime",
         ARCTIME => "arctime",
-        -6 => "comment",
+        COMMENT => "comment",
         LINK_GROUP => "link-group",
         XATTRS => "xattrs",
         FORKS => "forks",
@@ -1775,7 +1884,7 @@ pub fn entry_key_name(k: i128) -> Option<&'static str> {
         UNIX_UNAME => "unix-uname",
         UNIX_GNAME => "unix-gname",
         MAC_FLAGS => "mac-flags",
-        -100 => "zip-extras",
+        ZIP_EXTRAS => "zip-extras",
         _ => return None,
     })
 }
@@ -1783,7 +1892,7 @@ pub fn entry_key_name(k: i128) -> Option<&'static str> {
 /// The name of member `k` of the top-level map of the optional metadata.
 pub fn archive_key_name(k: i128) -> Option<&'static str> {
     match k {
-        -1 => Some("archive-comment"),
+        ARCHIVE_COMMENT => Some("archive-comment"),
         ENTRY_EXTRAS => Some("entry-extras"),
         SEGMENT_STATUS => Some("segment-status"),
         JOURNAL => Some("journal"),
@@ -1930,6 +2039,8 @@ pub(crate) struct Metadata {
     pub status: Status,
     /// Its `journal`.
     pub journal: Journal,
+    /// The rest of its top-level members, as far as they are known.
+    pub archive: ArchiveExtra,
     /// Where the optional metadata is in the block's data.
     pub opt: std::ops::Range<usize>,
 }
@@ -2073,7 +2184,7 @@ pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec
         return invalid("bytes after the entries");
     }
     let wanted = wanted(&out);
-    let (extras, forks, given, status, journal) = extras_given(opt, n, wanted.as_deref())?;
+    let (extras, forks, given, status, journal, archive) = extras_given(opt, n, wanted.as_deref())?;
     Ok(Metadata {
         prev,
         modules: module_offsets,
@@ -2085,6 +2196,7 @@ pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec
         given,
         status,
         journal,
+        archive,
         opt: d.len() - opt_size..d.len(),
     })
 }
@@ -2206,7 +2318,7 @@ mod tests {
         let mut t = Tree { root: got[0].clone(), ..Tree::default() };
         t.entries.push(Entry { parent: None, name: b"a".to_vec(), node: EntryNode::Dir, extra: got[0].clone() });
         assert!(check(&t, 0).is_ok());
-        let c = optional(&t, &[0], &|_| unreachable!(), Status::None, &[]);
+        let c = optional(&t, &[0], &|_| unreachable!(), Status::None, &[], &ArchiveExtra::default());
         assert_eq!(extras(&c, 1).unwrap().0, [got[0].clone(), got[0].clone()]);
         // (the indefinite key written as a definite one, the value as it was)
         assert!(c.windows(4).any(|w| w == [0x62, b'x', b'y', 0x61]));
@@ -2221,6 +2333,48 @@ mod tests {
         }
     }
 
+    /// Comments (archive-wide and of entries) and ZIP extra fields read and written again;
+    /// archive-wide members merged by key; bad ZIP extra fields not read nor written.
+    #[test]
+    fn comments_and_zip_extras() {
+        let x = Extra {
+            comment: Some(b"\xffnot UTF-8"[..].into()),
+            zip_extras: vec![(65535, vec![0; ZIP_EXTRA_MAX][..].into()), (-65536, b"c"[..].into())],
+            ..Extra::default()
+        };
+        let mut t = Tree::default();
+        t.entries.push(Entry { parent: None, name: b"a".to_vec(), node: EntryNode::Dir, extra: x.clone() });
+        assert!(check(&t, 0).is_ok());
+        let archive = ArchiveExtra {
+            comment: Some("주석".as_bytes().into()),
+            extensions: vec![(b"org.example.k"[..].into(), [0x01][..].into())],
+        };
+        let c = optional(&t, &[0], &|_| unreachable!(), Status::Complete, &[], &archive);
+        let got = extras_given(&c, 1, None).unwrap();
+        assert_eq!((&got.0[1], got.3, &got.5), (&x, Status::Complete, &archive));
+        // (the archive's comment a text string, the entry's a byte string)
+        assert_eq!(&c[..3], [0xa4, 0x20, 0x66]);
+        for bad in [(65536, &b""[..]), (-65537, b""), (0, &[0; ZIP_EXTRA_MAX + 1][..])] {
+            t.entries[0].extra.zip_extras = vec![(bad.0, bad.1.into())];
+            assert!(check(&t, 0).is_err());
+        }
+        t.entries[0].extra.zip_extras = vec![(1, b""[..].into()), (1, b"x"[..].into())];
+        assert!(check(&t, 0).is_err());
+        // {-2: [null, {-100: {65536: h''}}]}, {-2: [null, {-100: {1: ""}}]} (a text where bytes
+        // are), and {-2: [null, {-100: {1: h''}}]}
+        assert!(extras(&[0xa1, 0x21, 0x82, 0xf6, 0xa1, 0x38, 0x63, 0xa1, 0x1a, 0, 1, 0, 0, 0x40], 1).is_err());
+        assert!(extras(&[0xa1, 0x21, 0x82, 0xf6, 0xa1, 0x38, 0x63, 0xa1, 0x01, 0x60], 1).is_err());
+        assert!(extras(&[0xa1, 0x21, 0x82, 0xf6, 0xa1, 0x38, 0x63, 0xa1, 0x01, 0x40], 1).is_ok());
+        let mut a =
+            ArchiveExtra { comment: Some(b"a"[..].into()), extensions: vec![(b"k"[..].into(), [1][..].into())] };
+        a.merge(ArchiveExtra {
+            comment: None,
+            extensions: vec![(b"j"[..].into(), [2][..].into()), (b"k"[..].into(), [3][..].into())],
+        });
+        let want: Vec<Extension> = vec![(b"k"[..].into(), [3][..].into()), (b"j"[..].into(), [2][..].into())];
+        assert_eq!((a.comment.as_deref(), &a.extensions), (Some(&b"a"[..]), &want));
+    }
+
     #[test]
     fn optional_metadata() {
         let mut t = Tree::default();
@@ -2231,7 +2385,7 @@ mod tests {
             t.entries.push(Entry { parent: None, name: vec![b'a' + i as u8], node, extra });
         }
         let order: Vec<usize> = (0..3).collect();
-        let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::None, &[]);
+        let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::None, &[], &ArchiveExtra::default());
         let (got, forks) = extras(&c, 3).unwrap();
         assert_eq!(got[1..3], [t.entries[0].extra.clone(), t.entries[1].extra.clone()]);
         // (a time beyond 64 bits of nanoseconds of seconds)
@@ -2241,21 +2395,24 @@ mod tests {
         // (times of nanoseconds as they are)
         assert!(c.windows(2).any(|w| w == [0xd8, 126]));
         let none = Tree { entries: t.entries[..1].to_vec(), ..Tree::default() };
-        assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::None, &[]), b"");
+        assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::None, &[], &ArchiveExtra::default()), b"");
         // segment-status, alone and after entry-extras: true, or a map of what was left out
-        assert_eq!(optional(&none, &[0], &|_| unreachable!(), Status::Complete, &[]), [0xa1, 0x22, 0xf5]);
+        assert_eq!(
+            optional(&none, &[0], &|_| unreachable!(), Status::Complete, &[], &ArchiveExtra::default()),
+            [0xa1, 0x22, 0xf5]
+        );
         assert_eq!(extras_given(&[0xa1, 0x22, 0xf5], 1, None).unwrap().3, Status::Complete);
-        let both = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::Complete, &[]);
-        let (again, _, _, status, _) = extras_given(&both, 3, None).unwrap();
+        let both = optional(&t, &order, &|c| [c as u64 * 2, 0, 9], Status::Complete, &[], &ArchiveExtra::default());
+        let (again, _, _, status, ..) = extras_given(&both, 3, None).unwrap();
         assert!(status == Status::Complete && again == extras(&c, 3).unwrap().0);
         assert_eq!(extras_given(&c, 3, None).unwrap().3, Status::None);
         assert!(extras_given(&[0xa1, 0x22, 0xf4], 1, None).is_err());
         let left = Status::Incomplete { files: Some(3), bytes: Some(300) };
-        let m = optional(&none, &[0], &|_| unreachable!(), left, &[]);
+        let m = optional(&none, &[0], &|_| unreachable!(), left, &[], &ArchiveExtra::default());
         assert_eq!(m, [0xa1, 0x22, 0xa2, 0x00, 0x03, 0x01, 0x19, 0x01, 0x2c]);
         assert_eq!(extras_given(&m, 1, None).unwrap().3, left);
         let bare = Status::Incomplete { files: None, bytes: None };
-        assert_eq!(optional(&none, &[0], &|_| unreachable!(), bare, &[]), [0xa1, 0x22, 0xa0]);
+        assert_eq!(optional(&none, &[0], &|_| unreachable!(), bare, &[], &ArchiveExtra::default()), [0xa1, 0x22, 0xa0]);
         assert_eq!(extras_given(&[0xa1, 0x22, 0xa0], 1, None).unwrap().3, bare);
         // (other keys let be; a count of another kind, or the same key twice, not)
         let other = Status::Incomplete { files: Some(1), bytes: None };
@@ -2263,7 +2420,7 @@ mod tests {
         assert!(extras_given(&[0xa1, 0x22, 0xa1, 0x00, 0x20], 1, None).is_err());
         // journal: times to labels, written in the order of the times
         let points = vec![(1_700_000_000_000, "daily".to_string()), (5, String::new())];
-        let j = optional(&none, &[0], &|_| unreachable!(), Status::Complete, &points);
+        let j = optional(&none, &[0], &|_| unreachable!(), Status::Complete, &points, &ArchiveExtra::default());
         assert_eq!(&j[..5], [0xa2, 0x22, 0xf5, 0x23, 0xa2]);
         let got = extras_given(&j, 1, None).unwrap();
         assert_eq!(
@@ -2346,9 +2503,10 @@ mod tests {
     /// found where given twice.
     #[test]
     fn optional_metadata_keys_of_all_kinds() {
+        // (-10 rather than -1, `archive-comment`, whose value is read)
         let keys: Vec<&[u8]> = vec![
             &[0x01],
-            &[0x20],
+            &[0x29],
             &[0x41, 0x00],
             &[0x42, 0x00, 0x01],
             &[0x61, b'a'],
@@ -2431,7 +2589,7 @@ mod tests {
             let extra = Extra { gname: Some(vec![b'g', i % 2].into()), ..x.clone() };
             t.entries.push(Entry { parent: None, name: vec![b'a' + i], node: EntryNode::Dir, extra });
         }
-        let c = optional(&t, &[0, 1, 2], &|_| unreachable!(), Status::None, &[]);
+        let c = optional(&t, &[0, 1, 2], &|_| unreachable!(), Status::None, &[], &ArchiveExtra::default());
         let (got, _) = extras(&c, 3).unwrap();
         assert_eq!(got[1..], t.entries.iter().map(|e| e.extra.clone()).collect::<Vec<_>>()[..]);
         let same = |f: &dyn Fn(&Extra) -> &Arc<[u8]>| got[1..].windows(2).all(|w| Arc::ptr_eq(f(&w[0]), f(&w[1])));

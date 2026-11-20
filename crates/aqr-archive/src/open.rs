@@ -314,7 +314,7 @@ fn open_with<'c, 'n>(
     salvaging: bool,
     upto: Option<usize>,
 ) -> Decoded<Archive<'c, 'n>> {
-    let (blocks, tree, status, journal) = opened(c, sealed, salvaging, upto)?;
+    let (blocks, tree, status, journal, _) = opened(c, sealed, salvaging, upto)?;
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
     let kept = Archived::Parsed(Box::new(blocks));
     Ok(Archive {
@@ -360,28 +360,27 @@ pub(crate) fn footer_fields(p: Payload) -> Decoded<(usize, usize, u64, u64)> {
     Ok((fields_start, archive_end, size_hint, metadata))
 }
 
+/// What [`opened`] gives: an archive's blocks, its tree, its status, its journal points and its
+/// archive-wide members (the segments' merged).
+pub(crate) type Opened<'c> =
+    (Blocks<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>, tree::ArchiveExtra);
+
 /// The blocks of archive `c` (the payload of an encrypted one where `sealed`, salvaged where
-/// `salvaging`), its tree, its status and its journal points: what [`open_with`] opens, ended
-/// after the segment whose metadata block is at `upto` where it is given.
-#[allow(clippy::type_complexity)]
-pub(crate) fn opened(
-    c: &[u8],
-    sealed: bool,
-    salvaging: bool,
-    upto: Option<usize>,
-) -> Decoded<(Blocks<'_>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>)> {
+/// `salvaging`), its tree, its status, its journal points and its archive-wide members: what
+/// [`open_with`] opens, ended after the segment whose metadata block is at `upto` where it is
+/// given.
+pub(crate) fn opened(c: &[u8], sealed: bool, salvaging: bool, upto: Option<usize>) -> Decoded<Opened<'_>> {
     opened_with(c, sealed, salvaging, upto, None)
 }
 
 /// [`opened`], each segment read told too, in `segments` where it is given.
-#[allow(clippy::type_complexity)]
 pub(crate) fn opened_with<'c>(
     c: &'c [u8],
     sealed: bool,
     salvaging: bool,
     upto: Option<usize>,
     mut segments: Option<&mut Vec<tree::SegmentInfo>>,
-) -> Decoded<(Blocks<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>)> {
+) -> Decoded<Opened<'c>> {
     let (fields_start, archive_end, size_hint, metadata) = footer_fields(Payload::Plain(c))?;
     // (salvaging an encrypted archive's payload, its blocks lost are spacer blocks, its size
     // hint block among them maybe: not required then)
@@ -407,6 +406,7 @@ pub(crate) fn opened_with<'c>(
     let mut prev = HEADER_MAGIC.len() - 1;
     let mut status = None;
     let mut journal = Vec::new();
+    let mut archive = tree::ArchiveExtra::default();
     let mut ended = upto.is_none();
     for (k, (at, d)) in metas.into_iter().enumerate() {
         let m = tree::read(&d)?;
@@ -445,9 +445,12 @@ pub(crate) fn opened_with<'c>(
             Ok(Some((leaf, Some(outputs[leaf]))))
         };
         let (told, points) = (m.status, segments.is_some().then(|| m.journal.clone()));
+        let own = m.archive.clone();
+        archive.merge(m.archive.clone());
         trees.push(tree_of(m, at, prev, &mut leaf_at, outputs.len(), salvaging.then_some(&mut lost))?);
         if let (Some(all), Some(journal)) = (segments.as_deref_mut(), points) {
-            all.push(tree::SegmentInfo { tree: trees.last().expect("just pushed").clone(), status: told, journal });
+            let tree = trees.last().expect("just pushed").clone();
+            all.push(tree::SegmentInfo { tree, status: told, journal, archive: own });
         }
         prev = at;
         if upto == Some(at) {
@@ -470,7 +473,7 @@ pub(crate) fn opened_with<'c>(
         blocks.leaf_dictionary.push(None);
         blocks.sizes.leaves.push(0);
     }
-    Ok((blocks, tree, status, journal))
+    Ok((blocks, tree, status, journal, archive))
 }
 
 impl<'c, 'n> Archive<'c, 'n> {
