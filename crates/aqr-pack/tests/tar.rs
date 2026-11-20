@@ -95,8 +95,17 @@ fn tar_lists(archive: &[u8]) {
     let r = std::process::Command::new("tar").arg("-tf").arg(&path).output();
     std::fs::remove_dir_all(&dir).unwrap();
     let Ok(r) = r else { return eprintln!("no tar: not checked") };
-    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
-    let listed = String::from_utf8_lossy(&r.stdout);
+    let (listed, err) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    // Windows' tar (System32's bsdtar, which Command takes before the PATH's) takes names by the
+    // system's code page: `한글 이름.txt` where that is not Korean (CI's runners) it skips, telling
+    // so and failing; the others it lists, the long directory's name whole
+    if cfg!(windows) && !r.status.success() && err.matches("empty or unreadable filename").count() == 1 {
+        eprintln!("tar of a code page without the Korean name: the others checked");
+        assert!(listed.lines().any(|l| l.contains(&"d".repeat(120))), "{listed}");
+        assert_eq!(listed.lines().count(), 9, "{listed}");
+        return;
+    }
+    assert!(r.status.success(), "{err}");
     assert!(listed.lines().any(|l| l.ends_with(".txt") && l.len() > 130), "{listed}");
     assert_eq!(listed.lines().count(), 10, "{listed}");
 }
