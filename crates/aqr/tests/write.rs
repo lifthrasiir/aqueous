@@ -334,18 +334,27 @@ fn inputs_changing_while_archived() {
 }
 
 /// `aqr args` in `dir` with files limited to `kib` KiB (what a full disk does to a write: the
-/// signal ignored, the write failing).
+/// signal ignored, the write failing). The limit is set in bytes, not by a shell's `ulimit -f`,
+/// whose unit is not the same in every shell: dash's (Linux's `sh`) is 512 bytes, and 9 there
+/// was less than the archive to append to.
 #[cfg(unix)]
 fn limited(dir: &Path, kib: u32, args: &[&str]) -> Output {
-    Command::new("sh")
-        .current_dir(dir)
-        .arg("-c")
-        .arg(format!("trap '' XFSZ; ulimit -f {kib}; exec \"$0\" \"$@\""))
-        .arg(env!("CARGO_BIN_EXE_aqr"))
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+    use std::os::unix::process::CommandExt;
+    let bytes = libc::rlim_t::from(kib) * 1024;
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_aqr"));
+    cmd.current_dir(dir).args(args).stdin(Stdio::null());
+    // SAFETY: between fork and exec, only signal and setrlimit (async-signal-safe) are called
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let limit = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd.output().unwrap()
 }
 
 /// write/5: a write failing for want of room (as a full disk does) fails the run, tells which
