@@ -191,8 +191,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   and decoder that is aqr-archive, aqr-compress and aqr-decompress. Stream long output with
   `rg --line-buffered` rather than through `sort`, which hides progress. `cargo nextest run
   --cargo-profile release-test …` (no doctests) runs the tests of all binaries at once, about 3
-  times as fast over many packages. CI (`.github/workflows/test.yml`, Linux) tests what
-  `scripts/affected-crates.py BASE` selects: the packages changed and those depending on them.
+  times as fast over many packages. CI (`.github/workflows/test.yml`: Linux and Windows, macOS
+  by schedule and by hand) tests what `scripts/affected-crates.py BASE` selects: the packages
+  changed and those depending on them.
   A test reading another package's files names them by a relative path in its source
   (`"../../codecs/aqr-jpeg/tests/data/…"`), or the script misses it.
 - **Build and run the release `aqr` only through `cargo aqr <args>…`** (crates/aqr-bincache),
