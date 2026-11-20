@@ -23,8 +23,9 @@
 //!   version…" names the state the archive is in (`aqr --tag`), and "Extract a previous
 //!   version…" extracts one of the versions named (the points of its journal: `aqr -j`, `--tag`)
 //!   as it was, into a folder beside the archive named after it.
-//! - Explorer runs a process for each of the paths chosen: those of a verb in a folder are
-//!   gathered into the first of them (`gather`).
+//! - Explorer drops the paths chosen on the verb's class (`drop`: `--drop VERB`, this program as
+//!   a COM local server), all at once. A verb's command, one process for each path as other
+//!   programs may run it, is gathered into the first process of the verb in a folder (`gather`).
 //! - `aqr.exe` is the one beside this program, else the one on `PATH` (`AQR` names another).
 //!
 //! The window is a task dialog (`dialog`): what is being done, a bar of how far, the file at
@@ -37,6 +38,8 @@
 mod dialog;
 #[cfg(windows)]
 mod dpi;
+#[cfg(windows)]
+mod drop;
 #[cfg(windows)]
 mod gather;
 #[cfg(windows)]
@@ -69,10 +72,20 @@ fn main() -> std::process::ExitCode {
     aqr_l10n::init(&aqr_l10n::system_languages());
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let verb = args.first().and_then(|a| a.to_str()).unwrap_or("");
-    let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
     let fail = |main: &str, e: &str| {
         dialog::message(dialog::Icon::Error, main, e, None);
         ExitCode::FAILURE
+    };
+    // (`--drop VERB`, and COM's `-Embedding`: the paths dropped by Explorer, all at once)
+    let (verb, paths, dropped) = match verb {
+        "--drop" => {
+            let v = args.get(1).and_then(|a| a.to_str()).unwrap_or("");
+            match drop::receive(v) {
+                Ok(paths) => (v, paths, true),
+                Err(e) => return fail(win::nothing(), &e),
+            }
+        }
+        _ => (verb, args.iter().skip(1).map(PathBuf::from).collect(), false),
     };
     let (mut encrypt, mut format, mut options) = (false, "aqr", false);
     let name = verb;
@@ -152,6 +165,7 @@ fn main() -> std::process::ExitCode {
         }
     };
     let paths = match <[PathBuf; 1]>::try_from(paths) {
+        Ok([path]) if dropped => vec![path],
         // (one a process, as Explorer runs it: gathered into one)
         Ok([path]) => match gather::gather(name, path) {
             Some(paths) => paths,

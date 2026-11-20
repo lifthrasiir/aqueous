@@ -28,8 +28,10 @@
 //! read by Explorer in the user's language as it is now; the default values beside them are in
 //! the language of the registration.
 //!
-//! The verbs take any number of paths chosen (`MultiSelectModel` `Player`; Explorer runs a
-//! process for each, [`crate::gather`]). On Windows 11 they are under "Show more options": the
+//! The verbs take any number of paths chosen (`MultiSelectModel` `Player`): Explorer drops them
+//! all on the verb's `DropTarget`, a class of this program (`CLSID\{...}`, `LocalServer32`:
+//! [`crate::drop`]); a program running the verb's command runs a process for each path
+//! ([`crate::gather`]). On Windows 11 they are under "Show more options": the
 //! menu above takes only `IExplorerCommand` handlers of packaged applications.
 //!
 //! The values of `HKEY_CURRENT_USER` are set, read and deleted here for [`crate::install`] too.
@@ -144,8 +146,18 @@ pub fn register() -> Result<(), String> {
         set(key, None, text.text())?;
         set(key, Some("MUIVerb"), &indirect(text))?;
         set(key, Some("MultiSelectModel"), "Player")?;
+        // (Explorer drops the paths chosen on the class, all at once, rather than running the
+        // command for each: `crate::drop`)
+        if let Some(clsid) = crate::drop::clsid(verb) {
+            set(&format!(r"{key}\DropTarget"), Some("CLSID"), &crate::drop::braced(&clsid))?;
+        }
         set(&format!(r"{key}\command"), None, &command(verb))
     };
+    for v in crate::drop::VERBS {
+        let key = clsid_key(v);
+        set(&key, None, &format!("Aqueous {v}"))?;
+        set(&format!(r"{key}\LocalServer32"), None, &format!("\"{}\" --drop {v}", exe.display()))?;
+    }
     for (key, menu) in COMPRESS.into_iter().zip(MENU) {
         verb(key, shell::COMPRESS, "compress")?;
         set(key, Some("Icon"), &icon)?;
@@ -209,7 +221,15 @@ pub fn register() -> Result<(), String> {
     Ok(())
 }
 
+/// The key (under `Software\Classes`) of the class of `verb` ([`crate::drop`]).
+fn clsid_key(verb: &str) -> String {
+    format!(r"CLSID\{}", crate::drop::braced(&crate::drop::clsid(verb).unwrap()))
+}
+
 pub fn unregister() -> Result<(), String> {
+    for v in crate::drop::VERBS {
+        delete(&classes(&clsid_key(v)))?;
+    }
     for key in COMPRESS.iter().chain(&MENU).chain(&OLD).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }
