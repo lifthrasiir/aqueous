@@ -154,5 +154,7 @@ jobs:
       - env:
           ARGS: ${{ needs.select.outputs.args }}
         run: |
-          mapfile -t args <<< "$ARGS"
+          # (no mapfile: macOS's bash is 3.2)
+          args=()
+          while IFS= read -r a; do args+=("$a"); done <<< "$ARGS"
           cargo nextest run --profile ci --cargo-profile release-test --locked "${args[@]}"
