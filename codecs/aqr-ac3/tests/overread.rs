@@ -106,12 +106,17 @@ fn the_checksum_is_fast() {
 #[test]
 fn the_checksum_runs_at_the_tables_speed() {
     let d: Vec<u8> = (0..32 << 20).map(|i: u32| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
-    let t = Instant::now();
-    let c = crc16_of(&d);
-    let table = t.elapsed();
-    let t = Instant::now();
-    let b = crc16_bitwise(&d);
-    let bitwise = t.elapsed();
+    // the fastest of a few runs each: the first run of a binary just built ran at a quarter of
+    // the speed of the runs after it, and a runner of CI shares its cores
+    let fastest = |f: fn(&[u8]) -> u16| {
+        let runs = (0..3).map(|_| {
+            let t = Instant::now();
+            (f(&d), t.elapsed())
+        });
+        runs.reduce(|a, b| (a.0, a.1.min(b.1))).unwrap()
+    };
+    let (c, table) = fastest(crc16_of);
+    let (b, bitwise) = fastest(crc16_bitwise);
     assert_eq!(c, b);
     eprintln!("32 MiB: tables {table:?}, bitwise {bitwise:?}");
     assert!(table * 4 < bitwise, "tables {table:?}, bitwise {bitwise:?}");
