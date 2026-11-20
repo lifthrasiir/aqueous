@@ -514,7 +514,10 @@ impl Applier {
 /// is given to what is extracted of it (the files on Windows, all but links on macOS), so that
 /// the system asks before running them as it would the archive (SmartScreen, Gatekeeper),
 /// over any the archive has for them.
-pub struct Mark(Vec<u8>);
+pub struct Mark(
+    // (none made of an archive elsewhere: Mark::of gives None there)
+    #[cfg_attr(not(any(windows, target_os = "macos")), expect(dead_code))] Vec<u8>,
+);
 
 impl Mark {
     #[cfg(windows)]
