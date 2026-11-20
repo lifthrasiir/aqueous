@@ -153,6 +153,9 @@ pub fn register() -> Result<(), String> {
         delete(&classes(menu))?;
         set(menu, Some("MUIVerb"), "Aqueous")?;
         set(menu, Some("SubCommands"), "")?;
+        // (else of `Document`, the default: Explorer leaves the menu out where over 15 paths are
+        // chosen, whatever its verbs take)
+        set(menu, Some("MultiSelectModel"), "Player")?;
         set(menu, Some("Icon"), &icon)?;
         for (i, (name, text, v)) in more().into_iter().enumerate() {
             let key = format!(r"{menu}\shell\{name}");
