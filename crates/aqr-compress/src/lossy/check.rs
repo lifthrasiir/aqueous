@@ -1423,3 +1423,83 @@ fn asar_files(
     }
     Ok(())
 }
+
+/// PDB files: the superblock, the free block maps, the directory and its map, and each stream's
+/// data as they were; every other byte as it was or zero.
+pub(super) fn pdb(x: &[u8], r: &[u8]) -> Result<(), String> {
+    if x.len() != r.len() {
+        return Err("of another length".into());
+    }
+    let (bs, kept) = pdb_kept(x)?;
+    for (b, &k) in kept.iter().enumerate() {
+        let (xb, rb) = (&x[b * bs..(b + 1) * bs], &r[b * bs..(b + 1) * bs]);
+        if xb[..k] != rb[..k] {
+            return Err(format!("bytes kept in block {b} changed"));
+        }
+        if xb[k..].iter().zip(&rb[k..]).any(|(&a, &c)| c != 0 && c != a) {
+            return Err(format!("bytes of block {b} changed but to zeros"));
+        }
+    }
+    Ok(())
+}
+
+/// The block size of the MSF 7.00 file `x` and, of each block, the length of its prefix that it
+/// holds as structure or stream data.
+fn pdb_kept(x: &[u8]) -> Result<(usize, Vec<usize>), String> {
+    let le = |at: usize| x.get(at..at + 4).map(|v| u32::from_le_bytes(v.try_into().unwrap()) as usize);
+    if !x.starts_with(b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0") {
+        return Err("not MSF 7.00".into());
+    }
+    let (bs, nb, dsz, map) =
+        (le(32).ok_or("short")?, le(40).ok_or("short")?, le(44).ok_or("short")?, le(52).ok_or("short")?);
+    if ![512, 1024, 2048, 4096].contains(&bs) || nb == 0 || nb.checked_mul(bs) != Some(x.len()) {
+        return Err("bad block size or count".into());
+    }
+    let mut kept = vec![0usize; nb];
+    // (the superblock and the free block maps whole)
+    let mut claim = |b: usize, n: usize| -> Result<(), String> {
+        match kept.get_mut(b) {
+            Some(k) if *k == 0 => {
+                *k = n;
+                Ok(())
+            }
+            Some(_) => Err("block claimed twice".into()),
+            None => Err("block out of the file".into()),
+        }
+    };
+    claim(0, bs)?;
+    for k in (0..nb).step_by(bs) {
+        for b in [k + 1, k + 2] {
+            if b < nb {
+                claim(b, bs)?;
+            }
+        }
+    }
+    let nd = dsz.div_ceil(bs);
+    if dsz < 4 || 4 * nd > bs {
+        return Err("bad directory size".into());
+    }
+    claim(map, 4 * nd)?;
+    let mut dir = Vec::new();
+    for k in 0..nd {
+        let b = x[map * bs + 4 * k..][..4].try_into().map(u32::from_le_bytes).unwrap() as usize;
+        claim(b, (dsz - k * bs).min(bs))?;
+        dir.extend_from_slice(&x[b * bs..][..(dsz - k * bs).min(bs)]);
+    }
+    let w = |at: usize| dir.get(at..at + 4).map(|v| u32::from_le_bytes(v.try_into().unwrap()) as usize);
+    let ns = w(0).ok_or("short directory")?;
+    let mut at = 4usize.checked_add(ns.checked_mul(4).ok_or("bad count")?).ok_or("bad count")?;
+    for s in 0..ns {
+        let size = w(4 + 4 * s).ok_or("short directory")?;
+        let n = if size == u32::MAX as usize { 0 } else { size.div_ceil(bs) };
+        for k in 0..n {
+            let b = w(at + 4 * k).ok_or("short directory")?;
+            claim(b, (size - k * bs).min(bs))?;
+        }
+        at += 4 * n;
+    }
+    if at != dir.len() {
+        return Err("directory of other length".into());
+    }
+    Ok((bs, kept))
+}

@@ -38,6 +38,7 @@ mod disk;
 mod gzip;
 mod lzma;
 mod mca;
+mod pdb;
 mod sevenz;
 mod signatures;
 mod sqlite;
@@ -104,6 +105,7 @@ const REWRITERS: &[Rewriter] = &[
     Rewriter { class: Class::Slack, format: Format::Mca, rewrite: mca::slack, check: check::mca },
     Rewriter { class: Class::Slack, format: Format::Disk, rewrite: disk::slack, check: check::disk },
     Rewriter { class: Class::Slack, format: Format::Asar, rewrite: asar::slack, check: check::asar },
+    Rewriter { class: Class::Slack, format: Format::Pdb, rewrite: pdb::slack, check: check::pdb },
     Rewriter { class: Class::Slack, format: Format::Sqlite, rewrite: sqlite::slack, check: check::sqlite },
 ];
 
@@ -689,3 +691,5 @@ mod tests_signatures;
 pub(super) fn parse_any(spec: &str) -> Result<Lossy, String> {
     Lossy::parse(spec).map(|l| l.with_coding_min(0))
 }
+#[cfg(test)]
+mod tests_pdb;
