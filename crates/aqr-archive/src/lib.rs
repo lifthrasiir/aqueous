@@ -43,6 +43,8 @@ mod encoder;
 pub mod envelope;
 pub(crate) mod eval;
 mod evaluate;
+#[cfg(any(fuzzing, test))]
+pub mod fuzzing;
 mod index;
 pub mod inspect;
 mod level;

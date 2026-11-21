@@ -123,3 +123,47 @@ pub fn registered(m: Module) -> Option<Wasm> {
 pub fn options() -> aqr_compress::Options {
     aqr_compress::Options { threads: 1, modules: registered, ..aqr_compress::Options::default() }
 }
+
+/// The targets' mutator of archives (libFuzzer's `LLVMFuzzerCustomMutator`): half of the time,
+/// where a block's data decodes by itself ([`aqr_archive::fuzzing::blocks`]), one such block
+/// picked, its data decoded, mutated by libFuzzer's mutator and the block made again of it, a
+/// spacer block after it taking the bytes it no longer does (so that every block after it, and
+/// what tells where they are, stays where it was); else, and where the block made again is
+/// longer than it was, `data` mutated as it is.
+#[cfg(fuzzing)]
+pub fn mutate(data: &mut [u8], size: usize, max_size: usize, seed: u32) -> usize {
+    // (xorshift32, of the seed libFuzzer gives)
+    let mut s = seed | 1;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        s
+    };
+    if next() % 2 == 0 {
+        let c = &data[..size];
+        let blocks = aqr_archive::fuzzing::blocks(c);
+        if !blocks.is_empty() {
+            let b = &blocks[next() as usize % blocks.len()];
+            if let Some(mut d) = b.data(c) {
+                // (a little longer at most: compressed again, it may still fit)
+                let (n, max) = (d.len(), d.len() + d.len() / 8 + 16);
+                d.resize(max, 0);
+                let m = libfuzzer_sys::fuzzer_mutate(&mut d, n, max);
+                d.truncate(m);
+                let made = b.of(c, &d);
+                let room = b.at.len();
+                // (both of an even length: a spacer block, of 2 bytes at least, takes the rest)
+                if made.len() <= room {
+                    let mut new = made;
+                    if new.len() < room {
+                        new.extend_from_slice(&aqr_archive::fuzzing::spacer(room - new.len()));
+                    }
+                    data[b.at.clone()].copy_from_slice(&new);
+                    return size;
+                }
+            }
+        }
+    }
+    libfuzzer_sys::fuzzer_mutate(data, size, max_size)
+}

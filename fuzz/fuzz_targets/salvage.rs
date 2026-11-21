@@ -2,7 +2,7 @@
 #![no_main]
 
 use aqr_archive::mirror;
-use libfuzzer_sys::fuzz_target;
+use libfuzzer_sys::{fuzz_mutator, fuzz_target};
 
 #[global_allocator]
 static ALLOC: aqr_testkit::Refusing = aqr_testkit::Refusing(aqr_fuzz::ALLOCATION_MAX);
@@ -16,4 +16,8 @@ fuzz_target!(|c: &[u8]| {
             let _ = a.value(1);
         }
     }
+});
+
+fuzz_mutator!(|data: &mut [u8], size: usize, max_size: usize, seed: u32| {
+    aqr_fuzz::mutate(data, size, max_size, seed)
 });

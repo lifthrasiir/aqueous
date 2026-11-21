@@ -27,6 +27,14 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   recompressor's reading of untrusted files) and decompressed again by the native modules,
   which must give it back. Its seeds are the codecs' fixtures as they are.
 
+`decode`, `salvage` and `natives` mutate with a mutator of their own (`src/lib.rs`'s `mutate`):
+half of the time, a block whose data decodes by itself (aqr-archive's `fuzzing`: metadata, data,
+module, resource, dictionary and formula blocks, but those of a dictionary's data) is picked, its
+data decoded, mutated by libFuzzer's mutator and the block made again of it (Zstandard at level
+1, or raw Zstandard blocks), a spacer block after it taking what it no longer does, so that the
+blocks after it stay where the footer and the metadata tell; where it is longer than it was, and
+otherwise, the input is mutated as it is.
+
 In `decode`, `salvage` and `envelope`, the modules are toys known by their stand-ins (`src/lib.rs`: `rev`, `cut` of several outputs,
 `copy` as a part module), so that formulas applying modules are evaluated without the codecs.
 The global allocator is aqr-testkit's `Refusing` at 1 GiB: a reservation tried for more goes
@@ -55,6 +63,6 @@ as `run.sh` sets it), and timed as plain code by `cargo +nightly run --release -
 TARGET FILE...` (natives, compress): instrumented, `compress` is about 12 times as slow (a seed
 of 3.7 s, `aqr-egg-azonumbers.egg`, took 44 s). `corpus/`, `artifacts/` and `target/` are not committed.
 
-Left: a mutator that mutates blocks' decompressed data and
-frames it again, the round trip of formulas made by `arbitrary` through the encoder, and native
-modules against Wasm on the same inputs.
+Left: that mutator of `envelope`'s payloads (decrypted, mutated so and sealed again), the round
+trip of formulas made by `arbitrary` through the encoder, and native modules against Wasm on the
+same inputs.

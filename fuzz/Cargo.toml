@@ -70,3 +70,6 @@ bench = false
 
 [profile.release]
 debug = 1
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
