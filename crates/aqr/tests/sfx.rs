@@ -102,6 +102,91 @@ mod packed {
         fs::remove_dir_all(&d).unwrap();
     }
 
+    /// The Windows SDK's `signtool` (`AQR_SIGNTOOL`, else the latest of the SDK's x64 tools).
+    fn signtool() -> Option<PathBuf> {
+        if let Some(t) = std::env::var_os("AQR_SIGNTOOL") {
+            return Some(t.into());
+        }
+        let bin = Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
+        let mut found: Vec<PathBuf> = fs::read_dir(bin)
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join(r"x64\signtool.exe"))
+            .filter(|p| p.exists())
+            .collect();
+        found.sort();
+        found.pop()
+    }
+
+    /// A program signed once it is made (with a certificate of its own, made by OpenSSL: no store
+    /// of the system's touched) runs as one unsigned does, and aqr reads its archive (bytes
+    /// before it and after it, which locating does not take: the signature is left out first).
+    /// Where `signtool` or `openssl` is not there, told and passed.
+    #[test]
+    fn signed_afterwards() {
+        let Some(signtool) = signtool() else {
+            eprintln!("signed_afterwards: no signtool (the Windows SDK), not tried");
+            return;
+        };
+        let d = scratch("signed");
+        let openssl = |args: &[&str]| Command::new("openssl").current_dir(&d).args(args).output();
+        let made_cert = openssl(&[
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            "k.pem",
+            "-out",
+            "c.pem",
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=aqr test",
+            "-addext",
+            "extendedKeyUsage=codeSigning",
+        ]);
+        if !made_cert.is_ok_and(|o| o.status.success()) {
+            eprintln!("signed_afterwards: no openssl to make a certificate, not tried");
+            return;
+        }
+        let o =
+            openssl(&["pkcs12", "-export", "-out", "t.pfx", "-inkey", "k.pem", "-in", "c.pem", "-passout", "pass:x"]);
+        assert!(o.unwrap().status.success());
+        fs::create_dir_all(d.join("in")).unwrap();
+        fs::write(d.join("in/a.txt"), prose(200_000)).unwrap();
+        fs::write(d.join("in/b.bin"), (0..5000u32).map(|i| (i * 7 % 253) as u8).collect::<Vec<_>>()).unwrap();
+        made(&d, &["in"], "in.exe");
+        let o = Command::new(&signtool)
+            .current_dir(&d)
+            .args(["sign", "/q", "/fd", "sha256", "/f", "t.pfx", "/p", "x", "in.exe"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "signtool: {}", String::from_utf8_lossy(&o.stdout));
+        let signed = fs::read(d.join("in.exe")).unwrap();
+        let s = aqr_sfx::pe::signature(&signed).expect("a signature");
+        assert_eq!(s.end, signed.len());
+        // the system's check of it: its hash holds (its root is not trusted)
+        let ps = format!("(Get-AuthenticodeSignature -LiteralPath '{}').Status", d.join("in.exe").display());
+        let status = Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output().unwrap();
+        let status = String::from_utf8_lossy(&status.stdout).trim().to_string();
+        assert!(!["NotSigned", "HashMismatch", "NotSupportedFileFormat", ""].contains(&status.as_str()), "{status}");
+        // run, and read by aqr
+        run(&d, "in.exe", "out");
+        let o = aqr_in(&d, &["-d", "-o", "back", "in.exe"]);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success() && err.contains("its signature"), "{err}");
+        for out in ["out", "back"] {
+            for f in ["a.txt", "b.bin"] {
+                assert!(fs::read(d.join("in").join(f)).unwrap() == fs::read(d.join(out).join(f)).unwrap(), "{out}/{f}");
+            }
+        }
+        let o = aqr_in(&d, &["-t", "-q", "in.exe"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
     /// An icon of one image (a PNG by its signature, all that is checked of it).
     fn icon() -> Vec<u8> {
         let png = b"\x89PNG\r\n\x1a\n and the rest";

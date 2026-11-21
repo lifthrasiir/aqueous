@@ -149,13 +149,39 @@ pub(crate) fn map_archive(input: &Path, shown: &dyn std::fmt::Display) -> Result
 /// The archive in file `c` (`input`) as it is located (spec, "Locating an archive": an archive
 /// of a file appended to and not committed, one after other bytes, as a self-extracting
 /// executable has it), the bytes before or after it told where not `quiet`; all of `c` where
-/// none is found (to be repaired), or where it is encrypted.
+/// none is found (to be repaired), or where it is encrypted. A self-extracting program signed has
+/// bytes both before and after its archive, which locating does not take: where a file is not
+/// located, and is a PE image whose signature ends it, the archive is located before the
+/// signature.
 pub(crate) fn located<'c>(c: &'c [u8], input: &Path, quiet: bool) -> &'c [u8] {
-    let Some(r) = aqr_archive::locate(c) else { return c };
+    let signed = || aqr_sfx::pe::signature(c).filter(|s| s.end == c.len());
+    let (r, signature) = match aqr_archive::locate(c) {
+        Some(r) => (r, None),
+        // (the signature at 8 bytes: up to 7 zeros before it, which `signtool` adds, the footer's
+        // last bytes maybe zeros too)
+        None => match signed().and_then(|s| {
+            let before = &c[..s.start];
+            let zeros = before.iter().rev().take(7).take_while(|&&b| b == 0).count();
+            (0..=zeros).find_map(|pad| aqr_archive::locate(&before[..before.len() - pad])).map(|r| (r, s))
+        }) {
+            Some((r, s)) => (r, Some(s)),
+            None => return c,
+        },
+    };
     if !quiet && r.start > 0 {
         eprintln!("{}: {} before the archive left out", input.display(), bytes_of(r.start as u64));
     }
-    if !quiet && r.end < c.len() {
+    if let Some(s) = signature {
+        if !quiet {
+            let after = s.start - r.end;
+            let gap = if after > 0 { format!(" and {}", bytes_of(after as u64)) } else { String::new() };
+            eprintln!(
+                "{}: its signature ({}){gap} after the archive left out",
+                input.display(),
+                bytes_of(s.len() as u64)
+            );
+        }
+    } else if !quiet && r.end < c.len() {
         let n = bytes_of((c.len() - r.end) as u64);
         eprintln!(
             "{}: {n} after the archive left out (bytes added to it, or an append not committed)",

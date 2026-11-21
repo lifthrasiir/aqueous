@@ -116,6 +116,11 @@ fn unpack() -> Result<Pack, String> {
     }
     let mut file = |n: &str| files.remove(n).ok_or(format!("the self-extracting pack has no {n}"));
     let (stub, list) = (file("aqr-sfx-shim.exe")?, file("modules.txt")?);
+    // (a signature of the stub would be broken by what is appended: the program made is signed
+    // as a whole, by whoever makes it)
+    if aqr_sfx::pe::signature(&stub).is_some() {
+        return Err("the self-extracting pack's stub is signed (pack it unsigned: crates/aqr-sfx/pack.py)".into());
+    }
     let mut libs = HashMap::new();
     for l in String::from_utf8_lossy(&file("libs.txt")?).lines().filter(|l| !l.is_empty()) {
         let blob = file(&format!("libs/{l}"))?;

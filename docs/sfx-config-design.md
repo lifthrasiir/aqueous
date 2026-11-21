@@ -227,6 +227,14 @@ SFX가 같이 걸린다.
   파일 지우기(`Delete=`)는 두지 않는다.
 - `run` 모드의 SFX에서도 명령줄 `--noexec`(풀기만 하기)가 항상 통하게 한다.
 - `VERSIONINFO`와 서명이 평판에 크게 영향을 주므로, 문서에 서명 순서(SFX를 다 만든 뒤)를 적는다.
+- 서명(2026-11-21): Authenticode 서명은 파일 끝에 인증서 표를 더하고, 그 해시는 덧붙인 번들, 설정,
+  아카이브까지 덮는다. stub은 자기 이미지 뒤에서 아카이브를 찾으므로(뒤에 다른 바이트가 와도 된다)
+  서명한 SFX도 그대로 돈다. 그러나 스펙의 "Locating an archive"는 앞뒤에 모두 다른 바이트가 있는 파일을
+  받지 않으므로, aqr은 찾지 못한 파일이 PE이고 그 서명이 파일 끝을 차지하면 서명 앞(signtool이 넣는
+  0 패딩은 건너뛴다)에서 다시 찾는다 (`crates/aqr/src/decompress.rs`의 `located`). 스펙에 같은 단계를
+  넣을지는 따로 정한다. 덧붙이면 깨지므로 서명된 stub은 받지 않는다 (pack.py, aqr의 팩 읽기).
+  `crates/aqr/tests/sfx.rs`의 `signed_afterwards`가 OpenSSL로 만든 인증서와 `signtool`로 서명하고
+  돌려 본다 (둘 중 하나가 없으면 건너뛴다).
 
 ## 9. 순서
 

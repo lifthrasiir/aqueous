@@ -140,12 +140,26 @@ def interp_part(nightly):
         "target/x86_64-aqr-windows-msvc/release/aqr_interp.dll")
 
 
+def signed(exe):
+    """Whether PE image `exe` has a certificate table (Authenticode's: the data directory 4)."""
+    b = exe.read_bytes()
+    pe = int.from_bytes(b[0x3c:0x40], "little")
+    optional = pe + 24
+    plus = b[optional:optional + 2] == b"\x0b\x02"
+    d = optional + (112 if plus else 96) + 8 * 4
+    return b[pe:pe + 4] == b"PE\0\0" and int.from_bytes(b[d + 4:d + 8], "little") > 0
+
+
 def pack_part():
     """sfx.pack of what the other parts made, and pack.id."""
     for f, part in (("aqr-sfx-shim.exe", "modules"), ("modules.txt", "modules"), ("libs.txt", "modules"),
                     ("aqr-interp.blob", "interp")):
         if not (OUT / f).is_file():
             fail(f"no {OUT.as_posix()}/{f} (of --part={part})")
+    # (a signature of the stub would be broken by what aqr appends to it: the programs made are
+    # signed as a whole, by whoever makes them)
+    if signed(OUT / "aqr-sfx-shim.exe"):
+        fail(f"{OUT.as_posix()}/aqr-sfx-shim.exe is signed: pack it unsigned (sign the programs aqr makes)")
     for f in ("sfx.pack", "pack.id"):
         (OUT / f).unlink(missing_ok=True)
     # (AQR_SFX_PACK_BIN: aqr-sfx-pack built already, as the release workflow's job of the
