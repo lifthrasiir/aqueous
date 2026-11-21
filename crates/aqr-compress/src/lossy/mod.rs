@@ -9,8 +9,8 @@
 //!
 //! - `coding`: the DEFLATE streams of ZIP archives (`zip`) and gzip files (`gzip`) that zlib
 //!   does not give back made again by zlib's emulation ([`aqr_flate::zlib::compress`], level 6);
-//!   sizes, offsets and the rest of the container written again. From level 7 alone, where
-//!   aqr-flate emulates zlib (below, the record of zlib's streams is as large as of others').
+//!   sizes, offsets and the rest of the container written again. Their records are then a few
+//!   bytes at any level ([`Rewritten`]); from level 4 on, where DEFLATE streams are rebuilt.
 //! - `slack`: the bytes of a Minecraft region file (`mca`) that no chunk takes (freed sectors,
 //!   the ends of chunks' last sectors) zeroed in place.
 //!
@@ -297,45 +297,82 @@ aqr_common::zopt! {
 const RECORD_KEPT: usize = 64;
 const RECORD_PER: usize = 1024;
 
+/// zlib's parameters of the DEFLATE streams `coding` makes ([`redeflate`]): its defaults (level 6).
+pub(crate) const PARAMS: aqr_flate::zlib::Params =
+    aqr_flate::zlib::Params { level: 6, strategy: aqr_flate::zlib::Strategy::Default, wbits: 15, mem: 8 };
+
 /// Why the DEFLATE streams of a file are kept as they are at the level of `opt`, if they are:
-/// below level 7, zlib's streams are not emulated (aqr-flate's static profiles, whose record of a
-/// stream of zlib's is some 10% of it, as of any other encoder's: [`Options::flate_profile`]),
-/// and made again would gain nothing.
-fn unemulated(opt: &Options) -> Result<(), String> {
-    match opt.flate_profile() >= aqr_flate::ADAPTIVE {
-        true => Ok(()),
-        false => Err("below level 7, made again its DEFLATE streams would archive no smaller".into()),
+/// below level 4, where they are never rebuilt (`crate::inflated`).
+fn rebuilds(opt: &Options) -> Result<(), String> {
+    match crate::inflated::on(opt) {
+        false => Ok(()),
+        true => Err("below level 4, DEFLATE streams are kept as they are".into()),
     }
 }
 
-/// The DEFLATE stream `raw` made again by zlib's emulation at level 6 ([`aqr_flate::zlib::compress`]),
-/// where aqr-flate's record of it ([`Options::flate_profile`]) is larger than its record of
-/// `raw`; None where `raw` is kept: its record no more than [`RECORD_KEPT`] (of zlib), or no
-/// larger than the new one's (an encoder aqr-flate predicts well: Info-ZIP's, on small files,
-/// whose records were often smaller than zlib's), of more data than [`MAX_DATA`], or not parsed
-/// whole (it is checked as it is all the same). The record is what tells the archives apart:
-/// the data is the same.
+/// Where the files that `--lossy` rewrote are, among the data of a batch: their DEFLATE streams
+/// are zlib's at level 6 ([`PARAMS`]), but those kept as they were ([`redeflate`]), so they are
+/// deconstructed at the adaptive profile with its parameters hinted, at whatever level
+/// ([`Rewritten::flate`]): emulated, none searched for, their records are a few bytes. Below
+/// level 7 aqr-flate does not emulate zlib otherwise (its static profiles' record of a stream of
+/// zlib is some 10% of it, as of another encoder's): there the files that `--lossy` did not
+/// rewrite keep their streams' coding, which decodes faster.
+pub(crate) struct Rewritten(Vec<Range<*const u8>>);
+
+// SAFETY: the addresses are only compared, never read through
+unsafe impl Send for Rewritten {}
+unsafe impl Sync for Rewritten {}
+
+impl Rewritten {
+    /// Of the files of the data at `regions`, if any.
+    pub(crate) fn of(regions: impl Iterator<Item = Range<*const u8>>) -> Option<Rewritten> {
+        let v: Vec<_> = regions.collect();
+        (!v.is_empty()).then_some(Rewritten(v))
+    }
+
+    /// The profile and hints of a DEFLATE stream of `d` where it is in a file rewritten (at the
+    /// level of `opt`); None where it is not, or the level is of the adaptive profile anyway
+    /// (where zlib's parameters are searched for: those kept are not of [`PARAMS`]).
+    pub(crate) fn flate(&self, d: &[u8], opt: &Options) -> Option<(u16, aqr_flate::Hints)> {
+        let at = d.as_ptr_range();
+        let within = self.0.iter().any(|r| r.start <= at.start && at.end <= r.end);
+        (within && opt.flate_profile() < aqr_flate::ADAPTIVE)
+            .then(|| (aqr_flate::ADAPTIVE, aqr_flate::Hints { params: Some(PARAMS), ..Default::default() }))
+    }
+}
+
+/// The DEFLATE stream `raw` made again by zlib's emulation at level 6 ([`aqr_flate::zlib::compress`],
+/// [`PARAMS`]) where that pays; None where `raw` is kept: zlib's at level 6 already, of more data
+/// than [`MAX_DATA`], or not parsed whole (it is checked as it is all the same). The record of
+/// the stream made is a few bytes ([`Rewritten`]), whatever the level.
+///
+/// Below level 7, every other stream pays: the record of `raw` is that of a static profile,
+/// some 10% of it. From level 7 on, `raw` is deconstructed at the adaptive profile as it would
+/// be kept, and made again only where its record is more than [`RECORD_KEPT`] (zlib's at
+/// another level: emulated) and more than the new one's (an encoder aqr-flate predicts well:
+/// Info-ZIP's, on small files, whose records were often smaller than zlib's).
 fn redeflate(raw: &[u8], opt: &Options) -> Option<Vec<u8>> {
     let fopt = aqr_flate::Options {
         threads: 1,
         max_data: MAX_DATA.get(),
         zlib: aqr_flate::ZLIB.get(),
         verify: false,
-        ..aqr_flate::Options::for_profile(opt.flate_profile()).ok()?
+        ..aqr_flate::Options::for_profile(opt.flate_profile().max(aqr_flate::ADAPTIVE)).ok()?
     };
-    let record = |raw: &[u8]| {
-        let parsed = aqr_flate::Parsed::new(raw, &fopt).ok()?;
-        let (data, record, _) = parsed.deconstruct_bytes(&fopt, &aqr_flate::Hints::default()).ok()?;
-        Some((data, record.len()))
-    };
-    let (data, was) = record(raw)?;
-    if was <= RECORD_KEPT + raw.len() / RECORD_PER {
+    let parsed = aqr_flate::Parsed::new(raw, &fopt).ok()?;
+    if opt.flate_profile() < aqr_flate::ADAPTIVE {
+        let new = aqr_flate::zlib::compress(parsed.data(), PARAMS)?;
+        return (new[..] != raw[..]).then_some(new);
+    }
+    let (data, was, _) = parsed.deconstruct_bytes(&fopt, &aqr_flate::Hints::default()).ok()?;
+    if was.len() <= RECORD_KEPT + raw.len() / RECORD_PER {
         return None;
     }
-    let new = aqr_flate::zlib::compress(&data, aqr_flate::zlib::Params::default())?;
+    let new = aqr_flate::zlib::compress(&data, PARAMS)?;
     drop(data);
-    let (_, is) = record(&new)?;
-    (is < was && new[..] != raw[..]).then_some(new)
+    let hints = aqr_flate::Hints { params: Some(PARAMS), ..Default::default() };
+    let (_, is, _) = aqr_flate::Parsed::new(&new, &fopt).ok()?.deconstruct_bytes(&fopt, &hints).ok()?;
+    (is.len() < was.len() && new[..] != raw[..]).then_some(new)
 }
 
 /// What became of a content that a rewriter of [`Options::lossy`] takes.

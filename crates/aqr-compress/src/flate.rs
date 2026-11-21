@@ -295,7 +295,10 @@ fn member(
     probed: bool,
     cx: &Cx,
 ) -> Option<(u16, Member)> {
-    let profile = opt.flate_profile();
+    // (a stream of a file `--lossy` rewrote: zlib's, its record a few bytes, which pays)
+    let rewritten = cx.rewritten(d, opt);
+    let (profile, hints) = rewritten.unwrap_or((opt.flate_profile(), *hints));
+    let hints = &hints;
     let fopt = aqr_flate::Options {
         threads: opt.threads,
         max_data: usize::try_from(cx.inflate_left()).unwrap_or(usize::MAX),
@@ -312,7 +315,7 @@ fn member(
     if !cx.inflate(parsed.data().len() as u64) {
         return None;
     }
-    if let Some(probe) = crate::probe(opt, depth).filter(|_| probed)
+    if let Some(probe) = crate::probe(opt, depth).filter(|_| probed && rewritten.is_none())
         && !probe.pays(
             &cx.enc,
             parsed.len(),

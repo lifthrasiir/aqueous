@@ -684,6 +684,11 @@ impl<S: ?Sized> Ctx<'_, S> {
     fn stopping(&self) -> bool {
         self.stop.is_some_and(Stop::is_requested)
     }
+
+    /// Whether content `c`, read, is a file that `--lossy` rewrote.
+    fn rewritten(&self, c: usize) -> bool {
+        matches!(self.lossy.lock().unwrap().get(&c), Some(crate::lossy::Rewrite::Made { .. }))
+    }
 }
 
 /// The batches being made: read in order (under [`Pipe::reader`]) as there is room for them,
@@ -847,7 +852,9 @@ impl Reader {
                 std::collections::hash_map::Entry::Occupied(e) => lens.last_mut().unwrap().1 = Some(*e.get()),
                 std::collections::hash_map::Entry::Vacant(e) => {
                     e.insert(c);
-                    files.push(File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c)));
+                    let mut f = File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c));
+                    f.rewritten = cx.rewritten(c);
+                    files.push(f);
                     data.push(d);
                 }
             }
@@ -1086,7 +1093,9 @@ impl Writer {
             let files: Vec<File> = (again.iter().zip(&data))
                 .map(|(&c, d)| {
                     let hash = xxhash_rust::xxh3::xxh3_128(d);
-                    File::of(c, d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c))
+                    let mut f = File::of(c, d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c));
+                    f.rewritten = cx.rewritten(c);
+                    f
                 })
                 .collect();
             let part = self
@@ -1831,6 +1840,8 @@ struct File {
     sum: u64,
     /// The format it starts like ([`detect`]).
     format: Option<&'static str>,
+    /// Whether it is a file that `--lossy` rewrote ([`crate::lossy::Rewritten`]).
+    rewritten: bool,
 }
 
 impl File {
@@ -1845,6 +1856,7 @@ impl File {
             ch,
             sum: aqr_archive::checksum(d),
             format: detect(d).map(|f| f.name()),
+            rewritten: false,
         }
     }
 
@@ -1966,6 +1978,11 @@ fn analyze(
         cx.bodies = Some(std::sync::Arc::new(found.unwrap_or_default()));
     }
     let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    // (the files rewritten by --lossy, by where their data is: their streams coded as zlib's)
+    let rewritten = (files.iter().zip(&regions).enumerate())
+        .filter(|(k, (file, _))| file.rewritten && !raw.contains(k))
+        .map(|(_, (_, d))| d.as_ptr_range());
+    cx.rewritten = crate::lossy::Rewritten::of(rewritten).map(std::sync::Arc::new);
     // (nothing to tell where nothing is recompressed)
     cx.held = opt.recompresses().then(|| std::sync::Arc::new(Held::of(&regions, opt.threads)));
     cx.share_words(words(&regions, files, raw, opt).map(std::sync::Arc::new));

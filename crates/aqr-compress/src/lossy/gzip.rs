@@ -10,7 +10,7 @@ use crate::flate::gzip_deflate;
 /// `d` with its members' streams made again, None where none is; why it is kept where it is not
 /// gzip members alone.
 pub(super) fn coding(d: &[u8], opt: &Options) -> Result<Option<Vec<u8>>, String> {
-    super::unemulated(opt)?;
+    super::rebuilds(opt)?;
     let mut members = Vec::new();
     let mut p = 0;
     while p < d.len() {

@@ -44,6 +44,9 @@ pub struct Options {
     pub profile: u16,
     /// With an adaptive profile, whether to try zlib emulation ([`aqr_flate::Options::zlib`]).
     pub zlib: bool,
+    /// zlib's parameters that the DEFLATE bodies are taken to be made with, if any (hinted to
+    /// aqr-flate, [`aqr_flate::Hints::params`]: none searched for where they predict a body).
+    pub params: Option<aqr_flate::zlib::Params>,
     /// The most bytes of data that DEFLATE bodies may inflate to, all together; the bodies past
     /// it, those of the highest ratios first, are kept as they are.
     pub limit: u64,
@@ -67,6 +70,7 @@ impl Default for Options {
             threads: 1,
             profile: aqr_flate::PROFILE.get(),
             zlib: aqr_flate::ZLIB.get(),
+            params: None,
             limit: u64::MAX,
             kind: |_| Kind::Unknown,
             probe: None,
@@ -266,7 +270,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             |&j, _| {
                 let (p, fopt) = parsed[j].lock().unwrap().take()?;
                 let body = &locals[jobs[j].0].body;
-                match p.deconstruct_bytes(&fopt, &Hints::default()) {
+                match p.deconstruct_bytes(&fopt, &Hints { params: opt.params, ..Hints::default() }) {
                     // kept, the body would also take its CRC-32 and size
                     // (and tiny records are much alike, so that they compress well together)
                     Ok((data, record, _)) => (record.len() < body.len() + 16).then_some((data, record)),

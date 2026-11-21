@@ -344,7 +344,7 @@ fn turned_down() {
     assert!(r.is_err());
 }
 
-/// Options of level 8, where aqr-flate emulates zlib (`coding` of DEFLATE is from level 7 on).
+/// Options of level 8, where aqr-flate emulates zlib in every stream (and `redeflate` compares records).
 pub(super) fn high() -> Options {
     Options { level: aqr_archive::Level::HIGH, ..Options::default() }
 }

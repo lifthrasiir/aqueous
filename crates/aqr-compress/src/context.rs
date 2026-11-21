@@ -40,6 +40,9 @@ pub(crate) struct Cx {
     /// The DEFLATE streams of the files archived together, kept as they are, that files holding
     /// their data are made of ([`inflated`]), for an archive of several below level 4.
     pub(crate) bodies: Option<Arc<inflated::Bodies>>,
+    /// The files archived together that `--lossy` rewrote ([`crate::lossy::Rewritten`]), whose
+    /// DEFLATE streams are zlib's at level 6, coded so.
+    pub(crate) rewritten: Option<Arc<crate::lossy::Rewritten>>,
     /// The remaps of the ARM64 and x86 images of the Mach-O and ELF files archived together
     /// ([`exe::plan`]).
     pub(crate) remaps: Option<Arc<exe::Remaps>>,
@@ -218,6 +221,7 @@ impl Cx {
             later: Default::default(),
             held: None,
             bodies: None,
+            rewritten: None,
             remaps: None,
             words: Default::default(),
             coded_held: Default::default(),
@@ -231,6 +235,13 @@ impl Cx {
             kept_beside: Cell::new(0),
             defer_budget: (n as f64 * DEFER_BUDGET.get().max(0.0)) as usize,
         }
+    }
+
+    /// The aqr-flate profile and hints that a DEFLATE stream of `d` is deconstructed at where
+    /// it is in a file that `--lossy` rewrote, whose streams are zlib's
+    /// ([`crate::lossy::Rewritten::flate`]); None where it is as [`Options::flate_profile`] tells.
+    pub(crate) fn rewritten(&self, d: &[u8], opt: &Options) -> Option<(u16, aqr_flate::Hints)> {
+        self.rewritten.as_ref()?.flate(d, opt)
     }
 
     /// The most bytes of files of a set of the contents of a formula `depth` formats deep.

@@ -458,7 +458,7 @@ by default
 .Cm coding .
 .Cm coding
 makes the DEFLATE streams of ZIP and gzip files that zlib did not write again by zlib
-(from level 7 on, where that archives smaller);
+(from level 4 on; their records then cost a few bytes, but decoding is slower);
 .Cm slack
 zeroes the bytes of Minecraft region files that no chunk takes (deleted data is lost).
 Each file rewritten is checked to be read the same, else archived as it is and told so.

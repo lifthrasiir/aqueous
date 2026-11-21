@@ -8,16 +8,22 @@ use aqr_formula::Formula;
 use crate::{Cx, Options, kind_by_name};
 
 pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    let profile = opt.flate_profile();
+    // (an archive `--lossy` rewrote: its bodies zlib's, their records a few bytes, which pays)
+    let rewritten = cx.rewritten(d, opt);
+    let (profile, params) = match rewritten {
+        Some((profile, hints)) => (profile, hints.params),
+        None => (opt.flate_profile(), None),
+    };
     let zopt = aqr_zip::formula::Options {
         threads: opt.threads,
         profile,
+        params,
         zlib: aqr_flate::ZLIB.get(),
         // (below level 4, no DEFLATE body rebuilt: files holding their data are made of them,
         // [`crate::inflated`])
         limit: if crate::inflated::on(opt) { 0 } else { cx.inflate_left() },
         kind: kind_by_name,
-        probe: crate::probe(opt, depth),
+        probe: crate::probe(opt, depth).filter(|_| rewritten.is_none()),
         held: cx.held.clone().map(|h| {
             let except = h.owner(d);
             (h, except)

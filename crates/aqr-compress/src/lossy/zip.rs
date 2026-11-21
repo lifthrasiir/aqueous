@@ -22,7 +22,7 @@ const ENCRYPTED_BITS: u16 = 1 | 1 << 6 | 1 << 13;
 /// `d` with its deflated entries' streams made again, None where none is; why it is kept where it
 /// is not laid out plainly or is signed or encrypted.
 pub(super) fn coding(d: &[u8], opt: &Options) -> Result<Option<Vec<u8>>, String> {
-    super::unemulated(opt)?;
+    super::rebuilds(opt)?;
     let (base, _, recs) = zip::records(d);
     // (an APK's signing block is a gap before the central directory)
     if recs.iter().any(|r| matches!(r, Rec::Gap(g) if g.end >= 16 && d[g.end - 16..g.end] == APK_MAGIC[..])) {

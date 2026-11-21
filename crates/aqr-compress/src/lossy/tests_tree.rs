@@ -110,14 +110,20 @@ fn gzip_streams_of_others_made_again() {
     assert_eq!(r.len(), 16 + stream.len() + 8 + mb.len());
     let mut got = Vec::new();
     std::io::Read::read_to_end(&mut flate2::read::MultiGzDecoder::new(&r[..]), &mut got).unwrap();
-    assert_eq!(got, [a, b].concat());
+    assert_eq!(got, [&a[..], &b[..]].concat());
     // (zlib's alone: nothing to change)
     assert!(rewrite(&mb, &Lossy::parse("coding").unwrap(), &opt).is_none());
-    // (below level 7: kept as it is, told why)
-    assert!(matches!(
-        rewrite(&x, &Lossy::parse("coding").unwrap(), &Options::default()),
-        Some((Rewrite::Kept { .. }, None))
-    ));
+    // (below level 7, any stream but zlib's at level 6 made again: zlib's at 9 too)
+    let Some((Rewrite::Made { .. }, Some(r5))) = rewrite(&x, &Lossy::parse("coding").unwrap(), &Options::default())
+    else {
+        panic!("rewritten at the default level")
+    };
+    check::gzip(&x, &r5).unwrap();
+    let b6 = aqr_flate::zlib::compress(&b, PARAMS).unwrap();
+    assert_eq!(r5.len(), 2 * (16 + 8) + stream.len() + b6.len());
+    // (below level 4, where DEFLATE streams are kept as they are: kept, told why)
+    let low = Options { level: aqr_archive::Level::LOW, ..Options::default() };
+    assert!(matches!(rewrite(&x, &Lossy::parse("coding").unwrap(), &low), Some((Rewrite::Kept { .. }, None))));
     // (data after the members: kept as it is, told why)
     let tail = [x.clone(), vec![0; 16]].concat();
     assert!(matches!(rewrite(&tail, &Lossy::parse("coding").unwrap(), &opt), Some((Rewrite::Kept { .. }, None))));
@@ -223,4 +229,35 @@ fn tree_of_files_rewritten() {
     };
     assert!(got_tree.entries.iter().all(|e| e.extra.extensions.is_empty()));
     assert!(datas.iter().all(|x| got.iter().any(|g| g == x)));
+}
+
+/// At the default level, a file rewritten archives smaller than as it was (its bytes, not the
+/// modules'): its streams, zlib's
+/// at level 6, are coded at the adaptive profile with [`PARAMS`] hinted ([`Rewritten`]), their
+/// records a few bytes; those of libdeflate and of zlib at level 9 some 10% of them otherwise.
+#[test]
+fn default_level_pays() {
+    assert_eq!(PARAMS, aqr_flate::zlib::Params::default());
+    for encoder in ["libdeflate:level=9", "zlib:level=9"] {
+        let x = member(&text(300_000, 7), encoder);
+        let tree = aqr_archive::Tree {
+            entries: vec![aqr_archive::Entry {
+                parent: None,
+                name: b"a.txt.gz".to_vec(),
+                node: aqr_archive::EntryNode::File(0),
+                extra: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let inputs = [Input { name: b"a.txt.gz", data: &x }];
+        let size = |lossy: Option<&str>| {
+            let opt = Options { threads: 2, lossy: lossy.map(|l| Lossy::parse(l).unwrap()), ..Options::default() };
+            let a = compress_tree(&tree, &inputs, &opt);
+            assert!(a.report.unverified.is_empty());
+            // (the file's bytes: not the module blocks, which an archive of many has once)
+            a.report.files[0].archived
+        };
+        let (was, is) = (size(None), size(Some("coding")));
+        assert!(is < 0.95 * was, "{encoder}: {was} -> {is}");
+    }
 }

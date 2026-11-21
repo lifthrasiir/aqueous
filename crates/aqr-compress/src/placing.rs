@@ -60,6 +60,7 @@ pub(crate) struct Apart {
     pub(crate) pre: Option<Arc<verify::Prevalidator>>,
     pub(crate) held: Option<Arc<Held>>,
     pub(crate) bodies: Option<Arc<inflated::Bodies>>,
+    pub(crate) rewritten: Option<Arc<crate::lossy::Rewritten>>,
     pub(crate) remaps: Option<Arc<exe::Remaps>>,
     pub(crate) words: Option<Arc<aqr_wrt::formula::Shared>>,
     /// What was noted before it was made ([`Cx::coded_held`]), for each context made of it.
@@ -75,6 +76,7 @@ impl Cx {
             pre: self.pre.clone(),
             held: self.held.clone(),
             bodies: self.bodies.clone(),
+            rewritten: self.rewritten.clone(),
             remaps: self.remaps.clone(),
             words: self.words.borrow().clone(),
             coded_held: Arc::new(self.coded_held.borrow().clone()),
@@ -95,6 +97,7 @@ impl Apart {
         own.pre = self.pre.clone();
         own.held = self.held.clone();
         own.bodies = self.bodies.clone();
+        own.rewritten = self.rewritten.clone();
         own.remaps = self.remaps.clone();
         own.share_words(self.words.clone());
         own.coded_held = RefCell::new((*self.coded_held).clone());
