@@ -641,7 +641,7 @@ pub fn open(c: &[u8]) -> Decoded<Envelope<'_>> {
     }
     let h = header_len(mirrored);
     let Some(header) = c.get(..h) else { return invalid("truncated encrypted header") };
-    if mirrored && xxh64(&header[..h - 8], 0).to_le_bytes() != header[h - 8..] {
+    if mirrored && !crate::sum_holds(&xxh64(&header[..h - 8], 0).to_le_bytes()[..], &header[h - 8..]) {
         return invalid("bad encrypted header checksum");
     }
     let fields = Fields(header[8..8 + FIELDS].try_into().unwrap());

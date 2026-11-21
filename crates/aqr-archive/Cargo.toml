@@ -21,3 +21,7 @@ zstd = { workspace = true, features = ["zstdmt", "experimental", "zdict_builder"
 
 [dev-dependencies]
 aqr-testkit.workspace = true
+
+[lints.rust]
+# cargo-fuzz's builds (fuzz/), which skip the checksums
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

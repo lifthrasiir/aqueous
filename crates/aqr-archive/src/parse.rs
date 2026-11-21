@@ -379,7 +379,7 @@ pub(crate) fn decoded(d: &[u8], zstd: bool, checked: bool) -> Decoded<Vec<u8>> {
 /// [`decoded_with`] gives it, not copied.
 pub(crate) fn stored_checked(d: &[u8]) -> Decoded<&[u8]> {
     let end = d.len().checked_sub(8).ok_or_else(|| Failure::Invalid("truncated".into()))?;
-    if checksum(&d[..end]).to_le_bytes() != d[end..] {
+    if !sum_holds(&checksum(&d[..end]).to_le_bytes()[..], &d[end..]) {
         return invalid("checksum mismatch");
     }
     Ok(&d[..end])
@@ -416,7 +416,7 @@ pub(crate) fn decoded_upto(
         let n = end.min(usize::try_from(want).unwrap_or(usize::MAX));
         (d[..n].to_vec(), n == end)
     };
-    if whole && checked && checksum(&out).to_le_bytes() != d[end..] {
+    if whole && checked && !sum_holds(&checksum(&out).to_le_bytes()[..], &d[end..]) {
         return invalid("checksum mismatch");
     }
     Ok(out)

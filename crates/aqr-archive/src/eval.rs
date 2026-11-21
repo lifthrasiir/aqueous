@@ -693,7 +693,7 @@ impl<'a> Source<'a> for Summed<'a> {
             None => {
                 self.done = true;
                 let sum = self.hash.digest();
-                match at.ev.g.sums[&self.v].iter().all(|&s| s == sum) {
+                match at.ev.g.sums[&self.v].iter().all(|&s| sum_holds(sum, s)) {
                     true => Ok(None),
                     false => invalid("output checksum mismatch"),
                 }
@@ -878,7 +878,7 @@ fn write(
         }
     }
     match hash {
-        Some(h) if at.ev.g.sums[&r].iter().any(|&s| s != h.digest()) => invalid("output checksum mismatch"),
+        Some(h) if at.ev.g.sums[&r].iter().any(|&s| !sum_holds(h.digest(), s)) => invalid("output checksum mismatch"),
         _ => Ok(()),
     }
 }

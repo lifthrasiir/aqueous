@@ -170,6 +170,13 @@ pub fn checksum(d: &[u8]) -> u64 {
     xxh64(d, 0)
 }
 
+/// Whether a checksum computed, `got`, is the one stored, `want`: always so under `cfg(fuzzing)`
+/// (cargo-fuzz's builds, `fuzz/`), so that mutated inputs get past the checks to what follows.
+#[inline]
+pub(crate) fn sum_holds<T: PartialEq>(got: T, want: T) -> bool {
+    cfg!(fuzzing) || got == want
+}
+
 /// `f` as an archive, its blocks compressed at `level` ([`Encoder`]), with `checksum` of the
 /// output ([`checksum`]) if given. A leaf block checksums itself, which is the output: a
 /// `checksum` given must be its own. Fails on slices out of their stream, and on such a

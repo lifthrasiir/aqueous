@@ -1,0 +1,44 @@
+# Tokens of Aqueous archives (crates/aqr-archive/src/lib.rs, mirror.rs, envelope.rs, tree.rs):
+# the multi-byte ones that mutations hardly make. Single bytes (block types, opcodes) are left
+# to libFuzzer's comparisons (-use_value_profile=1).
+
+# magics
+header="\xf8\x04\x03\x6a\xd6\xbe"
+footer="\xfd\xaa\xae\xde\x85\x12"
+overlay_header="\x69\x0d\x15\xaf\xf6\xb2"
+overlay_footer="\xfc\x0f\x6e\x7b\x4b\xac"
+mirror="\x02\xaa\xf5\xfe\xba\x2b\xae\x23"
+overlay_mirror="\x01\x05\x34\xfa\xbd\x11\xaf\x53"
+encrypted_mirror="\x78\xd7\x3f\x69\x0a\xff\x44\x83"
+zstd="\x28\xb5\x2f\xfd"
+wasm="\x00asm\x01\x00\x00\x00"
+stand_in="aqueous-stand-in"
+task_slots="aqr_task_slots"
+
+# the size hint placeholder (a padded LEB128)
+size_hint="\x04\x0a\x80\x80\x80\x80\x80\x80\x80\x80\x80\x00"
+
+# block types of wider size fields (`+ 0..=3`)
+leaf_raw_16="\x25"
+leaf_raw_32="\x26"
+leaf_zstd_16="\x2d"
+non_leaf_zstd_16="\x45"
+formula_16="\x71"
+module_16="\x61"
+metadata_zstd_16="\x15"
+
+# LEB128s: large, and over u64
+leb_max="\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01"
+leb_over="\xff\xff\xff\xff\xff\xff\xff\xff\xff\x7f"
+leb_2="\x80\x01"
+leb_padded="\x80\x80\x00"
+
+# CBOR of the metadata: keys of two bytes, and lengths
+cbor_forks="\x38\x31"
+cbor_unix_mode="\x38\x45"
+cbor_map_long="\xb9\xff\xff"
+cbor_bytes_long="\x5a\xff\xff\xff\xff"
+cbor_text_long="\x7a\xff\xff\xff\xff"
+cbor_array_long="\x9b\xff\xff\xff\xff\xff\xff\xff\xff"
+cbor_indefinite="\x9f"
+cbor_tag="\xc1"

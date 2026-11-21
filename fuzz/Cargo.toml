@@ -1,0 +1,42 @@
+[package]
+name = "aqr-fuzz"
+version = "0.0.0"
+edition = "2024"
+description = "Fuzz targets of the archive decoder (cargo fuzz, nightly): its checksums skipped by cfg(fuzzing)"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: libFuzzer's binaries stay out of the main one's builds and tests.
+[workspace]
+
+[dependencies]
+aqr-archive = { path = "../crates/aqr-archive" }
+aqr-formula = { path = "../crates/aqr-formula" }
+aqr-testkit = { path = "../crates/aqr-testkit" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "salvage"
+path = "fuzz_targets/salvage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seeds"
+path = "src/bin/seeds.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

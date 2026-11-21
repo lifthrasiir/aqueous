@@ -500,7 +500,7 @@ fn mirror_at(a: &[u8], at: usize, ty: u64, data: Range<usize>, start: Option<usi
         return None;
     }
     let sum = u64::from_le_bytes(d[d.len() - 8..].try_into().unwrap());
-    if xxh64(&a[at..data.end - 8], 0) != sum {
+    if !crate::sum_holds(xxh64(&a[at..data.end - 8], 0), sum) {
         return None;
     }
     let mut p = 8;
