@@ -2231,3 +2231,32 @@ fn recompressed_larger_kept() {
     let Value::Tree(_, got) = decompress_value(&a.archive, 2).unwrap() else { panic!("a tree") };
     assert_eq!(got[0], x);
 }
+
+/// An archive of one file, a tree of it, is sized as the archive of the file alone is: its
+/// module blocks counted (none shares them), a formula losing only by them kept as its data (a
+/// small FLAC file in a tar, whose module's block is more than it gains). As a tree it took the
+/// formula as free, and archived larger than alone.
+#[test]
+fn tree_of_one_as_alone() {
+    let flac =
+        std::fs::read(format!("{}/../../codecs/aqr-flac/tests/data/u8_mono.flac", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let t = text(200_000, 3);
+    let x = tar(&[("a.flac", &flac), ("b.txt", &t)]);
+    let alone = aqr_compress::compress(&x, &Options { threads: 2, ..Options::default() });
+    let tree = Tree {
+        entries: vec![Entry {
+            parent: None,
+            name: b"x.tar".to_vec(),
+            node: EntryNode::File(0),
+            extra: Extra::default(),
+        }],
+        ..Tree::default()
+    };
+    let a = compress_tree(&tree, &[Input { name: b"x.tar", data: &x }], &Options { threads: 2, ..Options::default() });
+    assert!(
+        a.archive.len() * 100 <= alone.len() * 101,
+        "a tree of it {} against {} alone",
+        a.archive.len(),
+        alone.len()
+    );
+}

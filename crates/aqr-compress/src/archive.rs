@@ -791,7 +791,8 @@ impl Pipe {
             taken.map(|(files, data)| {
                 // (what is cut out of the files mapped shared, not copied: an image's files, say)
                 let _known: Vec<_> = data.iter().map(aqr_formula::store::known).collect();
-                let a = analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes, cx.siblings.clone());
+                let a =
+                    analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes, cx.siblings.clone(), cx.src.len() == 1);
                 (files, a)
             })
         }));
@@ -1110,8 +1111,9 @@ impl Writer {
                     f
                 })
                 .collect();
-            let part = self
-                .watched(cx, out, || analyze(i, &files, data, &HashSet::new(), cx.opt, notes, cx.siblings.clone()))?;
+            let part = self.watched(cx, out, || {
+                analyze(i, &files, data, &HashSet::new(), cx.opt, notes, cx.siblings.clone(), cx.src.len() == 1)
+            })?;
             self.put(i, &files, part, cx, out)?;
         }
         batch.iter().try_for_each(|&c| src.intact(c))?;
@@ -1203,7 +1205,9 @@ impl Writer {
             let data = reread(src, &files, opt.threads)?;
             let fs = &files[..];
             let as_they_are: HashSet<usize> = raw.union(&kept).copied().collect();
-            part = self.watched(cx, out, || analyze(i, fs, data, &as_they_are, opt, notes, cx.siblings.clone()))?;
+            part = self.watched(cx, out, || {
+                analyze(i, fs, data, &as_they_are, opt, notes, cx.siblings.clone(), cx.src.len() == 1)
+            })?;
         };
         files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);
@@ -1996,6 +2000,7 @@ struct Analyzed {
 /// The formula of batch `i` of `files` (by index, the data of each in `data`), recompressed but
 /// those (by index) in `raw`. The data is the formula's: where it is needed again, to verify
 /// the batch, it is read from the source ([`finish`]). Below level 2, [`analyze_plain`].
+#[allow(clippy::too_many_arguments)]
 fn analyze(
     i: usize,
     files: &[File],
@@ -2004,6 +2009,7 @@ fn analyze(
     opt: &Options,
     notes: &Notes,
     siblings: Option<std::sync::Arc<crate::siblings::Plan>>,
+    alone: bool,
 ) -> Analyzed {
     if !opt.recompresses() {
         return analyze_plain(i, files, data, opt, notes);
@@ -2029,8 +2035,14 @@ fn analyze(
     let nopt = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
     let total = files.iter().map(|f| f.len).sum();
     let mut cx = Cx::of_len(total, &nopt);
-    // (the archive has a module block of each module once)
-    cx.enc.share_modules();
+    // (the archive has a module block of each module once: the files of a batch share them; of an
+    // archive of one file, the batch is the file alone, sized as an archive of it is, its module
+    // blocks counted, the formulas losing only by them chosen together, `choose::by_blocks`: as a
+    // tree of one file, Info-ZIP's -9 of this repository's crates/ at -8 archived in 4,899,406
+    // bytes, against 4,742,609 alone, the formulas of its small members taken for free)
+    if !alone {
+        cx.enc.share_modules();
+    }
     cx.top_sets = Some(opt.set_bytes);
     // (the files known by where their copies are, and taken from the input; and what they
     // hold, a content told by where it is)
@@ -2094,7 +2106,9 @@ fn analyze(
     crate::memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     crate::memory::note_kept(&f, opt.application_bound, u64::MAX);
     notes.send(Note::Analyzed(i));
-    let Cx { enc, .. } = cx;
+    let Cx { mut enc, .. } = cx;
+    // (the batch's modules written once whatever: shared from now on)
+    enc.share_modules();
     let mut a = laid(f.into_inner(), files, enc, memo, opt);
     a.alternatives = alternatives;
     // (its streams compressed now, on the workers free, rather than by the writer as it comes

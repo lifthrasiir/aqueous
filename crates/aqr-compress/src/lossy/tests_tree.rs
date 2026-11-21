@@ -246,14 +246,15 @@ fn tree_of_files_rewritten() {
 }
 
 /// At the default level, a file rewritten archives smaller than as it was (its bytes, not the
-/// modules'): its streams, zlib's
+/// modules', of text enough for the module blocks to be paid for: an archive of a file alone
+/// counts them): its streams, zlib's
 /// at level 6, are coded at the adaptive profile with [`PARAMS`] hinted ([`Rewritten`]), their
 /// records a few bytes; those of libdeflate and of zlib at level 9 some 10% of them otherwise.
 #[test]
 fn default_level_pays() {
     assert_eq!(PARAMS, aqr_flate::zlib::Params::default());
     for encoder in ["libdeflate:level=9", "zlib:level=9"] {
-        let x = member(&text(300_000, 7), encoder);
+        let x = member(&text(3_000_000, 7), encoder);
         let tree = aqr_archive::Tree {
             entries: vec![aqr_archive::Entry {
                 parent: None,
