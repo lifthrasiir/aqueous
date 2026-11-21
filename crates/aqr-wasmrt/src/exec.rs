@@ -116,6 +116,9 @@ impl Exec {
                 }
             }
         }
+        // (let go of unlocked: where the future kept no waker of itself, this drops it, and
+        // dropping a future may wake others)
+        drop(job);
         let mut inner = self.inner.lock().unwrap();
         inner.polling -= 1;
         self.changed.notify_all();
@@ -183,13 +186,14 @@ impl Exec {
     fn end(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.over = true;
-        inner.queue.clear();
+        let queued = std::mem::take(&mut inner.queue);
         while inner.polling > 0 {
             inner = self.changed.wait(inner).unwrap();
         }
         let all = std::mem::take(&mut inner.all);
         drop(inner);
-        // (unlocked: dropping a future may wake others)
+        // (unlocked: dropping a future may wake others, those queued held by the queue alone too)
+        drop(queued);
         for job in all.iter().filter_map(std::sync::Weak::upgrade) {
             let fut = job.fut.lock().unwrap().take();
             drop(fut);
@@ -255,6 +259,98 @@ mod tests {
         drop(b);
         assert!(exec.block_on(async move { a.get().await }).is_err());
         assert!(dropped.load(Ordering::Relaxed));
+    }
+
+    /// A future dropped as the application ends, or as it is let go of once polled (no waker
+    /// of it kept), that wakes another future as it is dropped: the executor not locked then
+    /// (the decoder hung so on a FLAC archive, a task's state waking the tasks of its gang).
+    #[test]
+    fn dropping_wakes() {
+        /// Wakes the waker it holds as it is dropped.
+        struct WakeOnDrop(Arc<Mutex<Option<Waker>>>);
+        impl Drop for WakeOnDrop {
+            fn drop(&mut self) {
+                if let Some(w) = self.0.lock().unwrap().take() {
+                    w.wake();
+                }
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..100 {
+                let exec = Exec::new();
+                let (first, other) = (Arc::new(Mutex::new(None::<Waker>)), Arc::new(Mutex::new(None::<Waker>)));
+                let mut spawned = 0;
+                let r = exec.block_on(poll_fn(|cx| {
+                    spawned += 1;
+                    match spawned {
+                        // a future waiting forever, its waker kept, waking the first once polled
+                        1 => {
+                            *first.lock().unwrap() = Some(cx.waker().clone());
+                            let (first, other) = (first.clone(), other.clone());
+                            exec.spawn(poll_fn(move |cx| {
+                                *other.lock().unwrap() = Some(cx.waker().clone());
+                                if let Some(w) = first.lock().unwrap().take() {
+                                    w.wake();
+                                }
+                                Poll::<()>::Pending
+                            }));
+                            Poll::Pending
+                        }
+                        // a future that keeps no waker of itself, waking the other as it is dropped
+                        _ => {
+                            let w = WakeOnDrop(other.clone());
+                            exec.spawn(poll_fn(move |_| {
+                                let _ = &w;
+                                Poll::<()>::Pending
+                            }));
+                            Poll::Ready(())
+                        }
+                    }
+                }));
+                assert_eq!(r, Ok(()));
+
+                // (the future keeping no waker polled, and let go of, while the first waits)
+                let exec = Exec::new();
+                let (first, other) = (Arc::new(Mutex::new(None::<Waker>)), Arc::new(Mutex::new(None::<Waker>)));
+                let mut polled = 0;
+                let r = exec.block_on(poll_fn(|cx| {
+                    polled += 1;
+                    if polled > 1 {
+                        return Poll::Ready(());
+                    }
+                    *first.lock().unwrap() = Some(cx.waker().clone());
+                    // waiting, its waker kept, waking the other once polled; woken again (by the
+                    // other dropped), waking the first
+                    let later = Arc::new(Mutex::new(None::<Waker>));
+                    let (f, o, l) = (first.clone(), other.clone(), later.clone());
+                    let mut times = 0;
+                    exec.spawn(poll_fn(move |cx| {
+                        times += 1;
+                        *o.lock().unwrap() = Some(cx.waker().clone());
+                        let w = match times {
+                            1 => l.lock().unwrap().take(),
+                            _ => f.lock().unwrap().take(),
+                        };
+                        w.map(Waker::wake);
+                        Poll::<()>::Pending
+                    }));
+                    // waiting for the other to be polled (its waker kept), then keeping none
+                    let (w, o) = (WakeOnDrop(other.clone()), other.clone());
+                    exec.spawn(poll_fn(move |cx| {
+                        let _ = &w;
+                        if o.lock().unwrap().is_none() {
+                            *later.lock().unwrap() = Some(cx.waker().clone());
+                        }
+                        Poll::<()>::Pending
+                    }));
+                    Poll::Pending
+                }));
+                assert_eq!(r, Ok(()));
+            }
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the executor deadlocked");
     }
 
     /// A chain of futures each waiting for the one before, the first waiting for the last: done;
