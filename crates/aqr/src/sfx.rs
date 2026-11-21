@@ -118,7 +118,7 @@ fn unpack() -> Result<Pack, String> {
     let (stub, list) = (file("aqr-sfx-shim.exe")?, file("modules.txt")?);
     // (a signature of the stub would be broken by what is appended: the program made is signed
     // as a whole, by whoever makes it)
-    if aqr_sfx::pe::signature(&stub).is_some() {
+    if aqr_archive::pe_certificate_table(&stub).is_some() {
         return Err("the self-extracting pack's stub is signed (pack it unsigned: crates/aqr-sfx/pack.py)".into());
     }
     let mut libs = HashMap::new();

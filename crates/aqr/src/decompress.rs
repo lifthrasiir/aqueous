@@ -149,16 +149,14 @@ pub(crate) fn map_archive(input: &Path, shown: &dyn std::fmt::Display) -> Result
 /// The archive in file `c` (`input`) as it is located (spec, "Locating an archive": an archive
 /// of a file appended to and not committed, one after other bytes, as a self-extracting
 /// executable has it), the bytes before or after it told where not `quiet`; all of `c` where
-/// none is found (to be repaired), or where it is encrypted. A self-extracting program signed has
-/// bytes both before and after its archive, which locating does not take: where a file is not
-/// located, and is a PE image whose signature ends it, the archive is located before the
-/// signature.
+/// none is found (to be repaired), or where it is encrypted. Of a self-extracting program signed,
+/// the archive is located before its signature (the PE certificate table ending it).
 pub(crate) fn located<'c>(c: &'c [u8], input: &Path, quiet: bool) -> &'c [u8] {
-    let Some((r, signature)) = locate_in(c) else { return c };
+    let Some(r) = aqr_archive::locate(c) else { return c };
     if !quiet && r.start > 0 {
         eprintln!("{}: {} before the archive left out", input.display(), bytes_of(r.start as u64));
     }
-    if let Some(s) = signature {
+    if let Some(s) = aqr_archive::pe_certificate_table(c).filter(|s| s.start >= r.end) {
         if !quiet {
             let after = s.start - r.end;
             let gap = if after > 0 { format!(" and {}", bytes_of(after as u64)) } else { String::new() };
@@ -176,20 +174,6 @@ pub(crate) fn located<'c>(c: &'c [u8], input: &Path, quiet: bool) -> &'c [u8] {
         );
     }
     &c[r]
-}
-
-/// Where the archive in file `c` is ([`located`]), and the signature after it where it was located
-/// before one.
-pub(crate) fn locate_in(c: &[u8]) -> Option<(std::ops::Range<usize>, Option<std::ops::Range<usize>>)> {
-    if let Some(r) = aqr_archive::locate(c) {
-        return Some((r, None));
-    }
-    let s = aqr_sfx::pe::signature(c).filter(|s| s.end == c.len())?;
-    // (the signature at 8 bytes: up to 7 zeros before it, which `signtool` adds, the footer's last
-    // bytes maybe zeros too)
-    let before = &c[..s.start];
-    let zeros = before.iter().rev().take(7).take_while(|&&b| b == 0).count();
-    (0..=zeros).find_map(|pad| aqr_archive::locate(&before[..before.len() - pad])).map(|r| (r, Some(s)))
 }
 
 /// `n` bytes, told.

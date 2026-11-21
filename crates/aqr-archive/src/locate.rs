@@ -1,7 +1,8 @@
 //! Locating an archive in a file (spec, "Locating an archive"): the archive at the end of the
-//! file found from its footer, or the first one in the file found by reading its blocks, and
-//! either trimmed where a footer follows one of its metadata blocks (what appending to
-//! the archive leaves until it commits, spec, "Appending to an archive").
+//! file found from its footer, or the first one in the file found by reading its blocks, or the
+//! one at the end of a PE image before its certificate table (a self-extracting executable signed
+//! after it was made), and each trimmed where a footer follows one of its metadata blocks (what
+//! appending to the archive leaves until it commits, spec, "Appending to an archive").
 
 use std::ops::Range;
 
@@ -21,8 +22,39 @@ pub fn locate(file: &[u8]) -> Option<Range<usize>> {
         let e = forward(file, footer)?;
         return Some(0..footer_end(file, e)?);
     }
-    let h = back?;
-    Some(h..h + trim(&file[h..]))
+    if let Some(h) = back {
+        return Some(h..h + trim(&file[h..]));
+    }
+    // (the step 5: before the certificate table that ends a PE image, past the zeros, up to 7,
+    // that pad it to 8 bytes; the footer's own last bytes may be zeros too)
+    let c = pe_certificate_table(file)?.start;
+    let zeros = file[..c].iter().rev().take(7).take_while(|&&b| b == 0).count();
+    (0..=zeros).find_map(|k| {
+        let f = &file[..c - k];
+        let h = from_end(f)?;
+        Some(h..h + trim(&f[h..]))
+    })
+}
+
+/// The certificate table of PE image `file` (spec, "PE certificate table": Authenticode's
+/// signatures, the data directory 4, of a file offset), where it ends the file.
+pub fn pe_certificate_table(file: &[u8]) -> Option<Range<usize>> {
+    let u32_at = |o: usize| file.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    if !file.starts_with(b"MZ") {
+        return None;
+    }
+    let p = u32_at(60)?;
+    if file.get(p..p + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let o = p + 24;
+    let (dirs, count) = match u16_at(file, o)? {
+        0x10b => (o + 96, u32_at(o + 92)?),
+        0x20b => (o + 112, u32_at(o + 108)?),
+        _ => return None,
+    };
+    let (c, s) = (u32_at(dirs + 32)?, u32_at(dirs + 36)?);
+    (count >= 5 && s > 0 && c.checked_add(s)? == file.len()).then_some(c..file.len())
 }
 
 /// The footer magic matching the header magic at `at` of `d`, where there is one there.
@@ -221,5 +253,57 @@ mod tests {
         let (f, m) = footer_of(&a).unwrap();
         assert!(f.end == a.len() && f.len() < 30 && m.is_some_and(|m| m < f.start));
         assert_eq!(footer_of(&lead), None);
+    }
+
+    /// A PE image of PE32 or PE32+ with `body` after its headers and a certificate table of `n`
+    /// bytes at `body`'s end padded to 8 bytes by zeros (as `signtool` signs it).
+    fn signed(plus: bool, body: &[u8], n: usize) -> Vec<u8> {
+        let mut f = vec![0u8; 0x200];
+        f[..2].copy_from_slice(b"MZ");
+        f[60..64].copy_from_slice(&0x80u32.to_le_bytes());
+        f[0x80..0x84].copy_from_slice(b"PE\0\0");
+        let o = 0x80 + 24;
+        let (dirs, count) = if plus { (o + 112, o + 108) } else { (o + 96, o + 92) };
+        f[o..o + 2].copy_from_slice(&(if plus { 0x20bu16 } else { 0x10b }).to_le_bytes());
+        f[count..count + 4].copy_from_slice(&16u32.to_le_bytes());
+        f.extend_from_slice(body);
+        f.resize(f.len().next_multiple_of(8), 0);
+        let c = f.len();
+        f[dirs + 32..dirs + 36].copy_from_slice(&(c as u32).to_le_bytes());
+        f[dirs + 36..dirs + 40].copy_from_slice(&(n as u32).to_le_bytes());
+        f.extend(std::iter::repeat_n(0xa5, n));
+        f
+    }
+
+    #[test]
+    fn located_before_a_signature() {
+        let a = one(b"hello, signed");
+        for plus in [false, true] {
+            // (each length of the padding before the table)
+            for stub in 0..8 {
+                let body = [&vec![1u8; stub][..], &a].concat();
+                let f = signed(plus, &body, 24);
+                let at = 0x200 + stub;
+                assert_eq!(locate(&f), Some(at..at + a.len()), "{plus} {stub}");
+                assert_eq!(pe_certificate_table(&f), Some(f.len() - 24..f.len()));
+            }
+        }
+        // a footer ending in zeros (its padding's own): found by fewer zeros taken off
+        let mut z = a.clone();
+        let tail = z.len() - 1;
+        if z[tail] == 0 {
+            let f = signed(true, &z, 16);
+            assert!(locate(&f).is_some());
+        }
+        z.extend_from_slice(&[1, 2, 3]);
+        let f = signed(true, &z, 16);
+        assert_eq!(locate(&f), None, "(bytes not of the padding after the archive)");
+        // a table not ending the file, or of a directory not there: none
+        let mut f = signed(true, &a, 16);
+        f.push(0);
+        assert_eq!(locate(&f), None);
+        let mut f = signed(false, &a, 16);
+        f[0x80 + 24 + 92..0x80 + 24 + 96].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!((locate(&f), pe_certificate_table(&f)), (None, None));
     }
 }

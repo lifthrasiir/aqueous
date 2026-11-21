@@ -74,7 +74,7 @@ pub use encoder::*;
 pub use evaluate::{Evaluate, Limit, Modules};
 pub use level::*;
 pub use listing::{Applied, Listed};
-pub use locate::{block_at, footer_of, locate, trim};
+pub use locate::{block_at, footer_of, locate, pe_certificate_table, trim};
 pub use mirror::Mirroring;
 pub use open::*;
 use parse::*;

@@ -1082,6 +1082,20 @@ A file may contain an archive with leading bytes, e.g. a self-extracting executa
 or with trailing bytes, e.g. appended by a transfer.
 Since [=interpret an archive|interpreting an archive=] takes the archive alone,
 a decompressor accepting such a file has to locate the archive first.
+Both at once are located for one case alone:
+a self-extracting executable signed after it was made,
+whose signature follows the archive in the PE image's certificate table [[PE-FORMAT]].
+
+A [=byte sequence=] |file| <dfn>has a PE certificate table</dfn> at the offset |c| when
+all of the following hold, every offset read being within |file|:
+
+* |file| starts with the bytes `4D 5A` ("MZ").
+* Let |p| be the [=u32le=] at the offset 60. The bytes from |p| are `50 45 00 00` ("PE\0\0").
+* Let |o| be |p| + 24. The [=u16le=] at |o| is `0x10B`, and let |d| be |o| + 96 and |n| the [=u32le=] at |o| + 92;
+    or it is `0x20B`, and let |d| be |o| + 112 and |n| the [=u32le=] at |o| + 108.
+* |n| ≥ 5.
+* |c| is the [=u32le=] at |d| + 32 and |s| the [=u32le=] at |d| + 36 (the data directory of the certificate table,
+    whose address is a file offset), |s| > 0, and |c| + |s| is the length of |file|.
 
 A header magic and a footer magic <dfn>match</dfn> when they are
 [=const/HEADER_MAGIC=] and [=const/FOOTER_MAGIC=], or [=const/OVERLAY_HEADER_MAGIC=] and [=const/OVERLAY_FOOTER_MAGIC=].
@@ -1105,8 +1119,19 @@ To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
             If |file| is shorter than |e| + |m| + 10 bytes, return failure.
             Otherwise, return the first |e| + |m| + 10 bytes of |file|.
     4. If |back| is not null, return the result of [=trim a located archive|trimming=] the bytes of |file| from |back|.
-    5. Return failure.
+    5. If |file| [=has a PE certificate table=] at an offset |c|:
+        let |z| be the number of bytes of 0 that the first |c| bytes of |file| end with, but at most 7.
+        For each |k| from 0 to |z|, in order,
+        if the steps 2 and 4 applied to the first |c| − |k| bytes of |file| (as |file|) return an archive, return it.
+    6. Return failure.
 </ol>
+
+<div class=note>
+The certificate table starts at a multiple of 8 bytes, the bytes before it padded with zeros,
+which the step 5 skips; as the archive's footer may end with zeros of its own, each count of them is tried.
+The signature covers the archive, so a self-extracting executable is signed once it is whole,
+and appending to it ([[#appending]]) would break the signature.
+</div>
 
 To <dfn>trim a located archive</dfn> |a|, a [=byte sequence=] starting with a header magic and ending with a footer whose magic [=match|matches=] it:
 
@@ -7129,6 +7154,11 @@ or discarded as only meaningful to the ZIP container.
     "title": "Info-ZIP Extra Field Descriptions (proginfo/extrafld.txt in UnZip 6.0)",
     "publisher": "Info-ZIP",
     "href": "https://infozip.sourceforge.net/"
+  },
+  "PE-FORMAT": {
+    "title": "PE Format",
+    "publisher": "Microsoft",
+    "href": "https://learn.microsoft.com/en-us/windows/win32/debug/pe-format"
   },
   "RFC2119": {
     "title": "Key words for use in RFCs to Indicate Requirement Levels",

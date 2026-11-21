@@ -69,7 +69,7 @@ pub(crate) fn still_there(a: &crate::Args, out: &Path) -> Result<(), String> {
         return Ok(());
     }
     let c = std::fs::read(out).map_err(|e| format!("{} after --run-after: {e}", out.display()))?;
-    match crate::decompress::locate_in(&c) {
+    match aqr_archive::locate(&c) {
         Some(_) => Ok(()),
         None => Err(format!("{}: no archive found in it after --run-after (the command changed it so)", out.display())),
     }

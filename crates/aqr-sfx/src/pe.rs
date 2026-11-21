@@ -249,19 +249,6 @@ fn directory(im: &Image, i: usize) -> usize {
     im.optional + if im.plus { 112 } else { 96 } + 8 * i
 }
 
-/// Where the signature of PE image `exe` is in its file: its certificate table (Authenticode's,
-/// the data directory 4, of a file offset rather than an RVA), where it has one; `None` of an
-/// image unsigned, or of a file not a PE image. A signature ends the file as `signtool` writes
-/// it, after what was appended to the image (a self-extracting program's archive, which it
-/// covers).
-pub fn signature(exe: &[u8]) -> Option<std::ops::Range<usize>> {
-    let im = image(exe).ok()?;
-    let d = directory(&im, 4);
-    let at = u32::from_le_bytes(exe.get(d..d + 4)?.try_into().ok()?) as usize;
-    let len = u32::from_le_bytes(exe.get(d + 4..d + 8)?.try_into().ok()?) as usize;
-    (len > 0 && at.checked_add(len)? <= exe.len()).then_some(at..at + len)
-}
-
 /// Sets the subsystem of `exe`: of windows (2) where `gui`, else of the console (3).
 pub fn set_subsystem(exe: &mut [u8], gui: bool) -> Result<(), String> {
     let im = image(exe)?;

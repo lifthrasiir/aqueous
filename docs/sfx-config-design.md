@@ -229,10 +229,9 @@ SFX가 같이 걸린다.
 - `VERSIONINFO`와 서명이 평판에 크게 영향을 주므로, 문서에 서명 순서(SFX를 다 만든 뒤)를 적는다.
 - 서명(2026-11-21): Authenticode 서명은 파일 끝에 인증서 표를 더하고, 그 해시는 덧붙인 번들, 설정,
   아카이브까지 덮는다. stub은 자기 이미지 뒤에서 아카이브를 찾으므로(뒤에 다른 바이트가 와도 된다)
-  서명한 SFX도 그대로 돈다. 그러나 스펙의 "Locating an archive"는 앞뒤에 모두 다른 바이트가 있는 파일을
-  받지 않으므로, aqr은 찾지 못한 파일이 PE이고 그 서명이 파일 끝을 차지하면 서명 앞(signtool이 넣는
-  0 패딩은 건너뛴다)에서 다시 찾는다 (`crates/aqr/src/decompress.rs`의 `located`). 스펙에 같은 단계를
-  넣을지는 따로 정한다. 덧붙이면 깨지므로 서명된 stub은 받지 않는다 (pack.py, aqr의 팩 읽기).
+  서명한 SFX도 그대로 돈다. 앞뒤에 모두 다른 바이트가 있는 파일은 스펙의 "Locating an archive"가
+  이 경우 하나만 받는다: PE의 인증서 표가 파일 끝을 차지하면 그 앞(0 패딩은 건너뛴다)에서 찾는다
+  (5단계, "has a PE certificate table"; `aqr_archive::locate`). 덧붙이면 깨지므로 서명된 stub은 받지 않는다 (pack.py, aqr의 팩 읽기).
   `crates/aqr/tests/sfx.rs`의 `signed_afterwards`가 OpenSSL로 만든 인증서와 `signtool`로 서명하고
   돌려 본다 (둘 중 하나가 없으면 건너뛴다).
   서명은 `aqr -c --format sfx --run-after "signtool sign ... \"%AQR_OUTPUT%\""`처럼 hook으로 이어 붙일 수 있다

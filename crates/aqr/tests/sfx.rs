@@ -161,8 +161,7 @@ mod packed {
         let o = aqr_in(&d, &["-c", "-q", "--format", "sfx", "-o", "in.exe", "--run-after", &sign, "in"]);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let signed = fs::read(d.join("in.exe")).unwrap();
-        let s = aqr_sfx::pe::signature(&signed).expect("a signature");
-        assert_eq!(s.end, signed.len());
+        assert!(aqr_archive::pe_certificate_table(&signed).is_some(), "a signature");
         // the system's check of it: its hash holds (its root is not trusted)
         let ps = format!("(Get-AuthenticodeSignature -LiteralPath '{}').Status", d.join("in.exe").display());
         let status = Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output().unwrap();
