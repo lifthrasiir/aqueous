@@ -89,7 +89,7 @@ aqr-wasmrt = { workspace = true, features = ["wasmtime"] }
 
 [dev-dependencies]
 # (the tests run modules by Wasmtime, linked)
-aqr-wasmrt = { workspace = true, features = ["wasmtime", "sandbox"] }
+aqr-wasmrt = { workspace = true, features = ["wasmtime", "sandbox", "probe"] }
 aqr-7z.workspace = true
 aqr-alz.workspace = true
 aqr-egg.workspace = true

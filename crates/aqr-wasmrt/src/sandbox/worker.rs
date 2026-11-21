@@ -136,6 +136,7 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
                     }
                 }
             }
+            #[cfg(feature = "probe")]
             PROBE => {
                 let path = String::from_utf8_lossy(&get_bytes(r, u64::MAX)?).into_owned();
                 let port = get_u64(r)? as u16;
@@ -161,6 +162,7 @@ enum Inputs {
 /// What a module escaping the engine would try, each `"<what>: ok"` or the error (or panic,
 /// as Windows sockets are not started locked down): reading the file `path`, writing next to
 /// it, running it and connecting to `port` of the loopback.
+#[cfg(feature = "probe")]
 fn probe(path: &str, port: u16) -> Vec<String> {
     let said =
         |what: &str, f: &dyn Fn() -> io::Result<()>| match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {

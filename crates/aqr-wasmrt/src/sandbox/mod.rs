@@ -156,6 +156,7 @@ impl Sandbox {
 
     /// What a worker found it could do, for the tests: [`worker::probe`] of `path` and `port`.
     #[doc(hidden)]
+    #[cfg(feature = "probe")]
     pub fn probe(&self, path: &str, port: u16) -> aqr_archive::Decoded<Vec<String>> {
         self.with_worker(|w| {
             put_u8(&mut w.to, PROBE)?;

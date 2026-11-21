@@ -12,6 +12,9 @@ default = ["wasm", "sandbox", "wasmtime"]
 wasm = ["dep:wasmparser", "dep:windows-sys", "dep:aqr-blob"]
 # ... or so in worker processes locked down by the system (`sandbox`).
 sandbox = ["wasm"]
+# The workers answer a probe of what they can do, for the tests (`Sandbox::probe`): left out of
+# the programs, as connecting brings in Windows sockets (ws2_32) for that alone.
+probe = ["sandbox"]
 # Wasmtime linked (needed but on Windows x86-64: a crate enables it there).
 wasmtime = ["wasm", "dep:wasmtime"]
 

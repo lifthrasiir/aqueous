@@ -20,6 +20,8 @@ pub const READY: &[u8; 8] = b"AQRSBX\x01\x01";
 /// The requests.
 pub const LOAD: u8 = 1;
 pub const APPLY: u8 = 2;
+/// (of the tests alone: feature `probe`)
+#[cfg(feature = "probe")]
 pub const PROBE: u8 = 3;
 
 /// Where the inputs and outputs of an application are.
