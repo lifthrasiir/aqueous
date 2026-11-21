@@ -457,7 +457,10 @@ or
 by default
 .Cm coding .
 .Cm coding
-makes the DEFLATE streams of ZIP and gzip files that zlib did not write again by zlib
+makes the DEFLATE streams of ZIP and gzip files that zlib did not write again by zlib,
+and the LZMA streams of .lzma and .xz files of 8 MiB or more by an encoder of about
+.Ql xz -3
+whose parse costs next to nothing
 (from level 4 on; their records then cost a few bytes, but decoding is slower);
 .Cm slack
 zeroes the bytes that nothing reads, of Minecraft region files and SQLite databases

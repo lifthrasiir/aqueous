@@ -11,6 +11,8 @@ aqr_common::zopt_namespace!("lzma", "LZMA and LZMA2 streams (aqr-lzma)");
 pub mod alone;
 pub use aqr_common::arith;
 #[cfg(feature = "encode")]
+pub mod canonical;
+#[cfg(feature = "encode")]
 pub mod formula;
 pub mod greedy;
 pub mod lzma;

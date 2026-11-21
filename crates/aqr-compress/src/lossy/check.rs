@@ -666,3 +666,167 @@ fn sqlite_varint(d: &[u8], p: usize) -> Option<(u64, usize)> {
     }
     None
 }
+
+/// `liblzma`'s decoding of `d` read to its end, as `same_read` takes it: `d` must be all taken
+/// by it (no bytes after a stream).
+fn lzma_pair(
+    x: &[u8],
+    r: &[u8],
+    new: impl for<'a> Fn(&'a [u8]) -> liblzma::bufread::XzDecoder<&'a [u8]>,
+) -> Result<(), String> {
+    let (mut a, mut b) = (new(x), new(r));
+    if !same_read(&mut a, &mut b)? {
+        return Err("the data is not the same".into());
+    }
+    if b.total_in() != r.len() as u64 {
+        return Err("bytes after the stream of the file rewritten".into());
+    }
+    Ok(())
+}
+
+/// A `.lzma` file: the 13 bytes of header the same, and liblzma reading the same data of both
+/// (and all of the file rewritten).
+pub(super) fn lzma(x: &[u8], r: &[u8]) -> Result<(), String> {
+    if x.len() < 13 || r.len() < 13 || x[..13] != r[..13] {
+        return Err("the header is not the same".into());
+    }
+    lzma_pair(x, r, |d| {
+        let s = liblzma::stream::Stream::new_lzma_decoder(u64::MAX).expect("liblzma's decoder");
+        liblzma::bufread::XzDecoder::new_stream(d, s)
+    })
+}
+
+/// The blocks of a stream of an `.xz` file, as the index and the block headers tell them.
+struct XzStream {
+    flags: [u8; 2],
+    /// The filter flags and uncompressed size field of each block's header.
+    blocks: Vec<(Vec<u8>, Option<u64>)>,
+    /// The zeros after the stream.
+    padding: usize,
+}
+
+fn xz_varint(d: &[u8], p: &mut usize) -> Result<u64, String> {
+    let mut v = 0u64;
+    for i in 0..9 {
+        let b = *d.get(*p).ok_or("a varint cut")?;
+        *p += 1;
+        v |= ((b & 0x7f) as u64) << (7 * i);
+        if b & 0x80 == 0 {
+            return Ok(v);
+        }
+    }
+    Err("a varint too long".into())
+}
+
+fn xz_crc(d: &[u8]) -> u32 {
+    let mut c = flate2::Crc::new();
+    c.update(d);
+    c.sum()
+}
+
+fn xz_le32(d: &[u8], p: usize) -> Result<u32, String> {
+    Ok(u32::from_le_bytes(d.get(p..p + 4).ok_or("cut")?.try_into().unwrap()))
+}
+
+/// The streams of an `.xz` file, from the end as `xz` reads them: the footer, the index, and the
+/// blocks the index tells, each found by its unpadded size, down to the stream's header.
+fn xz_streams(d: &[u8]) -> Result<Vec<XzStream>, String> {
+    const CHECK: [usize; 16] = [0, 4, 4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64, 64];
+    let mut out = Vec::new();
+    let mut end = d.len();
+    while end > 0 {
+        let padding = d[..end].iter().rev().take_while(|&&b| b == 0).count();
+        if padding % 4 != 0 {
+            return Err("padding not of whole words".into());
+        }
+        let foot = end - padding;
+        let f = d.get(foot.checked_sub(12).ok_or("a stream cut")?..foot).ok_or("a stream cut")?;
+        if f[10..] != *b"YZ" || xz_le32(f, 0)? != xz_crc(&f[4..10]) {
+            return Err("not a footer".into());
+        }
+        let flags = [f[8], f[9]];
+        let index_len = (xz_le32(f, 4)? as usize + 1) * 4;
+        let idx = (foot - 12).checked_sub(index_len).ok_or("an index cut")?;
+        let ix = &d[idx..foot - 12];
+        if ix[0] != 0 || xz_le32(ix, index_len - 4)? != xz_crc(&ix[..index_len - 4]) {
+            return Err("an index damaged".into());
+        }
+        let mut p = 1;
+        let n = xz_varint(ix, &mut p)?;
+        let mut sizes = Vec::new();
+        for _ in 0..n {
+            let (u, s) = (xz_varint(ix, &mut p)?, xz_varint(ix, &mut p)?);
+            sizes.push((u as usize, s));
+        }
+        if ix[p..index_len - 4].iter().any(|&b| b != 0) || (p..index_len - 4).len() >= 4 {
+            return Err("an index's padding not right".into());
+        }
+        let total: usize = sizes.iter().map(|s| s.0.div_ceil(4) * 4).sum();
+        let start = idx.checked_sub(total + 12).ok_or("blocks cut")?;
+        let h = &d[start..start + 12];
+        if h[..6] != [0xfd, b'7', b'z', b'X', b'Z', 0] || h[6..8] != flags || xz_le32(h, 8)? != xz_crc(&h[6..8]) {
+            return Err("a stream's header not its footer's".into());
+        }
+        if flags[0] != 0 || flags[1] >= 16 {
+            return Err("stream flags reserved".into());
+        }
+        let check = CHECK[flags[1] as usize];
+        let mut at = start + 12;
+        let mut blocks = Vec::new();
+        for &(unpadded, uncompressed) in &sizes {
+            let hs = (d[at] as usize + 1) * 4;
+            let h = d.get(at..at + hs).ok_or("a block header cut")?;
+            if unpadded < hs + check || xz_le32(h, hs - 4)? != xz_crc(&h[..hs - 4]) {
+                return Err("a block's header or size not right".into());
+            }
+            let mut p = 2;
+            let packed = if h[1] & 0x40 != 0 { Some(xz_varint(h, &mut p)?) } else { None };
+            let size = if h[1] & 0x80 != 0 { Some(xz_varint(h, &mut p)?) } else { None };
+            if packed.is_some_and(|n| n != (unpadded - hs - check) as u64) || size.is_some_and(|n| n != uncompressed) {
+                return Err("a block's header not told by the index".into());
+            }
+            // (the filter flags alone: the padding after them follows the size fields' lengths)
+            let from = p;
+            for _ in 0..(h[1] & 3) + 1 {
+                xz_varint(h, &mut p)?;
+                let n = xz_varint(h, &mut p)? as usize;
+                p = p.checked_add(n).filter(|&q| q <= hs - 4).ok_or("a block's filter flags cut")?;
+            }
+            if h[p..hs - 4].iter().any(|&b| b != 0) {
+                return Err("a block header's padding not zeros".into());
+            }
+            blocks.push((h[from..p].to_vec(), size));
+            at += unpadded.div_ceil(4) * 4;
+        }
+        if at != idx {
+            return Err("the blocks do not end at the index".into());
+        }
+        out.push(XzStream { flags, blocks, padding });
+        end = start;
+    }
+    out.reverse();
+    Ok(out)
+}
+
+/// An `.xz` file: streams of the same check types, and blocks of the same filter flags and sizes
+/// of data (by headers and indexes read here, indexes agreeing with the blocks), the same
+/// padding between the streams, and liblzma reading the same data of both, through the CRCs and
+/// checks it verifies.
+pub(super) fn xz(x: &[u8], r: &[u8]) -> Result<(), String> {
+    let (a, b) = (
+        xz_streams(x).map_err(|e| format!("the original: {e}"))?,
+        xz_streams(r).map_err(|e| format!("the file rewritten: {e}"))?,
+    );
+    if a.len() != b.len() {
+        return Err("a number of streams not the same".into());
+    }
+    for (s, t) in a.iter().zip(&b) {
+        if s.flags != t.flags || s.padding != t.padding {
+            return Err("stream flags or padding not the same".into());
+        }
+        if s.blocks != t.blocks {
+            return Err("blocks' filter flags or sizes not the same".into());
+        }
+    }
+    lzma_pair(x, r, |d| liblzma::bufread::XzDecoder::new_multi_decoder(d))
+}

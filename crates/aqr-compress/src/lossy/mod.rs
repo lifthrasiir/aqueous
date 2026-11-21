@@ -11,6 +11,9 @@
 //!   does not give back made again by zlib's emulation ([`aqr_flate::zlib::compress`], level 6);
 //!   sizes, offsets and the rest of the container written again. Their records are then a few
 //!   bytes at any level ([`Rewritten`]); from level 4 on, where DEFLATE streams are rebuilt.
+//!   And the LZMA streams of `.lzma` files (`lzma`) and the LZMA2 streams of `.xz` files (`xz`)
+//!   made again by [`aqr_lzma::canonical`], whose parse aqr-lzma's record predicts (some 3% of
+//!   XZ Utils' records; streams about XZ Utils `-3`'s), of files of [`LZMA_MIN`] bytes or more.
 //! - `slack`: the bytes of a Minecraft region file (`mca`) that no chunk takes (freed sectors,
 //!   the ends of chunks' last sectors) zeroed in place; and those of a SQLite database
 //!   (`sqlite`) that SQLite never reads: the free space of b-tree pages (freeblocks but their
@@ -26,8 +29,10 @@
 
 mod check;
 mod gzip;
+mod lzma;
 mod mca;
 mod sqlite;
+mod xz;
 mod zip;
 
 use std::collections::HashMap;
@@ -84,6 +89,8 @@ type RewriteFn = fn(&[u8], &Options) -> Result<Option<Vec<u8>>, String>;
 const REWRITERS: &[Rewriter] = &[
     Rewriter { class: Class::Coding, format: Format::Zip, rewrite: zip::coding, check: check::zip },
     Rewriter { class: Class::Coding, format: Format::Gzip, rewrite: gzip::coding, check: check::gzip },
+    Rewriter { class: Class::Coding, format: Format::Lzma, rewrite: lzma::coding, check: check::lzma },
+    Rewriter { class: Class::Coding, format: Format::Xz, rewrite: xz::coding, check: check::xz },
     Rewriter { class: Class::Slack, format: Format::Mca, rewrite: mca::slack, check: check::mca },
     Rewriter { class: Class::Slack, format: Format::Sqlite, rewrite: sqlite::slack, check: check::sqlite },
 ];
@@ -92,6 +99,8 @@ const REWRITERS: &[Rewriter] = &[
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lossy {
     allowed: Vec<(Class, Option<Vec<Format>>)>,
+    /// The least bytes of a `.lzma` or `.xz` file rewritten ([`LZMA_MIN`], as it was parsed).
+    lzma_min: usize,
 }
 
 impl Lossy {
@@ -146,7 +155,7 @@ impl Lossy {
             }
         }
         allowed.sort_by_key(|a| a.0);
-        Ok(Lossy { allowed })
+        Ok(Lossy { allowed, lzma_min: LZMA_MIN.get() })
     }
 
     /// Whether files of `format` may lose what `class` does.
@@ -295,6 +304,13 @@ aqr_common::zopt! {
     /// The most bytes of data of a DEFLATE stream made again ([`redeflate`]): one of more is kept
     /// as it is (its data held whole twice, with the stream made of it).
     static MAX_DATA: Opt<usize> = Opt::size("lossy:max-data", 1 << 30, "most bytes of a DEFLATE stream's data made again");
+    /// The least bytes of a `.lzma` or `.xz` file rewritten ([`Lossy::lzma_min`]). R is some 10%
+    /// larger than a stream of XZ Utils `-6`, and pays only where its data is recompressed: the
+    /// tar of this repository's sources by XZ Utils `-6` at `-5`, archived alone (bytes; lossless
+    /// -> `--lossy`): 1 MB 523,253 -> 519,765; 3 MB 1,127,391 (kept as it is) -> 1,279,597 (R kept
+    /// as it is, larger); 10 MB 4,420,950 -> 4,262,312; 41.8 MB (`.lzma`) 16,345,514 ->
+    /// 15,620,068.
+    pub(crate) static LZMA_MIN: Opt<usize> = Opt::size("lossy:lzma-min", 8 << 20, "least bytes of an .lzma or .xz file rewritten");
 }
 
 /// Bytes of record of a DEFLATE stream (by aqr-flate) at most, besides [`RECORD_PER`]-ths of
@@ -404,6 +420,10 @@ pub(crate) fn rewrite(d: &[u8], lossy: &Lossy, opt: &Options) -> Option<(Rewrite
         // (coding only where the format is recompressed at all: else its streams are kept)
         if w.class == Class::Coding && !crate::format_on(format, opt) {
             continue;
+        }
+        if matches!(format, Format::Lzma | Format::Xz) && d.len() < lossy.lzma_min {
+            let reason = format!("under {} R would archive larger", aqr_common::zopt::show_size(lossy.lzma_min));
+            return Some((Rewrite::Kept { format, class: w.class, reason }, None));
         }
         let x = r.as_deref().unwrap_or(d);
         let made = std::panic::catch_unwind(|| (w.rewrite)(x, opt))
@@ -554,3 +574,6 @@ mod tests_tree;
 
 #[cfg(test)]
 mod tests_sqlite;
+
+#[cfg(test)]
+mod tests_lzma;
