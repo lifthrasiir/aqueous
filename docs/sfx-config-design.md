@@ -285,5 +285,7 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
 - 언어별 문구: `title`, `prompt`, `finish`는 문자열이거나 언어 태그별 표다
   (`prompt = { en = "...", ko = "..." }`). 고르는 순서: 태그 전체, 첫 부분 태그, 언어 없음, `en`, 첫 항목.
   stub 자신의 문구(덮어쓰기 질문, 버튼)는 아직 영어뿐이다 (aqr-l10n과 엮는 일은 남았다).
-- 남은 것: 2차의 나머지(배너, 바로가기, 환경 변수), GUI blob,
+- 환경 변수: `[run.env] NAME = "value"`. 실행하는 프로그램에만 더해진다 (같은 이름은 대소문자를 가리지
+  않고 바꾼다). 값과 `run.program`의 인자에서 `{dest}`는 파일을 푼 폴더다 (`setup.exe /D={dest}`).
+- 남은 것: 2차의 나머지(배너, 바로가기), GUI blob,
   `consoleAllocationPolicy`를 모르는 Windows에서의 `FreeConsole` 대체, 탐색기에서의 눈 확인.

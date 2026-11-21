@@ -214,8 +214,8 @@ fn version_not_known() {
 }
 
 /// The program run once the files are written (cmd.exe, as a file of the archive): its exit
-/// code the program's, its working directory, the files removed once it ends; `--noexec` and
-/// `--keep`.
+/// code the program's, its working directory, its environment and `{dest}` in its arguments,
+/// the files removed once it ends; `--noexec` and `--keep`.
 #[cfg(windows)]
 #[test]
 fn program_run() {
@@ -223,16 +223,32 @@ fn program_run() {
     let cmd = std::fs::read(std::env::var("SystemRoot").unwrap() + r"\System32\cmd.exe").unwrap();
     let a = archive(&[("bin/cmd.exe", cmd), ("bin/data.txt", b"data".to_vec()), (".aqr/sfx/sfx.toml", vec![])]);
     let copied = d.join("copied.txt");
+    let told = d.join("told.txt");
+    let (copied_s, told_s) = (copied.display().to_string(), told.display().to_string());
     let c = Config {
         run: Some(Run {
-            program: ["bin/cmd.exe", "/c", "copy", "data.txt", &copied.display().to_string(), "&", "exit", "7"]
-                .map(String::from)
-                .to_vec(),
+            program: [
+                "bin/cmd.exe",
+                "/c",
+                "copy",
+                "data.txt",
+                &copied_s,
+                "&",
+                "echo",
+                "%AQR_TEST%;{dest}>",
+                &told_s,
+                "&",
+                "exit",
+                "7",
+            ]
+            .map(String::from)
+            .to_vec(),
             cwd: "bin".into(),
             window: Window::Hidden,
             wait: true,
             cleanup: true,
             exit_code: true,
+            env: vec![("AQR_TEST".into(), "at {dest}".into())],
         }),
         ..extracting("{temp}", false, Overwrite::Always)
     };
@@ -240,6 +256,11 @@ fn program_run() {
     let o = run(&d, &exe, &[], "");
     assert_eq!(o.status.code(), Some(7), "{}", err(&o));
     assert_eq!(std::fs::read(&copied).unwrap(), b"data");
+    // (the variable set, {dest} the temporary directory made, in it and in an argument)
+    let told = std::fs::read_to_string(&told).unwrap();
+    let (var, arg) = told.trim_end().split_once(';').unwrap();
+    assert_eq!(var, format!("at {arg}"));
+    assert!(Path::new(arg).starts_with(d.join("tmp")) && Path::new(arg) != d.join("tmp"), "{told}");
     // (the temporary directory made removed, with all that was written)
     assert_eq!(std::fs::read_dir(d.join("tmp")).unwrap().count(), 0);
 

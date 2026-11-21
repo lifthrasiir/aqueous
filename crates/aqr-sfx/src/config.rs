@@ -30,12 +30,14 @@
 //! }
 //! text = tstr / { + tstr => tstr }  ; by language tag ("" of none)
 //! run = {
-//!   &(program: -1) => [+ tstr],   ; the first a path of the archive, by /
+//!   &(program: -1) => [+ tstr],   ; the first a path of the archive, by /; {dest} in the
+//!                                 ; others (and in env's values) where the files went
 //!   ? &(cwd: -2) => tstr,         ; "."
 //!   ? &(window: -3) => 0..2,      ; normal, hidden, minimized
 //!   ? &(wait: -4) => bool,        ; true
 //!   ? &(cleanup: -5) => bool,     ; false
 //!   ? &(exit-code: -6) => bool,   ; false
+//!   ? &(env: -7) => { * tstr => tstr },  ; set for it
 //!   * int => any,
 //! }
 //! ```
@@ -147,7 +149,14 @@ pub struct Run {
     pub cleanup: bool,
     /// Its exit code the self-extracting program's (waited for).
     pub exit_code: bool,
+    /// The environment variables set for it (its own those of the self-extracting program),
+    /// each its name and value.
+    pub env: Vec<(String, String)>,
 }
+
+/// What `{dest}` stands for in the arguments of the program run and the values of its
+/// environment ([`Run::program`], [`Run::env`]): the directory the files went to.
+pub const DEST: &str = "{dest}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Window {
@@ -191,6 +200,7 @@ const R_WINDOW: i128 = -3;
 const R_WAIT: i128 = -4;
 const R_CLEANUP: i128 = -5;
 const R_EXIT_CODE: i128 = -6;
+const R_ENV: i128 = -7;
 
 /// CBOR's simple values false and true.
 const FALSE: u8 = 20;
@@ -256,7 +266,7 @@ impl Config {
         put(K_QUIET, &|v| put_bool(v, self.quiet));
         if let Some(r) = &self.run {
             put(K_RUN, &|v| {
-                cbor::head(v, 5, 6);
+                cbor::head(v, 5, 7);
                 cbor::int(v, R_PROGRAM);
                 cbor::head(v, 4, r.program.len() as u64);
                 r.program.iter().for_each(|a| put_text(v, a));
@@ -267,6 +277,12 @@ impl Config {
                 for (k, b) in [(R_WAIT, r.wait), (R_CLEANUP, r.cleanup), (R_EXIT_CODE, r.exit_code)] {
                     cbor::int(v, k);
                     put_bool(v, b);
+                }
+                cbor::int(v, R_ENV);
+                cbor::head(v, 5, r.env.len() as u64);
+                for (n, x) in &r.env {
+                    put_text(v, n);
+                    put_text(v, x);
                 }
             });
         }
@@ -330,6 +346,7 @@ impl Config {
                         wait: true,
                         cleanup: false,
                         exit_code: false,
+                        env: Vec::new(),
                     };
                     for (k, v) in r.pairs() {
                         let Cbor::Int(k) = k else { continue };
@@ -346,6 +363,13 @@ impl Config {
                             R_WAIT => run.wait = boolean(&v, "wait")?,
                             R_CLEANUP => run.cleanup = boolean(&v, "cleanup")?,
                             R_EXIT_CODE => run.exit_code = boolean(&v, "exit-code")?,
+                            R_ENV => {
+                                let Cbor::Map(e) = v else { return Err(bad("env not a map")) };
+                                run.env = e
+                                    .pairs()
+                                    .map(|(n, x)| Ok((text(&n, "a variable's name")?, text(&x, "a variable")?)))
+                                    .collect::<Result<_, String>>()?;
+                            }
                             _ => {}
                         }
                     }
@@ -581,6 +605,12 @@ pub fn compile(
     let wait = run.boolean("wait")?;
     let cleanup = run.boolean("cleanup")?;
     let exit_code = run.boolean("exit-code")?;
+    let env = run.strings_by_name("env")?;
+    for (n, _) in &env {
+        if n.is_empty() || n.contains(['=', '\0']) {
+            return Err(format!("run.env: {n:?}: not a name of an environment variable"));
+        }
+    }
     let any = !run.table.is_empty();
     run.done()?;
     let run = match (running, program) {
@@ -602,7 +632,7 @@ pub fn compile(
                 let what = if cleanup { "cleanup" } else { "exit-code" };
                 return Err(format!("run.{what} with run.wait = false (the program is not waited for)"));
             }
-            Some(Run { program, cwd, window, wait, cleanup, exit_code })
+            Some(Run { program, cwd, window, wait, cleanup, exit_code, env })
         }
     };
 
@@ -713,6 +743,19 @@ impl<'a> Toml<'a> {
             None => Ok(None),
             Some(toml::Value::String(s)) => Ok(Some(s.clone())),
             Some(_) => Err(format!("{}: not a string", self.name(key))),
+        }
+    }
+
+    /// A table of strings, each its key and value (none where it is not there).
+    fn strings_by_name(&mut self, key: &str) -> Result<Vec<(String, String)>, String> {
+        let name = self.name(key);
+        match self.take(key) {
+            None => Ok(Vec::new()),
+            Some(toml::Value::Table(t)) => t
+                .iter()
+                .map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())).ok_or(format!("{name}.{k}: not a string")))
+                .collect(),
+            Some(_) => Err(format!("{name}: not a table of strings")),
         }
     }
 
@@ -882,6 +925,7 @@ mod tests {
                 wait: true,
                 cleanup: true,
                 exit_code: false,
+                env: vec![("APP_DIR".into(), "{dest}/bin".into())],
             }),
         }
     }
@@ -991,6 +1035,7 @@ mod tests {
                 wait: true,
                 cleanup: true,
                 exit_code: true,
+                env: Vec::new(),
             };
             assert_eq!(c.config.run, Some(want));
             assert_eq!((&c.config.dest[..], c.config.overwrite), ("{temp}", Overwrite::Always));
@@ -1036,6 +1081,8 @@ mod tests {
                 ("[run]\nprogram = [\"setup.exe\"]\ncwd = \"nowhere\"", "not a directory"),
                 ("[run]\nprogram = [\"setup.exe\"]\nwait = false\ncleanup = true", "run.cleanup with run.wait"),
                 ("mode = \"run\"", "no run.program"),
+                ("[run]\nprogram = [\"setup.exe\"]\n[run.env]\n\"A=B\" = \"x\"", "run.env: \"A=B\""),
+                ("[run]\nprogram = [\"setup.exe\"]\n[run.env]\nA = 1", "run.env.A: not a string"),
                 ("mode = \"extract\"\n[run]\nprogram = [\"setup.exe\"]", "nothing is run"),
                 ("mode = \"install\"", "mode"),
                 ("[extract]\ndest = \"C:/x\"", "extract.dest"),

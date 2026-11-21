@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aqr_sfx::config::{Run, Window};
+use aqr_sfx::config::{DEST, Run, Window};
 
 /// Runs `r`'s program of the files written under `dest`; its exit code where it is waited for.
 pub fn run(dest: &Path, r: &Run) -> Result<Option<i32>, String> {
@@ -13,11 +13,42 @@ pub fn run(dest: &Path, r: &Run) -> Result<Option<i32>, String> {
         d
     };
     let (program, cwd) = (under(&r.program[0]), under(&r.cwd));
-    spawn(&program, &r.program[1..], &cwd, r.window, r.wait).map_err(|e| format!("{}: {e}", program.display()))
+    let at = dest.display().to_string();
+    let args: Vec<String> = r.program[1..].iter().map(|a| a.replace(DEST, &at)).collect();
+    let env: Vec<(String, String)> = r.env.iter().map(|(n, v)| (n.clone(), v.replace(DEST, &at))).collect();
+    spawn(&program, &args, &env, &cwd, r.window, r.wait).map_err(|e| format!("{}: {e}", program.display()))
+}
+
+/// The environment block of this process's variables and `env` (in place of those of the same
+/// names, which Windows tells apart by case alone): `NAME=value` each, sorted by name, each
+/// ended by a NUL and the block by another.
+#[cfg(any(windows, test))]
+fn environment(own: impl Iterator<Item = (String, String)>, env: &[(String, String)]) -> Vec<u16> {
+    let mut all: std::collections::BTreeMap<String, (String, String)> = std::collections::BTreeMap::new();
+    for (n, v) in own.chain(env.iter().cloned()) {
+        all.insert(n.to_uppercase(), (n, v));
+    }
+    let mut block: Vec<u16> = Vec::new();
+    for (n, v) in all.into_values() {
+        block.extend(format!("{n}={v}").encode_utf16());
+        block.push(0);
+    }
+    block.push(0);
+    if block.len() == 1 {
+        block.push(0);
+    }
+    block
 }
 
 #[cfg(windows)]
-fn spawn(program: &Path, args: &[String], cwd: &Path, window: Window, wait: bool) -> Result<Option<i32>, String> {
+fn spawn(
+    program: &Path,
+    args: &[String],
+    env: &[(String, String)],
+    cwd: &Path,
+    window: Window,
+    wait: bool,
+) -> Result<Option<i32>, String> {
     use std::os::windows::ffi::OsStrExt;
     let wide = |s: &std::ffi::OsStr| s.encode_wide().chain([0]).collect::<Vec<u16>>();
     let mut line = quote(&program.to_string_lossy());
@@ -41,8 +72,16 @@ fn spawn(program: &Path, args: &[String], cwd: &Path, window: Window, wait: bool
             si.show_window = sys::SW_SHOWMINNOACTIVE;
         }
     }
+    // (this process's own where nothing is set)
+    let mut block = (!env.is_empty()).then(|| {
+        let own =
+            std::env::vars_os().map(|(n, v)| (n.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()));
+        environment(own, env)
+    });
+    let block_ptr = block.as_mut().map_or(std::ptr::null_mut(), |b| b.as_mut_ptr().cast());
     let mut pi = sys::ProcessInformation::default();
-    // SAFETY: NUL-terminated strings, the command line writable; the handles closed below
+    // SAFETY: NUL-terminated strings, the command line writable, the environment a block of
+    // UTF-16 (CREATE_UNICODE_ENVIRONMENT); the handles closed below
     let ok = unsafe {
         sys::CreateProcessW(
             app.as_ptr(),
@@ -51,7 +90,7 @@ fn spawn(program: &Path, args: &[String], cwd: &Path, window: Window, wait: bool
             std::ptr::null_mut(),
             0,
             flags,
-            std::ptr::null_mut(),
+            block_ptr,
             dir.as_ptr(),
             &si,
             &mut pi,
@@ -104,9 +143,16 @@ fn quote(a: &str) -> String {
 }
 
 #[cfg(not(windows))]
-fn spawn(program: &Path, args: &[String], cwd: &Path, _: Window, wait: bool) -> Result<Option<i32>, String> {
+fn spawn(
+    program: &Path,
+    args: &[String],
+    env: &[(String, String)],
+    cwd: &Path,
+    _: Window,
+    wait: bool,
+) -> Result<Option<i32>, String> {
     let mut c = std::process::Command::new(program);
-    c.args(args).current_dir(cwd);
+    c.args(args).envs(env.iter().map(|(n, v)| (n, v))).current_dir(cwd);
     match wait {
         true => c.status().map(|s| s.code()).map_err(|e| e.to_string()),
         false => c.spawn().map(|_| None).map_err(|e| e.to_string()),
@@ -190,7 +236,15 @@ mod sys {
 
 #[cfg(test)]
 mod tests {
-    use super::quote;
+    use super::{environment, quote};
+
+    #[test]
+    fn environment_block() {
+        let own = [("Path", "C:\\x"), ("TEMP", "t")].map(|(n, v)| (n.to_string(), v.to_string()));
+        let b = environment(own.into_iter(), &[("PATH".into(), "y".into()), ("NEW".into(), "1".into())]);
+        let text = String::from_utf16(&b).unwrap();
+        assert_eq!(text, "NEW=1\0PATH=y\0TEMP=t\0\0");
+    }
 
     #[test]
     fn arguments_quoted() {
