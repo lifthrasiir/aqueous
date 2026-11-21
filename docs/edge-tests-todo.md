@@ -48,6 +48,16 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
   read verbatim (only the walk's names are).
 - aqr-xsv: tables wider than about 1000 columns are not recognised (the dialect's sample of
   64 KiB holds too few records).
+- aqr-archive, found by fuzzing (`fuzz/`), to revisit:
+  - `mirror::repair` salvaging fills the gap up to a block restored past the end with zeros as
+    long as its mirror block tells, and a mirror block's checksum is no authentication: a file
+    of a few hundred bytes can make `aqr -d` take as much memory as is had (a resource failure
+    beyond it, no longer an abort). A genuine archive cut short may have a gap of GBs, so no
+    bound is plain; perhaps a budget (`-M`) given to `repair`.
+  - `parse::unzstd_with` tries reserving a leaf's declared size before decompressing (where
+    that fails, the output grows as it comes): an archive of a few bytes declaring TBs commits
+    as much as the system grants (Windows' commit charge). A Zstandard block of 4 bytes makes
+    at most 128 KiB, so a declared size over that ratio could be invalid at once.
 
 ### Housekeeping
 - The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs
