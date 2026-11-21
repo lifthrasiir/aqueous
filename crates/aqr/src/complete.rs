@@ -122,6 +122,8 @@ pub const OPTIONS: &[Opt] = &[
     opt(None, Some("auto-dir"), Value::None, "extract beside the archive, into a directory where needed"),
     opt(Some('f'), Some("force"), Value::None, "overwrite outputs"),
     opt(None, Some("rm"), Value::None, "remove the inputs once archived, or archives once extracted"),
+    many(None, Some("run-before"), Value::Text, "run CMD by the shell before each archive is written"),
+    many(None, Some("run-after"), Value::Text, "run CMD by the shell after each archive is written"),
     opt(Some('p'), Some("preserve"), Value::None, "keep and apply the metadata not commonly kept too"),
     opt(
         None,

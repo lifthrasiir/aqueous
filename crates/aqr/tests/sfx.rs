@@ -118,10 +118,10 @@ mod packed {
         found.pop()
     }
 
-    /// A program signed once it is made (with a certificate of its own, made by OpenSSL: no store
-    /// of the system's touched) runs as one unsigned does, and aqr reads its archive (bytes
-    /// before it and after it, which locating does not take: the signature is left out first).
-    /// Where `signtool` or `openssl` is not there, told and passed.
+    /// A program signed once it is made, by `--run-after` (with a certificate of its own, made by
+    /// OpenSSL: no store of the system's touched), runs as one unsigned does, and aqr reads its
+    /// archive (bytes before it and after it, which locating does not take: the signature is left
+    /// out first). Where `signtool` or `openssl` is not there, told and passed.
     #[test]
     fn signed_afterwards() {
         let Some(signtool) = signtool() else {
@@ -157,13 +157,9 @@ mod packed {
         fs::create_dir_all(d.join("in")).unwrap();
         fs::write(d.join("in/a.txt"), prose(200_000)).unwrap();
         fs::write(d.join("in/b.bin"), (0..5000u32).map(|i| (i * 7 % 253) as u8).collect::<Vec<_>>()).unwrap();
-        made(&d, &["in"], "in.exe");
-        let o = Command::new(&signtool)
-            .current_dir(&d)
-            .args(["sign", "/q", "/fd", "sha256", "/f", "t.pfx", "/p", "x", "in.exe"])
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "signtool: {}", String::from_utf8_lossy(&o.stdout));
+        let sign = format!("\"{}\" sign /q /fd sha256 /f t.pfx /p x \"%AQR_OUTPUT%\"", signtool.display());
+        let o = aqr_in(&d, &["-c", "-q", "--format", "sfx", "-o", "in.exe", "--run-after", &sign, "in"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let signed = fs::read(d.join("in.exe")).unwrap();
         let s = aqr_sfx::pe::signature(&signed).expect("a signature");
         assert_eq!(s.end, signed.len());

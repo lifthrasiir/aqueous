@@ -16,6 +16,10 @@ pub(crate) struct Args {
     pub(crate) force: bool,
     /// `--rm`: the inputs removed once their archive is made, or an archive once extracted.
     pub(crate) rm: bool,
+    /// `--run-before CMD`, `--run-after CMD`: commands run before and after each archive is
+    /// written ([`crate::hooks`]).
+    pub(crate) run_before: Vec<String>,
+    pub(crate) run_after: Vec<String>,
     /// `--atomic`: compressing, an archive made whole or not at all, rather than committed as it
     /// is written ([`stop`]).
     pub(crate) atomic: bool,
@@ -208,6 +212,8 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         auto_dir: false,
         force: false,
         rm: false,
+        run_before: Vec::new(),
+        run_after: Vec::new(),
         atomic: false,
         journal: None,
         at: None,
@@ -305,6 +311,8 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "--auto-dir" => a.auto_dir = true,
             "-f" | "--force" => a.force = true,
             "--rm" => a.rm = true,
+            "--run-before" => a.run_before.push(text(value("--run-before")?)),
+            "--run-after" => a.run_after.push(text(value("--run-after")?)),
             "--atomic" => a.atomic = true,
             "-j" | "--journal" => a.journal = Some(text(value("-j")?)),
             "--at" => a.at = Some(journal::at_of(&text(value("--at")?))?),
@@ -476,6 +484,19 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         }
         return Ok(a);
     }
+    if let Some(o) = hooks(&a) {
+        let reading = [
+            (a.decompress, "-d or -K"),
+            (a.list, "-t"),
+            (a.info, "-I"),
+            (a.tag.is_some(), "--tag"),
+            (a.history, "--history"),
+            (a.diff, "--diff"),
+        ];
+        if let Some((_, what)) = reading.iter().find(|m| m.0) {
+            return Err(format!("{o} with {what} (it is of an archive written)"));
+        }
+    }
     if a.edit.is_some() || a.compact {
         edit_args(&mut a, renames, last_dir.is_some())?;
         return Ok(a);
@@ -639,11 +660,23 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         return Err("--files-from - with standard input taken otherwise too".into());
     }
     stdio_args(&mut a)?;
+    if a.stdout && hooks(&a).is_some() {
+        return Err(format!("{}: an archive to standard output is no file to run it on", hooks(&a).unwrap()));
+    }
     if a.format == Pack::Sfx && (a.stdin || a.stdout) {
         return Err("--format sfx: not with standard input or output".into());
     }
     a.dir = dir;
     Ok(a)
+}
+
+/// The option of the hooks given (`--run-before`, else `--run-after`), where any is.
+fn hooks(a: &Args) -> Option<&'static str> {
+    match (a.run_before.is_empty(), a.run_after.is_empty()) {
+        (false, _) => Some("--run-before"),
+        (true, false) => Some("--run-after"),
+        (true, true) => None,
+    }
 }
 
 /// Of [`parse`], editing an archive ([`edit`]): the archive and its paths, checked against the

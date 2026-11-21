@@ -51,9 +51,16 @@ impl Edit {
     }
 }
 
-/// Edits the archive (the first input) as `a.edit` and `a.compact` tell ([module](self)).
+/// Edits the archive (the first input) as `a.edit` and `a.compact` tell ([module](self)), the
+/// hooks of `--run-before` and `--run-after` run on it ([`crate::hooks`]).
 pub fn edit(a: &Args) -> Result<(), String> {
     let path = a.inputs.first().ok_or("no archive given")?;
+    edit_in(a, path)?;
+    crate::hooks::run(a, crate::hooks::When::After, path)?;
+    crate::hooks::still_there(a, path)
+}
+
+fn edit_in(a: &Args, path: &PathBuf) -> Result<(), String> {
     let start = Instant::now();
     let mode = match a.edit {
         Some(Edit::Move) => "move",
@@ -62,6 +69,7 @@ pub fn edit(a: &Args) -> Result<(), String> {
     };
     crate::begin(mode, std::slice::from_ref(path), Some(path));
     let opened = append::open(path, a.quiet)?;
+    crate::hooks::run(a, crate::hooks::When::Before, path)?;
     let gone = match &a.select {
         Some(sel) => {
             let at = sel.find(opened.tree());

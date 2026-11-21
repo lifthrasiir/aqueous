@@ -154,20 +154,7 @@ pub(crate) fn map_archive(input: &Path, shown: &dyn std::fmt::Display) -> Result
 /// located, and is a PE image whose signature ends it, the archive is located before the
 /// signature.
 pub(crate) fn located<'c>(c: &'c [u8], input: &Path, quiet: bool) -> &'c [u8] {
-    let signed = || aqr_sfx::pe::signature(c).filter(|s| s.end == c.len());
-    let (r, signature) = match aqr_archive::locate(c) {
-        Some(r) => (r, None),
-        // (the signature at 8 bytes: up to 7 zeros before it, which `signtool` adds, the footer's
-        // last bytes maybe zeros too)
-        None => match signed().and_then(|s| {
-            let before = &c[..s.start];
-            let zeros = before.iter().rev().take(7).take_while(|&&b| b == 0).count();
-            (0..=zeros).find_map(|pad| aqr_archive::locate(&before[..before.len() - pad])).map(|r| (r, s))
-        }) {
-            Some((r, s)) => (r, Some(s)),
-            None => return c,
-        },
-    };
+    let Some((r, signature)) = locate_in(c) else { return c };
     if !quiet && r.start > 0 {
         eprintln!("{}: {} before the archive left out", input.display(), bytes_of(r.start as u64));
     }
@@ -189,6 +176,20 @@ pub(crate) fn located<'c>(c: &'c [u8], input: &Path, quiet: bool) -> &'c [u8] {
         );
     }
     &c[r]
+}
+
+/// Where the archive in file `c` is ([`located`]), and the signature after it where it was located
+/// before one.
+pub(crate) fn locate_in(c: &[u8]) -> Option<(std::ops::Range<usize>, Option<std::ops::Range<usize>>)> {
+    if let Some(r) = aqr_archive::locate(c) {
+        return Some((r, None));
+    }
+    let s = aqr_sfx::pe::signature(c).filter(|s| s.end == c.len())?;
+    // (the signature at 8 bytes: up to 7 zeros before it, which `signtool` adds, the footer's last
+    // bytes maybe zeros too)
+    let before = &c[..s.start];
+    let zeros = before.iter().rev().take(7).take_while(|&&b| b == 0).count();
+    (0..=zeros).find_map(|pad| aqr_archive::locate(&before[..before.len() - pad])).map(|r| (r, Some(s)))
 }
 
 /// `n` bytes, told.

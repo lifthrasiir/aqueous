@@ -257,25 +257,36 @@ impl aqr_compress::Source for Gathered {
 /// Compresses `inputs` into `out`.
 fn compress_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     match a.format {
-        Pack::Aqr => compress_aqr(a, inputs, out),
-        Pack::Other(f, level) => {
-            if a.append {
-                return Err(format!("{}: Aqueous archives alone are appended to", a.verb()));
-            }
-            if a.journal.is_some() {
-                return Err("-j: Aqueous archives alone have a journal".into());
-            }
-            pack_into(a, f, level, inputs, out)
-        }
-        Pack::Sfx => sfx_into(a, inputs, out),
+        Pack::Other(..) if a.append => return Err(format!("{}: Aqueous archives alone are appended to", a.verb())),
+        Pack::Other(..) if a.journal.is_some() => return Err("-j: Aqueous archives alone have a journal".into()),
+        Pack::Sfx => drop(sfx::pack()?),
+        _ => {}
     }
+    // (whether it is written over decided first, so that the hooks run of an output written alone;
+    // appending, the archive there already, to be appended to)
+    let force = match a.append {
+        true => false,
+        false => match output(a, out)? {
+            Some(f) => f,
+            None => return Ok(Vec::new()),
+        },
+    };
+    hooks::run(a, hooks::When::Before, out)?;
+    let gone = match a.format {
+        Pack::Aqr => compress_aqr(a, inputs, out, force),
+        Pack::Other(f, level) => pack_into(a, f, level, inputs, out, force),
+        Pack::Sfx => sfx_into(a, inputs, out, force),
+    }?;
+    hooks::run(a, hooks::When::After, out)?;
+    if !matches!(a.format, Pack::Other(..)) {
+        hooks::still_there(a, out)?;
+    }
+    Ok(gone)
 }
 
 /// Compresses `inputs` into self-extracting program `out` ([`sfx`]): the Aqueous archive made
 /// beside it first (a single file in it by its name), then the program of it.
-fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
-    sfx::pack()?;
-    let Some(force) = output(a, out)? else { return Ok(Vec::new()) };
+fn sfx_into(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec<Gone>, String> {
     let renames = match inputs.sole() {
         Some(input) if !input.is_dir() => vec![input.file_name().map(PathBuf::from)],
         _ => inputs.renames.to_vec(),
@@ -283,7 +294,7 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(format!(".{}.aqr", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    let made = compress_aqr(a, Inputs { renames: &renames, ..inputs }, &tmp).and_then(|gone| {
+    let made = compress_aqr(a, Inputs { renames: &renames, ..inputs }, &tmp, a.force).and_then(|gone| {
         let archive = fs::read(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
         // (the settings of .aqr/sfx/, read back of the archive made: what makes it again)
         let settings = sfx::settings(&archive, a.opt.threads)?;
@@ -317,7 +328,7 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
 }
 
 /// Compresses `inputs` into Aqueous archive `out` ([`compress_into`]).
-fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
+fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec<Gone>, String> {
     if a.append && (a.passphrase || a.opt.mirrors) {
         return Err(format!(
             "{}: not with {}",
@@ -325,14 +336,6 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
             if a.passphrase { "-P (an encrypted archive is not appended to)" } else { "-A" }
         ));
     }
-    // (appending, the archive there already, to be appended to)
-    let force = match a.append {
-        true => false,
-        false => match output(a, out)? {
-            Some(f) => f,
-            None => return Ok(Vec::new()),
-        },
-    };
     // (the archive appended to opened first: one not to be appended to told before the inputs are read)
     let opened = match a.append {
         true => Some(append::open(out, a.quiet)?),
@@ -610,8 +613,8 @@ fn pack_into(
     level: Option<u8>,
     inputs: Inputs,
     out: &Path,
+    force: bool,
 ) -> Result<Vec<Gone>, String> {
-    let Some(force) = output(a, out)? else { return Ok(Vec::new()) };
     begin("compress", inputs.paths, Some(out));
     let start = Instant::now();
     let renames = match inputs.sole() {

@@ -277,6 +277,21 @@ Overwrite outputs.
 .It Fl -rm
 Remove the inputs once archived (and checked), or an archive once extracted whole;
 what changed meanwhile is kept and told.
+.It Fl -run-before Ar cmd , Fl -run-after Ar cmd
+Run
+.Ar cmd
+by the system's shell
+.Pq Li cmd /c , Li sh -c
+before each archive is written, or once it is written whole
+.Pf ( Fl c ,
+.Fl a
+and the edits; signing a self-extracting program, say), each as often as given, in
+order, the archive's path in
+.Ev AQR_OUTPUT .
+A command failing fails
+.Nm ,
+the archive left as it is; an Aqueous archive no longer found in its file after one
+fails it too.
 .It Fl p , Fl -preserve
 Keep and apply the metadata not commonly kept too: access, status change and backup
 times; extracting, ownership, flags only the superuser can change, set-user-ID and
@@ -628,6 +643,15 @@ a long option's value may follow it after
 .Pq Fl -memory=2G .
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
+.It Ev AQR_OUTPUT , Ev AQR_HOOK
+Set for the commands of
+.Fl -run-before
+and
+.Fl -run-after :
+the archive's path (absolute), and
+.Cm before
+or
+.Cm after .
 .It Ev TMPDIR
 Where standard input is read into
 .Pq Fl ,

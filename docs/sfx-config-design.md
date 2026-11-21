@@ -235,6 +235,8 @@ SFX가 같이 걸린다.
   넣을지는 따로 정한다. 덧붙이면 깨지므로 서명된 stub은 받지 않는다 (pack.py, aqr의 팩 읽기).
   `crates/aqr/tests/sfx.rs`의 `signed_afterwards`가 OpenSSL로 만든 인증서와 `signtool`로 서명하고
   돌려 본다 (둘 중 하나가 없으면 건너뛴다).
+  서명은 `aqr -c --format sfx --run-after "signtool sign ... \"%AQR_OUTPUT%\""`처럼 hook으로 이어 붙일 수 있다
+  (`crates/aqr/src/hooks.rs`: 아카이브를 쓰는 작업마다, 셸로, 경로는 환경 변수로. 그 시험도 이렇게 서명한다).
 
 ## 9. 순서
 

@@ -181,6 +181,9 @@
 //!   each file archived too (below). An archive of a single file (and one with `--atomic`), or a
 //!   single file decompressed, is written as `OUTPUT.PID.part` and renamed once done: removed
 //!   where it fails or the process is stopped ([`stop`]), an output there before left as it was.
+//! - `--run-before CMD` and `--run-after CMD` run commands by the system's shell before and after
+//!   each archive is written (`-c`, `-a` and the edits; signing a self-extracting program, say),
+//!   the archive's path in `AQR_OUTPUT` ([`hooks`]).
 //! - An archive of several files is committed as it is written ([`stop`]; spec, "Appending to an
 //!   archive"): written as `OUTPUT.PID.part`, it is renamed once a segment of it is committed
 //!   (`-S`), and later commits are made in place, so that the file holds an archive of what was
@@ -281,6 +284,7 @@ mod files;
 mod fold;
 mod foreign;
 mod gather;
+mod hooks;
 mod info;
 mod ipc;
 mod journal;
@@ -397,6 +401,9 @@ Output:
   -f, --force           overwrite outputs
       --rm              remove the inputs once archived, or archives once extracted
                         (what changed meanwhile kept, as directories not left empty)
+      --run-before CMD  run CMD by the system's shell before each archive is written,
+      --run-after CMD   or once it is written (each as often as given, in order; the
+                        archive's path in AQR_OUTPUT; a command failing fails aqr)
   -p, --preserve        keep and apply the metadata not commonly kept too
       --mark WHEN       the marks of files from elsewhere (Zone.Identifier, quarantine):
                         extracting, propagate (the default: the archive's over the files'),
