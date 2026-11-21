@@ -305,3 +305,8 @@ tip_delete_originals = "--rm: 압축이 끝나면 압축한 원본을 지웁니�
 tip_threads = "-T: 작업 스레드의 수입니다."
 tip_memory = "-M: 한 번에 쓰는 힙의 대략적인 최댓값입니다. 너무 낮으면 느려질 수 있습니다."
 tip_module_memory = "--application-bound: 이보다 메모리가 더 필요한 재압축은 쓰지 않습니다. 올리면 더 작은 기기에서 열 수 없는 압축 파일이 만들어질 수 있습니다."
+
+[sfx]
+accept_license = "사용권 계약에 동의합니까?"
+extract_to = "압축을 풀 위치:"
+replace = "{path} 파일을 덮어쓸까요?"

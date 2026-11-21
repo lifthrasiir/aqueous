@@ -1,5 +1,5 @@
-//! The frontends' messages (aqr-win, aqr-win-install, aqr-mac, and aqr-ipc's for them) in the
-//! languages of `messages/*.toml`, `en.toml` the source and the fallback. README.md has the
+//! The frontends' messages (aqr-win, aqr-win-install, aqr-mac, and aqr-ipc's for them; the
+//! self-extracting stub's, the section `sfx`) in the languages of `messages/*.toml`, `en.toml` the source and the fallback. README.md has the
 //! format and how a language is added.
 //!
 //! Each section of the catalogs is a module, each message a constant ([`Msg`]) and a function
@@ -42,9 +42,23 @@ pub fn plural(tag: &str, n: u64) -> Option<Plural> {
     })
 }
 
-/// A message of the catalogs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Msg(u16);
+/// A message of the catalogs: of its section's table, at its index there.
+#[derive(Clone, Copy)]
+pub struct Msg(&'static Section, u16);
+
+impl PartialEq for Msg {
+    fn eq(&self, other: &Msg) -> bool {
+        std::ptr::eq(self.0, other.0) && self.1 == other.1
+    }
+}
+
+impl Eq for Msg {}
+
+impl std::fmt::Debug for Msg {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Msg({:?})", self.0.texts[0][self.1 as usize].first().map_or("", |(_, t)| *t))
+    }
+}
 
 /// The language chosen, an index of [`LANGS`].
 static LANG: AtomicUsize = AtomicUsize::new(0);
@@ -180,8 +194,9 @@ impl Msg {
     /// The text in language `lang` (an index of [`LANGS`]), of the category of `n` where it is a
     /// plural; English's where the language has none.
     fn form(self, lang: usize, n: Option<u64>) -> &'static str {
-        let (lang, forms) = match TEXTS[lang][self.0 as usize] {
-            [] => (0, TEXTS[0][self.0 as usize]),
+        let texts = &self.0.texts;
+        let (lang, forms) = match texts[lang][self.1 as usize] {
+            [] => (0, texts[0][self.1 as usize]),
             forms => (lang, forms),
         };
         let category = n.and_then(|n| plural(LANGS[lang], n)).unwrap_or(Plural::Other);
@@ -193,7 +208,7 @@ impl Msg {
     /// are there), the one that `messages/ids.toml` gives it: it does not change as messages are
     /// added. Panics for a message that is not in the table.
     pub fn resource(self) -> u16 {
-        match RESOURCE_IDS[self.0 as usize] {
+        match self.0.ids.get(self.1 as usize).copied().unwrap_or(0) {
             0 => panic!("not a message of Windows' string table"),
             id => id,
         }

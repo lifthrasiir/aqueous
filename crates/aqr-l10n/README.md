@@ -1,7 +1,7 @@
 # aqr-l10n
 
-The messages of the frontends (aqr-win, aqr-win-install, aqr-mac, and aqr-ipc's for them) in
-the languages of `messages/*.toml`: English (`en.toml`, the source and the fallback) and Korean
+The messages of the frontends (aqr-win, aqr-win-install, aqr-mac, and aqr-ipc's for them; the
+self-extracting stub, aqr-sfx-shim) in the languages of `messages/*.toml`: English (`en.toml`, the source and the fallback) and Korean
 (`ko.toml`). `aqr`'s own messages (its errors, which the windows show as they come) stay
 English.
 
@@ -20,7 +20,9 @@ cargo run -p aqr-l10n -- rc          # Windows' string table, as aqr-win embeds 
 ## The catalogs
 
 TOML, a section of messages for each part (`common`, `units`, `types`, `shell`, `win`, `options`, `install`, `mac`,
-`services`), a key for each message:
+`services`, `sfx`), a key for each message. Each section is a table of its own in the binary, so a
+program carries only the sections it uses (the stub, `sfx` alone: its buttons are the system's,
+user32's, so that its section stays three messages):
 
 ```toml
 [common]

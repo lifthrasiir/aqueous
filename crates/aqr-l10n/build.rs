@@ -241,50 +241,54 @@ fn unescape(text: &str) -> String {
     text.replace("{{", "{").replace("}}", "}")
 }
 
-/// The Rust: the languages, the texts, and the sections' modules.
+/// The Rust: the languages, and the sections' modules, each with its own table of texts (so that
+/// a program linking one section's messages, as the self-extracting stub does, carries no other).
 fn rust(out: &mut String, tags: &[&str], messages: &[Message]) {
-    let n = messages.len();
     writeln!(out, "// Written by aqr-l10n's build.rs from messages/*.toml.\n").unwrap();
     writeln!(out, "/// The languages of the catalogs, English first.").unwrap();
     writeln!(out, "pub const LANGS: [&str; {}] = {tags:?};", tags.len()).unwrap();
-    writeln!(out, "/// The id of each message in Windows' string table (0: it is not in it).").unwrap();
-    writeln!(
-        out,
-        "static RESOURCE_IDS: [u16; {n}] = {:?};",
-        messages.iter().map(|m| m.id.unwrap_or(0)).collect::<Vec<_>>()
-    )
-    .unwrap();
-    writeln!(out, "/// The forms of each message of each language (none: not translated).").unwrap();
-    writeln!(out, "static TEXTS: [[&[(Plural, &str)]; {n}]; {}] = [", tags.len()).unwrap();
-    for lang in 0..tags.len() {
-        writeln!(out, "    [").unwrap();
-        for m in messages {
-            let plain = !m.plural && m.params.is_empty();
-            let forms: Vec<String> = m.forms[lang]
-                .iter()
-                .map(|(c, t)| {
-                    let t = if plain { unescape(t) } else { t.clone() };
-                    format!("(Plural::{}, {t:?})", capitalize(c))
-                })
-                .collect();
-            writeln!(out, "        &[{}],", forms.join(", ")).unwrap();
-        }
-        writeln!(out, "    ],").unwrap();
-    }
-    writeln!(out, "];\n").unwrap();
+    writeln!(out, "/// The messages of a section: the forms of each in each language (none: not translated),").unwrap();
+    writeln!(out, "/// and the id of each in Windows' string table (none of a section not there, 0 of none).").unwrap();
+    writeln!(out, "struct Section {{").unwrap();
+    writeln!(out, "    texts: [&'static [&'static [(Plural, &'static str)]]; {}],", tags.len()).unwrap();
+    writeln!(out, "    ids: &'static [u16],").unwrap();
+    writeln!(out, "}}\n").unwrap();
     let sections: Vec<&str> =
         messages.iter().map(|m| m.section.as_str()).collect::<BTreeSet<_>>().into_iter().collect();
     for section in sections {
+        let of: Vec<&Message> = messages.iter().filter(|m| m.section == section).collect();
         writeln!(out, "pub mod {section} {{").unwrap();
         writeln!(out, "    #![allow(clippy::too_many_arguments)]").unwrap();
-        writeln!(out, "    use super::Msg;").unwrap();
+        writeln!(out, "    use super::{{Msg, Plural, Section}};").unwrap();
         writeln!(out, "    #[allow(unused_imports)]\n    use std::fmt::Display;").unwrap();
-        for (i, m) in messages.iter().enumerate().filter(|(_, m)| m.section == section) {
+        writeln!(out, "    static SECTION: Section = Section {{").unwrap();
+        writeln!(out, "        texts: [").unwrap();
+        for lang in 0..tags.len() {
+            writeln!(out, "            &[").unwrap();
+            for m in &of {
+                let plain = !m.plural && m.params.is_empty();
+                let forms: Vec<String> = m.forms[lang]
+                    .iter()
+                    .map(|(c, t)| {
+                        let t = if plain { unescape(t) } else { t.clone() };
+                        format!("(Plural::{}, {t:?})", capitalize(c))
+                    })
+                    .collect();
+                writeln!(out, "                &[{}],", forms.join(", ")).unwrap();
+            }
+            writeln!(out, "            ],").unwrap();
+        }
+        writeln!(out, "        ],").unwrap();
+        let ids: Vec<u16> =
+            if of.iter().any(|m| m.id.is_some()) { of.iter().map(|m| m.id.unwrap_or(0)).collect() } else { Vec::new() };
+        writeln!(out, "        ids: &{ids:?},").unwrap();
+        writeln!(out, "    }};").unwrap();
+        for (i, m) in of.iter().enumerate() {
             let english: Vec<String> = m.forms[0].iter().map(|(c, t)| format!("{c}: {t:?}")).collect();
             let doc = english.join("; ").replace('\n', "\\n");
             let name = &m.key;
             writeln!(out, "    /// {doc}").unwrap();
-            writeln!(out, "    pub const {}: Msg = Msg({i});", name.to_uppercase()).unwrap();
+            writeln!(out, "    pub const {}: Msg = Msg(&SECTION, {i});", name.to_uppercase()).unwrap();
             writeln!(out, "    /// {doc}").unwrap();
             if !m.plural && m.params.is_empty() {
                 writeln!(out, "    pub fn {name}() -> &'static str {{ {}.text() }}", name.to_uppercase()).unwrap();

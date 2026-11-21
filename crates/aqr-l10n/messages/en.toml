@@ -336,3 +336,10 @@ tip_delete_originals = "--rm: removes what was archived once the archive is made
 tip_threads = "-T: the number of worker threads."
 tip_memory = "-M: about the most heap taken at once. A low limit can slow it down."
 tip_module_memory = "--application-bound: recompressions needing more are not used. Raising it can make archives that smaller machines refuse."
+
+# The self-extracting stub (aqr-sfx-shim), in its dialogs and on its console. Its buttons are the
+# system's (OK, Cancel, Yes, No: what its message boxes have), so they are not here.
+[sfx]
+accept_license = "Do you accept the license?"
+extract_to = "Extract to:"
+replace = "Replace the file {path}?"

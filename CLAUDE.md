@@ -44,8 +44,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
     `build.rs` with aqr-exe's filters and zstd (Windows).
-  - `aqr-l10n` — the frontends' messages (`messages/{en,ko}.toml`, English the source), and
-    what the systems read of them: Windows' string table, the bundle's `.lproj/*.strings`.
+  - `aqr-l10n` — the frontends' messages (`messages/{en,ko}.toml`, English the source; a table
+    of each section, so that the SFX stub carries only its `sfx`), and what the systems read of
+    them: Windows' string table, the bundle's `.lproj/*.strings`.
   - `aqr-mac` — Finder's services, `.aqr` files opened and their progress in Finder over
     `aqr --ipc` (macOS); `bundle.sh` makes `target/dist/Aqueous.app` and its zip.
   - `aqr-formula` — entry formulas as recompressors declare them (`Formula`, `Node`, `Apply`,
@@ -136,7 +137,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `upx` is found, the blobs of the modules and of the shared libraries) and packs it
     (`aqr-sfx-pack`: `sfx.pack`).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-archive + aqr-sfx, no codecs or Wasmtime,
-    0.77 MB, 0.35 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
+    0.78 MB, 0.35 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
     of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle, the
     settings and the archive from right after its image (else it scans itself from the end for
     the archive's header magic, the settings right before it), decodes the archive running the

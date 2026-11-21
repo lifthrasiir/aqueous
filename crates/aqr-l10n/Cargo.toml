@@ -2,7 +2,7 @@
 name = "aqr-l10n"
 version = "0.1.0"
 edition = "2024"
-description = "The frontends' messages (aqr-win, aqr-win-install, aqr-mac) in the languages of messages/*.toml, and Windows' and macOS' resources made of them"
+description = "The frontends' messages (aqr-win, aqr-win-install, aqr-mac, aqr-sfx-shim) in the languages of messages/*.toml, and Windows' and macOS' resources made of them"
 publish = false
 
 [build-dependencies]

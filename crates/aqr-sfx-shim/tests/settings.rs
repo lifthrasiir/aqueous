@@ -179,7 +179,7 @@ fn where_asked() {
     let c = Config { ask: true, ..extracting("{cwd}/out", true, Overwrite::Always) };
     let exe = program(&d, "x", &[c.record(), a].concat());
     let o = run(&d, &exe, &[], "\n");
-    assert!(o.status.success() && err(&o).contains("Extract to ["), "{}", err(&o));
+    assert!(o.status.success() && err(&o).contains("Extract to: ["), "{}", err(&o));
     assert!(d.join("out/x/a.txt").exists());
     let o = run(&d, &exe, &[], "  there  \n");
     assert!(o.status.success() && d.join("there/a.txt").exists(), "{}", err(&o));
@@ -212,6 +212,8 @@ fn license_agreed_to() {
     assert!(!d.join("out").exists());
     let o = run_in(&d, &exe, &[], "y\n", "ko-KR");
     assert!(o.status.success() && err(&o).contains("한국어 사용 허락서."), "{}", err(&o));
+    // (the stub's own words in the language too)
+    assert!(err(&o).contains("사용권 계약에 동의합니까?"), "{}", err(&o));
     assert!(d.join("out/a.txt").exists());
     let o = run_in(&d, &exe, &["-y", "again"], "", "en");
     assert!(o.status.success() && !err(&o).contains("license"), "{}", err(&o));

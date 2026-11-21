@@ -1768,6 +1768,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-archive",
  "aqr-formula",
+ "aqr-l10n",
  "aqr-sfx",
 ]
 

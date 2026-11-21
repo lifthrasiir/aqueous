@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 aqr-sfx.workspace = true
 aqr-archive.workspace = true
+aqr-l10n.workspace = true
 
 [dev-dependencies]
 aqr-formula.workspace = true

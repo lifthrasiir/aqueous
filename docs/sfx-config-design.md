@@ -68,7 +68,7 @@ WinZip Self-Extractor, makeself.
   - 설정 blob: 나머지 전부 (1.1–1.3절). CBOR로 쓴다 (4절).
 - **SFX가 만들어진 뒤에는 아카이브 부분을 고쳐도 SFX의 동작이 바뀌지 않는다.** stub은 런타임에
   `sfx.toml`을 읽지 않는다. 그래서 stub에 TOML 파서가 들어가지 않고, 지금처럼 작게 유지된다
-  (0.77 MB, UPX로 0.35 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
+  (0.78 MB, UPX로 0.35 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
   SFX 속의 아카이브를 고치지 못하게 하는 규칙도 둔다 (7절).
 
 ### 2.1 큰 설정은 파일로, 작은 설정은 toml로
@@ -307,6 +307,14 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
   명령줄의 `DIR`이면 묻지 않는다. `{temp}`가 만든 폴더를 쓰지 않게 되면 지운다. 4절은 GUI의 질문을
   GUI blob에 두었지만, 라이선스처럼 stub의 대화상자로 했다 (user32, 그리고 셸의 COM). stub: 765,952 ->
   771,072바이트 (UPX로 350,720).
-- 남은 것: stub 자신의 문구(버튼, 덮어쓰기 질문, `Extract to:`)의 언어, 모든 사용자의 바로가기,
+- stub 자신의 문구: aqr-l10n의 섹션 `sfx`의 세 문장(라이선스 질문, `Extract to:`, 덮어쓰기 질문)뿐이다.
+  언어는 `ui.title` 등과 같이 고른다 (`AQR_SFX_LANG`, 없으면 사용자 UI 언어). 버튼(확인, 취소, 예,
+  아니요)은 메시지 상자와 같은 user32의 문자열 표(800번부터: `MB_GetString`의 것)를 `LoadStringW`로
+  읽는다. 그래서 운영체제의 언어를 따른다. 라이선스는 Accept/Decline 대신 질문과 예/아니요로 묻고,
+  찾아보기 버튼은 `...`이다. aqr-l10n은 섹션마다 따로 된 표를 만들게 바꿨다 (stub에는 `sfx`의 표만
+  들어간다). `MB_GetString`을 `GetProcAddress`로 찾았을 때는 Defender가 시험의 SFX를
+  `Trojan:Win32/Bearfoos.A!ml`로 잡았다 (바로가기를 만드는 시험만, 매번). stub: 771,072 -> 781,312바이트
+  (UPX로 354,304).
+- 남은 것: 모든 사용자의 바로가기,
   `consoleAllocationPolicy`를 모르는 Windows에서의 `FreeConsole` 대체, 암호(GUI blob: 암호 묻기를
   stub의 대화상자로 할지는 그때 정한다).

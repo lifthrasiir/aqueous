@@ -127,6 +127,7 @@ fn run(ui: &mut Ui) -> Result<i32, String> {
     let settings = config.is_some();
     let config = config.unwrap_or_default();
     let lang = ui::language();
+    aqr_l10n::init(&[lang.as_str()]);
     ui.title = config.title.as_ref().map_or_else(program_name, |t| t.pick(&lang).to_string());
     ui.quiet = args.yes || config.quiet;
 

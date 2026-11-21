@@ -1,10 +1,13 @@
 //! What the program tells and asks: on standard error and input, or in message boxes where it
 //! has neither (of the subsystem of windows, or of the console run from no console with the
-//! manifest's `consoleAllocationPolicy`: docs/encrypted-sfx-design.md, 4).
+//! manifest's `consoleAllocationPolicy`: docs/encrypted-sfx-design.md, 4). Its words are
+//! aqr-l10n's section `sfx`, of the language [`aqr_l10n::init`] chose; the dialogs' buttons are
+//! the system's own (OK, Cancel, Yes, No: [`os_string`]), as its message boxes' are.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use aqr_l10n::sfx;
 use aqr_sfx::Answer;
 
 pub struct Ui {
@@ -56,7 +59,7 @@ impl Ui {
         }
         eprintln!("{}", text.trim_end());
         eprintln!();
-        self.confirm("Do you accept the license?")
+        self.confirm(sfx::accept_license())
     }
 
     /// Asks the settings' prompt `q` as [`Ui::confirm`], in a dialog under the banner where there
@@ -75,7 +78,7 @@ impl Ui {
         let answer = if self.gui {
             dialog(&self.title, &o, Asking::Path, self.banner.as_deref())?
         } else {
-            raw_line(&format!("Extract to [{o}]: "))?
+            raw_line(&format!("{} [{o}] ", sfx::extract_to()))?
         };
         let answer = answer.trim();
         Some(if answer.is_empty() { offered.to_path_buf() } else { PathBuf::from(answer) })
@@ -102,9 +105,8 @@ impl Ui {
 
     /// Asks whether `path`, there already, is written over (quit where standard input ends).
     pub fn overwrite(&mut self, path: &Path) -> Answer {
-        let p = path.display();
+        let q = sfx::replace(path.display());
         if self.gui {
-            let q = format!("{p}\n\nThere already: write it over?\n(Cancel stops.)");
             return match message(&self.title, &q, MB_YESNOCANCEL | MB_ICONQUESTION) {
                 IDYES => Answer::Yes,
                 IDNO => Answer::No,
@@ -112,9 +114,7 @@ impl Ui {
             };
         }
         loop {
-            match line(&format!("{p}: there already. Write it over? [y]es, [n]o, [a]lways, ne[v]er, [q]uit "))
-                .as_deref()
-            {
+            match line(&format!("{q} [y]es, [n]o, [a]lways, ne[v]er, [q]uit ")).as_deref() {
                 Some("y" | "yes") => return Answer::Yes,
                 Some("n" | "no") => return Answer::No,
                 Some("a" | "always") => return Answer::All,
@@ -200,34 +200,39 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> Opt
     let dword = |t: &mut Vec<u16>, v: u32| t.extend_from_slice(&[v as u16, (v >> 16) as u16]);
     let child = 0x4000_0000 | 0x1000_0000;
     let tab = 0x0001_0000;
+    // (MB_GetString's: OK 0, Cancel 1, Yes 5, No 6)
     let (yes, no) = match asking {
-        Asking::License => ("Accept", "Decline"),
-        Asking::Question => ("Yes", "No"),
-        Asking::Path => ("OK", "Cancel"),
+        Asking::License | Asking::Question => (os_string(5, "&Yes"), os_string(6, "&No")),
+        Asking::Path => (os_string(0, "OK"), os_string(1, "Cancel")),
     };
-    let mut items: Vec<(u32, [u16; 4], u16, u16, &str)> = vec![
+    let mut items: Vec<(u32, [u16; 4], u16, u16, String)> = vec![
         match asking {
             // EDIT: ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY, WS_VSCROLL, WS_BORDER
             Asking::License => {
-                (child | tab | 0x4 | 0x40 | 0x800 | 0x0020_0000 | 0x0080_0000, [7, 7, 306, 170], 100, 0x81, "")
+                (child | tab | 0x4 | 0x40 | 0x800 | 0x0020_0000 | 0x0080_0000, [7, 7, 306, 170], 100, 0x81, "".into())
             }
             // STATIC: SS_NOPREFIX (its height as its text measures)
-            Asking::Question => (child | 0x80, [7, 7, 266, 8], 100, 0x82, ""),
+            Asking::Question => (child | 0x80, [7, 7, 266, 8], 100, 0x82, "".into()),
             // EDIT: ES_AUTOHSCROLL, WS_BORDER
-            Asking::Path => (child | tab | 0x80 | 0x0080_0000, [0, 0, 1, 14], 100, 0x81, ""),
+            Asking::Path => (child | tab | 0x80 | 0x0080_0000, [0, 0, 1, 14], 100, 0x81, "".into()),
         },
         // BUTTON: BS_DEFPUSHBUTTON (where they go laid out)
         (child | tab | 0x1, [0, 0, 52, 15], 1, 0x80, yes),
         (child | tab, [0, 0, 52, 15], 2, 0x80, no),
     ];
-    if asking == Asking::Path {
-        // STATIC: SS_NOPREFIX; BUTTON
-        items.push((child | 0x80, [0, 0, 1, 8], 102, 0x82, "Extract to:"));
-        items.push((child | tab, [0, 0, 52, 15], 3, 0x80, "Browse..."));
+    match asking {
+        // STATIC: SS_NOPREFIX; BUTTON (Browse, of no words)
+        Asking::Path => {
+            items.push((child | 0x80, [0, 0, 1, 8], 102, 0x82, sfx::extract_to().into()));
+            items.push((child | tab, [0, 0, 20, 15], 3, 0x80, "...".into()));
+        }
+        // STATIC: SS_NOPREFIX (the question beside the buttons)
+        Asking::License => items.push((child | 0x80, [0, 0, 1, 8], 102, 0x82, sfx::accept_license().into())),
+        Asking::Question => {}
     }
     if banner.is_some() {
         // STATIC: SS_BITMAP | SS_CENTERIMAGE
-        items.push((child | 0xe | 0x200, [0, 0, 1, 1], 101, 0x82, ""));
+        items.push((child | 0xe | 0x200, [0, 0, 1, 1], 101, 0x82, "".into()));
     }
     // DLGTEMPLATE: WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_MODALFRAME | DS_SETFONT
     dword(&mut t, 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x800 | 0x80 | 0x40);
@@ -252,7 +257,7 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> Opt
         dword(&mut t, style);
         dword(&mut t, 0);
         t.extend_from_slice(&[x, y, w, h, id, 0xffff, class]);
-        t.extend(wide(label));
+        t.extend(wide(&label));
         t.push(0);
     }
     // (the template at 4 bytes)
@@ -388,8 +393,9 @@ unsafe fn lay_out(h: *mut c_void, s: &Shown) {
                 sys::MoveWindow(sys::GetDlgItem(h, 102), mx, top + my, width - 2 * mx, label, 0);
                 let y = top + my + label + units(0, 3).1;
                 let eh = units(0, 14).1;
-                sys::MoveWindow(body, mx, y + (bh - eh) / 2, width - 2 * mx - bw - gap, eh, 0);
-                sys::MoveWindow(sys::GetDlgItem(h, 3), width - mx - bw, y, bw, bh, 0);
+                let browse = units(20, 0).0;
+                sys::MoveWindow(body, mx, y + (bh - eh) / 2, width - 2 * mx - browse - gap, eh, 0);
+                sys::MoveWindow(sys::GetDlgItem(h, 3), width - mx - browse, y, browse, bh, 0);
                 top += label + units(0, 3).1 + bh;
                 0
             }
@@ -410,6 +416,10 @@ unsafe fn lay_out(h: *mut c_void, s: &Shown) {
         let y = top + my + height + my;
         sys::MoveWindow(sys::GetDlgItem(h, 2), width - mx - bw, y, bw, bh, 0);
         sys::MoveWindow(sys::GetDlgItem(h, 1), width - mx - 2 * bw - gap, y, bw, bh, 0);
+        if s.asking == Asking::License {
+            let lh = units(0, 8).1;
+            sys::MoveWindow(sys::GetDlgItem(h, 102), mx, y + (bh - lh) / 2, width - 2 * mx - 2 * bw - 2 * gap, lh, 0);
+        }
         // the window of that client, of the same centre
         let mut r = Rect { left: 0, top: 0, right: width, bottom: y + bh + my };
         sys::AdjustWindowRectEx(&mut r, sys::GetWindowLongW(h, -16) as u32, 0, sys::GetWindowLongW(h, -20) as u32);
@@ -425,6 +435,21 @@ unsafe fn lay_out(h: *mut c_void, s: &Shown) {
 #[cfg(not(windows))]
 fn dialog(_: &str, _: &str, _: Asking, _: Option<&[u8]>) -> Option<String> {
     None
+}
+
+/// A string of the system's in the user's language: of user32's string table, the message
+/// boxes' buttons (`MB_GetString`'s, at 800 on: OK 0, Cancel 1, Yes 5, No 6, with their
+/// mnemonics, `예(&Y)`); `english` where it has none.
+#[cfg(windows)]
+fn os_string(id: u32, english: &str) -> String {
+    let mut buf = [0u16; 64];
+    // SAFETY: a name NUL-terminated (user32, loaded: the program links it); into a buffer of
+    // its length
+    let n = unsafe {
+        let user32 = sys::GetModuleHandleW("user32".encode_utf16().chain([0]).collect::<Vec<u16>>().as_ptr());
+        sys::LoadStringW(user32, 800 + id, buf.as_mut_ptr(), buf.len() as i32)
+    };
+    if n > 0 { String::from_utf16_lossy(&buf[..n as usize]) } else { english.into() }
 }
 
 #[cfg(windows)]
@@ -474,6 +499,7 @@ mod sys {
         pub fn GetWindowLongW(window: *mut core::ffi::c_void, index: i32) -> i32;
         pub fn SendMessageW(window: *mut core::ffi::c_void, msg: u32, wp: usize, lp: isize) -> isize;
         pub fn GetSysColor(index: i32) -> u32;
+        pub fn LoadStringW(module: *mut core::ffi::c_void, id: u32, buf: *mut u16, n: i32) -> i32;
         pub fn GetDC(window: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
         pub fn ReleaseDC(window: *mut core::ffi::c_void, dc: *mut core::ffi::c_void) -> i32;
         pub fn DrawTextW(dc: *mut core::ffi::c_void, text: *const u16, n: i32, r: *mut Rect, format: u32) -> i32;
