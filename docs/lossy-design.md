@@ -284,7 +284,9 @@ JAR v1 서명, OOXML과 ODF의 XML 서명, git의 객체 id는 풀린 내용에 
   BLOCK_UNINIT 그룹은 빼고), HFS+(할당 파일). 각각 자기 파서로 읽고(aqr-disk의 파일 목록과는 독립), 빈 곳이 aqr-disk가
   읽는 파일의 범위와 겹치거나 구조가 조금이라도 이상하면(사슬의 고리, 두 번 쓰인 클러스터, 깨끗이 내려지지 않은 볼륨,
   재생할 저널, 다른 FAT 사본) 그대로 둔다. 컨테이너(VHD, VMDK, DMG)는 아직 하지 않는다. 시험은 `fsck_msdos`,
-  `fsck_exfat`, `fsck_hfs`(macOS), `e2fsck -fn`(Linux VM), olefile로 R을 읽는다. 64 MB의 FAT32(`newfs_msdos`, 6 MB 무작위
+  `fsck_exfat`, `fsck_hfs`(macOS), `e2fsck -fn`, `ntfsfix -n`(Linux VM), olefile로 R을 읽는다. NTFS는 `mkntfs`로 만든
+  64 MB 볼륨에 4 MB 무작위 파일 8개를 쓰고 4개를 지운 것이 `-5`에서 32,135,082 → 16,130,922바이트이고, R을 ntfs-3g로
+  올리면 파일 5개의 SHA-256이 X와 같다. 64 MB의 FAT32(`newfs_msdos`, 6 MB 무작위
   파일 8개 중 4개를 지움)는 `-5`에서 48,129,708 → 24,124,612바이트이다. asar는 머리의 파일들이 차지하지 않는 데이터를
   0으로 채운다(이 Mac의 앱 셋에는 그런 바이트가 없다). APFS, ISO는 하지 않는다.
 - **표시에 `hash`는 아직 넣지 않는다**(§8의 질문 2).
