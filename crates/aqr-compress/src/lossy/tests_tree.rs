@@ -139,7 +139,7 @@ fn gzip_streams_of_others_made_again() {
 fn specs() {
     let all = Lossy::parse("all").unwrap();
     assert_eq!(all.classes().collect::<Vec<_>>(), [Class::Coding, Class::Slack]);
-    assert_eq!(Lossy::parse("").unwrap(), Lossy::parse("coding").unwrap());
+    assert!(Lossy::parse("").is_err());
     let some = Lossy::parse("coding:zip,slack").unwrap();
     assert!(some.allows(Class::Coding, Format::Zip) && !some.allows(Class::Coding, Format::Gzip));
     assert!(some.allows(Class::Slack, Format::Mca));
@@ -154,9 +154,9 @@ fn specs() {
 #[test]
 fn mark_read_back() {
     for m in [
-        Mark { classes: vec!["coding".into()], size: 0 },
-        Mark { classes: vec!["coding".into(), "slack".into()], size: 1 << 40 },
-        Mark { classes: vec!["slack".into()], size: 300 },
+        Mark { classes: vec!["coding".into()], size: 0, hash: None },
+        Mark { classes: vec!["coding".into(), "slack".into()], size: 1 << 40, hash: Some([7; 32]) },
+        Mark { classes: vec!["slack".into()], size: 300, hash: Some([0xa5; 32]) },
     ] {
         let x = m.extension();
         assert_eq!(&x.0[..], KEY.as_bytes());
@@ -164,7 +164,19 @@ fn mark_read_back() {
     }
     // {0: ["coding"], 1: 5, 2: h'00'}: a hash skipped
     let v: Arc<[u8]> = [&[0xa3, 0x00, 0x81, 0x66][..], b"coding", &[0x01, 0x05, 0x02, 0x41, 0x00]].concat().into();
-    assert_eq!(Mark::of(&[(KEY.as_bytes().into(), v)]), Some(Mark { classes: vec!["coding".into()], size: 5 }));
+    assert_eq!(
+        Mark::of(&[(KEY.as_bytes().into(), v)]),
+        Some(Mark { classes: vec!["coding".into()], size: 5, hash: None })
+    );
+    // {0: ["slack"], 1: 1, 2: 18539(h'..')}: the hash as written, and of another tag skipped
+    let h = [0x11u8; 32];
+    let mut v = [&[0xa3, 0x00, 0x81, 0x65][..], b"slack", &[0x01, 0x01, 0x02, 0xd9, 0x48, 0x6b, 0x58, 0x20]].concat();
+    v.extend(h);
+    let m = Mark { classes: vec!["slack".into()], size: 1, hash: Some(h) };
+    assert_eq!(m.extension().1[..], v[..]);
+    assert_eq!(Mark::of(&[(KEY.as_bytes().into(), v.clone().into())]), Some(m));
+    v[13] = 0x4a;
+    assert_eq!(Mark::of(&[(KEY.as_bytes().into(), v.into())]).map(|m| m.hash), Some(None));
     for bad in [&[0xa1, 0x01, 0x05][..], &[0xa2, 0x00, 0x80, 0x01, 0x05], &[0xa2, 0x00, 0x81, 0x66]] {
         assert_eq!(Mark::of(&[(KEY.as_bytes().into(), bad.into())]), None, "{bad:?}");
     }
@@ -213,7 +225,9 @@ fn tree_of_files_rewritten() {
                 _ => {
                     assert_ne!(got[k], x);
                     let class = if c == 0 { "slack" } else { "coding" };
-                    assert_eq!(mark, Some(Mark { classes: vec![class.into()], size: x.len() as u64 }), "{segment}");
+                    let hash = sha2::Digest::finalize(<sha2::Sha512_256 as sha2::Digest>::new_with_prefix(x)).into();
+                    let want = Mark { classes: vec![class.into()], size: x.len() as u64, hash: Some(hash) };
+                    assert_eq!(mark, Some(want), "{segment}");
                     assert!(
                         matches!(&rewritten[c].lossy, Some(Rewrite::Made { len, .. }) if *len == got[k].len() as u64)
                     );

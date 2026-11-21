@@ -147,7 +147,7 @@ pub const OPTIONS: &[Opt] = &[
     opt(Some('D'), Some("dictionaries"), Value::None, "compress blocks alike with dictionaries"),
     opt(Some('A'), Some("archival"), Value::None, "mirror blocks for long-term preservation"),
     opt(None, Some("no-check"), Value::None, "do not decode the archive made to check it"),
-    opt(None, Some("lossy"), Value::None, "archive files as others read the same (coding, slack)"),
+    opt(None, Some("lossy"), Value::Of(|| of(&["coding", "slack", "all"])), "archive files as others read the same"),
     opt(None, Some("atomic"), Value::None, "make the archive whole or not at all"),
     opt(Some('a'), Some("append"), Value::None, "append the inputs to an archive"),
     opt(Some('s'), Some("sync"), Value::None, "append, and take away what the inputs do not have"),

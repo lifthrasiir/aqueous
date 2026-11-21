@@ -483,7 +483,11 @@ fn json(
         }
         // (archived as another file read the same: what was lost, and the size it was)
         if let Some(m) = aqr_compress::lossy::Mark::of(&x.extensions) {
-            e.insert("lossy".into(), json!({ "classes": m.classes, "size": m.size }));
+            let mut l = json!({ "classes": m.classes, "size": m.size });
+            if let Some(h) = m.hash {
+                l["sha512_256"] = h.iter().map(|b| format!("{b:02x}")).collect::<String>().into();
+            }
+            e.insert("lossy".into(), l);
         }
         entries.push(Value::Object(e));
     }
@@ -662,7 +666,7 @@ mod tests {
         assert_eq!(flags(&x, Some(true)), "x------");
         assert_eq!(flags(&x, Some(false)), "-------");
         assert_eq!(flags(&Extra { link_group: Some(3), win_attrs: Some(0x3), ..Extra::default() }, None), "--=-");
-        let mark = aqr_compress::lossy::Mark { classes: vec!["slack".into()], size: 9 };
+        let mark = aqr_compress::lossy::Mark { classes: vec!["slack".into()], size: 9, hash: None };
         assert_eq!(flags(&Extra { extensions: vec![mark.extension()], ..Extra::default() }, None), "---~");
         assert_eq!(win(&Extra { win_attrs: Some(0x21), ..Extra::default() }), "R--A--");
         assert_eq!(mac(&Extra { mac_flags: Some(0x8002), ..Extra::default() }), "uchg,hidden");

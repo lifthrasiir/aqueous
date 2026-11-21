@@ -80,6 +80,8 @@ aqr-zip = { workspace = true, default-features = true }
 aqr-zstd = { workspace = true, default-features = true }
 # (`lossy`'s checks: zlib-rs's inflate, apart from aqr-flate's)
 flate2.workspace = true
+# (`lossy`'s marks: the SHA-512/256 of the file as it was)
+sha2.workspace = true
 memmap2.workspace = true
 xxhash-rust = { workspace = true, features = ["xxh3", "xxh64"] }
 zstd.workspace = true

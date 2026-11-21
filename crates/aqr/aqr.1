@@ -441,7 +441,7 @@ Make an archive for long-term preservation: the blocks whose damage would lose m
 file mirrored, to be restored from as it is read.
 .It Fl -no-check
 Do not decode the archive made to check it.
-.It Fl -lossy Ns Op = Ns Ar spec
+.It Fl -lossy Ar spec
 Archive the files that a rewriter takes as other files that their readers take as the
 same, what only their encoders chose lost; each entry is marked so, with the size it was
 .Pf ( Fl t Fl v
@@ -453,9 +453,7 @@ is classes separated by commas, each
 or
 .Ar class Ns : Ns Ar format Ns Op + Ns Ar format ... ,
 or
-.Cm all ;
-by default
-.Cm coding .
+.Cm all .
 .Cm coding
 makes the DEFLATE streams of ZIP and gzip files that zlib did not write again by zlib,
 and the LZMA streams of .lzma, .xz and 7z files by an encoder of about

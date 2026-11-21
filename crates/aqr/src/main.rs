@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -K | -t] [-o OUTPUT] [-L] [-f] [--rm] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [-B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [--lossy[=SPEC]] [-P] [--stats[=FILE]] [-Z NAME[=VALUE]]... [-h]
+//! [-B SIZE] [-b SIZE] [-S SIZE] [-D] [-A] [--no-check] [--lossy SPEC] [-P] [--stats[=FILE]] [-Z NAME[=VALUE]]... [-h]
 //! INPUT [--rename TO]...
 //!
 //! aqr -d \[OPTIONS\] ARCHIVE [PATH [--rename TO]]...; aqr -d --each \[OPTIONS\] ARCHIVE...; aqr -t [-q | -v] ARCHIVE \[PATH\]...;
@@ -99,7 +99,7 @@
 //!   leaf blocks still whole are evaluated each alone, their files of no name written into
 //!   `#salvaged` (`leaf-N`) beside the tree extracted whole ([`salvage_unnamed`]). An archive
 //!   whose footer is made again after a segment not meant to be the last fails the run too.
-//! - `--lossy[=SPEC]`: compressing, the files that a rewriter of SPEC takes archived as other
+//! - `--lossy SPEC`: compressing, the files that a rewriter of SPEC takes archived as other
 //!   files that their readers take as the same ([`aqr_compress::lossy`], docs/lossy-design.md):
 //!   what only their encoders chose lost, each entry marked so (an extension key, with the size
 //!   it was; `-t -v` and `--json` tell it), `-a` and `-s` comparing a file with that size. A
@@ -443,10 +443,10 @@ Compression:
   -A, --archival        for long-term preservation: mirror the blocks whose damage
                         would lose more than a file, to be restored from as it is read
       --no-check        do not decode the archive made to check it
-      --lossy[=SPEC]    archive files as others read the same: what their encoders chose
+      --lossy SPEC      archive files as others read the same: what their encoders chose
                         lost (coding: streams made again; slack: unused bytes zeroed,
                         deleted data lost); SPEC is classes by commas, each CLASS or
-                        CLASS:FORMAT+..., or all (default coding)
+                        CLASS:FORMAT+..., or all
       --atomic          make the archive whole or not at all: stopped (Ctrl-C), nothing
                         kept, rather than what was written ended as an archive
   -a, --append          append the inputs to an archive (the first input, or -o): what

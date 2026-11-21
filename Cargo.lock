@@ -371,6 +371,7 @@ dependencies = [
  "libc",
  "liblzma",
  "memmap2",
+ "sha2",
  "xxhash-rust",
  "zstd",
 ]

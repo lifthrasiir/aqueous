@@ -113,10 +113,12 @@ pub struct Lossy {
 
 impl Lossy {
     /// `--lossy=SPEC`: classes separated by commas, each `CLASS` or `CLASS:FORMAT+FORMAT...`,
-    /// or `all` (every class); empty, `coding` (the only one losing no deleted data). A format
-    /// must be one that the class rewrites; a class rewriting nothing yet is turned down.
+    /// or `all` (every class); never empty, as what is lost is to be named. A format must be one
+    /// that the class rewrites; a class rewriting nothing yet is turned down.
     pub fn parse(spec: &str) -> Result<Lossy, String> {
-        let spec = if spec.is_empty() { "coding" } else { spec };
+        if spec.is_empty() {
+            return Err("--lossy: no class named (coding, slack, all)".into());
+        }
         let mut allowed: Vec<(Class, Option<Vec<Format>>)> = Vec::new();
         for item in spec.split(',') {
             let (name, formats) = match item.split_once(':') {
@@ -180,21 +182,28 @@ impl Lossy {
 /// The extension key of the [`Mark`] of an entry archived as another file than it was.
 pub const KEY: &str = "org.mearie.aqr.lossy";
 
+/// The CBOR tag of a SHA-512/256 digest (COSE's algorithm −17 as a tag of 18556 + the algorithm,
+/// RFC 9054's way: 18539), of [`Mark::hash`].
+pub const SHA512_256_TAG: u64 = 18539;
+
 /// The mark of an entry archived as another file than it was (docs/lossy-design.md §4.1):
-/// what was lost, and the size of the file it was. Its value is the CBOR map `{0: [+ tstr], 1:
-/// uint}` (classes by name, size), under [`KEY`].
+/// what was lost, the size of the file it was and its SHA-512/256. Its value is the CBOR map
+/// `{0: [+ tstr], 1: uint, ? 2: #6.18539(bstr .size 32)}` (classes by name, size, digest), under
+/// [`KEY`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mark {
     /// The classes of what was lost (their names: [`Class::name`], or of a later aqr).
     pub classes: Vec<String>,
     /// Bytes of the file as it was.
     pub size: u64,
+    /// The SHA-512/256 of the file as it was (none of a mark of another digest, or of none).
+    pub hash: Option<[u8; 32]>,
 }
 
 impl Mark {
     /// The extension key (`aqr_archive::Extension`) of the mark.
     pub fn extension(&self) -> aqr_archive::Extension {
-        let mut v = vec![0xa2, 0x00];
+        let mut v = vec![0xa2 + self.hash.is_some() as u8, 0x00];
         cbor_head(&mut v, 4, self.classes.len() as u64);
         for c in &self.classes {
             cbor_head(&mut v, 3, c.len() as u64);
@@ -202,6 +211,12 @@ impl Mark {
         }
         v.push(0x01);
         cbor_head(&mut v, 0, self.size);
+        if let Some(h) = &self.hash {
+            v.push(0x02);
+            cbor_head(&mut v, 6, SHA512_256_TAG);
+            cbor_head(&mut v, 2, 32);
+            v.extend_from_slice(h);
+        }
         (KEY.as_bytes().into(), v.into())
     }
 
@@ -217,7 +232,7 @@ impl Mark {
         if major != 5 {
             return None;
         }
-        let (mut classes, mut size) = (None, None);
+        let (mut classes, mut size, mut hash) = (None, None, None);
         for _ in 0..n {
             let (major, key) = cbor_read(v, &mut p)?;
             if major != 0 {
@@ -248,11 +263,20 @@ impl Mark {
                     }
                     size = Some(n);
                 }
-                // (`hash`, and what a later aqr adds: a byte string, skipped)
-                _ => {
-                    let (major, len) = cbor_read(v, &mut p)?;
+                // (`hash`, and what a later aqr adds: a byte string, or one of a tag, skipped but
+                // SHA-512/256's)
+                k => {
+                    let (mut major, mut len) = cbor_read(v, &mut p)?;
+                    let mut tag = None;
+                    if major == 6 {
+                        tag = Some(len);
+                        (major, len) = cbor_read(v, &mut p)?;
+                    }
                     if major != 2 {
                         return None;
+                    }
+                    if k == 2 && tag == Some(SHA512_256_TAG) && len == 32 {
+                        hash = Some(v.get(p..p + 32)?.try_into().ok()?);
                     }
                     p = p.checked_add(usize::try_from(len).ok()?)?;
                     if p > v.len() {
@@ -262,7 +286,7 @@ impl Mark {
             }
         }
         (p == v.len()).then_some(())?;
-        Some(Mark { classes: classes?, size: size? })
+        Some(Mark { classes: classes?, size: size?, hash })
     }
 }
 
@@ -441,7 +465,8 @@ pub(crate) fn rewrite(d: &[u8], lossy: &Lossy, opt: &Options) -> Option<(Rewrite
         }
     }
     let r = r.filter(|r| r[..] != d[..])?;
-    let made = Rewrite::Made { format, mark: Mark { classes, size: d.len() as u64 }, len: r.len() as u64 };
+    let hash = Some(sha2::Digest::finalize(<sha2::Sha512_256 as sha2::Digest>::new_with_prefix(d)).into());
+    let made = Rewrite::Made { format, mark: Mark { classes, size: d.len() as u64, hash }, len: r.len() as u64 };
     Some((made, Some(r)))
 }
 

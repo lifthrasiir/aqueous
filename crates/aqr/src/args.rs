@@ -364,7 +364,9 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "-D" | "--dictionaries" => a.opt.dictionaries = true,
             "-A" | "--archival" => a.opt.mirrors = true,
             "--no-check" => a.opt.verify = false,
-            "--lossy" => lossy = Some(inline.take().map(text).unwrap_or_default()),
+            "--lossy" => {
+                lossy = Some(text(value("--lossy (what may be lost: CLASS[,CLASS...], of coding, slack, all)")?))
+            }
             "--stats" => match inline.take() {
                 None => stats = true,
                 Some(to) => {
