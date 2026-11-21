@@ -249,6 +249,8 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
             seeds
         }
         "envelope" => envelopes(),
+        // (bytes that `src/formula.rs` makes formulas of)
+        "roundtrip" => (0..16).map(|i| (format!("noise-{i}"), noise(64 << (i % 8), i as u32))).collect(),
         "compress" => fixtures(),
         // (the fixtures recompressed, their archives made again of stored blocks: those whose
         // formula applies a module)

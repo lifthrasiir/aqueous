@@ -1,5 +1,6 @@
 //! Runs inputs through a target's body as plain code (no sanitizer, no coverage, checksums
-//! checked), timed: `replay TARGET FILE...`, to tell a slow input of the fuzzer's from one of
+//! checked), timed: `replay TARGET FILE...`
+//! (natives, compress, roundtrip), to tell a slow input of the fuzzer's from one of
 //! the code's.
 
 use std::time::Instant;
@@ -22,6 +23,24 @@ fn main() {
                 )
             }
             "natives" => format!("{:?}", aqr_archive::decode_value(&d, &aqr_fuzz::Known).map(|_| ())),
+            "roundtrip" => {
+                let mut u = libfuzzer_sys::arbitrary::Unstructured::new(&d);
+                let _ = u.choose_index(4);
+                let _ = u.arbitrary::<bool>();
+                let made = Instant::now();
+                let f = aqr_fuzz::formula::formula(&mut u);
+                let made = made.elapsed().as_secs_f64();
+                let r = Instant::now();
+                let want = f.as_ref().ok().and_then(aqr_fuzz::formula::reference);
+                let r = r.elapsed().as_secs_f64();
+                let all = Instant::now();
+                aqr_fuzz::formula::roundtrip(&d);
+                format!(
+                    "given back (made in {made:.3} s, of {} bytes, the reference's in {r:.3} s; all {:.3} s)",
+                    want.map_or(0, |w| w.len()),
+                    all.elapsed().as_secs_f64()
+                )
+            }
             _ => panic!("no target {t}"),
         };
         eprintln!("{f}: {:.2} s, {what}", start.elapsed().as_secs_f64());

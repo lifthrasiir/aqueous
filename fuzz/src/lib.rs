@@ -2,6 +2,8 @@
 //! ([`aqr_archive::stand_in`]), so that formulas applying modules are evaluated without the
 //! codecs (whose own decoding wants targets of its own).
 
+pub mod formula;
+
 use aqr_archive::{Decoded, Failure, Loaded, Natives, PartIn, PartOut, Runner, Wasm, natives};
 use aqr_formula::{Apply, Error, Module, Result, Shared};
 
@@ -42,7 +44,13 @@ impl aqr_archive::Modules for Toys {
         match a.module.name {
             "rev" => Ok(inputs.concat().into_iter().rev().collect()),
             "copy" => Ok(inputs.concat()),
-            _ => Err(Error::new("not a toy of one output")),
+            // (of one output, as the encoder writes it)
+            "cut" => {
+                let mut d = inputs.concat();
+                d.truncate(a.len as usize);
+                Ok(d)
+            }
+            _ => Err(Error::new("not a toy")),
         }
     }
 

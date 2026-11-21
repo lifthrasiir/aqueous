@@ -18,6 +18,14 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   chunk that does not authenticate is decrypted without it and taken to where its tag's first
   byte is even, so that a mutation of a chunk is one of the payload at the same place, and the
   chunks of the others are the ones not trusted.
+- `roundtrip`: a formula made of the input (`src/formula.rs`: up to 3 streams of each kind, up
+  to 3 applications of several outputs, of `cut`, a node or a patch split, and a root of slices,
+  concatenations, packs, applications of `rev` and `copy`, outputs and patches, each output
+  placed once; now and then a slice out of its stream or an application of another size)
+  archived by the encoder (stored, zstd 1 and 3, low) and decoded again, whole and streamed: where
+  the target's reference evaluator, a recursive walk of its own (not aqr-archive's), gives an
+  output, the encoder has to take the formula and the archive has to give it back. Its seeds are
+  only bytes to make formulas of.
 - `natives`: an archive of recompressed files decoded by aqr-decompress's native modules (a
   module not known fails: no Wasmtime), so each module's decoding of the params and streams an
   archive tells. Its seeds are the codecs' fixtures (`codecs/*/tests/data`, at most 256 KiB)
@@ -35,7 +43,7 @@ data decoded, mutated by libFuzzer's mutator and the block made again of it (Zst
 blocks after it stay where the footer and the metadata tell; where it is longer than it was, and
 otherwise, the input is mutated as it is.
 
-In `decode`, `salvage` and `envelope`, the modules are toys known by their stand-ins (`src/lib.rs`: `rev`, `cut` of several outputs,
+In `decode`, `salvage`, `envelope` and `roundtrip`, the modules are toys known by their stand-ins (`src/lib.rs`: `rev`, `cut` of several outputs,
 `copy` as a part module), so that formulas applying modules are evaluated without the codecs.
 The global allocator is aqr-testkit's `Refusing` at 1 GiB: a reservation tried for more goes
 on without it, as on an exhausted heap, and an allocation that cannot fail aborts, which the
@@ -60,9 +68,9 @@ inventory's constructors in `__mod_init_func`, which ld then refuses ("initializ
 no target"). Crashes go to `artifacts/TARGET/`; one is run again by
 `target/aarch64-apple-darwin/release/TARGET FILE` (with `ASAN_OPTIONS=allocator_may_return_null=1`,
 as `run.sh` sets it), and timed as plain code by `cargo +nightly run --release --bin replay --
-TARGET FILE...` (natives, compress): instrumented, `compress` is about 12 times as slow (a seed
+TARGET FILE...` (natives, compress, roundtrip): instrumented, `compress` is about 12 times as slow (a seed
 of 3.7 s, `aqr-egg-azonumbers.egg`, took 44 s). `corpus/`, `artifacts/` and `target/` are not committed.
 
-Left: that mutator of `envelope`'s payloads (decrypted, mutated so and sealed again), the round
-trip of formulas made by `arbitrary` through the encoder, and native modules against Wasm on the
-same inputs.
+Left: that mutator of `envelope`'s payloads (decrypted, mutated so and sealed again); in
+`roundtrip`, trees of several leaves (batches, the dictionaries trained for them), resources and
+the encoder's other options; native modules against Wasm on the same inputs.
