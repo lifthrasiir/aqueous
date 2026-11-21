@@ -6,7 +6,7 @@ use std::process::{Command, Output, Stdio};
 
 use aqr_archive::{Encoder, Entry, EntryNode, Extra, Leaf, Level, Segment, Tree};
 use aqr_formula::Formula;
-use aqr_sfx::config::{Config, Overwrite, Run, Text, Window};
+use aqr_sfx::config::{Config, Overwrite, Text};
 
 /// An archive of `files` (each its path by `/` and its bytes; the directories made of their
 /// paths), stored.
@@ -285,6 +285,8 @@ fn version_not_known() {
 #[cfg(windows)]
 #[test]
 fn program_run() {
+    use aqr_sfx::config::{Run, Window};
+
     let d = scratch("run");
     let cmd = std::fs::read(std::env::var("SystemRoot").unwrap() + r"\System32\cmd.exe").unwrap();
     let a = archive(&[("bin/cmd.exe", cmd), ("bin/data.txt", b"data".to_vec()), (".aqr/sfx/sfx.toml", vec![])]);
