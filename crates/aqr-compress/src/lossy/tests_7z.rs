@@ -42,7 +42,7 @@ fn have_7z() -> bool {
 
 /// `coding`.
 fn coding() -> Lossy {
-    Lossy::parse("coding").unwrap()
+    parse_any("coding").unwrap()
 }
 
 /// The directory of a test, removed with it.

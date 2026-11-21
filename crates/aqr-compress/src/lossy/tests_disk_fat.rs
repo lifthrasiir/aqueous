@@ -37,7 +37,7 @@ fn zeros(d: &[u8]) -> usize {
 }
 
 fn rewritten(x: &[u8]) -> Option<(Rewrite, Option<Vec<u8>>)> {
-    rewrite(x, &Lossy::parse("slack").unwrap(), &Options::default())
+    rewrite(x, &parse_any("slack").unwrap(), &Options::default())
 }
 
 /// `x` with its free bytes filled with a pattern, as the stale data of deleted files.

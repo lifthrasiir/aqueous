@@ -49,8 +49,7 @@ fn region_slack_zeroed() {
     let x = region(0xa5);
     assert_eq!(detect(&x), Some(Format::Mca));
     let opt = Options::default();
-    let Some((Rewrite::Made { format, mark, len }, Some(r))) = rewrite(&x, &Lossy::parse("slack").unwrap(), &opt)
-    else {
+    let Some((Rewrite::Made { format, mark, len }, Some(r))) = rewrite(&x, &parse_any("slack").unwrap(), &opt) else {
         panic!("rewritten")
     };
     assert_eq!(
@@ -63,9 +62,9 @@ fn region_slack_zeroed() {
     assert_eq!(r, region(0));
     check::mca(&x, &r).unwrap();
     // (none to zero: nothing rewritten)
-    assert!(rewrite(&r, &Lossy::parse("slack").unwrap(), &opt).is_none());
+    assert!(rewrite(&r, &parse_any("slack").unwrap(), &opt).is_none());
     // (not taken by coding alone)
-    assert!(rewrite(&x, &Lossy::parse("coding").unwrap(), &opt).is_none());
+    assert!(rewrite(&x, &parse_any("coding").unwrap(), &opt).is_none());
     // a check of its own: a chunk changed, or slack made other than zeros, fails
     for (at, what) in
         [(2 * 4096 + 100, "a chunk changed"), (4 * 4096 + 7, "but to zeros"), (6 * 4096 + 3, "but to zeros")]
@@ -97,7 +96,7 @@ fn gzip_streams_of_others_made_again() {
     let (ma, mb) = (member(&a, "libdeflate:level=9"), member(&b, "zlib:level=9"));
     let x = [ma.clone(), mb.clone()].concat();
     let opt = super::tests::high();
-    let Some((Rewrite::Made { mark, .. }, Some(r))) = rewrite(&x, &Lossy::parse("coding:gzip").unwrap(), &opt) else {
+    let Some((Rewrite::Made { mark, .. }, Some(r))) = rewrite(&x, &parse_any("coding:gzip").unwrap(), &opt) else {
         panic!("rewritten")
     };
     assert_eq!((&mark.classes[..], mark.size), (&["coding".to_string()][..], x.len() as u64));
@@ -112,10 +111,9 @@ fn gzip_streams_of_others_made_again() {
     std::io::Read::read_to_end(&mut flate2::read::MultiGzDecoder::new(&r[..]), &mut got).unwrap();
     assert_eq!(got, [&a[..], &b[..]].concat());
     // (zlib's alone: nothing to change)
-    assert!(rewrite(&mb, &Lossy::parse("coding").unwrap(), &opt).is_none());
+    assert!(rewrite(&mb, &parse_any("coding").unwrap(), &opt).is_none());
     // (below level 7, any stream but zlib's at level 6 made again: zlib's at 9 too)
-    let Some((Rewrite::Made { .. }, Some(r5))) = rewrite(&x, &Lossy::parse("coding").unwrap(), &Options::default())
-    else {
+    let Some((Rewrite::Made { .. }, Some(r5))) = rewrite(&x, &parse_any("coding").unwrap(), &Options::default()) else {
         panic!("rewritten at the default level")
     };
     check::gzip(&x, &r5).unwrap();
@@ -123,10 +121,10 @@ fn gzip_streams_of_others_made_again() {
     assert_eq!(r5.len(), 2 * (16 + 8) + stream.len() + b6.len());
     // (below level 4, where DEFLATE streams are kept as they are: kept, told why)
     let low = Options { level: aqr_archive::Level::LOW, ..Options::default() };
-    assert!(matches!(rewrite(&x, &Lossy::parse("coding").unwrap(), &low), Some((Rewrite::Kept { .. }, None))));
+    assert!(matches!(rewrite(&x, &parse_any("coding").unwrap(), &low), Some((Rewrite::Kept { .. }, None))));
     // (data after the members: kept as it is, told why)
     let tail = [x.clone(), vec![0; 16]].concat();
-    assert!(matches!(rewrite(&tail, &Lossy::parse("coding").unwrap(), &opt), Some((Rewrite::Kept { .. }, None))));
+    assert!(matches!(rewrite(&tail, &parse_any("coding").unwrap(), &opt), Some((Rewrite::Kept { .. }, None))));
     // a check of its own: other data, header or trailer fails
     for at in [3, 40, r.len() - mb.len() - 3] {
         let mut bad = r.clone();
@@ -137,17 +135,17 @@ fn gzip_streams_of_others_made_again() {
 
 #[test]
 fn specs() {
-    let all = Lossy::parse("all").unwrap();
+    let all = parse_any("all").unwrap();
     assert_eq!(all.classes().collect::<Vec<_>>(), [Class::Coding, Class::Slack]);
-    assert!(Lossy::parse("").is_err());
-    let some = Lossy::parse("coding:zip,slack").unwrap();
+    assert!(parse_any("").is_err());
+    let some = parse_any("coding:zip,slack").unwrap();
     assert!(some.allows(Class::Coding, Format::Zip) && !some.allows(Class::Coding, Format::Gzip));
     assert!(some.allows(Class::Slack, Format::Mca));
-    assert_eq!(Lossy::parse("coding:zip,coding").unwrap(), Lossy::parse("coding").unwrap());
-    let both = Lossy::parse("coding:zip,coding:gzip").unwrap();
+    assert_eq!(parse_any("coding:zip,coding").unwrap(), parse_any("coding").unwrap());
+    let both = parse_any("coding:zip,coding:gzip").unwrap();
     assert!(both.allows(Class::Coding, Format::Zip) && both.allows(Class::Coding, Format::Gzip));
     for bad in ["cod", "coding:png", "slack:zip", "layout", "all:zip", "coding:"] {
-        assert!(Lossy::parse(bad).is_err(), "{bad}");
+        assert!(parse_any(bad).is_err(), "{bad}");
     }
 }
 
@@ -206,7 +204,7 @@ fn tree_of_files_rewritten() {
     };
     let inputs: Vec<Input> = (0..3).map(|c| Input { name: names[c].as_bytes(), data: datas[c] }).collect();
     for segment in [0, 1] {
-        let opt = Options { threads: 2, lossy: Some(Lossy::parse("all").unwrap()), segment, ..super::tests::high() };
+        let opt = Options { threads: 2, lossy: Some(parse_any("all").unwrap()), segment, ..super::tests::high() };
         let a = compress_tree(&tree, &inputs, &opt);
         assert!(a.report.unverified.is_empty());
         let aqr_archive::Value::Tree(got_tree, got) = aqr_decompress::decompress_value(&a.archive, 1).unwrap() else {
@@ -267,7 +265,7 @@ fn default_level_pays() {
         };
         let inputs = [Input { name: b"a.txt.gz", data: &x }];
         let size = |lossy: Option<&str>| {
-            let opt = Options { threads: 2, lossy: lossy.map(|l| Lossy::parse(l).unwrap()), ..Options::default() };
+            let opt = Options { threads: 2, lossy: lossy.map(|l| parse_any(l).unwrap()), ..Options::default() };
             let a = compress_tree(&tree, &inputs, &opt);
             assert!(a.report.unverified.is_empty());
             // (the file's bytes: not the module blocks, which an archive of many has once)
@@ -294,7 +292,7 @@ fn database_with_journal_kept() {
         let names = [&b"a.db"[..], journal.as_bytes()];
         let datas = [&db[..], data];
         let inputs: Vec<Input> = (0..2).map(|c| Input { name: names[c], data: datas[c] }).collect();
-        let opt = Options { lossy: Some(Lossy::parse("slack").unwrap()), ..Options::default() };
+        let opt = Options { lossy: Some(parse_any("slack").unwrap()), ..Options::default() };
         let rw = Rewriting::new(&inputs[..], &opt);
         let r = crate::Source::read(&rw, 0).unwrap();
         assert_eq!(r[..], db[..]);
@@ -327,7 +325,7 @@ fn rewritten_larger_made_again() {
         ..Default::default()
     };
     let inputs: Vec<Input> = (0..2).map(|c| Input { name: names[c].as_bytes(), data: &x }).collect();
-    let lossy = Lossy::parse("coding").unwrap();
+    let lossy = parse_any("coding").unwrap();
     let opt = Options { threads: 2, lossy: Some(lossy), ..super::tests::high() };
     let a = compress_tree(&tree, &inputs, &opt);
     let plain = compress_tree(&tree, &inputs, &Options { lossy: None, ..opt.clone() });
@@ -345,4 +343,21 @@ fn rewritten_larger_made_again() {
     };
     assert!(got.iter().all(|g| g[..] == x[..]));
     assert!(t.entries.iter().all(|e| Mark::of(&e.extra.extensions).is_none()));
+}
+
+/// `coding` takes no file under [`CODING_MIN`] (64 KiB): its gain is next to nothing, and its
+/// batch would mostly be made twice. `slack` takes them all.
+#[test]
+fn coding_min() {
+    let small = member(&text(30_000, 9), "libdeflate:level=9");
+    assert!(small.len() < 64 << 10);
+    let opt = super::tests::high();
+    assert!(rewrite(&small, &Lossy::parse("coding").unwrap(), &opt).is_none());
+    assert!(matches!(rewrite(&small, &parse_any("coding").unwrap(), &opt), Some((Rewrite::Made { .. }, _))));
+    let large = member(&text(1_000_000, 9), "libdeflate:level=9");
+    assert!(large.len() >= 64 << 10);
+    assert!(matches!(rewrite(&large, &Lossy::parse("coding").unwrap(), &opt), Some((Rewrite::Made { .. }, _))));
+    let region = region(0x11);
+    assert!(region.len() < 64 << 10);
+    assert!(matches!(rewrite(&region, &Lossy::parse("slack").unwrap(), &opt), Some((Rewrite::Made { .. }, _))));
 }

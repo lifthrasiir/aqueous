@@ -216,7 +216,7 @@ fn read(d: &[u8]) -> Vec<(String, Vec<u8>)> {
 }
 
 fn slack(d: &[u8]) -> Option<(Rewrite, Option<Vec<u8>>)> {
-    rewrite(d, &Lossy::parse("slack").unwrap(), &Options::default())
+    rewrite(d, &parse_any("slack").unwrap(), &Options::default())
 }
 
 fn files(d: &[u8]) -> Vec<(Vec<u8>, Vec<Range<usize>>)> {

@@ -22,6 +22,8 @@ pub(super) fn coding(d: &[u8], _: &Options) -> Result<Option<Vec<u8>>, String> {
         return Err("data after the stream".into());
     }
     let mut r = d[..alone::HEADER].to_vec();
+    aqr_common::allowance::check();
     r.extend(canonical::lzma(&dec.data, h.props, h.dict, dec.marker));
+    aqr_common::allowance::check();
     Ok((r[..] != d[..]).then_some(r))
 }

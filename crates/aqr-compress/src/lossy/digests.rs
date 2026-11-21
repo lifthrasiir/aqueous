@@ -76,13 +76,13 @@ pub(super) fn forms(h: &[u8]) -> [Vec<u8>; 5] {
     [h.to_vec(), hex(b"0123456789abcdef"), hex(b"0123456789ABCDEF"), base64(h, STD), base64(h, URL)]
 }
 
-/// The class and format of content `head` that `lossy` lets a rewriter take, if any.
-fn taken(head: &[u8], lossy: &Lossy, opt: &Options) -> Option<(Format, Class)> {
+/// The class and format of content `head` (of `len` bytes) that `lossy` lets a rewriter take, if any.
+fn taken(head: &[u8], len: u64, lossy: &Lossy, opt: &Options) -> Option<(Format, Class)> {
     let format = detect(head)?;
     let w = REWRITERS.iter().find(|w| {
         w.format == format
             && lossy.allows(w.class, format)
-            && (w.class != Class::Coding || crate::format_on(format, opt))
+            && (w.class != Class::Coding || lossy.codes(format, len, opt))
     })?;
     Some((format, w.class))
 }
@@ -94,8 +94,9 @@ pub(crate) fn referenced<S: Source + ?Sized>(src: &S, opt: &Options) -> Vec<(usi
     let _s = aqr_common::trace::span("lossy:digests");
     let n = src.len();
     let heads = aqr_common::pool::par_map(n, opt.threads, |c| src.read_range(c, 0..HEAD).ok());
-    let candidates: Vec<(usize, Format, Class)> =
-        (0..n).filter_map(|c| heads[c].as_deref().and_then(|h| taken(h, lossy, opt)).map(|(f, k)| (c, f, k))).collect();
+    let candidates: Vec<(usize, Format, Class)> = (0..n)
+        .filter_map(|c| heads[c].as_deref().and_then(|h| taken(h, src.size(c), lossy, opt)).map(|(f, k)| (c, f, k)))
+        .collect();
     if candidates.is_empty() {
         return Vec::new();
     }

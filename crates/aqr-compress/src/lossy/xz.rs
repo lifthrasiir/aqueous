@@ -167,7 +167,9 @@ pub(super) fn coding(d: &[u8], _: &Options) -> Result<Option<Vec<u8>>, String> {
                 data.extend_from_slice(&s.data);
             }
             drop(dec);
+            aqr_common::allowance::check();
             let stream = canonical::lzma2(&data, props, dict);
+            aqr_common::allowance::check();
             drop(data);
             let hdr = write_header(&h, h.packed.map(|_| stream.len() as u64));
             // the block as it was: its padding (zeros) and check

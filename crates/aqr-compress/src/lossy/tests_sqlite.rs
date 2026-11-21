@@ -67,7 +67,7 @@ fn zeros(d: &[u8]) -> usize {
 }
 
 fn rewritten(x: &[u8]) -> Option<(Rewrite, Option<Vec<u8>>)> {
-    rewrite(x, &Lossy::parse("slack").unwrap(), &Options::default())
+    rewrite(x, &parse_any("slack").unwrap(), &Options::default())
 }
 
 /// R of `x`, checked as `sqlite3` reads them the same.

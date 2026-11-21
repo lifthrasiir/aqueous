@@ -272,5 +272,5 @@ fn xz_block_header_with_sizes() {
 
 /// `coding`.
 fn coding() -> Lossy {
-    Lossy::parse("coding").unwrap()
+    parse_any("coding").unwrap()
 }

@@ -51,7 +51,7 @@ fn with(other: Option<(&str, Vec<u8>)>) -> (Rewrite, bool) {
         ..Default::default()
     };
     let inputs: Vec<Input> = (0..names.len()).map(|c| Input { name: &names[c], data: &datas[c] }).collect();
-    let opt = Options { threads: 2, lossy: Some(Lossy::parse("coding").unwrap()), ..super::tests::high() };
+    let opt = Options { threads: 2, lossy: Some(parse_any("coding").unwrap()), ..super::tests::high() };
     let a = compress_tree(&tree, &inputs, &opt);
     let aqr_archive::Value::Tree(_, got) = aqr_decompress::decompress_value(&a.archive, 1).unwrap() else {
         panic!("a tree")

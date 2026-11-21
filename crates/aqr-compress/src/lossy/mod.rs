@@ -111,6 +111,8 @@ const REWRITERS: &[Rewriter] = &[
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lossy {
     allowed: Vec<(Class, Option<Vec<Format>>)>,
+    /// The least bytes of a file `coding` rewrites ([`CODING_MIN`] as it was parsed).
+    coding_min: usize,
 }
 
 impl Lossy {
@@ -167,7 +169,18 @@ impl Lossy {
             }
         }
         allowed.sort_by_key(|a| a.0);
-        Ok(Lossy { allowed })
+        Ok(Lossy { allowed, coding_min: CODING_MIN.get() })
+    }
+
+    /// The same, `coding` rewriting files of `n` bytes or more.
+    pub fn with_coding_min(self, n: usize) -> Lossy {
+        Lossy { coding_min: n, ..self }
+    }
+
+    /// Whether `coding` rewrites a file of `format` of `len` bytes: where it is recompressed at all
+    /// (else its streams are kept), of [`CODING_MIN`] bytes or more.
+    pub(crate) fn codes(&self, format: Format, len: u64, opt: &Options) -> bool {
+        crate::format_on(format, opt) && len >= self.coding_min as u64
     }
 
     /// Whether files of `format` may lose what `class` does.
@@ -338,6 +351,11 @@ aqr_common::zopt! {
     /// The most bytes of data of a DEFLATE stream made again ([`redeflate`]): one of more is kept
     /// as it is (its data held whole twice, with the stream made of it).
     static MAX_DATA: Opt<usize> = Opt::size("lossy:max-data", 1 << 30, "most bytes of a DEFLATE stream's data made again");
+    /// The least bytes of a file that `coding` rewrites ([`rewrite`]). A smaller one gained next to
+    /// nothing and was mostly made again as it was, its batch made twice: of 10gb at -5 with
+    /// `--lossy all`, the 292 files made again as they were had medians of 504 bytes (gzip), 19 KB
+    /// (ZIP) and 45 KB (LZMA), and the time doubled (169.8 -> 351.8 s).
+    static CODING_MIN: Opt<usize> = Opt::size("lossy:coding-min", 64 << 10, "least bytes of a file coding rewrites");
 }
 
 /// Bytes of record of a DEFLATE stream (by aqr-flate) at most, besides [`RECORD_PER`]-ths of
@@ -409,8 +427,10 @@ fn redeflate(raw: &[u8], opt: &Options) -> Option<Vec<u8>> {
         ..aqr_flate::Options::for_profile(opt.flate_profile().max(aqr_flate::ADAPTIVE)).ok()?
     };
     let parsed = aqr_flate::Parsed::new(raw, &fopt).ok()?;
+    aqr_common::allowance::check();
     if opt.flate_profile() < aqr_flate::ADAPTIVE {
         let new = aqr_flate::zlib::compress(parsed.data(), PARAMS)?;
+        aqr_common::allowance::check();
         return (new[..] != raw[..]).then_some(new);
     }
     let (data, was, _) = parsed.deconstruct_bytes(&fopt, &aqr_flate::Hints::default()).ok()?;
@@ -423,6 +443,11 @@ fn redeflate(raw: &[u8], opt: &Options) -> Option<Vec<u8>> {
     let (_, is, _) = aqr_flate::Parsed::new(&new, &fopt).ok()?.deconstruct_bytes(&fopt, &hints).ok()?;
     (is.len() < was.len() && new[..] != raw[..]).then_some(new)
 }
+
+/// Bytes of a file from which on it is rewritten alone ([`LARGE_ONE`]).
+const LARGE: usize = 32 << 20;
+/// Held by the rewriting of a file of [`LARGE`] bytes or more.
+static LARGE_ONE: Mutex<()> = Mutex::new(());
 
 /// What became of a content that a rewriter of [`Options::lossy`] takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,13 +469,17 @@ pub(crate) fn rewrite(d: &[u8], lossy: &Lossy, opt: &Options) -> Option<(Rewrite
     let mut r: Option<Vec<u8>> = None;
     let mut classes = Vec::new();
     for w in REWRITERS.iter().filter(|w| w.format == format && lossy.allows(w.class, format)) {
-        // (coding only where the format is recompressed at all: else its streams are kept)
-        if w.class == Class::Coding && !crate::format_on(format, opt) {
+        // (coding only where the format is recompressed at all, else its streams are kept; and of
+        // files of [`CODING_MIN`] bytes or more)
+        if w.class == Class::Coding && !lossy.codes(format, d.len() as u64, opt) {
             continue;
         }
         let x = r.as_deref().unwrap_or(d);
-        let made = std::panic::catch_unwind(|| (w.rewrite)(x, opt))
-            .unwrap_or_else(|e| Err(format!("rewriter panicked: {}", panic_text(&e))));
+        // (within the heap a recompression may take, as recompressions are: given up past it)
+        let limit = aqr_common::budget::attempt_limit();
+        let made = std::panic::catch_unwind(|| aqr_common::allowance::attempt(limit, || (w.rewrite)(x, opt)))
+            .unwrap_or_else(|e| Ok(Err(format!("rewriter panicked: {}", panic_text(&e)))))
+            .unwrap_or_else(|e| Err(format!("given up past {} of heap", aqr_common::zopt::show_size(e.used as usize))));
         match made {
             Ok(None) => {}
             Ok(Some(y)) => {
@@ -577,6 +606,10 @@ impl<S: Source + ?Sized> Source for Rewriting<'_, S> {
             return Ok(r);
         }
         let d = self.src.read(c)?;
+        // (one large file rewritten at a time: their heap is several times their data, which the
+        // batch's admission does not count, as zlib's emulation of enwik9.zip's 1 GB takes 3.9 GB;
+        // four of them at once took 8.47 GB of 10gb's run)
+        let _one = (d.len() >= LARGE).then(|| LARGE_ONE.lock().unwrap_or_else(|e| e.into_inner()));
         let _s = aqr_common::trace::span("lossy");
         if detect(&d) == Some(Format::Sqlite)
             && lossy.allows(Class::Slack, Format::Sqlite)
@@ -650,3 +683,9 @@ mod tests_disk_ntfs;
 mod tests_disk_ole;
 #[cfg(test)]
 mod tests_signatures;
+
+/// `Lossy::parse(spec)` for the tests: `coding` of files of any size (their files are small).
+#[cfg(test)]
+pub(super) fn parse_any(spec: &str) -> Result<Lossy, String> {
+    Lossy::parse(spec).map(|l| l.with_coding_min(0))
+}

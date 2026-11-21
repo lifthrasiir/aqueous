@@ -79,11 +79,14 @@ fn decode(c: &Coder, packed: &[u8], size: u64) -> Result<Layer, String> {
 
 /// The stream of `c` made again of `l`.
 fn remake(c: &Coder, l: &Layer) -> Vec<u8> {
-    if c.id == header::LZMA {
+    aqr_common::allowance::check();
+    let s = if c.id == header::LZMA {
         canonical::lzma(&l.data, l.props, l.dict, false)
     } else {
         canonical::lzma2(&l.data, l.props, l.dict)
-    }
+    };
+    aqr_common::allowance::check();
+    s
 }
 
 /// The NUMBER `v`, as it is in the header (the shortest).

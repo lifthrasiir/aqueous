@@ -131,7 +131,7 @@ fn put32(d: &mut [u8], p: usize, v: usize) {
 }
 
 fn rewritten(x: &[u8]) -> Option<(Rewrite, Option<Vec<u8>>)> {
-    rewrite(x, &Lossy::parse("slack").unwrap(), &Options::default())
+    rewrite(x, &parse_any("slack").unwrap(), &Options::default())
 }
 
 /// Fills the free ranges of `x` with a pattern; their total.

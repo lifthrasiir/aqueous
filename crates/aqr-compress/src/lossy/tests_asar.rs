@@ -36,15 +36,14 @@ fn bytes_of_no_file_zeroed() {
     let files: [(&str, &[u8], bool); 3] = [("a", b"alpha alpha", false), ("b", b"beta", true), ("c", b"gamma!", false)];
     let x = asar(&files, b"stale");
     assert!(aqr_asar::starts(&x));
-    let Some((Rewrite::Made { format, .. }, Some(r))) =
-        rewrite(&x, &Lossy::parse("slack").unwrap(), &Options::default())
+    let Some((Rewrite::Made { format, .. }, Some(r))) = rewrite(&x, &parse_any("slack").unwrap(), &Options::default())
     else {
         panic!("rewritten")
     };
     assert_eq!(format, Format::Asar);
     assert_eq!(r, asar(&files, b"\0\0\0\0\0"));
     check::asar(&x, &r).unwrap();
-    assert!(rewrite(&r, &Lossy::parse("slack").unwrap(), &Options::default()).is_none());
+    assert!(rewrite(&r, &parse_any("slack").unwrap(), &Options::default()).is_none());
     // a file's byte, the header, a byte of no file made other than zero
     let at_a = r.windows(11).position(|w| w == b"alpha alpha").unwrap();
     for (at, what) in [(at_a, "a file"), (20, "header"), (at_a - 1, "but to zeros")] {
@@ -57,7 +56,7 @@ fn bytes_of_no_file_zeroed() {
     let at = bad.windows(12).position(|w| w == b"\"offset\":\"5\"").unwrap();
     bad[at + 10] = b'x';
     assert!(matches!(
-        rewrite(&bad, &Lossy::parse("slack").unwrap(), &Options::default()),
+        rewrite(&bad, &parse_any("slack").unwrap(), &Options::default()),
         Some((Rewrite::Kept { .. }, None))
     ));
 }

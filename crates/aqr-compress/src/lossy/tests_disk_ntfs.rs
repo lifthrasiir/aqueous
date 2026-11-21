@@ -62,7 +62,7 @@ fn dirty(d: &[u8]) -> (Vec<u8>, usize) {
 }
 
 fn slack() -> Lossy {
-    Lossy::parse("slack").unwrap()
+    parse_any("slack").unwrap()
 }
 
 #[test]
