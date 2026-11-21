@@ -327,6 +327,8 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
   들어간다). `MB_GetString`을 `GetProcAddress`로 찾았을 때는 Defender가 시험의 SFX를
   `Trojan:Win32/Bearfoos.A!ml`로 잡았다 (바로가기를 만드는 시험만, 매번). stub: 771,072 -> 781,312바이트
   (UPX로 354,304).
-- 남은 것: 모든 사용자의 바로가기,
-  `consoleAllocationPolicy`를 모르는 Windows에서의 `FreeConsole` 대체, 암호(GUI blob: 암호 묻기를
-  stub의 대화상자로 할지는 그때 정한다).
+- 콘솔 버리기: stub은 시작할 때 자기 콘솔에 자기 프로세스뿐이고 표준 오류가 그 콘솔이면(Windows가 이
+  프로그램만을 위해 만든 콘솔: `consoleAllocationPolicy`를 모르는 Windows 11 24H2 이전, 또는 manifest가 없는
+  설정 없는 SFX를 탐색기에서 실행했을 때) `FreeConsole`하고 표준 핸들을 비운다. 그 뒤로는 창으로 묻고
+  알린다 (창은 잠깐 번쩍인다; `encrypted-sfx-design.md` 4절).
+- 남은 것: 모든 사용자의 바로가기, 암호(GUI blob: 암호 묻기를 stub의 대화상자로 할지는 그때 정한다).

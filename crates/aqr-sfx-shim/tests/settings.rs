@@ -169,6 +169,40 @@ fn asked_first() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// Started with a console of its own (as Explorer starts it where the manifest's
+/// `consoleAllocationPolicy` is not known, or with no manifest: the stub with no settings), the
+/// program gives the console up and tells in windows: its failure in a message box, which it
+/// waits on (killed here), where with a console it would have ended at once.
+#[cfg(windows)]
+#[test]
+fn console_given_up() {
+    let d = scratch("console");
+    std::fs::create_dir_all(d.join("out")).unwrap();
+    std::fs::write(d.join("out/a.txt"), b"there").unwrap();
+    // (no settings: a file there fails)
+    let exe = program(&d, "detaching", &archive(&[("a.txt", b"a".to_vec())]));
+    // (`start "" /wait`: the command line as it is, the empty title not quoted again)
+    use std::os::windows::process::CommandExt;
+    let mut c = Command::new("cmd")
+        .current_dir(&d)
+        .raw_arg(format!("/d /c start \"\" /wait \"{}\" out", exe.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+    // (the program itself still there, waiting on its message box)
+    let listed = Command::new("tasklist").args(["/nh", "/fi", "imagename eq detaching.exe"]).output().unwrap();
+    let waiting = String::from_utf8_lossy(&listed.stdout).contains("detaching.exe");
+    let _ = Command::new("taskkill").args(["/f", "/im", "detaching.exe"]).output();
+    let _ = c.kill();
+    let _ = c.wait();
+    assert!(waiting, "ended at once: not in a message box");
+    assert_eq!(std::fs::read(d.join("out/a.txt")).unwrap(), b"there");
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// Where the files go asked (`extract.ask`): the place offered taken by an empty answer, another
 /// given, cancelled where standard input ends (nothing written), not asked by `-y` nor where
 /// the command line tells.

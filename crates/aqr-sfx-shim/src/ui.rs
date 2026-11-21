@@ -23,7 +23,9 @@ pub struct Ui {
 
 impl Ui {
     pub fn new() -> Ui {
-        Ui { title: crate::program_name(), quiet: false, banner: None, gui: no_stderr() }
+        // (a console made for this program alone given up first: then of no standard error)
+        let detached = detach_own_console();
+        Ui { title: crate::program_name(), quiet: false, banner: None, gui: detached || no_stderr() }
     }
 
     /// Tells failure `e`.
@@ -524,6 +526,11 @@ mod sys {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         pub fn GetStdHandle(which: u32) -> *mut core::ffi::c_void;
+        pub fn SetStdHandle(which: u32, handle: *mut core::ffi::c_void) -> i32;
+        pub fn GetConsoleWindow() -> *mut core::ffi::c_void;
+        pub fn GetConsoleProcessList(ids: *mut u32, count: u32) -> u32;
+        pub fn GetConsoleMode(handle: *mut core::ffi::c_void, mode: *mut u32) -> i32;
+        pub fn FreeConsole() -> i32;
         pub fn GetModuleHandleW(name: *const u16) -> *mut core::ffi::c_void;
         pub fn GetUserDefaultUILanguage() -> u16;
         pub fn LCIDToLocaleName(lcid: u32, name: *mut u16, len: i32, flags: u32) -> i32;
@@ -538,6 +545,40 @@ fn message(title: &str, text: &str, kind: u32) -> i32 {
     // (MB_SETFOREGROUND: in front of the window it was run from)
     // SAFETY: NUL-terminated strings, no owner window
     unsafe { sys::MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), kind | 0x10000) }
+}
+
+/// Gives up the console where Windows made it for this program alone (docs/encrypted-sfx-design.md,
+/// 4): run from Explorer, say, by a Windows that does not know the manifest's
+/// `consoleAllocationPolicy` (before Windows 11 24H2), or of a program with no manifest (the stub
+/// with no settings). That console has no process but this one, and standard error is it (not
+/// redirected); its window closes (it flashes), the standard handles are let go, and what is told
+/// and asked is in windows then. Whether it was given up.
+#[cfg(windows)]
+fn detach_own_console() -> bool {
+    // SAFETY: of this process's console and standard handles; a buffer of 2 process ids
+    unsafe {
+        if sys::GetConsoleWindow().is_null() {
+            return false;
+        }
+        let mut ids = [0u32; 2];
+        let mut mode = 0u32;
+        let err = sys::GetStdHandle(-12i32 as u32);
+        if sys::GetConsoleProcessList(ids.as_mut_ptr(), 2) != 1 || sys::GetConsoleMode(err, &mut mode) == 0 {
+            return false;
+        }
+        if sys::FreeConsole() == 0 {
+            return false;
+        }
+        for which in [-10i32, -11, -12] {
+            sys::SetStdHandle(which as u32, std::ptr::null_mut());
+        }
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn detach_own_console() -> bool {
+    false
 }
 
 /// Whether the program has no standard error: run as a program of windows, or of the console
