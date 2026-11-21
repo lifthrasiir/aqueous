@@ -34,7 +34,10 @@
 //!   its), `classes` (`archived` by the class of the streams holding it, largest first: `class`
 //!   and `archived`, `(formula)` the formula block with the small streams in it; none of a file
 //!   archived alone, nor in JSON of aqr before it),
-//!   `same_as` (the content it is the same as) and `modules`;
+//!   `same_as` (the content it is the same as), `modules`, and `lossy` where a rewriter of
+//!   `--lossy` took it: `outcome` (`made`, archived as another file; `kept`, turned down;
+//!   `failed`, not found the same), `format`, and of one made `classes` and `size` (of the file
+//!   as it was), else `class` and `reason`;
 //! - `fallbacks` (compressing only): the recompressions not used or given up, and the applications
 //!   kept over the bound, each `module` (of a recompression given up for its heap or for a panic,
 //!   the format), `needed` and `bytes`, `kept`, `heap` and `panicked` (whether a recompression
@@ -307,6 +310,8 @@ pub struct Content {
     pub classes: Vec<aqr_compress::ClassBytes>,
     pub same_as: Option<usize>,
     pub modules: Vec<String>,
+    /// What became of it where a rewriter of `--lossy` took it (`len` is then R's).
+    pub lossy: Option<aqr_compress::lossy::Rewrite>,
 }
 
 /// The sampling of a run of `mode` from `input` to `output` by `threads`, until finished
@@ -708,8 +713,55 @@ fn outliers(run: &Run) -> String {
             ),
         );
     }
+    // the files rewritten by --lossy, by format, and those it took but kept as they are
+    for line in lossy_lines(&run.contents, true) {
+        say(&mut out, line);
+    }
     if said == 0 {
         out += "  nothing stands out\n";
+    }
+    out
+}
+
+/// What `--lossy` did of `contents`: of each format, the files archived as others (and how
+/// their bytes changed as files) and, where `kept`, those turned down; and those whose check
+/// failed, each.
+pub fn lossy_lines(contents: &[Content], kept: bool) -> Vec<String> {
+    use aqr_compress::lossy::Rewrite;
+    use std::collections::BTreeMap;
+    // (of each format: files, bytes as they were and as they are; of each format and reason: files)
+    let mut made: BTreeMap<&str, (u64, u64, u64)> = BTreeMap::new();
+    let mut turned: BTreeMap<(&str, &str), u64> = BTreeMap::new();
+    let mut out = Vec::new();
+    for c in contents.iter().filter(|c| c.same_as.is_none()) {
+        match &c.lossy {
+            Some(Rewrite::Made { format, mark, len }) => {
+                let e = made.entry(format.name()).or_default();
+                (e.0, e.1, e.2) = (e.0 + 1, e.1 + mark.size, e.2 + len);
+            }
+            Some(Rewrite::Kept { format, reason, .. }) => *turned.entry((format.name(), reason)).or_default() += 1,
+            Some(Rewrite::Failed { format, class, reason }) => out.push(format!(
+                "{}: {} ({}) kept as it was, not found the same as rewritten: {reason}",
+                c.path,
+                format.name(),
+                class.name()
+            )),
+            None => {}
+        }
+    }
+    for (format, (n, was, is)) in made {
+        out.push(format!(
+            "lossy, {format}: {n} file{} archived as others read the same ({} -> {} as files)",
+            if n == 1 { "" } else { "s" },
+            size(was as f64),
+            size(is as f64)
+        ));
+    }
+    if kept {
+        for ((format, reason), n) in turned {
+            let (s, are) = if n == 1 { ("", "it is") } else { ("s", "they are") };
+            out.push(format!("lossy, {format}: {n} file{s} kept as {are}: {reason}"));
+        }
     }
     out
 }
@@ -802,6 +854,32 @@ fn json(run: &Run, partial: bool) -> String {
         if !c.modules.is_empty() {
             *o += ",\"modules\":";
             array(o, &c.modules, |o, m| string(o, m));
+        }
+        if let Some(l) = &c.lossy {
+            use aqr_compress::lossy::Rewrite;
+            let (outcome, format) = match l {
+                Rewrite::Made { format, .. } => ("made", format),
+                Rewrite::Kept { format, .. } => ("kept", format),
+                Rewrite::Failed { format, .. } => ("failed", format),
+            };
+            *o += ",\"lossy\":{\"outcome\":";
+            string(o, outcome);
+            *o += ",\"format\":";
+            string(o, format.name());
+            match l {
+                Rewrite::Made { mark, .. } => {
+                    *o += ",\"classes\":";
+                    array(o, &mark.classes, |o, c| string(o, c));
+                    _ = write!(o, ",\"size\":{}", mark.size);
+                }
+                Rewrite::Kept { class, reason, .. } | Rewrite::Failed { class, reason, .. } => {
+                    *o += ",\"class\":";
+                    string(o, class.name());
+                    *o += ",\"reason\":";
+                    string(o, reason);
+                }
+            }
+            o.push('}');
         }
         o.push('}');
     });

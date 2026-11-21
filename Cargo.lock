@@ -366,6 +366,7 @@ dependencies = [
  "aqr-xsv",
  "aqr-zip",
  "aqr-zstd",
+ "flate-zoo",
  "flate2",
  "libc",
  "liblzma",

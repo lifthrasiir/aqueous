@@ -14,7 +14,8 @@
 //!   their files alone are read too ([`aqr_archive::Archive::sized`]); `-v` and the whole archive listed
 //!   read all of its blocks, which a file's share of the blocks it takes is of.
 //! - By default: the size, the modification time, the flags (`x` executable, `r` read-only,
-//!   `h` hidden, `@` extended attributes, `+` forks, `=` a hard link) and the instructions of
+//!   `h` hidden, `@` extended attributes, `+` forks, `=` a hard link, `~` archived as another
+//!   file read the same, `--lossy`) and the instructions of
 //!   the formula making the file (`[N]`) of each, and the total.
 //! - `-v`: the bytes of the data blocks a file is made of and of the other blocks it takes
 //!   (its formula block, modules, resources and dictionaries; blocks shared by several files
@@ -22,7 +23,7 @@
 //!   block taken by several files shared among them by their sizes, so that files taking the
 //!   same blocks have the same ratio: [`aqr_archive::Listed::share`]), its segment (from 1), its
 //!   owner, permissions (`rwxr-xr-x`), Windows' attributes (`RHSATI`), macOS' flags (as
-//!   `chflags` names them), the flags `@+=`, its modification time, and the formula summarized
+//!   `chflags` names them), the flags `@+=~`, its modification time, and the formula summarized
 //!   ([`aqr_archive::Listed::formula`]); and the total of the archive's data blocks and the rest.
 //!
 //! `--json`: each archive's listing as a line of JSON instead ([`json`]): its entries with all
@@ -480,6 +481,10 @@ fn json(
         if !x.forks.is_empty() {
             e.insert("forks".into(), x.forks.iter().map(|(n, _)| text(name_bytes(n).0)).collect());
         }
+        // (archived as another file read the same: what was lost, and the size it was)
+        if let Some(m) = aqr_compress::lossy::Mark::of(&x.extensions) {
+            e.insert("lossy".into(), json!({ "classes": m.classes, "size": m.size }));
+        }
         entries.push(Value::Object(e));
     }
     let mut o = json!({
@@ -553,7 +558,8 @@ fn time(t: Option<Time>) -> String {
     format!("{y:04}-{mo:02}-{d:02} {clock}{zone}")
 }
 
-/// `@` (extended attributes), `+` (forks) and `=` (a hard link), `-` where not; with `x`
+/// `@` (extended attributes), `+` (forks), `=` (a hard link) and `~` (archived as another file
+/// read the same, `--lossy`: [`aqr_compress::lossy::Mark`]), `-` where not; with `x`
 /// (executable), `r` (read-only) and `h` (hidden) before them by default (of a file or not).
 fn flags(x: &Extra, file: Option<bool>) -> String {
     let f = |on: bool, c: char| if on { c } else { '-' };
@@ -564,7 +570,13 @@ fn flags(x: &Extra, file: Option<bool>) -> String {
         let hidden = x.win_attrs.is_some_and(|w| w & 0x2 != 0) || x.mac_flags.is_some_and(|m| m & 0x8000 != 0);
         s.extend([f(exec, 'x'), f(ro, 'r'), f(hidden, 'h')]);
     }
-    s.extend([f(!x.xattrs.is_empty(), '@'), f(!x.forks.is_empty(), '+'), f(x.link_group.is_some(), '=')]);
+    let lossy = aqr_compress::lossy::Mark::of(&x.extensions).is_some();
+    s.extend([
+        f(!x.xattrs.is_empty(), '@'),
+        f(!x.forks.is_empty(), '+'),
+        f(x.link_group.is_some(), '='),
+        f(lossy, '~'),
+    ]);
     s
 }
 
@@ -647,9 +659,11 @@ mod tests {
         let x = Extra { mode: Some(0o4755), ..Extra::default() };
         assert_eq!(mode(&x), "rwsr-xr-x");
         assert_eq!(mode(&Extra { mode: Some(0o1644), ..x.clone() }), "rw-r--r-T");
-        assert_eq!(flags(&x, Some(true)), "x-----");
-        assert_eq!(flags(&x, Some(false)), "------");
-        assert_eq!(flags(&Extra { link_group: Some(3), win_attrs: Some(0x3), ..Extra::default() }, None), "--=");
+        assert_eq!(flags(&x, Some(true)), "x------");
+        assert_eq!(flags(&x, Some(false)), "-------");
+        assert_eq!(flags(&Extra { link_group: Some(3), win_attrs: Some(0x3), ..Extra::default() }, None), "--=-");
+        let mark = aqr_compress::lossy::Mark { classes: vec!["slack".into()], size: 9 };
+        assert_eq!(flags(&Extra { extensions: vec![mark.extension()], ..Extra::default() }, None), "---~");
         assert_eq!(win(&Extra { win_attrs: Some(0x21), ..Extra::default() }), "R--A--");
         assert_eq!(mac(&Extra { mac_flags: Some(0x8002), ..Extra::default() }), "uchg,hidden");
         assert_eq!(owner(&Extra { uid: Some(501), gname: Some(b"staff"[..].into()), ..Extra::default() }), "501:staff");

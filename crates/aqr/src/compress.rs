@@ -363,13 +363,14 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
     let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
-    // a single file: an archive of the file alone (but renamed: in a tree, at its name)
+    // a single file: an archive of the file alone (but renamed: in a tree, at its name; and with
+    // --lossy, which marks the entry)
     let followed = match inputs.sole() {
         Some(input) if a.dereference => Some(follow(input)?),
         _ => None,
     };
     let single = match followed.as_ref().or(inputs.sole()) {
-        Some(input) if !a.append => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
+        Some(input) if !a.append && a.opt.lossy.is_none() => Some((input, meta(input)?)).filter(|(_, m)| m.is_file()),
         _ => None,
     };
     if single.is_some() && a.journal.is_some() {
@@ -446,6 +447,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
                     classes: Vec::new(),
                     same_as: None,
                     modules: f.applies().iter().map(|m| m.module.to_string()).collect(),
+                    lossy: None,
                 }],
                 fallbacks: fallbacks.clone(),
                 trace: rec.finish(),
@@ -565,9 +567,25 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
         })?,
     };
     let fallbacks = aqr_compress::fallbacks();
+    let contents: Vec<stats::Content> = (r.files.iter().zip(&g.contents))
+        .map(|(f, (p, ..))| stats::Content {
+            path: p.display().to_string(),
+            kind: f.format.unwrap_or("-"),
+            len: f.len,
+            archived: Some(f.archived),
+            classes: f.classes.clone(),
+            same_as: f.same_as,
+            modules: f.modules.iter().map(|m| m.to_string()).collect(),
+            lossy: f.lossy.clone(),
+        })
+        .collect();
     if !a.quiet {
         if a.verbose {
             tell_fallbacks(&fallbacks);
+        }
+        // (what --lossy did: those turned down with -v; a check failed always)
+        if opt.lossy.is_some() {
+            stats::lossy_lines(&contents, a.verbose).iter().for_each(|l| eprintln!("{l}"));
         }
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
         if r.mirrors > 0 {
@@ -581,17 +599,6 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
     }
     end(Some(out), files, g.input_bytes(), r.len as u64, start);
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
-        let contents = (r.files.iter().zip(&g.contents))
-            .map(|(f, (p, ..))| stats::Content {
-                path: p.display().to_string(),
-                kind: f.format.unwrap_or("-"),
-                len: f.len,
-                archived: Some(f.archived),
-                classes: f.classes.clone(),
-                same_as: f.same_as,
-                modules: f.modules.iter().map(|m| m.to_string()).collect(),
-            })
-            .collect();
         s.add(stats::Run {
             mode: "compress",
             input: inputs.shown(),

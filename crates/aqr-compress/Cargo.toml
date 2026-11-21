@@ -78,6 +78,8 @@ aqr-log = { workspace = true, default-features = true }
 aqr-xsv = { workspace = true, default-features = true }
 aqr-zip = { workspace = true, default-features = true }
 aqr-zstd = { workspace = true, default-features = true }
+# (`lossy`'s checks: zlib-rs's inflate, apart from aqr-flate's)
+flate2.workspace = true
 memmap2.workspace = true
 xxhash-rust = { workspace = true, features = ["xxh3", "xxh64"] }
 zstd.workspace = true
@@ -88,7 +90,8 @@ libc.workspace = true
 [dev-dependencies]
 # (the tests run modules by Wasmtime, linked)
 aqr-wasmrt = { workspace = true, features = ["wasmtime"] }
-flate2.workspace = true
+# (DEFLATE streams of other encoders than zlib, for `lossy`'s tests)
+flate-zoo.workspace = true
 aqr-testkit.workspace = true
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

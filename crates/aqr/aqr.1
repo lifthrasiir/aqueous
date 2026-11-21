@@ -441,6 +441,30 @@ Make an archive for long-term preservation: the blocks whose damage would lose m
 file mirrored, to be restored from as it is read.
 .It Fl -no-check
 Do not decode the archive made to check it.
+.It Fl -lossy Ns Op = Ns Ar spec
+Archive the files that a rewriter takes as other files that their readers take as the
+same, what only their encoders chose lost; each entry is marked so, with the size it was
+.Pf ( Fl t Fl v
+shows it as
+.Sq ~ ) .
+.Ar spec
+is classes separated by commas, each
+.Ar class
+or
+.Ar class Ns : Ns Ar format Ns Op + Ns Ar format ... ,
+or
+.Cm all ;
+by default
+.Cm coding .
+.Cm coding
+makes the DEFLATE streams of ZIP and gzip files that zlib did not write again by zlib
+(from level 7 on, where that archives smaller);
+.Cm slack
+zeroes the bytes of Minecraft region files that no chunk takes (deleted data is lost).
+Each file rewritten is checked to be read the same, else archived as it is and told so.
+Not with
+.Fl A ,
+nor into archives of other formats.
 .It Fl -atomic
 Make the archive whole or not at all.
 By default an archive of several files is committed as it is written, so that a stopped

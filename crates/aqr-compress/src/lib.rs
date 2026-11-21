@@ -141,6 +141,7 @@ mod formats;
 mod git;
 mod hdf5;
 mod inflated;
+pub mod lossy;
 mod lzma;
 mod made;
 pub mod mapped;

@@ -97,6 +97,12 @@ pub trait Source: Sync {
         let _ = c;
         Ok(())
     }
+
+    /// Content `c` written (its batch's): what is held of it may be let go of. Its bytes may still
+    /// be read again (a content of the same in a later segment).
+    fn done(&self, c: usize) {
+        let _ = c;
+    }
 }
 
 impl Source for [Input<'_>] {
@@ -298,8 +304,10 @@ pub struct FileReport {
     pub classes: Vec<ClassBytes>,
     /// The content it is the same as, stored once.
     pub same_as: Option<usize>,
-    /// Bytes of the content.
+    /// Bytes of the content (as archived: R where it is [`crate::lossy::Rewrite::Made`]).
     pub len: u64,
+    /// What became of it, where a rewriter of [`Options::lossy`] took it.
+    pub lossy: Option<crate::lossy::Rewrite>,
 }
 
 /// Bytes of the archive that are a file's ([`FileReport::archived`]) held by the streams of a
@@ -465,8 +473,20 @@ fn compress_tree_noting<S: Source + ?Sized>(
         .then(|| crate::siblings::plan(src))
         .filter(|p| !p.is_empty())
         .map(std::sync::Arc::new);
-    let cx =
-        Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries, tree, stop, siblings };
+    // (the batches' contents as `--lossy` rewrites them: what is looked at before, of `src`)
+    let rw = crate::lossy::Rewriting::new(src, opt);
+    let cx = Ctx {
+        src: &rw,
+        opt,
+        notes: &notes,
+        batches: &batches,
+        weights: &weights,
+        entries: &entries,
+        tree,
+        stop,
+        siblings,
+        lossy: &rw.made,
+    };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),
         state: Mutex::new(State {
@@ -527,7 +547,16 @@ fn compress_tree_noting<S: Source + ?Sized>(
             (Some(t), contents)
         }
     };
-    let tree = last.as_ref().unwrap_or(tree);
+    // (of one segment: the tree as it is, the marks of the files rewritten put in)
+    let marked = match last.is_none() && wr.r.files.iter().any(|f| f.lossy.is_some()) {
+        true => {
+            let mut t = tree.clone();
+            t.entries.iter_mut().for_each(|e| wr.mark(&e.node, &mut e.extra));
+            Some(t)
+        }
+        false => None,
+    };
+    let tree = last.as_ref().or(marked.as_ref()).unwrap_or(tree);
     if let Some(point) = &opt.journal {
         wr.w.set_journal(vec![point.clone()]).map_err(bad_tree)?;
     }
@@ -647,6 +676,8 @@ struct Ctx<'a, S: ?Sized> {
     stop: Option<&'a Stop<'a>>,
     /// The files to take apart by others ([`crate::siblings`]).
     siblings: Option<std::sync::Arc<crate::siblings::Plan>>,
+    /// What became of the contents that a rewriter of [`Options::lossy`] took, as they are read.
+    lossy: &'a Mutex<HashMap<usize, crate::lossy::Rewrite>>,
 }
 
 impl<S: ?Sized> Ctx<'_, S> {
@@ -1063,6 +1094,13 @@ impl Writer {
             self.put(i, &files, part, cx, out)?;
         }
         batch.iter().try_for_each(|&c| src.intact(c))?;
+        {
+            let mut lossy = cx.lossy.lock().unwrap();
+            for &c in batch {
+                self.r.files[c].lossy = lossy.remove(&c);
+                src.done(c);
+            }
+        }
         notes.send(Note::Written(i));
         tell(Event::Written { contents: batch, report: &self.r });
         Ok(())
@@ -1365,9 +1403,25 @@ impl Writer {
             };
             new[k] = Some(entries.len());
             let parent = e.parent.map(|p| new[p].expect("a directory taken"));
-            entries.push(Entry { parent, name: e.name.clone(), node, extra: extra(&e.extra, own[k], &mut content) });
+            let mut x = extra(&e.extra, own[k], &mut content);
+            if own[k] {
+                self.mark(&e.node, &mut x);
+            }
+            entries.push(Entry { parent, name: e.name.clone(), node, extra: x });
         }
         (Tree { root, entries }, contents)
+    }
+
+    /// The mark of a file of `node` archived as another file than it was ([`crate::lossy::Mark`]),
+    /// put in its extra `x`.
+    fn mark(&self, node: &EntryNode, x: &mut Extra) {
+        if let &EntryNode::File(c) = node
+            && let Some(crate::lossy::Rewrite::Made { mark, .. }) = &self.r.files[c].lossy
+        {
+            let (k, v) = mark.extension();
+            x.extensions.retain(|e| e.0 != k);
+            x.extensions.push((k, v));
+        }
     }
 }
 
@@ -2420,6 +2474,8 @@ fn report(
                 classes: classes[l].iter().map(|c| ClassBytes { archived: c.archived * share, ..c.clone() }).collect(),
                 same_as: None,
                 len: files[k].len as u64,
+                // (told once its batch is written)
+                lossy: None,
             }
         })
         .collect();

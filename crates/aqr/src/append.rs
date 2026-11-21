@@ -184,8 +184,10 @@ fn diff(g: &mut Gathered, old: &Tree, sizes: &[u64], sync: bool) -> bool {
         let before = was.get(&new_paths[k][..]).map(|&o| &old.entries[o]);
         taken[k] = match (&e.node, before.map(|b| &b.node)) {
             (_, None) => true,
+            // (a file archived as another, `--lossy`, by the size it was)
             (&EntryNode::File(c), Some(&EntryNode::File(o))) => {
-                g.contents[c].2 != sizes.get(o).copied().unwrap_or(u64::MAX)
+                let was = aqr_compress::lossy::Mark::of(&before.unwrap().extra.extensions).map(|m| m.size);
+                g.contents[c].2 != was.or(sizes.get(o).copied()).unwrap_or(u64::MAX)
                     || e.extra.mtime != before.unwrap().extra.mtime
             }
             (EntryNode::Dir, Some(EntryNode::Dir)) => false,

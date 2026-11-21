@@ -263,6 +263,8 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     let (mut list_stdin, mut listed) = (false, false);
     let mut memory = None;
     let mut application_bound = None;
+    // (`--lossy[=SPEC]`, checked once all are read)
+    let mut lossy: Option<String> = None;
     // (`-C`: the directory so far, by input the one it was given in, and the last given)
     let (mut dir, mut dirs, mut last_dir) = (PathBuf::new(), Vec::new(), None);
     // (`-Z`: the developer options, set once all are read)
@@ -362,6 +364,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "-D" | "--dictionaries" => a.opt.dictionaries = true,
             "-A" | "--archival" => a.opt.mirrors = true,
             "--no-check" => a.opt.verify = false,
+            "--lossy" => lossy = Some(inline.take().map(text).unwrap_or_default()),
             "--stats" => match inline.take() {
                 None => stats = true,
                 Some(to) => {
@@ -477,6 +480,18 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         }
         Some(b) => aqr_formula::set_application_limit(b),
         None => {}
+    }
+    if let Some(spec) = &lossy {
+        let modes = [
+            (a.decompress || a.list || a.info, "it is for compressing"),
+            (a.edit.is_some() || a.compact, "an archive edited keeps its files as they are"),
+            (a.tag.is_some() || a.history || a.diff, "it is for compressing"),
+            (a.opt.mirrors, "-A (an archive for preservation keeps its files as they are)"),
+        ];
+        if let Some((_, why)) = modes.iter().find(|m| m.0) {
+            return Err(format!("--lossy: {why}"));
+        }
+        a.opt.lossy = Some(aqr_compress::lossy::Lossy::parse(spec)?);
     }
     if a.session {
         if !a.inputs.is_empty() {
@@ -598,6 +613,9 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
                 };
                 if a.opt.mirrors {
                     return Err(format!("-A: {} archives are not made so here (.aqr only)", f.ext()));
+                }
+                if a.opt.lossy.is_some() {
+                    return Err(format!("--lossy: {} archives are not made so here (.aqr only)", f.ext()));
                 }
                 if a.passphrase && !f.encrypts() {
                     return Err(format!("-P: {} archives are not encrypted here (.zip and .7z are)", f.ext()));
