@@ -105,7 +105,10 @@ pub(crate) fn bug(what: &'static str, bytes: usize) {
     }
 }
 
-/// Held by the tests that look at [`fallbacks`], of the process: one at a time.
+/// Held by the tests that look at [`fallbacks`], of the process, and by those that inject faults
+/// ([`HOGS`], [`PANICS`], [`NAMED_PANICS`]) for all they do: one at a time. A fault is of any
+/// recompression of its format or step and length, on any thread, so a test injecting one codes
+/// data of lengths no other test codes (another such test, holding this, is not running).
 pub(crate) static FALLBACKS_SEEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The heap a recompression as `format` of data of `len` bytes may take, where it takes
@@ -2215,10 +2218,22 @@ fn tree_given_back(files: &[(&str, &[u8])], opt: &Options) -> Archived {
     a
 }
 
+/// [`FALLBACKS_SEEN`] held, for all of a test.
+fn seen() -> std::sync::MutexGuard<'static, ()> {
+    FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// `files` archived with `what` of `bytes` bytes panicking: given back all the same; what
-/// [`fallbacks`] told of the panics of `what`.
-fn panicking(what: &'static str, bytes: usize, files: &[(&str, &[u8])], opt: &Options) -> (Archived, Vec<Fallback>) {
-    let _seen = FALLBACKS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+/// [`fallbacks`] told of the panics of `what`. Of a test holding [`FALLBACKS_SEEN`] (`_seen`)
+/// from its start: its runs of the same files without the panic too, which another test's panic
+/// would hit (`inflated` and `gzip` of gzip files of the same length).
+fn panicking(
+    _seen: &std::sync::MutexGuard<'static, ()>,
+    what: &'static str,
+    bytes: usize,
+    files: &[(&str, &[u8])],
+    opt: &Options,
+) -> (Archived, Vec<Fallback>) {
     let _ = fallbacks();
     NAMED_PANICS.lock().unwrap().push((what, bytes));
     let a = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree_given_back(files, opt)));
@@ -2231,13 +2246,14 @@ fn panicking(what: &'static str, bytes: usize, files: &[(&str, &[u8])], opt: &Op
 /// of a file) gives the files up, not the archive: they are archived as they are.
 #[test]
 fn zstd_share_panic_falls_back() {
+    let seen = seen();
     let text = babble(20_000);
     let zst = zstd::bulk::compress(&text, 3).unwrap();
     let files: [(&str, &[u8]); 2] = [("g.txt", &text), ("g.txt.zst", &zst)];
     let opt = Options { threads: 2, ..Options::default() };
     // (the files taken from the frames cost next to nothing)
     let ok = tree_given_back(&files, &opt);
-    let (a, told) = panicking("zstd-share", text.len() + zst.len(), &files, &opt);
+    let (a, told) = panicking(&seen, "zstd-share", text.len() + zst.len(), &files, &opt);
     assert_eq!(told.len(), 1, "{told:?}");
     assert!(told[0].message == "a bug of the recompressor" && !told[0].heap);
     assert!(a.archive.len() > ok.archive.len() + zst.len() / 2, "{} against {}", a.archive.len(), ok.archive.len());
@@ -2247,6 +2263,7 @@ fn zstd_share_panic_falls_back() {
 /// loses the sharing, not the archive.
 #[test]
 fn inflated_panic_falls_back() {
+    let seen = seen();
     let text = babble(20_000);
     let mut z = flate2::GzBuilder::new().filename("g.txt").write(Vec::new(), flate2::Compression::new(6));
     std::io::Write::write_all(&mut z, &text).unwrap();
@@ -2254,7 +2271,7 @@ fn inflated_panic_falls_back() {
     let files: [(&str, &[u8]); 2] = [("g.txt", &text), ("g.txt.gz", &gz)];
     let opt = Options { threads: 2, level: Level::LOW, ..Options::default() };
     let ok = tree_given_back(&files, &opt);
-    let (a, told) = panicking("inflated", text.len() + gz.len(), &files, &opt);
+    let (a, told) = panicking(&seen, "inflated", text.len() + gz.len(), &files, &opt);
     assert_eq!(told.len(), 1, "{told:?}");
     assert!(a.archive.len() > ok.archive.len() + gz.len() / 2, "{} against {}", a.archive.len(), ok.archive.len());
 }
@@ -2262,6 +2279,7 @@ fn inflated_panic_falls_back() {
 /// A panic of the packs' sets (a pack with its indexes) falls back to the files alone.
 #[test]
 fn git_sets_panic_falls_back() {
+    let seen = seen();
     let fixture = |ext: &str| {
         std::fs::read(format!("{}/../../codecs/aqr-git/tests/data/small.{ext}", env!("CARGO_MANIFEST_DIR"))).unwrap()
     };
@@ -2270,7 +2288,7 @@ fn git_sets_panic_falls_back() {
     let opt = Options { threads: 2, smaller: false, ..Options::default() };
     let ok = tree_given_back(&files, &opt);
     assert!(ok.report.files.iter().any(|f| f.modules.iter().any(|m| m.name == "git-pack-index-recons")));
-    let (a, told) = panicking("git-sets", idx.len() + pack.len() + rev.len(), &files, &opt);
+    let (a, told) = panicking(&seen, "git-sets", idx.len() + pack.len() + rev.len(), &files, &opt);
     assert_eq!(told.len(), 1, "{told:?}");
     assert!(!a.report.files.iter().any(|f| f.modules.iter().any(|m| m.name == "git-pack-index-recons")));
     // (the pack alone still recompressed)
@@ -2280,13 +2298,15 @@ fn git_sets_panic_falls_back() {
 /// A panic of the recompressor of PNG files in a set gives the set up, each file as alone.
 #[test]
 fn png_set_panic_falls_back() {
+    let seen = seen();
+    // (of a size no other test's sets are: theirs would panic too)
     let files =
-        [variant(200, 150, None), variant(200, 150, Some((20, 30, 40, 50))), variant(200, 150, Some((90, 10, 30, 90)))];
+        [variant(210, 150, None), variant(210, 150, Some((20, 30, 40, 50))), variant(210, 150, Some((90, 10, 30, 90)))];
     let d = stored_zip(&[("a.png", &files[0]), ("b.png", &files[1]), ("c.png", &files[2])]);
     let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
     let ok = tree_given_back(&[("z.zip", &d)], &opt);
     assert!(ok.report.files[0].modules.iter().any(|m| m.name == "png-set"), "{:?}", ok.report.files[0].modules);
-    let (a, told) = panicking("png-set", files.iter().map(Vec::len).sum(), &[("z.zip", &d)], &opt);
+    let (a, told) = panicking(&seen, "png-set", files.iter().map(Vec::len).sum(), &[("z.zip", &d)], &opt);
     assert_eq!(told.len(), 1, "{told:?}");
     assert!(!a.report.files[0].modules.iter().any(|m| m.name == "png-set"));
 }
@@ -2295,6 +2315,7 @@ fn png_set_panic_falls_back() {
 /// member as it is, the container still recompressed.
 #[test]
 fn member_panic_falls_back() {
+    let seen = seen();
     let text = babble(20_000);
     let mut z = flate2::GzBuilder::new().filename("t.txt").write(Vec::new(), flate2::Compression::new(6));
     std::io::Write::write_all(&mut z, &text).unwrap();
@@ -2304,7 +2325,7 @@ fn member_panic_falls_back() {
     let ok = tree_given_back(&[("m.zip", &zip)], &opt);
     let modules = |a: &Archived| a.report.files[0].modules.iter().map(|m| m.name).collect::<Vec<_>>();
     assert!(modules(&ok).contains(&"zip-recons") && modules(&ok).contains(&"flate-set"), "{:?}", modules(&ok));
-    let (a, told) = panicking("gzip", gz.len(), &[("m.zip", &zip)], &opt);
+    let (a, told) = panicking(&seen, "gzip", gz.len(), &[("m.zip", &zip)], &opt);
     // (once for the member's own formula, once for a scan of the container's data)
     assert!(!told.is_empty() && told.iter().all(|t| t.bytes == gz.len() as u64), "{told:?}");
     assert!(modules(&a).contains(&"zip-recons"), "{:?}", modules(&a));
