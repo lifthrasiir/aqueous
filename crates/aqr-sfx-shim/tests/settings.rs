@@ -350,7 +350,10 @@ fn program_run() {
 #[test]
 fn shortcuts_made() {
     use aqr_sfx::config::{Shortcut, ShortcutAt};
-    let d = scratch("shortcuts");
+    // (its long form: the shell reads a shortcut's target back long, RUNNER~1 as runneradmin,
+    // the temporary directory of the runner given short)
+    let d = std::fs::canonicalize(scratch("shortcuts")).unwrap();
+    let d = PathBuf::from(d.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
     let a = archive(&[("bin/app.exe", b"MZ not run".to_vec()), ("doc.txt", b"doc".to_vec())]);
     let c = Config {
         shortcuts: vec![
@@ -412,7 +415,10 @@ fn shortcuts_made() {
     let app = read(&links.join("desktop/앱.lnk"));
     let want = [
         strip(&out.join(r"bin\app.exe")),
-        format!("--in {}", d.join("out").display()),
+        match d.join("out").display().to_string() {
+            o if o.contains(' ') => format!("--in \"{o}\""),
+            o => format!("--in {o}"),
+        },
         strip(&out.join("bin")),
         "The app".into(),
     ];
