@@ -203,8 +203,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   times as fast over many packages. CI (`.github/workflows/test.yml`: Linux and Windows, macOS
   by schedule and by hand) tests what `scripts/affected-crates.py BASE` selects: the packages
   changed and those depending on them.
-  A test reading another package's files names them by a relative path in its source
-  (`"../../codecs/aqr-jpeg/tests/data/…"`), or the script misses it.
+  A test reading another package's files names them in its source by a relative path
+  (`"../../codecs/aqr-jpeg/tests/data/…"`) or a path from the root (`fixture("codecs/aqr-7z/…")`),
+  up to a `{` of a format string at least; else the script misses it
+  (`scripts/affected-crates.py --readers PATH` tells who it finds).
 - **Build and run the release `aqr` only through `cargo aqr <args>…`** (crates/aqr-bincache),
   never `cargo build -p aqr`, `cargo run -p aqr` or `target/release/aqr` directly: it builds
   as needed and keeps each binary by a hash of its sources, so a rebuild for a source tree

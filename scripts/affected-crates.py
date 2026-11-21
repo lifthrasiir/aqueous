@@ -2,11 +2,13 @@
 """The workspace's packages whose tests a change can affect, for CI.
 
     scripts/affected-crates.py BASE [HEAD]
+    scripts/affected-crates.py --readers PATH...
 
 prints the arguments of `cargo test` (or `cargo nextest run`) that select the packages to test,
 one per line: `--package=NAME` for each, or `--workspace` (with `--exclude` of the packages never
 tested) where the change reaches everything; nothing where no test is affected. The changes are
-those from the merge base of BASE and HEAD to HEAD.
+those from the merge base of BASE and HEAD to HEAD. With `--readers`, the packages whose sources
+name each PATH (repo-relative) instead, a line each: `PATH: NAME...`.
 
 A package is affected when a file under its directory changed, when a package it depends on
 (normally, for its build or for its tests) is, but not where only the other's tests, benchmarks,
@@ -90,9 +92,11 @@ def workspace_dependency_changes(base, head):
 
 
 def main():
-    base = sys.argv[1]
-    head = sys.argv[2] if len(sys.argv) > 2 else "HEAD"
-    changed = [p for p in git("diff", "--name-only", "--no-renames", f"{base}...{head}").splitlines() if p]
+    readers_of = sys.argv[2:] if sys.argv[1] == "--readers" else None
+    if readers_of is None:
+        base = sys.argv[1]
+        head = sys.argv[2] if len(sys.argv) > 2 else "HEAD"
+        changed = [p for p in git("diff", "--name-only", "--no-renames", f"{base}...{head}").splitlines() if p]
 
     meta = json.loads(
         subprocess.run(
@@ -118,9 +122,12 @@ def main():
     # Paths out of its directory named by each package's sources
     # (`../../codecs/aqr-jpeg/tests/data/gradient.jpg`, `"/../aqr-modules/wasm/bcj-delta.wasm"`
     # after `CARGO_MANIFEST_DIR`): relative to the source file (`include_bytes!`) or to the package's
-    # directory (the tests' working directory, `CARGO_MANIFEST_DIR`), whichever is there.
+    # directory (the tests' working directory, `CARGO_MANIFEST_DIR`), whichever is there; and
+    # string literals of paths from the repository's root (`fixture("codecs/aqr-7z/tests/data/copy.7z")`,
+    # a helper putting `../../` before it), up to a `{` of a format string (the directory then).
     named = {}  # repo-relative path -> (package id, whether its build takes it)
     pat = re.compile(r"(?:\.\./)+[A-Za-z0-9_][A-Za-z0-9_./-]*")
+    rooted = re.compile(r'"((?:codecs|crates|spec)/[A-Za-z0-9_][A-Za-z0-9_./-]*)')
     for d, i in dirs.items():
         top = os.path.join(ROOT, d)
         for sub, subdirs, files in os.walk(top):
@@ -149,6 +156,20 @@ def main():
                             continue
                         if os.path.exists(os.path.join(ROOT, p)):
                             named.setdefault(p, set()).add((i, built))
+                for m in rooted.finditer(text):
+                    line = text[text.rfind("\n", 0, m.start()) + 1 : m.start()]
+                    built = re.search(r"\binclude(_bytes|_str)?!", line) is not None and not local_file
+                    p = os.path.normpath(m.group(1)).replace(os.sep, "/").rstrip("/")
+                    if p.startswith(d + "/") or p == d:
+                        continue
+                    if os.path.exists(os.path.join(ROOT, p)):
+                        named.setdefault(p, set()).add((i, built))
+
+    if readers_of is not None:
+        for path in readers_of:
+            rs = {r for prefix, rs in named.items() for r, _ in rs if path == prefix or path.startswith(prefix + "/")}
+            print(f"{path}: " + " ".join(sorted(by_id[i]["name"] for i in rs)))
+        return
 
     def owner(path):
         best = None
