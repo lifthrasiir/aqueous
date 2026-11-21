@@ -31,11 +31,16 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   archive tells. Its seeds are the codecs' fixtures (`codecs/*/tests/data`, at most 256 KiB)
   recompressed and archived again of stored blocks, the modules by their hashes alone
   (shorthand module blocks), at most 512 KiB.
+- `wasm`: `natives`' archives decoded twice, by the native modules and by the same modules as
+  WebAssembly (Wasmtime): both fail, or both give the same; a resource failure of either is let
+  be (natively, some modules decode whole on threads, not held to their plans; in Wasm, an
+  application over its limits fails). Its seeds are `natives`'. It found the executor's deadlock
+  of aqr-wasmrt (a future dropped with the executor locked, waking another).
 - `compress`: a file compressed (its format found by aqr-compress and recompressed: every
   recompressor's reading of untrusted files) and decompressed again by the native modules,
   which must give it back. Its seeds are the codecs' fixtures as they are.
 
-`decode`, `salvage` and `natives` mutate with a mutator of their own (`src/lib.rs`'s `mutate`):
+`decode`, `salvage`, `natives` and `wasm` mutate with a mutator of their own (`src/lib.rs`'s `mutate`):
 half of the time, a block whose data decodes by itself (aqr-archive's `fuzzing`: metadata, data,
 module, resource, dictionary and formula blocks, but those of a dictionary's data) is picked, its
 data decoded, mutated by libFuzzer's mutator and the block made again of it (Zstandard at level
@@ -68,9 +73,12 @@ inventory's constructors in `__mod_init_func`, which ld then refuses ("initializ
 no target"). Crashes go to `artifacts/TARGET/`; one is run again by
 `target/aarch64-apple-darwin/release/TARGET FILE` (with `ASAN_OPTIONS=allocator_may_return_null=1`,
 as `run.sh` sets it), and timed as plain code by `cargo +nightly run --release --bin replay --
-TARGET FILE...` (natives, compress, roundtrip): instrumented, `compress` is about 12 times as slow (a seed
-of 3.7 s, `aqr-egg-azonumbers.egg`, took 44 s). `corpus/`, `artifacts/` and `target/` are not committed.
+TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzzing"` and a
+`CARGO_TARGET_DIR` of its own, the checksums skipped as the fuzzer skips them). Instrumented,
+`compress` is about 12 times as slow (a seed of 3.7 s, `aqr-egg-azonumbers.egg`, took 44 s). A
+timeout that does not come again alone may be a race: the file given many times over, to either,
+runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
 
 Left: that mutator of `envelope`'s payloads (decrypted, mutated so and sealed again); in
 `roundtrip`, trees of several leaves (batches, the dictionaries trained for them), resources and
-the encoder's other options; native modules against Wasm on the same inputs.
+the encoder's other options; in `wasm`, the failures' kinds compared too.

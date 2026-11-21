@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs fuzz target $1 (decode, salvage, envelope, roundtrip, natives,
-# compress) with its seeds (and the dictionary of
+# wasm, compress) with its seeds (and the dictionary of
 # archives), further arguments to libFuzzer:
 # ./run.sh decode -max_total_time=600 -fork=8 -ignore_crashes=1
 set -eu
@@ -12,6 +12,7 @@ case $t in
     compress) opts="-max_len=262144 -timeout=120" ;;
     roundtrip) opts="-max_len=16384 -timeout=10" ;;
     envelope) opts="-dict=aqr.dict -max_len=327680 -timeout=10" ;;
+    wasm) opts="-dict=aqr.dict -max_len=524288 -timeout=60" ;;
     natives) opts="-dict=aqr.dict -max_len=524288 -timeout=30" ;;
     *) opts="-dict=aqr.dict -max_len=65536 -timeout=10" ;;
 esac

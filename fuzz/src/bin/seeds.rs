@@ -254,7 +254,7 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
         "compress" => fixtures(),
         // (the fixtures recompressed, their archives made again of stored blocks: those whose
         // formula applies a module)
-        "natives" => {
+        "natives" | "wasm" => {
             let enc = Encoder::new(Level::STORED).with_modules(aqr_fuzz::registered);
             fixtures()
                 .into_iter()

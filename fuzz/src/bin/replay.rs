@@ -1,6 +1,6 @@
 //! Runs inputs through a target's body as plain code (no sanitizer, no coverage, checksums
 //! checked), timed: `replay TARGET FILE...`
-//! (natives, compress, roundtrip), to tell a slow input of the fuzzer's from one of
+//! (natives, wasm, compress, roundtrip), to tell a slow input of the fuzzer's from one of
 //! the code's.
 
 use std::time::Instant;
@@ -21,6 +21,14 @@ fn main() {
                     c.len(),
                     back.map_or_else(|e| e.to_string(), |b| (b == d).to_string())
                 )
+            }
+            "wasm" => {
+                let t = Instant::now();
+                let n = aqr_archive::decode_value(&d, &aqr_fuzz::Known).map(|_| ());
+                let native = t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                let w = aqr_archive::decode_value(&d, &aqr_decompress::Wasm).map(|_| ());
+                format!("natively {n:?} in {native:.2} s, in Wasm {w:?} in {:.2} s", t.elapsed().as_secs_f64())
             }
             "natives" => format!("{:?}", aqr_archive::decode_value(&d, &aqr_fuzz::Known).map(|_| ())),
             "roundtrip" => {

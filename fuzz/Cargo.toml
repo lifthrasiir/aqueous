@@ -48,6 +48,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "wasm"
+path = "fuzz_targets/wasm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "compress"
 path = "fuzz_targets/compress.rs"
 test = false
