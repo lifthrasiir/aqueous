@@ -68,7 +68,7 @@ WinZip Self-Extractor, makeself.
   - 설정 blob: 나머지 전부 (1.1–1.3절). CBOR로 쓴다 (4절).
 - **SFX가 만들어진 뒤에는 아카이브 부분을 고쳐도 SFX의 동작이 바뀌지 않는다.** stub은 런타임에
   `sfx.toml`을 읽지 않는다. 그래서 stub에 TOML 파서가 들어가지 않고, 지금처럼 작게 유지된다
-  (0.67 MB, UPX로 0.30 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
+  (0.71 MB, UPX로 0.33 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
   SFX 속의 아카이브를 고치지 못하게 하는 규칙도 둔다 (7절).
 
 ### 2.1 큰 설정은 파일로, 작은 설정은 toml로
@@ -139,8 +139,10 @@ description = "Example installer"
   실행하고, 기다리고, 지우고, 종료 코드를 돌려준다. 나머지 키는 그 위에 덮어쓴다. 이렇게 하면 조합의
   수가 줄어든다.
 - `program`은 셸 문자열이 아니라 argv 배열이다. 따옴표 처리가 갈리지 않고, 다른 플랫폼의 stub이
-  생겨도 그대로 쓸 수 있다. 실행은 `CreateProcessW`로 하고 셸(cmd)을 거치지 않는다. `.bat`이나
-  `.cmd`를 실행하려면 `["cmd", "/c", "x.bat"]`처럼 명시해야 한다.
+  생겨도 그대로 쓸 수 있다. 실행은 `CreateProcessW`로 하고 셸(cmd)을 거치지 않는다. 첫 원소는
+  아카이브 안의 `.exe`(또는 `.com`)여야 한다(3절, 8절). 그래서 `.bat`, `.cmd`, `.msi`는 지금 실행할 수
+  없다. 시스템의 `cmd`나 `msiexec`를 부르는 것은 8절의 "임의 명령"이 되기 때문이다. 필요해지면 그런
+  것만 따로 허용하는 키를 검토한다.
 - 경로 변수(`{temp}` 등)는 몇 개로 고정하고, 런타임에 stub이 해석한다. Windows 환경 변수
   (`%VAR%`)를 그대로 확장하게 하면 stub이 그 문법에 묶인다.
 
@@ -164,10 +166,14 @@ description = "Example installer"
   더하는 대신 버전 키를 올리고, stub은 모르는 버전이면 실패한다. 지금은 aqr에 stub이 들어 있어 둘이
   항상 함께 배포되므로, 버전이 어긋나는 일은 aqr-ld merge로 만든 SFX처럼 stub을 따로 다루는 경우뿐이다.
 - 문자열은 CBOR의 text string(UTF-8)이다. stub이 Win32 API에 넘길 때 UTF-16으로 바꾼다.
-- 놓을 곳은 번들의 엔트리 하나(예: `sfx:config`)를 우선 검토한다. `Sfx::load`가 이미 이름 붙은
-  엔트리(`HASH/SLOTS`, `lib:NAME`, `aqr-interp`)를 다루므로 길이 하나만 늘면 된다. 번들이 없는
-  SFX(모듈 blob이 하나도 필요 없는 아카이브)에서는 설정만 담은 번들을 붙인다. PE 리소스에 두는 방법도
-  있지만 5절의 UPX 문제를 설정까지 떠안게 된다.
+- 번들의 엔트리로 두지 않고, 번들과 아카이브 사이에 레코드 하나로 둔다:
+  `"AQRSFXC1" le64:n cbor[n] le64:n "AQRSFXC1"`. 번들의 엔트리는 모두 blob이라
+  (`Blob::from_bytes`, PE의 사실들) 설정을 끼우려면 번들의 형식을 바꿔야 했고, 번들이 없는 SFX에
+  설정만 담은 번들을 붙이는 일도 생긴다. 레코드는 앞뒤에 매직과 길이가 있어서, stub은 번들 뒤에서
+  앞으로 읽거나, 뒤에서 훑어 찾은 아카이브(aqr-ld merge로 만든 stub, ELF 등 PE가 아닌 경우)의 바로
+  앞에서 거꾸로 읽는다. PE 리소스에 두는 방법도 있지만 5절의 UPX 문제를 설정까지 떠안게 된다.
+- CBOR의 읽기는 aqr-archive의 것을 그대로 쓴다 (`aqr_archive::cbor`: 선택적 메타데이터의 읽기를
+  공개한 것). 키의 CDDL은 `crates/aqr-sfx/src/config.rs`에 있다.
 
 ## 5. PE 속성을 쓰는 일: UPX
 
@@ -183,8 +189,13 @@ UPX는 첫 아이콘, `VERSIONINFO`, manifest를 압축하지 않고 남기지�
 3. stub에 빈 자리(최대 크기를 정해 둔 아이콘, `VERSIONINFO` 슬롯)를 미리 두고 그 바이트만 패치한다.
    단순하지만 아이콘 크기에 상한이 생긴다.
 
-1을 기본으로 검토한다. 어느 쪽이든 결과를 `pemerge-test.sh` 수준의 시험(실행, 탐색기에서 보이는
-아이콘, 속성 창)으로 확인한다.
+구현은 이 셋 중 어느 것도 아니다. **리소스를 마지막 섹션 뒤에 새 섹션으로 쓰고, 데이터 디렉터리의
+리소스 항목만 그쪽으로 돌린다** (`crates/aqr-sfx/src/pe.rs`). UPX의 섹션(UPX0, UPX1, UPX2: import와
+재배치가 UPX2에 있다)은 한 바이트도 건드리지 않으므로 `--compress-resources=0`도 필요 없다. stub에
+있던 리소스는 데이터를 옮기지 않고 RVA 그대로 새 디렉터리에 다시 넣는다 (UPX가 실행할 때 풀어 놓는
+리소스도 그대로 통한다). 새로 쓰는 종류(아이콘, 그룹 아이콘, `VERSIONINFO`, manifest)의 예전 항목만
+빠진다. 지금의 stub에는 리소스가 하나도 없다. 남은 일은 탐색기에서 보이는 아이콘과 속성 창을 눈으로
+확인하는 것이다 (aqr의 `tests/sfx.rs`는 리소스를 읽어 보고, UPX로 압축한 stub을 실행한다).
 
 ## 6. `.aqr/` 경로
 
@@ -227,3 +238,39 @@ SFX가 같이 걸린다.
 
 GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sfx-design.md` 4절대로 GUI blob이
 맡는다. 그런 질문이 하나라도 있는 설정이면, 암호가 없어도 GUI blob을 붙인다.
+
+## 10. 구현 (2026-11-21)
+
+9절의 1차와 제목, `prompt`, `finish`까지 구현했다.
+
+- `crates/aqr-sfx/src/config.rs`: 설정(`Config`), 그 레코드(4절), `sfx.toml`의 컴파일과 검증
+  (`compile`, feature `encode`: aqr만). `crates/aqr-sfx/src/pe.rs`: 아이콘, `VERSIONINFO`, manifest,
+  서브시스템 (5절). `crates/aqr/src/sfx.rs`: 만든 아카이브에서 `.aqr/sfx/`의 파일만 디코딩해 컴파일한다
+  (`settings`). 원본이 아카이브에 그대로 있다는 것을 이 경로가 보장한다.
+- stub(`crates/aqr-sfx-shim`): 명령줄 `[-y] [--noexec] [--keep] [DIR]`, 덮어쓰기 정책
+  (`aqr_sfx::extract_with`: 묻기는 y/n/always/never/quit), 실행(`CreateProcessW`, 창 상태), 기다림, 종료
+  코드, 정리. 콘솔이 없으면(표준 오류가 없으면) 메시지와 질문은 `MessageBoxW`로 한다. 파일의 수정
+  시각도 이제 아카이브대로 둔다 (`newer`에 필요하다).
+- 정한 것들:
+  - `{temp}`는 임시 폴더 아래에 새로 만든 폴더다. 정리는 stub이 만든 파일과 폴더만 지운다 (원래 있던
+    파일은 대상 폴더가 어디든 건드리지 않는다).
+  - 기본값: `extract`는 `{cwd}`, `subdir = false`, `overwrite = "ask"`. `run`은 `{temp}`,
+    `overwrite = "always"`, `wait = true`, `cleanup`과 `exit-code`는 `wait`를 따른다
+    (`wait = false`인데 둘 중 하나를 켜면 오류). `mode`가 없으면 `run.program`이 있을 때 `run`이다.
+    `pe.subsystem`의 기본은 `cli`다 (설정이 없는 SFX와 같다).
+  - 설정이 없는 SFX는 전과 같다 (현재 폴더, 있는 파일은 실패, stub의 이미지는 그대로).
+  - `run` 모드에서는 `.aqr/`를 풀지 않는다 (6절). `--noexec`이면 푼다.
+  - manifest: `requestedExecutionLevel`(`admin`), Windows 7–11의 `supportedOS`, PerMonitorV2 DPI,
+    Common Controls 6, 그리고 CLI일 때 `consoleAllocationPolicy`. `.aqr/sfx/manifest.xml`이 있으면
+    그것을 쓰고, 그때 `admin`을 함께 주면 오류다.
+  - `VERSIONINFO`의 문자열: `version`(FileVersion, ProductVersion), `product`, `company`,
+    `description`, `copyright`(LegalCopyright).
+- 7절: `aqr -a`, `-s`, `--delete`, `--compact`, 저널 되감기는 파일의 맨 앞에서 시작하지 않는 아카이브를
+  거부한다 (`crates/aqr/src/append.rs`). 전에는 앞에 다른 바이트가 있는 아카이브도 고쳤고 그것을
+  시험했다 (`tests/edit.rs`, `tests/write.rs`: 이제 거부를 시험한다). 스펙의 "Appending to an archive"에
+  같은 권고를 더했다. 그래서 섹터를 가로지르는 꼬리말을 지우고 새로 쓰는 append.rs의 경로(앞에 다른
+  바이트가 있을 때만 생긴다)는 aqr에서 쓰이지 않는다. 지울지는 따로 정한다.
+- 아직 받지 않는 키는 "not yet"으로 실패한다: `extract.ask`(경로 묻기: GUI blob과 함께), `ui.license`,
+  `ui.banner`(첫 세그먼트 분리, 2.1절과 함께).
+- 남은 것: 2차의 나머지(첫 세그먼트, 라이선스, 배너, 언어별 문구, 바로가기, 환경 변수), GUI blob,
+  `consoleAllocationPolicy`를 모르는 Windows에서의 `FreeConsole` 대체, 탐색기에서의 눈 확인.

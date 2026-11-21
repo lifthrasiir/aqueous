@@ -8,7 +8,10 @@
 //! out. The blobs are Windows x86-64 only; elsewhere [`Sfx::find`] finds none.
 
 pub mod bundle;
+pub mod config;
 mod native;
+#[cfg(feature = "encode")]
+pub mod pe;
 #[cfg(windows)]
 pub mod resource;
 
@@ -183,68 +186,193 @@ impl Sfx {
 
 // ---- writing the decoded files out
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aqr_archive::{EntryNode, Value};
+pub use config::Overwrite;
+
+/// What is answered where a file is there already and the program asks ([`Overwrite::Ask`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// Written over.
+    Yes,
+    /// Left as it is.
+    No,
+    /// Written over, and every other there too.
+    All,
+    /// Left, and every other there too.
+    None,
+    /// Nothing more written: the extraction fails.
+    Quit,
+}
+
+/// How [`extract_with`] writes the files.
+pub struct Extracting<'a> {
+    pub overwrite: Overwrite,
+    /// Asked of a path there already, where [`Overwrite::Ask`].
+    pub ask: &'a mut dyn FnMut(&Path) -> Answer,
+    /// The directory `.aqr` of the archive's root left out (what makes the program again: not
+    /// written where a program is run, docs/sfx-config-design.md, 6).
+    pub skip_aqr: bool,
+    /// What was made, in order (directories before what is in them; the directories of the
+    /// destination made among them): what [`clean`] removes. Kept where the extraction fails.
+    pub made: Vec<PathBuf>,
+    /// Of the files, those left as they were there.
+    pub left: usize,
+}
+
+impl Extracting<'_> {
+    /// As [`extract`] writes: nothing there written over.
+    pub fn new(ask: &mut dyn FnMut(&Path) -> Answer) -> Extracting<'_> {
+        Extracting { overwrite: Overwrite::Fail, ask, skip_aqr: false, made: Vec::new(), left: 0 }
+    }
+}
 
 /// Writes the files of `value` under `dest`, returning how many were written. Nothing there is
 /// written over or through: a file there already fails, and so does a link (or junction) where a
 /// directory of the archive goes, which would lead out of `dest`.
 pub fn extract(value: Value, dest: &Path) -> Result<usize, String> {
+    extract_with(value, dest, &mut Extracting::new(&mut |_| Answer::Quit))
+}
+
+/// [`extract`] as `x` tells: a file there written over or not by [`Extracting::overwrite`] (but a
+/// directory, or a link where a directory of the archive goes, still fails), the files' times
+/// of modification set where the archive has them.
+pub fn extract_with(value: Value, dest: &Path, x: &mut Extracting) -> Result<usize, String> {
+    // (the directories of the destination made noted, outermost first)
+    let mut missing: Vec<PathBuf> =
+        dest.ancestors().take_while(|p| !p.as_os_str().is_empty() && !p.exists()).map(Path::to_path_buf).collect();
     std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    missing.reverse();
+    x.made.extend(missing);
     match value {
         Value::File(data) => {
-            write(&dest.join("aqr-sfx-output"), &data)?;
-            Ok(1)
+            let wrote = write(&dest.join("aqr-sfx-output"), &data, None, x)?;
+            Ok(wrote as usize)
         }
         Value::Tree(tree, contents) => {
-            let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(tree.entries.len());
+            // each entry's path, `None` where it is left out
+            let mut paths: Vec<Option<PathBuf>> = Vec::with_capacity(tree.entries.len());
             let mut files = 0;
             for e in &tree.entries {
                 // the entries come each after its parent, so the parent's path is known
                 let base = match e.parent {
                     Some(p) => paths[p].clone(),
-                    None => dest.to_path_buf(),
+                    None if x.skip_aqr && e.name == b".aqr" => None,
+                    None => Some(dest.to_path_buf()),
                 };
-                let path = base.join(sanitized(&e.name));
+                let Some(path) = base.map(|b| b.join(sanitized(&e.name))) else {
+                    paths.push(None);
+                    continue;
+                };
                 match &e.node {
-                    EntryNode::Dir => dir(&path)?,
+                    EntryNode::Dir => {
+                        if dir(&path)? {
+                            x.made.push(path.clone());
+                        }
+                    }
                     EntryNode::File(c) => {
                         let data = contents.get(*c).ok_or_else(|| format!("{}: no content", path.display()))?;
-                        write(&path, data)?;
-                        files += 1;
+                        let mtime = e.extra.mtime.as_ref().map(system_time);
+                        if write(&path, data, mtime, x)? {
+                            files += 1;
+                        }
                     }
                     // links and special entries are left out of this first stub
                     _ => {}
                 }
-                paths.push(path);
+                paths.push(Some(path));
             }
             Ok(files)
         }
     }
 }
 
-/// Makes directory `path` (its parent there), or takes the one there: not a link to one.
-fn dir(path: &Path) -> Result<(), String> {
+/// Removes what `made` names ([`Extracting::made`]): the files, then the directories innermost
+/// first where they are empty. What cannot be removed (a file still open) is left; returns how
+/// many were.
+pub fn clean(made: &[PathBuf]) -> usize {
+    let mut left = 0;
+    for p in made.iter().rev() {
+        let gone = match std::fs::symlink_metadata(p) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir(p),
+            Ok(_) => std::fs::remove_file(p),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+        left += gone.is_err() as usize;
+    }
+    left
+}
+
+fn system_time(t: &aqr_archive::Time) -> std::time::SystemTime {
+    let at = std::time::Duration::new(t.secs.unsigned_abs(), 0);
+    let base = match t.secs >= 0 {
+        true => std::time::UNIX_EPOCH.checked_add(at),
+        false => std::time::UNIX_EPOCH.checked_sub(at),
+    };
+    base.and_then(|b| b.checked_add(std::time::Duration::from_nanos(t.nanos.into()))).unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// Makes directory `path` (its parent there), or takes the one there: not a link to one. Whether
+/// it was made.
+fn dir(path: &Path) -> Result<bool, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(()),
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(false),
         Ok(_) => Err(err(&"there already, not a directory (or a link), not written through")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(path).map_err(|e| err(&e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).map(|_| true).map_err(|e| err(&e))
+        }
         Err(e) => Err(err(&e)),
     }
 }
 
-/// Writes `data` to `path` (its directory made already), a new file: not over one there, nor
-/// through a link there.
-fn write(path: &Path, data: &[u8]) -> Result<(), String> {
+/// Writes `data` to `path` (its directory made already), a new file: not through a link there,
+/// and over a file there only as `x` tells (the link itself replaced). Whether it was written.
+fn write(path: &Path, data: &[u8], mtime: Option<std::time::SystemTime>, x: &mut Extracting) -> Result<bool, String> {
     use std::io::Write;
     let err = |e: std::io::Error| match e.kind() {
         std::io::ErrorKind::AlreadyExists => format!("{}: there already, not written over", path.display()),
         _ => format!("{}: {e}", path.display()),
     };
+    if let Ok(m) = std::fs::symlink_metadata(path) {
+        if m.is_dir() {
+            return Err(format!("{}: a directory there, not written over", path.display()));
+        }
+        let over = match x.overwrite {
+            Overwrite::Fail => return Err(err(std::io::ErrorKind::AlreadyExists.into())),
+            Overwrite::Always => true,
+            Overwrite::Never => false,
+            Overwrite::Newer => mtime.zip(m.modified().ok()).is_some_and(|(new, old)| new > old),
+            Overwrite::Ask => match (x.ask)(path) {
+                Answer::Yes => true,
+                Answer::No => false,
+                Answer::All => {
+                    x.overwrite = Overwrite::Always;
+                    true
+                }
+                Answer::None => {
+                    x.overwrite = Overwrite::Never;
+                    false
+                }
+                Answer::Quit => return Err(format!("{}: there already; stopped", path.display())),
+            },
+        };
+        if !over {
+            x.left += 1;
+            return Ok(false);
+        }
+        // (a link to a directory is one to remove as a directory, on Windows)
+        std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path)).map_err(err)?;
+    }
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(err)?;
-    f.write_all(data).map_err(err)
+    x.made.push(path.to_path_buf());
+    f.write_all(data).map_err(err)?;
+    if let Some(t) = mtime {
+        f.set_modified(t).map_err(err)?;
+    }
+    Ok(true)
 }
 
 /// An entry name (WTF-8) as a path component, lossily, as a Windows name cannot escape its
@@ -307,6 +435,79 @@ mod tests {
             assert!(e.contains("not written through"), "{e}");
             assert!(!out.join("x").exists());
         }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A file there is written over or left as the policy tells (asked: as answered); `.aqr`
+    /// left out where told; [`clean`] removes what was made and nothing else.
+    #[test]
+    fn overwrite_policies_and_clean() {
+        use super::{Answer, Extracting, Overwrite, clean, extract_with};
+        use std::path::Path;
+        let d = std::env::temp_dir().join(format!("aqr-sfx-overwrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let at = |secs, name: &[u8], c| {
+            let mut e = entry(None, name, EntryNode::File(c));
+            e.extra.mtime = Some(aqr_archive::Time { secs, nanos: 0, zone: aqr_archive::Zone::Utc, unit: 1 });
+            e
+        };
+        // (of 2001 and of 2100: older and newer than the files there, written now)
+        let t = Tree {
+            entries: vec![
+                at(1_000_000_000, b"old", 0),
+                at(4_102_444_800, b"new", 1),
+                entry(None, b".aqr", EntryNode::Dir),
+                entry(Some(2), b"sfx", EntryNode::File(0)),
+            ],
+            ..Tree::default()
+        };
+        let v = || Value::Tree(Box::new(t.clone()), vec![b"archive's".to_vec(), b"archive's".to_vec()]);
+        let read = |n: &str| String::from_utf8(std::fs::read(d.join(n)).unwrap()).unwrap();
+        let there = || {
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            ["old", "new"].iter().for_each(|n| std::fs::write(d.join(n), b"there").unwrap());
+        };
+        let mut never = |_: &Path| -> Answer { panic!("asked") };
+        for (policy, want) in [
+            (Overwrite::Always, ["archive's", "archive's"]),
+            (Overwrite::Never, ["there", "there"]),
+            (Overwrite::Newer, ["there", "archive's"]),
+        ] {
+            there();
+            let mut x = Extracting { overwrite: policy, skip_aqr: true, ..Extracting::new(&mut never) };
+            let n = extract_with(v(), &d, &mut x).unwrap();
+            assert_eq!([read("old"), read("new")], want.map(String::from), "{policy:?}");
+            assert_eq!(n + x.left, 2, "{policy:?}");
+            assert!(!d.join(".aqr").exists());
+        }
+        // asked: a file at a time, or all of them at once
+        for (answers, want) in [
+            (vec![Answer::No, Answer::Yes], ["there", "archive's"]),
+            (vec![Answer::All], ["archive's", "archive's"]),
+            (vec![Answer::None], ["there", "there"]),
+        ] {
+            there();
+            let mut answers = answers.into_iter();
+            let mut ask = |_: &Path| answers.next().expect("asked once more");
+            let mut x = Extracting { overwrite: Overwrite::Ask, ..Extracting::new(&mut ask) };
+            extract_with(v(), &d, &mut x).unwrap();
+            assert_eq!([read("old"), read("new")], want.map(String::from));
+            assert_eq!(read(".aqr/sfx"), "archive's");
+        }
+        there();
+        let mut quit = |_: &Path| Answer::Quit;
+        let e = extract_with(v(), &d, &mut Extracting { overwrite: Overwrite::Ask, ..Extracting::new(&mut quit) });
+        assert!(e.unwrap_err().contains("stopped"));
+
+        // what was made removed, the destination's directories among them; nothing else
+        there();
+        let dest = d.join("a/b");
+        let mut x = Extracting::new(&mut never);
+        assert_eq!(extract_with(v(), &dest, &mut x), Ok(3));
+        assert_eq!(x.made.len(), 2 + 4);
+        assert_eq!(clean(&x.made), 0);
+        assert!(!d.join("a").exists() && d.join("old").exists());
         std::fs::remove_dir_all(&d).unwrap();
     }
 

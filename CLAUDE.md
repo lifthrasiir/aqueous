@@ -19,8 +19,11 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     compression dialog's questions before it begins (`src/session.rs`). `--format sfx` (`src/sfx.rs`,
     Windows x86-64) makes a self-extracting program: the archive with shorthand module blocks for
     the modules that have native blobs, after aqr-sfx-shim (packed by UPX) and the bundle of
-    those blobs (and of the interpreter blob, if any module is in full: aqr-sfx's `bundle`). What
-    it bundles is `target/aqr-sfx/` (or
+    those blobs (and of the interpreter blob, if any module is in full: aqr-sfx's `bundle`), and
+    what the program does once run where the input's root has `.aqr/sfx/sfx.toml`
+    (`docs/sfx-config-design.md`: read back of the archive made, compiled by aqr-sfx's `config`
+    into a record of CBOR before the archive, and the stub's icon, `VERSIONINFO`, manifest and
+    subsystem written by its `pe`, as a section after UPX's). What it bundles is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and packs (`sfx.pack`, the blobs as
     bundles of LZMA2, ~4.7 MB: only aqr reads it); it is no part of aqr's build but written into
     the linked executable as resources (`aqr-sfx-pack --embed DIR EXE`, aqr-sfx's `resource`, read
@@ -127,16 +130,18 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     last function, through aqr-exe's x86 disfilter, the streams of all the blobs one after
     another by stream and the rest apart, each a zstd frame at 19; feature `encode` makes them;
     feature `xz` the same of raw LZMA2 frames, for the pack aqr carries alone, not the stub),
-    placed by `aqr_blob::load`. `extract` writes a decoded archive's files out. Shared by the
+    placed by `aqr_blob::load`. `extract` writes a decoded archive's files out (`extract_with`:
+    as the settings write over what is there, the made noted for `clean`). Shared by the
     stub and aqr. `pack.py` gathers what aqr embeds (the stub, packed by UPX `-9` where `AQR_UPX` or
     `upx` is found, the blobs of the modules and of the shared libraries) and packs it
     (`aqr-sfx-pack`: `sfx.pack`).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-archive + aqr-sfx, no codecs or Wasmtime,
-    0.67 MB, 0.30 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
-    of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle and
-    the archive from right after its image (else it scans itself from the end for the archive's
-    header magic), decodes the archive running the modules through the blobs, and writes the
-    files out.
+    0.71 MB, 0.33 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
+    of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle, the
+    settings and the archive from right after its image (else it scans itself from the end for
+    the archive's header magic, the settings right before it), decodes the archive running the
+    modules through the blobs, writes the files out and runs the program the settings tell
+    (`src/run.rs`; its questions and messages in boxes where it has no console, `src/ui.rs`).
   - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_vtable`, aqr-blob's
     `Vtable`: load, apply, apply_part, and for aqr the loads of aqr-wasmrt, the bound and the
     sandbox's worker) that runs any Wasm module handed to it by Wasmtime (`aqr-wasmrt`), no codecs

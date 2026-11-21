@@ -61,6 +61,11 @@ mod slices;
 mod spool;
 mod stand_in;
 mod tree;
+/// CBOR as the optional metadata is read and written (RFC 8949): any well-formed data item read
+/// ([`cbor::whole_item`]), the heads of the items written ([`cbor::head`], [`cbor::int`]).
+pub mod cbor {
+    pub use super::tree::{Cbor, Items, head, int, whole_item};
+}
 
 use blocks::*;
 pub use compress::*;

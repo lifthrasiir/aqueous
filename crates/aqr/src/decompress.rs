@@ -1062,6 +1062,12 @@ impl aqr_archive::Runner for Decoder {
             Err(e) => Err(Failure::Resource(format!("no sandbox: {e}"))),
         }
     }
+
+    /// The modules this program carries, which a self-extracting program's archive names by
+    /// their hashes alone (`--format sfx`).
+    fn registered(&self, hash: &[u8; 32]) -> aqr_archive::Decoded<Vec<u8>> {
+        self.native.registered(hash)
+    }
 }
 
 /// The summary of an archive decoded into `out` (`None`: tested).

@@ -37,8 +37,9 @@
 //! - `--format sfx` (Windows x86-64): a self-extracting program, `INPUT.exe` without `-o` ([`sfx`]):
 //!   the Aqueous archive (a single file in it by its name) after a stub that writes its files out
 //!   when run, with the native blobs of the modules the archive names by their hashes merged into
-//!   it (and the interpreter blob, for any other module). Not with `-a`, `-A`, `-P`, `-j` or
-//!   standard input or output.
+//!   it (and the interpreter blob, for any other module); what the program does once run as
+//!   the `.aqr/sfx/sfx.toml` of the input's root tells (docs/sfx-config-design.md). Not with `-a`,
+//!   `-A`, `-P`, `-j` or standard input or output.
 //! - `-d` (the default as `unaqr`): an archive into its name without `.aqr`, or `-o`. An
 //!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip, bzip2,
 //!   xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
@@ -372,7 +373,8 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
                         tar.xz, tar.lzma, tar.zst, or gz, bz2, xz, lzma, zst of a
                         single file (also by -o's name); -l is the format's level
                         (zlib's 0-9; xz, lzma, 7z: 0-9; bz2: 1-9; zst: 1-22); sfx, a
-                        self-extracting program (Windows)
+                        self-extracting program (Windows; its settings in the
+                        input's .aqr/sfx/sfx.toml)
 
 Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
   PATH                  a path in the archive (a directory with what is under it),

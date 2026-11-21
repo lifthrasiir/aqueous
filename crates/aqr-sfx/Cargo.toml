@@ -15,10 +15,13 @@ aqr-exe = { workspace = true, features = ["decode"] }
 zstd.workspace = true
 # (XZ Utils' liblzma, as aqr-pack builds it: the pack aqr carries, `xz`)
 liblzma = { workspace = true, features = ["static"], optional = true }
+# (sfx.toml, compiled into a program's settings: aqr's alone)
+toml = { workspace = true, optional = true }
 
 [features]
-# Making bundles of blobs (`bundle::pack`), for aqr; the stub only unpacks them.
-encode = ["aqr-exe/encode"]
+# Making bundles of blobs (`bundle::pack`), the settings of sfx.toml (`config::compile`) and the
+# stub's resources (`pe`), for aqr; the stub only unpacks and reads them.
+encode = ["aqr-exe/encode", "dep:toml"]
 # Bundles of raw LZMA2 frames (`bundle::pack_xz`, `bundle::unpack`): the pack that aqr carries,
 # which its stub never reads.
 xz = ["dep:liblzma"]

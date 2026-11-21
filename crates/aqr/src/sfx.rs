@@ -14,13 +14,20 @@
 //! against (crates/aqr-dll/layout.py: the runtime among them; the imports between them bound as
 //! the stub places them); any other module is written in full, and the interpreter blob is in the
 //! bundle to run it.
+//!
+//! An archive whose root has `.aqr/sfx/` makes a program of its settings ([`settings`],
+//! docs/sfx-config-design.md): `sfx.toml` and the files it names there, read back of the
+//! archive made (which keeps them as files: what makes the same program again), compiled into
+//! the settings the stub reads ([`aqr_sfx::config`], after the bundle) and what they make of
+//! the stub's image (its icon, `VERSIONINFO`, manifest and subsystem: [`aqr_sfx::pe`]).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::hex;
-use aqr_archive::Wasm;
+use aqr_archive::{EntryNode, Tree, Wasm};
 use aqr_formula::Module;
+use aqr_sfx::config::{Compiled, Kind};
 
 /// The pack this program's executable carries, in place, and the digest of its files (`pack.id`);
 /// both empty where it carries none.
@@ -149,12 +156,85 @@ pub struct Made {
     pub libs: usize,
     pub interp: bool,
     pub bundle: usize,
+    /// Whether it has settings (of `.aqr/sfx/`).
+    pub settings: bool,
 }
 
-/// The self-extracting program of `archive` (an Aqueous archive made with [`wasm_of`]): the stub,
-/// the bundle of the native blobs of the modules it names by their hashes and, if it has any
-/// module in full, of the interpreter blob (none where it has no module), and the archive.
-pub fn make(archive: &[u8]) -> Result<Made, String> {
+/// The path of the directory of the settings in an archive's root.
+pub const SETTINGS: [&[u8]; 2] = [b".aqr", b"sfx"];
+
+/// The entry of the directory `.aqr/sfx/` of the root of `t` ([`SETTINGS`]), if there is one.
+pub fn settings_dir(t: &Tree) -> Option<usize> {
+    let mut at = None;
+    for name in SETTINGS {
+        at = Some(t.entries.iter().position(|e| e.parent == at && e.name == name && e.node == EntryNode::Dir)?);
+    }
+    at
+}
+
+/// The path (by `/`) of entry `i` of `t`, under entry `under` where given (else the root).
+fn path_of(t: &Tree, mut i: usize, under: Option<usize>) -> String {
+    let mut parts = Vec::new();
+    while Some(i) != under {
+        let e = &t.entries[i];
+        parts.push(String::from_utf8_lossy(&e.name).into_owned());
+        match e.parent {
+            Some(p) => i = p,
+            None => break,
+        }
+    }
+    parts.reverse();
+    parts.join("/")
+}
+
+/// The settings of `archive` (made by [`wasm_of`]) where its root has `.aqr/sfx/`: its files
+/// there decoded (the leaves holding them alone), compiled and checked against the archive's
+/// paths ([`aqr_sfx::config::compile`]).
+pub fn settings(archive: &[u8], threads: usize) -> Result<Option<Compiled>, String> {
+    let native = aqr_decompress::Native { threads };
+    let a = aqr_archive::open(archive, &native).map_err(|e| format!("{e:?}"))?;
+    let Some(t) = a.tree() else { return Ok(None) };
+    let Some(dir) = settings_dir(t) else { return Ok(None) };
+    // the files under .aqr/sfx/, by their paths there
+    let mut files: HashMap<String, usize> = HashMap::new();
+    let mut kinds: HashMap<String, Kind> = HashMap::new();
+    for (i, e) in t.entries.iter().enumerate() {
+        let path = path_of(t, i, None);
+        match e.node {
+            EntryNode::File(c) => {
+                kinds.insert(path, Kind::File);
+                // (an entry under the directory: one of its ancestors)
+                let mut p = e.parent;
+                while let Some(q) = p {
+                    if q == dir {
+                        files.insert(path_of(t, i, Some(dir)), c);
+                        break;
+                    }
+                    p = t.entries[q].parent;
+                }
+            }
+            EntryNode::Dir => drop(kinds.insert(path, Kind::Dir)),
+            _ => {}
+        }
+    }
+    let mut only = vec![false; a.contents_len()];
+    files.values().for_each(|&c| only[c] = true);
+    let got = std::sync::Mutex::new(HashMap::new());
+    a.contents_of(threads, Some(&only), |c, d| {
+        got.lock().unwrap().insert(c, d);
+        Ok(())
+    })
+    .map_err(|e| format!(".aqr/sfx/: {e:?}"))?;
+    let got = got.into_inner().unwrap();
+    let file = |n: &str| files.get(n).and_then(|c| got.get(c).cloned());
+    aqr_sfx::config::compile(&file, &|p| kinds.get(p).copied()).map(Some)
+}
+
+/// The self-extracting program of `archive` (an Aqueous archive made with [`wasm_of`]): the stub
+/// (its image as `settings` tells), the bundle of the native blobs of the modules it names by
+/// their hashes and, if it has any module in full, of the interpreter blob (none where it has no
+/// module), the settings, and the archive.
+pub fn make(archive: &[u8], settings: Option<&Compiled>) -> Result<Made, String> {
     let pack = pack()?;
     let ins = aqr_archive::inspect::inspect(archive, false, &|_| None, None).map_err(|e| format!("{e:?}"))?;
     let (mut hashes, mut full) = (Vec::new(), false);
@@ -195,9 +275,22 @@ pub fn make(archive: &[u8]) -> Result<Made, String> {
         blobs.push((aqr_sfx::INTERP.to_owned(), interpreter()?));
     }
     let bundle = if blobs.is_empty() { Vec::new() } else { aqr_sfx::bundle::pack(&blobs)? };
-    let mut exe = Vec::with_capacity(pack.stub.len() + bundle.len() + archive.len());
-    exe.extend_from_slice(&pack.stub);
+    let stub = match settings {
+        Some(s) => aqr_sfx::pe::apply(&pack.stub, &s.pe)?,
+        None => pack.stub.clone(),
+    };
+    let record = settings.map(|s| s.config.record()).unwrap_or_default();
+    let mut exe = Vec::with_capacity(stub.len() + bundle.len() + record.len() + archive.len());
+    exe.extend_from_slice(&stub);
     exe.extend_from_slice(&bundle);
+    exe.extend_from_slice(&record);
     exe.extend_from_slice(archive);
-    Ok(Made { exe, natives: hashes.len(), libs: libs.len(), interp: full, bundle: bundle.len() })
+    Ok(Made {
+        exe,
+        natives: hashes.len(),
+        libs: libs.len(),
+        interp: full,
+        bundle: bundle.len(),
+        settings: settings.is_some(),
+    })
 }

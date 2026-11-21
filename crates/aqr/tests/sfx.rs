@@ -102,6 +102,83 @@ mod packed {
         fs::remove_dir_all(&d).unwrap();
     }
 
+    /// An icon of one image (a PNG by its signature, all that is checked of it).
+    fn icon() -> Vec<u8> {
+        let png = b"\x89PNG\r\n\x1a\n and the rest";
+        let mut ico = vec![0, 0, 1, 0, 1, 0, 32, 32, 0, 0, 1, 0, 32, 0];
+        ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&22u32.to_le_bytes());
+        ico.extend_from_slice(png);
+        ico
+    }
+
+    /// A program of the settings of `.aqr/sfx/` (docs/sfx-config-design.md): its icon, version
+    /// and subsystem in its image, run (cmd.exe of the archive: its exit code the program's, the
+    /// files written to a new temporary directory and removed once it ends); and the settings
+    /// kept in the archive as files, which make the same program again.
+    #[test]
+    fn sfx_of_settings() {
+        let d = scratch("settings");
+        fs::create_dir_all(d.join("in/.aqr/sfx")).unwrap();
+        fs::create_dir_all(d.join("in/bin")).unwrap();
+        let cmd = fs::read(std::env::var("SystemRoot").unwrap() + r"\System32\cmd.exe").unwrap();
+        fs::write(d.join("in/bin/cmd.exe"), cmd).unwrap();
+        fs::write(d.join("in/bin/data.txt"), prose(50_000)).unwrap();
+        fs::write(d.join("in/.aqr/sfx/icon.ico"), icon()).unwrap();
+        let copied = d.join("copied.txt");
+        let toml = format!(
+            "mode = \"run\"\ntitle = \"Example\"\n\n[run]\nprogram = [\"bin/cmd.exe\", \"/c\", \"copy\", \"data.txt\", {:?}, \"&\", \"exit\", \"7\"]\ncwd = \"bin\"\nwindow = \"hidden\"\n\n[pe]\nicon = \"icon.ico\"\nsubsystem = \"gui\"\nversion = \"1.2.3\"\nproduct = \"Example\"\ncompany = \"Example Inc.\"\n",
+            copied.display().to_string()
+        );
+        fs::write(d.join("in/.aqr/sfx/sfx.toml"), &toml).unwrap();
+        made(&d, &["in"], "setup.exe");
+        let exe = fs::read(d.join("setup.exe")).unwrap();
+        let res = aqr_sfx::pe::resources(&exe).unwrap();
+        let kinds: Vec<_> = res.iter().map(|r| r.kind.clone()).collect();
+        use aqr_sfx::pe::Id::Num;
+        assert_eq!(kinds, [Num(3), Num(14), Num(16), Num(24)]);
+        let pe = u32::from_le_bytes(exe[0x3c..0x40].try_into().unwrap()) as usize;
+        assert_eq!(u16::from_le_bytes([exe[pe + 24 + 68], exe[pe + 25 + 68]]), 2, "of windows");
+
+        let tmp = d.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let o = Command::new(d.join("setup.exe")).current_dir(&d).env("TMP", &tmp).env("TEMP", &tmp).output().unwrap();
+        assert_eq!(o.status.code(), Some(7), "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(fs::read(&copied).unwrap() == fs::read(d.join("in/bin/data.txt")).unwrap());
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0, "the files written removed");
+
+        // the archive's .aqr/sfx/ as it was, and the program made of it again the same (up to the
+        // archive: its root's times may differ)
+        let o = aqr_in(&d, &["-d", "-q", "-o", "out", "setup.exe"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(fs::read_to_string(d.join("out/.aqr/sfx/sfx.toml")).unwrap(), toml);
+        made(&d, &["out"], "again.exe");
+        let again = fs::read(d.join("again.exe")).unwrap();
+        let (at, at_again) = (aqr_archive::locate(&exe).unwrap().start, aqr_archive::locate(&again).unwrap().start);
+        assert!(exe[..at] == again[..at_again]);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Settings not right fail when the program is made, none made.
+    #[test]
+    fn settings_checked() {
+        let d = scratch("checked");
+        fs::create_dir_all(d.join("in/.aqr/sfx")).unwrap();
+        fs::write(d.join("in/a.txt"), prose(1000)).unwrap();
+        for (toml, told) in [
+            ("tilte = \"x\"\n", "tilte: not a setting known"),
+            ("[run]\nprogram = [\"setup.exe\"]\n", "run.program: setup.exe: not a file of the archive"),
+            ("[pe]\nicon = \"icon.ico\"\n", "pe.icon: icon.ico: not a file of .aqr/sfx/"),
+        ] {
+            fs::write(d.join("in/.aqr/sfx/sfx.toml"), toml).unwrap();
+            let o = aqr_in(&d, &["-c", "--format", "sfx", "-o", "x.exe", "in"]);
+            let err = String::from_utf8_lossy(&o.stderr);
+            assert!(!o.status.success() && err.contains(told), "{toml}: {err}");
+            assert!(!d.join("x.exe").exists());
+        }
+        fs::remove_dir_all(&d).unwrap();
+    }
+
     /// The modules run as WebAssembly (`-Z wasm`) by the interpreter blob of the pack, as aqr.exe
     /// links no Wasmtime: an archive of a module (aqr-wrt's) tested and extracted as it was.
     #[test]
@@ -125,6 +202,23 @@ mod packed {
         assert!(list.contains("wrt"), "{list}");
         fs::remove_dir_all(&d).unwrap();
     }
+}
+
+/// `.aqr/sfx/` archived but not into a self-extracting program: told, and kept as files.
+#[test]
+fn settings_not_of_a_program() {
+    let d = scratch("not-sfx");
+    fs::create_dir_all(d.join("in/.aqr/sfx")).unwrap();
+    fs::write(d.join("in/.aqr/sfx/sfx.toml"), "title = \"x\"\n").unwrap();
+    let o = aqr_in(&d, &["-c", "-o", "a.aqr", "in"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success() && err.contains(".aqr/sfx/: archived as files"), "{err}");
+    let o = aqr_in(&d, &["-d", "-q", "-o", "out", "a.aqr"]);
+    assert!(o.status.success() && d.join("out/.aqr/sfx/sfx.toml").exists());
+    // (not of the root: not told)
+    let o = aqr_in(&d, &["-c", "-o", "b.aqr", "in", "out"]);
+    assert!(!String::from_utf8_lossy(&o.stderr).contains(".aqr/sfx/"));
+    fs::remove_dir_all(&d).unwrap();
 }
 
 #[test]

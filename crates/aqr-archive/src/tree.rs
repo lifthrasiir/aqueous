@@ -1041,7 +1041,7 @@ const TAG_SCALES: [(u64, i128); 8] = [
 ];
 
 /// A CBOR head of major type `major` and argument `v`, in the shortest encoding.
-fn head(out: &mut Vec<u8>, major: u8, v: u64) {
+pub fn head(out: &mut Vec<u8>, major: u8, v: u64) {
     let m = major << 5;
     match v {
         0..24 => out.push(m | v as u8),
@@ -1062,7 +1062,7 @@ fn head(out: &mut Vec<u8>, major: u8, v: u64) {
 }
 
 /// A CBOR integer (within 64 bits, positive or negative).
-fn int(out: &mut Vec<u8>, v: i128) {
+pub fn int(out: &mut Vec<u8>, v: i128) {
     if v >= 0 { head(out, 0, v as u64) } else { head(out, 1, (-1 - v) as u64) }
 }
 
@@ -1070,7 +1070,7 @@ fn int(out: &mut Vec<u8>, v: i128) {
 /// borrowed from the data, and arrays, maps and tagged items as the bytes of their contents
 /// ([`Items`]), checked as they are read first and read again where looked into.
 #[derive(Debug, Clone)]
-enum Cbor<'a> {
+pub enum Cbor<'a> {
     Int(i128),
     Bytes(Cow<'a, [u8]>),
     Text(Cow<'a, [u8]>),
@@ -1087,14 +1087,14 @@ enum Cbor<'a> {
 /// checked already: `d`, the bytes of all of them (a break after them where of an indefinite
 /// length), and their number (`None`: up to the break), each at `depth`.
 #[derive(Debug, Clone, Copy)]
-struct Items<'a> {
+pub struct Items<'a> {
     d: &'a [u8],
     n: Option<usize>,
     depth: usize,
 }
 
 impl<'a> Items<'a> {
-    fn iter(self) -> impl Iterator<Item = Cbor<'a>> {
+    pub fn iter(self) -> impl Iterator<Item = Cbor<'a>> {
         let (mut at, mut k) = (0, 0);
         std::iter::from_fn(move || {
             if ended(self.d, &mut at, self.n, k) {
@@ -1106,7 +1106,7 @@ impl<'a> Items<'a> {
     }
 
     /// Of a map, its pairs.
-    fn pairs(self) -> impl Iterator<Item = (Cbor<'a>, Cbor<'a>)> {
+    pub fn pairs(self) -> impl Iterator<Item = (Cbor<'a>, Cbor<'a>)> {
         let mut items = self.iter();
         std::iter::from_fn(move || Some((items.next()?, items.next().expect("a map of pairs"))))
     }
@@ -1307,6 +1307,17 @@ fn skip(d: &[u8], at: &mut usize, depth: usize) -> Decoded<()> {
         _ => return bad(),
     }
     Ok(())
+}
+
+/// The CBOR data item that is the whole of `d`, as the optional metadata's are read (what else
+/// is of CBOR reads it so: a self-extracting program's settings, aqr-sfx's `config`).
+pub fn whole_item(d: &[u8]) -> Decoded<Cbor<'_>> {
+    let mut at = 0;
+    let c = item(d, &mut at, 0)?;
+    if at != d.len() {
+        return invalid("bytes after a CBOR data item");
+    }
+    Ok(c)
 }
 
 /// Reads a CBOR data item at `*at` of `d`.

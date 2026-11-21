@@ -285,7 +285,9 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     let tmp = PathBuf::from(tmp);
     let made = compress_aqr(a, Inputs { renames: &renames, ..inputs }, &tmp).and_then(|gone| {
         let archive = fs::read(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        let made = sfx::make(&archive)?;
+        // (the settings of .aqr/sfx/, read back of the archive made: what makes it again)
+        let settings = sfx::settings(&archive, a.opt.threads)?;
+        let made = sfx::make(&archive, settings.as_ref())?;
         // (written beside it and renamed: not a program in part where the disk is full)
         files::write_whole(out, force, |f| std::io::Write::write_all(f, &made.exe))?;
         Ok((gone, made, archive.len()))
@@ -294,8 +296,9 @@ fn sfx_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, String> {
     let (gone, made, archived) = made?;
     if !a.quiet {
         eprintln!(
-            "{}: self-extracting, {} module{} native ({} shared librar{}){}: {} ({} of the blobs, {} of the archive){}",
+            "{}: self-extracting{}, {} module{} native ({} shared librar{}){}: {} ({} of the blobs, {} of the archive){}",
             out.display(),
+            if made.settings { " (the settings of .aqr/sfx/)" } else { "" },
             made.natives,
             plural(made.natives),
             made.libs,
@@ -464,6 +467,9 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
             eprintln!("skipped {s}");
         }
         g.warnings.iter().for_each(|w| eprintln!("{w}"));
+        if a.format != Pack::Sfx && sfx::settings_dir(&g.tree).is_some() {
+            eprintln!(".aqr/sfx/: archived as files (the settings of a self-extracting program: --format sfx)");
+        }
     }
     // appending: what the archive holds already left out
     let prior = match opened {
