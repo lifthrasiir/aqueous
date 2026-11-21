@@ -484,7 +484,11 @@ fn compress_tree_noting<S: Source + ?Sized>(
     // (those of digests in the others, or signed beside them, kept as they are)
     rw.keep(crate::lossy::digests::referenced(src, opt));
     let revoke = |c: usize| rw.revoke(c);
+    // (joined as this ends, however it does: what is dropped there, the inputs mapped among it,
+    // let go of before it returns)
+    let later = Later::default();
     let cx = Ctx {
+        later: &later,
         src: &rw,
         opt,
         notes: &notes,
@@ -671,8 +675,35 @@ aqr_common::zopt! {
     static SIBLINGS: Opt<bool> = Opt::flag("siblings", true, "take apart files of no header by others archived along (VPKs, .resS)");
 }
 
+/// What a batch made drops, dropped on threads of their own ([`Later::drop`]), all of them joined
+/// as it is dropped: of linux-4.0.1 at -1, its encoder and formula took 0.12 s of the thread
+/// making the archive, of 10gb's 1.1 s, for which nothing else was written.
+#[derive(Default)]
+struct Later(Mutex<Vec<std::thread::JoinHandle<()>>>);
+
+impl Later {
+    /// `t` dropped on a thread of its own (here, where none can be made: the thread's closure,
+    /// which holds it, dropped as it fails).
+    fn drop<T: Send + 'static>(&self, t: T) {
+        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        held.retain(|h| !h.is_finished());
+        if let Ok(h) = std::thread::Builder::new().name("aqr-drop".into()).spawn(move || drop(t)) {
+            held.push(h);
+        }
+    }
+}
+
+impl Drop for Later {
+    fn drop(&mut self) {
+        for h in std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner())) {
+            let _ = h.join();
+        }
+    }
+}
+
 /// What the batches being made share ([`compress_tree_noting`]).
 struct Ctx<'a, S: ?Sized> {
+    later: &'a Later,
     src: &'a S,
     opt: &'a Options,
     notes: &'a Notes,
@@ -1163,7 +1194,8 @@ impl Writer {
         let mut made = loop {
             let w = &self.w;
             let fs = &files[..];
-            let made = self.watched(cx, out, move || finish(i, w, fs, part, src, opt, notes))?;
+            let later = cx.later;
+            let made = self.watched(cx, out, move || finish(i, w, fs, part, src, opt, notes, later))?;
             // (the files `--lossy` rewrote that archive in as many bytes as they were, or more:
             // made again as they were, which kept as they are cost no more, docs/lossy-design.md §1)
             let larger: Vec<usize> = (0..files.len())
@@ -2335,15 +2367,15 @@ fn finish<S: Source + ?Sized>(
     src: &S,
     opt: &Options,
     notes: &Notes,
+    later: &Later,
 ) -> Made {
     let Analyzed { f, leaves, at, mut enc, memo, alternatives } = a;
     enc.on_precompress(Some(notes.encoding(i)));
     let encoding = aqr_common::trace::span("encode");
     let batch = w.batch(&enc, &f, &leaves).expect("slices within their streams");
     drop(encoding);
-    drop(enc);
     let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
-    drop(f);
+    later.drop((enc, f));
 
     let bad = if opt.verify {
         let read =
