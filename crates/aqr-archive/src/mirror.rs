@@ -29,6 +29,8 @@ use std::ops::Range;
 use aqr_common::varint;
 use xxhash_rust::xxh64::xxh64;
 
+use crate::{Decoded, resource};
+
 use super::{FOOTER_MAGIC, FOOTER_TYPE, HEADER_MAGIC, OVERLAY_FOOTER_MAGIC, OVERLAY_FOOTER_TYPE, OVERLAY_HEADER_MAGIC};
 
 pub const MIRROR_MAGIC: [u8; 8] = [0x02, 0xaa, 0xf5, 0xfe, 0xba, 0x2b, 0xae, 0x23];
@@ -847,10 +849,13 @@ fn failing_non_leaf(out: &mut Vec<u8>, n: usize) {
 ///   Salvaging, also where blocks of a later segment come after it (cut short before that
 ///   segment's metadata block): those blocks lost, cut off, and the footer made again after the
 ///   metadata block.
-pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Option<Repaired> {
+///
+/// A resource failure where the memory for the archive repaired is not had: a block restored
+/// past the end may be told anywhere (a mirror block's checksum is no authentication).
+pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Decoded<Option<Repaired>> {
     // (read one after another up to a footer at the end, as all its blocks are as they are to be)
     if c.walked && erased.is_empty() && c.differing(a).next().is_none() {
-        return None;
+        return Ok(None);
     }
     let mirrors: Vec<&Found> =
         c.mirrors.iter().filter(|m| !erased.iter().any(|e| overlap(e, &(m.at..m.end)))).collect();
@@ -889,6 +894,12 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
             continue;
         }
         let b = v.get_or_insert_with(|| a.to_vec());
+        // (the room for the block, and for a gap before it, reserved as it is: grown by doubling,
+        // a gap told anywhere would take twice as much)
+        let end = m.target_end();
+        if b.len() < end && b.try_reserve_exact(end - b.len()).is_err() {
+            return resource(format!("no memory for {end} bytes of an archive repaired"));
+        }
         if m.target > b.len() {
             if !(salvage && headed) {
                 continue;
@@ -899,14 +910,15 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
             if e > m.target || (m.target - e) % 2 == 1 {
                 continue;
             }
-            b.truncate(e);
+            // (cut to the last block whole, or its padding byte added where a block restored
+            // before ends it without one)
+            b.resize(e, 0);
             if m.target > e {
                 spacer(b, (m.target - e) as u64);
                 // (nothing lost where only a padding byte was cut off)
                 lost.push(e..m.target);
             }
         }
-        let end = m.target_end();
         if b.len() < end {
             b.resize(end, 0);
         }
@@ -983,11 +995,16 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
                 lost.push(e..b.len());
                 cut_off = Some(e..b.len());
             }
-            // (its padding, where cut off, restored as a zero byte)
-            b.resize(e, 0);
             let mut f = Vec::new();
             varint::put(&mut f, (e - HEADER_MAGIC.len()) as u64);
             varint::put(&mut f, (e + 8 - meta) as u64);
+            // (the padding and the footer reserved as they are, as the blocks restored were)
+            let more = (e + FOOTER_MAGIC.len() + 4 + f.len()).saturating_sub(b.len());
+            if b.try_reserve_exact(more).is_err() {
+                return resource(format!("no memory for {} bytes of an archive repaired", b.len() + more));
+            }
+            // (its padding, where cut off, restored as a zero byte)
+            b.resize(e, 0);
             let overlay = b.starts_with(&OVERLAY_HEADER_MAGIC);
             b.extend_from_slice(if overlay { &OVERLAY_FOOTER_MAGIC } else { &FOOTER_MAGIC });
             b.extend_from_slice(&(f.len() as u16).to_le_bytes());
@@ -1005,9 +1022,9 @@ pub fn repair(a: &[u8], c: &Check, salvage: bool, erased: &[Range<usize>]) -> Op
         }
     }
     if restored.is_empty() && !footer && !header && lost.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), header, footer, lost, cut_off })
+    Ok(Some(Repaired { bytes: v.expect("changed"), restored: restored.len(), header, footer, lost, cut_off }))
 }
 
 /// The blocks of archive `a` (repaired or not: those before `cut` do not matter) from the start
@@ -1251,7 +1268,7 @@ mod tests {
             let cd = check(&d);
             assert!(cd.walked);
             assert_eq!(cd.differing(&d).count(), 1);
-            let r = repair(&d, &cd, false, &[]).unwrap();
+            let r = repair(&d, &cd, false, &[]).unwrap().unwrap();
             assert_eq!((r.restored, r.footer), (1, false));
             assert_eq!(r.bytes, m);
         }
@@ -1263,7 +1280,7 @@ mod tests {
         let cd = check(&d);
         // (read one after another, the spacer block's zeros resynchronising the blocks)
         assert!(cd.walked && cd.mirrors.len() == 5);
-        let r = repair(&d, &cd, false, &[]).unwrap();
+        let r = repair(&d, &cd, false, &[]).unwrap().unwrap();
         assert_eq!((r.restored, &r.bytes), (1, &m));
         assert_eq!(files(&r.bytes), files(&m));
         // the header damaged too: found by their magic, the archive starting where they tell, its
@@ -1271,7 +1288,7 @@ mod tests {
         d[0] ^= 1;
         let cd = check(&d);
         assert!(!cd.walked && cd.mirrors.len() == 5);
-        let r = repair(&d, &cd, false, &[]).unwrap();
+        let r = repair(&d, &cd, false, &[]).unwrap().unwrap();
         assert!(r.restored == 1 && r.header);
         assert_eq!(r.bytes, m);
     }
@@ -1287,7 +1304,7 @@ mod tests {
         let cd = check(&d);
         assert_eq!((cd.mirrors.len(), cd.broken, cd.unmirrored()), (4, 1, 1));
         assert!(!cd.mirrored(&d, false));
-        assert_eq!(repair(&d, &cd, false, &[]), None);
+        assert_eq!(repair(&d, &cd, false, &[]).unwrap(), None);
         assert_eq!(files(&d), files(&m));
     }
 
@@ -1306,7 +1323,7 @@ mod tests {
             d[t.data.start + 1] ^= 1;
             let cd = check(&d);
             assert_eq!((cd.mirrors.len(), cd.broken, cd.unmirrored()), (4, 1, 1), "block {k}");
-            assert_eq!(repair(&d, &cd, false, &[]), None, "block {k}");
+            assert_eq!(repair(&d, &cd, false, &[]).unwrap(), None, "block {k}");
             assert!(!cd.mirrored(&d, false));
             // (what is damaged is no valid archive, never a panic)
             let r = decode_value(&d, &n);
@@ -1316,7 +1333,7 @@ mod tests {
             let mut e = d.clone();
             e[other.target_end() - 3] ^= 0x55;
             let ce = check(&e);
-            let r = repair(&e, &ce, false, &[]).unwrap();
+            let r = repair(&e, &ce, false, &[]).unwrap().unwrap();
             assert_eq!(r.restored, 1, "block {k}");
             let (own, theirs) = (t.target..t.target_end(), other.target..other.target_end());
             assert_eq!(r.bytes[theirs.clone()], m[theirs], "block {k}");
@@ -1341,18 +1358,18 @@ mod tests {
             let d = &m[..cut];
             let cd = check(d);
             assert!(!cd.walked);
-            let r = repair(d, &cd, false, &[]).unwrap();
+            let r = repair(d, &cd, false, &[]).unwrap().unwrap();
             assert_eq!((r.restored, r.footer), ((cut <= meta + 3) as usize, true));
             assert_eq!(files(&r.bytes), files(&m));
         }
         // (cut before the metadata block: not repaired, as files' blocks are lost)
         let d = &m[..meta - 1];
-        assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));
+        assert!(repair(d, &check(d), false, &[]).unwrap().is_none_or(|r| !r.footer));
         // in the archive without it, a truncation into the metadata block is lost
         let m = mirrored(&segment(&[0, 3000, 3000], false, None), 4096, false);
         let meta = check(&m).targets.last().unwrap().0;
         let d = &m[..meta + 3];
-        assert_eq!(repair(d, &check(d), false, &[]), None);
+        assert_eq!(repair(d, &check(d), false, &[]).unwrap(), None);
     }
 
     /// A truncation before the metadata block, salvaged: the metadata block restored past the
@@ -1369,8 +1386,8 @@ mod tests {
         let third = c.targets.iter().rev().nth(1).unwrap().0;
         for cut in [third + 1, third + 40, meta - 1] {
             let d = &m[..cut];
-            assert!(repair(d, &check(d), false, &[]).is_none_or(|r| r.lost.is_empty() && !r.footer));
-            let r = repair(d, &check(d), true, &[]).unwrap();
+            assert!(repair(d, &check(d), false, &[]).unwrap().is_none_or(|r| r.lost.is_empty() && !r.footer));
+            let r = repair(d, &check(d), true, &[]).unwrap().unwrap();
             assert!(r.restored == 1 && r.footer && r.lost.len() == 1 && r.lost[0].end == meta, "{cut}");
             // (not an archive as the spec reads it: a file at no block, or a formula block referring
             // to a block not there)
@@ -1432,13 +1449,13 @@ mod tests {
         // (cut just after the first metadata block: repaired as an archive of the first segment,
         // which does not tell it was meant to be the last)
         let d = &out[..second];
-        let r = repair(d, &check(d), false, &[]).unwrap();
+        let r = repair(d, &check(d), false, &[]).unwrap().unwrap();
         assert!(r.footer && r.lost.is_empty() && r.cut_off.is_none());
         assert_eq!(super::super::open(&r.bytes, &natives).unwrap().status(), Some(crate::Status::None));
         for cut in [second + 1, out.len() - 20] {
             let d = &out[..cut];
-            assert!(repair(d, &check(d), false, &[]).is_none_or(|r| !r.footer));
-            let r = repair(d, &check(d), true, &[]).unwrap();
+            assert!(repair(d, &check(d), false, &[]).unwrap().is_none_or(|r| !r.footer));
+            let r = repair(d, &check(d), true, &[]).unwrap().unwrap();
             assert!(r.footer && r.lost.len() == 1 && r.lost[0] == (second..cut), "{cut}: {r:?}");
             assert_eq!(r.cut_off, Some(second..cut));
             // the second segment's leaves whole, each alone: a file of no name each (of the
@@ -1475,7 +1492,7 @@ mod tests {
         let c = check(&m);
         let meta = c.targets.last().unwrap().0;
         let salvaged = |d: &[u8], erased: &[Range<usize>]| {
-            let r = repair(d, &check(d), true, erased).unwrap();
+            let r = repair(d, &check(d), true, erased).unwrap().unwrap();
             let natives = natives();
             let a = super::super::open_salvaging(&r.bytes, &natives, false).unwrap();
             let got = std::sync::Mutex::new(vec![None; 3]);
@@ -1511,6 +1528,52 @@ mod tests {
         assert_eq!(got[..2], [Some(want[0].clone()), Some(want[1].clone())]);
     }
 
+    /// A mirror block telling its block is far past the end of an archive cut short (a forged one:
+    /// its checksum is no authentication) is not restored by filling the gap where the memory for
+    /// it is not had: a resource failure, not an abort.
+    /// A forged mirror block telling a block far past the end, after the archive's own of the
+    /// metadata block: the archive grown by what it takes, not by doubling (over the tests'
+    /// allocator's bound), and the gap after the padding of the metadata block restored.
+    #[test]
+    fn salvages_gaps_exactly() {
+        let m = mirrored(&segment(&[0, 3000, 3000], false, Some(1)), 4096, false);
+        let c = check(&m);
+        let meta = c.targets.last().unwrap().0;
+        let third = c.targets.iter().rev().nth(1).unwrap().0;
+        let (bs, _) = blocks(&m);
+        let b = bs.iter().find(|b| b.0 == meta).unwrap();
+        let block = &m[b.0..b.2.end];
+        let mut d = m[..third + 1].to_vec();
+        d.resize(d.len().next_multiple_of(2), 0);
+        let far = 600 << 20;
+        for target in [far, far + block.len() - 2] {
+            let at = d.len().next_multiple_of(2);
+            d.resize(at, 0);
+            d.extend_from_slice(&mirror_of(block, target as u64, at as u64, false));
+        }
+        let r = repair(&d, &check(&d), true, &[]).unwrap().unwrap();
+        // (read one after another to the footer made again: the gap's spacer block after the
+        // padding of the block restored before it)
+        assert!(r.footer && blocks(&r.bytes).1 == Ended::Footer);
+        assert_eq!(&r.bytes[far..far + block.len()], block);
+    }
+
+    #[test]
+    fn salvages_no_gap_past_memory() {
+        let m = mirrored(&segment(&[0, 3000, 3000], false, Some(1)), 4096, false);
+        let c = check(&m);
+        let meta = c.targets.last().unwrap().0;
+        let third = c.targets.iter().rev().nth(1).unwrap().0;
+        let mut d = m[..third + 1].to_vec();
+        d.resize(d.len().next_multiple_of(2), 0);
+        let at = d.len();
+        let (blocks, _) = blocks(&m);
+        let b = blocks.iter().find(|b| b.0 == meta).unwrap();
+        d.extend_from_slice(&mirror_of(&m[b.0..b.2.end], 1 << 50, at as u64, false));
+        assert!(check(&d).mirrors.iter().any(|f| f.at == at && f.target == 1 << 50));
+        assert!(matches!(repair(&d, &check(&d), true, &[]), Err(crate::Failure::Resource(_))));
+    }
+
     /// Of an encrypted archive's payload, a mirror block in a file's content (an attacker's file
     /// in someone's encrypted archive) is not taken for a block of the archive, cut short or its
     /// blocks damaged: the mirror blocks only those read one after another through its trusted
@@ -1543,24 +1606,24 @@ mod tests {
         let footer = d.len() - (FOOTER_MAGIC.len() + 4 + (d[d.len() - 2] as usize));
         let cut = &g[..footer];
         assert!(check(cut).mirrors.iter().any(|f| f.at == at));
-        assert_eq!(restored(repair(cut, &check(cut), true, std::slice::from_ref(&e)), cut), forged);
+        assert_eq!(restored(repair(cut, &check(cut), true, std::slice::from_ref(&e)).unwrap(), cut), forged);
         let s = check_sealed(cut, std::slice::from_ref(&e), true);
         assert!(s.sealed && !s.mirrors.iter().any(|f| f.at == at));
-        assert_ne!(restored(repair(cut, &s, true, std::slice::from_ref(&e)), cut), forged);
+        assert_ne!(restored(repair(cut, &s, true, std::slice::from_ref(&e)).unwrap(), cut), forged);
         // all trusted but cut: its own mirror blocks reached from the header, nothing restored
         let s = check_sealed(&d[..footer], &[], true);
         assert!(s.mirrors.len() == 5 && !s.mirrors.iter().any(|f| f.at == at));
-        assert_eq!(restored(repair(&d[..footer], &s, true, &[]), &d[..footer]), &m[e.clone()]);
+        assert_eq!(restored(repair(&d[..footer], &s, true, &[]).unwrap(), &d[..footer]), &m[e.clone()]);
         // not cut: restored from its own mirror block, found from the metadata block the footer
         // tells
         let s = check_sealed(&g, std::slice::from_ref(&e), false);
         assert!(!s.mirrors.iter().any(|f| f.at == at) && s.mirrors.len() == 5);
-        let r = repair(&g, &s, true, std::slice::from_ref(&e));
+        let r = repair(&g, &s, true, std::slice::from_ref(&e)).unwrap();
         assert_eq!(restored(r, &g), &m[target.0..target.2.end]);
         // all trusted: as read one after another, nothing restored
         let s = check_sealed(&d, &[], false);
         assert!(s.walked && s.sealed);
-        assert_eq!(repair(&d, &s, true, &[]), None);
+        assert_eq!(repair(&d, &s, true, &[]).unwrap(), None);
     }
 
     /// A mirror block of an archive within the archive (as a file of it, stored) is not taken

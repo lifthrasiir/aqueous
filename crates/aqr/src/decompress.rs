@@ -236,7 +236,8 @@ impl Repair {
             Some(_) => aqr_archive::mirror::check_sealed(read, &erased, cut),
             None => aqr_archive::mirror::check(read),
         };
-        let restored = aqr_archive::mirror::repair(read, &mirrors, true, &erased);
+        let restored = aqr_archive::mirror::repair(read, &mirrors, true, &erased)
+            .map_err(|e| format!("{}: repairing: {e}", input.display()))?;
         if let Some(r) = &restored {
             if r.header {
                 eprintln!("{}: its header magic restored", input.display());
