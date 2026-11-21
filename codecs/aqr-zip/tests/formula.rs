@@ -322,6 +322,26 @@ fn descriptors_and_zip64() {
     roundtrip(&Zip { end64: true, ..archive(es) }.bytes());
 }
 
+/// Data descriptors of every form are read as they are written, whether or not the local
+/// header has zip64 data: a long one with its signature after a header of none was read as a
+/// short one (its low 4 bytes of size matching), the rest of it left a gap.
+#[test]
+fn descriptors_read_whole() {
+    use aqr_zip::zip::{Desc, Rec, records};
+    for (sig, long, want) in [
+        (false, false, Desc::Short),
+        (true, false, Desc::ShortSig),
+        (false, true, Desc::Long),
+        (true, true, Desc::LongSig),
+    ] {
+        let es = entries().into_iter().map(|e| Entry { desc: Some((sig, long)), ..e }).collect();
+        let d = archive(es).bytes();
+        let (_, _, recs) = records(&d);
+        assert!(!recs.iter().any(|r| matches!(r, Rec::Gap(_))), "{want:?}: {recs:?}");
+        assert!(recs.iter().all(|r| !matches!(r, Rec::Local(l) if l.desc != want)), "{want:?}");
+    }
+}
+
 /// Data before the archive, offsets from either start, data after it, a comment holding
 /// signatures.
 #[test]

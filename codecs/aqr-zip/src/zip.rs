@@ -339,23 +339,28 @@ pub fn deflate_len(d: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// The data descriptor after a body of `len` bytes ending at `at`, if one is there: by its
-/// signature, or without one where a record or the end of `d` follows. The long form is
-/// preferred where the local header has zip64 data.
+/// signature, or without one where a record or the end of `d` follows. A form followed by a
+/// record or the end of `d` is preferred, then (of those) the long form where the local header
+/// has zip64 data: a long descriptor with its signature fits as a short one too, where its low
+/// 4 bytes of size match, but leaves 8 bytes before what follows.
 fn descriptor(d: &[u8], at: usize, len: usize, long_first: bool) -> Desc {
-    let fits = |desc: Desc| {
+    let fits = |desc: Desc, followed: bool| {
         let q = at + if desc.sig() { 4 } else { 0 };
         let e = at + desc.bytes();
         e <= d.len()
             && (!desc.sig() || d[at..at + 4] == DESC)
             && if desc.long() { u64_at(d, q + 4) == len as u64 } else { u32_at(d, q + 4) == len as u32 }
-            && (desc.sig() || e == d.len() || d[e..].starts_with(b"PK"))
+            && (desc.sig() && !followed || e == d.len() || d[e..].starts_with(b"PK"))
     };
     let order = if long_first {
         [Desc::LongSig, Desc::ShortSig, Desc::Long, Desc::Short]
     } else {
         [Desc::ShortSig, Desc::LongSig, Desc::Short, Desc::Long]
     };
-    order.into_iter().find(|&desc| fits(desc)).unwrap_or(Desc::None)
+    [true, false]
+        .into_iter()
+        .find_map(|followed| order.into_iter().find(|&desc| fits(desc, followed)))
+        .unwrap_or(Desc::None)
 }
 
 fn local_at(d: &[u8], p: usize, map: &BTreeMap<usize, Info>) -> Option<Local> {
