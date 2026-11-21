@@ -48,6 +48,19 @@ pub fn parse(d: &[u8], dia: &Dialect, limit: usize) -> Table {
 /// starts before `until`, at most `limit` of them. The records are the same as `parse`'s whole
 /// (a record's cut depends on where it starts only); the fields' offsets are those of `d`.
 pub fn parse_part(d: &[u8], from: usize, until: usize, dia: &Dialect, limit: usize) -> Table {
+    cut(d, from, until, dia, limit, &mut |_| true).expect("kept on")
+}
+
+/// [`parse_part`], given up (none) as soon as `keep`, told of the table after each record, says
+/// so.
+fn cut(
+    d: &[u8],
+    from: usize,
+    until: usize,
+    dia: &Dialect,
+    limit: usize,
+    keep: &mut dyn FnMut(&Table) -> bool,
+) -> Option<Table> {
     let mut t = Table::default();
     let mut p = from;
     while p < d.len() && p < until && t.records.len() < limit {
@@ -65,9 +78,12 @@ pub fn parse_part(d: &[u8], from: usize, until: usize, dia: &Dialect, limit: usi
                 p = next;
             }
         }
+        if !keep(&t) {
+            return None;
+        }
     }
     t.end = p;
-    t
+    Some(t)
 }
 
 /// Where the record at `p` that is kept as it is ends: after its line's end, or after the
@@ -183,6 +199,12 @@ aqr_common::zopt! {
 /// them (all of them in a short file); the one of the most consistent records, then of the
 /// most fields.
 pub fn dialect(s: &[u8], whole: bool) -> Option<Dialect> {
+    dialect_pruned(s, whole, true)
+}
+
+/// [`dialect`], its candidates parsed whole (`prune` false) or given up as soon as their records
+/// so far tell that they cannot be taken ([`Hopeless`]), which tells the same.
+fn dialect_pruned(s: &[u8], whole: bool, prune: bool) -> Option<Dialect> {
     if memchr(0, s).is_some() {
         return None;
     }
@@ -207,8 +229,14 @@ pub fn dialect(s: &[u8], whole: bool) -> Option<Dialect> {
     let mut best: Option<((u64, usize), Dialect)> = None;
     let dialect_pct = DIALECT_PCT.get();
     let sample_records = SAMPLE_RECORDS.get();
+    let hopeless = hopeless(sample_records, dialect_pct);
     for dia in cands {
-        let mut t = parse(s, &dia, sample_records);
+        let Some(mut t) = (match prune {
+            true => cut(s, 0, s.len(), &dia, sample_records, &mut hopeless.watch()),
+            false => Some(parse(s, &dia, sample_records)),
+        }) else {
+            continue;
+        };
         // (the last record cut by the sample's end)
         if !whole && t.records.len() > 1 && matches!(t.records.last(), Some(Record::Fields { end: E_NONE, .. })) {
             t.records.pop();
@@ -237,6 +265,43 @@ pub fn dialect(s: &[u8], whole: bool) -> Option<Dialect> {
         }
     }
     best.map(|b| b.1)
+}
+
+/// When the records of a sample cut so far tell that its dialect cannot be taken ([`dialect`]),
+/// however the rest is cut: of the at most `limit` records it takes, those not of some width of
+/// two fields or more, but the last (cut by the end of the sample, and left out), are more than
+/// `100 - pct` percent of `limit` for every such width (the records not of a width only grow in
+/// number as more are cut), or those kept as they are more than one in 50 of `limit`. (Of
+/// 48,933 files of a Linux tree, the candidates parsed whole took 4.5 of 9.9 thread-seconds of
+/// reading them.)
+struct Hopeless {
+    others: usize,
+    raw: usize,
+}
+
+fn hopeless(limit: usize, pct: usize) -> Hopeless {
+    Hopeless { others: limit.saturating_mul(100usize.saturating_sub(pct)) / 100 + 1, raw: limit / 50 }
+}
+
+impl Hopeless {
+    /// What [`cut`] is to keep on by: of the records cut so far, the counts of each width (of
+    /// two fields or more), looked at as each is cut.
+    fn watch(&self) -> impl FnMut(&Table) -> bool + '_ {
+        let mut widths = std::collections::HashMap::<usize, usize>::new();
+        let (mut most, mut raw) = (0usize, 0usize);
+        move |t: &Table| {
+            match t.records.last() {
+                Some(Record::Fields { fields, .. }) if fields.len() >= 2 => {
+                    let n = widths.entry(fields.len()).or_default();
+                    *n += 1;
+                    most = most.max(*n);
+                }
+                Some(Record::Raw(_)) => raw += 1,
+                _ => {}
+            }
+            raw <= self.raw && t.records.len() - most <= self.others
+        }
+    }
 }
 
 /// Whether a column of the records of `width` fields of `t` (over `s`) starts with a digit, a
@@ -280,6 +345,52 @@ mod tests {
         let ssv = "2004-02-28 00:59:16.02785 3 1 19.9884 37.0933\n2004-02-28 01:03:16.33393 11 1 19.3024 38.4629\n";
         assert_eq!(dia(&ssv.repeat(10)), Some((b" ".to_vec(), Some(b'"'), vec![])));
         assert_eq!(dia(&"words and more words\n".repeat(10)), None);
+    }
+
+    /// The candidates given up early tell the dialect that they parsed whole would: of tables
+    /// with records of other widths and kept as they are in shares about the bounds, cut short
+    /// or whole, and of other text.
+    #[test]
+    fn pruned_dialects_agree() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let mut inputs: Vec<Vec<u8>> = vec![
+            b"int main(void) {\n  return f(a, b);\n}\n".repeat(3000),
+            b"just some words, and more\nof them\n".repeat(2000),
+            b"a,b,c\n1,\"x, y\",3\n".repeat(2000),
+        ];
+        for &(bad_in, raw_in) in &[(9, 0), (10, 0), (11, 0), (12, 0), (0, 49), (0, 50), (0, 51), (10, 50), (3, 0)] {
+            for rows in [5, 9, 300, 999, 1000, 1001, 3000] {
+                let mut d = Vec::new();
+                for _ in 0..rows {
+                    if raw_in > 0 && next(raw_in) == 0 {
+                        d.extend_from_slice(b"\"open,quote,x\n");
+                    } else if bad_in > 0 && next(bad_in) == 0 {
+                        let w = next(5) as usize;
+                        d.extend_from_slice(vec!["y"; w + 1].join(",").as_bytes());
+                        d.push(b'\n');
+                    } else {
+                        d.extend_from_slice(format!("{},{},{}\n", next(100), next(1000), next(7)).as_bytes());
+                    }
+                }
+                inputs.push(d);
+            }
+        }
+        let (mut taken, mut all) = (0, 0);
+        for d in &inputs {
+            for cut in [d.len(), d.len().min(64 << 10), d.len() / 2] {
+                let s = &d[..cut];
+                let whole = cut == d.len();
+                let (a, b) = (dialect_pruned(s, whole, true), dialect_pruned(s, whole, false));
+                (taken, all) = (taken + a.is_some() as usize, all + 1);
+                assert_eq!(a.map(|d| (d.delim, d.quote, d.term)), b.map(|d| (d.delim, d.quote, d.term)));
+            }
+        }
+        // (of both kinds)
+        assert!(taken > all / 4 && taken < all * 3 / 4, "{taken} of {all} taken");
     }
 
     #[test]

@@ -77,9 +77,10 @@ pub fn starts(d: &[u8]) -> bool {
         true => &head[..head.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1)],
         false => head,
     };
-    if head.iter().any(|&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r') || b == 0x7f) {
-        return false;
-    }
+    // (given up as soon as the lines of other words are too many for those of statements, which
+    // are at most the lines left: of 48,933 files of a Linux tree, the whole heads looked at took
+    // 1.3 of 9.9 thread-seconds of reading them)
+    let lines = memchr::memchr_iter(b'\n', head).count() + 1;
     let (mut known, mut other, mut verts) = (0usize, 0usize, 0usize);
     for line in head.split(|&b| b == b'\n') {
         let mut words = line.split(|&b| matches!(b, b' ' | b'\t' | b'\r')).filter(|w| !w.is_empty());
@@ -89,6 +90,9 @@ pub fn starts(d: &[u8]) -> bool {
         }
         if !STATEMENTS.contains(&kw) {
             other += 1;
+            if other * 33 > lines {
+                return false;
+            }
             continue;
         }
         known += 1;
@@ -97,7 +101,9 @@ pub fn starts(d: &[u8]) -> bool {
             verts += 1;
         }
     }
-    verts >= 3 && other * 32 <= known
+    verts >= 3
+        && other * 32 <= known
+        && !head.iter().any(|&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r') || b == 0x7f)
 }
 
 /// A block as coded: stored whole, or its streams.
