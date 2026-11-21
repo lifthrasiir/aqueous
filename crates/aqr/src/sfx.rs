@@ -185,7 +185,7 @@ pub fn settings(archive: &[u8], threads: usize) -> Result<Option<Compiled>, Stri
         }
     }
     let files = aqr_sfx::config::read_files(archive, &native, threads, &|_| true)?;
-    aqr_sfx::config::compile(&|n| files.get(n).cloned(), &|p| kinds.get(p).copied()).map(Some)
+    aqr_sfx::config::compile(&files, &|p| kinds.get(p).copied()).map(Some)
 }
 
 /// The self-extracting program of `archive` (an Aqueous archive made with [`wasm_of`]): the stub

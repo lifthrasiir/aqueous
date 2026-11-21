@@ -6,7 +6,7 @@ use std::process::{Command, Output, Stdio};
 
 use aqr_archive::{Encoder, Entry, EntryNode, Extra, Leaf, Level, Segment, Tree};
 use aqr_formula::Formula;
-use aqr_sfx::config::{Config, Overwrite, Run, Window};
+use aqr_sfx::config::{Config, Overwrite, Run, Text, Window};
 
 /// An archive of `files` (each its path by `/` and its bytes; the directories made of their
 /// paths), stored.
@@ -57,12 +57,18 @@ fn program(d: &Path, name: &str, tail: &[u8]) -> PathBuf {
     path
 }
 
-/// Runs `exe` in `d` with `args`, `input` its standard input, the temporary directory `d/tmp`.
+/// Runs `exe` in `d` with `args`, `input` its standard input, the temporary directory `d/tmp`,
+/// the user's language English.
 fn run(d: &Path, exe: &Path, args: &[&str], input: &str) -> Output {
+    run_in(d, exe, args, input, "en")
+}
+
+/// [`run`] of the user's language `lang`.
+fn run_in(d: &Path, exe: &Path, args: &[&str], input: &str, lang: &str) -> Output {
     let tmp = d.join("tmp");
     std::fs::create_dir_all(&tmp).unwrap();
     let mut c = Command::new(exe);
-    c.current_dir(d).args(args).env("TMP", &tmp).env("TEMP", &tmp).env("TMPDIR", &tmp);
+    c.current_dir(d).args(args).env("TMP", &tmp).env("TEMP", &tmp).env("TMPDIR", &tmp).env("AQR_SFX_LANG", lang);
     c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = c.spawn().unwrap();
     std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
@@ -146,8 +152,8 @@ fn asked_first() {
     let d = scratch("prompt");
     let a = archive(&[("a.txt", b"a".to_vec())]);
     let c = Config {
-        prompt: Some("Extract?".into()),
-        finish: Some("All done.".into()),
+        prompt: Some(Text(vec![("en".into(), "Extract?".into()), ("ko".into(), "풀까요?".into())])),
+        finish: Some(Text::plain("All done.")),
         ..extracting("{cwd}/out", false, Overwrite::Always)
     };
     let exe = program(&d, "x", &[c.record(), a].concat());
@@ -157,6 +163,40 @@ fn asked_first() {
     let o = run(&d, &exe, &[], "y\n");
     assert!(o.status.success() && err(&o).contains("Extract?") && err(&o).contains("All done."), "{}", err(&o));
     assert!(d.join("out/a.txt").exists());
+    // (in the user's language)
+    let o = run_in(&d, &exe, &["other"], "y\n", "ko-KR");
+    assert!(o.status.success() && err(&o).contains("풀까요?"), "{}", err(&o));
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// The license of the archive's `.aqr/sfx/`, of the user's language where there is one: shown
+/// and agreed to before anything is written, declined, or not asked (`-y`).
+#[test]
+fn license_agreed_to() {
+    let d = scratch("license");
+    let a = archive(&[
+        (".aqr/sfx/license.txt", b"\xef\xbb\xbfThe license, in English.\n".to_vec()),
+        (".aqr/sfx/license.ko.txt", "한국어 사용 허락서.\n".as_bytes().to_vec()),
+        ("a.txt", b"a".to_vec()),
+    ]);
+    let c = Config { license: Some("license.txt".into()), ..extracting("{cwd}/out", false, Overwrite::Always) };
+    let exe = program(&d, "x", &[c.record(), a].concat());
+    let o = run_in(&d, &exe, &[], "n\n", "en-US");
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert!(err(&o).contains("The license, in English.") && err(&o).contains("accept the license"), "{}", err(&o));
+    assert!(!d.join("out").exists());
+    let o = run_in(&d, &exe, &[], "y\n", "ko-KR");
+    assert!(o.status.success() && err(&o).contains("한국어 사용 허락서."), "{}", err(&o));
+    assert!(d.join("out/a.txt").exists());
+    let o = run_in(&d, &exe, &["-y", "again"], "", "en");
+    assert!(o.status.success() && !err(&o).contains("license"), "{}", err(&o));
+    assert!(d.join("again/a.txt").exists());
+    // (named but not in the archive: a failure, nothing written)
+    let c = Config { license: Some("gone.txt".into()), ..extracting("{cwd}/gone", false, Overwrite::Always) };
+    let exe = program(&d, "y", &[c.record(), archive(&[("a.txt", b"a".to_vec())])].concat());
+    let o = run_in(&d, &exe, &[], "y\n", "en");
+    assert!(!o.status.success() && err(&o).contains("no gone.txt in the archive's first segment"), "{}", err(&o));
+    assert!(!d.join("gone").exists());
     std::fs::remove_dir_all(&d).unwrap();
 }
 

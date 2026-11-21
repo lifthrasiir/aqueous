@@ -17,16 +17,18 @@
 //! ```cddl
 //! config = {
 //!   &(version: -1) => 1,
-//!   ? &(title: -2) => tstr,
+//!   ? &(title: -2) => text,
 //!   ? &(dest: -3) => tstr,        ; "{cwd}" where absent
 //!   ? &(subdir: -4) => bool,      ; false
 //!   ? &(overwrite: -5) => 0..3,   ; ask, always, never, newer; absent: a file there fails
-//!   ? &(prompt: -6) => tstr,
-//!   ? &(finish: -7) => tstr,
+//!   ? &(prompt: -6) => text,
+//!   ? &(finish: -7) => text,
 //!   ? &(quiet: -8) => bool,       ; false
 //!   ? &(run: -9) => run,
+//!   ? &(license: -10) => tstr,    ; a file of .aqr/sfx/, `license.txt`: `license.ko.txt` for ko
 //!   * int => any,
 //! }
+//! text = tstr / { + tstr => tstr }  ; by language tag ("" of none)
 //! run = {
 //!   &(program: -1) => [+ tstr],   ; the first a path of the archive, by /
 //!   ? &(cwd: -2) => tstr,         ; "."
@@ -52,20 +54,67 @@ pub const VERSION: i128 = 1;
 /// directory of programs (`%ProgramFiles%`).
 pub const PLACES: [&str; 4] = ["{temp}", "{here}", "{cwd}", "{programs}"];
 
+/// A text of the settings, in one language or several: each its language's tag (`ko`,
+/// `en-US`; empty for the one of no language) and the text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Text(pub Vec<(String, String)>);
+
+impl Text {
+    /// A text of no language.
+    pub fn plain(s: &str) -> Text {
+        Text(vec![(String::new(), s.into())])
+    }
+
+    /// The text for language `lang` (a tag, `ko-KR`): of that tag, else of its first subtag
+    /// (`ko`, `ko-KP`), else of no language, else English, else the first.
+    pub fn pick(&self, lang: &str) -> &str {
+        let primary = |t: &str| t.split('-').next().unwrap_or("").to_ascii_lowercase();
+        let of = |f: &dyn Fn(&str) -> bool| self.0.iter().find(|(l, _)| f(l)).map(|(_, t)| &t[..]);
+        of(&|l| l.eq_ignore_ascii_case(lang))
+            .or_else(|| of(&|l| !l.is_empty() && primary(l) == primary(lang)))
+            .or_else(|| of(&|l| l.is_empty()))
+            .or_else(|| of(&|l| primary(l) == "en"))
+            .or_else(|| self.0.first().map(|(_, t)| &t[..]))
+            .unwrap_or("")
+    }
+}
+
+/// The names of the file `name` of `.aqr/sfx/` for language `lang` in the order they are
+/// looked for (`license.txt` for `ko-KR`: `license.ko-KR.txt`, `license.ko.txt`, `license.txt`).
+pub fn names_for(name: &str, lang: &str) -> Vec<String> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && !s.ends_with('/') => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    let primary = lang.split('-').next().unwrap_or("");
+    let mut names = Vec::new();
+    for l in [lang, primary] {
+        let n = format!("{stem}.{l}{ext}");
+        if !l.is_empty() && !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names.push(name.into());
+    names
+}
+
 /// What a self-extracting program does once run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// The title of its windows (the program's name where none).
-    pub title: Option<String>,
+    pub title: Option<Text>,
     /// Where the files go: one of [`PLACES`], and a relative path under it by `/`.
     pub dest: String,
     /// The files under a directory of the program's name (`foo.exe`: `foo`) there.
     pub subdir: bool,
     pub overwrite: Overwrite,
     /// Asked before anything is written (yes or no).
-    pub prompt: Option<String>,
+    pub prompt: Option<Text>,
     /// Told once done.
-    pub finish: Option<String>,
+    pub finish: Option<Text>,
+    /// The license agreed to before anything is written: a file of `.aqr/sfx/` in the
+    /// archive's first segment, of its language where there is one ([`names_for`]).
+    pub license: Option<String>,
     /// Nothing asked nor told (as the command line's `-y`).
     pub quiet: bool,
     /// The program run once the files are written.
@@ -118,6 +167,7 @@ impl Default for Config {
             overwrite: Overwrite::Fail,
             prompt: None,
             finish: None,
+            license: None,
             quiet: false,
             run: None,
         }
@@ -134,6 +184,7 @@ const K_PROMPT: i128 = -6;
 const K_FINISH: i128 = -7;
 const K_QUIET: i128 = -8;
 const K_RUN: i128 = -9;
+const K_LICENSE: i128 = -10;
 const R_PROGRAM: i128 = -1;
 const R_CWD: i128 = -2;
 const R_WINDOW: i128 = -3;
@@ -148,6 +199,19 @@ const TRUE: u8 = 21;
 fn put_text(out: &mut Vec<u8>, s: &str) {
     cbor::head(out, 3, s.len() as u64);
     out.extend_from_slice(s.as_bytes());
+}
+
+fn put_texts(out: &mut Vec<u8>, t: &Text) {
+    match &t.0[..] {
+        [(l, s)] if l.is_empty() => put_text(out, s),
+        all => {
+            cbor::head(out, 5, all.len() as u64);
+            for (l, s) in all {
+                put_text(out, l);
+                put_text(out, s);
+            }
+        }
+    }
 }
 
 fn put_bool(out: &mut Vec<u8>, b: bool) {
@@ -166,7 +230,7 @@ impl Config {
         };
         put(K_VERSION, &|v| cbor::int(v, VERSION));
         if let Some(t) = &self.title {
-            put(K_TITLE, &|v| put_text(v, t));
+            put(K_TITLE, &|v| put_texts(v, t));
         }
         put(K_DEST, &|v| put_text(v, &self.dest));
         put(K_SUBDIR, &|v| put_bool(v, self.subdir));
@@ -181,10 +245,13 @@ impl Config {
             put(K_OVERWRITE, &|v| cbor::int(v, o));
         }
         if let Some(t) = &self.prompt {
-            put(K_PROMPT, &|v| put_text(v, t));
+            put(K_PROMPT, &|v| put_texts(v, t));
         }
         if let Some(t) = &self.finish {
-            put(K_FINISH, &|v| put_text(v, t));
+            put(K_FINISH, &|v| put_texts(v, t));
+        }
+        if let Some(l) = &self.license {
+            put(K_LICENSE, &|v| put_text(v, l));
         }
         put(K_QUIET, &|v| put_bool(v, self.quiet));
         if let Some(r) = &self.run {
@@ -220,6 +287,14 @@ impl Config {
             Cbor::Text(t) => Ok(String::from_utf8_lossy(t).into_owned()),
             _ => Err(bad(&format!("{what} not a text"))),
         };
+        let texts = |v: &Cbor, what: &str| match v {
+            Cbor::Map(m) => {
+                let t: Result<Vec<_>, String> =
+                    m.pairs().map(|(l, s)| Ok((text(&l, what)?, text(&s, what)?))).collect();
+                Ok(Text(t?)).and_then(|t| if t.0.is_empty() { Err(bad(&format!("{what} of no text"))) } else { Ok(t) })
+            }
+            v => Ok(Text::plain(&text(v, what)?)),
+        };
         let boolean = |v: &Cbor, what: &str| match v {
             Cbor::Simple(FALSE) => Ok(false),
             Cbor::Simple(TRUE) => Ok(true),
@@ -235,15 +310,16 @@ impl Config {
             let Cbor::Int(k) = k else { continue };
             match k {
                 K_VERSION => version = Some(v),
-                K_TITLE => c.title = Some(text(&v, "the title")?),
+                K_TITLE => c.title = Some(texts(&v, "the title")?),
                 K_DEST => c.dest = text(&v, "the destination")?,
                 K_SUBDIR => c.subdir = boolean(&v, "subdir")?,
                 K_OVERWRITE => {
                     c.overwrite = [Overwrite::Ask, Overwrite::Always, Overwrite::Never, Overwrite::Newer]
                         [int(&v, "overwrite", 3)? as usize]
                 }
-                K_PROMPT => c.prompt = Some(text(&v, "the prompt")?),
-                K_FINISH => c.finish = Some(text(&v, "the finish")?),
+                K_PROMPT => c.prompt = Some(texts(&v, "the prompt")?),
+                K_FINISH => c.finish = Some(texts(&v, "the finish")?),
+                K_LICENSE => c.license = Some(text(&v, "the license")?),
                 K_QUIET => c.quiet = boolean(&v, "quiet")?,
                 K_RUN => {
                     let Cbor::Map(r) = v else { return Err(bad("run not a map")) };
@@ -398,19 +474,14 @@ pub fn read_files(
     let all = aqr_archive::open(c, runner).map_err(err)?;
     let Some(&first) = all.segment_metadata().map_err(err)?.first() else { return Ok(Default::default()) };
     drop(all);
+    // (decoded whole: the first segment has the files of .aqr/sfx/ alone, and so the stub uses
+    // no other way of decoding than the one it extracts by)
     let a = aqr_archive::open_upto(c, runner, first).map_err(err)?;
-    let Some(t) = a.tree() else { return Ok(Default::default()) };
-    let files: Vec<(String, usize)> = files_of(t).into_iter().filter(|(n, _)| wanted(n)).collect();
-    let mut only = vec![false; a.contents_len()];
-    files.iter().for_each(|&(_, c)| only[c] = true);
-    let got = std::sync::Mutex::new(std::collections::HashMap::new());
-    a.contents_of(threads, Some(&only), |c, d| {
-        got.lock().unwrap().insert(c, d);
-        Ok(())
-    })
-    .map_err(err)?;
-    let mut got = got.into_inner().unwrap();
-    Ok(files.into_iter().filter_map(|(n, c)| Some((n, got.remove(&c)?))).collect())
+    let aqr_archive::Value::Tree(t, mut contents) = a.value(threads).map_err(err)? else {
+        return Ok(Default::default());
+    };
+    let files = files_of(&t).into_iter().filter(|(n, _)| wanted(n));
+    Ok(files.filter_map(|(n, c)| Some((n, std::mem::take(contents.get_mut(c)?)))).collect())
 }
 
 // ---- compiling sfx.toml (aqr)
@@ -458,9 +529,10 @@ pub enum Kind {
 /// it names not there, a program not in the archive fail here, not when the program runs.
 #[cfg(feature = "encode")]
 pub fn compile(
-    file: &dyn Fn(&str) -> Option<Vec<u8>>,
+    files: &std::collections::HashMap<String, Vec<u8>>,
     kind: &dyn Fn(&str) -> Option<Kind>,
 ) -> Result<Compiled, String> {
+    let file = &|n: &str| files.get(n).cloned();
     let toml = file("sfx.toml").ok_or(".aqr/sfx/sfx.toml: not there")?;
     let toml = String::from_utf8(toml).map_err(|_| ".aqr/sfx/sfx.toml: not UTF-8".to_string())?;
     let table: toml::Table = toml.parse().map_err(|e| format!(".aqr/sfx/sfx.toml: {e}"))?;
@@ -471,7 +543,7 @@ pub fn compile(
     let mut run = t.section("run")?;
     let mut ui = t.section("ui")?;
     let mut pe = t.section("pe")?;
-    let title = t.text("title")?;
+    let title = t.texts("title")?;
     t.done()?;
 
     let running = match mode.as_deref() {
@@ -535,13 +607,27 @@ pub fn compile(
     };
 
     // ui
-    for k in ["license", "banner"] {
-        if ui.table.contains_key(k) {
-            return Err(format!("ui.{k}: not yet (docs/sfx-config-design.md, 9)"));
-        }
+    if ui.table.contains_key("banner") {
+        return Err("ui.banner: not yet (docs/sfx-config-design.md, 9)".into());
     }
-    let prompt = ui.text("prompt")?;
-    let finish = ui.text("finish")?;
+    let license = match ui.text("license")? {
+        Some(name) => {
+            // (each of its languages' files too: text, as it is shown)
+            for (n, d) in std::iter::once(name.clone())
+                .chain(language_files(files, &name))
+                .filter_map(|n| Some((n.clone(), sfx_file(file, "ui.license", &n).ok()?)))
+            {
+                if std::str::from_utf8(&d).is_err() {
+                    return Err(format!("ui.license: {n}: not UTF-8"));
+                }
+            }
+            sfx_file(file, "ui.license", &name)?;
+            Some(name)
+        }
+        None => None,
+    };
+    let prompt = ui.texts("prompt")?;
+    let finish = ui.texts("finish")?;
     let quiet = ui.boolean("quiet")?.unwrap_or(false);
     ui.done()?;
 
@@ -592,7 +678,7 @@ pub fn compile(
     pe.done()?;
     let version = (!strings.is_empty()).then(|| VersionInfo { numbers: numbers.map_or([0; 4], |(n, _)| n), strings });
 
-    let config = Config { title, dest, subdir, overwrite, prompt, finish, quiet, run };
+    let config = Config { title, dest, subdir, overwrite, prompt, finish, license, quiet, run };
     Ok(Compiled { config, pe: Pe { gui, icon, manifest, version } })
 }
 
@@ -627,6 +713,28 @@ impl<'a> Toml<'a> {
             None => Ok(None),
             Some(toml::Value::String(s)) => Ok(Some(s.clone())),
             Some(_) => Err(format!("{}: not a string", self.name(key))),
+        }
+    }
+
+    /// A text, or a table of them by language tag ([`Text`]).
+    fn texts(&mut self, key: &str) -> Result<Option<Text>, String> {
+        let name = self.name(key);
+        match self.take(key) {
+            None => Ok(None),
+            Some(toml::Value::String(s)) => Ok(Some(Text::plain(s))),
+            Some(toml::Value::Table(t)) if !t.is_empty() => {
+                let mut all = Vec::new();
+                for (l, v) in t {
+                    let tag = !l.is_empty()
+                        && l.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric()));
+                    match v.as_str() {
+                        Some(s) if tag => all.push((l.clone(), s.to_string())),
+                        _ => return Err(format!("{name}.{l}: not a string of a language tag (en, ko, pt-BR)")),
+                    }
+                }
+                Ok(Some(Text(all)))
+            }
+            Some(_) => Err(format!("{name}: not a string, nor a table of them by language")),
         }
     }
 
@@ -667,6 +775,27 @@ impl<'a> Toml<'a> {
             None => Ok(()),
         }
     }
+}
+
+/// The files of `.aqr/sfx/` of other languages of `name` there (`license.ko.txt` of
+/// `license.txt`): those of a language tag between its stem and its extension.
+#[cfg(feature = "encode")]
+fn language_files(files: &std::collections::HashMap<String, Vec<u8>>, name: &str) -> Vec<String> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s, format!(".{e}")),
+        None => (name, String::new()),
+    };
+    let mut of: Vec<String> = (files.keys())
+        .filter(|n| {
+            let tag = n.strip_prefix(stem).and_then(|r| r.strip_prefix('.')).and_then(|r| r.strip_suffix(&ext[..]));
+            tag.is_some_and(|t| {
+                !t.is_empty() && t.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+            })
+        })
+        .cloned()
+        .collect();
+    of.sort();
+    of
 }
 
 /// A file of `.aqr/sfx/` that setting `what` names.
@@ -738,12 +867,13 @@ mod tests {
 
     fn run_config() -> Config {
         Config {
-            title: Some("Example Setup".into()),
+            title: Some(Text::plain("Example Setup")),
             dest: "{temp}/x".into(),
             subdir: true,
             overwrite: Overwrite::Newer,
-            prompt: Some("Install?".into()),
+            prompt: Some(Text(vec![("en".into(), "Install?".into()), ("ko".into(), "설치할까요?".into())])),
             finish: None,
+            license: Some("license.txt".into()),
             quiet: false,
             run: Some(Run {
                 program: vec!["bin/setup.exe".into(), "/S".into(), "한글".into()],
@@ -786,6 +916,27 @@ mod tests {
     }
 
     #[test]
+    fn texts_by_language() {
+        let t = Text(vec![
+            ("de".into(), "Deutsch".into()),
+            ("en".into(), "English".into()),
+            ("ko".into(), "한국어".into()),
+        ]);
+        for (lang, want) in
+            [("ko-KR", "한국어"), ("ko", "한국어"), ("KO-kr", "한국어"), ("en-GB", "English"), ("fr-FR", "English")]
+        {
+            assert_eq!(t.pick(lang), want, "{lang}");
+        }
+        let t =
+            Text(vec![("pt-BR".into(), "Brasil".into()), ("pt".into(), "Portugal".into()), ("".into(), "any".into())]);
+        assert_eq!((t.pick("pt-BR"), t.pick("pt-PT"), t.pick("ja")), ("Brasil", "Brasil", "any"));
+        assert_eq!(Text(vec![("de".into(), "Deutsch".into())]).pick("ja"), "Deutsch");
+        assert_eq!(names_for("license.txt", "ko-KR"), ["license.ko-KR.txt", "license.ko.txt", "license.txt"]);
+        assert_eq!(names_for("legal/LICENSE", "ko"), ["legal/LICENSE.ko", "legal/LICENSE"]);
+        assert_eq!(names_for("license.txt", ""), ["license.txt"]);
+    }
+
+    #[test]
     fn destinations() {
         let mut place = |p: &str| Ok(std::path::PathBuf::from(format!("/{p}")));
         assert_eq!(destination("{cwd}", &mut place).unwrap(), std::path::Path::new("/cwd"));
@@ -808,7 +959,26 @@ mod tests {
                 "bin" => Some(Kind::Dir),
                 _ => None,
             };
-            compile(&|n| files.get(n).cloned(), &archive)
+            compile(&files, &archive)
+        }
+
+        #[test]
+        fn license_and_texts() {
+            let toml = "title = { en = \"Setup\", ko = \"설치\" }\n[ui]\nlicense = \"license.txt\"\nprompt = \"Go?\"\n";
+            let c = compiled(toml, &[("license.txt", b"MIT"), ("license.ko.txt", "MIT, 한국어".as_bytes())]).unwrap();
+            assert_eq!(c.config.license.as_deref(), Some("license.txt"));
+            assert_eq!(c.config.title.as_ref().map(|t| t.pick("ko-KR")), Some("설치"));
+            assert_eq!(c.config.prompt, Some(Text::plain("Go?")));
+            let back = Config::from_cbor(&c.config.to_cbor()).unwrap();
+            assert_eq!(back, c.config);
+            // (the license there, each of its languages' files text)
+            let e = compiled(toml, &[]).unwrap_err();
+            assert!(e.contains("ui.license: license.txt: not a file of .aqr/sfx/"), "{e}");
+            let e = compiled(toml, &[("license.txt", b"MIT"), ("license.ko.txt", b"\xff\xfe")]).unwrap_err();
+            assert!(e.contains("license.ko.txt: not UTF-8"), "{e}");
+            let e = compiled("title = { \"en_US\" = \"x\" }", &[]).unwrap_err();
+            assert!(e.contains("title.en_US: not a string of a language tag"), "{e}");
+            assert!(compiled("title = {}", &[]).is_err());
         }
 
         #[test]
@@ -872,7 +1042,7 @@ mod tests {
                 ("[extract]\ndest = \"{temp}/../x\"", "extract.dest"),
                 ("[extract]\noverwrite = \"maybe\"", "extract.overwrite"),
                 ("[extract]\nask = true", "not yet"),
-                ("[ui]\nlicense = \"license.txt\"", "not yet"),
+                ("[ui]\nbanner = \"banner.png\"", "not yet"),
                 ("[pe]\nicon = \"icon.ico\"", "not a file of .aqr/sfx/"),
                 ("[pe]\nversion = \"1.2.3.4.5\"", "pe.version"),
                 ("[pe]\nversion = \"1.70000\"", "pe.version"),

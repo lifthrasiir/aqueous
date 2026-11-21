@@ -103,9 +103,10 @@ fn run(ui: &mut Ui) -> Result<i32, String> {
     // right before it)
     let opened = |x: usize| {
         let d = &bytes[x..];
-        aqr_archive::open(&d[aqr_archive::locate(d).filter(|r| r.start == 0)?], &runner).ok().map(|a| (a, x))
+        let c = &d[aqr_archive::locate(d).filter(|r| r.start == 0)?];
+        aqr_archive::open(c, &runner).ok().map(|a| (a, x, c))
     };
-    let (archive, start) = match opened(at) {
+    let (archive, start, c) = match opened(at) {
         Some(a) => a,
         None => (0..=bytes.len().saturating_sub(HEADER_MAGIC.len()))
             .rev()
@@ -120,14 +121,29 @@ fn run(ui: &mut Ui) -> Result<i32, String> {
     }
     let settings = config.is_some();
     let config = config.unwrap_or_default();
-    ui.title = config.title.clone().unwrap_or_else(program_name);
+    let lang = ui::language();
+    ui.title = config.title.as_ref().map_or_else(program_name, |t| t.pick(&lang).to_string());
     ui.quiet = args.yes || config.quiet;
 
     if let Some(p) = &config.prompt
         && !ui.quiet
-        && !ui.confirm(p)
+        && !ui.confirm(p.pick(&lang))
     {
         return Ok(2);
+    }
+    // the license, of the archive's first segment (docs/sfx-config-design.md, 2.1), of the
+    // user's language where it has one
+    if let Some(l) = &config.license
+        && !ui.quiet
+    {
+        let names = aqr_sfx::config::names_for(l, &lang);
+        let files = aqr_sfx::config::read_files(c, &runner, runner.threads(), &|n| names.iter().any(|m| m == n))?;
+        let text =
+            names.iter().find_map(|n| files.get(n)).ok_or_else(|| format!("no {l} in the archive's first segment"))?;
+        let text = String::from_utf8_lossy(text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text));
+        if !ui.license(&text) {
+            return Ok(2);
+        }
     }
     let fresh = std::cell::RefCell::new(None);
     let dest = match &args.dest {
@@ -186,7 +202,7 @@ fn run(ui: &mut Ui) -> Result<i32, String> {
     if let Some(f) = &config.finish
         && !ui.quiet
     {
-        ui.tell(f);
+        ui.tell(f.pick(&lang));
     }
     Ok(code)
 }
