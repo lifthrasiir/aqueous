@@ -850,22 +850,29 @@ impl Reader {
         let (src, batch) = (cx.src, &cx.batches[i]);
         let bytes = batch.iter().map(|&c| src.size(c)).sum();
         cx.notes.send(Note::Batch { batch: i, bytes, verify: cx.opt.verify, contents: batch.clone() });
+        // (each file's facts made as it is read, on the threads reading, but of those the same as
+        // a content of a batch before: of 48,933 files of a Linux tree, the formats looked for
+        // one after another took 3.3 s, the batch read in 0.3 s)
+        let first = &self.first;
         let read = aqr_common::pool::par_map(batch.len(), cx.opt.threads, |i| {
-            let d = src.read(batch[i])?;
+            let c = batch[i];
+            let d = src.read(c)?;
             let hash = xxhash_rust::xxh3::xxh3_128(&d);
-            Ok::<_, io::Error>((d, hash))
+            let f = (!first.contains_key(&(hash, d.len())))
+                .then(|| File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c)));
+            Ok::<_, io::Error>((d, hash, f))
         });
         let mut files: Vec<File> = Vec::with_capacity(batch.len());
         let mut data = Vec::with_capacity(batch.len());
         let mut lens = Vec::with_capacity(batch.len());
         for (&c, d) in batch.iter().zip(read) {
-            let (d, hash) = d?;
+            let (d, hash, f) = d?;
             lens.push((d.len() as u64, None));
             match self.first.entry((hash, d.len())) {
                 std::collections::hash_map::Entry::Occupied(e) => lens.last_mut().unwrap().1 = Some(*e.get()),
                 std::collections::hash_map::Entry::Vacant(e) => {
                     e.insert(c);
-                    let mut f = File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c));
+                    let mut f = f.expect("made of a content not of a batch before");
                     f.rewritten = cx.rewritten(c);
                     files.push(f);
                     data.push(d);
@@ -1101,16 +1108,17 @@ impl Writer {
             }
         }
         if !again.is_empty() {
-            let data = aqr_common::pool::par_map(again.len(), cx.opt.threads, |k| src.read(again[k]));
-            let data: Vec<Bytes> = data.into_iter().collect::<io::Result<_>>()?;
-            let files: Vec<File> = (again.iter().zip(&data))
-                .map(|(&c, d)| {
-                    let hash = xxhash_rust::xxh3::xxh3_128(d);
-                    let mut f = File::of(c, d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c));
-                    f.rewritten = cx.rewritten(c);
-                    f
-                })
-                .collect();
+            // (each file's facts made as it is read, as `Reader::read` does)
+            let read = aqr_common::pool::par_map(again.len(), cx.opt.threads, |k| {
+                let c = again[k];
+                let d = src.read(c)?;
+                let hash = xxhash_rust::xxh3::xxh3_128(&d);
+                let mut f = File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c));
+                f.rewritten = cx.rewritten(c);
+                Ok::<_, io::Error>((d, f))
+            });
+            let (data, files): (Vec<Bytes>, Vec<File>) =
+                read.into_iter().collect::<io::Result<Vec<_>>>()?.into_iter().unzip();
             let part = self.watched(cx, out, || {
                 analyze(i, &files, data, &HashSet::new(), cx.opt, notes, cx.siblings.clone(), cx.src.len() == 1)
             })?;
