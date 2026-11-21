@@ -131,6 +131,33 @@ impl Fields {
 
     /// The key wrapping the file key, derived by scrypt from `passphrase`.
     fn wrapping(&self, passphrase: &[u8]) -> Key {
+        #[cfg(fuzzing)]
+        return self.kept(passphrase);
+        #[cfg(not(fuzzing))]
+        self.derived(passphrase)
+    }
+
+    /// [`Fields::wrapping`] fuzzed: scrypt's keys kept, so that the seeds' are derived once, not
+    /// for every input.
+    #[cfg(fuzzing)]
+    fn kept(&self, passphrase: &[u8]) -> Key {
+        /// The keys kept at most: those of mutated salts come and go.
+        const KEPT: usize = 64;
+        type Kept = Vec<((Vec<u8>, u8, Vec<u8>), Key)>;
+        static KEYS: Mutex<Kept> = Mutex::new(Vec::new());
+        let of = (passphrase.to_vec(), self.work_factor(), self.salt().to_vec());
+        if let Some((_, k)) = KEYS.lock().unwrap().iter().find(|(o, _)| *o == of) {
+            return *k;
+        }
+        let k = self.derived(passphrase);
+        let mut keys = KEYS.lock().unwrap();
+        keys.truncate(KEPT - 1);
+        keys.insert(0, (of, k));
+        k
+    }
+
+    /// [`Fields::wrapping`], scrypt run.
+    fn derived(&self, passphrase: &[u8]) -> Key {
         let salt = [&b"age-encryption.org/v1/scrypt"[..], self.salt()].concat();
         let params = scrypt::Params::new(self.work_factor(), 8, 1, 32).expect("a work factor in range");
         let mut key = Key::default();
@@ -820,7 +847,7 @@ impl<'c> Unlocked<'c> {
                 let c = self.chunks[m];
                 d.copy_from_slice(&c[..c.len() - 16]);
                 let tag = Tag::from_slice(&c[c.len() - 16..]);
-                if self.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, m == last), &[], d, tag).is_err() {
+                if !self.opens(m, m == last, d, tag) {
                     return invalid(format!("encrypted chunk {m} does not authenticate"));
                 }
             }
@@ -840,7 +867,6 @@ impl<'c> Unlocked<'c> {
     /// authenticates only as not the last: the payload cut short after it, what came after it
     /// lost, though all of what is there is as it was sealed.
     pub fn decrypt_lossy(&self, out: &mut [u8], threads: usize) -> (Vec<usize>, bool) {
-        use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
         assert_eq!(out.len(), self.len());
         const TASK: usize = 64;
         let last = self.chunks.len() - 1;
@@ -855,7 +881,7 @@ impl<'c> Unlocked<'c> {
                 let (body, tag) = (&c[..c.len() - 16], Tag::from_slice(&c[c.len() - 16..]));
                 let opens = |is_last: bool, d: &mut [u8]| {
                     d.copy_from_slice(body);
-                    self.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, is_last), &[], d, tag).is_ok()
+                    self.opens(m, is_last, d, tag)
                 };
                 let authentic = match m == last {
                     true if opens(true, d) => true,
@@ -867,17 +893,41 @@ impl<'c> Unlocked<'c> {
                     false => opens(false, d),
                 };
                 if !authentic {
-                    // (ChaCha20-Poly1305's keystream: from the second block, the first the MAC's key)
                     d.copy_from_slice(body);
-                    let mut k = chacha20::ChaCha20::new(&self.key, &chunk_nonce(m as u64, m == last));
-                    k.seek(64u64);
-                    k.apply_keystream(d);
+                    self.unauthenticated(m, m == last, d);
                     failed.push(m);
                 }
             }
             failed
         });
         (failed.into_iter().flatten().collect(), cut.into_inner())
+    }
+
+    /// Chunk `m` of sealed bytes `d` and tag `tag` (the last or not) decrypted in place: whether
+    /// it authenticates (`d` as it was where not).
+    ///
+    /// Fuzzed (`cfg(fuzzing)`, as the checksums are skipped), a chunk that does not authenticate
+    /// is decrypted without it, and taken to where its tag's first byte is even: a mutation of
+    /// its bytes is then one of the payload's, at the same place, and the chunks taken not to
+    /// authenticate are those of tags of an odd first byte.
+    fn opens(&self, m: usize, last: bool, d: &mut [u8], tag: &Tag) -> bool {
+        if self.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, last), &[], d, tag).is_ok() {
+            return true;
+        }
+        if cfg!(fuzzing) && tag[0] % 2 == 0 {
+            self.unauthenticated(m, last, d);
+            return true;
+        }
+        false
+    }
+
+    /// Chunk `m` of sealed bytes `d` (the last or not) decrypted in place without its tag.
+    fn unauthenticated(&self, m: usize, last: bool, d: &mut [u8]) {
+        use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+        // (ChaCha20-Poly1305's keystream: from the second block, the first the MAC's key)
+        let mut k = chacha20::ChaCha20::new(&self.key, &chunk_nonce(m as u64, last));
+        k.seek(64u64);
+        k.apply_keystream(d);
     }
 
     /// The bytes of the payload of chunk `m`.
@@ -998,7 +1048,7 @@ impl<'c> Decrypting<'c> {
             self.decrypted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let tag = Tag::from_slice(&c[n..]);
             let last = m + 1 == self.done.len();
-            let ok = self.unlocked.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, last), &[], d, tag).is_ok();
+            let ok = self.unlocked.opens(m, last, d, tag);
             if self.let_go {
                 // SAFETY: of a file mapped read only (as `let_go_read` was told)
                 unsafe { aqr_common::pages::let_go(c.as_ptr(), c.len()) };

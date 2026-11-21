@@ -22,6 +22,11 @@ pub const OUTPUT_MAX: u64 = 1 << 24;
 /// `-malloc_limit_mb` would take a reservation tried for one too.
 pub const ALLOCATION_MAX: usize = 1 << 30;
 
+/// The passphrase the seeds of `envelope` are sealed with, and the work factor (scrypt's least,
+/// 4 MiB): the target unlocks only that.
+pub const PASSPHRASE: &[u8] = b"aqueous";
+pub const WORK_FACTOR: u8 = 12;
+
 pub struct Toys;
 
 fn bounded(n: u64) -> Result<()> {

@@ -2,9 +2,12 @@
 //! single files and trees, stored and compressed, of each instruction and of the toy modules.
 //! Stored blocks keep their bytes in sight of the mutations; the checksums are skipped anyway.
 
+use std::io::{Cursor, Write};
 use std::path::Path;
 
-use aqr_archive::{ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Tree, checksum, encode};
+use aqr_archive::{
+    ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Tree, checksum, encode, envelope, mirror,
+};
 use aqr_formula::{Apply, Formula, Kind, NO_LIMIT, Node, patch};
 use aqr_fuzz::{COPY, CUT, REV};
 
@@ -81,8 +84,8 @@ fn formulas() -> Vec<(&'static str, Formula)> {
 }
 
 /// A tree of a directory, files (one of a module's output, two of one leaf), a link and a
-/// fifo, in two batches.
-fn tree(level: Level) -> Vec<u8> {
+/// fifo, in two batches; `hinted`, a size hint block first (as an encrypted archive's payload).
+fn tree(level: Level, hinted: bool) -> Vec<u8> {
     let enc = Encoder::new(level);
     let mut f = Formula::default();
     let a = f.push("a", b"hello".to_vec());
@@ -90,8 +93,8 @@ fn tree(level: Level) -> Vec<u8> {
     let mut g = Formula::default();
     let c = g.push("c", noise(500, 7));
     let [o0, o1] = <[Node; 2]>::try_from(g.share(cut(vec![c]), vec![200, 300])).unwrap();
-    let mut w = SegmentWriter::new();
-    let mut out = SegmentWriter::header().to_vec();
+    let mut w = SegmentWriter::with_size_hint(hinted);
+    let mut out = w.head().to_vec();
     let mut contents = Vec::new();
     for (f, leaves) in [
         (
@@ -159,6 +162,66 @@ const FIXTURE_MAX: usize = 256 << 10;
 /// would cut a longer one).
 const ARCHIVE_MAX: usize = 512 << 10;
 
+/// Payload `a` (its size hint to be filled in) sealed by the fuzzed passphrase, `mirrored` or not.
+fn sealed(a: &[u8], mirrored: bool) -> Vec<u8> {
+    let mut s =
+        envelope::Sealer::new(Cursor::new(Vec::new()), aqr_fuzz::PASSPHRASE, aqr_fuzz::WORK_FACTOR, mirrored).unwrap();
+    s.write_all(a).unwrap();
+    s.into_inner().unwrap().into_inner()
+}
+
+/// The seeds of `envelope`: the single files of [`formulas`] and the trees as payloads, sealed
+/// with mirrored headers and without, a tree's blocks mirrored too; a file of several chunks, and
+/// it cut short after a chunk (its last authenticating only as not the last) and of its header
+/// magic damaged (its header taken from a mirrored header).
+fn envelopes() -> Vec<(String, Vec<u8>)> {
+    let mut payloads = Vec::new();
+    for (name, f) in formulas() {
+        for (l, level) in [("stored", Level::STORED), ("zstd", Level::Zstd(3))] {
+            payloads.push((format!("{name}-{l}"), Encoder::new(level).with_size_hint(true).encode(&f, None).unwrap()));
+        }
+    }
+    payloads.push(("tree-stored".into(), tree(Level::STORED, true)));
+    payloads.push(("tree-zstd".into(), tree(Level::Zstd(3), true)));
+    let mut big = Formula::default();
+    big.root = big.push("a", noise(200 << 10, 8));
+    let big = Encoder::new(Level::STORED).with_size_hint(true).encode(&big, None).unwrap();
+    let mirrored = |a: &[u8]| {
+        let mut m = mirror::Mirroring::new(Vec::new(), true);
+        m.write_all(a).unwrap();
+        m.into_inner()
+    };
+    payloads.push(("tree-mirrored".into(), mirrored(&tree(Level::STORED, true))));
+    payloads.push(("big".into(), big));
+    let mut seeds = Vec::new();
+    for (name, a) in &payloads {
+        seeds.push((format!("{name}-sealed"), sealed(a, false)));
+        seeds.push((format!("{name}-sealed-mirrored"), sealed(a, true)));
+    }
+    let big = sealed(&payloads.last().unwrap().1, true);
+    let mut damaged = big.clone();
+    damaged[..8].fill(0);
+    seeds.push(("big-header-damaged".into(), damaged));
+    // (after chunk 1: the header of 113 bytes, two chunks sealed of 64 KiB and 16 bytes, and the
+    // mirrored header of 117 bytes before chunk 1)
+    let mut cut = big;
+    cut.truncate(113 + 2 * ((64 << 10) + 16) + 117);
+    seeds.push(("big-cut".into(), cut));
+    let runner = aqr_fuzz::toys();
+    for (name, c) in &seeds[..seeds.len() - 2] {
+        let p = envelope::open(c).and_then(|e| e.unlock(aqr_fuzz::PASSPHRASE)).and_then(|u| u.decrypt(1));
+        if let Err(e) = p.and_then(|p| aqr_archive::open_payload(&p, &runner)?.value(1)) {
+            panic!("seed {name} does not decode: {e}");
+        }
+    }
+    let [(_, damaged), (_, cut)] = &seeds[seeds.len() - 2..] else { unreachable!() };
+    let (_, opened) = envelope::open_damaged(damaged).unwrap();
+    assert_eq!(opened.header_from, Some(1), "the damaged header taken from mirrored header 1");
+    let u = envelope::open(cut).unwrap().unlock(aqr_fuzz::PASSPHRASE).unwrap();
+    assert_eq!(u.decrypt_lossy(&mut vec![0; u.len()], 1), (vec![], true), "cut short after chunk 1");
+    seeds
+}
+
 /// The seeds of target `t`.
 fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
     match t {
@@ -176,8 +239,8 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
                     }
                 }
             }
-            seeds.push(("tree-stored".into(), tree(Level::STORED)));
-            seeds.push(("tree-zstd".into(), tree(Level::Zstd(3))));
+            seeds.push(("tree-stored".into(), tree(Level::STORED, false)));
+            seeds.push(("tree-zstd".into(), tree(Level::Zstd(3), false)));
             for (name, c) in &seeds {
                 if let Err(e) = aqr_archive::decode_value(c, &runner) {
                     panic!("seed {name} does not decode: {e}");
@@ -185,6 +248,7 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
             }
             seeds
         }
+        "envelope" => envelopes(),
         "compress" => fixtures(),
         // (the fixtures recompressed, their archives made again of stored blocks: those whose
         // formula applies a module)
