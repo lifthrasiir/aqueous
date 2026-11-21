@@ -68,7 +68,7 @@ WinZip Self-Extractor, makeself.
   - 설정 blob: 나머지 전부 (1.1–1.3절). CBOR로 쓴다 (4절).
 - **SFX가 만들어진 뒤에는 아카이브 부분을 고쳐도 SFX의 동작이 바뀌지 않는다.** stub은 런타임에
   `sfx.toml`을 읽지 않는다. 그래서 stub에 TOML 파서가 들어가지 않고, 지금처럼 작게 유지된다
-  (0.73 MB, UPX로 0.33 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
+  (0.76 MB, UPX로 0.34 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
   SFX 속의 아카이브를 고치지 못하게 하는 규칙도 둔다 (7절).
 
 ### 2.1 큰 설정은 파일로, 작은 설정은 toml로
@@ -287,5 +287,11 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
   stub 자신의 문구(덮어쓰기 질문, 버튼)는 아직 영어뿐이다 (aqr-l10n과 엮는 일은 남았다).
 - 환경 변수: `[run.env] NAME = "value"`. 실행하는 프로그램에만 더해진다 (같은 이름은 대소문자를 가리지
   않고 바꾼다). 값과 `run.program`의 인자에서 `{dest}`는 파일을 푼 폴더다 (`setup.exe /D={dest}`).
-- 남은 것: 2차의 나머지(배너, 바로가기), GUI blob,
+- 바로가기: `[[shortcut]]`마다 `target`(아카이브의 파일), `name`(문자열이나 언어별 표), `at`
+  (`"desktop"` 또는 `"start-menu"`), 시작 메뉴 아래의 `folder`, `args`(`{dest}`), `description`.
+  stub이 파일을 쓴 뒤, 프로그램을 실행하기 전에 셸의 `IShellLinkW`로 만든다 (사용자의 바탕 화면과
+  시작 메뉴의 프로그램. 모든 사용자의 것은 아직 없다). 파일이 남을 때만 뜻이 있으므로 `run.cleanup`과
+  함께 쓰면 오류다. 시험에서는 `AQR_SFX_SHORTCUTS`가 두 폴더를 대신한다.
+- stub의 크기: 환경 변수와 바로가기로 733,696 -> 758,784바이트 (UPX로 344,576).
+- 남은 것: 2차의 나머지(배너), GUI blob,
   `consoleAllocationPolicy`를 모르는 Windows에서의 `FreeConsole` 대체, 탐색기에서의 눈 확인.

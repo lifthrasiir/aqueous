@@ -276,3 +276,68 @@ fn program_run() {
     assert!(d.join("only/bin/data.txt").exists() && d.join("only/.aqr/sfx/sfx.toml").exists() && !copied.exists());
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+/// Shortcuts to files written (on stand-ins of the desktop and the start menu,
+/// `AQR_SFX_SHORTCUTS`), read back by the shell: target, arguments of `{dest}`, working
+/// directory, description, name in the user's language, the start menu's folder.
+#[cfg(windows)]
+#[test]
+fn shortcuts_made() {
+    use aqr_sfx::config::{Shortcut, ShortcutAt};
+    let d = scratch("shortcuts");
+    let a = archive(&[("bin/app.exe", b"MZ not run".to_vec()), ("doc.txt", b"doc".to_vec())]);
+    let c = Config {
+        shortcuts: vec![
+            Shortcut {
+                target: "bin/app.exe".into(),
+                name: Text(vec![("en".into(), "App".into()), ("ko".into(), "앱".into())]),
+                at: ShortcutAt::Desktop,
+                folder: None,
+                args: vec!["--in".into(), "{dest}".into()],
+                description: Some(Text::plain("The app")),
+            },
+            Shortcut {
+                target: "doc.txt".into(),
+                name: Text::plain("Doc"),
+                at: ShortcutAt::StartMenu,
+                folder: Some("Example/Tools".into()),
+                args: Vec::new(),
+                description: None,
+            },
+        ],
+        ..extracting("{cwd}/out", false, Overwrite::Always)
+    };
+    let exe = program(&d, "x", &[c.record(), a].concat());
+    let links = d.join("links");
+    let o = Command::new(&exe)
+        .current_dir(&d)
+        .env("AQR_SFX_LANG", "ko-KR")
+        .env("AQR_SFX_SHORTCUTS", &links)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    let read = |p: &Path| {
+        let script = format!(
+            "$l = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); \
+             [Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+             $l.TargetPath; $l.Arguments; $l.WorkingDirectory; $l.Description",
+            p.display()
+        );
+        let o = Command::new("powershell").args(["-NoProfile", "-Command", &script]).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect::<Vec<_>>()
+    };
+    let out = d.join("out");
+    let strip = |p: &Path| p.display().to_string();
+    let app = read(&links.join("desktop/앱.lnk"));
+    let want = [
+        strip(&out.join(r"bin\app.exe")),
+        format!("--in {}", d.join("out").display()),
+        strip(&out.join("bin")),
+        "The app".into(),
+    ];
+    assert_eq!(app, want);
+    let doc = read(&links.join(r"start-menu\Example\Tools\Doc.lnk"));
+    assert_eq!(doc[0], strip(&out.join("doc.txt")));
+    std::fs::remove_dir_all(&d).unwrap();
+}

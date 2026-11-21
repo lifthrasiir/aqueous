@@ -26,6 +26,16 @@
 //!   ? &(quiet: -8) => bool,       ; false
 //!   ? &(run: -9) => run,
 //!   ? &(license: -10) => tstr,    ; a file of .aqr/sfx/, `license.txt`: `license.ko.txt` for ko
+//!   ? &(shortcuts: -11) => [* shortcut],
+//!   * int => any,
+//! }
+//! shortcut = {
+//!   &(target: -1) => tstr,        ; a file of the archive, by /
+//!   &(name: -2) => text,
+//!   &(at: -3) => 0..1,            ; the desktop, the start menu's programs
+//!   ? &(folder: -4) => tstr,      ; under the start menu's programs, by /
+//!   ? &(args: -5) => [* tstr],    ; {dest} where the files went
+//!   ? &(description: -6) => text,
 //!   * int => any,
 //! }
 //! text = tstr / { + tstr => tstr }  ; by language tag ("" of none)
@@ -121,6 +131,30 @@ pub struct Config {
     pub quiet: bool,
     /// The program run once the files are written.
     pub run: Option<Run>,
+    /// The shortcuts made once the files are written.
+    pub shortcuts: Vec<Shortcut>,
+}
+
+/// A shortcut to a file written ([`Config::shortcuts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shortcut {
+    /// A path of the archive (by `/`) to the file.
+    pub target: String,
+    /// Its name (of the file `NAME.lnk`).
+    pub name: Text,
+    pub at: ShortcutAt,
+    /// A directory of the start menu's programs it is in (by `/`).
+    pub folder: Option<String>,
+    /// The arguments it gives the target ([`DEST`] where the files went).
+    pub args: Vec<String>,
+    pub description: Option<Text>,
+}
+
+/// Where a shortcut is made: the user's desktop, or the user's programs of the start menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutAt {
+    Desktop,
+    StartMenu,
 }
 
 /// What is done with a file where the archive's file goes.
@@ -179,6 +213,7 @@ impl Default for Config {
             license: None,
             quiet: false,
             run: None,
+            shortcuts: Vec::new(),
         }
     }
 }
@@ -194,6 +229,13 @@ const K_FINISH: i128 = -7;
 const K_QUIET: i128 = -8;
 const K_RUN: i128 = -9;
 const K_LICENSE: i128 = -10;
+const K_SHORTCUTS: i128 = -11;
+const S_TARGET: i128 = -1;
+const S_NAME: i128 = -2;
+const S_AT: i128 = -3;
+const S_FOLDER: i128 = -4;
+const S_ARGS: i128 = -5;
+const S_DESCRIPTION: i128 = -6;
 const R_PROGRAM: i128 = -1;
 const R_CWD: i128 = -2;
 const R_WINDOW: i128 = -3;
@@ -264,6 +306,34 @@ impl Config {
             put(K_LICENSE, &|v| put_text(v, l));
         }
         put(K_QUIET, &|v| put_bool(v, self.quiet));
+        if !self.shortcuts.is_empty() {
+            put(K_SHORTCUTS, &|v| {
+                cbor::head(v, 4, self.shortcuts.len() as u64);
+                for s in &self.shortcuts {
+                    let n = 3 + s.folder.is_some() as u64 + !s.args.is_empty() as u64 + s.description.is_some() as u64;
+                    cbor::head(v, 5, n);
+                    cbor::int(v, S_TARGET);
+                    put_text(v, &s.target);
+                    cbor::int(v, S_NAME);
+                    put_texts(v, &s.name);
+                    cbor::int(v, S_AT);
+                    cbor::int(v, s.at as i128);
+                    if let Some(f) = &s.folder {
+                        cbor::int(v, S_FOLDER);
+                        put_text(v, f);
+                    }
+                    if !s.args.is_empty() {
+                        cbor::int(v, S_ARGS);
+                        cbor::head(v, 4, s.args.len() as u64);
+                        s.args.iter().for_each(|a| put_text(v, a));
+                    }
+                    if let Some(d) = &s.description {
+                        cbor::int(v, S_DESCRIPTION);
+                        put_texts(v, d);
+                    }
+                }
+            });
+        }
         if let Some(r) = &self.run {
             put(K_RUN, &|v| {
                 cbor::head(v, 5, 7);
@@ -337,6 +407,48 @@ impl Config {
                 K_FINISH => c.finish = Some(texts(&v, "the finish")?),
                 K_LICENSE => c.license = Some(text(&v, "the license")?),
                 K_QUIET => c.quiet = boolean(&v, "quiet")?,
+                K_SHORTCUTS => {
+                    let Cbor::Array(all) = v else { return Err(bad("shortcuts not an array")) };
+                    for s in all.iter() {
+                        let Cbor::Map(m) = s else { return Err(bad("a shortcut not a map")) };
+                        let (mut target, mut name, mut at) = (None, None, None);
+                        let mut sc = Shortcut {
+                            target: String::new(),
+                            name: Text::default(),
+                            at: ShortcutAt::Desktop,
+                            folder: None,
+                            args: Vec::new(),
+                            description: None,
+                        };
+                        for (k, v) in m.pairs() {
+                            let Cbor::Int(k) = k else { continue };
+                            match k {
+                                S_TARGET => target = Some(text(&v, "a shortcut's target")?),
+                                S_NAME => name = Some(texts(&v, "a shortcut's name")?),
+                                S_AT => {
+                                    at = Some(
+                                        [ShortcutAt::Desktop, ShortcutAt::StartMenu]
+                                            [int(&v, "a shortcut's place", 1)? as usize],
+                                    )
+                                }
+                                S_FOLDER => sc.folder = Some(text(&v, "a shortcut's folder")?),
+                                S_ARGS => {
+                                    let Cbor::Array(a) = v else {
+                                        return Err(bad("a shortcut's arguments not an array"));
+                                    };
+                                    sc.args = a.iter().map(|a| text(&a, "an argument")).collect::<Result<_, _>>()?;
+                                }
+                                S_DESCRIPTION => sc.description = Some(texts(&v, "a shortcut's description")?),
+                                _ => {}
+                            }
+                        }
+                        let (Some(t), Some(n), Some(a)) = (target, name, at) else {
+                            return Err(bad("a shortcut of no target, name or place"));
+                        };
+                        (sc.target, sc.name, sc.at) = (t, n, a);
+                        c.shortcuts.push(sc);
+                    }
+                }
                 K_RUN => {
                     let Cbor::Map(r) = v else { return Err(bad("run not a map")) };
                     let mut run = Run {
@@ -568,6 +680,7 @@ pub fn compile(
     let mut ui = t.section("ui")?;
     let mut pe = t.section("pe")?;
     let title = t.texts("title")?;
+    let shortcut_tables = t.tables("shortcut")?;
     t.done()?;
 
     let running = match mode.as_deref() {
@@ -708,7 +821,39 @@ pub fn compile(
     pe.done()?;
     let version = (!strings.is_empty()).then(|| VersionInfo { numbers: numbers.map_or([0; 4], |(n, _)| n), strings });
 
-    let config = Config { title, dest, subdir, overwrite, prompt, finish, license, quiet, run };
+    // shortcuts, to files that stay
+    let mut shortcuts = Vec::new();
+    for table in shortcut_tables {
+        let mut sc = Toml::new(table, "shortcut");
+        let target = sc.text("target")?.ok_or("shortcut: no target")?;
+        check_relative(&target).map_err(|e| format!("shortcut.target: {target}: {e}"))?;
+        if kind(&target) != Some(Kind::File) || target == ".aqr" || target.starts_with(".aqr/") {
+            return Err(format!("shortcut.target: {target}: not a file of the archive"));
+        }
+        let name = sc.texts("name")?.ok_or("shortcut: no name")?;
+        let at = match sc.text("at")?.as_deref() {
+            Some("desktop") => ShortcutAt::Desktop,
+            Some("start-menu") => ShortcutAt::StartMenu,
+            Some(a) => return Err(format!("shortcut.at: {a:?}, not \"desktop\" nor \"start-menu\"")),
+            None => return Err("shortcut: no at (\"desktop\" or \"start-menu\")".into()),
+        };
+        let folder = sc.text("folder")?;
+        if let Some(f) = &folder {
+            if at != ShortcutAt::StartMenu {
+                return Err("shortcut.folder: of the start menu alone".into());
+            }
+            check_relative(f).map_err(|e| format!("shortcut.folder: {f}: {e}"))?;
+        }
+        let args = sc.strings("args")?.unwrap_or_default();
+        let description = sc.texts("description")?;
+        sc.done()?;
+        if run.as_ref().is_some_and(|r| r.cleanup) {
+            return Err("shortcut with run.cleanup (to files removed once the program ran)".into());
+        }
+        shortcuts.push(Shortcut { target, name, at, folder, args, description });
+    }
+
+    let config = Config { title, dest, subdir, overwrite, prompt, finish, license, quiet, run, shortcuts };
     Ok(Compiled { config, pe: Pe { gui, icon, manifest, version } })
 }
 
@@ -743,6 +888,18 @@ impl<'a> Toml<'a> {
             None => Ok(None),
             Some(toml::Value::String(s)) => Ok(Some(s.clone())),
             Some(_) => Err(format!("{}: not a string", self.name(key))),
+        }
+    }
+
+    /// An array of tables (`[[key]]`; none where it is not there).
+    fn tables(&mut self, key: &str) -> Result<Vec<&'a toml::Table>, String> {
+        let name = self.name(key);
+        match self.take(key) {
+            None => Ok(Vec::new()),
+            Some(toml::Value::Array(a)) => {
+                a.iter().map(|v| v.as_table().ok_or(format!("{name}: not an array of tables ([[{name}]])"))).collect()
+            }
+            Some(_) => Err(format!("{name}: not an array of tables ([[{name}]])")),
         }
     }
 
@@ -927,6 +1084,14 @@ mod tests {
                 exit_code: false,
                 env: vec![("APP_DIR".into(), "{dest}/bin".into())],
             }),
+            shortcuts: vec![Shortcut {
+                target: "bin/setup.exe".into(),
+                name: Text::plain("Setup"),
+                at: ShortcutAt::StartMenu,
+                folder: Some("Example".into()),
+                args: vec!["{dest}".into()],
+                description: Some(Text(vec![("en".into(), "Set up".into())])),
+            }],
         }
     }
 
@@ -1026,6 +1191,19 @@ mod tests {
         }
 
         #[test]
+        fn shortcuts() {
+            let toml = "[[shortcut]]\ntarget = \"bin/tool.exe\"\nname = { en = \"Tool\", ko = \"도구\" }\nat = \"start-menu\"\nfolder = \"Example\"\nargs = [\"{dest}\"]\n\n[[shortcut]]\ntarget = \"readme.txt\"\nname = \"Readme\"\nat = \"desktop\"\n";
+            let c = compiled(toml, &[]).unwrap().config;
+            assert_eq!(c.shortcuts.len(), 2);
+            assert_eq!((c.shortcuts[0].at, c.shortcuts[0].folder.as_deref()), (ShortcutAt::StartMenu, Some("Example")));
+            assert_eq!(c.shortcuts[0].name.pick("ko"), "도구");
+            assert_eq!(Config::from_cbor(&c.to_cbor()).unwrap(), c);
+            // (with a program run and kept: made)
+            let kept = "[run]\nprogram = [\"setup.exe\"]\ncleanup = false\n".to_string() + toml;
+            assert_eq!(compiled(&kept, &[]).unwrap().config.shortcuts.len(), 2);
+        }
+
+        #[test]
         fn modes_and_their_defaults() {
             let c = compiled("mode = \"run\"\n[run]\nprogram = [\"setup.exe\", \"/S\"]\n", &[]).unwrap();
             let want = Run {
@@ -1081,6 +1259,22 @@ mod tests {
                 ("[run]\nprogram = [\"setup.exe\"]\ncwd = \"nowhere\"", "not a directory"),
                 ("[run]\nprogram = [\"setup.exe\"]\nwait = false\ncleanup = true", "run.cleanup with run.wait"),
                 ("mode = \"run\"", "no run.program"),
+                ("[[shortcut]]\ntarget = \"nope.exe\"\nname = \"x\"\nat = \"desktop\"", "shortcut.target: nope.exe"),
+                ("[[shortcut]]\ntarget = \"setup.exe\"\nat = \"desktop\"", "shortcut: no name"),
+                ("[[shortcut]]\ntarget = \"setup.exe\"\nname = \"x\"\nat = \"taskbar\"", "shortcut.at"),
+                (
+                    "[[shortcut]]\ntarget = \"setup.exe\"\nname = \"x\"\nat = \"desktop\"\nfolder = \"a\"",
+                    "start menu alone",
+                ),
+                (
+                    "[[shortcut]]\ntarget = \"setup.exe\"\nname = \"x\"\nat = \"desktop\"\nicon = \"i\"",
+                    "shortcut.icon: not a setting",
+                ),
+                (
+                    "[run]\nprogram = [\"setup.exe\"]\n[[shortcut]]\ntarget = \"readme.txt\"\nname = \"x\"\nat = \"desktop\"",
+                    "run.cleanup",
+                ),
+                ("shortcut = 1", "shortcut: not an array of tables"),
                 ("[run]\nprogram = [\"setup.exe\"]\n[run.env]\n\"A=B\" = \"x\"", "run.env: \"A=B\""),
                 ("[run]\nprogram = [\"setup.exe\"]\n[run.env]\nA = 1", "run.env.A: not a string"),
                 ("mode = \"extract\"\n[run]\nprogram = [\"setup.exe\"]", "nothing is run"),

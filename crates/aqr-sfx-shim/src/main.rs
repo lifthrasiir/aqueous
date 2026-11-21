@@ -20,6 +20,7 @@
 //! leaves the files written where they would be cleaned up.
 
 mod run;
+mod shortcut;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -180,6 +181,11 @@ fn run(ui: &mut Ui) -> Result<i32, String> {
             return Err(e);
         }
     };
+    // the shortcuts, to the files written
+    for s in &config.shortcuts {
+        let at = shortcut::make(&dest, s, &lang)?;
+        ui.note(&format!("shortcut {}", at.display()));
+    }
     let mut code = 0;
     match running {
         None => {

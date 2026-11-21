@@ -136,12 +136,13 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `upx` is found, the blobs of the modules and of the shared libraries) and packs it
     (`aqr-sfx-pack`: `sfx.pack`).
   - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-archive + aqr-sfx, no codecs or Wasmtime,
-    0.73 MB, 0.33 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
+    0.76 MB, 0.34 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
     of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle, the
     settings and the archive from right after its image (else it scans itself from the end for
     the archive's header magic, the settings right before it), decodes the archive running the
-    modules through the blobs, writes the files out and runs the program the settings tell
-    (`src/run.rs`; its questions and messages in boxes where it has no console, `src/ui.rs`).
+    modules through the blobs, writes the files out, makes the shortcuts (`src/shortcut.rs`) and
+    runs the program the settings tell (`src/run.rs`; its questions, messages and license dialog
+    in boxes where it has no console, `src/ui.rs`).
   - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_vtable`, aqr-blob's
     `Vtable`: load, apply, apply_part, and for aqr the loads of aqr-wasmrt, the bound and the
     sandbox's worker) that runs any Wasm module handed to it by Wasmtime (`aqr-wasmrt`), no codecs

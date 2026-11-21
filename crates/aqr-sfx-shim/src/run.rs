@@ -118,7 +118,7 @@ fn spawn(
 /// Argument `a` as the C runtime's command line parsing takes it back (in quotes where it has a
 /// space, a tab or a quote, or is empty; the backslashes before a quote doubled).
 #[cfg(any(windows, test))]
-fn quote(a: &str) -> String {
+pub(crate) fn quote(a: &str) -> String {
     if !a.is_empty() && !a.contains([' ', '\t', '\n', '\x0b', '"']) {
         return a.into();
     }
