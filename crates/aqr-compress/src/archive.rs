@@ -481,6 +481,8 @@ fn compress_tree_noting<S: Source + ?Sized>(
         .map(std::sync::Arc::new);
     // (the batches' contents as `--lossy` rewrites them: what is looked at before, of `src`)
     let rw = crate::lossy::Rewriting::new(src, opt);
+    // (those of digests in the others, or signed beside them, kept as they are)
+    rw.keep(crate::lossy::digests::referenced(src, opt));
     let revoke = |c: usize| rw.revoke(c);
     let cx = Ctx {
         src: &rw,

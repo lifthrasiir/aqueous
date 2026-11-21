@@ -33,11 +33,13 @@
 
 mod asar;
 mod check;
+pub(crate) mod digests;
 mod disk;
 mod gzip;
 mod lzma;
 mod mca;
 mod sevenz;
+mod signatures;
 mod sqlite;
 mod xz;
 mod zip;
@@ -504,6 +506,16 @@ impl<'a, S: Source + ?Sized> Rewriting<'a, S> {
         Rewriting { src, lossy: opt.lossy.as_ref(), opt, held, made, sizes, revoked }
     }
 
+    /// The contents to keep as they are, what became of them ([`digests::referenced`]): read as
+    /// they are.
+    pub(crate) fn keep(&self, kept: Vec<(usize, Rewrite)>) {
+        let (mut revoked, mut made) = (self.revoked.lock().unwrap(), self.made.lock().unwrap());
+        for (c, w) in kept {
+            revoked.insert(c);
+            made.insert(c, w);
+        }
+    }
+
     /// Content `c` read as it is from now on, not rewritten: where R archived in as many bytes as
     /// X is, or more (docs/lossy-design.md §1: a file the lossy path does not make smaller is
     /// archived as it was). What became of it, if it was rewritten: kept, told why.
@@ -625,6 +637,8 @@ mod tests_7z;
 #[cfg(test)]
 mod tests_asar;
 #[cfg(test)]
+mod tests_digests;
+#[cfg(test)]
 mod tests_disk_ext;
 #[cfg(test)]
 mod tests_disk_fat;
@@ -634,3 +648,5 @@ mod tests_disk_hfs;
 mod tests_disk_ntfs;
 #[cfg(test)]
 mod tests_disk_ole;
+#[cfg(test)]
+mod tests_signatures;

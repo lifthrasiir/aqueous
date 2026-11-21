@@ -45,6 +45,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -294,6 +303,7 @@ dependencies = [
 name = "aqr-compress"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "aqr-7z",
  "aqr-alz",
  "aqr-apfs",
@@ -366,11 +376,14 @@ dependencies = [
  "aqr-xsv",
  "aqr-zip",
  "aqr-zstd",
+ "blake2",
  "flate-zoo",
  "flate2",
  "libc",
  "liblzma",
+ "md-5",
  "memmap2",
+ "sha1",
  "sha2",
  "xxhash-rust",
  "zstd",
@@ -2036,6 +2049,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2838,6 +2860,16 @@ name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
 
 [[package]]
 name = "memchr"
