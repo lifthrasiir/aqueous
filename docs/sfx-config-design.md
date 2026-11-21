@@ -68,7 +68,7 @@ WinZip Self-Extractor, makeself.
   - 설정 blob: 나머지 전부 (1.1–1.3절). CBOR로 쓴다 (4절).
 - **SFX가 만들어진 뒤에는 아카이브 부분을 고쳐도 SFX의 동작이 바뀌지 않는다.** stub은 런타임에
   `sfx.toml`을 읽지 않는다. 그래서 stub에 TOML 파서가 들어가지 않고, 지금처럼 작게 유지된다
-  (0.76 MB, UPX로 0.34 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
+  (0.76 MB, UPX로 0.35 MB). 큰 파일을 어떻게 이 원칙 안에 두는지는 2.1절에서 다룬다. 애초에 aqr이
   SFX 속의 아카이브를 고치지 못하게 하는 규칙도 둔다 (7절).
 
 ### 2.1 큰 설정은 파일로, 작은 설정은 toml로
@@ -120,7 +120,7 @@ exit-code = true              # 프로그램의 종료 코드를 돌려주는지
 
 [ui]
 license = "license.txt"       # .aqr/sfx/ 기준. license.<언어>.txt가 있으면 그쪽을 고른다
-banner = "banner.png"
+banner = "banner.png"         # .aqr/sfx/ 기준, 언어별 파일은 license와 같다. PNG, BMP, JPEG, GIF
 prompt = "Install Example?"
 finish = "Done."
 quiet = false                 # 무인 모드. 명령줄 -y와 같은 효과
@@ -270,8 +270,7 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
   시험했다 (`tests/edit.rs`, `tests/write.rs`: 이제 거부를 시험한다). 스펙의 "Appending to an archive"에
   같은 권고를 더했다. 그래서 섹터를 가로지르는 꼬리말을 지우고 새로 쓰는 append.rs의 경로(앞에 다른
   바이트가 있을 때만 생긴다)는 aqr에서 쓰이지 않는다. 지울지는 따로 정한다.
-- 아직 받지 않는 키는 "not yet"으로 실패한다: `extract.ask`(경로 묻기: GUI blob과 함께), `ui.license`,
-  `ui.banner`(첫 세그먼트 분리, 2.1절과 함께).
+- 아직 받지 않는 키는 "not yet"으로 실패한다: `extract.ask`(경로 묻기: GUI blob과 함께).
 - 첫 세그먼트(2.1절): aqr은 `.aqr/sfx/`의 파일을 첫 배치에 두고 그 뒤에 세그먼트를 닫는다
   (`aqr_compress::Options::lead`). 첫 세그먼트에는 디렉터리 항목도 함께 들어간다(내용이 없다).
   설정은 첫 세그먼트에서만 읽는다(`aqr_sfx::config::read_files`, stub도 같다). 비용: 데모(0.7 MB)에서
@@ -293,5 +292,13 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
   시작 메뉴의 프로그램. 모든 사용자의 것은 아직 없다). 파일이 남을 때만 뜻이 있으므로 `run.cleanup`과
   함께 쓰면 오류다. 시험에서는 `AQR_SFX_SHORTCUTS`가 두 폴더를 대신한다.
 - stub의 크기: 환경 변수와 바로가기로 733,696 -> 758,784바이트 (UPX로 344,576).
-- 남은 것: 2차의 나머지(배너), GUI blob,
+- 배너(`ui.banner`): `.aqr/sfx/`의 이미지(라이선스처럼 언어별 파일을 고른다). 창으로 물을 때만 쓴다.
+  `prompt`와 라이선스를 메모리에서 만든 대화상자로 묻고 그 위에 배너를 보인다 (배너가 없으면 `prompt`는
+  전처럼 `MessageBoxW`). 콘솔에서는 읽지도 않는다. 디코딩은 Windows의 WIC가 한다
+  (`CLSID_WICImagingFactory1`: Windows 7부터. PNG, BMP, JPEG, GIF). 이미지의 크기는 96 DPI 기준이고, 창의
+  DPI에 맞춰 WIC의 Fant 보간으로 늘린다. 투명한 부분은 대화상자의 색과 섞는다. 대화상자는 배너보다
+  좁으면 배너만큼 넓어지고, 넓으면 배너가 가운데에 온다. 컴파일은 파일이 있는지, 그 magic이 네 형식 중
+  하나인지 본다. `prompt`도 라이선스도 없으면 보일 곳이 없으므로 오류다. 디코딩에 실패하면 배너 없이
+  묻는다. stub: 758,784 -> 764,928바이트 (UPX로 347,648).
+- 남은 것: GUI blob,
   `consoleAllocationPolicy`를 모르는 Windows에서의 `FreeConsole` 대체, 탐색기에서의 눈 확인.

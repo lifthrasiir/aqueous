@@ -180,7 +180,7 @@ fn license_agreed_to() {
         ("a.txt", b"a".to_vec()),
     ]);
     let c = Config { license: Some("license.txt".into()), ..extracting("{cwd}/out", false, Overwrite::Always) };
-    let exe = program(&d, "x", &[c.record(), a].concat());
+    let exe = program(&d, "x", &[c.record(), a.clone()].concat());
     let o = run_in(&d, &exe, &[], "n\n", "en-US");
     assert_eq!(o.status.code(), Some(2), "{}", err(&o));
     assert!(err(&o).contains("The license, in English.") && err(&o).contains("accept the license"), "{}", err(&o));
@@ -191,6 +191,11 @@ fn license_agreed_to() {
     let o = run_in(&d, &exe, &["-y", "again"], "", "en");
     assert!(o.status.success() && !err(&o).contains("license"), "{}", err(&o));
     assert!(d.join("again/a.txt").exists());
+    // (a banner, of windows alone: on the console neither read nor shown, there or not)
+    let c = Config { banner: Some("banner.png".into()), ..c };
+    let exe = program(&d, "b", &[c.record(), a].concat());
+    let o = run_in(&d, &exe, &["banner"], "y\n", "en");
+    assert!(o.status.success() && err(&o).contains("The license, in English."), "{}", err(&o));
     // (named but not in the archive: a failure, nothing written)
     let c = Config { license: Some("gone.txt".into()), ..extracting("{cwd}/gone", false, Overwrite::Always) };
     let exe = program(&d, "y", &[c.record(), archive(&[("a.txt", b"a".to_vec())])].concat());

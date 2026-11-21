@@ -19,6 +19,8 @@
 //! file there written over where the settings would ask), `--noexec` runs nothing, `--keep`
 //! leaves the files written where they would be cleaned up.
 
+#[cfg(windows)]
+mod banner;
 mod run;
 mod shortcut;
 mod ui;
@@ -126,21 +128,36 @@ fn run(ui: &mut Ui) -> Result<i32, String> {
     ui.title = config.title.as_ref().map_or_else(program_name, |t| t.pick(&lang).to_string());
     ui.quiet = args.yes || config.quiet;
 
+    // the license and the banner (in windows alone), of the archive's first segment
+    // (docs/sfx-config-design.md, 2.1), of the user's language where they have one
+    let asking = !ui.quiet && (config.prompt.is_some() || config.license.is_some());
+    let names_of = |f: &Option<String>, shown: bool| match f {
+        Some(f) if shown => aqr_sfx::config::names_for(f, &lang),
+        _ => Vec::new(),
+    };
+    let license = names_of(&config.license, asking);
+    let banner = names_of(&config.banner, asking && ui.windowed());
+    let mut files = if license.is_empty() && banner.is_empty() {
+        Default::default()
+    } else {
+        let wanted = |n: &str| license.iter().chain(&banner).any(|m| m == n);
+        aqr_sfx::config::read_files(c, &runner, runner.threads(), &wanted)?
+    };
+    ui.banner = banner.iter().find_map(|n| files.remove(n));
+
     if let Some(p) = &config.prompt
         && !ui.quiet
-        && !ui.confirm(p.pick(&lang))
+        && !ui.prompt(p.pick(&lang))
     {
         return Ok(2);
     }
-    // the license, of the archive's first segment (docs/sfx-config-design.md, 2.1), of the
-    // user's language where it has one
     if let Some(l) = &config.license
         && !ui.quiet
     {
-        let names = aqr_sfx::config::names_for(l, &lang);
-        let files = aqr_sfx::config::read_files(c, &runner, runner.threads(), &|n| names.iter().any(|m| m == n))?;
-        let text =
-            names.iter().find_map(|n| files.get(n)).ok_or_else(|| format!("no {l} in the archive's first segment"))?;
+        let text = license
+            .iter()
+            .find_map(|n| files.get(n))
+            .ok_or_else(|| format!("no {l} in the archive's first segment"))?;
         let text = String::from_utf8_lossy(text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text));
         if !ui.license(&text) {
             return Ok(2);

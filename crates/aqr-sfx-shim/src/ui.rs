@@ -12,13 +12,15 @@ pub struct Ui {
     pub title: String,
     /// Nothing asked (`-y`, the settings' `quiet`).
     pub quiet: bool,
+    /// The image above the prompt and the license in their dialogs (the settings' banner).
+    pub banner: Option<Vec<u8>>,
     /// Of message boxes: no standard error.
     gui: bool,
 }
 
 impl Ui {
     pub fn new() -> Ui {
-        Ui { title: crate::program_name(), quiet: false, gui: no_stderr() }
+        Ui { title: crate::program_name(), quiet: false, banner: None, gui: no_stderr() }
     }
 
     /// Tells failure `e`.
@@ -50,11 +52,25 @@ impl Ui {
     /// (no where it ends), else in a dialog of its text.
     pub fn license(&mut self, text: &str) -> bool {
         if self.gui {
-            return license_dialog(&self.title, text);
+            return dialog(&self.title, text, Asking::License, self.banner.as_deref());
         }
         eprintln!("{}", text.trim_end());
         eprintln!();
         self.confirm("Do you accept the license?")
+    }
+
+    /// Asks the settings' prompt `q` as [`Ui::confirm`], in a dialog under the banner where there
+    /// is one.
+    pub fn prompt(&mut self, q: &str) -> bool {
+        match &self.banner {
+            Some(b) if self.gui => dialog(&self.title, q, Asking::Question, Some(b)),
+            _ => self.confirm(q),
+        }
+    }
+
+    /// Whether what is asked is asked in windows (no standard error).
+    pub fn windowed(&self) -> bool {
+        self.gui
     }
 
     /// Asks `q`, yes or no (no where standard input ends).
@@ -132,31 +148,64 @@ fn system_language() -> String {
     l.split(['.', '@']).next().unwrap_or("").replace('_', "-")
 }
 
-/// The dialog of a license (a template made in memory: user32 alone): its text read-only and
-/// scrolled, Accept and Decline. Whether it was accepted.
+/// What a [`dialog`] asks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Asking {
+    /// A license agreed to: its text read-only and scrolled, Accept and Decline.
+    License,
+    /// A question: Yes and No.
+    Question,
+}
+
+/// What a [`dialog`]'s procedure takes.
 #[cfg(windows)]
-fn license_dialog(title: &str, text: &str) -> bool {
+struct Shown<'a> {
+    text: Vec<u16>,
+    asking: Asking,
+    banner: Option<&'a [u8]>,
+    /// The banner's bitmap made, freed once the dialog ends.
+    bitmap: std::cell::Cell<*mut c_void>,
+}
+
+/// A dialog of `text` asking `asking` (a template made in memory: user32 alone, and WIC for the
+/// banner), under `banner` where there is one: laid out once its banner and text are measured.
+/// Whether it was agreed to (Accept, Yes).
+#[cfg(windows)]
+fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> bool {
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let mut t: Vec<u16> = Vec::new();
     let dword = |t: &mut Vec<u16>, v: u32| t.extend_from_slice(&[v as u16, (v >> 16) as u16]);
+    let child = 0x4000_0000 | 0x1000_0000;
+    let tab = 0x0001_0000;
+    let (yes, no) = if asking == Asking::License { ("Accept", "Decline") } else { ("Yes", "No") };
+    let mut items: Vec<(u32, [u16; 4], u16, u16, &str)> = vec![
+        match asking {
+            // EDIT: ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY, WS_VSCROLL, WS_BORDER
+            Asking::License => {
+                (child | tab | 0x4 | 0x40 | 0x800 | 0x0020_0000 | 0x0080_0000, [7, 7, 306, 170], 100, 0x81, "")
+            }
+            // STATIC: SS_NOPREFIX (its height as its text measures)
+            Asking::Question => (child | 0x80, [7, 7, 266, 8], 100, 0x82, ""),
+        },
+        // BUTTON: BS_DEFPUSHBUTTON (where they go laid out)
+        (child | tab | 0x1, [0, 0, 52, 15], 1, 0x80, yes),
+        (child | tab, [0, 0, 52, 15], 2, 0x80, no),
+    ];
+    if banner.is_some() {
+        // STATIC: SS_BITMAP | SS_CENTERIMAGE
+        items.push((child | 0xe | 0x200, [0, 0, 1, 1], 101, 0x82, ""));
+    }
     // DLGTEMPLATE: WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_MODALFRAME | DS_SHELLFONT
     dword(&mut t, 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x800 | 0x80 | 0x48);
     dword(&mut t, 0);
-    t.extend_from_slice(&[3, 0, 0, 320, 206]);
+    let width = if asking == Asking::License { 320 } else { 280 };
+    t.extend_from_slice(&[items.len() as u16, 0, 0, width, 100]);
     // (no menu, the default class), the title, the font
     t.extend_from_slice(&[0, 0]);
     t.extend(wide(title));
     t.push(9);
     t.extend(wide("MS Shell Dlg"));
     // the items, each at 4 bytes: style, x, y, width, height, id, class (an atom), its text
-    let child = 0x4000_0000 | 0x1000_0000 | 0x0001_0000;
-    let items: [(u32, [u16; 4], u16, u16, &str); 3] = [
-        // EDIT: ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY, WS_VSCROLL, WS_BORDER
-        (child | 0x4 | 0x40 | 0x800 | 0x0020_0000 | 0x0080_0000, [7, 7, 306, 170], 100, 0x81, ""),
-        // BUTTON: BS_DEFPUSHBUTTON
-        (child | 0x1, [204, 184, 52, 15], 1, 0x80, "Accept"),
-        (child, [261, 184, 52, 15], 2, 0x80, "Decline"),
-    ];
     for (style, [x, y, w, h], id, class, label) in items {
         if t.len() % 2 == 1 {
             t.push(0);
@@ -169,14 +218,21 @@ fn license_dialog(title: &str, text: &str) -> bool {
     }
     // (the template at 4 bytes)
     let template: Vec<u32> = t.chunks(2).map(|c| c[0] as u32 | (*c.get(1).unwrap_or(&0) as u32) << 16).collect();
-    let text = wide(&text.replace("\r\n", "\n").replace('\n', "\r\n"));
+    let shown = Shown {
+        text: wide(&text.replace("\r\n", "\n").replace('\n', "\r\n")),
+        asking,
+        banner,
+        bitmap: std::cell::Cell::new(std::ptr::null_mut()),
+    };
 
     extern "system" fn proc(h: *mut c_void, msg: u32, wp: usize, lp: isize) -> isize {
-        // SAFETY: the dialog's window; WM_INITDIALOG's parameter the text given below
+        // SAFETY: the dialog's window; WM_INITDIALOG's parameter the `Shown` given below
         unsafe {
             match msg {
                 0x110 => {
-                    sys::SetDlgItemTextW(h, 100, lp as *const u16);
+                    let s = &*(lp as *const Shown);
+                    sys::SetDlgItemTextW(h, 100, s.text.as_ptr());
+                    lay_out(h, s);
                     sys::SetFocus(sys::GetDlgItem(h, 1));
                     0
                 }
@@ -188,22 +244,85 @@ fn license_dialog(title: &str, text: &str) -> bool {
             }
         }
     }
-    // SAFETY: a template of the layout DialogBoxIndirectParamW reads, at 4 bytes; the text alive
-    // as long as the dialog is
+    // SAFETY: a template of the layout DialogBoxIndirectParamW reads, at 4 bytes; what is shown
+    // alive as long as the dialog is
     let r = unsafe {
         sys::DialogBoxIndirectParamW(
             sys::GetModuleHandleW(std::ptr::null()),
             template.as_ptr().cast(),
             std::ptr::null_mut(),
             proc,
-            text.as_ptr() as isize,
+            (&raw const shown) as isize,
         )
     };
+    if !shown.bitmap.get().is_null() {
+        crate::banner::free(shown.bitmap.get());
+    }
     r == 1
 }
 
+/// Lays dialog `h` out (in pixels): the banner across its top (centred, the rest of its first
+/// pixel's colour), the text under it (a question's as high as it measures), the buttons at
+/// the bottom right; the dialog as wide as the banner where that is wider, about where it was.
+#[cfg(windows)]
+unsafe fn lay_out(h: *mut c_void, s: &Shown) {
+    use sys::Rect;
+    // SAFETY: the dialog's window and its items of the template
+    unsafe {
+        let units = |x: i32, y: i32| {
+            let mut r = Rect { left: 0, top: 0, right: x, bottom: y };
+            sys::MapDialogRect(h, &mut r);
+            (r.right, r.bottom)
+        };
+        let (mx, my) = units(7, 7);
+        let (bw, bh) = units(52, 15);
+        let (gap, _) = units(5, 0);
+        let mut client = Rect::default();
+        sys::GetClientRect(h, &mut client);
+        let mut width = client.right;
+        let mut top = 0;
+        if let Some(d) = s.banner
+            && let Some((b, w, bh)) = crate::banner::bitmap(d, crate::banner::dpi(h), sys::GetSysColor(15))
+        {
+            s.bitmap.set(b);
+            let at = sys::GetDlgItem(h, 101);
+            sys::SendMessageW(at, 0x172, 0, b as isize); // STM_SETIMAGE, IMAGE_BITMAP
+            width = width.max(w);
+            sys::MoveWindow(at, 0, 0, width, bh, 0);
+            top = bh;
+        }
+        let body = sys::GetDlgItem(h, 100);
+        let height = match s.asking {
+            Asking::License => units(0, 170).1,
+            Asking::Question => {
+                // DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS, in the control's font
+                let dc = sys::GetDC(body);
+                let old = sys::SelectObject(dc, sys::SendMessageW(body, 0x31, 0, 0) as *mut c_void);
+                let mut r = Rect { left: 0, top: 0, right: width - 2 * mx, bottom: 0 };
+                sys::DrawTextW(dc, s.text.as_ptr(), -1, &mut r, 0x400 | 0x10 | 0x800 | 0x40);
+                sys::SelectObject(dc, old);
+                sys::ReleaseDC(body, dc);
+                r.bottom.max(units(0, 8).1)
+            }
+        };
+        sys::MoveWindow(body, mx, top + my, width - 2 * mx, height, 0);
+        let y = top + my + height + my;
+        sys::MoveWindow(sys::GetDlgItem(h, 2), width - mx - bw, y, bw, bh, 0);
+        sys::MoveWindow(sys::GetDlgItem(h, 1), width - mx - 2 * bw - gap, y, bw, bh, 0);
+        // the window of that client, of the same centre
+        let mut r = Rect { left: 0, top: 0, right: width, bottom: y + bh + my };
+        sys::AdjustWindowRectEx(&mut r, sys::GetWindowLongW(h, -16) as u32, 0, sys::GetWindowLongW(h, -20) as u32);
+        let mut was = Rect::default();
+        sys::GetWindowRect(h, &mut was);
+        let (w, ht) = (r.right - r.left, r.bottom - r.top);
+        let (cx, cy) = ((was.left + was.right) / 2, (was.top + was.bottom) / 2);
+        // SWP_NOZORDER | SWP_NOACTIVATE
+        sys::SetWindowPos(h, std::ptr::null_mut(), cx - w / 2, (cy - ht / 2).max(0), w, ht, 0x4 | 0x10);
+    }
+}
+
 #[cfg(not(windows))]
-fn license_dialog(_: &str, _: &str) -> bool {
+fn dialog(_: &str, _: &str, _: Asking, _: Option<&[u8]>) -> bool {
     false
 }
 
@@ -234,6 +353,38 @@ mod sys {
         pub fn GetDlgItem(dialog: *mut core::ffi::c_void, id: i32) -> *mut core::ffi::c_void;
         pub fn SetFocus(window: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
         pub fn EndDialog(dialog: *mut core::ffi::c_void, result: isize) -> i32;
+        pub fn MapDialogRect(dialog: *mut core::ffi::c_void, r: *mut Rect) -> i32;
+        pub fn GetClientRect(window: *mut core::ffi::c_void, r: *mut Rect) -> i32;
+        pub fn GetWindowRect(window: *mut core::ffi::c_void, r: *mut Rect) -> i32;
+        pub fn MoveWindow(window: *mut core::ffi::c_void, x: i32, y: i32, w: i32, h: i32, repaint: i32) -> i32;
+        pub fn SetWindowPos(
+            window: *mut core::ffi::c_void,
+            after: *mut core::ffi::c_void,
+            x: i32,
+            y: i32,
+            w: i32,
+            h: i32,
+            flags: u32,
+        ) -> i32;
+        pub fn AdjustWindowRectEx(r: *mut Rect, style: u32, menu: i32, ex_style: u32) -> i32;
+        pub fn GetWindowLongW(window: *mut core::ffi::c_void, index: i32) -> i32;
+        pub fn SendMessageW(window: *mut core::ffi::c_void, msg: u32, wp: usize, lp: isize) -> isize;
+        pub fn GetSysColor(index: i32) -> u32;
+        pub fn GetDC(window: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        pub fn ReleaseDC(window: *mut core::ffi::c_void, dc: *mut core::ffi::c_void) -> i32;
+        pub fn DrawTextW(dc: *mut core::ffi::c_void, text: *const u16, n: i32, r: *mut Rect, format: u32) -> i32;
+    }
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        pub fn SelectObject(dc: *mut core::ffi::c_void, o: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct Rect {
+        pub left: i32,
+        pub top: i32,
+        pub right: i32,
+        pub bottom: i32,
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {

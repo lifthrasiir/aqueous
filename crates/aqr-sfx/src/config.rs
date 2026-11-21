@@ -27,6 +27,8 @@
 //!   ? &(run: -9) => run,
 //!   ? &(license: -10) => tstr,    ; a file of .aqr/sfx/, `license.txt`: `license.ko.txt` for ko
 //!   ? &(shortcuts: -11) => [* shortcut],
+//!   ? &(banner: -12) => tstr,     ; a file of .aqr/sfx/ (as the license's, by language): PNG,
+//!                                 ; BMP, JPEG or GIF, above the prompt and the license
 //!   * int => any,
 //! }
 //! shortcut = {
@@ -127,6 +129,9 @@ pub struct Config {
     /// The license agreed to before anything is written: a file of `.aqr/sfx/` in the
     /// archive's first segment, of its language where there is one ([`names_for`]).
     pub license: Option<String>,
+    /// The image shown above the prompt and the license where they are in windows: a file of
+    /// `.aqr/sfx/` as [`Config::license`] (PNG, BMP, JPEG or GIF), at its size at 96 DPI.
+    pub banner: Option<String>,
     /// Nothing asked nor told (as the command line's `-y`).
     pub quiet: bool,
     /// The program run once the files are written.
@@ -211,6 +216,7 @@ impl Default for Config {
             prompt: None,
             finish: None,
             license: None,
+            banner: None,
             quiet: false,
             run: None,
             shortcuts: Vec::new(),
@@ -230,6 +236,7 @@ const K_QUIET: i128 = -8;
 const K_RUN: i128 = -9;
 const K_LICENSE: i128 = -10;
 const K_SHORTCUTS: i128 = -11;
+const K_BANNER: i128 = -12;
 const S_TARGET: i128 = -1;
 const S_NAME: i128 = -2;
 const S_AT: i128 = -3;
@@ -304,6 +311,9 @@ impl Config {
         }
         if let Some(l) = &self.license {
             put(K_LICENSE, &|v| put_text(v, l));
+        }
+        if let Some(b) = &self.banner {
+            put(K_BANNER, &|v| put_text(v, b));
         }
         put(K_QUIET, &|v| put_bool(v, self.quiet));
         if !self.shortcuts.is_empty() {
@@ -406,6 +416,7 @@ impl Config {
                 K_PROMPT => c.prompt = Some(texts(&v, "the prompt")?),
                 K_FINISH => c.finish = Some(texts(&v, "the finish")?),
                 K_LICENSE => c.license = Some(text(&v, "the license")?),
+                K_BANNER => c.banner = Some(text(&v, "the banner")?),
                 K_QUIET => c.quiet = boolean(&v, "quiet")?,
                 K_SHORTCUTS => {
                     let Cbor::Array(all) = v else { return Err(bad("shortcuts not an array")) };
@@ -750,9 +761,6 @@ pub fn compile(
     };
 
     // ui
-    if ui.table.contains_key("banner") {
-        return Err("ui.banner: not yet (docs/sfx-config-design.md, 9)".into());
-    }
     let license = match ui.text("license")? {
         Some(name) => {
             // (each of its languages' files too: text, as it is shown)
@@ -771,6 +779,22 @@ pub fn compile(
     };
     let prompt = ui.texts("prompt")?;
     let finish = ui.texts("finish")?;
+    let banner = match ui.text("banner")? {
+        Some(name) => {
+            sfx_file(file, "ui.banner", &name)?;
+            for n in std::iter::once(name.clone()).chain(language_files(files, &name)) {
+                let Ok(d) = sfx_file(file, "ui.banner", &n) else { continue };
+                if !is_image(&d) {
+                    return Err(format!("ui.banner: {n}: not PNG, BMP, JPEG nor GIF"));
+                }
+            }
+            if prompt.is_none() && license.is_none() {
+                return Err("ui.banner: shown above ui.prompt and ui.license, and neither is given".into());
+            }
+            Some(name)
+        }
+        None => None,
+    };
     let quiet = ui.boolean("quiet")?.unwrap_or(false);
     ui.done()?;
 
@@ -853,7 +877,7 @@ pub fn compile(
         shortcuts.push(Shortcut { target, name, at, folder, args, description });
     }
 
-    let config = Config { title, dest, subdir, overwrite, prompt, finish, license, quiet, run, shortcuts };
+    let config = Config { title, dest, subdir, overwrite, prompt, finish, license, banner, quiet, run, shortcuts };
     Ok(Compiled { config, pe: Pe { gui, icon, manifest, version } })
 }
 
@@ -998,6 +1022,12 @@ fn language_files(files: &std::collections::HashMap<String, Vec<u8>>, name: &str
     of
 }
 
+/// Whether `d` is an image the stub shows (WIC decodes): PNG, BMP, JPEG or GIF, by its magic.
+#[cfg(feature = "encode")]
+fn is_image(d: &[u8]) -> bool {
+    [&b"\x89PNG\r\n\x1a\n"[..], b"BM", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"].iter().any(|m| d.starts_with(m))
+}
+
 /// A file of `.aqr/sfx/` that setting `what` names.
 #[cfg(feature = "encode")]
 fn sfx_file(file: &dyn Fn(&str) -> Option<Vec<u8>>, what: &str, name: &str) -> Result<Vec<u8>, String> {
@@ -1074,6 +1104,7 @@ mod tests {
             prompt: Some(Text(vec![("en".into(), "Install?".into()), ("ko".into(), "설치할까요?".into())])),
             finish: None,
             license: Some("license.txt".into()),
+            banner: Some("banner.png".into()),
             quiet: false,
             run: Some(Run {
                 program: vec!["bin/setup.exe".into(), "/S".into(), "한글".into()],
@@ -1191,6 +1222,20 @@ mod tests {
         }
 
         #[test]
+        fn banner() {
+            let png: &[u8] = b"\x89PNG\r\n\x1a\n...";
+            let toml = "[ui]\nbanner = \"banner.png\"\nprompt = \"Go?\"\n";
+            let c = compiled(toml, &[("banner.png", png), ("banner.ko.png", b"BM...")]).unwrap();
+            assert_eq!(c.config.banner.as_deref(), Some("banner.png"));
+            assert_eq!(Config::from_cbor(&c.config.to_cbor()).unwrap(), c.config);
+            // (an image, each of its languages' files; above something asked)
+            let e = compiled(toml, &[("banner.png", png), ("banner.ko.png", b"<svg/>")]).unwrap_err();
+            assert!(e.contains("ui.banner: banner.ko.png: not PNG, BMP, JPEG nor GIF"), "{e}");
+            let e = compiled("[ui]\nbanner = \"banner.png\"", &[("banner.png", png)]).unwrap_err();
+            assert!(e.contains("neither is given"), "{e}");
+        }
+
+        #[test]
         fn shortcuts() {
             let toml = "[[shortcut]]\ntarget = \"bin/tool.exe\"\nname = { en = \"Tool\", ko = \"도구\" }\nat = \"start-menu\"\nfolder = \"Example\"\nargs = [\"{dest}\"]\n\n[[shortcut]]\ntarget = \"readme.txt\"\nname = \"Readme\"\nat = \"desktop\"\n";
             let c = compiled(toml, &[]).unwrap().config;
@@ -1283,7 +1328,7 @@ mod tests {
                 ("[extract]\ndest = \"{temp}/../x\"", "extract.dest"),
                 ("[extract]\noverwrite = \"maybe\"", "extract.overwrite"),
                 ("[extract]\nask = true", "not yet"),
-                ("[ui]\nbanner = \"banner.png\"", "not yet"),
+                ("[ui]\nbanner = \"banner.png\"", "ui.banner: banner.png: not a file of .aqr/sfx/"),
                 ("[pe]\nicon = \"icon.ico\"", "not a file of .aqr/sfx/"),
                 ("[pe]\nversion = \"1.2.3.4.5\"", "pe.version"),
                 ("[pe]\nversion = \"1.70000\"", "pe.version"),
