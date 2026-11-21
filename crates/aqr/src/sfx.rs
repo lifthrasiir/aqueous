@@ -160,74 +160,32 @@ pub struct Made {
     pub settings: bool,
 }
 
-/// The path of the directory of the settings in an archive's root.
-pub const SETTINGS: [&[u8]; 2] = [b".aqr", b"sfx"];
-
-/// The entry of the directory `.aqr/sfx/` of the root of `t` ([`SETTINGS`]), if there is one.
+/// The entry of the directory `.aqr/sfx/` of the root of `t`, if there is one.
 pub fn settings_dir(t: &Tree) -> Option<usize> {
-    let mut at = None;
-    for name in SETTINGS {
-        at = Some(t.entries.iter().position(|e| e.parent == at && e.name == name && e.node == EntryNode::Dir)?);
-    }
-    at
-}
-
-/// The path (by `/`) of entry `i` of `t`, under entry `under` where given (else the root).
-fn path_of(t: &Tree, mut i: usize, under: Option<usize>) -> String {
-    let mut parts = Vec::new();
-    while Some(i) != under {
-        let e = &t.entries[i];
-        parts.push(String::from_utf8_lossy(&e.name).into_owned());
-        match e.parent {
-            Some(p) => i = p,
-            None => break,
-        }
-    }
-    parts.reverse();
-    parts.join("/")
+    aqr_sfx::config::dir_of(t)
 }
 
 /// The settings of `archive` (made by [`wasm_of`]) where its root has `.aqr/sfx/`: its files
-/// there decoded (the leaves holding them alone), compiled and checked against the archive's
-/// paths ([`aqr_sfx::config::compile`]).
+/// there, of its first segment (where the compressor put them: [`aqr_compress::Options::lead`]),
+/// decoded, compiled and checked against the archive's paths ([`aqr_sfx::config::compile`]).
 pub fn settings(archive: &[u8], threads: usize) -> Result<Option<Compiled>, String> {
     let native = aqr_decompress::Native { threads };
     let a = aqr_archive::open(archive, &native).map_err(|e| format!("{e:?}"))?;
     let Some(t) = a.tree() else { return Ok(None) };
-    let Some(dir) = settings_dir(t) else { return Ok(None) };
-    // the files under .aqr/sfx/, by their paths there
-    let mut files: HashMap<String, usize> = HashMap::new();
+    if settings_dir(t).is_none() {
+        return Ok(None);
+    }
     let mut kinds: HashMap<String, Kind> = HashMap::new();
     for (i, e) in t.entries.iter().enumerate() {
-        let path = path_of(t, i, None);
+        let path = aqr_sfx::config::path_of(t, i, None);
         match e.node {
-            EntryNode::File(c) => {
-                kinds.insert(path, Kind::File);
-                // (an entry under the directory: one of its ancestors)
-                let mut p = e.parent;
-                while let Some(q) = p {
-                    if q == dir {
-                        files.insert(path_of(t, i, Some(dir)), c);
-                        break;
-                    }
-                    p = t.entries[q].parent;
-                }
-            }
+            EntryNode::File(_) => drop(kinds.insert(path, Kind::File)),
             EntryNode::Dir => drop(kinds.insert(path, Kind::Dir)),
             _ => {}
         }
     }
-    let mut only = vec![false; a.contents_len()];
-    files.values().for_each(|&c| only[c] = true);
-    let got = std::sync::Mutex::new(HashMap::new());
-    a.contents_of(threads, Some(&only), |c, d| {
-        got.lock().unwrap().insert(c, d);
-        Ok(())
-    })
-    .map_err(|e| format!(".aqr/sfx/: {e:?}"))?;
-    let got = got.into_inner().unwrap();
-    let file = |n: &str| files.get(n).and_then(|c| got.get(c).cloned());
-    aqr_sfx::config::compile(&file, &|p| kinds.get(p).copied()).map(Some)
+    let files = aqr_sfx::config::read_files(archive, &native, threads, &|_| true)?;
+    aqr_sfx::config::compile(&|n| files.get(n).cloned(), &|p| kinds.get(p).copied()).map(Some)
 }
 
 /// The self-extracting program of `archive` (an Aqueous archive made with [`wasm_of`]): the stub

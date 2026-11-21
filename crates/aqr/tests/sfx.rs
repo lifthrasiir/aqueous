@@ -137,6 +137,18 @@ mod packed {
         let kinds: Vec<_> = res.iter().map(|r| r.kind.clone()).collect();
         use aqr_sfx::pe::Id::Num;
         assert_eq!(kinds, [Num(3), Num(14), Num(16), Num(24)]);
+        // the files of .aqr/sfx/ in the first segment, alone (docs/sfx-config-design.md, 2.1)
+        let c = &exe[aqr_archive::locate(&exe).unwrap()];
+        let all = aqr_archive::open(c, &aqr_archive::NoModules).unwrap();
+        let segments = all.segment_metadata().unwrap();
+        assert_eq!(segments.len(), 2);
+        let first = aqr_archive::open_upto(c, &aqr_archive::NoModules, segments[0]).unwrap();
+        let t = first.tree().unwrap();
+        let files: Vec<_> = (t.entries.iter().enumerate())
+            .filter(|(_, e)| matches!(e.node, aqr_archive::EntryNode::File(_)))
+            .map(|(i, _)| aqr_sfx::config::path_of(t, i, None))
+            .collect();
+        assert_eq!(files, [".aqr/sfx/icon.ico", ".aqr/sfx/sfx.toml"]);
         let pe = u32::from_le_bytes(exe[0x3c..0x40].try_into().unwrap()) as usize;
         assert_eq!(u16::from_le_bytes([exe[pe + 24 + 68], exe[pe + 25 + 68]]), 2, "of windows");
 

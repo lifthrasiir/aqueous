@@ -272,5 +272,9 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
   바이트가 있을 때만 생긴다)는 aqr에서 쓰이지 않는다. 지울지는 따로 정한다.
 - 아직 받지 않는 키는 "not yet"으로 실패한다: `extract.ask`(경로 묻기: GUI blob과 함께), `ui.license`,
   `ui.banner`(첫 세그먼트 분리, 2.1절과 함께).
-- 남은 것: 2차의 나머지(첫 세그먼트, 라이선스, 배너, 언어별 문구, 바로가기, 환경 변수), GUI blob,
+- 첫 세그먼트(2.1절): aqr은 `.aqr/sfx/`의 파일을 첫 배치에 두고 그 뒤에 세그먼트를 닫는다
+  (`aqr_compress::Options::lead`). 첫 세그먼트에는 디렉터리 항목도 함께 들어간다(내용이 없다).
+  설정은 첫 세그먼트에서만 읽는다(`aqr_sfx::config::read_files`, stub도 같다). 비용: 데모(0.7 MB)에서
+  68바이트, 2.2 MB의 소스에서 132바이트. 모듈 블록이 겹치지 않는다.
+- 남은 것: 2차의 나머지(라이선스, 배너, 언어별 문구, 바로가기, 환경 변수), GUI blob,
   `consoleAllocationPolicy`를 모르는 Windows에서의 `FreeConsole` 대체, 탐색기에서의 눈 확인.

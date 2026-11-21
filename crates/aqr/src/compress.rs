@@ -471,6 +471,16 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Strin
             eprintln!(".aqr/sfx/: archived as files (the settings of a self-extracting program: --format sfx)");
         }
     }
+    // (a self-extracting program's settings first, a segment of their own: what its stub reads
+    // alone, docs/sfx-config-design.md, 2.1)
+    let led;
+    let opt = match aqr_sfx::config::files_of(&g.tree) {
+        f if a.format == Pack::Sfx && !f.is_empty() => {
+            led = aqr_compress::Options { lead: f.into_iter().map(|(_, c)| c).collect(), ..opt.clone() };
+            &led
+        }
+        _ => opt,
+    };
     // appending: what the archive holds already left out
     let prior = match opened {
         Some(o) => match o.against(&mut g, a.sync) {

@@ -335,6 +335,84 @@ fn split_place(dest: &str) -> Option<(&str, &str)> {
     (rest.is_empty() || rest.starts_with('/')).then(|| (&p[1..p.len() - 1], rest))
 }
 
+// ---- the files of .aqr/sfx/
+
+/// The path of the directory of the settings in an archive's root.
+pub const DIR: [&[u8]; 2] = [b".aqr", b"sfx"];
+
+/// The entry of the directory `.aqr/sfx/` of the root of `t` ([`DIR`]), if there is one.
+pub fn dir_of(t: &aqr_archive::Tree) -> Option<usize> {
+    let mut at = None;
+    for name in DIR {
+        at = Some(
+            t.entries.iter().position(|e| e.parent == at && e.name == name && e.node == aqr_archive::EntryNode::Dir)?,
+        );
+    }
+    at
+}
+
+/// The path (by `/`) of entry `i` of `t`, under entry `under` where given (else the root).
+pub fn path_of(t: &aqr_archive::Tree, mut i: usize, under: Option<usize>) -> String {
+    let mut parts = Vec::new();
+    while Some(i) != under {
+        let e = &t.entries[i];
+        parts.push(String::from_utf8_lossy(&e.name).into_owned());
+        match e.parent {
+            Some(p) => i = p,
+            None => break,
+        }
+    }
+    parts.reverse();
+    parts.join("/")
+}
+
+/// The files under `.aqr/sfx/` of `t`, each its path there (by `/`) and its content.
+pub fn files_of(t: &aqr_archive::Tree) -> Vec<(String, usize)> {
+    let Some(dir) = dir_of(t) else { return Vec::new() };
+    let mut files = Vec::new();
+    for (i, e) in t.entries.iter().enumerate() {
+        let aqr_archive::EntryNode::File(c) = e.node else { continue };
+        let mut p = e.parent;
+        while let Some(q) = p {
+            if q == dir {
+                files.push((path_of(t, i, Some(dir)), c));
+                break;
+            }
+            p = t.entries[q].parent;
+        }
+    }
+    files
+}
+
+/// The files of `.aqr/sfx/` that `wanted` names (by their paths there) of the first segment of
+/// archive `c` (docs/sfx-config-design.md, 2.1: where the compressor puts them, and where alone
+/// they are looked for, so that a segment appended does not change them), decoded; those not
+/// there left out.
+pub fn read_files(
+    c: &[u8],
+    runner: &dyn aqr_archive::Runner,
+    threads: usize,
+    wanted: &dyn Fn(&str) -> bool,
+) -> Result<std::collections::HashMap<String, Vec<u8>>, String> {
+    let err = |e: aqr_archive::Failure| format!(".aqr/sfx/: {e:?}");
+    let all = aqr_archive::open(c, runner).map_err(err)?;
+    let Some(&first) = all.segment_metadata().map_err(err)?.first() else { return Ok(Default::default()) };
+    drop(all);
+    let a = aqr_archive::open_upto(c, runner, first).map_err(err)?;
+    let Some(t) = a.tree() else { return Ok(Default::default()) };
+    let files: Vec<(String, usize)> = files_of(t).into_iter().filter(|(n, _)| wanted(n)).collect();
+    let mut only = vec![false; a.contents_len()];
+    files.iter().for_each(|&(_, c)| only[c] = true);
+    let got = std::sync::Mutex::new(std::collections::HashMap::new());
+    a.contents_of(threads, Some(&only), |c, d| {
+        got.lock().unwrap().insert(c, d);
+        Ok(())
+    })
+    .map_err(err)?;
+    let mut got = got.into_inner().unwrap();
+    Ok(files.into_iter().filter_map(|(n, c)| Some((n, got.remove(&c)?))).collect())
+}
+
 // ---- compiling sfx.toml (aqr)
 
 /// What the settings make of the program's own image ([`crate::pe::apply`]).

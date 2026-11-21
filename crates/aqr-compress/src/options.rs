@@ -74,6 +74,11 @@ pub struct Options {
     /// modules and dictionaries written again, a file of the same content as one of it made
     /// again). None (0): one segment.
     pub segment: usize,
+    /// Of an archive of several files: the contents (by index of the source) put first, in a
+    /// segment of their own (and of the contents they are held together with): what a reader
+    /// opens alone, the settings of a self-extracting program (docs/sfx-config-design.md, 2.1).
+    /// None by default.
+    pub lead: Vec<usize>,
     /// Where large buffers of streams are kept rather than on the heap: the path the names of
     /// [`spill::Spill`]'s files extend (made there and gone once their buffers are dropped;
     /// beside the output by aqr, named after it, as a temporary directory may be on another
@@ -210,6 +215,7 @@ impl Default for Options {
             set_bytes: SET_BYTES.get(),
             batch: 512 << 20,
             segment: SEGMENT,
+            lead: Vec::new(),
             spill: None,
             application_bound: None,
             journal: None,

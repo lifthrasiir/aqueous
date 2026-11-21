@@ -484,6 +484,13 @@ impl<'c, 'n> Archive<'c, 'n> {
         &self.journal
     }
 
+    /// Where the metadata block of each segment is, from the archive's header magic, in the
+    /// order of the segments (as [`JournalPoint::metadata`]: what [`open_upto`] takes); none
+    /// where the archive has no metadata block.
+    pub fn segment_metadata(&self) -> Decoded<Vec<usize>> {
+        Ok(self.parsed()?.segments.iter().filter_map(|s| s.metadata.as_ref().map(|m| m.0)).collect())
+    }
+
     /// The archive's blocks, all of them read (where they are not yet, now, as [`open`] reads
     /// them).
     pub(crate) fn parsed(&self) -> Decoded<&Blocks<'c>> {

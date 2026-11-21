@@ -417,6 +417,18 @@ fn compress_tree_noting<S: Source + ?Sized>(
     order.iter().for_each(|&c| members.entry(group[c]).or_default().push(c));
     let mut batches: Vec<Vec<usize>> = vec![Vec::new()];
     let mut bytes = 0u64;
+    // the units of the contents led with first, a batch of their own
+    let mut led = 0;
+    if !opt.lead.is_empty() {
+        for &c in &opt.lead {
+            let Some(unit) = members.remove(&group[c]) else { continue };
+            batches[0].extend(unit);
+        }
+        if !batches[0].is_empty() {
+            batches.push(Vec::new());
+            led = 1;
+        }
+    }
     for &c in &order {
         let Some(unit) = members.remove(&group[c]) else { continue };
         let size = unit.iter().fold(0u64, |n, &c| n.saturating_add(src.size(c)));
@@ -432,7 +444,10 @@ fn compress_tree_noting<S: Source + ?Sized>(
     // written, and those after it for it, the threads idle as the longest file of either is made
     let weight = |b: &Vec<usize>| b.iter().map(|&c| src.size(c)).sum::<u64>();
     let first = FIRST.get();
-    batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(first));
+    batches[led..].sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(first));
+    if batches.last().is_some_and(|b| b.is_empty()) && batches.len() > 1 {
+        batches.pop();
+    }
 
     let w = match from {
         Some(a) if a.kill => SegmentWriter::appending(a.footer.clone(), a.metadata),
@@ -978,7 +993,9 @@ impl Writer {
                 drop(st);
                 pipe.changed.notify_all();
                 let segment = cx.opt.segment;
-                if segment > 0 && self.next < cx.batches.len() && self.w.segment_len() >= segment {
+                // (the batch of the contents led with ended by a segment: [`Options::lead`])
+                let led = self.next == 1 && cx.opt.lead.first().is_some_and(|c| cx.batches[0].contains(c));
+                if self.next < cx.batches.len() && (led || segment > 0 && self.w.segment_len() >= segment) {
                     self.close(cx, out)?;
                 }
                 continue;
