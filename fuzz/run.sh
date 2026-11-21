@@ -1,11 +1,21 @@
 #!/bin/sh
-# Runs fuzz target $1 (decode, salvage) with the seeds and the dictionary, further arguments to
-# libFuzzer: ./run.sh decode -max_total_time=600 -fork=8 -ignore_crashes=1
+# Runs fuzz target $1 (decode, salvage, natives, compress) with its seeds (and the dictionary of
+# archives), further arguments to libFuzzer:
+# ./run.sh decode -max_total_time=600 -fork=8 -ignore_crashes=1
 set -eu
 cd "$(dirname "$0")"
 t=${1:?target}
 shift
-[ -d corpus/"$t" ] || cargo +nightly run -q --release --bin seeds -- corpus/"$t"
+[ -d corpus/"$t" ] || cargo +nightly run -q --release --bin seeds -- "$t" corpus/"$t"
+case $t in
+    compress) opts="-max_len=262144 -timeout=120" ;;
+    natives) opts="-dict=aqr.dict -max_len=524288 -timeout=30" ;;
+    *) opts="-dict=aqr.dict -max_len=65536 -timeout=10" ;;
+esac
+# (ASan's redzones around globals would pad inventory's constructors in __mod_init_func, which
+# ld then takes for initializers of no target)
+export RUSTFLAGS="${RUSTFLAGS:-} -Cllvm-args=-asan-globals=0"
 export ASAN_OPTIONS=${ASAN_OPTIONS:-allocator_may_return_null=1}
-exec cargo +nightly fuzz run -O "$t" corpus/"$t" -- -dict=aqr.dict -use_value_profile=1 \
-    -max_len=65536 -rss_limit_mb=4096 -malloc_limit_mb=4096 -timeout=10 "$@"
+# shellcheck disable=SC2086
+exec cargo +nightly fuzz run -O "$t" corpus/"$t" -- $opts -use_value_profile=1 \
+    -rss_limit_mb=4096 -malloc_limit_mb=4096 "$@"

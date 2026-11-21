@@ -13,6 +13,8 @@ cargo-fuzz = true
 
 [dependencies]
 aqr-archive = { path = "../crates/aqr-archive" }
+aqr-compress = { path = "../crates/aqr-compress" }
+aqr-decompress = { path = "../crates/aqr-decompress" }
 aqr-formula = { path = "../crates/aqr-formula" }
 aqr-testkit = { path = "../crates/aqr-testkit" }
 libfuzzer-sys = "0.4"
@@ -27,6 +29,27 @@ bench = false
 [[bin]]
 name = "salvage"
 path = "fuzz_targets/salvage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compress"
+path = "fuzz_targets/compress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "natives"
+path = "fuzz_targets/natives.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"
 test = false
 doc = false
 bench = false

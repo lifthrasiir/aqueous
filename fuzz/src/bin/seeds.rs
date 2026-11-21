@@ -127,32 +127,104 @@ fn tree(level: Level) -> Vec<u8> {
     out
 }
 
-fn main() {
-    let dirs: Vec<String> = std::env::args().skip(1).collect();
-    assert!(!dirs.is_empty(), "usage: seeds DIR...");
-    let runner = aqr_fuzz::toys();
-    let mut seeds =
-        vec![("quine".to_string(), include_bytes!("../../../crates/aqr-archive/testdata/quine.aqr").to_vec())];
-    for (name, f) in formulas() {
-        for (l, level) in [("stored", Level::STORED), ("zstd", Level::Zstd(3))] {
-            let c = encode(&f, None, level).unwrap();
-            let want = aqr_archive::decode(&c, &runner).unwrap_or_else(|e| panic!("seed {name}: {e}"));
-            seeds.push((format!("{name}-{l}"), c));
-            if !matches!(f.root, Node::Slice { .. }) {
-                seeds.push((format!("{name}-{l}-sum"), encode(&f, Some(checksum(&want)), level).unwrap()));
+/// The fixtures of the codecs' tests of at most `FIXTURE_MAX` bytes, by path.
+fn fixtures() -> Vec<(String, Vec<u8>)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../codecs");
+    let mut out = Vec::new();
+    let mut crates: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.path()).collect();
+    crates.sort();
+    for c in crates {
+        let Ok(files) = std::fs::read_dir(c.join("tests/data")) else { continue };
+        let mut files: Vec<_> = files.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+        files.sort();
+        for f in files {
+            let d = std::fs::read(&f).unwrap();
+            if d.len() <= FIXTURE_MAX {
+                let name = format!(
+                    "{}-{}",
+                    c.file_name().unwrap().to_string_lossy(),
+                    f.file_name().unwrap().to_string_lossy()
+                );
+                out.push((name, d));
             }
         }
     }
-    seeds.push(("tree-stored".into(), tree(Level::STORED)));
-    seeds.push(("tree-zstd".into(), tree(Level::Zstd(3))));
-    for (name, c) in &seeds {
-        if let Err(e) = aqr_archive::decode_value(c, &runner) {
-            panic!("seed {name} does not decode: {e}");
+    out
+}
+
+/// The largest fixture taken as a seed: libFuzzer's inputs are as long as the longest seed.
+const FIXTURE_MAX: usize = 256 << 10;
+
+/// The largest archive of stored blocks taken as a seed of natives (run.sh's `-max_len`, which
+/// would cut a longer one).
+const ARCHIVE_MAX: usize = 512 << 10;
+
+/// The seeds of target `t`.
+fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
+    match t {
+        "decode" | "salvage" => {
+            let runner = aqr_fuzz::toys();
+            let mut seeds =
+                vec![("quine".to_string(), include_bytes!("../../../crates/aqr-archive/testdata/quine.aqr").to_vec())];
+            for (name, f) in formulas() {
+                for (l, level) in [("stored", Level::STORED), ("zstd", Level::Zstd(3))] {
+                    let c = encode(&f, None, level).unwrap();
+                    let want = aqr_archive::decode(&c, &runner).unwrap_or_else(|e| panic!("seed {name}: {e}"));
+                    seeds.push((format!("{name}-{l}"), c));
+                    if !matches!(f.root, Node::Slice { .. }) {
+                        seeds.push((format!("{name}-{l}-sum"), encode(&f, Some(checksum(&want)), level).unwrap()));
+                    }
+                }
+            }
+            seeds.push(("tree-stored".into(), tree(Level::STORED)));
+            seeds.push(("tree-zstd".into(), tree(Level::Zstd(3))));
+            for (name, c) in &seeds {
+                if let Err(e) = aqr_archive::decode_value(c, &runner) {
+                    panic!("seed {name} does not decode: {e}");
+                }
+            }
+            seeds
         }
-        for d in &dirs {
-            std::fs::create_dir_all(d).unwrap();
-            std::fs::write(Path::new(d).join(format!("{name}.aqr")), c).unwrap();
+        "compress" => fixtures(),
+        // (the fixtures recompressed, their archives made again of stored blocks: those whose
+        // formula applies a module)
+        "natives" => {
+            let enc = Encoder::new(Level::STORED).with_modules(aqr_fuzz::registered);
+            fixtures()
+                .into_iter()
+                .filter_map(|(name, d)| {
+                    let mut f = aqr_compress::recompress(&d, &aqr_fuzz::options());
+                    if f.applies().is_empty() {
+                        return None;
+                    }
+                    aqr_compress::declare_memory(&mut f);
+                    let c = enc.encode(&f, Some(checksum(&d))).unwrap_or_else(|e| panic!("{name}: {e}"));
+                    // (a formula not verified that does not give its file back is left out)
+                    if c.len() > ARCHIVE_MAX {
+                        return None;
+                    }
+                    match aqr_archive::decode(&c, &aqr_fuzz::Known) {
+                        Ok(back) if back == d => Some((format!("{name}.aqr"), c)),
+                        r => {
+                            eprintln!("{name}: left out, {:?}", r.map(|b| b.len()));
+                            None
+                        }
+                    }
+                })
+                .collect()
         }
+        _ => panic!("no target {t}"),
     }
-    eprintln!("{} seeds", seeds.len());
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let [t, dir] = &args[..] else { panic!("usage: seeds TARGET DIR") };
+    let seeds = seeds(t);
+    std::fs::create_dir_all(dir).unwrap();
+    for (name, c) in &seeds {
+        let name = if name.ends_with(".aqr") || t == "compress" { name.clone() } else { format!("{name}.aqr") };
+        std::fs::write(Path::new(dir).join(name), c).unwrap();
+    }
+    eprintln!("{} seeds of {t}", seeds.len());
 }

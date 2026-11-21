@@ -2,7 +2,7 @@
 //! ([`aqr_archive::stand_in`]), so that formulas applying modules are evaluated without the
 //! codecs (whose own decoding wants targets of its own).
 
-use aqr_archive::{Natives, PartIn, PartOut, natives};
+use aqr_archive::{Decoded, Failure, Loaded, Natives, PartIn, PartOut, Runner, Wasm, natives};
 use aqr_formula::{Apply, Error, Module, Result, Shared};
 
 /// The concatenation of its inputs reversed.
@@ -84,4 +84,37 @@ impl aqr_archive::Modules for Toys {
 
 pub fn toys() -> Natives<'static, Toys> {
     natives(&[REV, CUT, COPY], &Toys)
+}
+
+/// The modules of aqr-decompress run natively, and no other (a module not known fails rather
+/// than running as WebAssembly: Wasmtime is fuzzed elsewhere, and slow here).
+pub struct Known;
+
+impl Runner for Known {
+    fn load(&self, wasm: &[u8]) -> Decoded<Box<dyn Loaded + '_>> {
+        match aqr_decompress::known(wasm) {
+            Some(_) => NATIVE.load(wasm),
+            None => Err(Failure::Resource("a module not known".into())),
+        }
+    }
+
+    fn registered(&self, hash: &[u8; 32]) -> Decoded<Vec<u8>> {
+        NATIVE.registered(hash)
+    }
+}
+
+static NATIVE: aqr_decompress::Native = aqr_decompress::Native { threads: 1 };
+
+/// How the encoder writes module `m`: its hash alone (a shorthand module block), so that the
+/// archives fuzzed hold no module bytes to waste mutations on.
+pub fn registered(m: Module) -> Option<Wasm> {
+    let k = aqr_decompress::built(m)?;
+    let wasm = aqr_archive::module_of_block_data(k.block)?;
+    Some(Wasm::Registered { hash: k.sha512_256, classes: aqr_archive::task_classes(&wasm) })
+}
+
+/// The options files are compressed with: one thread, the default level, modules by their
+/// hashes.
+pub fn options() -> aqr_compress::Options {
+    aqr_compress::Options { threads: 1, modules: registered, ..aqr_compress::Options::default() }
 }
