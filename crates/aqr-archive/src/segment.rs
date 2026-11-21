@@ -1869,9 +1869,9 @@ mod tests {
                     }
                 }
             }
+            // ("f" of the segment read, not on the way to the path, not in its tree)
             if p == "d/a" {
-                let f = find(t, "f").expect("of the segment read");
-                assert_eq!(t.entries[f].extra.mode, None);
+                assert!(find(t, "f").is_none());
                 assert!(all.entries[find(all, "f").unwrap()].extra.mode.is_some());
             }
             if let Some(u) = unread {
@@ -1880,6 +1880,18 @@ mod tests {
             // (all of it not read so)
             assert!(unread.is_none() || a.contents(1, |_, _| Ok(())).is_err());
         }
+        // paths together, the first segment read for "c": "e/x" of it still taken away by the
+        // second's tombstone, which its tree has on the way to it; "d" as the whole's, and no
+        // entries but those on the way to the paths and under them
+        let ps = [names("c"), names("e/x"), names("d")];
+        let a = open_indexed_at(Payload::Plain(&out), &natives, 2, &ps).unwrap();
+        for p in ["c", "e/x", "d"] {
+            assert_eq!(files(&a, p), files(&whole, p), "{p}");
+        }
+        assert!(find(a.tree().unwrap(), "e").is_none() && find(a.tree().unwrap(), "e/x").is_none());
+        let mut left: Vec<&[u8]> = a.tree().unwrap().entries.iter().map(|e| &e.name[..]).collect();
+        left.sort();
+        assert_eq!(left, [&b"a"[..], b"c", b"d", b"n"]);
     }
 
     #[test]

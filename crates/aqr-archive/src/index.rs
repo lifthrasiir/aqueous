@@ -116,12 +116,26 @@ fn look_up(entries: &tree::Entries, by: &HashMap<(usize, &[u8]), usize>, names: 
 
 /// Of a segment of `entries`, the paths `open` (each its names in turn) looked up ([`look_up`]):
 /// those it settles taken out of `open`; and by entry (by number from the root), whether it is at
-/// one of those or under one, whose extras are to be read.
-fn wanted(entries: &tree::Entries, open: &mut Vec<&[Vec<u8>]>) -> Vec<bool> {
+/// one of those or under one, whose extras are to be read; and whether it is of the segment's tree
+/// ([`super::tree_of`]): those, and those on the way to each path (the directories above it, or
+/// the entry other than a directory that settles it), which tell what the segments merged have
+/// at the paths.
+fn wanted(entries: &tree::Entries, open: &mut Vec<&[Vec<u8>]>) -> (Vec<bool>, Vec<bool>) {
     let by: HashMap<(usize, &[u8]), usize> =
         entries.iter().enumerate().map(|(k, (dir, name, _))| ((*dir, &name[..]), k + 1)).collect();
     let mut wanted = vec![false; entries.len() + 1];
+    let mut kept = vec![false; entries.len() + 1];
+    kept[0] = true;
     open.retain(|names| {
+        let mut dir = 0;
+        for name in names.iter() {
+            let Some(&k) = by.get(&(dir, &name[..])) else { break };
+            kept[k] = true;
+            match entries[k - 1].2 {
+                Read::Dir => dir = k,
+                _ => break,
+            }
+        }
         let (at, settled) = look_up(entries, &by, names);
         if let Some(k) = at {
             wanted[k] = true;
@@ -131,8 +145,9 @@ fn wanted(entries: &tree::Entries, open: &mut Vec<&[Vec<u8>]>) -> Vec<bool> {
     // (each entry after its parent)
     for (k, (dir, ..)) in entries.iter().enumerate() {
         wanted[k + 1] |= *dir != 0 && wanted[*dir];
+        kept[k + 1] |= wanted[k + 1];
     }
-    wanted
+    (wanted, kept)
 }
 
 /// Archive `p` (of the footer's fields from `fields_start`, and `size_hint`) indexed by its
@@ -185,13 +200,19 @@ pub(super) fn open<'c>(
             });
         }
         // (of paths looked up, the extras of the entries at them and under them alone)
+        // (and of those, the entries on the way to them alone in the tree: `wanted`)
+        let mut kept = None;
         let m = tree::read_with(&decoded(data, ty & 0x04 != 0, true)?, &mut |entries| {
-            paths.map(|_| wanted(entries, &mut open))
+            paths.map(|_| {
+                let (w, k) = wanted(entries, &mut open);
+                kept = Some(k);
+                w
+            })
         })?;
         // (a metadata block points to one before it: 0 is itself, a loop)
         let prev = usize::try_from(m.prev).ok().filter(|&b| b > 0).and_then(|b| at.checked_sub(b));
         let settled = paths.is_some() && open.is_empty();
-        metas.push((at, next, m));
+        metas.push((at, next, m, kept));
         match prev {
             Some(b) if b == HEADER_MAGIC.len() - 1 => {
                 start = HEADER_MAGIC.len();
@@ -215,7 +236,7 @@ pub(super) fn open<'c>(
     let mut segments: Vec<SegmentIndex> = Vec::with_capacity(metas.len());
     let mut leaves: Vec<(usize, usize)> = Vec::new();
     let mut first = Counts::default();
-    for (k, (at, _, m)) in metas.iter().enumerate() {
+    for (k, (at, _, m, _)) in metas.iter().enumerate() {
         let (at, start) = (*at, if k == 0 { start } else { metas[k - 1].1 });
         let within = |o: u64| usize::try_from(o).ok().and_then(|o| at.checked_sub(o)).filter(|&b| b >= start);
         let places = |offsets: &[u64]| -> Decoded<Vec<usize>> {
@@ -263,7 +284,7 @@ pub(super) fn open<'c>(
     let mut prev = metas[0].0 - metas[0].2.prev as usize;
     let mut status = None;
     let mut journal = Vec::new();
-    for (k, (at, _, m)) in metas.into_iter().enumerate() {
+    for (k, (at, _, m, kept)) in metas.into_iter().enumerate() {
         if k == 0 && whole && m.entries.is_empty() {
             return invalid("the first segment of no entries");
         }
@@ -284,7 +305,7 @@ pub(super) fn open<'c>(
             }
             Ok(Some((l, None)))
         };
-        trees.push(tree_of(m, at, prev, &mut leaf_of, leaf_at.len(), None)?);
+        trees.push(tree_of(m, at, prev, &mut leaf_of, leaf_at.len(), None, kept.as_deref())?);
         prev = at;
     }
     let tree = match trees.len() {

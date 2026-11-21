@@ -447,7 +447,7 @@ pub(crate) fn opened_with<'c>(
         let (told, points) = (m.status, segments.is_some().then(|| m.journal.clone()));
         let own = m.archive.clone();
         archive.merge(m.archive.clone());
-        trees.push(tree_of(m, at, prev, &mut leaf_at, outputs.len(), salvaging.then_some(&mut lost))?);
+        trees.push(tree_of(m, at, prev, &mut leaf_at, outputs.len(), salvaging.then_some(&mut lost), None)?);
         if let (Some(all), Some(journal)) = (segments.as_deref_mut(), points) {
             let tree = trees.last().expect("just pushed").clone();
             all.push(tree::SegmentInfo { tree, status: told, journal, archive: own });
@@ -1002,7 +1002,9 @@ type LeafAt<'a> = dyn FnMut(usize, Option<u64>) -> Decoded<Option<(usize, Option
 /// header magic, less 1, where it is the first), `leaf_at` telling the leaf block at a place (by
 /// its index, and its outputs where they are known; a file's dictionary given to be checked),
 /// none where none is there; and its contents, each a leaf and an output of it, and the size of
-/// the files of it. Salvaging (`lost`), the leaves not there are numbered from `lost_from`.
+/// the files of it. Salvaging (`lost`), the leaves not there are numbered from `lost_from`. Of
+/// the entries `kept` alone (by number from the root, each with its parent) where it is given: the
+/// others left out, and not checked (spec, "Partial access").
 pub(crate) fn tree_of(
     m: tree::Metadata,
     at: usize,
@@ -1010,7 +1012,9 @@ pub(crate) fn tree_of(
     leaf_at: &mut LeafAt,
     lost_from: usize,
     mut lost: Option<&mut usize>,
+    kept: Option<&[bool]>,
 ) -> Decoded<tree::SegmentTree> {
+    let kept = |k: usize| kept.is_none_or(|w| w.get(k) == Some(&true));
     if m.prev != (at - prev) as u64 {
         return invalid(match prev {
             p if p < HEADER_MAGIC.len() => "a first metadata block not pointing to the header",
@@ -1071,12 +1075,21 @@ pub(crate) fn tree_of(
     // the tree's index of each entry by number, tombstones left out
     let mut index = vec![None; m.entries.len() + 1];
     let mut names = HashSet::with_capacity(m.entries.len());
-    if !m.entries.iter().all(|(parent, name, _)| names.insert((*parent, &name[..]))) {
+    if !m
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| kept(k + 1))
+        .all(|(_, (parent, name, _))| names.insert((*parent, &name[..])))
+    {
         return invalid("two entries of a name in a directory");
     }
     drop(names);
     for (k, (parent, name, read)) in m.entries.into_iter().enumerate() {
         let k = k + 1;
+        if !kept(k) {
+            continue;
+        }
         let parent_index = match parent {
             0 => None,
             p => Some(index[p].expect("a directory")),
@@ -1104,7 +1117,7 @@ pub(crate) fn tree_of(
         t.entries.push(Entry { parent: parent_index, name, node, extra: std::mem::take(&mut extras[k]) });
     }
     // (after the files, so that their contents are numbered as they are)
-    for (k, forks) in m.forks.into_iter().enumerate() {
+    for (k, forks) in m.forks.into_iter().enumerate().filter(|(k, _)| kept(*k)) {
         for (name, (offset, output, size)) in forks {
             let c = content(offset, output, size, None)?.0;
             match k {
