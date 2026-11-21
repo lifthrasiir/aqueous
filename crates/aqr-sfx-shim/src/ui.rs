@@ -195,16 +195,17 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> boo
         // STATIC: SS_BITMAP | SS_CENTERIMAGE
         items.push((child | 0xe | 0x200, [0, 0, 1, 1], 101, 0x82, ""));
     }
-    // DLGTEMPLATE: WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_MODALFRAME | DS_SHELLFONT
-    dword(&mut t, 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x800 | 0x80 | 0x48);
+    // DLGTEMPLATE: WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_MODALFRAME | DS_SETFONT
+    dword(&mut t, 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x800 | 0x80 | 0x40);
     dword(&mut t, 0);
     let width = if asking == Asking::License { 320 } else { 280 };
     t.extend_from_slice(&[items.len() as u16, 0, 0, width, 100]);
-    // (no menu, the default class), the title, the font
+    // (no menu, the default class), the title, the font: the message boxes'
     t.extend_from_slice(&[0, 0]);
     t.extend(wide(title));
-    t.push(9);
-    t.extend(wide("MS Shell Dlg"));
+    let (points, face) = message_font();
+    t.push(points);
+    t.extend(face);
     // the items, each at 4 bytes: style, x, y, width, height, id, class (an atom), its text
     for (style, [x, y, w, h], id, class, label) in items {
         if t.len() % 2 == 1 {
@@ -259,6 +260,35 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> boo
         crate::banner::free(shown.bitmap.get());
     }
     r == 1
+}
+
+/// The font of the message boxes (`NONCLIENTMETRICS`' `lfMessageFont`: Segoe UI, its Hangul
+/// and the like of fonts linked to it, as Malgun Gothic), its size in points and its face
+/// (NUL-terminated); `MS Shell Dlg` at 9 where it is not told (whose Hangul is Gulim's
+/// bitmaps at that size).
+#[cfg(windows)]
+fn message_font() -> (u16, Vec<u16>) {
+    // NONCLIENTMETRICSW of Vista on (504 bytes): lfMessageFont, a LOGFONTW, at 408 (its height
+    // first, its face at 28, of 32 characters)
+    let mut m = [0u32; 126];
+    m[0] = 504;
+    // SAFETY: SPI_GETNONCLIENTMETRICS into a buffer of the size its first field tells; a DC of
+    // the screen released
+    let (got, per_inch) = unsafe {
+        let got = sys::SystemParametersInfoW(0x29, 504, m.as_mut_ptr().cast(), 0);
+        let dc = sys::GetDC(std::ptr::null_mut());
+        let d = sys::GetDeviceCaps(dc, 90); // LOGPIXELSY
+        sys::ReleaseDC(std::ptr::null_mut(), dc);
+        (got, d)
+    };
+    let font = &m[102..125];
+    let height = font[0] as i32;
+    let face: Vec<u16> = font[7..].iter().flat_map(|&w| [w as u16, (w >> 16) as u16]).take_while(|&c| c != 0).collect();
+    if got == 0 || face.is_empty() || height == 0 || per_inch <= 0 {
+        return (9, "MS Shell Dlg".encode_utf16().chain([0]).collect());
+    }
+    let points = (height.unsigned_abs() * 72 + per_inch as u32 / 2) / per_inch as u32;
+    (points.clamp(6, 24) as u16, face.into_iter().chain([0]).collect())
 }
 
 /// Lays dialog `h` out (in pixels): the banner across its top (centred, the rest of its first
@@ -377,6 +407,11 @@ mod sys {
     #[link(name = "gdi32")]
     unsafe extern "system" {
         pub fn SelectObject(dc: *mut core::ffi::c_void, o: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        pub fn GetDeviceCaps(dc: *mut core::ffi::c_void, index: i32) -> i32;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        pub fn SystemParametersInfoW(action: u32, param: u32, data: *mut core::ffi::c_void, flags: u32) -> i32;
     }
     #[repr(C)]
     #[derive(Default)]
