@@ -1,6 +1,7 @@
 //! The shortcuts the settings make once the files are written ([`aqr_sfx::config::Shortcut`]):
-//! `NAME.lnk` on the user's desktop or among the user's programs of the start menu, made by the
-//! shell's `IShellLinkW` and saved by its `IPersistFile`.
+//! `NAME.lnk` on the desktop or among the programs of the start menu, the user's or all users'
+//! (the program run as an administrator), made by the shell's `IShellLinkW` and saved by its
+//! `IPersistFile`.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,7 @@ use aqr_sfx::config::{DEST, Shortcut, ShortcutAt};
 pub fn make(dest: &Path, s: &Shortcut, lang: &str) -> Result<PathBuf, String> {
     let mut target = dest.to_path_buf();
     s.target.split('/').for_each(|p| target.push(aqr_sfx::sanitized(p.as_bytes())));
-    let mut at = folder(s.at)?;
+    let mut at = folder(s.at, s.all_users)?;
     if let Some(f) = &s.folder {
         f.split('/').for_each(|p| at.push(aqr_sfx::sanitized(p.as_bytes())));
     }
@@ -25,22 +26,27 @@ pub fn make(dest: &Path, s: &Shortcut, lang: &str) -> Result<PathBuf, String> {
     Ok(at)
 }
 
-/// The folder of shortcuts `at`: under `AQR_SFX_SHORTCUTS` where it is set (`desktop`,
-/// `start-menu`: for tests), else the user's.
-fn folder(at: ShortcutAt) -> Result<PathBuf, String> {
+/// The folder of shortcuts `at`, all users' where `all`: under `AQR_SFX_SHORTCUTS` where it is
+/// set (`desktop`, `start-menu`, `all-users-` before them: for tests), else the system's.
+fn folder(at: ShortcutAt, all: bool) -> Result<PathBuf, String> {
     match std::env::var_os("AQR_SFX_SHORTCUTS") {
-        Some(d) => Ok(PathBuf::from(d).join(if at == ShortcutAt::Desktop { "desktop" } else { "start-menu" })),
-        None => user_folder(at),
+        Some(d) => {
+            let place = if at == ShortcutAt::Desktop { "desktop" } else { "start-menu" };
+            Ok(PathBuf::from(d).join(if all { format!("all-users-{place}") } else { place.into() }))
+        }
+        None => system_folder(at, all),
     }
 }
 
 #[cfg(windows)]
-fn user_folder(at: ShortcutAt) -> Result<PathBuf, String> {
+fn system_folder(at: ShortcutAt, all: bool) -> Result<PathBuf, String> {
     use std::os::windows::ffi::OsStringExt;
-    // CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS
-    let csidl = match at {
-        ShortcutAt::Desktop => 0x10,
-        ShortcutAt::StartMenu => 0x02,
+    // CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS; CSIDL_COMMON_DESKTOPDIRECTORY, CSIDL_COMMON_PROGRAMS
+    let csidl = match (at, all) {
+        (ShortcutAt::Desktop, false) => 0x10,
+        (ShortcutAt::StartMenu, false) => 0x02,
+        (ShortcutAt::Desktop, true) => 0x19,
+        (ShortcutAt::StartMenu, true) => 0x17,
     };
     let mut buf = [0u16; 260];
     // SAFETY: a buffer of MAX_PATH
@@ -53,7 +59,7 @@ fn user_folder(at: ShortcutAt) -> Result<PathBuf, String> {
 }
 
 #[cfg(not(windows))]
-fn user_folder(_: ShortcutAt) -> Result<PathBuf, String> {
+fn system_folder(_: ShortcutAt, _: bool) -> Result<PathBuf, String> {
     Err("shortcuts are made on Windows alone".into())
 }
 

@@ -300,7 +300,8 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
 - 바로가기: `[[shortcut]]`마다 `target`(아카이브의 파일), `name`(문자열이나 언어별 표), `at`
   (`"desktop"` 또는 `"start-menu"`), 시작 메뉴 아래의 `folder`, `args`(`{dest}`), `description`.
   stub이 파일을 쓴 뒤, 프로그램을 실행하기 전에 셸의 `IShellLinkW`로 만든다 (사용자의 바탕 화면과
-  시작 메뉴의 프로그램. 모든 사용자의 것은 아직 없다). 파일이 남을 때만 뜻이 있으므로 `run.cleanup`과
+  시작 메뉴의 프로그램. `all-users = true`면 모든 사용자의 것: 관리자로 쓸 수 있으므로 `pe.admin = true`
+  (또는 `manifest.xml`)가 없으면 오류다). 파일이 남을 때만 뜻이 있으므로 `run.cleanup`과
   함께 쓰면 오류다. 시험에서는 `AQR_SFX_SHORTCUTS`가 두 폴더를 대신한다.
 - stub의 크기: 환경 변수와 바로가기로 733,696 -> 758,784바이트 (UPX로 344,576).
 - 배너(`ui.banner`): `.aqr/sfx/`의 이미지(라이선스처럼 언어별 파일을 고른다). 창으로 물을 때만 쓴다.
@@ -331,4 +332,4 @@ GUI의 질문(경로 선택, 덮어쓰기 확인, 라이선스)은 `encrypted-sf
   프로그램만을 위해 만든 콘솔: `consoleAllocationPolicy`를 모르는 Windows 11 24H2 이전, 또는 manifest가 없는
   설정 없는 SFX를 탐색기에서 실행했을 때) `FreeConsole`하고 표준 핸들을 비운다. 그 뒤로는 창으로 묻고
   알린다 (창은 잠깐 번쩍인다; `encrypted-sfx-design.md` 4절).
-- 남은 것: 모든 사용자의 바로가기, 암호(GUI blob: 암호 묻기를 stub의 대화상자로 할지는 그때 정한다).
+- 남은 것: 암호(GUI blob: 암호 묻기를 stub의 대화상자로 할지는 그때 정한다), GUI(aqr-win)에서 SFX 설정과 서명.

@@ -361,6 +361,7 @@ fn shortcuts_made() {
                 folder: None,
                 args: vec!["--in".into(), "{dest}".into()],
                 description: Some(Text::plain("The app")),
+                all_users: false,
             },
             Shortcut {
                 target: "doc.txt".into(),
@@ -369,6 +370,16 @@ fn shortcuts_made() {
                 folder: Some("Example/Tools".into()),
                 args: Vec::new(),
                 description: None,
+                all_users: false,
+            },
+            Shortcut {
+                target: "doc.txt".into(),
+                name: Text::plain("Doc for all"),
+                at: ShortcutAt::StartMenu,
+                folder: Some("Example".into()),
+                args: Vec::new(),
+                description: None,
+                all_users: true,
             },
         ],
         ..extracting("{cwd}/out", false, Overwrite::Always)
@@ -405,5 +416,8 @@ fn shortcuts_made() {
     assert_eq!(app, want);
     let doc = read(&links.join(r"start-menu\Example\Tools\Doc.lnk"));
     assert_eq!(doc[0], strip(&out.join("doc.txt")));
+    // (of all users: their start menu's, a stand-in of its own)
+    let all = read(&links.join(r"all-users-start-menu\Example\Doc for all.lnk"));
+    assert_eq!(all[0], strip(&out.join("doc.txt")));
     std::fs::remove_dir_all(&d).unwrap();
 }

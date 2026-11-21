@@ -38,6 +38,7 @@
 //!   &(at: -3) => 0..1,            ; the desktop, the start menu's programs
 //!   ? &(folder: -4) => tstr,      ; under the start menu's programs, by /
 //!   ? &(args: -5) => [* tstr],    ; {dest} where the files went
+//!   ? &(all-users: -7) => bool,   ; false: of all users (their desktop, start menu's programs)
 //!   ? &(description: -6) => text,
 //!   * int => any,
 //! }
@@ -156,9 +157,12 @@ pub struct Shortcut {
     /// The arguments it gives the target ([`DEST`] where the files went).
     pub args: Vec<String>,
     pub description: Option<Text>,
+    /// Of all users (their desktop, their programs of the start menu), not the user's alone:
+    /// the program run as an administrator.
+    pub all_users: bool,
 }
 
-/// Where a shortcut is made: the user's desktop, or the user's programs of the start menu.
+/// Where a shortcut is made: the desktop, or the programs of the start menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutAt {
     Desktop,
@@ -248,6 +252,7 @@ const S_AT: i128 = -3;
 const S_FOLDER: i128 = -4;
 const S_ARGS: i128 = -5;
 const S_DESCRIPTION: i128 = -6;
+const S_ALL_USERS: i128 = -7;
 const R_PROGRAM: i128 = -1;
 const R_CWD: i128 = -2;
 const R_WINDOW: i128 = -3;
@@ -328,7 +333,11 @@ impl Config {
             put(K_SHORTCUTS, &|v| {
                 cbor::head(v, 4, self.shortcuts.len() as u64);
                 for s in &self.shortcuts {
-                    let n = 3 + s.folder.is_some() as u64 + !s.args.is_empty() as u64 + s.description.is_some() as u64;
+                    let n = 3
+                        + s.folder.is_some() as u64
+                        + !s.args.is_empty() as u64
+                        + s.description.is_some() as u64
+                        + s.all_users as u64;
                     cbor::head(v, 5, n);
                     cbor::int(v, S_TARGET);
                     put_text(v, &s.target);
@@ -348,6 +357,10 @@ impl Config {
                     if let Some(d) = &s.description {
                         cbor::int(v, S_DESCRIPTION);
                         put_texts(v, d);
+                    }
+                    if s.all_users {
+                        cbor::int(v, S_ALL_USERS);
+                        put_bool(v, true);
                     }
                 }
             });
@@ -439,6 +452,7 @@ impl Config {
                             folder: None,
                             args: Vec::new(),
                             description: None,
+                            all_users: false,
                         };
                         for (k, v) in m.pairs() {
                             let Cbor::Int(k) = k else { continue };
@@ -459,6 +473,7 @@ impl Config {
                                     sc.args = a.iter().map(|a| text(&a, "an argument")).collect::<Result<_, _>>()?;
                                 }
                                 S_DESCRIPTION => sc.description = Some(texts(&v, "a shortcut's description")?),
+                                S_ALL_USERS => sc.all_users = boolean(&v, "a shortcut's all-users")?,
                                 _ => {}
                             }
                         }
@@ -877,11 +892,16 @@ pub fn compile(
         }
         let args = sc.strings("args")?.unwrap_or_default();
         let description = sc.texts("description")?;
+        let all_users = sc.boolean("all-users")?.unwrap_or(false);
         sc.done()?;
+        // (of a manifest given, its requestedExecutionLevel not read: taken as it says)
+        if all_users && admin != Some(true) && file("manifest.xml").is_none() {
+            return Err("shortcut.all-users: written as an administrator alone (pe.admin = true)".into());
+        }
         if run.as_ref().is_some_and(|r| r.cleanup) {
             return Err("shortcut with run.cleanup (to files removed once the program ran)".into());
         }
-        shortcuts.push(Shortcut { target, name, at, folder, args, description });
+        shortcuts.push(Shortcut { target, name, at, folder, args, description, all_users });
     }
 
     let config = Config { title, dest, subdir, ask, overwrite, prompt, finish, license, banner, quiet, run, shortcuts };
@@ -1130,6 +1150,7 @@ mod tests {
                 folder: Some("Example".into()),
                 args: vec!["{dest}".into()],
                 description: Some(Text(vec![("en".into(), "Set up".into())])),
+                all_users: true,
             }],
         }
     }
@@ -1250,7 +1271,16 @@ mod tests {
             assert_eq!(c.shortcuts.len(), 2);
             assert_eq!((c.shortcuts[0].at, c.shortcuts[0].folder.as_deref()), (ShortcutAt::StartMenu, Some("Example")));
             assert_eq!(c.shortcuts[0].name.pick("ko"), "도구");
+            assert!(!c.shortcuts[0].all_users);
             assert_eq!(Config::from_cbor(&c.to_cbor()).unwrap(), c);
+            // (of all users: of a program run as an administrator alone, or of a manifest given)
+            let all = "[[shortcut]]\ntarget = \"readme.txt\"\nname = \"Readme\"\nat = \"desktop\"\nall-users = true\n";
+            let e = compiled(all, &[]).unwrap_err();
+            assert!(e.contains("shortcut.all-users: written as an administrator alone"), "{e}");
+            let c = compiled(&format!("{all}[pe]\nadmin = true\n"), &[]).unwrap().config;
+            assert!(c.shortcuts[0].all_users);
+            assert_eq!(Config::from_cbor(&c.to_cbor()).unwrap(), c);
+            assert!(compiled(all, &[("manifest.xml", b"<assembly/>")]).is_ok());
             // (with a program run and kept: made)
             let kept = "[run]\nprogram = [\"setup.exe\"]\ncleanup = false\n".to_string() + toml;
             assert_eq!(compiled(&kept, &[]).unwrap().config.shortcuts.len(), 2);
