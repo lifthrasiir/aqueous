@@ -162,7 +162,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "clip-recons",
         version: 3,
-        sha512_256: hex("259582d64eeaafa73b0ca6dd27c28935c6f16437560b183e9521c476a1e9ee8c"),
+        sha512_256: hex("10801864cb68ddba6ecce2f7063834a25f054b6fc43b92f83e03535877f47b18"),
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
@@ -414,7 +414,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "mca-recons",
         version: 2,
-        sha512_256: hex("216344f2356e88e2604fbd0db7d499ac9b5381777bf414c548f7b8622dfaacbd"),
+        sha512_256: hex("d8f797e2fa2342f2e577a6262115fbe9f068e3a55c9e98548af8e93b5d2bd0b1"),
         block: include_bytes!("../wasm/mca-recons.block"),
     },
     Known {

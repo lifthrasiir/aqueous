@@ -390,6 +390,15 @@ fn inflate(d: &[u8], sink: &mut impl Sink) -> Option<usize> {
     Some(inflate::parse_head(d, usize::MAX, sink).ok()?.end)
 }
 
+/// The data of the DEFLATE stream `raw`, all of it the stream, or None where it is not one or its
+/// data would be over `max` bytes: neither its tokens kept nor what follows read, as
+/// [`aqr_flate::Parsed`] would.
+pub(crate) fn inflate_whole(raw: &[u8], max: usize) -> Option<Vec<u8>> {
+    let mut data = Capped(Data(Vec::new()), max);
+    let end = inflate(raw, &mut data)?;
+    (end == raw.len() && data.0.0.len() <= max).then_some(data.0.0)
+}
+
 /// A sink of nothing.
 struct Skip;
 

@@ -1128,15 +1128,30 @@ fn flush_block(
     df: &[u32; 32],
     last: bool,
 ) -> Block {
+    flush_block_at(e.params(), e.window_base(), start, end, tokens, lf, df, last)
+}
+
+/// [`flush_block`] of an emulator of `p` whose window starts at data position `base`.
+#[allow(clippy::too_many_arguments)]
+fn flush_block_at(
+    p: Params,
+    base: usize,
+    start: usize,
+    end: usize,
+    tokens: Vec<Token>,
+    lf: &[u32; 288],
+    df: &[u32; 32],
+    last: bool,
+) -> Block {
     let header = zlib_header_of(lf, df);
     let (opt_lenb, static_lenb) = zlib_lenb(lf, df, &header);
     let mut opt = opt_lenb;
-    if static_lenb <= opt || e.params().strategy == Strategy::Fixed {
+    if static_lenb <= opt || p.strategy == Strategy::Fixed {
         opt = static_lenb;
     }
     let stored_len = (end - start) as i64;
     // The data must still be in zlib's window to be stored.
-    let body = if stored_len + 4 <= opt && start >= e.window_base() && stored_len <= 65535 {
+    let body = if stored_len + 4 <= opt && start >= base && stored_len <= 65535 {
         Body::Stored { pad: 0, len: stored_len as u16 }
     } else if static_lenb == opt {
         Body::Fixed { tokens }
@@ -1151,6 +1166,202 @@ fn flush_block(
 /// parameters.
 pub fn compress(data: &[u8], p: Params) -> Option<Vec<u8>> {
     compress_onto(data, p, Vec::with_capacity(data.len() / 4 + 64))
+}
+
+/// Bytes of data each thread of [`compress_threads`] parses (but the last).
+#[cfg(feature = "encode")]
+const SEGMENT: usize = 8 << 20;
+/// Bytes past a segment's end that its parse goes on, for the next segment's to meet it at a
+/// token boundary of the same state ([`compress_threads`]).
+#[cfg(feature = "encode")]
+const MEET: usize = 64 << 10;
+
+/// [`compress`] of `data`, byte for byte, its parse on up to `threads` threads (for parameters
+/// that can be resumed, [`Params::resumable`]: the lazy parser's state at a token boundary is
+/// of the data alone, its hash chains of every position). The data is cut into segments of
+/// [`SEGMENT`] bytes; each is parsed by an emulator of its own from a window before it (so that
+/// its chains are whole there) to [`MEET`] bytes past its end, and the segments are joined at
+/// the first token boundary past a segment's start where both emulators are in the same state
+/// (their [`Checkpoint`]s the same): the tokens on are the same. The tokens are then cut into
+/// blocks as zlib's buffer cuts them (by their count) and written. Where segments do not meet
+/// (none was seen), the data is compressed on one thread.
+#[cfg(feature = "encode")]
+pub fn compress_threads(data: &[u8], p: Params, threads: usize) -> Option<Vec<u8>> {
+    compress_segments(data, p, threads, SEGMENT)
+}
+
+/// How many times [`compress_segments`] fell back to one thread where segments did not meet.
+#[cfg(all(test, feature = "encode"))]
+static UNMET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// [`compress_threads`] in segments of `seg` bytes (for the tests).
+#[cfg(feature = "encode")]
+pub(crate) fn compress_segments(data: &[u8], p: Params, threads: usize, seg: usize) -> Option<Vec<u8>> {
+    let w = 1usize << p.wbits;
+    let seg = seg.max(4 * w);
+    if !p.valid() || !p.resumable() || threads <= 1 || data.len() < 2 * seg {
+        return compress(data, p);
+    }
+    let n = data.len();
+    let count = n.div_ceil(seg);
+    let limit = p.block_tokens();
+    let mut out = crate::write::Writer::append_to(Vec::with_capacity(n / 4 + 64));
+    // the tokens not written yet (the first the `drained`-th of the stream), where the window's
+    // start changed (by the index of the token of the stream), where the last segment parsed
+    // starts among them (its token 0, `at0`, of the stream) and its tail; the data written
+    let (mut tokens, mut bases, mut drained, mut at0) = (Vec::<Token>::new(), Vec::<(usize, usize)>::new(), 0, 0);
+    let mut tail: Vec<(Checkpoint, usize)> = Vec::new();
+    let mut start = 0;
+    // (the blocks of the tokens up to the `upto`-th of the stream written, or all of them where
+    // `end`, the last of fewer than `limit` tokens)
+    let mut write = |tokens: &mut Vec<Token>, bases: &[(usize, usize)], drained: &mut usize, upto: usize, end: bool| {
+        let mut t = 0;
+        loop {
+            let left = tokens.len() - t;
+            if !end && *drained + t + limit > upto {
+                break;
+            }
+            let block = &tokens[t..t + left.min(limit)];
+            let last = end && block.len() < limit;
+            let (lf, df) = freqs(block);
+            let e = start + block.iter().map(|t| t.span()).sum::<usize>();
+            // (the window as the emulator had it after the block's last token was predicted, or,
+            // of the last, after the end was)
+            let at = *drained + if last { tokens.len() } else { t + block.len() - 1 };
+            let base = bases.iter().take_while(|&&(i, _)| i <= at).last().map_or(0, |&(_, b)| b);
+            let b = flush_block_at(p, base, start, e, block.to_vec(), &lf, &df, last);
+            let toks = match &b.body {
+                Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => &tokens[..],
+                Body::Stored { .. } => &[],
+            };
+            out.block(&b, toks, data).ok()?;
+            (start, t) = (e, t + block.len());
+            if last {
+                return Some(true);
+            }
+        }
+        tokens.drain(..t);
+        *drained += t;
+        Some(false)
+    };
+    // the segments parsed `threads` at a time, each joined to the one before where they meet in
+    // the same state
+    for wave in (0..count).collect::<Vec<_>>().chunks(threads) {
+        let runs = aqr_common::pool::par_map(wave.len(), threads, |j| {
+            let k = wave[j];
+            let (from, to) = (k * seg, ((k + 1) * seg).min(n));
+            let off = if k == 0 { 0 } else { (from / w * w).saturating_sub(w) };
+            let stop = if k + 1 == count { n } else { (to + MEET).min(n) };
+            segment_run(data, p, off, (k > 0).then_some(from), (k + 1 < count).then_some(to), stop)
+        });
+        for (j, run) in runs.into_iter().enumerate() {
+            let run = run?;
+            if wave[j] == 0 {
+                (tokens, bases, tail) = (run.tokens, run.bases, run.tail);
+                continue;
+            }
+            let before: std::collections::HashMap<usize, (Checkpoint, usize)> =
+                tail.iter().map(|&(cp, i)| (cp.cursor, (cp, i))).collect();
+            let Some((i_before, i_this)) =
+                run.head.iter().find_map(|&(cp, i)| before.get(&cp.cursor).filter(|t| t.0 == cp).map(|t| (t.1, i)))
+            else {
+                #[cfg(test)]
+                UNMET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return compress(data, p);
+            };
+            let cut = at0 + i_before;
+            tokens.truncate(cut - drained);
+            bases.retain(|&(i, _)| i < cut);
+            // (the window's start as the segment's emulator had it at its token `i_this`)
+            let base = run.bases.iter().take_while(|&&(i, _)| i <= i_this).last().map(|&(_, b)| b);
+            bases.extend(base.map(|b| (cut, b)));
+            tokens.extend_from_slice(&run.tokens[i_this..]);
+            bases.extend(run.bases.iter().filter(|&&(i, _)| i > i_this).map(|&(i, b)| (cut + i - i_this, b)));
+            at0 = cut - i_this;
+            tail = run.tail;
+            if wave[j] + 1 == count && !run.ended {
+                #[cfg(test)]
+                UNMET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return compress(data, p);
+            }
+        }
+        // (what no join can cut written: before the last segment's tail)
+        let upto = tail.first().map_or(usize::MAX, |&(_, i)| at0 + i);
+        if wave.last() != Some(&(count - 1)) {
+            write(&mut tokens, &bases, &mut drained, upto, false)?;
+            // (of where the window's start changed before them, the last alone kept)
+            let keep = bases.iter().rposition(|&(i, _)| i < drained).unwrap_or(0);
+            bases.drain(..keep);
+        }
+    }
+    write(&mut tokens, &bases, &mut drained, usize::MAX, true)?;
+    out.finish(0, &[]).ok()
+}
+
+/// A segment's parse ([`compress_segments`]): its tokens; the emulator's checkpoints (of the
+/// whole data) at its token boundaries from the segment's start for [`MEET`] bytes (`head`) and
+/// from its end (`tail`), each with the count of tokens before it; where the window's start
+/// changed (its count of tokens and the start, after that token was predicted; of the end, the
+/// count of all); whether the data ended.
+#[cfg(feature = "encode")]
+struct SegmentRun {
+    tokens: Vec<Token>,
+    head: Vec<(Checkpoint, usize)>,
+    tail: Vec<(Checkpoint, usize)>,
+    bases: Vec<(usize, usize)>,
+    ended: bool,
+}
+
+/// The parse of `data` from `off` (a multiple of the window's size) to the token at or past
+/// `stop`, its checkpoints from `head` and from `tail` on ([`SegmentRun`]).
+#[cfg(feature = "encode")]
+fn segment_run(
+    data: &[u8],
+    p: Params,
+    off: usize,
+    head: Option<usize>,
+    tail: Option<usize>,
+    stop: usize,
+) -> Option<SegmentRun> {
+    let mut e = Emulator::new(&data[off..], p);
+    let mut r = SegmentRun { tokens: Vec::new(), head: Vec::new(), tail: Vec::new(), bases: Vec::new(), ended: false };
+    let mut base = usize::MAX;
+    loop {
+        if (head.is_some() || tail.is_some())
+            && let Some(cp) = e.checkpoint()
+        {
+            let cp = Checkpoint {
+                cursor: cp.cursor + off,
+                origin: cp.origin + off,
+                fed: cp.fed + off,
+                source: if cp.length > 2 { cp.source + off } else { cp.source },
+                ..cp
+            };
+            if head.is_some_and(|h| (h..h + MEET).contains(&cp.cursor)) {
+                r.head.push((cp, r.tokens.len()));
+            }
+            if tail.is_some_and(|t| cp.cursor >= t) {
+                r.tail.push((cp, r.tokens.len()));
+            }
+        }
+        let next = e.predict();
+        let b = off + e.window_base();
+        if b != base {
+            r.bases.push((r.tokens.len(), b));
+            base = b;
+        }
+        let Some((q, t)) = next else {
+            r.ended = true;
+            return Some(r);
+        };
+        if off + q >= stop {
+            return Some(r);
+        }
+        if !e.commit(t) {
+            return None;
+        }
+        r.tokens.push(t);
+    }
 }
 
 /// [`compress`] appended to `out`, which is given back: written within its capacity where that
@@ -1468,3 +1679,95 @@ const _: () = {
     assert!(size_of::<Lane>() == wasm::LANE as usize && size_of::<Job>() == wasm::JOB as usize);
     assert!(SLACK as u64 == wasm::WINDOW_SLACK);
 };
+
+#[cfg(all(test, feature = "encode"))]
+mod threads_tests {
+    use super::*;
+
+    fn data(kind: usize, n: usize) -> Vec<u8> {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        match kind {
+            // text-like: words of a small vocabulary
+            0 => {
+                let words = ["alpha ", "beta ", "gamma ", "delta ", "epsilon\n", "zeta, ", "eta ", "theta "];
+                let mut d = Vec::new();
+                while d.len() < n {
+                    d.extend_from_slice(words[(next() % 8) as usize].as_bytes());
+                }
+                d.truncate(n);
+                d
+            }
+            // random bytes (stored blocks)
+            1 => (0..n).map(|_| next() as u8).collect(),
+            // long runs and repeats far back
+            2 => (0..n).map(|i| if (i / 5000) % 3 == 0 { 0 } else { (i % 251) as u8 }).collect(),
+            // a mix of random and repeated pieces
+            _ => {
+                let mut d = Vec::new();
+                while d.len() < n {
+                    let r = next();
+                    if r % 3 == 0 && d.len() > 70_000 {
+                        let back = 1 + (r >> 8) as usize % 60_000;
+                        let len = 3 + (r >> 32) as usize % 300;
+                        let s = d.len() - back;
+                        for k in 0..len {
+                            let b = d[s + k];
+                            d.push(b);
+                        }
+                    } else {
+                        d.extend((0..(r >> 40) % 200).map(|_| next() as u8));
+                    }
+                }
+                d.truncate(n);
+                d
+            }
+        }
+    }
+
+    /// The same bytes as [`compress`], in segments of the least size (four windows), many joins.
+    #[test]
+    fn threads_give_compress() {
+        for kind in 0..4 {
+            let d = data(kind, 3 << 20);
+            for (level, wbits, mem, strategy) in [
+                (6, 15, 8, Strategy::Default),
+                (9, 15, 9, Strategy::Default),
+                (4, 15, 8, Strategy::Default),
+                (6, 12, 8, Strategy::Default),
+                (5, 15, 3, Strategy::Filtered),
+                (7, 9, 8, Strategy::Default),
+            ] {
+                let p = Params { level, strategy, wbits, mem };
+                let want = compress(&d, p).unwrap();
+                for (threads, seg) in [(4, 0), (8, 300_000), (3, 1 << 20)] {
+                    let got = compress_segments(&d, p, threads, seg).unwrap();
+                    assert!(
+                        got == want,
+                        "kind {kind} {p} threads {threads} seg {seg}: {} vs {}",
+                        got.len(),
+                        want.len()
+                    );
+                    assert_eq!(
+                        UNMET.load(std::sync::atomic::Ordering::Relaxed),
+                        0,
+                        "kind {kind} {p}: segments not met"
+                    );
+                }
+            }
+        }
+        // (small and empty data, and parameters not resumable: as compress)
+        for n in [0, 1, 1000] {
+            let d = data(0, n);
+            assert_eq!(compress_threads(&d, Params::default(), 4), compress(&d, Params::default()));
+        }
+        let fast = Params { level: 1, ..Params::default() };
+        let d = data(0, 3 << 20);
+        assert_eq!(compress_segments(&d, fast, 4, 0), compress(&d, fast));
+    }
+}

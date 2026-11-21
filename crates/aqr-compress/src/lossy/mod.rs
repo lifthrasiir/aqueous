@@ -410,8 +410,8 @@ impl Rewritten {
     }
 }
 
-/// The DEFLATE stream `raw` made again by zlib's emulation at level 6 ([`aqr_flate::zlib::compress`],
-/// [`PARAMS`]) where that pays; None where `raw` is kept: zlib's at level 6 already, of more data
+/// The DEFLATE stream `raw` made again by zlib's emulation at level 6 ([`PARAMS`], on the threads
+/// as on one: [`aqr_flate::zlib::compress_threads`]) where that pays; None where `raw` is kept: zlib's at level 6 already, of more data
 /// than [`MAX_DATA`], or not parsed whole (it is checked as it is all the same). The record of
 /// the stream made is a few bytes ([`Rewritten`]), whatever the level.
 ///
@@ -428,18 +428,21 @@ fn redeflate(raw: &[u8], opt: &Options) -> Option<Vec<u8>> {
         verify: false,
         ..aqr_flate::Options::for_profile(opt.flate_profile().max(aqr_flate::ADAPTIVE)).ok()?
     };
-    let parsed = aqr_flate::Parsed::new(raw, &fopt).ok()?;
-    aqr_common::allowance::check();
+    // (below level 7 its data alone: neither its tokens nor its record needed)
     if opt.flate_profile() < aqr_flate::ADAPTIVE {
-        let new = aqr_flate::zlib::compress(parsed.data(), PARAMS)?;
+        let data = crate::flate::inflate_whole(raw, MAX_DATA.get())?;
+        aqr_common::allowance::check();
+        let new = aqr_flate::zlib::compress_threads(&data, PARAMS, opt.threads)?;
         aqr_common::allowance::check();
         return (new[..] != raw[..]).then_some(new);
     }
+    let parsed = aqr_flate::Parsed::new(raw, &fopt).ok()?;
+    aqr_common::allowance::check();
     let (data, was, _) = parsed.deconstruct_bytes(&fopt, &aqr_flate::Hints::default()).ok()?;
     if was.len() <= RECORD_KEPT + raw.len() / RECORD_PER {
         return None;
     }
-    let new = aqr_flate::zlib::compress(&data, PARAMS)?;
+    let new = aqr_flate::zlib::compress_threads(&data, PARAMS, opt.threads)?;
     drop(data);
     let hints = aqr_flate::Hints { params: Some(PARAMS), ..Default::default() };
     let (_, is, _) = aqr_flate::Parsed::new(&new, &fopt).ok()?.deconstruct_bytes(&fopt, &hints).ok()?;
