@@ -525,6 +525,14 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
     // committed as it is written, and ended as it is where stopped, but with --atomic
     let placed = std::sync::atomic::AtomicBool::new(prior.is_some());
     let total = g.contents.iter().map(|c| c.2).sum::<u64>();
+    let fitted;
+    let opt = match a.batch_given {
+        true => opt,
+        false => {
+            fitted = aqr_compress::Options { batch: fitted_batch(opt.batch, total), ..opt.clone() };
+            &fitted
+        }
+    };
     let ended = |r: &aqr_compress::Report| stopped_tree(a, out, force, &placed, (files as u64, total), r);
     let stopping = (!a.atomic).then(|| aqr_compress::Stop { requested: stop::graceful(), ended: &ended });
     let r = match prior {
@@ -832,4 +840,22 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
         aqr_l10n::duration(t, 2),
         total as f64 / 1e6 / t.max(1e-9)
     );
+}
+
+aqr_common::zopt! {
+    /// The least bytes of a batch fitted to the files ([`fitted_batch`]).
+    static BATCH_LEAST: Opt<usize> = Opt::size("batch-least", 128 << 20, "least bytes of a batch fitted to the files (no -B)");
+    /// The batches the files are cut into at least, where they are not of [`BATCH_LEAST`] each.
+    static BATCH_PARTS: Opt<u64> = Opt::value("batch-parts", 4, "batches the files are cut into at least, without -B");
+}
+
+/// The bytes of a batch (`most`, as `-B` gives it, not given) for files of `total` bytes: a
+/// [`BATCH_PARTS`]th of them, but [`BATCH_LEAST`] at least, so that the batches read, analyzed,
+/// encoded and written overlap where there are few. (linux-4.0.1, 551 MB of 48,933 files, Ryzen 7
+/// 9700X: of 512 MiB batches 1.77 s at -1 and 6.88 s at the default level, of 128 MiB 1.47 and
+/// 5.90 s, the archive 0.04% larger and 0.04% smaller; 10gb's left of 512 MiB, 21.5 s at -1, as
+/// 128 MiB took 22.2 s and 0.5% more.)
+pub(crate) fn fitted_batch(most: usize, total: u64) -> usize {
+    let part = usize::try_from(total / BATCH_PARTS.get().max(1)).unwrap_or(usize::MAX);
+    most.min(part.max(BATCH_LEAST.get()))
 }

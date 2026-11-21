@@ -23,6 +23,8 @@ pub(crate) struct Args {
     /// `--atomic`: compressing, an archive made whole or not at all, rather than committed as it
     /// is written ([`stop`]).
     pub(crate) atomic: bool,
+    /// `-B SIZE` given: the batches of that size, not fitted to the files ([`crate::compress::fitted_batch`]).
+    pub(crate) batch_given: bool,
     /// `-j LABEL`: compressing, the state the archive is left in named as a journal point
     /// ([`journal`]), the label as given (`opt.journal` has it with its placeholders filled in).
     pub(crate) journal: Option<String>,
@@ -215,6 +217,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         run_before: Vec::new(),
         run_after: Vec::new(),
         atomic: false,
+        batch_given: false,
         journal: None,
         at: None,
         history: false,
@@ -353,7 +356,8 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             }
             "--depth" => a.opt.depth = text(value("--depth")?).parse().map_err(|_| "--depth takes a number")?,
             "-B" | "--batch" => {
-                a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1)
+                a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1);
+                a.batch_given = true;
             }
             "-b" | "--block-size" => {
                 a.opt.block = size_of(&text(value("-b")?)).ok_or("-b takes a size (64K, 1M, ...)")?.max(1)
