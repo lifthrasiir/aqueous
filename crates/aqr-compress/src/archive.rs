@@ -50,6 +50,12 @@ use crate::{Cx, Once, Options, bundle, detect, kind_by_name, nested, place_all, 
 aqr_common::zopt_namespace!("together", "contents that hold each other, kept in one batch (aqr-compress)");
 
 aqr_common::zopt! {
+    /// Whether the files recompressed that archive in as many bytes as they are, or more, are
+    /// made again kept as they are ([`Writer::put`]).
+    static KEPT_LARGER: Opt<bool> = Opt::flag("kept-larger", true, "make again kept as they are the files recompressed no smaller");
+}
+
+aqr_common::zopt! {
     /// Streams shorter than this are put together with those of their class and kind without
     /// telling whether they compress.
     static MERGE_PROBE: Opt<usize> =
@@ -1138,7 +1144,9 @@ impl Writer {
         out: &mut Out,
     ) -> io::Result<()> {
         let (src, opt, notes, batch) = (cx.src, cx.opt, cx.notes, &cx.batches[i]);
-        let mut raw = HashSet::new();
+        // (those not given back; those recompressed that archived in as many bytes as they are,
+        // or more: both made again kept as they are)
+        let (mut raw, mut kept) = (HashSet::new(), HashSet::new());
         let mut files = std::borrow::Cow::Borrowed(files);
         let mut made = loop {
             let w = &self.w;
@@ -1153,35 +1161,47 @@ impl Writer {
                     _ => false,
                 })
                 .collect();
+            // (and any recompressed that archives in as many bytes as it is, or more, though each
+            // formula of it was compared with its data as it was made: the contents of a
+            // formula compared kept as they are, each made after into one compared alone, which
+            // together archive larger than the contents did, as a tar's members of an .xz file)
+            // (of a file alone in its batch: a file's share does not tell what the others take of
+            // its streams, stored once for several, or held by others, which are lost kept as it
+            // is: on 10gb at -5, of 10 files taken so (7 batches made again) the archive was
+            // 2,464,160,095 bytes rather than 2,437,777,215; nor below level 4, where files are
+            // made of the DEFLATE streams kept, `inflated`; nor files coded against each other)
+            let in_sets: HashSet<usize> = made.sets.iter().flatten().copied().collect();
+            let costly: Vec<usize> = (0..files.len())
+                .filter(|_| opt.smaller && !crate::inflated::on(opt) && KEPT_LARGER.get() && files.len() == 1)
+                .filter(|&k| !files[k].rewritten && !raw.contains(&k) && !kept.contains(&k) && !in_sets.contains(&k))
+                .filter(|&k| !made.files[k].modules.is_empty() && made.files[k].archived >= files[k].len as f64)
+                .collect();
             let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
-            if bad.is_empty() && larger.is_empty() {
+            if bad.is_empty() && larger.is_empty() && costly.is_empty() {
                 break made;
             }
-            if !larger.is_empty() && bad.is_empty() {
+            if bad.is_empty() {
                 let owned = files.to_mut();
                 for &k in &larger {
                     let c = owned[k].c;
-                    let kept = (cx.revoke)(c);
+                    let w = (cx.revoke)(c);
                     let d = src.read(c)?;
                     let hash = xxhash_rust::xxh3::xxh3_128(&d);
                     owned[k] = File::of(c, &d, hash, owned[k].kind, owned[k].entry);
-                    cx.lossy.lock().unwrap().extend(kept.map(|w| (c, w)));
+                    cx.lossy.lock().unwrap().extend(w.map(|w| (c, w)));
                 }
-                let bytes = batch.iter().map(|&c| src.size(c)).sum();
-                notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
-                let data = reread(src, &files, opt.threads)?;
-                let fs = &files[..];
-                part = self.watched(cx, out, || analyze(i, fs, data, &raw, opt, notes, cx.siblings.clone()))?;
-                continue;
+                kept.extend(costly);
+            } else {
+                // (not given back as it was not read as it is: told so, not made again)
+                files.iter().try_for_each(|f| src.intact(f.c))?;
+                raw.extend(bad);
             }
-            // (not given back as it was not read as it is: told so, not made again)
-            files.iter().try_for_each(|f| src.intact(f.c))?;
-            raw.extend(bad);
             let bytes = batch.iter().map(|&c| src.size(c)).sum();
             notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
             let data = reread(src, &files, opt.threads)?;
             let fs = &files[..];
-            part = self.watched(cx, out, || analyze(i, fs, data, &raw, opt, notes, cx.siblings.clone()))?;
+            let as_they_are: HashSet<usize> = raw.union(&kept).copied().collect();
+            part = self.watched(cx, out, || analyze(i, fs, data, &as_they_are, opt, notes, cx.siblings.clone()))?;
         };
         files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);

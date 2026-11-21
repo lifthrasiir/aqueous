@@ -2183,3 +2183,51 @@ fn unity_resource_file() {
     let (_, r) = archived(&files[1..], &Options::default());
     assert!(!r.files[0].modules.iter().any(|m| m.name == "bcn-recons"));
 }
+
+/// An `.xz` file of a tar of FLAC files (aqr-flac's fixtures, several of the same audio): each
+/// formula of it is compared with its data as it is made (the `.xz` file's with the tar kept as
+/// it is, which wins; then each member's), but together they archive larger than the file
+/// (488,882 bytes of 459,472), as XZ Utils matched the members' bytes across them. The file is
+/// made again kept as it is: no larger than it is.
+#[test]
+fn recompressed_larger_kept() {
+    let names = [
+        "c6",
+        "s16_cut",
+        "s16_f0",
+        "s16_f5",
+        "s16_ffmpeg",
+        "s16_junk",
+        "s16_lax",
+        "s16_tags",
+        "s24_f8",
+        "s32",
+        "silence",
+        "u8_mono",
+    ];
+    let members: Vec<(String, Vec<u8>)> = names
+        .iter()
+        .map(|n| {
+            let path = format!("{}/../../codecs/aqr-flac/tests/data/{n}.flac", env!("CARGO_MANIFEST_DIR"));
+            (format!("{n}.flac"), std::fs::read(path).unwrap())
+        })
+        .collect();
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let mut x = Vec::new();
+    liblzma::write::XzEncoder::new(&mut x, 6).write_all(&tar(&refs)).unwrap();
+    let tree = Tree {
+        entries: vec![Entry {
+            parent: None,
+            name: b"a.tar.xz".to_vec(),
+            node: EntryNode::File(0),
+            extra: Extra::default(),
+        }],
+        ..Tree::default()
+    };
+    let a =
+        compress_tree(&tree, &[Input { name: b"a.tar.xz", data: &x }], &Options { threads: 2, ..Options::default() });
+    let f = &a.report.files[0];
+    assert!(f.archived <= x.len() as f64 + 64.0, "{} of {}: {:?}", f.archived, x.len(), f.classes);
+    let Value::Tree(_, got) = decompress_value(&a.archive, 2).unwrap() else { panic!("a tree") };
+    assert_eq!(got[0], x);
+}
