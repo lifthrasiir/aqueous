@@ -463,7 +463,9 @@ and the LZMA streams of .lzma, .xz and 7z files by an encoder of about
 whose parse costs next to nothing
 (from level 4 on; their records then cost a few bytes, but decoding is slower);
 .Cm slack
-zeroes the bytes that nothing reads, of Minecraft region files and SQLite databases
+zeroes the bytes that nothing reads, of Minecraft region files, SQLite databases,
+asar archives and the free space of disk images' file systems (FAT, exFAT, NTFS, ext,
+HFS+, and OLE compound files such as .msi and .doc)
 (deleted data is lost; a database with its journal archived along is kept).
 Each file rewritten is checked to be read the same, else archived as it is and told so;
 so is one that does not archive smaller rewritten.

@@ -21,7 +21,9 @@
 //!   (`sqlite`) that SQLite never reads: the free space of b-tree pages (freeblocks but their
 //!   headers), the freelist's pages but their lists, the ends of last overflow pages (never
 //!   its header nor the bytes each page reserves). A database with its journal archived along
-//!   is kept as it is ([`Rewriting::journaled`]).
+//!   is kept as it is ([`Rewriting::journaled`]). The free bytes of the file systems of disk
+//!   images (`disk`: OLE compound files, FAT, exFAT, NTFS, ext2/3/4, HFS+), each by its own
+//!   allocation (`disk.rs`); and the bytes of an asar archive's data that no file takes (`asar`).
 //!
 //! Each R is checked against X by code of its own ([`check`]: flate2 rather than aqr-flate,
 //! parsers apart from the rewriters'); where the check fails, X is archived and the failure told
@@ -29,7 +31,9 @@
 //! files read as a content of [`crate::compress_tree`]: [`crate::compress`] archives the file as
 //! it is.
 
+mod asar;
 mod check;
+mod disk;
 mod gzip;
 mod lzma;
 mod mca;
@@ -96,6 +100,8 @@ const REWRITERS: &[Rewriter] = &[
     Rewriter { class: Class::Coding, format: Format::Xz, rewrite: xz::coding, check: check::xz },
     Rewriter { class: Class::Coding, format: Format::SevenZip, rewrite: sevenz::coding, check: check::sevenz },
     Rewriter { class: Class::Slack, format: Format::Mca, rewrite: mca::slack, check: check::mca },
+    Rewriter { class: Class::Slack, format: Format::Disk, rewrite: disk::slack, check: check::disk },
+    Rewriter { class: Class::Slack, format: Format::Asar, rewrite: asar::slack, check: check::asar },
     Rewriter { class: Class::Slack, format: Format::Sqlite, rewrite: sqlite::slack, check: check::sqlite },
 ];
 
@@ -591,3 +597,15 @@ mod tests_lzma;
 
 #[cfg(test)]
 mod tests_7z;
+#[cfg(test)]
+mod tests_asar;
+#[cfg(test)]
+mod tests_disk_ext;
+#[cfg(test)]
+mod tests_disk_fat;
+#[cfg(test)]
+mod tests_disk_hfs;
+#[cfg(test)]
+mod tests_disk_ntfs;
+#[cfg(test)]
+mod tests_disk_ole;

@@ -1201,3 +1201,225 @@ pub(super) fn sevenz(x: &[u8], r: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Disk images (`disk::slack`): of the same length; the same files as aqr-disk reads them (names,
+/// extents) with the same bytes; every byte that is not the same zero in R, and within the free
+/// ranges of X's file systems ([`super::disk::free`]), none of which holds a file's.
+pub(super) fn disk(x: &[u8], r: &[u8]) -> Result<(), String> {
+    if x.len() != r.len() {
+        return Err("of another length".into());
+    }
+    let fss = super::disk::file_systems();
+    let (a, b) = (aqr_disk::files(x, fss), aqr_disk::files(r, fss));
+    if a.len() != b.len() {
+        return Err(format!("{} files rather than {}", b.len(), a.len()));
+    }
+    for (f, g) in a.iter().zip(&b) {
+        if f.name != g.name || f.extents != g.extents {
+            return Err(format!("{}: not the same file", String::from_utf8_lossy(&f.name)));
+        }
+        if f.extents.iter().any(|e| x.get(e.clone()) != r.get(e.clone())) {
+            return Err(format!("{}: of other bytes", String::from_utf8_lossy(&f.name)));
+        }
+    }
+    let free = super::disk::free(x)?;
+    let mut at = 0;
+    for f in &free {
+        if x[at..f.start] != r[at..f.start] {
+            return Err("bytes changed out of the free ones".into());
+        }
+        if r[f.clone()].iter().any(|&b| b != 0) {
+            return Err("free bytes not zeros".into());
+        }
+        at = f.end;
+    }
+    if x[at..] != r[at..] {
+        return Err("bytes changed out of the free ones".into());
+    }
+    Ok(())
+}
+
+/// Electron's asar archives: of the same length and header (all before the data); the bytes that
+/// the files take the same (by a reader of the header's JSON of its own); every other byte the
+/// same or zero.
+pub(super) fn asar(x: &[u8], r: &[u8]) -> Result<(), String> {
+    let u32le = |p: usize| x.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    let (start, len) = (8 + u32le(4).ok_or("cut")?, u32le(12).ok_or("cut")?);
+    if x.len() != r.len() || start > x.len() || 16 + len > start || x[..start] != r[..start] {
+        return Err("of another length or header".into());
+    }
+    let mut live = Vec::new();
+    asar_files(&x[16..16 + len], &mut 0, start, x.len(), &mut live, 0)?;
+    live.sort_unstable_by_key(|l: &std::ops::Range<usize>| l.start);
+    let mut at = start;
+    for l in live.iter().cloned().chain(std::iter::once(x.len()..x.len())) {
+        if l.start > at && r[at..l.start].iter().zip(&x[at..l.start]).any(|(&a, &b)| a != 0 && a != b) {
+            return Err("bytes of no file changed but to zeros".into());
+        }
+        if x[l.clone()] != r[l.clone()] {
+            return Err("a file's bytes changed".into());
+        }
+        at = at.max(l.end);
+    }
+    Ok(())
+}
+
+/// The spans of the files of the JSON object at `*p` of `t` (an entry of `files`, or the root),
+/// skipping what it does not need, to `out`.
+fn asar_files(
+    t: &[u8],
+    p: &mut usize,
+    start: usize,
+    len: usize,
+    out: &mut Vec<std::ops::Range<usize>>,
+    depth: usize,
+) -> Result<(), String> {
+    let bad = || "a header not read".to_string();
+    if depth > 1000 {
+        return Err(bad());
+    }
+    let ws = |p: &mut usize| {
+        while t.get(*p).is_some_and(|b| b.is_ascii_whitespace()) {
+            *p += 1;
+        }
+    };
+    let string = |p: &mut usize| -> Option<Vec<u8>> {
+        if t.get(*p) != Some(&b'"') {
+            return None;
+        }
+        let mut s = Vec::new();
+        *p += 1;
+        loop {
+            match *t.get(*p)? {
+                b'"' => break,
+                b'\\' => {
+                    s.push(*t.get(*p + 1)?);
+                    *p += 2;
+                }
+                b => {
+                    s.push(b);
+                    *p += 1;
+                }
+            }
+        }
+        *p += 1;
+        Some(s)
+    };
+    // (any value skipped)
+    fn skip(t: &[u8], p: &mut usize, depth: usize) -> Option<()> {
+        if depth > 1000 {
+            return None;
+        }
+        while t.get(*p).is_some_and(|b| b.is_ascii_whitespace()) {
+            *p += 1;
+        }
+        match *t.get(*p)? {
+            b'"' => {
+                *p += 1;
+                while *t.get(*p)? != b'"' {
+                    *p += if t[*p] == b'\\' { 2 } else { 1 };
+                }
+                *p += 1;
+            }
+            open @ (b'{' | b'[') => {
+                let close = if open == b'{' { b'}' } else { b']' };
+                *p += 1;
+                loop {
+                    while t.get(*p).is_some_and(|b| b.is_ascii_whitespace() || *b == b',' || *b == b':') {
+                        *p += 1;
+                    }
+                    if *t.get(*p)? == close {
+                        *p += 1;
+                        break;
+                    }
+                    skip(t, p, depth + 1)?;
+                }
+            }
+            _ => {
+                while t.get(*p).is_some_and(|b| !matches!(b, b',' | b'}' | b']') && !b.is_ascii_whitespace()) {
+                    *p += 1;
+                }
+            }
+        }
+        Some(())
+    }
+    ws(p);
+    if t.get(*p) != Some(&b'{') {
+        return Err(bad());
+    }
+    *p += 1;
+    let (mut size, mut offset, mut unpacked, mut link, mut dir) = (None, None, false, false, false);
+    loop {
+        ws(p);
+        match t.get(*p) {
+            Some(b'}') => {
+                *p += 1;
+                break;
+            }
+            Some(b',') => {
+                *p += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let key = string(p).ok_or_else(bad)?;
+        ws(p);
+        if t.get(*p) != Some(&b':') {
+            return Err(bad());
+        }
+        *p += 1;
+        ws(p);
+        match &key[..] {
+            b"files" => {
+                dir = true;
+                ws(p);
+                if t.get(*p) != Some(&b'{') {
+                    return Err(bad());
+                }
+                *p += 1;
+                loop {
+                    ws(p);
+                    match t.get(*p) {
+                        Some(b'}') => {
+                            *p += 1;
+                            break;
+                        }
+                        Some(b',') => {
+                            *p += 1;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    string(p).ok_or_else(bad)?;
+                    ws(p);
+                    if t.get(*p) != Some(&b':') {
+                        return Err(bad());
+                    }
+                    *p += 1;
+                    asar_files(t, p, start, len, out, depth + 1)?;
+                }
+            }
+            b"size" => {
+                let from = *p;
+                skip(t, p, depth).ok_or_else(bad)?;
+                size = std::str::from_utf8(&t[from..*p]).ok().and_then(|s| s.trim().parse::<usize>().ok());
+            }
+            b"offset" => offset = string(p).and_then(|s| String::from_utf8(s).ok()?.parse::<usize>().ok()),
+            b"unpacked" => {
+                unpacked = t[*p..].starts_with(b"true");
+                skip(t, p, depth).ok_or_else(bad)?;
+            }
+            b"link" => {
+                link = true;
+                skip(t, p, depth).ok_or_else(bad)?;
+            }
+            _ => skip(t, p, depth).ok_or_else(bad)?,
+        }
+    }
+    if depth > 0 && !dir && !link && !unpacked {
+        let (size, offset) = (size.ok_or_else(bad)?, offset.ok_or_else(bad)?);
+        let at = start.checked_add(offset).filter(|a| a.checked_add(size).is_some_and(|e| e <= len)).ok_or_else(bad)?;
+        out.push(at..at + size);
+    }
+    Ok(())
+}
