@@ -124,10 +124,18 @@ def main():
 
 
 def write(path, lines):
-    """Writes the lines to the file by way of a new one beside it, with LF endings."""
+    """Writes the lines to the file by way of a new one beside it, with LF endings; not where
+    it holds them already, of whatever line endings (CRLF, as Git checks it out with
+    core.autocrlf: written again with LF, the file would be told modified for nothing)."""
+    text = "".join(l + "\n" for l in lines)
+    try:
+        if path.read_bytes().replace(b"\r\n", b"\n") == text.encode("utf-8"):
+            return
+    except FileNotFoundError:
+        pass
     new = path.with_name(path.name + ".new")
     with open(new, "w", encoding="utf-8", newline="\n") as f:
-        f.write("".join(l + "\n" for l in lines))
+        f.write(text)
     os.replace(new, path)
 
 
