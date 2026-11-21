@@ -50,24 +50,31 @@ fn without(want: &[(String, Vec<u8>)], gone: &[&str]) -> Vec<(String, Vec<u8>)> 
 }
 
 /// Paths taken out of an archive, one after another: what is left extracted, the archive grown
-/// by a little each time; again after a stub before it, and with appending after.
+/// by a little each time, and with appending after. An archive after a stub before it is not
+/// edited (nor appended to), left as it is: what reads it there may not read what is written
+/// (docs/sfx-config-design.md, 7).
 #[test]
 fn deleted() {
     let d = scratch("deleted");
     let want = source(&d);
     ok(&d, &["-q", "-o", "a.aqr", "src"]);
     let a = fs::read(d.join("a.aqr")).unwrap();
-    fs::write(d.join("lead.aqr"), [b"#!stub\n".as_slice(), &a].concat()).unwrap();
-    for name in ["a.aqr", "lead.aqr"] {
-        let len = || fs::metadata(d.join(name)).unwrap().len();
-        let before = len();
-        ok(&d, &["-q", "--delete", name, "sub/deep", "t0.txt"]);
-        assert!(len() > before && len() < before + 200, "{} -> {}", before, len());
-        assert_eq!(extracted(&d, name), without(&want, &["sub/deep", "t0.txt"]));
-        ok(&d, &["-q", "--delete", name, "sub/t1.txt"]);
-        assert_eq!(extracted(&d, name), without(&want, &["sub/deep", "t0.txt", "sub/t1.txt"]));
-        ok(&d, &["-K", name]);
+    let lead = [b"#!stub\n".as_slice(), &a].concat();
+    fs::write(d.join("lead.aqr"), &lead).unwrap();
+    for args in [&["--delete", "lead.aqr", "t0.txt"][..], &["--compact", "lead.aqr"], &["-a", "lead.aqr", "src"]] {
+        let o = aqr(&d, args);
+        assert!(!o.status.success() && stderr(&o).contains("after 7 bytes of other data"), "{args:?}: {}", stderr(&o));
+        assert_eq!(fs::read(d.join("lead.aqr")).unwrap(), lead, "{args:?}");
     }
+    let name = "a.aqr";
+    let len = || fs::metadata(d.join(name)).unwrap().len();
+    let before = len();
+    ok(&d, &["-q", "--delete", name, "sub/deep", "t0.txt"]);
+    assert!(len() > before && len() < before + 200, "{} -> {}", before, len());
+    assert_eq!(extracted(&d, name), without(&want, &["sub/deep", "t0.txt"]));
+    ok(&d, &["-q", "--delete", name, "sub/t1.txt"]);
+    assert_eq!(extracted(&d, name), without(&want, &["sub/deep", "t0.txt", "sub/t1.txt"]));
+    ok(&d, &["-K", name]);
     // what was taken out appended again
     ok(&d, &["-q", "-a", "a.aqr", "src"]);
     assert_eq!(extracted(&d, "a.aqr"), want);
@@ -101,8 +108,8 @@ fn delete_refused() {
 }
 
 /// An archive appended to, synchronized and taken from, written again: what it holds the same,
-/// the file smaller than it was and about as one made of it anew; a stub before it kept; a link
-/// to it left a link. Written again once more, the same bytes.
+/// the file smaller than it was and about as one made of it anew; a link to it left a link.
+/// Written again once more, the same bytes.
 #[test]
 fn compacted() {
     let d = scratch("compacted");
@@ -119,9 +126,8 @@ fn compacted() {
     assert_eq!(held, now);
     assert_ne!(held, want);
     let a = fs::read(d.join("a.aqr")).unwrap();
-    fs::write(d.join("lead.aqr"), [b"#!stub\n".as_slice(), &a].concat()).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink("lead.aqr", d.join("link.aqr")).unwrap();
+    std::os::unix::fs::symlink("a.aqr", d.join("link.aqr")).unwrap();
     let len = |n: &str| fs::metadata(d.join(n)).unwrap().len();
     ok(&d, &["-q", "--compact", "a.aqr"]);
     ok(&d, &["-K", "a.aqr"]);
@@ -130,10 +136,12 @@ fn compacted() {
     let compacted = fs::read(d.join("a.aqr")).unwrap();
     ok(&d, &["-q", "--compact", "a.aqr"]);
     assert_eq!(fs::read(d.join("a.aqr")).unwrap(), compacted);
-    let link = if cfg!(unix) { "link.aqr" } else { "lead.aqr" };
-    ok(&d, &["-q", "--compact", link]);
-    assert!(fs::symlink_metadata(d.join(link)).unwrap().file_type().is_symlink() == cfg!(unix));
-    assert_eq!(fs::read(d.join("lead.aqr")).unwrap(), [b"#!stub\n".as_slice(), &compacted].concat());
+    #[cfg(unix)]
+    {
+        ok(&d, &["-q", "--compact", "link.aqr"]);
+        assert!(fs::symlink_metadata(d.join("link.aqr")).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(d.join("a.aqr")).unwrap(), compacted);
+    }
     // taken out and written again at once: no tombstone, nothing of it left
     ok(&d, &["-q", "--delete", "--compact", "a.aqr", "sub"]);
     let mut left = held.clone();

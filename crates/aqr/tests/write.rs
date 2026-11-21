@@ -67,17 +67,18 @@ fn mirrored_archive_not_appended() {
 }
 
 /// The length of a stub to put before archive `a` so that its footer's first bytes (those a
-/// commit makes a spacer block) cross a sector of the file, or none.
+/// commit makes a spacer block) cross a sector of the file, or none (a stub of a byte at least).
 fn stub_for_crossing(a: &[u8], crossing: bool) -> usize {
     let at = aqr_archive::locate(a).unwrap();
     let (footer, _) = aqr_archive::footer_of(&a[at.clone()]).unwrap();
     let n = aqr_archive::kill(footer.len()).len();
-    (0..512).find(|p| aqr_archive::crossing((p + at.start + footer.start) as u64, n) == crossing).unwrap()
+    (1..512).find(|p| aqr_archive::crossing((p + at.start + footer.start) as u64, n) == crossing).unwrap()
 }
 
-/// write/2: a footer across a sector of the file is written over (the file cut at it, the new
-/// footer after) rather than made a spacer block; behind a stub too. A file cut as a crash
-/// between the two leaves it, whole up to the footer, is still appended to.
+/// write/2: an archive behind a stub, its footer across a sector of the file or not, is not
+/// appended to (docs/sfx-config-design.md, 7: what reads it there may not read what is
+/// appended), the file left as it is; it is still read. A file cut as a crash leaves it, whole
+/// up to the footer, is extracted, and told of where it is appended to.
 #[test]
 fn footer_across_a_sector() {
     let d = scratch("sector");
@@ -87,20 +88,14 @@ fn footer_across_a_sector() {
     for crossing in [false, true] {
         let stub = vec![b'#'; stub_for_crossing(&a, crossing)];
         let name = format!("s{crossing}.aqr");
-        fs::write(d.join(&name), [&stub[..], &a].concat()).unwrap();
+        let file = [&stub[..], &a].concat();
+        fs::write(d.join(&name), &file).unwrap();
         fs::write(d.join("src/new.txt"), text(99, 5000)).unwrap();
-        let o = ok(&d, &["-v", "-a", &name, "src"]);
-        assert_eq!(stderr(&o).contains("across a sector"), crossing, "{}", stderr(&o));
-        let got = fs::read(d.join(&name)).unwrap();
-        assert!(got.starts_with(&stub) && got.len() > a.len() + stub.len());
-        assert_eq!(extracted(&d, &name), files(&d.join("src")));
-        let t = ok(&d, &["-K", &name]);
-        assert!(!stderr(&t).contains("incomplete"), "{}", stderr(&t));
-        // and again, from the file as it is now
-        fs::write(d.join("src/new.txt"), text(98, 7000)).unwrap();
-        ok(&d, &["-q", "-a", &name, "src"]);
-        assert_eq!(extracted(&d, &name), files(&d.join("src")));
+        let o = aqr(&d, &["-v", "-a", &name, "src"]);
+        assert!(!o.status.success() && stderr(&o).contains("bytes of other data"), "{}", stderr(&o));
+        assert_eq!(fs::read(d.join(&name)).unwrap(), file);
         fs::remove_file(d.join("src/new.txt")).unwrap();
+        assert_eq!(extracted(&d, &name), files(&d.join("src")));
     }
     // the crash: the file cut at its footer (as `set_len` left it), before the new one is written
     let at = aqr_archive::locate(&a).unwrap();

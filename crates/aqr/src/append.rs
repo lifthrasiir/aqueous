@@ -71,6 +71,14 @@ pub fn open(path: &Path, quiet: bool) -> Result<Opened, String> {
             return Err(err(&"an encrypted archive is not appended to (its nonces would be used again)"));
         }
         let at = aqr_archive::locate(&c).ok_or_else(|| err(&"no archive found in it (aqr -K tells more)"))?;
+        // (an archive after other bytes, a self-extracting program's say, is read alone: what
+        // reads it there may not read what is appended, docs/sfx-config-design.md, 7)
+        if at.start > 0 {
+            return Err(err(&format!(
+                "an archive after {} bytes of other data (a self-extracting program's, say) is not appended to nor edited",
+                at.start
+            )));
+        }
         if at.end < c.len() {
             cut = Some(tail(&c, at.clone(), path)?);
         }

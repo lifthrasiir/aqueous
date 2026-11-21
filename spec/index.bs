@@ -1178,6 +1178,11 @@ can't commit as above, and instead removes the footer and writes the segments an
 Such an archive stopped being written before the new footer is whole loses its footer,
 which can be [=reconstruct the footer|reconstructed=] ([[#repair]]).
 
+A compressor is advised not to append to an archive [=locate an archive|located=] after leading bytes at all.
+What put the archive there may read it as it was and not what is appended:
+a self-extracting executable may carry only the modules the archive used and read only its first segments,
+and a signature over the file no longer holds once it changes.
+
 A compressor appending to an archive MUST NOT leave a footer other than the one at the end,
 except while it is writing; another compressor appending to such an archive MUST first remove the trailing bytes or complete the commit.
 Each metadata block whose segment ends a commit SHOULD have `segment-status` ([[#segment-status]]).
