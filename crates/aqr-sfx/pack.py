@@ -58,6 +58,10 @@ def main():
     part = args.pop(0).removeprefix("--part=") if args and args[0].startswith("--part=") else "all"
     if part not in PARTS:
         fail(f"--part={part}: one of {', '.join(PARTS)}")
+    # (checked before anything is removed: `--help`, taken for a module, once emptied OUT)
+    for m in args:
+        if m.startswith("-") or not Path(f"crates/aqr-modules/src/bin/{m}.rs").exists():
+            fail(f"{m}: not an option nor a module (usage: pack.py [--part=PART] [MODULE...])")
     if part == "all":
         shutil.rmtree(OUT, ignore_errors=True)
     OUT.mkdir(parents=True, exist_ok=True)
