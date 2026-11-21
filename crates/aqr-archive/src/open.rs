@@ -681,6 +681,7 @@ impl<'c, 'n> Archive<'c, 'n> {
         }
         let tally = Tally { tell: None, decompressed: AtomicU64::new(0), evaluated: AtomicU64::new(0), totals: (0, 0) };
         let contents = Contents {
+            need: vec![u64::MAX; refs.len()],
             refs: refs.into_iter().map(AtomicUsize::new).collect(),
             data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Waited::new(Slot::Raw(d, zstd, dict))).collect(),
             dictionaries: &blocks.dictionaries,
@@ -815,10 +816,15 @@ impl<'c, 'n> Archive<'c, 'n> {
             return invalid("a non-leaf block no formula block references");
         }
         let mut refs = vec![0; blocks.non_leaf.len()];
+        // (of some contents alone, each block decoded only as far as their slices reach: all of
+        // it where every content is taken, for its checksum to be checked)
+        let mut need = vec![if only.is_some() { 0 } else { u64::MAX }; blocks.non_leaf.len()];
         for p in picked.iter().filter_map(|&i| programs[i].as_ref()) {
             for insn in &p.insns {
-                if let &Insn::Slice { block, .. } = insn {
+                if let &Insn::Slice { block, start, len } = insn {
                     refs[p.blocks[block]] += 1;
+                    let n = &mut need[p.blocks[block]];
+                    *n = (*n).max(start.saturating_add(len));
                 }
             }
         }
@@ -862,6 +868,7 @@ impl<'c, 'n> Archive<'c, 'n> {
         };
         tally.add(0, 0);
         let contents = Contents {
+            need,
             refs: refs.into_iter().map(AtomicUsize::new).collect(),
             data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Waited::new(Slot::Raw(d, zstd, dict))).collect(),
             dictionaries: &blocks.dictionaries,

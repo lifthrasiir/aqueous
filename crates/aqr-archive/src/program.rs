@@ -466,6 +466,8 @@ pub(crate) struct Contents<'c, 't> {
     pub(crate) data: Vec<Waited<Slot<'c>>>,
     pub(crate) dictionaries: &'c [dict::Dictionary],
     pub(crate) refs: Vec<AtomicUsize>,
+    /// Of each block, the bytes of it to decode: those its slices reach (`u64::MAX`: all of it).
+    pub(crate) need: Vec<u64>,
     /// Told of the blocks as they are decoded.
     pub(crate) tally: &'t Tally<'t>,
     /// Whether the pages of a block are let go of once it is read ([`Archive::let_go_read`]).
@@ -545,7 +547,7 @@ impl<'c> Contents<'c, '_> {
         }
         if let Slot::Raw(d, zstd, dict) = *s {
             self.ensure(d)?;
-            let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
+            let decoded = decoded_upto(d, zstd, true, dict.map(|d| &self.dictionaries[d]), self.need[o]);
             self.tally.add(d.len() as u64, 0);
             *s = Slot::Decoded(Arc::new(decoded?));
             self.read(d);
@@ -560,7 +562,12 @@ impl<'c> Contents<'c, '_> {
     /// is not decoded yet: checked, and let go of as read, not copied. None for any other.
     pub(crate) fn stored(&self, o: usize) -> Option<Decoded<&'c [u8]>> {
         let Slot::Raw(d, false, _) = *self.data[o].lock().unwrap() else { return None };
-        let d = self.ensure(d).and_then(|()| stored_checked(d));
+        // (of the part its slices reach alone, where that is shorter: not checked, as `block`)
+        let part = usize::try_from(self.need[o]).ok().filter(|&n| n < d.len().saturating_sub(8));
+        let d = self.ensure(d).and_then(|()| match part {
+            Some(n) => Ok(&d[..n]),
+            None => stored_checked(d),
+        });
         if let Ok(d) = d {
             self.tally.add(d.len() as u64, 0);
         }
@@ -574,7 +581,9 @@ impl<'c> Contents<'c, '_> {
         let Slot::Raw(d, zstd, dict) = *s else { return };
         *s = Slot::Ahead;
         drop(s);
-        let decoded = self.ensure(d).and_then(|()| decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d])));
+        let decoded = self
+            .ensure(d)
+            .and_then(|()| decoded_upto(d, zstd, true, dict.map(|d| &self.dictionaries[d]), self.need[o]));
         let mut s = self.data[o].lock().unwrap();
         *s = match decoded {
             Ok(b) => {

@@ -387,8 +387,20 @@ pub(crate) fn stored_checked(d: &[u8]) -> Decoded<&[u8]> {
 
 /// [`decoded`], of Zstandard data compressed with dictionary `dict`.
 pub(crate) fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
+    decoded_upto(d, zstd, checked, dict, u64::MAX)
+}
+
+/// [`decoded_with`] of the first `want` bytes alone, where the data is longer: decompressed only
+/// as far as those, its checksum (of all of it) not checked then (spec, "Partial access").
+pub(crate) fn decoded_upto(
+    d: &[u8],
+    zstd: bool,
+    checked: bool,
+    dict: Option<&dict::Dictionary>,
+    want: u64,
+) -> Decoded<Vec<u8>> {
     let end = d.len().checked_sub(if checked { 8 } else { 0 }).ok_or_else(|| Failure::Invalid("truncated".into()))?;
-    let out = if zstd {
+    let (out, whole) = if zstd {
         let mut at = 0;
         // the original size by how much longer it is, or `0` then by how much shorter
         let delta = leb(d, &mut at)?;
@@ -399,11 +411,12 @@ pub(crate) fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&di
             .checked_add(delta)
             .and_then(|n| n.checked_sub(shrink))
             .ok_or_else(|| Failure::Invalid("bad size".into()))?;
-        unzstd(window, blocks, size, dict)?
+        (unzstd(window, blocks, size, want.min(size), dict)?, want >= size)
     } else {
-        d[..end].to_vec()
+        let n = end.min(usize::try_from(want).unwrap_or(usize::MAX));
+        (d[..n].to_vec(), n == end)
     };
-    if checked && checksum(&out).to_le_bytes() != d[end..] {
+    if whole && checked && checksum(&out).to_le_bytes() != d[end..] {
         return invalid("checksum mismatch");
     }
     Ok(out)
@@ -413,8 +426,9 @@ fn zstd_failure(e: zstd_safe::ErrorCode) -> Failure {
     Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)))
 }
 
-/// Zstandard `blocks` of `window` making exactly `size` bytes, with dictionary `dict`.
-fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
+/// Zstandard `blocks` of `window` making exactly `size` bytes, with dictionary `dict`: their
+/// first `want` (of at most `size`) alone, decompressed as far as those where they are fewer.
+fn unzstd(window: u8, blocks: &[u8], size: u64, want: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
     let _s = aqr_common::trace::span("unzstd");
     // A context of the thread's, kept for the next frame (with its input buffer) where there is
     // no dictionary to refer to: archives have a formula block a leaf, each a frame, and making
@@ -427,9 +441,9 @@ fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>)
             Ok(mut c) => {
                 let dctx = c.get_or_insert_with(zstd_safe::DCtx::create);
                 dctx.reset(ResetDirective::SessionAndParameters).map_err(zstd_failure)?;
-                unzstd_with(dctx, window, blocks, size)
+                unzstd_with(dctx, window, blocks, size, want)
             }
-            Err(_) => unzstd_with(&mut zstd_safe::DCtx::create(), window, blocks, size),
+            Err(_) => unzstd_with(&mut zstd_safe::DCtx::create(), window, blocks, size, want),
         }),
         Some(d) => {
             let mut dctx = zstd_safe::DCtx::create();
@@ -437,13 +451,13 @@ fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>)
                 dict::Dictionary::Raw(d) => dctx.ref_prefix(d).map(drop).map_err(zstd_failure)?,
                 dict::Dictionary::Tables(d) => dctx.ref_ddict(d).map(drop).map_err(zstd_failure)?,
             }
-            unzstd_with(&mut dctx, window, blocks, size)
+            unzstd_with(&mut dctx, window, blocks, size, want)
         }
     }
 }
 
 /// [`unzstd`] with `dctx` (of its dictionary, if any).
-fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
+fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64, want: u64) -> Decoded<Vec<u8>> {
     // the frame: a header, then the blocks (not copied after it)
     let head = [ZSTD_MAGIC[0], ZSTD_MAGIC[1], ZSTD_MAGIC[2], ZSTD_MAGIC[3], 0, window];
     let mut frame = [&head[..], blocks].into_iter();
@@ -451,14 +465,22 @@ fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64)
     // up to one byte more than `size`, to tell a longer output: as much room as that from the
     // start where it can be had (written into as it is, without a window buffer of the
     // context's), else made as the output comes
-    let limit = size.saturating_add(1);
+    // (of a part, as much as that, decompressed into with the context's window buffer: the
+    // output written into as it is would have to hold all of it)
+    let part = want < size;
+    let limit = if part { want } else { size.saturating_add(1) };
     let mut out: Vec<u8> = Vec::new();
     if let Ok(n) = usize::try_from(limit)
         && out.try_reserve_exact(n).is_ok()
+        && !part
     {
         dctx.set_parameter(zstd_safe::DParameter::StableOutBuffer(true)).map_err(zstd_failure)?;
     }
     loop {
+        if part && out.len() as u64 >= want {
+            out.truncate(want as usize);
+            return Ok(out);
+        }
         let Some(room) = limit.checked_sub(out.len() as u64).filter(|&r| r > 0) else {
             return invalid("decompressed data longer than declared");
         };

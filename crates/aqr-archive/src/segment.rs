@@ -1217,6 +1217,58 @@ mod tests {
         assert_eq!(got.into_inner().unwrap(), [b"olleh".to_vec(), b"zyx".to_vec(), b"wvu".to_vec()]);
     }
 
+    /// Contents taken alone decode a non-leaf block only as far as their slices reach: of a
+    /// block whose own checksum is damaged, a file at its start is had (by its own checksum),
+    /// and one at its end, which takes the whole block, fails.
+    #[test]
+    fn contents_of_prefix() {
+        let mut f = Formula::default();
+        let mut x = 1u64;
+        let data: Vec<u8> = (0..1u32 << 20)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                b'a' + (x >> 60) as u8
+            })
+            .collect();
+        f.push("s", data.clone());
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let parts = [(0, 1000), (data.len() as u64 - 1000, 1000)];
+        let leaves: Vec<Leaf> = parts
+            .iter()
+            .map(|&(start, len)| Leaf {
+                outputs: vec![Node::slice(0, start, len)],
+                sums: vec![Some(crate::checksum(&data[start as usize..(start + len) as usize]))],
+            })
+            .collect();
+        let batch = w.batch(&enc, &f, &leaves).unwrap();
+        w.commit(&batch);
+        out.extend_from_slice(batch.blocks());
+        let mut t = Tree::default();
+        let contents: Vec<ContentAt> =
+            (0..2).map(|k| ContentAt { leaf: batch.leaf_at[k], output: 0, size: 1000 }).collect();
+        for k in 0..2 {
+            t.entries.push(entry(None, &format!("f{k}"), EntryNode::File(k)));
+        }
+        out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        // (the block's checksum, at its end, damaged)
+        let sum = crate::checksum(&data).to_le_bytes();
+        let at = out.windows(8).position(|s| s == sum).expect("the block's checksum");
+        out[at] ^= 1;
+        let natives = natives();
+        let a = super::super::open(&out, &natives).unwrap();
+        let got = std::sync::Mutex::new(Vec::new());
+        a.contents_of(2, Some(&[true, false]), |c, d| {
+            got.lock().unwrap().push((c, d));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got.into_inner().unwrap(), [(0, data[..1000].to_vec())]);
+        assert!(a.contents_of(2, Some(&[false, true]), |_, _| Ok(())).is_err());
+        assert!(a.contents(2, |_, _| Ok(())).is_err());
+    }
+
     /// The bytes of module and resource blocks in a batch: of a module applied by another leaf
     /// and of one only taken so, and of a resource as stored.
     #[test]
