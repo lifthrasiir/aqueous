@@ -458,14 +458,15 @@ by default
 .Cm coding .
 .Cm coding
 makes the DEFLATE streams of ZIP and gzip files that zlib did not write again by zlib,
-and the LZMA streams of .lzma and .xz files of 8 MiB or more by an encoder of about
+and the LZMA streams of .lzma, .xz and 7z files by an encoder of about
 .Ql xz -3
 whose parse costs next to nothing
 (from level 4 on; their records then cost a few bytes, but decoding is slower);
 .Cm slack
 zeroes the bytes that nothing reads, of Minecraft region files and SQLite databases
 (deleted data is lost; a database with its journal archived along is kept).
-Each file rewritten is checked to be read the same, else archived as it is and told so.
+Each file rewritten is checked to be read the same, else archived as it is and told so;
+so is one that does not archive smaller rewritten.
 Not with
 .Fl A ,
 nor into archives of other formats.

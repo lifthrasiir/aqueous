@@ -176,7 +176,9 @@ fn mark_read_back() {
 #[test]
 fn tree_of_files_rewritten() {
     let (mca, t) = (region(0x5a), text(40_000, 5));
-    let gz = member(&text(100_000, 6), "libdeflate:level=12");
+    // (of text enough for its R to be recompressed: smaller, R would be kept as it is, larger
+    // than the file, and made again as it was)
+    let gz = member(&text(400_000, 6), "libdeflate:level=12");
     let names = ["r.0.0.mca", "a.txt.gz", "b.txt"];
     let datas: [&[u8]; 3] = [&mca, &gz, &t];
     let tree = aqr_archive::Tree {
@@ -289,4 +291,44 @@ fn database_with_journal_kept() {
             (w, _) => assert!(!kept, "{journal}: {w:?}"),
         }
     }
+}
+
+/// A file whose R archives in as many bytes as it was or more (a small `.xz` file, its R some 10%
+/// larger, both kept as they are) is made again as it was: given back as it was, not marked,
+/// told why, in an archive as large as without `--lossy`; so are the files of the same content.
+#[test]
+fn rewritten_larger_made_again() {
+    let mut x = Vec::new();
+    std::io::Write::write_all(&mut liblzma::write::XzEncoder::new(&mut x, 6), &text(100_000, 8)).unwrap();
+    let names = ["a.tar.xz", "b.tar.xz"];
+    let tree = aqr_archive::Tree {
+        entries: (0..2)
+            .map(|c| aqr_archive::Entry {
+                parent: None,
+                name: names[c].as_bytes().to_vec(),
+                node: aqr_archive::EntryNode::File(c),
+                extra: Default::default(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let inputs: Vec<Input> = (0..2).map(|c| Input { name: names[c].as_bytes(), data: &x }).collect();
+    let lossy = Lossy::parse("coding").unwrap();
+    let opt = Options { threads: 2, lossy: Some(lossy), ..super::tests::high() };
+    let a = compress_tree(&tree, &inputs, &opt);
+    let plain = compress_tree(&tree, &inputs, &Options { lossy: None, ..opt.clone() });
+    assert_eq!(a.archive.len(), plain.archive.len());
+    for f in &a.report.files {
+        assert!(
+            matches!(&f.lossy, Some(Rewrite::Kept { reason, .. }) if reason.contains("no smaller")),
+            "{:?}",
+            f.lossy
+        );
+        assert_eq!(f.len, x.len() as u64);
+    }
+    let aqr_archive::Value::Tree(t, got) = aqr_decompress::decompress_value(&a.archive, 1).unwrap() else {
+        panic!("a tree")
+    };
+    assert!(got.iter().all(|g| g[..] == x[..]));
+    assert!(t.entries.iter().all(|e| Mark::of(&e.extra.extensions).is_none()));
 }

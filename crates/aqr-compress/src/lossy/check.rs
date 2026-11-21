@@ -830,3 +830,374 @@ pub(super) fn xz(x: &[u8], r: &[u8]) -> Result<(), String> {
     }
     lzma_pair(x, r, |d| liblzma::bufread::XzDecoder::new_multi_decoder(d))
 }
+
+/// A reader of `n` bytes at most from `r`, counting what it gave.
+struct Counted<R> {
+    r: R,
+    n: u64,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let k = self.r.read(buf)?;
+        self.n += k as u64;
+        Ok(k)
+    }
+}
+
+/// A NUMBER of a 7z header at `*p`.
+fn sz_number(h: &[u8], p: &mut usize) -> Result<u64, String> {
+    let first = *h.get(*p).ok_or("a header cut")?;
+    *p += 1;
+    let mut v = 0u64;
+    for i in 0..8 {
+        let mask = 0x80u8 >> i;
+        if first & mask == 0 {
+            return Ok(v | ((first & mask.wrapping_sub(1)) as u64) << (8 * i));
+        }
+        v |= (*h.get(*p).ok_or("a header cut")? as u64) << (8 * i);
+        *p += 1;
+    }
+    Ok(v)
+}
+
+fn sz_byte(h: &[u8], p: &mut usize) -> Result<u8, String> {
+    let b = *h.get(*p).ok_or("a header cut")?;
+    *p += 1;
+    Ok(b)
+}
+
+fn sz_skip(h: &[u8], p: &mut usize, n: u64) -> Result<(), String> {
+    *p = usize::try_from(n).ok().and_then(|n| p.checked_add(n)).filter(|&e| e <= h.len()).ok_or("a header cut")?;
+    Ok(())
+}
+
+/// A coder of a 7z folder, as the header tells it.
+#[derive(PartialEq)]
+struct SzCoder {
+    id: Vec<u8>,
+    ins: u64,
+    outs: u64,
+    props: Vec<u8>,
+}
+
+/// A folder of a 7z archive, as the header tells it.
+struct SzFolder {
+    coders: Vec<SzCoder>,
+    packed: Vec<u64>,
+    /// The size of each coder's output, and the folder's CRC-32.
+    sizes: Vec<u64>,
+    crc: Option<u32>,
+}
+
+/// The packed streams' info and the folders of a streams info of a 7z header, and where in the
+/// header the packed streams' info (but its id) is.
+struct SzStreams {
+    pos: u64,
+    sizes: Vec<u64>,
+    crcs: Vec<Option<u32>>,
+    folders: Vec<SzFolder>,
+    pack_info: std::ops::Range<usize>,
+}
+
+fn sz_digests(h: &[u8], p: &mut usize, n: usize) -> Result<Vec<Option<u32>>, String> {
+    let all = sz_byte(h, p)? != 0;
+    let mut defined = vec![true; n];
+    if !all {
+        let bits = h.get(*p..*p + n.div_ceil(8)).ok_or("a header cut")?;
+        *p += n.div_ceil(8);
+        defined = (0..n).map(|i| bits[i / 8] >> (7 - i % 8) & 1 != 0).collect();
+    }
+    defined
+        .into_iter()
+        .map(|d| {
+            Ok(match d {
+                true => {
+                    let b = h.get(*p..*p + 4).ok_or("a header cut")?;
+                    *p += 4;
+                    Some(u32::from_le_bytes(b.try_into().unwrap()))
+                }
+                false => None,
+            })
+        })
+        .collect()
+}
+
+/// The packed streams' info and the unpack info of the streams info at `p` of `h` (what follows,
+/// the substreams, is not read).
+fn sz_streams(h: &[u8], mut p: usize) -> Result<SzStreams, String> {
+    if sz_number(h, &mut p)? != 6 {
+        return Err("no packed streams' info".into());
+    }
+    let from = p;
+    let pos = sz_number(h, &mut p)?;
+    let n = usize::try_from(sz_number(h, &mut p)?).ok().filter(|&n| n <= h.len()).ok_or("a header cut")?;
+    let (mut sizes, mut crcs) = (Vec::new(), vec![None; n]);
+    loop {
+        match sz_number(h, &mut p)? {
+            0 => break,
+            9 => sizes = (0..n).map(|_| sz_number(h, &mut p)).collect::<Result<_, _>>()?,
+            10 => crcs = sz_digests(h, &mut p, n)?,
+            _ => return Err("an unknown property of the packed streams".into()),
+        }
+    }
+    if sizes.len() != n {
+        return Err("the packed streams' sizes not told".into());
+    }
+    let pack_info = from..p;
+    let mut folders = Vec::new();
+    if sz_number(h, &mut p)? == 7 {
+        if sz_number(h, &mut p)? != 11 {
+            return Err("no folders".into());
+        }
+        let count = usize::try_from(sz_number(h, &mut p)?).ok().filter(|&n| n <= h.len()).ok_or("a header cut")?;
+        if sz_byte(h, &mut p)? != 0 {
+            return Err("external folders".into());
+        }
+        for _ in 0..count {
+            let nc = usize::try_from(sz_number(h, &mut p)?).ok().filter(|&n| n <= 64).ok_or("too many coders")?;
+            let mut coders = Vec::new();
+            for _ in 0..nc {
+                let flags = sz_byte(h, &mut p)?;
+                if flags & 0xc0 != 0 {
+                    return Err("a coder of unknown flags".into());
+                }
+                let id = h.get(p..p + (flags & 15) as usize).ok_or("a header cut")?.to_vec();
+                p += id.len();
+                let (ins, outs) =
+                    if flags & 0x10 != 0 { (sz_number(h, &mut p)?, sz_number(h, &mut p)?) } else { (1, 1) };
+                let mut props = Vec::new();
+                if flags & 0x20 != 0 {
+                    let k = sz_number(h, &mut p)?;
+                    let from = p;
+                    sz_skip(h, &mut p, k)?;
+                    props = h[from..p].to_vec();
+                }
+                coders.push(SzCoder { id, ins, outs, props });
+            }
+            let ins: u64 = coders.iter().map(|c| c.ins).sum();
+            let outs: u64 = coders.iter().map(|c| c.outs).sum();
+            if outs == 0 || outs > 64 || ins > 64 || ins < outs - 1 {
+                return Err("a folder's streams not right".into());
+            }
+            let binds: Vec<(u64, u64)> = (0..outs - 1)
+                .map(|_| Ok((sz_number(h, &mut p)?, sz_number(h, &mut p)?)))
+                .collect::<Result<_, String>>()?;
+            let packed = if ins - (outs - 1) == 1 {
+                vec![(0..ins).find(|i| !binds.iter().any(|b| b.0 == *i)).ok_or("a folder's bind pairs not right")?]
+            } else {
+                (0..ins - (outs - 1)).map(|_| sz_number(h, &mut p)).collect::<Result<_, _>>()?
+            };
+            folders.push(SzFolder { coders, packed, sizes: Vec::new(), crc: None });
+        }
+        if sz_number(h, &mut p)? != 12 {
+            return Err("no unpack sizes".into());
+        }
+        for f in &mut folders {
+            let outs: u64 = f.coders.iter().map(|c| c.outs).sum();
+            f.sizes = (0..outs).map(|_| sz_number(h, &mut p)).collect::<Result<_, _>>()?;
+        }
+        loop {
+            match sz_number(h, &mut p)? {
+                0 => break,
+                10 => {
+                    let crcs = sz_digests(h, &mut p, count)?;
+                    folders.iter_mut().zip(crcs).for_each(|(f, c)| f.crc = c);
+                }
+                _ => return Err("an unknown property of the folders".into()),
+            }
+        }
+    }
+    Ok(SzStreams { pos, sizes, crcs, folders, pack_info })
+}
+
+type SzLayer<'a> =
+    Counted<liblzma::bufread::XzDecoder<std::io::BufReader<std::io::Chain<std::io::Cursor<Vec<u8>>, &'a [u8]>>>>;
+
+/// What liblzma gives of the raw LZMA or LZMA2 stream of coder `c`, of data of `size` bytes, as a
+/// reader (LZMA's with the header of an `.lzma` file, so that its size is known).
+fn sz_layer<'a>(c: &SzCoder, packed: &'a [u8], size: u64) -> Result<SzLayer<'a>, String> {
+    use liblzma::stream::{Filters, LzmaOptions, Stream};
+    let (stream, head) = if c.id == [3, 1, 1] {
+        if c.props.len() != 5 {
+            return Err("LZMA properties not of 5 bytes".into());
+        }
+        let mut head = c.props.clone();
+        head.extend(size.to_le_bytes());
+        (Stream::new_lzma_decoder(u64::MAX).map_err(|e| e.to_string())?, head)
+    } else {
+        let &[b] = &c.props[..] else { return Err("LZMA2 properties not of 1 byte".into()) };
+        if b > 40 {
+            return Err("LZMA2 properties not right".into());
+        }
+        let dict = if b == 40 { u32::MAX } else { (2 | (b as u32 & 1)) << (b / 2 + 11) };
+        let mut o = LzmaOptions::new_preset(0).map_err(|e| e.to_string())?;
+        o.dict_size(dict);
+        let mut f = Filters::new();
+        f.lzma2(&o);
+        (Stream::new_raw_decoder(&f).map_err(|e| e.to_string())?, Vec::new())
+    };
+    let d = std::io::Read::chain(std::io::Cursor::new(head), packed);
+    Ok(Counted { r: liblzma::bufread::XzDecoder::new_stream(std::io::BufReader::new(d), stream), n: 0 })
+}
+
+/// A 7z archive, read: its header (decoded where it was encoded), what it says of its streams,
+/// and its packed streams.
+struct Sz<'a> {
+    /// The decoded header bytes, without the packed streams' info's fields.
+    masked: Vec<u8>,
+    /// The coder of an encoded header, its properties.
+    header_coder: Option<(Vec<u8>, Vec<u8>)>,
+    streams: Option<SzStreams>,
+    packs: Vec<&'a [u8]>,
+}
+
+fn sz_inflate(c: &SzCoder, packed: &[u8], size: u64) -> Result<Vec<u8>, String> {
+    if size > 1 << 30 {
+        return Err("a header of over 1 GiB".into());
+    }
+    let mut r = sz_layer(c, packed, size)?;
+    let mut v = Vec::new();
+    Read::take(&mut r, size + 1).read_to_end(&mut v).map_err(|e| format!("a header not decoded: {e}"))?;
+    Ok(v)
+}
+
+fn sz_open(d: &[u8]) -> Result<Sz<'_>, String> {
+    if d.len() < 32 || d[..6] != [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c] || d[6] != 0 {
+        return Err("not a 7z archive".into());
+    }
+    if xz_le32(d, 8)? != xz_crc(&d[12..32]) {
+        return Err("the start header's CRC-32 not right".into());
+    }
+    let (off, size) = (le(d, 12, 8)?, le(d, 20, 8)?);
+    let start = 32u64.checked_add(off).ok_or("the next header out of the file")?;
+    if start.checked_add(size) != Some(d.len() as u64) || size == 0 {
+        return Err("the next header not at the end of the file".into());
+    }
+    let hb = &d[start as usize..];
+    if xz_le32(d, 28)? != xz_crc(hb) {
+        return Err("the next header's CRC-32 not right".into());
+    }
+    let mut p = 0;
+    let (header, header_coder, end) = match sz_number(hb, &mut p)? {
+        1 => (hb.to_vec(), None, off),
+        23 => {
+            let s = sz_streams(hb, p)?;
+            let ([f], [size]) = (&s.folders[..], &s.sizes[..]) else {
+                return Err("an encoded header of more than one stream".into());
+            };
+            let [c] = &f.coders[..] else { return Err("an encoded header of several coders".into()) };
+            if c.ins != 1 || c.outs != 1 || !(c.id == [3, 1, 1] || c.id == [0x21]) || f.sizes.len() != 1 {
+                return Err("an encoded header of an unknown coder, or encrypted".into());
+            }
+            if 32u64.checked_add(s.pos).and_then(|a| a.checked_add(*size)) != Some(start) {
+                return Err("an encoded header's stream not before the header".into());
+            }
+            let packed = &d[32 + s.pos as usize..start as usize];
+            if s.crcs[0].is_some_and(|c| c != xz_crc(packed)) {
+                return Err("an encoded header's packed CRC-32 not right".into());
+            }
+            let plain = sz_inflate(c, packed, f.sizes[0])?;
+            if plain.len() as u64 != f.sizes[0] || f.crc.is_some_and(|c| c != xz_crc(&plain)) {
+                return Err("an encoded header not what it tells".into());
+            }
+            (plain, Some((c.id.clone(), c.props.clone())), s.pos)
+        }
+        _ => return Err("a header of an unknown kind".into()),
+    };
+    // the plain header: the streams info of its main streams
+    let mut p = 1;
+    let mut streams = None;
+    loop {
+        match sz_number(&header, &mut p)? {
+            0 | 5 => break,
+            2 => loop {
+                if sz_number(&header, &mut p)? == 0 {
+                    break;
+                }
+                let n = sz_number(&header, &mut p)?;
+                sz_skip(&header, &mut p, n)?;
+            },
+            4 => {
+                streams = Some(sz_streams(&header, p)?);
+                break;
+            }
+            _ => return Err("a header with additional streams".into()),
+        }
+    }
+    let mut masked = header.clone();
+    let mut packs = Vec::new();
+    if let Some(s) = &streams {
+        masked.drain(s.pack_info.clone());
+        if s.pos != 0 {
+            return Err("packed streams not at the start".into());
+        }
+        let mut at = 32u64;
+        for (&n, crc) in s.sizes.iter().zip(&s.crcs) {
+            let e = at.checked_add(n).filter(|&e| e <= 32 + end).ok_or("a packed stream out of the file")?;
+            let b = &d[at as usize..e as usize];
+            if crc.is_some_and(|c| c != xz_crc(b)) {
+                return Err("a packed stream's CRC-32 not right".into());
+            }
+            packs.push(b);
+            at = e;
+        }
+        if at != 32 + end {
+            return Err("packed streams not following one another".into());
+        }
+        if s.folders.iter().map(|f| f.packed.len()).sum::<usize>() != packs.len() {
+            return Err("packed streams not of the folders".into());
+        }
+    } else if end != 0 {
+        return Err("bytes between the signature and the header".into());
+    }
+    Ok(Sz { masked, header_coder, streams, packs })
+}
+
+/// A 7z archive: the same header but the packed streams' info (so the same folders, coders and
+/// their properties, sizes, CRC-32s, substreams and files), the encoded header's coder the same,
+/// the packed streams following one another with the CRC-32s right, and each folder's data the
+/// same as liblzma decodes it: where an LZMA or LZMA2 coder takes the packed stream, that
+/// coder's output (before filters), else the packed stream as it is.
+pub(super) fn sevenz(x: &[u8], r: &[u8]) -> Result<(), String> {
+    let (a, b) = (sz_open(x)?, sz_open(r).map_err(|e| format!("the file rewritten: {e}"))?);
+    if a.masked != b.masked {
+        return Err("the headers are not the same".into());
+    }
+    if a.header_coder != b.header_coder {
+        return Err("the encoded header's coders are not the same".into());
+    }
+    let (Some(s), Some(_)) = (&a.streams, &b.streams) else { return Ok(()) };
+    if a.packs.len() != b.packs.len() {
+        return Err("another number of packed streams".into());
+    }
+    let mut at = 0;
+    for (i, f) in s.folders.iter().enumerate() {
+        let (ps, pr) = (&a.packs[at..at + f.packed.len()], &b.packs[at..at + f.packed.len()]);
+        at += f.packed.len();
+        let alone = f.packed.len() == 1
+            && f.coders.iter().all(|c| c.ins == 1 && c.outs == 1)
+            && f.coders.get(f.packed[0] as usize).is_some_and(|c| c.id == [3, 1, 1] || c.id == [0x21]);
+        if !alone {
+            if ps != pr {
+                return Err(format!("the packed streams of folder {i} are not the same"));
+            }
+            continue;
+        }
+        let k = f.packed[0] as usize;
+        let size = f.sizes[k];
+        let (mut u, mut v) = (sz_layer(&f.coders[k], ps[0], size)?, sz_layer(&f.coders[k], pr[0], size)?);
+        if !same_read(&mut Read::take(&mut u, size + 1), &mut Read::take(&mut v, size + 1))? {
+            return Err(format!("the data of folder {i} is not the same"));
+        }
+        if v.n != size {
+            return Err(format!("the data of folder {i} is not of its size"));
+        }
+        // (the stream is all of its packed stream)
+        let head = if f.coders[k].id == [3, 1, 1] { 13 } else { 0 };
+        if v.r.total_in() != head + pr[0].len() as u64 {
+            return Err(format!("folder {i}'s stream is not all of its packed stream"));
+        }
+    }
+    Ok(())
+}

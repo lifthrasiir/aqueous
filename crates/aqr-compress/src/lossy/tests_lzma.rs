@@ -209,8 +209,18 @@ fn archived(names: &[&str], files: &[Vec<u8>], what: &str) -> (usize, usize) {
     for (c, x) in files.iter().enumerate() {
         let e = got_tree.entries.iter().find(|e| e.name == names[c].as_bytes()).unwrap();
         let aqr_archive::EntryNode::File(k) = e.node else { panic!("a file") };
-        assert_eq!(got[k], made(x));
-        assert!(Mark::of(&e.extra.extensions).is_some());
+        // (R where it archived smaller, else X, made again as it was)
+        match &a.report.files[c].lossy {
+            Some(Rewrite::Made { .. }) => {
+                assert_eq!(got[k], made(x));
+                assert!(Mark::of(&e.extra.extensions).is_some());
+            }
+            Some(Rewrite::Kept { reason, .. }) if reason.contains("no smaller") => {
+                assert_eq!(got[k], *x);
+                assert!(Mark::of(&e.extra.extensions).is_none());
+            }
+            w => panic!("{what}: {w:?}"),
+        }
     }
     eprintln!("{what}: archive {} with --lossy, {} without", a.archive.len(), plain.archive.len());
     (a.archive.len(), plain.archive.len())
@@ -220,13 +230,12 @@ fn archived(names: &[&str], files: &[Vec<u8>], what: &str) -> (usize, usize) {
 fn xz_tree_archived() {
     let data = text(700_000, 6);
     let (a, b) = (xz(&data, 6, Check::Crc64), xz(&data, 1, Check::Crc64));
-    // one file: made again, R about 10% larger (XZ Utils' parser, not the canonical one) and
-    // no recompression pays: nothing is gained, little lost
+    // one file: R about 10% larger (XZ Utils' parser, not the canonical one) where no
+    // recompression pays, so made again as it was: nothing lost
     let (with, without) = archived(&["a.xz"], std::slice::from_ref(&a), "xz, one file");
-    assert!(with <= without * 115 / 100, "{with} {without}");
+    assert!(with <= without, "{with} {without}");
     // the same data of two encoders: one R's worth of archive
     let (with, without) = archived(&["a.xz", "b.xz"], &[a.clone(), b.clone()], "xz, two encoders");
-    eprintln!("X {} {}", a.len(), b.len());
     assert!(with <= without, "{with} {without}");
 }
 
@@ -235,7 +244,7 @@ fn lzma_tree_archived() {
     let data = text(700_000, 7);
     let x = lzma_alone(&data);
     let (with, without) = archived(&["a.lzma"], &[x], "lzma, one file");
-    assert!(with <= without * 115 / 100, "{with} {without}");
+    assert!(with <= without, "{with} {without}");
 }
 
 /// A block header with its compressed size (as XZ Utils' threaded encoder writes it) whose
@@ -261,27 +270,7 @@ fn xz_block_header_with_sizes() {
     check::xz(&x, &r).unwrap();
 }
 
-/// `coding` of files of any size ([`LZMA_MIN`] 0).
+/// `coding`.
 fn coding() -> Lossy {
-    let _any = LZMA_MIN.set_here(0);
     Lossy::parse("coding").unwrap()
-}
-
-/// Below [`LZMA_MIN`], kept as they are, told why.
-#[test]
-fn small_kept() {
-    let x = liblzma_xz(b"some text, some text, some text");
-    let opt = Options { level: aqr_archive::Level::HIGH, ..Options::default() };
-    let r = rewrite(&x, &Lossy::parse("coding").unwrap(), &opt);
-    assert!(
-        matches!(r, Some((Rewrite::Kept { ref reason, .. }, None)) if reason.contains("larger")),
-        "{:?}",
-        r.map(|r| r.0)
-    );
-}
-
-fn liblzma_xz(d: &[u8]) -> Vec<u8> {
-    let mut x = Vec::new();
-    std::io::Write::write_all(&mut liblzma::write::XzEncoder::new(&mut x, 6), d).unwrap();
-    x
 }

@@ -475,6 +475,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         .map(std::sync::Arc::new);
     // (the batches' contents as `--lossy` rewrites them: what is looked at before, of `src`)
     let rw = crate::lossy::Rewriting::new(src, opt);
+    let revoke = |c: usize| rw.revoke(c);
     let cx = Ctx {
         src: &rw,
         opt,
@@ -486,6 +487,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         stop,
         siblings,
         lossy: &rw.made,
+        revoke: &revoke,
     };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),
@@ -678,6 +680,8 @@ struct Ctx<'a, S: ?Sized> {
     siblings: Option<std::sync::Arc<crate::siblings::Plan>>,
     /// What became of the contents that a rewriter of [`Options::lossy`] took, as they are read.
     lossy: &'a Mutex<HashMap<usize, crate::lossy::Rewrite>>,
+    /// The contents made again as they were ([`crate::lossy::Rewriting::revoke`]).
+    revoke: &'a (dyn Fn(usize) -> Option<crate::lossy::Rewrite> + Sync),
 }
 
 impl<S: ?Sized> Ctx<'_, S> {
@@ -1109,6 +1113,14 @@ impl Writer {
                 self.r.files[c].lossy = lossy.remove(&c);
                 src.done(c);
             }
+            // (those of the same content as another: what became of it, its length, as one made
+            // again as it was is no longer what they were read as)
+            for &c in batch {
+                if let Some(t) = self.r.files[c].same_as {
+                    let (len, w) = (self.r.files[t].len, self.r.files[t].lossy.clone());
+                    (self.r.files[c].len, self.r.files[c].lossy) = (len, w);
+                }
+            }
         }
         notes.send(Note::Written(i));
         tell(Event::Written { contents: batch, report: &self.r });
@@ -1127,20 +1139,49 @@ impl Writer {
     ) -> io::Result<()> {
         let (src, opt, notes, batch) = (cx.src, cx.opt, cx.notes, &cx.batches[i]);
         let mut raw = HashSet::new();
+        let mut files = std::borrow::Cow::Borrowed(files);
         let mut made = loop {
             let w = &self.w;
-            let made = self.watched(cx, out, move || finish(i, w, files, part, src, opt, notes))?;
+            let fs = &files[..];
+            let made = self.watched(cx, out, move || finish(i, w, fs, part, src, opt, notes))?;
+            // (the files `--lossy` rewrote that archive in as many bytes as they were, or more:
+            // made again as they were, which kept as they are cost no more, docs/lossy-design.md §1)
+            let larger: Vec<usize> = (0..files.len())
+                .filter(|&k| files[k].rewritten && !raw.contains(&k))
+                .filter(|&k| match cx.lossy.lock().unwrap().get(&files[k].c) {
+                    Some(crate::lossy::Rewrite::Made { mark, .. }) => made.files[k].archived >= mark.size as f64,
+                    _ => false,
+                })
+                .collect();
             let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
-            if bad.is_empty() {
+            if bad.is_empty() && larger.is_empty() {
                 break made;
+            }
+            if !larger.is_empty() && bad.is_empty() {
+                let owned = files.to_mut();
+                for &k in &larger {
+                    let c = owned[k].c;
+                    let kept = (cx.revoke)(c);
+                    let d = src.read(c)?;
+                    let hash = xxhash_rust::xxh3::xxh3_128(&d);
+                    owned[k] = File::of(c, &d, hash, owned[k].kind, owned[k].entry);
+                    cx.lossy.lock().unwrap().extend(kept.map(|w| (c, w)));
+                }
+                let bytes = batch.iter().map(|&c| src.size(c)).sum();
+                notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
+                let data = reread(src, &files, opt.threads)?;
+                let fs = &files[..];
+                part = self.watched(cx, out, || analyze(i, fs, data, &raw, opt, notes, cx.siblings.clone()))?;
+                continue;
             }
             // (not given back as it was not read as it is: told so, not made again)
             files.iter().try_for_each(|f| src.intact(f.c))?;
             raw.extend(bad);
             let bytes = batch.iter().map(|&c| src.size(c)).sum();
             notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
-            let data = reread(src, files, opt.threads)?;
-            part = self.watched(cx, out, || analyze(i, files, data, &raw, opt, notes, cx.siblings.clone()))?;
+            let data = reread(src, &files, opt.threads)?;
+            let fs = &files[..];
+            part = self.watched(cx, out, || analyze(i, fs, data, &raw, opt, notes, cx.siblings.clone()))?;
         };
         files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);
@@ -1172,6 +1213,8 @@ impl Writer {
             let f = &made.files[k];
             let c = file.c;
             (r.files[c].format, r.files[c].modules, r.files[c].archived) = (f.format, f.modules.clone(), f.archived);
+            // (of the file as it is archived: X's where it was made again as it was)
+            r.files[c].len = file.len as u64;
             r.files[c].classes = f.classes.clone();
         }
         let global = |ks: &[usize]| ks.iter().map(|&k| files[k].c).collect::<Vec<_>>();
@@ -1828,6 +1871,7 @@ fn sort_key(name: &[u8]) -> (Vec<u8>, &[u8]) {
 
 /// A file of a batch: its content, the kind its name tells, and what is known of its data,
 /// which is held only by the formula of the batch ([`make`]).
+#[derive(Clone)]
 struct File {
     c: usize,
     kind: Kind,
