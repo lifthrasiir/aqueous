@@ -142,8 +142,14 @@ pub(crate) struct FileOut<'f> {
 /// A file written to as [`stop::held`] has it: not as the process is stopped and the output undone.
 pub(crate) struct Held<'f>(pub(crate) &'f fs::File);
 
+/// The most bytes written at once ([`Held`]): on Windows, a write of 64 MiB or more ran at 1.6-1.85
+/// GB/s, of 4-16 MiB at 4.5 GB/s (512 MiB to a new file on NTFS, Ryzen 7 9700X); an archive's
+/// batch, written whole, is of hundreds of MB.
+const WRITE_AT_ONCE: usize = 8 << 20;
+
 impl Write for Held<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let buf = &buf[..buf.len().min(WRITE_AT_ONCE)];
         stop::held(|| (&*self.0).write(buf))
     }
 
