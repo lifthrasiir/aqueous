@@ -158,8 +158,9 @@ mod packed {
         fs::write(d.join("in/a.txt"), prose(200_000)).unwrap();
         fs::write(d.join("in/b.bin"), (0..5000u32).map(|i| (i * 7 % 253) as u8).collect::<Vec<_>>()).unwrap();
         let sign = format!("\"{}\" sign /q /fd sha256 /f t.pfx /p x \"%AQR_OUTPUT%\"", signtool.display());
-        let o = aqr_in(&d, &["-c", "-q", "--format", "sfx", "-o", "in.exe", "--run-after", &sign, "in"]);
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let o = aqr_in(&d, &["-c", "--format", "sfx", "-o", "in.exe", "--run-after", &sign, "in"]);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success() && !err.contains("not signed"), "{err}");
         let signed = fs::read(d.join("in.exe")).unwrap();
         assert!(aqr_archive::pe_certificate_table(&signed).is_some(), "a signature");
         // the system's check of it: its hash holds (its root is not trusted)
@@ -179,6 +180,39 @@ mod packed {
         }
         let o = aqr_in(&d, &["-t", "-q", "in.exe"]);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A program made unsigned is told so: on standard error (not with `-q`), and to a frontend
+    /// (`--ipc`) as a `notice` of kind `unsigned`.
+    #[test]
+    fn told_unsigned() {
+        use std::io::{BufRead, Write};
+        let d = scratch("unsigned");
+        fs::create_dir_all(d.join("in")).unwrap();
+        fs::write(d.join("in/a.txt"), prose(20_000)).unwrap();
+        let o = aqr_in(&d, &["-c", "--format", "sfx", "-o", "a.exe", "in"]);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success() && err.contains("a.exe: not signed"), "{err}");
+        let o = aqr_in(&d, &["-c", "-q", "-f", "--format", "sfx", "-o", "a.exe", "in"]);
+        assert!(o.status.success() && !String::from_utf8_lossy(&o.stderr).contains("not signed"));
+        // the frontend's
+        let mut c = Command::new(aqr())
+            .current_dir(&d)
+            .args(["--ipc", "-c", "-f", "--format", "sfx", "-o", "a.exe", "in"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        writeln!(c.stdin.as_mut().unwrap(), "{{\"hello\":1,\"answers\":[]}}").unwrap();
+        let out = std::io::BufReader::new(c.stdout.take().unwrap());
+        let told: Vec<serde_json::Value> = out.lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+        assert!(c.wait().unwrap().success());
+        let notice = told.iter().find(|v| v["event"] == "notice").expect("a notice");
+        assert_eq!(notice["kind"], "unsigned");
+        assert!(notice["output"].as_str().unwrap().ends_with("a.exe"), "{notice}");
+        assert!(notice["message"].as_str().unwrap().starts_with("not signed"), "{notice}");
         fs::remove_dir_all(&d).unwrap();
     }
 

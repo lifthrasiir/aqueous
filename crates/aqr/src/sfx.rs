@@ -193,6 +193,30 @@ pub fn settings(archive: &[u8], threads: usize) -> Result<Option<Compiled>, Stri
     aqr_sfx::config::compile(&files, &|p| kinds.get(p).copied()).map(Some)
 }
 
+/// Tells (on standard error but with `-q`, and to the frontend: `{"event":"notice","kind":
+/// "unsigned"}`, [`crate::ipc`]) where self-extracting program `out`, as it is left once made, is
+/// not signed: Windows' SmartScreen and antivirus software warn of such programs, or block them.
+pub fn tell_unsigned(a: &crate::Args, out: &std::path::Path) -> Result<(), String> {
+    let exe = std::fs::read(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    if aqr_archive::pe_certificate_table(&exe).is_some() {
+        return Ok(());
+    }
+    let message = concat!(
+        "not signed: SmartScreen and antivirus software may warn of it or block it; ",
+        "sign it once it is made (--run-after runs a command on it, its path in AQR_OUTPUT)",
+    );
+    if !a.quiet {
+        eprintln!("{}: {message}", out.display());
+    }
+    crate::ipc::tell(serde_json::json!({
+        "event": "notice",
+        "kind": "unsigned",
+        "output": out.display().to_string(),
+        "message": message,
+    }));
+    Ok(())
+}
+
 /// The self-extracting program of `archive` (an Aqueous archive made with [`wasm_of`]): the stub
 /// (its image as `settings` tells), the bundle of the native blobs of the modules it names by
 /// their hashes and, if it has any module in full, of the interpreter blob (none where it has no

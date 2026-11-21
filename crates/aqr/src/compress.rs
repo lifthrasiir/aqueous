@@ -281,6 +281,10 @@ fn compress_into(a: &Args, inputs: Inputs, out: &Path) -> Result<Vec<Gone>, Stri
     if !matches!(a.format, Pack::Other(..)) {
         hooks::still_there(a, out)?;
     }
+    // (of the program as it is left: signed by a hook, say)
+    if a.format == Pack::Sfx {
+        sfx::tell_unsigned(a, out)?;
+    }
     Ok(gone)
 }
 

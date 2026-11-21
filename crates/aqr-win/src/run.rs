@@ -110,6 +110,12 @@ fn conclude(verb: Verb, job: Job, status: Option<std::process::ExitStatus>, coun
             ExitCode::SUCCESS
         }
         Outcome::Silent => ExitCode::FAILURE,
-        Outcome::Done => ExitCode::SUCCESS,
+        Outcome::Done => {
+            // (what aqr told of the archives made: a self-extracting program not signed)
+            if let Some((main, text)) = aqr_ipc::notice(&s) {
+                dialog::message(Icon::Warning, &main, &text, None);
+            }
+            ExitCode::SUCCESS
+        }
     }
 }

@@ -35,6 +35,9 @@ ok = "OK"
 cancel = "Cancel"
 choose_version = "Extract which version of {name}?"
 no_versions = "{name} has no named versions"
+# Of aqr's `notice` of kind `unsigned`: a self-extracting program made that is not signed.
+unsigned_name = "{name} is not signed"
+unsigned = "SmartScreen and antivirus software may warn of a self-extracting program that is not signed, or block it. Sign it with a code-signing certificate before passing it around."
 
 # The parts of a time, as `aqr_l10n::duration` puts them together (by a space, those of zero left
 # out): `{n}` a number of seconds under a minute (of decimals, maybe), else whole numbers.

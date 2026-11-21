@@ -314,6 +314,9 @@ pub struct State {
     /// The `end` events with the names of their archives ([`State::name`]), the outputs skipped.
     pub ended: Vec<(String, Value)>,
     pub skipped: Vec<PathBuf>,
+    /// The `notice` events: what to tell of the archives made, which does not fail them
+    /// ([`notice`]).
+    pub notices: Vec<Value>,
     pub error: Option<String>,
     pub stopped: bool,
     /// The user gave up a passphrase (`aqr`'s error for that is not told).
@@ -364,6 +367,7 @@ impl State {
                 self.ended.push((name, v));
             }
             Some("skipped") => self.skipped.extend(path(&v["output"])),
+            Some("notice") => self.notices.push(v),
             Some("error") => self.error = Some(v["message"].as_str().unwrap_or("").to_string()),
             Some("stopped") => self.stopped = true,
             _ => {}
@@ -503,6 +507,30 @@ fn failure(s: &State, status: Option<std::process::ExitStatus>) -> Option<String
     }
 }
 
+/// What the `notice` events of the job whose [`State`] is `s` tell, for the frontend to show
+/// (once it is done): the main line, and the text (a paragraph of each, those of a kind not known
+/// in `aqr`'s words). `None` where there are none.
+pub fn notice(s: &State) -> Option<(String, String)> {
+    let named = |v: &Value| v["output"].as_str().map(|o| file_name(Path::new(o))).unwrap_or_default();
+    let first = s.notices.first()?;
+    let main = match first["kind"].as_str() {
+        Some("unsigned") => aqr_l10n::common::unsigned_name(named(first)),
+        _ => named(first),
+    };
+    let mut text: Vec<String> = Vec::new();
+    for v in &s.notices {
+        let t = match v["kind"].as_str() {
+            Some("unsigned") => aqr_l10n::common::unsigned().to_string(),
+            _ => aqr_l10n::common::named(named(v), v["message"].as_str().unwrap_or("")),
+        };
+        // (several archives of the same: told once)
+        if !text.contains(&t) {
+            text.push(t);
+        }
+    }
+    Some((main, text.join("\n\n")))
+}
+
 /// What came of a job of `verb` over `count` archives, ended with `status` (`None`: unknown),
 /// for the frontend to show.
 pub enum Outcome {
@@ -538,6 +566,25 @@ pub fn outcome(verb: Verb, count: usize, s: &State, status: Option<std::process:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The notices told, in the frontend's words of the kinds it knows (English here), aqr's of
+    /// the others; each text once.
+    #[test]
+    fn notices() {
+        let mut s = State::default();
+        assert!(notice(&s).is_none());
+        for line in [
+            r#"{"event":"notice","kind":"unsigned","output":"d/a.exe","message":"not signed: ..."}"#,
+            r#"{"event":"notice","kind":"unsigned","output":"d/b.exe","message":"not signed: ..."}"#,
+            r#"{"event":"notice","kind":"later","output":"d/c.aqr","message":"something new"}"#,
+        ] {
+            s.take(line);
+        }
+        let (main, text) = notice(&s).unwrap();
+        assert_eq!(main, "a.exe is not signed");
+        assert!(text.starts_with("SmartScreen") && text.ends_with("\n\nc.aqr: something new"), "{text}");
+        assert_eq!(text.matches("SmartScreen").count(), 1);
+    }
 
     /// What `aqr` tells of two archives tested, one of them failing.
     #[test]

@@ -29,6 +29,11 @@
 //! - `{"event":"end","output":O,"files":N,"read":R,"written":W,"seconds":S}`: an archive done
 //!   (`written` is what was decoded, decoding).
 //! - `{"event":"skipped","output":O}`: an archive not made, as the frontend answered.
+//! - `{"event":"notice","kind":K,"output":O,"message":M}`: something to tell of archive `O` made,
+//!   which does not fail it: `M` in English, for a frontend that does not know kind `K` (and
+//!   shows its own words of those it knows). `unsigned`: a self-extracting program, as it is left
+//!   once made (and `--run-after` ran), is not signed (Windows' SmartScreen and antivirus software
+//!   warn of such programs, or block them).
 //! - `{"event":"error","message":...}`: the failure that the program ends with.
 //! - `{"event":"stopped"}`: stopped as the frontend asked; the output being written removed
 //!   ([`crate::stop`]). Of an archive ended as it was (`finish`, or a signal), `"kept"` too:

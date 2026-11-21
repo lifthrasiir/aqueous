@@ -236,6 +236,9 @@ SFX가 같이 걸린다.
   돌려 본다 (둘 중 하나가 없으면 건너뛴다).
   서명은 `aqr -c --format sfx --run-after "signtool sign ... \"%AQR_OUTPUT%\""`처럼 hook으로 이어 붙일 수 있다
   (`crates/aqr/src/hooks.rs`: 아카이브를 쓰는 작업마다, 셸로, 경로는 환경 변수로. 그 시험도 이렇게 서명한다).
+  다 만든 SFX(hook까지 돈 뒤)에 서명이 없으면 aqr이 알린다: stderr에 한 줄(`-q`면 없음), 그리고 프런트엔드에
+  `{"event":"notice","kind":"unsigned",...}` (`crates/aqr/src/ipc.rs`). aqr-win은 끝난 뒤 그것을 경고 대화상자로
+  보인다 (aqr-ipc의 `notice`, 문구는 aqr-l10n의 `common.unsigned*`). 모르는 `kind`는 함께 오는 영어 `message`로 보인다.
 
 ## 9. 순서
 
