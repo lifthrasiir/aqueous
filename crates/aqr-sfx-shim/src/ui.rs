@@ -3,7 +3,7 @@
 //! manifest's `consoleAllocationPolicy`: docs/encrypted-sfx-design.md, 4).
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aqr_sfx::Answer;
 
@@ -52,7 +52,7 @@ impl Ui {
     /// (no where it ends), else in a dialog of its text.
     pub fn license(&mut self, text: &str) -> bool {
         if self.gui {
-            return dialog(&self.title, text, Asking::License, self.banner.as_deref());
+            return dialog(&self.title, text, Asking::License, self.banner.as_deref()).is_some();
         }
         eprintln!("{}", text.trim_end());
         eprintln!();
@@ -63,9 +63,22 @@ impl Ui {
     /// is one.
     pub fn prompt(&mut self, q: &str) -> bool {
         match &self.banner {
-            Some(b) if self.gui => dialog(&self.title, q, Asking::Question, Some(b)),
+            Some(b) if self.gui => dialog(&self.title, q, Asking::Question, Some(b)).is_some(),
             _ => self.confirm(q),
         }
+    }
+
+    /// Asks where the files go, `offered` offered (taken where the answer is empty); `None`
+    /// where it was cancelled (or standard input ends).
+    pub fn path(&mut self, offered: &Path) -> Option<PathBuf> {
+        let o = offered.display().to_string();
+        let answer = if self.gui {
+            dialog(&self.title, &o, Asking::Path, self.banner.as_deref())?
+        } else {
+            raw_line(&format!("Extract to [{o}]: "))?
+        };
+        let answer = answer.trim();
+        Some(if answer.is_empty() { offered.to_path_buf() } else { PathBuf::from(answer) })
     }
 
     /// Whether what is asked is asked in windows (no standard error).
@@ -116,12 +129,17 @@ impl Ui {
 /// A line of standard input after prompt `p` on standard error, trimmed and in lower case;
 /// `None` where it ends.
 fn line(p: &str) -> Option<String> {
+    raw_line(p).map(|s| s.to_lowercase())
+}
+
+/// A line of standard input after prompt `p` on standard error, trimmed; `None` where it ends.
+fn raw_line(p: &str) -> Option<String> {
     eprint!("{p}");
     let _ = std::io::stderr().flush();
     let mut s = String::new();
     match std::io::stdin().read_line(&mut s) {
         Ok(0) | Err(_) => None,
-        Ok(_) => Some(s.trim().to_lowercase()),
+        Ok(_) => Some(s.trim().to_string()),
     }
 }
 
@@ -155,6 +173,8 @@ enum Asking {
     License,
     /// A question: Yes and No.
     Question,
+    /// A folder: its path offered to edit, Browse, OK and Cancel.
+    Path,
 }
 
 /// What a [`dialog`]'s procedure takes.
@@ -165,19 +185,26 @@ struct Shown<'a> {
     banner: Option<&'a [u8]>,
     /// The banner's bitmap made, freed once the dialog ends.
     bitmap: std::cell::Cell<*mut c_void>,
+    /// The path edited, taken as OK is pressed.
+    answer: std::cell::RefCell<String>,
 }
 
 /// A dialog of `text` asking `asking` (a template made in memory: user32 alone, and WIC for the
 /// banner), under `banner` where there is one: laid out once its banner and text are measured.
-/// Whether it was agreed to (Accept, Yes).
+/// `None` where it was declined (Decline, No, Cancel), else the path edited (of a question and
+/// a license nothing).
 #[cfg(windows)]
-fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> bool {
+fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> Option<String> {
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let mut t: Vec<u16> = Vec::new();
     let dword = |t: &mut Vec<u16>, v: u32| t.extend_from_slice(&[v as u16, (v >> 16) as u16]);
     let child = 0x4000_0000 | 0x1000_0000;
     let tab = 0x0001_0000;
-    let (yes, no) = if asking == Asking::License { ("Accept", "Decline") } else { ("Yes", "No") };
+    let (yes, no) = match asking {
+        Asking::License => ("Accept", "Decline"),
+        Asking::Question => ("Yes", "No"),
+        Asking::Path => ("OK", "Cancel"),
+    };
     let mut items: Vec<(u32, [u16; 4], u16, u16, &str)> = vec![
         match asking {
             // EDIT: ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY, WS_VSCROLL, WS_BORDER
@@ -186,11 +213,18 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> boo
             }
             // STATIC: SS_NOPREFIX (its height as its text measures)
             Asking::Question => (child | 0x80, [7, 7, 266, 8], 100, 0x82, ""),
+            // EDIT: ES_AUTOHSCROLL, WS_BORDER
+            Asking::Path => (child | tab | 0x80 | 0x0080_0000, [0, 0, 1, 14], 100, 0x81, ""),
         },
         // BUTTON: BS_DEFPUSHBUTTON (where they go laid out)
         (child | tab | 0x1, [0, 0, 52, 15], 1, 0x80, yes),
         (child | tab, [0, 0, 52, 15], 2, 0x80, no),
     ];
+    if asking == Asking::Path {
+        // STATIC: SS_NOPREFIX; BUTTON
+        items.push((child | 0x80, [0, 0, 1, 8], 102, 0x82, "Extract to:"));
+        items.push((child | tab, [0, 0, 52, 15], 3, 0x80, "Browse..."));
+    }
     if banner.is_some() {
         // STATIC: SS_BITMAP | SS_CENTERIMAGE
         items.push((child | 0xe | 0x200, [0, 0, 1, 1], 101, 0x82, ""));
@@ -198,7 +232,11 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> boo
     // DLGTEMPLATE: WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_CENTER | DS_MODALFRAME | DS_SETFONT
     dword(&mut t, 0x8000_0000 | 0x00c0_0000 | 0x0008_0000 | 0x800 | 0x80 | 0x40);
     dword(&mut t, 0);
-    let width = if asking == Asking::License { 320 } else { 280 };
+    let width = match asking {
+        Asking::License => 320,
+        Asking::Question => 280,
+        Asking::Path => 300,
+    };
     t.extend_from_slice(&[items.len() as u16, 0, 0, width, 100]);
     // (no menu, the default class), the title, the font: the message boxes'
     t.extend_from_slice(&[0, 0]);
@@ -224,6 +262,7 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> boo
         asking,
         banner,
         bitmap: std::cell::Cell::new(std::ptr::null_mut()),
+        answer: Default::default(),
     };
 
     extern "system" fn proc(h: *mut c_void, msg: u32, wp: usize, lp: isize) -> isize {
@@ -231,14 +270,33 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> boo
         unsafe {
             match msg {
                 0x110 => {
+                    // (what is shown kept for the commands, GWLP_USERDATA)
+                    sys::SetWindowLongPtrW(h, -21, lp);
                     let s = &*(lp as *const Shown);
                     sys::SetDlgItemTextW(h, 100, s.text.as_ptr());
                     lay_out(h, s);
-                    sys::SetFocus(sys::GetDlgItem(h, 1));
+                    sys::SetFocus(sys::GetDlgItem(h, if s.asking == Asking::Path { 100 } else { 1 }));
                     0
                 }
-                0x111 if matches!(wp & 0xffff, 1 | 2) => {
-                    sys::EndDialog(h, (wp & 0xffff) as isize);
+                0x111 if matches!(wp & 0xffff, 1..=3) => {
+                    let s = &*(sys::GetWindowLongPtrW(h, -21) as *const Shown);
+                    let id = (wp & 0xffff) as i32;
+                    if s.asking == Asking::Path && id != 2 {
+                        let mut buf = vec![0u16; 32768];
+                        let n = sys::GetDlgItemTextW(h, 100, buf.as_mut_ptr(), buf.len() as i32);
+                        let path = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+                        if id == 3 {
+                            if let Some(p) = crate::folder::pick(h, &path) {
+                                let p: Vec<u16> = p.encode_utf16().chain([0]).collect();
+                                sys::SetDlgItemTextW(h, 100, p.as_ptr());
+                            }
+                            return 1;
+                        }
+                        *s.answer.borrow_mut() = path;
+                    }
+                    if id != 3 {
+                        sys::EndDialog(h, id as isize);
+                    }
                     1
                 }
                 _ => 0,
@@ -259,7 +317,7 @@ fn dialog(title: &str, text: &str, asking: Asking, banner: Option<&[u8]>) -> boo
     if !shown.bitmap.get().is_null() {
         crate::banner::free(shown.bitmap.get());
     }
-    r == 1
+    (r == 1).then(|| shown.answer.take())
 }
 
 /// The font of the message boxes (`NONCLIENTMETRICS`' `lfMessageFont`: Segoe UI, its Hangul
@@ -324,6 +382,17 @@ unsafe fn lay_out(h: *mut c_void, s: &Shown) {
         let body = sys::GetDlgItem(h, 100);
         let height = match s.asking {
             Asking::License => units(0, 170).1,
+            Asking::Path => {
+                // the label, under it the path and Browse
+                let label = units(0, 8).1;
+                sys::MoveWindow(sys::GetDlgItem(h, 102), mx, top + my, width - 2 * mx, label, 0);
+                let y = top + my + label + units(0, 3).1;
+                let eh = units(0, 14).1;
+                sys::MoveWindow(body, mx, y + (bh - eh) / 2, width - 2 * mx - bw - gap, eh, 0);
+                sys::MoveWindow(sys::GetDlgItem(h, 3), width - mx - bw, y, bw, bh, 0);
+                top += label + units(0, 3).1 + bh;
+                0
+            }
             Asking::Question => {
                 // DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS, in the control's font
                 let dc = sys::GetDC(body);
@@ -335,7 +404,9 @@ unsafe fn lay_out(h: *mut c_void, s: &Shown) {
                 r.bottom.max(units(0, 8).1)
             }
         };
-        sys::MoveWindow(body, mx, top + my, width - 2 * mx, height, 0);
+        if s.asking != Asking::Path {
+            sys::MoveWindow(body, mx, top + my, width - 2 * mx, height, 0);
+        }
         let y = top + my + height + my;
         sys::MoveWindow(sys::GetDlgItem(h, 2), width - mx - bw, y, bw, bh, 0);
         sys::MoveWindow(sys::GetDlgItem(h, 1), width - mx - 2 * bw - gap, y, bw, bh, 0);
@@ -352,8 +423,8 @@ unsafe fn lay_out(h: *mut c_void, s: &Shown) {
 }
 
 #[cfg(not(windows))]
-fn dialog(_: &str, _: &str, _: Asking, _: Option<&[u8]>) -> bool {
-    false
+fn dialog(_: &str, _: &str, _: Asking, _: Option<&[u8]>) -> Option<String> {
+    None
 }
 
 #[cfg(windows)]
@@ -380,6 +451,9 @@ mod sys {
             param: isize,
         ) -> isize;
         pub fn SetDlgItemTextW(dialog: *mut core::ffi::c_void, id: i32, text: *const u16) -> i32;
+        pub fn GetDlgItemTextW(dialog: *mut core::ffi::c_void, id: i32, text: *mut u16, n: i32) -> i32;
+        pub fn SetWindowLongPtrW(window: *mut core::ffi::c_void, index: i32, value: isize) -> isize;
+        pub fn GetWindowLongPtrW(window: *mut core::ffi::c_void, index: i32) -> isize;
         pub fn GetDlgItem(dialog: *mut core::ffi::c_void, id: i32) -> *mut core::ffi::c_void;
         pub fn SetFocus(window: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
         pub fn EndDialog(dialog: *mut core::ffi::c_void, result: isize) -> i32;

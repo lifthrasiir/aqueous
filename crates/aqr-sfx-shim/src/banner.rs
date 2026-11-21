@@ -55,7 +55,7 @@ type Release = unsafe extern "system" fn(P) -> u32;
 type Make = unsafe extern "system" fn(P, *mut P) -> i32;
 
 /// Method `i` of the vtable of COM object `o`, as `F`.
-unsafe fn slot<F: Copy>(o: P, i: usize) -> F {
+pub unsafe fn slot<F: Copy>(o: P, i: usize) -> F {
     // SAFETY: (the caller's) `o` an object whose vtable has a method of type `F` at `i`
     unsafe { std::mem::transmute_copy(&*(*(o as *const *const usize)).add(i)) }
 }
@@ -152,6 +152,8 @@ pub fn free(b: P) {
     // SAFETY: a bitmap made here, selected nowhere
     unsafe { sys::DeleteObject(b) };
 }
+
+pub(crate) use sys::Guid;
 
 mod sys {
     use super::P;

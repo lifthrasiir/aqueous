@@ -169,6 +169,31 @@ fn asked_first() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// Where the files go asked (`extract.ask`): the place offered taken by an empty answer, another
+/// given, cancelled where standard input ends (nothing written), not asked by `-y` nor where
+/// the command line tells.
+#[test]
+fn where_asked() {
+    let d = scratch("ask");
+    let a = archive(&[("a.txt", b"a".to_vec())]);
+    let c = Config { ask: true, ..extracting("{cwd}/out", true, Overwrite::Always) };
+    let exe = program(&d, "x", &[c.record(), a].concat());
+    let o = run(&d, &exe, &[], "\n");
+    assert!(o.status.success() && err(&o).contains("Extract to ["), "{}", err(&o));
+    assert!(d.join("out/x/a.txt").exists());
+    let o = run(&d, &exe, &[], "  there  \n");
+    assert!(o.status.success() && d.join("there/a.txt").exists(), "{}", err(&o));
+    let o = run(&d, &exe, &[], "");
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    for (args, at) in [(&["-y"][..], "out/x"), (&["given"][..], "given")] {
+        std::fs::remove_dir_all(d.join("out")).ok();
+        let o = run(&d, &exe, args, "");
+        assert!(o.status.success() && !err(&o).contains("Extract to"), "{args:?}: {}", err(&o));
+        assert!(d.join(at).join("a.txt").exists(), "{args:?}");
+    }
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// The license of the archive's `.aqr/sfx/`, of the user's language where there is one: shown
 /// and agreed to before anything is written, declined, or not asked (`-y`).
 #[test]

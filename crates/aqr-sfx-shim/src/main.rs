@@ -21,6 +21,8 @@
 
 #[cfg(windows)]
 mod banner;
+#[cfg(windows)]
+mod folder;
 mod run;
 mod shortcut;
 mod ui;
@@ -170,6 +172,19 @@ fn run(ui: &mut Ui) -> Result<i32, String> {
             let mut d = aqr_sfx::config::destination(&config.dest, &mut |p| place(p, &fresh))?;
             if config.subdir {
                 d.push(aqr_sfx::sanitized(program_name().as_bytes()));
+            }
+            // (asked, that offered; a new temporary directory of it not taken removed)
+            if config.ask && !ui.quiet {
+                let asked = ui.path(&d);
+                if asked.as_ref() != Some(&d)
+                    && let Some(t) = fresh.borrow_mut().take()
+                {
+                    let _ = std::fs::remove_dir(t);
+                }
+                match asked {
+                    Some(a) => d = a,
+                    None => return Ok(2),
+                }
             }
             d
         }

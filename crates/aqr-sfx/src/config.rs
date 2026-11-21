@@ -27,6 +27,7 @@
 //!   ? &(run: -9) => run,
 //!   ? &(license: -10) => tstr,    ; a file of .aqr/sfx/, `license.txt`: `license.ko.txt` for ko
 //!   ? &(shortcuts: -11) => [* shortcut],
+//!   ? &(ask: -13) => bool,        ; false: where the files go asked, dest (and subdir) offered
 //!   ? &(banner: -12) => tstr,     ; a file of .aqr/sfx/ (as the license's, by language): PNG,
 //!                                 ; BMP, JPEG or GIF, above the prompt and the license
 //!   * int => any,
@@ -121,6 +122,8 @@ pub struct Config {
     pub dest: String,
     /// The files under a directory of the program's name (`foo.exe`: `foo`) there.
     pub subdir: bool,
+    /// Where the files go asked, [`Config::dest`] (and [`Config::subdir`]) offered.
+    pub ask: bool,
     pub overwrite: Overwrite,
     /// Asked before anything is written (yes or no).
     pub prompt: Option<Text>,
@@ -212,6 +215,7 @@ impl Default for Config {
             title: None,
             dest: "{cwd}".into(),
             subdir: false,
+            ask: false,
             overwrite: Overwrite::Fail,
             prompt: None,
             finish: None,
@@ -237,6 +241,7 @@ const K_RUN: i128 = -9;
 const K_LICENSE: i128 = -10;
 const K_SHORTCUTS: i128 = -11;
 const K_BANNER: i128 = -12;
+const K_ASK: i128 = -13;
 const S_TARGET: i128 = -1;
 const S_NAME: i128 = -2;
 const S_AT: i128 = -3;
@@ -293,6 +298,9 @@ impl Config {
         }
         put(K_DEST, &|v| put_text(v, &self.dest));
         put(K_SUBDIR, &|v| put_bool(v, self.subdir));
+        if self.ask {
+            put(K_ASK, &|v| put_bool(v, true));
+        }
         let overwrite = match self.overwrite {
             Overwrite::Fail => None,
             Overwrite::Ask => Some(0),
@@ -409,6 +417,7 @@ impl Config {
                 K_TITLE => c.title = Some(texts(&v, "the title")?),
                 K_DEST => c.dest = text(&v, "the destination")?,
                 K_SUBDIR => c.subdir = boolean(&v, "subdir")?,
+                K_ASK => c.ask = boolean(&v, "ask")?,
                 K_OVERWRITE => {
                     c.overwrite = [Overwrite::Ask, Overwrite::Always, Overwrite::Never, Overwrite::Newer]
                         [int(&v, "overwrite", 3)? as usize]
@@ -712,9 +721,7 @@ pub fn compile(
         Some("newer") => Overwrite::Newer,
         Some(o) => return Err(format!("extract.overwrite: {o:?}, not \"ask\", \"always\", \"never\" nor \"newer\"")),
     };
-    if ex.boolean("ask")?.is_some() {
-        return Err("extract.ask: not yet (a path asked for comes with the program's dialogs)".into());
-    }
+    let ask = ex.boolean("ask")?.unwrap_or(false);
     ex.done()?;
 
     // run
@@ -877,7 +884,7 @@ pub fn compile(
         shortcuts.push(Shortcut { target, name, at, folder, args, description });
     }
 
-    let config = Config { title, dest, subdir, overwrite, prompt, finish, license, banner, quiet, run, shortcuts };
+    let config = Config { title, dest, subdir, ask, overwrite, prompt, finish, license, banner, quiet, run, shortcuts };
     Ok(Compiled { config, pe: Pe { gui, icon, manifest, version } })
 }
 
@@ -1100,6 +1107,7 @@ mod tests {
             title: Some(Text::plain("Example Setup")),
             dest: "{temp}/x".into(),
             subdir: true,
+            ask: true,
             overwrite: Overwrite::Newer,
             prompt: Some(Text(vec![("en".into(), "Install?".into()), ("ko".into(), "설치할까요?".into())])),
             finish: None,
@@ -1327,7 +1335,7 @@ mod tests {
                 ("[extract]\ndest = \"C:/x\"", "extract.dest"),
                 ("[extract]\ndest = \"{temp}/../x\"", "extract.dest"),
                 ("[extract]\noverwrite = \"maybe\"", "extract.overwrite"),
-                ("[extract]\nask = true", "not yet"),
+                ("[extract]\nask = 1", "extract.ask: not true nor false"),
                 ("[ui]\nbanner = \"banner.png\"", "ui.banner: banner.png: not a file of .aqr/sfx/"),
                 ("[pe]\nicon = \"icon.ico\"", "not a file of .aqr/sfx/"),
                 ("[pe]\nversion = \"1.2.3.4.5\"", "pe.version"),
