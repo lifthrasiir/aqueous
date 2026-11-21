@@ -261,3 +261,32 @@ fn default_level_pays() {
         assert!(is < 0.95 * was, "{encoder}: {was} -> {is}");
     }
 }
+
+/// A SQLite database with a journal archived along (`NAME-journal`, `NAME-wal`, not empty) is
+/// kept as it is, told why: a rollback could need what its free pages hold. An empty journal
+/// does not count.
+#[test]
+fn database_with_journal_kept() {
+    let mut db = vec![0u8; 2 * 4096];
+    db[..16].copy_from_slice(b"SQLite format 3\0");
+    db[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    (db[18], db[19], db[21], db[22], db[23]) = (1, 1, 64, 32, 32);
+    assert_eq!(detect(&db), Some(Format::Sqlite));
+    for (journal, data, kept) in
+        [("a.db-journal", &b"journal"[..], true), ("a.db-wal", b"wal", true), ("a.db-journal", b"", false)]
+    {
+        let names = [&b"a.db"[..], journal.as_bytes()];
+        let datas = [&db[..], data];
+        let inputs: Vec<Input> = (0..2).map(|c| Input { name: names[c], data: datas[c] }).collect();
+        let opt = Options { lossy: Some(Lossy::parse("slack").unwrap()), ..Options::default() };
+        let rw = Rewriting::new(&inputs[..], &opt);
+        let r = crate::Source::read(&rw, 0).unwrap();
+        assert_eq!(r[..], db[..]);
+        let made = rw.made.lock().unwrap();
+        match (made.get(&0), kept) {
+            (Some(Rewrite::Kept { reason, .. }), true) => assert!(reason.contains(&journal[5..]), "{reason}"),
+            (Some(Rewrite::Kept { reason, .. }), false) => assert!(!reason.contains("archived along"), "{reason}"),
+            (w, _) => assert!(!kept, "{journal}: {w:?}"),
+        }
+    }
+}

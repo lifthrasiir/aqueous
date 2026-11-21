@@ -12,7 +12,11 @@
 //!   sizes, offsets and the rest of the container written again. Their records are then a few
 //!   bytes at any level ([`Rewritten`]); from level 4 on, where DEFLATE streams are rebuilt.
 //! - `slack`: the bytes of a Minecraft region file (`mca`) that no chunk takes (freed sectors,
-//!   the ends of chunks' last sectors) zeroed in place.
+//!   the ends of chunks' last sectors) zeroed in place; and those of a SQLite database
+//!   (`sqlite`) that SQLite never reads: the free space of b-tree pages (freeblocks but their
+//!   headers), the freelist's pages but their lists, the ends of last overflow pages (never
+//!   its header nor the bytes each page reserves). A database with its journal archived along
+//!   is kept as it is ([`Rewriting::journaled`]).
 //!
 //! Each R is checked against X by code of its own ([`check`]: flate2 rather than aqr-flate,
 //! parsers apart from the rewriters'); where the check fails, X is archived and the failure told
@@ -23,6 +27,7 @@
 mod check;
 mod gzip;
 mod mca;
+mod sqlite;
 mod zip;
 
 use std::collections::HashMap;
@@ -80,6 +85,7 @@ const REWRITERS: &[Rewriter] = &[
     Rewriter { class: Class::Coding, format: Format::Zip, rewrite: zip::coding, check: check::zip },
     Rewriter { class: Class::Coding, format: Format::Gzip, rewrite: gzip::coding, check: check::gzip },
     Rewriter { class: Class::Slack, format: Format::Mca, rewrite: mca::slack, check: check::mca },
+    Rewriter { class: Class::Slack, format: Format::Sqlite, rewrite: sqlite::slack, check: check::sqlite },
 ];
 
 /// What may be lost (`--lossy`): by class, the formats it is let to rewrite (none named: all).
@@ -444,11 +450,32 @@ pub(crate) struct Rewriting<'a, S: ?Sized> {
     held: Mutex<HashMap<usize, Bytes>>,
     /// What became of the contents that a rewriter takes.
     pub(crate) made: Mutex<HashMap<usize, Rewrite>>,
+    /// The sizes of the contents by their names, for [`Rewriting::journaled`].
+    sizes: std::sync::OnceLock<HashMap<&'a [u8], u64>>,
 }
 
 impl<'a, S: Source + ?Sized> Rewriting<'a, S> {
     pub(crate) fn new(src: &'a S, opt: &'a Options) -> Rewriting<'a, S> {
-        Rewriting { src, lossy: opt.lossy.as_ref(), opt, held: Mutex::default(), made: Mutex::default() }
+        let (held, made, sizes) = Default::default();
+        Rewriting { src, lossy: opt.lossy.as_ref(), opt, held, made, sizes }
+    }
+
+    /// Why content `c`, a SQLite database, is kept as it is, if it is: where a journal of it is
+    /// archived along (`NAME-journal` or `NAME-wal`, not empty), the database is not all there is
+    /// of it. A hot rollback journal restores pages as they were before a transaction, and a page
+    /// the transaction freed holds what the database has again once it is rolled back: a
+    /// database written as it was archived. (The journal not among the inputs is not seen.)
+    fn journaled(&self, c: usize) -> Option<String> {
+        let sizes =
+            self.sizes.get_or_init(|| (0..self.src.len()).map(|c| (self.src.name(c), self.src.size(c))).collect());
+        let name = self.src.name(c);
+        [&b"-journal"[..], b"-wal"].into_iter().find_map(|suffix| {
+            let beside = [name, suffix].concat();
+            sizes
+                .get(&beside[..])
+                .filter(|&&n| n > 0)
+                .map(|_| format!("a {} archived along, not empty", String::from_utf8_lossy(&suffix[1..])))
+        })
     }
 
     fn held(&self, c: usize) -> Option<Bytes> {
@@ -477,6 +504,14 @@ impl<S: Source + ?Sized> Source for Rewriting<'_, S> {
         }
         let d = self.src.read(c)?;
         let _s = aqr_common::trace::span("lossy");
+        if detect(&d) == Some(Format::Sqlite)
+            && lossy.allows(Class::Slack, Format::Sqlite)
+            && let Some(reason) = self.journaled(c)
+        {
+            let kept = Rewrite::Kept { format: Format::Sqlite, class: Class::Slack, reason };
+            self.made.lock().unwrap().insert(c, kept);
+            return Ok(d);
+        }
         let Some((w, r)) = rewrite(&d, lossy, self.opt) else { return Ok(d) };
         let r = match r {
             Some(r) => {
@@ -516,3 +551,6 @@ impl<S: Source + ?Sized> Source for Rewriting<'_, S> {
 mod tests;
 #[cfg(test)]
 mod tests_tree;
+
+#[cfg(test)]
+mod tests_sqlite;

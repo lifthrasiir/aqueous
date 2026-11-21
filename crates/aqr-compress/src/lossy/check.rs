@@ -456,3 +456,213 @@ fn masked_at(d: &[u8], range: &std::ops::Range<usize>, fields: &[(usize, Option<
 fn masked_8(d: &[u8], range: &std::ops::Range<usize>) -> Vec<u8> {
     masked_at(d, range, &[(8, None)])
 }
+
+/// SQLite databases (<https://www.sqlite.org/fileformat2.html>): of the same length; the header,
+/// the reserved bytes of every page, the pages that are no b-tree, overflow page nor freelist
+/// page, the b-tree pages' headers, cell pointers, cells (with their overflow pages' links and
+/// payloads) and freeblock headers, and the freelist trunks' links and leaf numbers the same;
+/// every other byte the same or zero. The structure is that of X, read here (by no code of the
+/// rewriter's).
+pub(super) fn sqlite(x: &[u8], r: &[u8]) -> Result<(), String> {
+    if x.len() != r.len() {
+        return Err("of another length".into());
+    }
+    let keep = sqlite_kept(x)?;
+    // (`keep`: sorted, apart)
+    let mut p = 0;
+    for k in keep.iter().chain([&(x.len()..x.len())]) {
+        if k.start > p
+            && r[p..k.start] != x[p..k.start]
+            && r[p..k.start].iter().zip(&x[p..k.start]).any(|(&a, &b)| a != 0 && a != b)
+        {
+            return Err(format!("bytes at {p}..{} changed but to zeros", k.start));
+        }
+        if r[k.clone()] != x[k.clone()] {
+            return Err(format!("bytes kept at {}..{} changed", k.start, k.end));
+        }
+        p = k.end;
+    }
+    Ok(())
+}
+
+/// The ranges of the SQLite database `x` that a rewriter must not change, in order and apart.
+fn sqlite_kept(x: &[u8]) -> Result<Vec<std::ops::Range<usize>>, String> {
+    let be = |at: usize, n: usize| x[at..at + n].iter().fold(0usize, |v, &b| v << 8 | b as usize);
+    if x.len() < 100 || &x[..16] != b"SQLite format 3\0" {
+        return Err("not a database".into());
+    }
+    let size = match be(16, 2) {
+        1 => 65536,
+        s if (512..=32768).contains(&s) && s.is_power_of_two() => s,
+        _ => return Err("bad page size".into()),
+    };
+    let usable = size - x[20] as usize;
+    if usable < 480 || !x.len().is_multiple_of(size) || x.len() < size {
+        return Err("bad usable size or length".into());
+    }
+    let n = x.len() / size;
+    // (page numbers from 1; kind: 0 none, 1 other claimed, tree 2, free 3, overflow 4)
+    let mut kind = vec![0u8; n + 1];
+    // (ranges within pages, as absolute)
+    let mut keep: Vec<std::ops::Range<usize>> = Vec::new();
+    keep.push(0..100);
+    let at = |p: usize| (p - 1) * size;
+    let page_ok = |p: usize| (2..=n).contains(&p);
+    let lock = 0x4000_0000 / size + 1;
+    if n >= lock {
+        kind[lock] = 1;
+    }
+    if be(52, 4) != 0 {
+        let mut p = 2;
+        while p <= n {
+            kind[p] = 1;
+            p += usable / 5 + 1;
+        }
+    }
+    for (p, &k) in kind.iter().enumerate().skip(1) {
+        keep.push(at(p) + usable..at(p) + size);
+        if k == 1 {
+            keep.push(at(p)..at(p) + usable);
+        }
+    }
+    // the freelist
+    let (mut t, mut seen) = (be(32, 4), 0);
+    while t != 0 {
+        if !page_ok(t) || kind[t] != 0 {
+            return Err("freelist page misplaced".into());
+        }
+        kind[t] = 3;
+        let k = be(at(t) + 4, 4);
+        if k > usable / 4 - 2 {
+            return Err("freelist trunk too full".into());
+        }
+        keep.push(at(t)..at(t) + 8 + 4 * k);
+        for i in 0..k {
+            let l = be(at(t) + 8 + 4 * i, 4);
+            if !page_ok(l) || kind[l] != 0 {
+                return Err("freelist leaf misplaced".into());
+            }
+            kind[l] = 3;
+        }
+        seen += 1 + k;
+        t = be(at(t), 4);
+    }
+    if seen != be(36, 4) {
+        return Err("freelist count differs".into());
+    }
+    // the b-trees
+    let mut chains: Vec<(usize, usize)> = Vec::new();
+    for p in 1..=n {
+        let h = if p == 1 { 100 } else { 0 };
+        if kind[p] != 0 || !matches!(x[at(p) + h], 2 | 5 | 10 | 13) {
+            continue;
+        }
+        kind[p] = 2;
+        let (b, ty) = (at(p), x[at(p) + h]);
+        let leaf = ty & 8 != 0;
+        let count = be(b + h + 3, 2);
+        let arr_end = h + if leaf { 8 } else { 12 } + 2 * count;
+        if arr_end > usable {
+            return Err(format!("page {p}: cell pointers outside"));
+        }
+        keep.push(b..b + arr_end);
+        let lim = |v: usize| (usable - 12) * v / 255 - 23;
+        let (max_local, min_local) = (if ty == 13 { usable - 35 } else { lim(64) }, lim(32));
+        for i in 0..count {
+            let c = be(b + arr_end - 2 * (count - i), 2);
+            if c >= usable {
+                return Err(format!("page {p}: cell outside"));
+            }
+            let mut q = b + c + if leaf { 0 } else { 4 };
+            let mut total = 0;
+            if ty != 5 {
+                let (v, e) = sqlite_varint(x, q).ok_or("cell varint")?;
+                total = v as usize;
+                q = e;
+            }
+            if ty == 5 || ty == 13 {
+                q = sqlite_varint(x, q).ok_or("cell varint")?.1;
+            }
+            let mut end = q;
+            if ty != 5 {
+                let local = if total <= max_local {
+                    total
+                } else if min_local + (total - min_local) % (usable - 4) <= max_local {
+                    min_local + (total - min_local) % (usable - 4)
+                } else {
+                    min_local
+                };
+                end += local;
+                if total > local {
+                    if end + 4 > b + usable {
+                        return Err(format!("page {p}: cell outside"));
+                    }
+                    chains.push((be(end, 4), total - local));
+                    end += 4;
+                }
+            }
+            if end > b + usable {
+                return Err(format!("page {p}: cell outside"));
+            }
+            keep.push(b + c..end);
+        }
+        let mut f = be(b + h + 1, 2);
+        let mut guard = 0;
+        while f != 0 {
+            if f + 4 > usable {
+                return Err(format!("page {p}: freeblock outside"));
+            }
+            keep.push(b + f..b + f + 4);
+            f = be(b + f, 2);
+            guard += 1;
+            if guard > usable {
+                return Err(format!("page {p}: freeblock loop"));
+            }
+        }
+    }
+    // the overflow chains
+    for (mut p, mut rest) in chains {
+        loop {
+            if !page_ok(p) || kind[p] != 0 {
+                return Err("overflow page misplaced".into());
+            }
+            kind[p] = 4;
+            if rest <= usable - 4 {
+                keep.push(at(p)..at(p) + 4 + rest);
+                break;
+            }
+            keep.push(at(p)..at(p) + usable);
+            rest -= usable - 4;
+            p = be(at(p), 4);
+        }
+    }
+    // the pages of no structure
+    for p in (1..=n).filter(|&p| kind[p] == 0) {
+        keep.push(at(p)..at(p) + size);
+    }
+    keep.retain(|k| k.start < k.end);
+    keep.sort_by_key(|k| (k.start, k.end));
+    let mut out: Vec<std::ops::Range<usize>> = Vec::with_capacity(keep.len());
+    for k in keep {
+        match out.last_mut() {
+            Some(l) if k.start <= l.end => l.end = l.end.max(k.end),
+            _ => out.push(k),
+        }
+    }
+    Ok(out)
+}
+
+fn sqlite_varint(d: &[u8], p: usize) -> Option<(u64, usize)> {
+    let mut v = 0u64;
+    for i in 0..9 {
+        let b = *d.get(p + i)?;
+        if i == 8 {
+            return Some((v << 8 | b as u64, p + 9));
+        }
+        v = v << 7 | (b & 0x7f) as u64;
+        if b & 0x80 == 0 {
+            return Some((v, p + i + 1));
+        }
+    }
+    None
+}
