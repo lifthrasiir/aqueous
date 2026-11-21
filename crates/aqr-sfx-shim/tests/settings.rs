@@ -394,12 +394,15 @@ fn shortcuts_made() {
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", err(&o));
+    // (by Shell.Application: WScript.Shell's CreateShortcut takes its path through the ANSI
+    // code page, so that it does not find a name of other letters, 앱 on a system of 1252)
     let read = |p: &Path| {
         let script = format!(
-            "$l = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); \
+            "$l = (New-Object -ComObject Shell.Application).NameSpace('{}').ParseName('{}').GetLink; \
              [Console]::OutputEncoding = [Text.Encoding]::UTF8; \
-             $l.TargetPath; $l.Arguments; $l.WorkingDirectory; $l.Description",
-            p.display()
+             $l.Path; $l.Arguments; $l.WorkingDirectory; $l.Description",
+            p.parent().unwrap().display(),
+            p.file_name().unwrap().to_string_lossy()
         );
         let o = Command::new("powershell").args(["-NoProfile", "-Command", &script]).output().unwrap();
         String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect::<Vec<_>>()
