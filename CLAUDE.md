@@ -25,7 +25,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     into a record of CBOR before the archive, and the stub's icon, `VERSIONINFO`, manifest and
     subsystem written by its `pe`, as a section after UPX's). What it bundles is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and packs (`sfx.pack`, the blobs as
-    bundles of LZMA2, ~4.7 MB: only aqr reads it); it is no part of aqr's build but written into
+    bundles of LZMA2, ~4.4 MB: only aqr reads it); it is no part of aqr's build but written into
     the linked executable as resources (`aqr-sfx-pack --embed DIR EXE`, aqr-sfx's `resource`, read
     in place as it runs): `cargo aqr` writes it into the binary it keeps (`pack.id` in its
     manifest), aqr's tests/sfx.rs into a copy of theirs. Each blob is used only for the hash it
@@ -92,7 +92,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     table, a dispatch table added (`demo/{stub,modadd,modxor}`, `pemerge-test.sh`); a library too
     (`merge_bytes`). `src/msvc.rs`: the MSVC linker of aqr-dll's no-TLS
     target, cutting a shared library's exports to a list (`AQR_LD_EXPORTS`, made by `exports`) so
-    that `/OPT:REF` drops the rest, its import library still of every export.
+    that `/OPT:REF` drops the rest, its import library still of every export; libraries
+    linked with no entry point (`/NOENTRY`: the C runtime's DLL startup and its imports left out).
   - `aqr-wasmrt` — runs the Wasm modules of aqr natively by Wasmtime (`wasm::load`), in the
     process or in a sandbox worker (`sandbox::Sandbox`), with no native codecs linked. Shared by
     aqr-decompress (for modules it does not know natively) and the self-extracting interpreter

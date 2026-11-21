@@ -44,8 +44,18 @@ fn expanded(args: &[std::ffi::OsString]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Links as `link.exe` with `args`, the export list cut first where there is a list for it.
+/// Links as `link.exe` with `args`, the export list cut first where there is a list for it. A
+/// library is linked with no entry point (`/NOENTRY`): its blob runs no `DllMain`, and the C
+/// runtime's (`_DllMainCRTStartup`, linked statically even with the runtime's DLLs) would bring
+/// in what only it uses (the security cookie's start, the report of a cookie overrun), with their
+/// imports from kernel32, into every module. The runtime's import libraries are named then, as
+/// those objects of its startup named them (`/DEFAULTLIB`).
 pub fn link(args: &[std::ffi::OsString]) -> Result<()> {
+    let mut args = args.to_vec();
+    if expanded(&args)?.iter().any(|a| a == "/DLL") {
+        args.extend(["/NOENTRY", "vcruntime.lib", "ucrt.lib"].map(std::ffi::OsString::from));
+    }
+    let args = &args[..];
     if let Some(dir) = std::env::var_os("AQR_LD_NEEDED") {
         // (what rustc's object of symbols references, which no import table shows: kept)
         let all = expanded(args)?;
