@@ -1772,6 +1772,7 @@ dependencies = [
  "aqr-common",
  "aqr-exe",
  "aqr-formula",
+ "aqr-testkit",
  "liblzma",
  "toml",
  "zstd",

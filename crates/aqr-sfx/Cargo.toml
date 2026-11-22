@@ -30,3 +30,6 @@ xz = ["dep:liblzma"]
 [[bin]]
 name = "aqr-sfx-pack"
 required-features = ["encode", "xz"]
+
+[dev-dependencies]
+aqr-testkit.workspace = true

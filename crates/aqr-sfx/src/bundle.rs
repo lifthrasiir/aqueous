@@ -234,8 +234,9 @@ mod xz {
     pub fn decompress(z: &[u8], raw: usize) -> Result<Vec<u8>, String> {
         let e = |e: Error| format!("the bundle of blobs: LZMA2: {e}");
         let mut s = Stream::new_raw_decoder(&filters(raw).map_err(e)?).map_err(e)?;
-        // (a byte more than it should be, so that a frame of more is told)
-        let mut out = Vec::with_capacity(raw + 1);
+        // (a byte more than it should be, so that a frame of more is told; reserved as it may be:
+        // what a frame tells is not to abort the program where it is not had)
+        let mut out = super::room(raw.saturating_add(1))?;
         loop {
             let (at, had) = (s.total_in() as usize, out.len());
             match s.process_vec(&z[at..], &mut out, Action::Finish).map_err(e)? {
@@ -247,6 +248,31 @@ mod xz {
             }
         }
     }
+}
+
+/// A vector of room for `n` bytes, where it is had: an error otherwise (a size a bundle tells is
+/// not to abort the program).
+fn room(n: usize) -> Result<Vec<u8>, String> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).map_err(|_| format!("the bundle of blobs: no memory for {n} bytes"))?;
+    Ok(v)
+}
+
+/// The most bytes a Zstandard block makes (RFC 8878, `Block_Maximum_Size`).
+const ZSTD_BLOCK_MAX: usize = 128 << 10;
+
+/// The `raw` bytes of Zstandard frame `z`: more than its blocks can make is invalid at once (each
+/// block making any takes 4 bytes at least and makes 128 KiB at most), the rest reserved as it
+/// may be.
+fn unzstd_frame(z: &[u8], raw: usize) -> Result<Vec<u8>, String> {
+    if raw > (z.len() / 4 + 1).saturating_mul(ZSTD_BLOCK_MAX) {
+        return Err("the bundle of blobs: a frame of a length beyond what it makes".into());
+    }
+    let mut out = room(raw)?;
+    zstd::bulk::Decompressor::new()
+        .and_then(|mut d| d.decompress_to_buffer(z, &mut out))
+        .map_err(|e| format!("the bundle of blobs: {e}"))?;
+    Ok(out)
 }
 
 /// The blobs of bundle `d` (as [`pack`] took them: each its name in the program and its bytes).
@@ -278,7 +304,7 @@ pub fn unpack(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
             .map(|&(raw, z)| {
                 s.spawn(move || {
                     let f = match codec {
-                        Codec::Zstd => zstd::bulk::decompress(z, raw).map_err(|e| format!("the bundle of blobs: {e}")),
+                        Codec::Zstd => unzstd_frame(z, raw),
                         #[cfg(feature = "xz")]
                         Codec::Xz => xz::decompress(z, raw),
                     }?;
@@ -323,7 +349,7 @@ pub fn unpack(d: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
             *p = streams[i].get(st_at[i]..st_at[i].checked_add(n).ok_or_else(bad)?).ok_or_else(bad)?;
             st_at[i] += n;
         }
-        let mut image = Vec::with_capacity(image_len);
+        let mut image = room(image_len)?;
         if code_len > 0 {
             let origin = image_base.wrapping_add(first.into());
             let st = x86::DecodedStreams::new(origin, u8::try_from(sentinel).map_err(|_| bad())?, parts);
