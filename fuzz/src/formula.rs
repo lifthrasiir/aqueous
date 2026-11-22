@@ -3,7 +3,7 @@
 //! decoder's): a recursive walk of the nodes, the toy modules as `src/lib.rs` has them.
 
 use aqr_archive::{
-    ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Status, Tree, Value, checksum, kill,
+    ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Status, Time, Tree, Value, checksum, kill,
 };
 use aqr_formula::{Formula, Kind, Node, Of, Resource, packed, patch};
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
@@ -419,6 +419,7 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     let mut out = w.head().to_vec();
     // by path, what the archive is to give, its segments merged
     let mut want: Paths = Default::default();
+    let mut root = Extra::default();
     let mut batches = Vec::new();
     // (whether every output written evaluates, of files replaced or not named too: the archive
     // holds them still)
@@ -477,32 +478,40 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
         // (so that later segments meet earlier ones' paths), merged into what is to be
         evaluates &= wants.iter().all(Option::is_some);
         let mut seg = Segment::default();
+        // (the root's extra merged as a directory's: kept where the segment's is null)
+        seg.t.root = extra(u);
+        if !seg.t.root.is_empty() {
+            root = seg.t.root.clone();
+        }
         let mut named = Vec::new();
         for (i, w) in wants.into_iter().enumerate() {
             let Some(p) = path(u) else { break };
-            if let Some(e) = seg.put(&p, EntryNode::File(named.len())) {
+            let x = extra(u);
+            if let Some(e) = seg.put(u, &mut want, &p, EntryNode::File(named.len()), x.clone()) {
                 named.push((e, contents[i]));
-                merge(&mut want, &p, Want::File(w));
+                merge(&mut want, &p, Want::File(w, x));
             }
         }
         for _ in 0..u.int_in_range(0..=3).unwrap_or(0) {
             let Some(p) = path(u) else { break };
-            let (node, w) = match u.int_in_range(0..=2).unwrap_or(0) {
-                0 => (EntryNode::Dir, Some(Want::Dir)),
+            let x = extra(u);
+            let (node, w, x) = match u.int_in_range(0..=2).unwrap_or(0) {
+                0 => (EntryNode::Dir, Some(Want::Dir(x.clone())), x),
                 1 => {
                     let target = p.iter().rev().cloned().collect::<Vec<_>>().join(&b'/');
-                    (EntryNode::Link(target.clone()), Some(Want::Link(target)))
+                    (EntryNode::Link(target.clone()), Some(Want::Link(target, x.clone())), x)
                 }
-                _ => (EntryNode::TOMBSTONE, None),
+                // (a tombstone of no extra)
+                _ => (EntryNode::TOMBSTONE, None, Extra::default()),
             };
-            if seg.put(&p, node).is_some() {
+            if seg.put(u, &mut want, &p, node, x).is_some() {
                 match w {
                     Some(w) => merge(&mut want, &p, w),
                     // (a tombstone: its parents declared, merged as directories; it and what is under
                     // it removed)
                     None => {
                         for k in 1..p.len() {
-                            merge(&mut want, &p[..k], Want::Dir);
+                            merge(&mut want, &p[..k], Want::Dir(Extra::default()));
                         }
                         want.retain(|q, _| !q.starts_with(&p));
                     }
@@ -537,10 +546,11 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
             for e in &t.entries {
                 let mut p = e.parent.map_or_else(Vec::new, |q| paths[q].clone());
                 p.push(e.name.clone());
+                let x = e.extra.clone();
                 let w = match &e.node {
-                    &EntryNode::File(c) => Some(Want::File(Some(files[c].clone()))),
-                    EntryNode::Dir => Some(Want::Dir),
-                    EntryNode::Link(t) => Some(Want::Link(t.clone())),
+                    &EntryNode::File(c) => Some(Want::File(Some(files[c].clone()), x)),
+                    EntryNode::Dir => Some(Want::Dir(x)),
+                    EntryNode::Link(t) => Some(Want::Link(t.clone(), x)),
                     _ => None,
                 };
                 if let Some(w) = w {
@@ -549,18 +559,47 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
                 paths.push(p);
             }
             assert!(got == want, "entries decoded otherwise\n{got:?}\n{want:?}\n{batches:?}");
+            assert!(t.root == root, "the root's extra decoded otherwise\n{:?}\n{root:?}", t.root);
         }
         r => panic!("an archive of a tree that evaluates does not decode: {:?}\n{batches:?}", r.map(|_| ())),
     }
 }
 
 /// What a tree is to have at a path: a file (its bytes; None where they do not evaluate, by the
-/// reference), a directory or a link.
+/// reference), a directory or a link, and its extra.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Want {
-    File(Option<Vec<u8>>),
-    Dir,
-    Link(Vec<u8>),
+    File(Option<Vec<u8>>, Extra),
+    Dir(Extra),
+    Link(Vec<u8>, Extra),
+}
+
+/// An entry extra of `u`: null (empty) half of the time, else some of its members of any entry
+/// (times, the mode, the owners, a comment).
+fn extra(u: &mut Unstructured) -> Extra {
+    let mut x = Extra::default();
+    if u.arbitrary::<bool>().unwrap_or(false) {
+        return x;
+    }
+    let mut some = || u.arbitrary::<bool>().unwrap_or(false);
+    let (t, m, o, c) = (some(), some(), some(), some());
+    if t {
+        let secs = u.int_in_range(-(1i64 << 34)..=1 << 34).unwrap_or(0);
+        x.mtime = Some(Time::new(secs, u.int_in_range(0..=999_999_999).unwrap_or(0)));
+    }
+    if m {
+        x.mode = Some(u.int_in_range(0..=0o7777).unwrap_or(0o644));
+    }
+    if o {
+        x.uid = Some(u.arbitrary::<u32>().unwrap_or(0) as u64);
+        x.gid = Some(u.arbitrary::<u16>().unwrap_or(0) as u64);
+    }
+    if c {
+        let n = u.int_in_range(1..=8).unwrap_or(1);
+        let comment: Vec<u8> = (0..n).map(|_| b'a' + u.int_in_range(0..=25).unwrap_or(0)).collect();
+        x.comment = Some(comment.into());
+    }
+    x
 }
 
 type Paths = std::collections::BTreeMap<Vec<Vec<u8>>, Want>;
@@ -572,13 +611,18 @@ fn path(u: &mut Unstructured) -> Option<Vec<Vec<u8>>> {
 }
 
 /// Node `w` at path `p` merged into `paths` (spec, "Merging segments"): a directory merged with
-/// one there, its parents too (a segment declares them); any other node replacing what is there,
-/// with what is under it.
+/// one there (its extra replacing that one's where it is not null), its parents too (a segment
+/// declares them, of null extras); any other node replacing what is there, with what is under
+/// it.
 fn merge(paths: &mut Paths, p: &[Vec<u8>], w: Want) {
     for k in 1..p.len() {
-        merge(paths, &p[..k], Want::Dir);
+        merge(paths, &p[..k], Want::Dir(Extra::default()));
     }
-    if w == Want::Dir && paths.get(p) == Some(&Want::Dir) {
+    // (a directory merged into one: its extra where it has one, else the one there)
+    if let (Want::Dir(x), Some(Want::Dir(y))) = (&w, paths.get_mut(p)) {
+        if !x.is_empty() {
+            *y = x.clone();
+        }
         return;
     }
     paths.retain(|q, _| !q.starts_with(p));
@@ -593,26 +637,38 @@ struct Segment {
 }
 
 impl Segment {
-    /// Node `node` at path `p`, its parents directories (declared where they are not): its
+    /// Node `node` of `extra` at path `p`, its parents directories (declared where they are not,
+    /// of extras of `u` a quarter of the time, else null, merged into `want` as they are): its
     /// entry, or None where the path or a parent is taken by another node.
-    fn put(&mut self, p: &[Vec<u8>], node: EntryNode) -> Option<usize> {
+    fn put(
+        &mut self,
+        u: &mut Unstructured,
+        want: &mut Paths,
+        p: &[Vec<u8>],
+        node: EntryNode,
+        extra: Extra,
+    ) -> Option<usize> {
+        let not_dir = |k: usize| self.at.get(&p[..k]).is_some_and(|&e| self.t.entries[e].node != EntryNode::Dir);
+        if self.at.contains_key(p) || (1..p.len()).any(not_dir) {
+            return None;
+        }
         let mut parent = None;
         for k in 1..p.len() {
             parent = Some(match self.at.get(&p[..k]) {
-                Some(&e) if self.t.entries[e].node == EntryNode::Dir => e,
-                Some(_) => return None,
-                None => self.push(parent, &p[..k], EntryNode::Dir),
+                Some(&e) => e,
+                None => {
+                    let x = if u.ratio(1, 4).unwrap_or(false) { self::extra(u) } else { Extra::default() };
+                    merge(want, &p[..k], Want::Dir(x.clone()));
+                    self.push(parent, &p[..k], EntryNode::Dir, x)
+                }
             });
         }
-        if self.at.contains_key(p) {
-            return None;
-        }
-        Some(self.push(parent, p, node))
+        Some(self.push(parent, p, node, extra))
     }
 
-    fn push(&mut self, parent: Option<usize>, p: &[Vec<u8>], node: EntryNode) -> usize {
+    fn push(&mut self, parent: Option<usize>, p: &[Vec<u8>], node: EntryNode, extra: Extra) -> usize {
         let name = p.last().unwrap().clone();
-        self.t.entries.push(Entry { parent, name, node, extra: Extra::default() });
+        self.t.entries.push(Entry { parent, name, node, extra });
         self.at.insert(p.to_vec(), self.t.entries.len() - 1);
         self.t.entries.len() - 1
     }
