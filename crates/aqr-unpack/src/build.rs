@@ -255,8 +255,23 @@ impl Builder {
     /// (and an entry of `node` and `extra` at the end where `node` is given). A directory given
     /// again takes the later one's metadata (where it has any), another node given again takes
     /// the place of the one before; a node in place of a directory or the other way round is an
-    /// error, as is a path through a node not a directory. Errors tell what is left out.
+    /// error, as is a path through a node not a directory. Errors tell what is left out: a file
+    /// left out, its content is no file's ([`Builder::live`]).
     pub fn add(&mut self, names: &[&[u8]], node: Option<EntryNode>, extra: Extra) -> Result<Option<usize>, String> {
+        let file = match node {
+            Some(EntryNode::File(c)) => Some(c),
+            _ => None,
+        };
+        let r = self.add_node(names, node, extra);
+        if r.is_err()
+            && let Some(c) = file
+        {
+            self.dead.insert(c);
+        }
+        r
+    }
+
+    fn add_node(&mut self, names: &[&[u8]], node: Option<EntryNode>, extra: Extra) -> Result<Option<usize>, String> {
         let mut at = None;
         let dirs = if node.is_some() { names.len().saturating_sub(1) } else { names.len() };
         for (k, name) in names[..dirs].iter().enumerate() {

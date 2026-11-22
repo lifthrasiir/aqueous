@@ -1193,3 +1193,21 @@ fn sevenz_links() {
     assert!(o.notes.iter().any(|n| n.starts_with("none: a link to nothing")), "{:?}", o.notes);
     assert_eq!(o.done.skipped, 2);
 }
+
+/// Files left out as they are added (a file of a directory's name, a file under a file) have
+/// their contents left out too: no content is told but of a file of the tree (fuzz/unpack found
+/// an ALZ archive's file of a directory's name decoded and told, of no file).
+#[test]
+fn contents_of_entries_left_out() {
+    let d = zip_of(
+        &[E::stored("a/", b""), E::stored("a", b"xyz"), E::stored("f", b"file"), E::stored("f/g", b"under a file")],
+        false,
+    );
+    let r = Rec::default();
+    let done = Opened::open(Format::Zip, &d).unwrap().unpack(2, &r).unwrap();
+    let files: Vec<usize> =
+        done.tree.entries.iter().filter_map(|e| if let EntryNode::File(c) = e.node { Some(c) } else { None }).collect();
+    let told: Vec<usize> = r.contents.lock().unwrap().keys().copied().collect();
+    assert!(told.iter().all(|c| files.contains(c)), "contents {told:?}, of files {files:?}");
+    assert_eq!(told.len(), 1, "f's alone");
+}
