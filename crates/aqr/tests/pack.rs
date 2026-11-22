@@ -181,6 +181,14 @@ fn told(check: Option<(&str, &str)>, file: &Path) -> String {
     s
 }
 
+/// The compressor tar runs as a filter of a `.EXT` it does not decompress itself, where it is
+/// bsdtar: zstd where it has no libzstd (its `--version` tells the libraries it has).
+fn filtered(ext: &str) -> Option<&'static str> {
+    let v = Command::new("tar").arg("--version").output().ok()?;
+    let v = String::from_utf8_lossy(&v.stdout);
+    (ext == "tar.zst" && v.contains("bsdtar") && !v.contains("libzstd")).then_some("zstd")
+}
+
 #[test]
 fn tar_under_each_compressor() {
     let d = scratch("tar");
@@ -205,7 +213,29 @@ fn tar_under_each_compressor() {
         if cfg!(unix) && Command::new("tar").arg("--version").output().is_ok() {
             let x = d.join(format!("by-tar-{ext}"));
             fs::create_dir(&x).unwrap();
-            let o = Command::new("tar").arg("-xf").arg(&a).arg("-C").arg(&x).output().unwrap();
+            let o = match filtered(ext) {
+                // (tar running the compressor as a filter, as bsdtar without libzstd does: the
+                // compressor's output given to tar here instead. Run by bsdtar 3.5.3, `zstd -d`
+                // exited 1 now and then on CI's macOS runner, where `zstd -t` and `zstd -dc` of
+                // the same file did not: of the filter's pipe, not of the file)
+                Some(tool) => {
+                    let d = Command::new(tool).arg("-dc").arg(&a).output().unwrap();
+                    assert!(d.status.success(), "{tool} -dc {ext}: {}", String::from_utf8_lossy(&d.stderr));
+                    let mut c = Command::new("tar")
+                        .arg("-xf")
+                        .arg("-")
+                        .arg("-C")
+                        .arg(&x)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    std::io::Write::write_all(&mut c.stdin.take().unwrap(), &d.stdout).unwrap();
+                    c.wait_with_output().unwrap()
+                }
+                None => Command::new("tar").arg("-xf").arg(&a).arg("-C").arg(&x).output().unwrap(),
+            };
             assert!(o.status.success(), "tar -xf {ext}: {}{}", String::from_utf8_lossy(&o.stderr), told(check, &a));
             // (by the paths of the files, as macOS may have the names in another normal form)
             for (name, want) in files(&src).into_iter().filter(|f| !f.0.ends_with('/')) {
