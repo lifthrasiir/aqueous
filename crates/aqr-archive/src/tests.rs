@@ -3638,3 +3638,65 @@ fn module_offsets_of_segments() {
         }
     }
 }
+
+/// A split's outputs spread over the leaves of a batch: refused (each output is taken in the
+/// leaf it is made in, as there is no instruction dropping the others); taken by one leaf, in any
+/// order and of any size (empty too), decoded as the split cuts it. fuzz/roundtrip found leaf
+/// blocks written of such leaves, leaving more outputs than they declare.
+#[test]
+fn split_outputs_in_one_leaf() {
+    use crate::{ContentAt, Entry, EntryNode, Extra, Leaf, SegmentWriter, Tree};
+    let data: Vec<u8> = (0..100u8).collect();
+    for (sizes, order) in
+        [(vec![0, 0, 0, 0], [1, 2, 0, 3]), (vec![10, 20, 30, 40], [1, 2, 0, 3]), (vec![10, 20, 30, 40], [0, 1, 2, 3])]
+    {
+        let mut f = Formula::default();
+        let total: u64 = sizes.iter().sum();
+        let s = f.push("t", data[..total as usize].to_vec());
+        let node = if total == 0 { Node::Concat(Vec::new()) } else { s };
+        let outputs = f.split_node(node, sizes.clone());
+        let at = |i: usize| sizes[..i].iter().sum::<u64>() as usize;
+        let want: Vec<Vec<u8>> = order.iter().map(|&i| data[at(i)..at(i) + sizes[i] as usize].to_vec()).collect();
+        let enc = Encoder::new(Level::STORED);
+        let w = SegmentWriter::new();
+        let spread = vec![
+            Leaf { outputs: order[..3].iter().map(|&i| outputs[i].clone()).collect(), sums: vec![None; 3] },
+            Leaf { outputs: vec![outputs[order[3]].clone()], sums: vec![None] },
+        ];
+        assert!(w.batch(&enc, &f, &spread).is_err(), "{sizes:?} {order:?}");
+        // (with a leaf of a file of its own after it)
+        let other = f.push("u", b"other".to_vec());
+        let leaves = vec![
+            Leaf { outputs: order.iter().map(|&i| outputs[i].clone()).collect(), sums: vec![None; 4] },
+            Leaf { outputs: vec![other], sums: vec![None] },
+        ];
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let mut b = w.batch(&enc, &f, &leaves).unwrap();
+        w.commit(&b);
+        let (d, r) = b.take_blocks();
+        out.extend_from_slice(&d[r]);
+        let mut contents = Vec::new();
+        for (&leaf, l) in b.leaf_at.iter().zip(&leaves) {
+            for (output, n) in l.outputs.iter().enumerate() {
+                contents.push(ContentAt { leaf, output, size: n.len() });
+            }
+        }
+        let mut t = Tree::default();
+        for i in 0..contents.len() {
+            t.entries.push(Entry {
+                parent: None,
+                name: format!("f{i}").into_bytes(),
+                node: EntryNode::File(i),
+                extra: Extra::default(),
+            });
+        }
+        out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        match decode_value(&out, &natives()) {
+            Ok(Value::Tree(_, files)) => {
+                assert_eq!(files, [want, vec![b"other".to_vec()]].concat(), "{sizes:?} {order:?}")
+            }
+            r => panic!("{sizes:?} {order:?}: {:?}", r.map(|_| ())),
+        }
+    }
+}

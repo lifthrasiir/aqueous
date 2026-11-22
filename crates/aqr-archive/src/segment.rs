@@ -472,8 +472,10 @@ impl SegmentWriter {
     }
 
     /// The blocks of `leaves` over `f`'s streams and applications of several outputs (its root
-    /// not used), to follow those so far. Fails on slices out of their streams and on outputs
-    /// not taken once each (by one leaf).
+    /// not used), to follow those so far. Fails on slices out of their streams, on outputs not
+    /// taken once each, and on an application's outputs taken by several leaves: a leaf's
+    /// formula block makes every output of the applications it takes of, and takes them all
+    /// (there is no instruction dropping one).
     pub fn batch(&self, enc: &Encoder, f: &Formula, leaves: &[Leaf]) -> Result<Batch> {
         // (the streams are looked at in `f`: not copied)
         let check = Formula {
@@ -500,6 +502,16 @@ impl SegmentWriter {
         }
 
         let (uses, data_leaves, literal) = planned(f, leaves);
+        let mut taken_by = vec![None; f.shared.len()];
+        for (l, u) in uses.iter().enumerate() {
+            for &i in &u.shared {
+                if let Some(k) = taken_by[i].replace(l) {
+                    return Err(Error::new(format!(
+                        "the outputs of application of several outputs #{i} taken by leaves #{k} and #{l}, not one"
+                    )));
+                }
+            }
+        }
         let data_leaf = |i: usize| data_leaves[i];
         // (the streams of literals as pieces: [`Emit::literals`])
         let one: Vec<[&[u8]; 1]> =
