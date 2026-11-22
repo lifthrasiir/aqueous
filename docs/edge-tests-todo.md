@@ -54,10 +54,6 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
     of a few hundred bytes can make `aqr -d` take as much memory as is had (a resource failure
     beyond it, no longer an abort). A genuine archive cut short may have a gap of GBs, so no
     bound is plain; perhaps a budget (`-M`) given to `repair`.
-  - `parse::unzstd_with` tries reserving a leaf's declared size before decompressing (where
-    that fails, the output grows as it comes): an archive of a few bytes declaring TBs commits
-    as much as the system grants (Windows' commit charge). A Zstandard block of 4 bytes makes
-    at most 128 KiB, so a declared size over that ratio could be invalid at once.
 
 ### Housekeeping
 - The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs

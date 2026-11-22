@@ -3750,3 +3750,29 @@ fn opened_of_paths_evaluated_whole() {
         assert_eq!(got.into_inner().unwrap().as_ref(), Some(&whole.1[wk]));
     }
 }
+
+/// Zstandard data declaring more than its blocks can make (each block of 4 bytes at least where
+/// it makes any, and of 128 KiB at most: RFC 8878's Block_Maximum_Size) is invalid at once, not
+/// reserved as declared: an RLE block of 4 bytes declaring 2^40 bytes, against the same of its
+/// 128 KiB. (Of the reservations fuzzing showed, `docs/edge-tests-todo.md`.)
+#[test]
+fn zstd_sizes_beyond_blocks() {
+    // (Last_Block, Block_Type 1 (RLE), Block_Size 128 KiB; the byte repeated)
+    let n = 128u32 << 10;
+    let head = (n << 3 | 1 << 1 | 1).to_le_bytes();
+    let blocks = [head[0], head[1], head[2], b'a'];
+    let data = |size: u64| {
+        let mut d = Vec::new();
+        aqr_common::varint::put(&mut d, size - blocks.len() as u64);
+        // (a window of 128 KiB: Block_Maximum_Size is the smaller of it and 128 KiB)
+        d.push(7 << 3);
+        d.extend_from_slice(&blocks);
+        d.extend_from_slice(&checksum(&vec![b'a'; n as usize]).to_le_bytes());
+        d
+    };
+    aqr_testkit::case("zstd_sizes_beyond_blocks");
+    let r = crate::parse::decoded(&data(1 << 40), true, true);
+    assert!(matches!(r, Err(Failure::Invalid(_))), "{:?}", r.map(|d| d.len()));
+    assert!(aqr_testkit::most() < 1 << 24, "a request of {} bytes", aqr_testkit::most());
+    assert_eq!(crate::parse::decoded(&data(n as u64), true, true).unwrap(), vec![b'a'; n as usize]);
+}

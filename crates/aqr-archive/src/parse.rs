@@ -392,6 +392,9 @@ pub(crate) fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&di
 
 /// [`decoded_with`] of the first `want` bytes alone, where the data is longer: decompressed only
 /// as far as those, its checksum (of all of it) not checked then (spec, "Partial access").
+/// The most bytes a Zstandard block makes (RFC 8878, `Block_Maximum_Size`).
+const ZSTD_BLOCK_MAX: u64 = 128 << 10;
+
 pub(crate) fn decoded_upto(
     d: &[u8],
     zstd: bool,
@@ -411,6 +414,11 @@ pub(crate) fn decoded_upto(
             .checked_add(delta)
             .and_then(|n| n.checked_sub(shrink))
             .ok_or_else(|| Failure::Invalid("bad size".into()))?;
+        // (each block making any bytes takes 4 at least, its header and one, and makes 128 KiB
+        // at most, RFC 8878's Block_Maximum_Size: more declared is invalid, not reserved)
+        if size > (blocks.len() as u64 / 4 + 1).saturating_mul(ZSTD_BLOCK_MAX) {
+            return invalid("a size declared beyond what its Zstandard blocks make");
+        }
         (unzstd(window, blocks, size, want.min(size), dict)?, want >= size)
     } else {
         let n = end.min(usize::try_from(want).unwrap_or(usize::MAX));
