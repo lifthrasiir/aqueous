@@ -629,7 +629,8 @@ fn groups(m: &Paths) -> std::collections::BTreeSet<Vec<Vec<Vec<u8>>>> {
 }
 
 /// An entry extra of `u`: null (empty) half of the time, else some of its members of any entry
-/// (times, the mode, the owners, a comment).
+/// (times, the mode, the owners, a comment, extended attributes, extension keys, ZIP extra
+/// fields).
 fn extra(u: &mut Unstructured) -> Extra {
     let mut x = Extra::default();
     if u.arbitrary::<bool>().unwrap_or(false) {
@@ -652,6 +653,28 @@ fn extra(u: &mut Unstructured) -> Extra {
         let n = u.int_in_range(1..=8).unwrap_or(1);
         let comment: Vec<u8> = (0..n).map(|_| b'a' + u.int_in_range(0..=25).unwrap_or(0)).collect();
         x.comment = Some(comment.into());
+    }
+    // (extended attributes, extension keys and ZIP extra fields: lists of names not repeated)
+    let names = [&b"a"[..], b"b", b"c"];
+    let taken = |u: &mut Unstructured| names.iter().filter(|_| u.arbitrary::<bool>().unwrap_or(false)).count();
+    for k in 0..taken(u) {
+        let n = u.int_in_range(0..=8).unwrap_or(0);
+        let v: std::sync::Arc<[u8]> = u.bytes(n.min(u.len())).unwrap_or_default().into();
+        x.xattrs.push(([&b"user."[..], names[k]].concat().into(), v));
+    }
+    for k in 0..taken(u) {
+        // (a value of one CBOR data item: an integer of 0 to 23)
+        let v = u.int_in_range(0..=23).unwrap_or(0);
+        x.extensions.push(([&b"org.example."[..], names[k]].concat().into(), vec![v][..].into()));
+    }
+    for _ in 0..taken(u) {
+        let key = u.int_in_range(-65536..=65535).unwrap_or(0);
+        if x.zip_extras.iter().any(|z| z.0 == key) {
+            continue;
+        }
+        let n = u.int_in_range(0..=8).unwrap_or(0);
+        let v: std::sync::Arc<[u8]> = u.bytes(n.min(u.len())).unwrap_or_default().into();
+        x.zip_extras.push((key, v));
     }
     x
 }
