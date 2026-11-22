@@ -117,7 +117,10 @@ fn work_is_traced() {
         }
     }
     assert!(wall > 0.1, "the module spun for {wall} s");
-    assert!(busy >= 0.5 * wall, "{busy} thread-seconds outside the pool of a run of {wall} s");
+    // (the worker's CPU time, as it tells it: not a share of the wall time, which grows where
+    // the worker waits for a CPU, as among the other tests of the workspace; 2^31 rounds of a
+    // loop carried through its counter take a cycle each at least, half a second at 4.5 GHz)
+    assert!(busy >= 0.25, "{busy} thread-seconds outside the pool of a run of {wall} s");
 }
 
 /// A module spinning for a million rounds for each byte of the parameters.
