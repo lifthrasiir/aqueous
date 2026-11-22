@@ -2,7 +2,9 @@
 //! by a reference evaluator of their own ([`reference`]), apart from aqr-archive's (the
 //! decoder's): a recursive walk of the nodes, the toy modules as `src/lib.rs` has them.
 
-use aqr_archive::{ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Tree, Value, checksum};
+use aqr_archive::{
+    ContentAt, Encoder, Entry, EntryNode, Extra, Leaf, Level, SegmentWriter, Status, Tree, Value, checksum, kill,
+};
 use aqr_formula::{Formula, Kind, Node, Of, Resource, packed, patch};
 use libfuzzer_sys::arbitrary::{Result, Unstructured};
 
@@ -362,8 +364,9 @@ impl Reference<'_> {
 }
 
 /// `roundtrip`'s body: of `d`, a formula archived and decoded again (whole, and streamed), or a
-/// tree of 1 to 3 batches of leaves ([`batch`]) written as segments are, its files decoded
-/// again; where [`reference`] gives what each is, the encoder takes it and the archive gives it
+/// tree of 1 to 3 segments committed one after another (appended to by another writer now and
+/// then, as `aqr -a` does), each of 1 or 2 batches of leaves ([`batch`]), files of later
+/// segments replacing earlier ones of their paths now and then, its files decoded again; where [`reference`] gives what each is, the encoder takes it and the archive gives it
 /// back.
 pub fn roundtrip(d: &[u8]) {
     let mut u = Unstructured::new(d);
@@ -410,61 +413,116 @@ fn file_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
 fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     let Ok(dictionaries) = u.arbitrary::<bool>() else { return };
     let enc = Encoder::new(level).with_dictionaries(dictionaries);
+    let runner = crate::toys();
     let mut w = SegmentWriter::new();
     let mut out = w.head().to_vec();
-    // by content (a file each): where it is, and what it is to be
-    let (mut contents, mut want) = (Vec::new(), Vec::new());
+    // by path, what the archive is to give (None: what does not evaluate, by the reference)
+    let mut want: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> = Default::default();
     let mut batches = Vec::new();
-    for _ in 0..u.int_in_range(1..=3).unwrap_or(1) {
-        let Ok((f, outputs)) = batch(u) else { break };
-        let all: Vec<Node> = outputs.iter().flatten().cloned().collect();
-        let mut r = references(&f, &all).into_iter();
-        let wants: Vec<Vec<Option<Vec<u8>>>> = outputs.iter().map(|o| r.by_ref().take(o.len()).collect()).collect();
-        let leaves: Vec<Leaf> = outputs
-            .into_iter()
-            .zip(&wants)
-            .map(|(outputs, w)| {
-                let sums = w.iter().map(|w| w.as_deref().filter(|_| summed).map(checksum)).collect();
-                Leaf { outputs, sums }
+    // (whether every output written evaluates, of files replaced or not named too: the archive
+    // holds them still)
+    let mut evaluates = true;
+    for k in 0..u.int_in_range(1..=3).unwrap_or(1) {
+        // (appended to by another writer now and then, of what the archive tells of itself, as
+        // `aqr -a` appends)
+        if k > 0 && u.arbitrary::<bool>().unwrap_or(false) {
+            let Some((footer, Some(metadata))) = aqr_archive::footer_of(&out) else { panic!("no footer") };
+            w = SegmentWriter::appending(footer, metadata);
+        }
+        out.extend_from_slice(w.pad());
+        let (mut contents, mut wants) = (Vec::new(), Vec::new());
+        for _ in 0..u.int_in_range(1..=2).unwrap_or(1) {
+            let Ok((f, outputs)) = batch(u) else { break };
+            let all: Vec<Node> = outputs.iter().flatten().cloned().collect();
+            let mut r = references(&f, &all).into_iter();
+            let ws: Vec<Vec<Option<Vec<u8>>>> = outputs.iter().map(|o| r.by_ref().take(o.len()).collect()).collect();
+            let leaves: Vec<Leaf> = outputs
+                .into_iter()
+                .zip(&ws)
+                .map(|(outputs, w)| {
+                    let sums = w.iter().map(|w| w.as_deref().filter(|_| summed).map(checksum)).collect();
+                    Leaf { outputs, sums }
+                })
+                .collect();
+            let evaluates = ws.iter().flatten().all(Option::is_some);
+            let mut b = match (w.batch(&enc, &f, &leaves), evaluates) {
+                (Ok(b), _) => b,
+                (Err(e), true) => panic!("a batch that evaluates not archived: {e}\n{f:?}\n{leaves:?}"),
+                (Err(_), false) => return,
+            };
+            w.commit(&b);
+            let (d, r) = b.take_blocks();
+            out.extend_from_slice(&d[r]);
+            for (&leaf, (l, w)) in b.leaf_at.iter().zip(leaves.iter().zip(ws)) {
+                for (output, (n, w)) in l.outputs.iter().zip(w).enumerate() {
+                    contents.push(ContentAt { leaf, output, size: n.len() });
+                    wants.push(w);
+                }
+            }
+            batches.push((f, leaves));
+        }
+        if contents.is_empty() {
+            return;
+        }
+        // its files: of paths of their own, or of an earlier segment's (replacing its file)
+        let earlier: Vec<Vec<u8>> = want.keys().cloned().collect();
+        evaluates &= wants.iter().all(Option::is_some);
+        let mut t = Tree::default();
+        for (i, w) in wants.into_iter().enumerate() {
+            let name = match earlier.is_empty() || !u.ratio(1, 4).unwrap_or(false) {
+                true => format!("s{k}f{i}").into_bytes(),
+                false => earlier[u.choose_index(earlier.len()).unwrap_or(0)].clone(),
+            };
+            if t.entries.iter().any(|e| e.name == name) {
+                continue;
+            }
+            t.entries.push(Entry {
+                parent: None,
+                name: name.clone(),
+                node: EntryNode::File(i),
+                extra: Extra::default(),
+            });
+            want.insert(name, w);
+        }
+        // (the contents named, a file each, in the order of the entries)
+        let contents: Vec<ContentAt> = t
+            .entries
+            .iter_mut()
+            .enumerate()
+            .map(|(e, entry)| {
+                let EntryNode::File(c) = entry.node else { unreachable!() };
+                entry.node = EntryNode::File(e);
+                contents[c]
             })
             .collect();
-        let evaluates = wants.iter().flatten().all(Option::is_some);
-        let mut b = match (w.batch(&enc, &f, &leaves), evaluates) {
-            (Ok(b), _) => b,
-            (Err(e), true) => panic!("a batch that evaluates not archived: {e}\n{f:?}\n{leaves:?}"),
+        let status = if u.arbitrary::<bool>().unwrap_or(false) { Status::Complete } else { Status::None };
+        match (w.close_as(&enc, &t, &contents, status), evaluates) {
+            (Ok(m), _) => out.extend_from_slice(&m),
+            (Err(e), true) => panic!("a segment that evaluates not closed: {e}\n{batches:?}"),
             (Err(_), false) => return,
-        };
-        w.commit(&b);
-        let (d, r) = b.take_blocks();
-        out.extend_from_slice(&d[r]);
-        for (&leaf, (l, w)) in b.leaf_at.iter().zip(leaves.iter().zip(wants)) {
-            for (output, (n, w)) in l.outputs.iter().zip(w).enumerate() {
-                contents.push(ContentAt { leaf, output, size: n.len() });
-                want.push(w);
-            }
         }
-        batches.push((f, leaves));
+        let (end, old) = w.footer(0);
+        out.extend_from_slice(&end);
+        // (committed: the footer before made a spacer block)
+        if let Some(old) = old {
+            let k = kill(old.len());
+            out[old.start..old.start + k.len()].copy_from_slice(&k);
+            out[old.start + k.len()..old.end].fill(0);
+        }
     }
-    let entry = |parent, name: String, node| Entry { parent, name: name.into_bytes(), node, extra: Extra::default() };
-    let mut t = Tree::default();
-    t.entries.push(entry(None, "d".into(), EntryNode::Dir));
-    for i in 0..contents.len() {
-        t.entries.push(entry(Some(0), format!("f{i}"), EntryNode::File(i)));
-    }
-    let evaluates = want.iter().all(Option::is_some);
-    let c = match (w.finish(&enc, &t, &contents), evaluates) {
-        (Ok((c, _)), _) => [out, c].concat(),
-        (Err(e), true) => panic!("a tree that evaluates not archived: {e}\n{batches:?}"),
-        (Err(_), false) => return,
-    };
-    let got = aqr_archive::decode_value(&c, &crate::toys());
+    let got = aqr_archive::decode_value(&out, &runner);
     if !evaluates {
         return;
     }
     match got {
-        Ok(Value::Tree(_, files)) => {
-            let want: Vec<Vec<u8>> = want.into_iter().flatten().collect();
-            assert!(files == want, "files decoded otherwise\n{batches:?}");
+        Ok(Value::Tree(t, files)) => {
+            let mut by_path = std::collections::BTreeMap::new();
+            for e in &t.entries {
+                if let EntryNode::File(c) = e.node {
+                    by_path.insert(e.name.clone(), Some(files[c].clone()));
+                }
+            }
+            assert!(by_path == want, "files decoded otherwise\n{batches:?}");
         }
         r => panic!("an archive of a tree that evaluates does not decode: {:?}\n{batches:?}", r.map(|_| ())),
     }
