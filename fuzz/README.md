@@ -52,6 +52,16 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   or a fork told); where it unpacks, unpacked again of every other file's path alone, those
   files as they were. Its seeds are aqr-unpack's test archives and the codecs' of those
   formats. It found contents of files left out as they were added told still.
+- `modules`: a WebAssembly module, as an archive may carry any, checked against the profile
+  and run by aqr-wasmrt (Wasmtime, in this process) as the decoder runs one it does not know,
+  of an application of the input's parameters, resources, inputs, outputs' sizes and limits:
+  of the input's bytes (its seeds aqr-modules' own modules), or made by wasm-smith of a shape
+  of the input (a whole module, a part module or one of tasks, of task slots; the memories and
+  host functions of the profile of its kind, the entry point of the application's arity), its
+  loops bounded by fuel, its `memory.grow` of other memories than the working memory made
+  grows that fail (the profile refuses them). Nothing is checked of what it gives (the decoder
+  checks the outputs' sizes): that it fails or ends, and does not crash. Slow (Wasmtime
+  compiling each module, instrumented).
 - `natives`: an archive of recompressed files decoded by aqr-decompress's native modules (a
   module not known fails: no Wasmtime), so each module's decoding of the params and streams an
   archive tells. Its seeds are the codecs' fixtures (`codecs/*/tests/data`, at most 256 KiB)

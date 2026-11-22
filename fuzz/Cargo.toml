@@ -18,6 +18,12 @@ aqr-decompress = { path = "../crates/aqr-decompress" }
 aqr-formula = { path = "../crates/aqr-formula" }
 aqr-testkit = { path = "../crates/aqr-testkit" }
 aqr-unpack = { path = "../crates/aqr-unpack" }
+aqr-wasmrt = { path = "../crates/aqr-wasmrt" }
+sha2 = "0.10"
+wasm-smith = { version = "0.262", features = ["wasmparser"] }
+wasm-encoder = { version = "0.262", features = ["wasmparser"] }
+wasmparser = "0.262"
+wat = "1"
 libfuzzer-sys = "0.4"
 
 [[bin]]
@@ -58,6 +64,13 @@ bench = false
 [[bin]]
 name = "unpack"
 path = "fuzz_targets/unpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "modules"
+path = "fuzz_targets/modules.rs"
 test = false
 doc = false
 bench = false

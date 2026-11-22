@@ -246,6 +246,31 @@ fn unpackable() -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// The seeds of `modules`: the modules aqr-modules builds of at most 128 KiB, as the bytes of a
+/// module (after the byte choosing so and 64 of the application's), and bytes of noise for
+/// wasm-smith to make modules of, of each kind of entry point.
+fn modules() -> Vec<(String, Vec<u8>)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/aqr-modules/wasm");
+    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    files.retain(|p| p.extension().is_some_and(|e| e == "wasm"));
+    files.sort();
+    let head = noise(64, 11);
+    let mut out: Vec<(String, Vec<u8>)> = files
+        .iter()
+        .filter_map(|f| {
+            let d = std::fs::read(f).unwrap();
+            (d.len() <= 128 << 10)
+                .then(|| (f.file_name().unwrap().to_string_lossy().to_string(), [&[0][..], &head, &d].concat()))
+        })
+        .collect();
+    for e in 1..=3u8 {
+        for k in 0..4 {
+            out.push((format!("made-{e}-{k}"), [&[e][..], &head, &noise(4096, 100 * e as u32 + k)].concat()));
+        }
+    }
+    out
+}
+
 /// The seeds of target `t`.
 fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
     match t {
@@ -274,6 +299,7 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
         }
         "envelope" => envelopes(),
         "unpack" => unpackable(),
+        "modules" => modules(),
         // (bytes that `src/formula.rs` makes formulas of)
         "roundtrip" => (0..16).map(|i| (format!("noise-{i}"), noise(64 << (i % 8), i as u32))).collect(),
         "compress" => fixtures(),
@@ -314,7 +340,7 @@ fn main() {
     let seeds = seeds(t);
     std::fs::create_dir_all(dir).unwrap();
     for (name, c) in &seeds {
-        let name = if name.ends_with(".aqr") || t == "compress" || t == "unpack" {
+        let name = if name.ends_with(".aqr") || ["compress", "unpack", "modules"].contains(&t.as_str()) {
             name.clone()
         } else {
             format!("{name}.aqr")
