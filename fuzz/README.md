@@ -20,19 +20,24 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   chunks of the others are the ones not trusted.
 - `roundtrip`: a formula made of the input (`src/formula.rs`: up to 3 streams of each kind, up
   to 3 applications of several outputs, of `cut`, a node or a patch split, and a root of slices,
-  concatenations, packs, applications of `rev` and `copy`, outputs and patches, each output
-  placed once; now and then a slice out of its stream or an application of another size)
-  archived by the encoder (stored, zstd 1 and 3, low) and decoded again, whole and streamed: where
-  the target's reference evaluator, a recursive walk of its own (not aqr-archive's), gives an
-  output, the encoder has to take the formula and the archive has to give it back. Its seeds are
-  only bytes to make formulas of.
+  concatenations, packs, applications of `rev` and `copy` (now and then of resources), outputs
+  and patches, each output placed once; now and then a slice out of its stream or an
+  application of another size) archived by the encoder (stored, zstd 1 and 3, low) and decoded
+  again, whole and streamed; or a tree of 1 to 3 batches of such formulas, each of 1 to 4 leaves
+  of 1 to 3 outputs (an application's outputs all in one leaf, as `SegmentWriter::batch` wants
+  them), written as segments are, with dictionaries or without, its files decoded again. Where
+  the target's reference evaluator, a recursive walk of its own (not aqr-archive's), gives the
+  outputs, the encoder has to take them and the archive has to give them back. Its seeds are only
+  bytes to make formulas of. It found `batch` taking an application's outputs spread over
+  leaves, whose blocks then did not decode.
 - `natives`: an archive of recompressed files decoded by aqr-decompress's native modules (a
   module not known fails: no Wasmtime), so each module's decoding of the params and streams an
   archive tells. Its seeds are the codecs' fixtures (`codecs/*/tests/data`, at most 256 KiB)
   recompressed and archived again of stored blocks, the modules by their hashes alone
   (shorthand module blocks), at most 512 KiB.
 - `wasm`: `natives`' archives decoded twice, by the native modules and by the same modules as
-  WebAssembly (Wasmtime): both fail, or both give the same; a resource failure of either is let
+  WebAssembly (Wasmtime): both fail alike (invalid, unsupported), or both give the same; a
+  resource failure of either is let
   be (natively, some modules decode whole on threads, not held to their plans; in Wasm, an
   application over its limits fails). Its seeds are `natives`'. It found the executor's deadlock
   of aqr-wasmrt (a future dropped with the executor locked, waking another).
@@ -40,7 +45,10 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   recompressor's reading of untrusted files) and decompressed again by the native modules,
   which must give it back. Its seeds are the codecs' fixtures as they are.
 
-`decode`, `salvage`, `natives` and `wasm` mutate with a mutator of their own (`src/lib.rs`'s `mutate`):
+`decode`, `salvage`, `natives` and `wasm` mutate with a mutator of their own (`src/lib.rs`'s `mutate`;
+`envelope` with `mutate_sealed`, of the payload decrypted by the seeds' passphrase, the changes
+put back into the ciphertext where they are, as ChaCha20's keystream is the same, and the
+changed chunks' tags made to be taken):
 half of the time, a block whose data decodes by itself (aqr-archive's `fuzzing`: metadata, data,
 module, resource, dictionary and formula blocks, but those of a dictionary's data) is picked, its
 data decoded, mutated by libFuzzer's mutator and the block made again of it (Zstandard at level
@@ -79,6 +87,5 @@ TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzz
 timeout that does not come again alone may be a race: the file given many times over, to either,
 runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
 
-Left: that mutator of `envelope`'s payloads (decrypted, mutated so and sealed again); in
-`roundtrip`, trees of several leaves (batches, the dictionaries trained for them), resources and
-the encoder's other options; in `wasm`, the failures' kinds compared too.
+Left: in `roundtrip`, archives appended to (`-a`) and the encoder's other options (module
+blocks, the size hint sealed); `aqr-compress`'s plans of batches through `roundtrip`'s evaluator.

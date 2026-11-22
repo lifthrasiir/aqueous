@@ -817,6 +817,12 @@ impl<'c> Envelope<'c> {
 }
 
 impl<'c> Unlocked<'c> {
+    /// The chunks sealed, each its bytes and tag (for the fuzz targets' mutator).
+    #[cfg(any(fuzzing, test))]
+    pub(crate) fn sealed_chunks(&self) -> &[&'c [u8]] {
+        &self.chunks
+    }
+
     /// The bytes of the payload.
     pub fn len(&self) -> usize {
         self.chunks.iter().map(|c| c.len() - 16).sum()

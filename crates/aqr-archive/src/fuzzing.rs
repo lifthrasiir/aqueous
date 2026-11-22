@@ -3,7 +3,8 @@
 //! blocks by the generic structure, the data of each as it is decoded, and the block made again
 //! of other data, so that a mutation of what a block holds (a formula, a metadata tree) gets
 //! past its Zstandard coding. Blocks of a dictionary's data are left out (their data is not
-//! decoded without it).
+//! decoded without it). An encrypted archive's payload is decrypted for it, and put back
+//! ([`unsealed`]).
 
 use std::ops::Range;
 
@@ -104,6 +105,51 @@ fn framed(ty: u64, d: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The payload of an encrypted archive decrypted, to be mutated and put back ([`Sealed::put`]).
+pub struct Sealed {
+    pub payload: Vec<u8>,
+    /// By chunk: where its sealed bytes are in the archive, and how many (its tag after them).
+    at: Vec<(usize, usize)>,
+}
+
+/// Encrypted archive `c` unlocked by `passphrase`, where its work factor is `work_factor` (no
+/// other, for scrypt's time and memory), its payload decrypted (of the chunks that do not
+/// authenticate too, as fuzzed: [`super::envelope::Unlocked::decrypt_lossy`]).
+pub fn unsealed(c: &[u8], passphrase: &[u8], work_factor: u8) -> Option<Sealed> {
+    let (e, _) = super::envelope::open_damaged(c).ok()?;
+    if e.work_factor() != work_factor {
+        return None;
+    }
+    let u = e.unlock(passphrase).ok()?;
+    let mut payload = vec![0; u.len()];
+    u.decrypt_lossy(&mut payload, 1);
+    let at = u.sealed_chunks().iter().map(|s| (s.as_ptr() as usize - c.as_ptr() as usize, s.len() - 16)).collect();
+    Some(Sealed { payload, at })
+}
+
+impl Sealed {
+    /// Payload `new` (as long as the payload) put into archive `c` (of which it was unsealed) in
+    /// place of the payload: the ChaCha20 ciphertext changed where the bytes are, as the
+    /// keystream is the same, and the tag of a chunk changed made to be taken as fuzzed
+    /// (its first byte even: `Unlocked::opens`).
+    pub fn put(&self, c: &mut [u8], new: &[u8]) {
+        assert_eq!(new.len(), self.payload.len());
+        let mut p = 0;
+        for &(at, n) in &self.at {
+            let mut changed = false;
+            for i in 0..n {
+                let d = self.payload[p + i] ^ new[p + i];
+                c[at + i] ^= d;
+                changed |= d != 0;
+            }
+            if changed {
+                c[at + n] &= !1;
+            }
+            p += n;
+        }
+    }
+}
+
 /// A spacer block of `n` bytes in all (even, at least 2), of zeros.
 pub fn spacer(n: usize) -> Vec<u8> {
     assert!(n >= 2 && n.is_multiple_of(2));
@@ -168,6 +214,33 @@ mod tests {
         found.head = back(found.head);
         found.coded = back(found.coded);
         found
+    }
+
+    /// A payload changed and put back decrypts (without authentication) to what was put, the
+    /// chunks changed not authenticating (as not fuzzed).
+    #[test]
+    fn payloads_put_back() {
+        use std::io::Write;
+        let d: Vec<u8> = (0..200_000u32).map(|i| (i * 31 % 253) as u8).collect();
+        let a = Encoder::new(Level::STORED).with_size_hint(true).encode(&Formula::raw("raw", d), None).unwrap();
+        for mirrored in [false, true] {
+            let mut s =
+                super::super::envelope::Sealer::new(std::io::Cursor::new(Vec::new()), b"p", 12, mirrored).unwrap();
+            s.write_all(&a).unwrap();
+            let mut c = s.into_inner().unwrap().into_inner();
+            assert!(unsealed(&c, b"p", 13).is_none());
+            let sealed = unsealed(&c, b"p", 12).unwrap();
+            // (but for its size hint, filled in)
+            assert!(sealed.payload.len() == a.len() && sealed.payload[20..] == a[20..]);
+            let mut new = sealed.payload.clone();
+            new[70_000] ^= 0x55;
+            new[150_000..150_010].fill(7);
+            sealed.put(&mut c, &new);
+            let u = super::super::envelope::open(&c).unwrap().unlock(b"p").unwrap();
+            let mut got = vec![0; u.len()];
+            assert_eq!(u.decrypt_lossy(&mut got, 1), (vec![1, 2], false));
+            assert!(got == new);
+        }
     }
 
     #[test]

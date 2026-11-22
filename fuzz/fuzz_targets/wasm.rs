@@ -1,7 +1,7 @@
 //! An archive of recompressed files decoded twice, by the native modules and by the same
-//! modules as WebAssembly (Wasmtime): both fail, or both give the same. A resource failure of
-//! either is let be (natively, some modules decode whole on threads, not held to their plans;
-//! in Wasm, an application over its limits fails).
+//! modules as WebAssembly (Wasmtime): both fail alike (of the same kind: invalid, unsupported),
+//! or both give the same. A resource failure of either is let be (natively, some modules decode
+//! whole on threads, not held to their plans; in Wasm, an application over its limits fails).
 #![no_main]
 
 use aqr_archive::Failure;
@@ -18,7 +18,11 @@ fuzz_target!(|c: &[u8]| {
     let wasm = aqr_archive::decode_value(c, &aqr_decompress::Wasm);
     match (native, wasm) {
         (Ok(n), Ok(w)) => assert!(n == w, "natively and in Wasm decoded otherwise"),
-        (_, Err(Failure::Resource(_))) | (Err(_), Err(_)) => {}
+        (_, Err(Failure::Resource(_))) => {}
+        (Err(n), Err(w)) => assert!(
+            std::mem::discriminant(&n) == std::mem::discriminant(&w),
+            "failing otherwise: natively {n}, in Wasm {w}"
+        ),
         (Ok(_), Err(e)) => panic!("decoded natively, not in Wasm: {e}"),
         (Err(e), Ok(_)) => panic!("decoded in Wasm, not natively: {e}"),
     }
