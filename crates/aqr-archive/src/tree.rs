@@ -1101,7 +1101,7 @@ impl<'a> Items<'a> {
                 return None;
             }
             k += 1;
-            Some(item(self.d, &mut at, self.depth).expect("an item checked"))
+            Some(checked_item(self.d, &mut at, self.depth))
         })
     }
 
@@ -1374,13 +1374,13 @@ fn item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Decoded<Cbor<'a>> {
                     let key_at = *at;
                     let (key, _) = pair(d, at, depth, n)?;
                     if k < FEW_KEYS {
-                        if few[..k].iter().any(|&q| item(d, &mut { q }, depth + 1).is_ok_and(|q| q == key)) {
+                        if few[..k].iter().any(|&q| checked_item(d, &mut { q }, depth + 1) == key) {
                             return invalid("duplicate keys in the optional metadata");
                         }
                         few[k] = key_at;
                     } else {
                         if many.is_empty() {
-                            many.extend(few.iter().map(|&q| item(d, &mut { q }, depth + 1).expect("a key read")));
+                            many.extend(few.iter().map(|&q| checked_item(d, &mut { q }, depth + 1)));
                         }
                         many.push(key);
                     }
@@ -1407,6 +1407,64 @@ fn item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Decoded<Cbor<'a>> {
         },
         _ => return bad(),
     })
+}
+
+/// The item at `*at` of `d` at `depth`, read by [`item`] already (checked so): read again without
+/// checking it, the ends of its arrays, maps and tags found by [`skip`] alone, so that what is
+/// under an item is not read again for each item above it (its items read as they are iterated,
+/// [`Items::iter`], and its keys as they are compared: a map's keys maps of keys maps, each read
+/// again at each level above, took minutes of a few kilobytes).
+fn checked_item<'a>(d: &'a [u8], at: &mut usize, depth: usize) -> Cbor<'a> {
+    let (major, ai, arg) = head_of(d, at).expect("an item checked");
+    let string = |b: Cow<'a, [u8]>| if major == 2 { Cbor::Bytes(b) } else { Cbor::Text(b) };
+    match (major, arg) {
+        (0, Some(v)) => Cbor::Int(v as i128),
+        (1, Some(v)) => Cbor::Int(-1 - v as i128),
+        (2 | 3, Some(n)) => {
+            let b = &d[*at..*at + n as usize];
+            *at += n as usize;
+            string(Cow::Borrowed(b))
+        }
+        (2 | 3, None) => {
+            let mut b = Vec::new();
+            while d[*at] != 0xff {
+                match checked_item(d, at, depth + 1) {
+                    Cbor::Bytes(c) | Cbor::Text(c) => b.extend_from_slice(&c),
+                    _ => unreachable!("a chunk of its major type"),
+                }
+            }
+            *at += 1;
+            string(Cow::Owned(b))
+        }
+        (4 | 5, arg) => {
+            let start = *at;
+            let n = count(d, *at, arg).expect("an item checked");
+            *at = start - 1 - head_len(ai);
+            skip(d, at, depth).expect("an item checked");
+            // (the items of a map: its keys and values)
+            let n = n.map(|n| if major == 4 { n } else { 2 * n });
+            let items = Items { d: &d[start..*at], n, depth: depth + 1 };
+            if major == 4 { Cbor::Array(items) } else { Cbor::Map(items) }
+        }
+        (6, Some(tag)) => {
+            let start = *at;
+            skip(d, at, depth + 1).expect("an item checked");
+            Cbor::Tag(tag, Items { d: &d[start..*at], n: Some(1), depth: depth + 1 })
+        }
+        (7, Some(v)) => match ai {
+            25..28 => Cbor::Float(v),
+            _ => Cbor::Simple(v as u8),
+        },
+        _ => unreachable!("an item checked"),
+    }
+}
+
+/// The bytes of a head's argument of additional information `ai` (after its first byte).
+fn head_len(ai: u8) -> usize {
+    match ai {
+        24..28 => 1 << (ai - 24),
+        _ => 0,
+    }
 }
 
 /// Reads a pair of a map at `depth` of `n` pairs ([`count`]) at `*at` of `d`.
@@ -2218,6 +2276,15 @@ mod tests {
 
     /// Items gone over by their heads ([`skip`]) end where those read do, and are bad where
     /// their heads are.
+    #[test]
+    fn nested_keys_read_once() {
+        // (maps whose keys are maps and chains of tags, nested: fuzz/sfx found its reading take
+        // minutes, each level reading again all that is under it, as keys are compared)
+        let d = include_bytes!("../testdata/cbor-nested-keys.bin");
+        let r = aqr_testkit::within(std::time::Duration::from_secs(10), || whole_item(d).map(drop));
+        assert!(r.is_ok(), "{r:?}");
+    }
+
     #[test]
     fn skipped_as_read() {
         let good: [&[u8]; 9] = [
