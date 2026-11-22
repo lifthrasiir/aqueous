@@ -309,7 +309,7 @@ pub fn inspect<'c>(
     if has_metadata {
         let last = segments.last().and_then(|s| s.metadata.as_ref()).map(|m| m.at);
         let back = usize::try_from(metadata_back).ok().and_then(|b| (fields_start).checked_sub(b));
-        if back != last {
+        if back.is_none() || back != last {
             return invalid("no metadata block where the footer points");
         }
     } else if metadata_back != 0 {

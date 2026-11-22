@@ -3700,3 +3700,18 @@ fn split_outputs_in_one_leaf() {
         }
     }
 }
+
+/// A footer telling of a metadata block where there is none, its offset back past the archive's
+/// start: invalid, as the index's reading has it (fuzz/decode found the whole reading taking it,
+/// the place computed and the last segment's metadata block both none).
+#[test]
+fn footer_of_metadata_before_the_archive() {
+    let c = [
+        0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe, 0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12, 0x03, 0x00, 0x00, 0xd6, 0x00, 0x03,
+        0x00,
+    ];
+    assert!(locate(&c).is_some(), "an archive by its header and footer");
+    let r = open(&c, &natives()).and_then(|a| a.value(1).map(drop));
+    assert!(matches!(r, Err(Failure::Invalid(ref m)) if m.contains("metadata")), "{r:?}");
+    assert!(crate::inspect::inspect(&c, false, &|_| None, Some(64)).is_err());
+}

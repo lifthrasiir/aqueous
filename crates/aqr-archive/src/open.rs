@@ -386,8 +386,9 @@ pub(crate) fn opened_with<'c>(
     // hint block among them maybe: not required then)
     let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], 0, size_hint, metadata != 0, sealed && !salvaging)?;
     if metadata != 0 {
+        // (a place before the archive's start is none: not the last segment's none either)
         let at = usize::try_from(metadata).ok().and_then(|b| fields_start.checked_sub(b));
-        if blocks.segments.last().and_then(|s| s.metadata.as_ref()).map(|m| m.0) != at {
+        if at.is_none() || blocks.segments.last().and_then(|s| s.metadata.as_ref()).map(|m| m.0) != at {
             return invalid("no metadata block where the footer points");
         }
     }
