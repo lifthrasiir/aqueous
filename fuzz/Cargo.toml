@@ -20,11 +20,13 @@ aqr-pack = { path = "../crates/aqr-pack" }
 aqr-testkit = { path = "../crates/aqr-testkit" }
 aqr-unpack = { path = "../crates/aqr-unpack" }
 aqr-wasmrt = { path = "../crates/aqr-wasmrt" }
+flate2 = "1"
 sha2 = "0.10"
 wasm-smith = { version = "0.262", features = ["wasmparser"] }
 wasm-encoder = { version = "0.262", features = ["wasmparser"] }
 wasmparser = "0.262"
 wat = "1"
+zstd = "0.13"
 libfuzzer-sys = "0.4"
 
 [[bin]]

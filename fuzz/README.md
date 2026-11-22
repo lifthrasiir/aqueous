@@ -85,7 +85,13 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   of aqr-wasmrt (a future dropped with the executor locked, waking another).
 - `compress`: a file compressed (its format found by aqr-compress and recompressed: every
   recompressor's reading of untrusted files) and decompressed again by the native modules,
-  which must give it back. Its seeds are the codecs' fixtures as they are.
+  which must give it back. Its seeds are the codecs' fixtures as they are, and of the codecs of
+  none (their tests making their inputs in code), seeds made of synthetic data
+  (`src/seedgen.rs`: text of each kind, gzip, Zstandard, PNG of each colour type and filter,
+  safetensors, asar, Minecraft's regions, aqr-modules' modules; by the tools installed, SQLite
+  databases, ffmpeg's AC-3, Vorbis, ADPCM, Matroska and ProRes, gettext's catalogs, cc's
+  executables and objects of x86-64 and ARM64, xz of branch filters). `seeds report` tells the
+  modules each one's recompression applies.
 
 `decode`, `salvage`, `natives` and `wasm` mutate with a mutator of their own (`src/lib.rs`'s `mutate`;
 `envelope` with `mutate_sealed`, of the payload decrypted by the seeds' passphrase, the changes

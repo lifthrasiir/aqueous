@@ -3,6 +3,9 @@
 //! Stored blocks keep their bytes in sight of the mutations; the checksums are skipped anyway.
 
 use std::io::{Cursor, Write};
+
+#[path = "../seedgen.rs"]
+mod seedgen;
 use std::path::Path;
 
 use aqr_archive::{
@@ -130,8 +133,16 @@ fn tree(level: Level, hinted: bool) -> Vec<u8> {
     out
 }
 
-/// The fixtures of the codecs' tests of at most `FIXTURE_MAX` bytes, by path.
+/// The fixtures of the codecs' tests of at most `FIXTURE_MAX` bytes, by path, and the seeds made
+/// of the formats of the codecs of none (`src/seedgen.rs`).
 fn fixtures() -> Vec<(String, Vec<u8>)> {
+    let mut out = test_files();
+    out.extend(seedgen::generated(FIXTURE_MAX));
+    out
+}
+
+/// The fixtures of the codecs' tests of at most `FIXTURE_MAX` bytes, by path.
+fn test_files() -> Vec<(String, Vec<u8>)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../codecs");
     let mut out = Vec::new();
     let mut crates: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.path()).collect();
@@ -340,6 +351,17 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // (`seeds report`: of each seed made, the modules its recompression applies)
+    if args.first().map(String::as_str) == Some("report") {
+        for (name, d) in seedgen::generated(FIXTURE_MAX) {
+            let f = aqr_compress::recompress(&d, &aqr_fuzz::options());
+            let mut ms: Vec<String> = f.applies().iter().map(|a| a.module.name.to_string()).collect();
+            ms.sort();
+            ms.dedup();
+            println!("{name} {} {}", d.len(), ms.join(","));
+        }
+        return;
+    }
     let [t, dir] = &args[..] else { panic!("usage: seeds TARGET DIR") };
     let seeds = seeds(t);
     std::fs::create_dir_all(dir).unwrap();
