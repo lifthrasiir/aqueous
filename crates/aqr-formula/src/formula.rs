@@ -382,13 +382,20 @@ impl Formula {
                 at += m.1 - m.0;
             }
             let data = if s.data.is_shared() && at < s.data.len() as u64 {
-                // (bytes shared copied only as far as they are kept, to the store where one is set:
-                // they were most likely of it)
-                let mut d = store::Writer::new(Some(at as usize));
-                for m in &merged {
-                    d.write(&s.data[m.0 as usize..m.1 as usize]);
-                }
-                d.into_bytes()
+                // (one range kept of bytes known, a file mapped, say: shared as it is, not copied;
+                // else bytes shared copied only as far as they are kept, to the store where one is
+                // set: they were most likely of it)
+                let one = match &merged[..] {
+                    [m] => store::find(&s.data[m.0 as usize..m.1 as usize]),
+                    _ => None,
+                };
+                one.unwrap_or_else(|| {
+                    let mut d = store::Writer::new(Some(at as usize));
+                    for m in &merged {
+                        d.write(&s.data[m.0 as usize..m.1 as usize]);
+                    }
+                    d.into_bytes()
+                })
             } else {
                 // in place: the bytes kept only move towards the start
                 let mut data = s.data;

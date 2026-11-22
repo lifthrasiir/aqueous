@@ -376,4 +376,28 @@ mod tests {
         w.write(&piece[..100]);
         assert!(!w.into_bytes().is_shared());
     }
+
+    /// A stream of bytes [`known`] (a file mapped) of which one range is kept by its slices is
+    /// that range of them as [`crate::Formula::compact`] cuts it, shared, not copied; of two
+    /// ranges, a copy of them.
+    #[test]
+    fn compacted_known_shared() {
+        let d: Vec<u8> = (0..1u32 << 20).map(|i| (i * 7) as u8).collect();
+        let input = Bytes::shared(Arc::new(d.clone()));
+        let _known = known(&input);
+        let base = input.as_ptr() as usize;
+        let mut f = crate::Formula::default();
+        f.push_as("raw", crate::Kind::Unknown, input.clone());
+        f.root = crate::Node::slice(0, 100 << 10, 600 << 10);
+        f.compact();
+        let s = &f.streams[0].data;
+        assert!(s.is_shared() && s.as_ptr() as usize == base + (100 << 10), "copied");
+        assert!(s[..] == d[100 << 10..700 << 10]);
+        let mut f = crate::Formula::default();
+        f.push_as("raw", crate::Kind::Unknown, input.clone());
+        f.root =
+            crate::Node::Concat(vec![crate::Node::slice(0, 0, 10 << 10), crate::Node::slice(0, 500 << 10, 10 << 10)]);
+        f.compact();
+        assert!(f.streams[0].data[..] == [&d[..10 << 10], &d[500 << 10..510 << 10]].concat());
+    }
 }
