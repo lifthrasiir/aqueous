@@ -384,7 +384,9 @@ pub fn compress_tree_into<S: Source + ?Sized>(
     let opt = &crate::verifying(opt);
     let (tracker, notes) = Tracker::new((0..src.len()).map(|c| src.size(c)).collect());
     crate::compressing(opt);
-    let _spill = crate::spilling(opt);
+    // (none below level 2: each batch is read, compressed and written, and nothing of it held
+    // longer than the batches made at once, [`analyze_plain`])
+    let _spill = opt.recompresses().then(|| crate::spilling(opt)).flatten();
     std::thread::scope(|s| {
         s.spawn(|| tracker.run(tell));
         // (the notes gone with it, the tracker done)
@@ -1191,67 +1193,79 @@ impl Writer {
         // or more: both made again kept as they are)
         let (mut raw, mut kept) = (HashSet::new(), HashSet::new());
         let mut files = std::borrow::Cow::Borrowed(files);
-        let mut made = loop {
-            let w = &self.w;
-            let fs = &files[..];
-            let later = cx.later;
-            let made = self.watched(cx, out, move || finish(i, w, fs, part, src, opt, notes, later))?;
-            // (the files `--lossy` rewrote that archive in as many bytes as they were, or more:
-            // made again as they were, which kept as they are cost no more, docs/lossy-design.md §1)
-            let larger: Vec<usize> = (0..files.len())
-                .filter(|&k| files[k].rewritten && !raw.contains(&k))
-                .filter(|&k| match cx.lossy.lock().unwrap().get(&files[k].c) {
-                    Some(crate::lossy::Rewrite::Made { mark, .. }) => made.files[k].archived >= mark.size as f64,
-                    _ => false,
-                })
-                .collect();
-            // (and any recompressed that archives in as many bytes as it is, or more, though each
-            // formula of it was compared with its data as it was made: the contents of a
-            // formula compared kept as they are, each made after into one compared alone, which
-            // together archive larger than the contents did, as a tar's members of an .xz file)
-            // (of a file alone in its batch: a file's share does not tell what the others take of
-            // its streams, stored once for several, or held by others, which are lost kept as it
-            // is: on 10gb at -5, of 10 files taken so (7 batches made again) the archive was
-            // 2,464,160,095 bytes rather than 2,437,777,215; nor below level 3, where files are
-            // made of the DEFLATE streams kept, `inflated`; nor files coded against each other)
-            let in_sets: HashSet<usize> = made.sets.iter().flatten().copied().collect();
-            let costly: Vec<usize> = (0..files.len())
-                .filter(|_| opt.smaller && !crate::inflated::on(opt) && KEPT_LARGER.get() && files.len() == 1)
-                .filter(|&k| !files[k].rewritten && !raw.contains(&k) && !kept.contains(&k) && !in_sets.contains(&k))
-                .filter(|&k| !made.files[k].modules.is_empty() && made.files[k].archived >= files[k].len as f64)
-                .collect();
-            let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
-            if bad.is_empty() && larger.is_empty() && costly.is_empty() {
-                break made;
+        // (below level 2, of a batch not verified nor held back nor made again, the blocks written
+        // to the archive as they are made, nothing of them held: [`Writer::put_direct`])
+        let direct = !opt.recompresses() && !opt.verify && !self.hold && !files.iter().any(|f| f.rewritten);
+        let mut made = if direct {
+            if cx.stopping() {
+                return Err(self.stopped(cx, out));
             }
-            if bad.is_empty() {
-                let owned = files.to_mut();
-                for &k in &larger {
-                    let c = owned[k].c;
-                    let w = (cx.revoke)(c);
-                    let d = src.read(c)?;
-                    let hash = xxhash_rust::xxh3::xxh3_128(&d);
-                    owned[k] = File::of(c, &d, hash, owned[k].kind, owned[k].entry);
-                    cx.lossy.lock().unwrap().extend(w.map(|w| (c, w)));
+            self.put_direct(i, &files, part, cx, out)?
+        } else {
+            loop {
+                let w = &self.w;
+                let fs = &files[..];
+                let later = cx.later;
+                let made = self.watched(cx, out, move || finish(i, w, fs, part, src, opt, notes, later))?;
+                // (the files `--lossy` rewrote that archive in as many bytes as they were, or more:
+                // made again as they were, which kept as they are cost no more, docs/lossy-design.md §1)
+                let larger: Vec<usize> = (0..files.len())
+                    .filter(|&k| files[k].rewritten && !raw.contains(&k))
+                    .filter(|&k| match cx.lossy.lock().unwrap().get(&files[k].c) {
+                        Some(crate::lossy::Rewrite::Made { mark, .. }) => made.files[k].archived >= mark.size as f64,
+                        _ => false,
+                    })
+                    .collect();
+                // (and any recompressed that archives in as many bytes as it is, or more, though each
+                // formula of it was compared with its data as it was made: the contents of a
+                // formula compared kept as they are, each made after into one compared alone, which
+                // together archive larger than the contents did, as a tar's members of an .xz file)
+                // (of a file alone in its batch: a file's share does not tell what the others take of
+                // its streams, stored once for several, or held by others, which are lost kept as it
+                // is: on 10gb at -5, of 10 files taken so (7 batches made again) the archive was
+                // 2,464,160,095 bytes rather than 2,437,777,215; nor below level 3, where files are
+                // made of the DEFLATE streams kept, `inflated`; nor files coded against each other)
+                let in_sets: HashSet<usize> = made.sets.iter().flatten().copied().collect();
+                let costly: Vec<usize> = (0..files.len())
+                    .filter(|_| opt.smaller && !crate::inflated::on(opt) && KEPT_LARGER.get() && files.len() == 1)
+                    .filter(|&k| {
+                        !files[k].rewritten && !raw.contains(&k) && !kept.contains(&k) && !in_sets.contains(&k)
+                    })
+                    .filter(|&k| !made.files[k].modules.is_empty() && made.files[k].archived >= files[k].len as f64)
+                    .collect();
+                let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
+                if bad.is_empty() && larger.is_empty() && costly.is_empty() {
+                    break made;
                 }
-                kept.extend(costly);
-            } else {
-                // (not given back as it was not read as it is: told so, not made again)
-                files.iter().try_for_each(|f| src.intact(f.c))?;
-                raw.extend(bad);
+                if bad.is_empty() {
+                    let owned = files.to_mut();
+                    for &k in &larger {
+                        let c = owned[k].c;
+                        let w = (cx.revoke)(c);
+                        let d = src.read(c)?;
+                        let hash = xxhash_rust::xxh3::xxh3_128(&d);
+                        owned[k] = File::of(c, &d, hash, owned[k].kind, owned[k].entry);
+                        cx.lossy.lock().unwrap().extend(w.map(|w| (c, w)));
+                    }
+                    kept.extend(costly);
+                } else {
+                    // (not given back as it was not read as it is: told so, not made again)
+                    files.iter().try_for_each(|f| src.intact(f.c))?;
+                    raw.extend(bad);
+                }
+                let bytes = batch.iter().map(|&c| src.size(c)).sum();
+                notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
+                let data = reread(src, &files, opt.threads)?;
+                let fs = &files[..];
+                let as_they_are: HashSet<usize> = raw.union(&kept).copied().collect();
+                part = self.watched(cx, out, || {
+                    analyze(i, fs, data, &as_they_are, opt, notes, cx.siblings.clone(), cx.src.len() == 1)
+                })?;
             }
-            let bytes = batch.iter().map(|&c| src.size(c)).sum();
-            notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
-            let data = reread(src, &files, opt.threads)?;
-            let fs = &files[..];
-            let as_they_are: HashSet<usize> = raw.union(&kept).copied().collect();
-            part = self.watched(cx, out, || {
-                analyze(i, fs, data, &as_they_are, opt, notes, cx.siblings.clone(), cx.src.len() == 1)
-            })?;
         };
         files.iter().try_for_each(|f| src.intact(f.c))?;
         self.w.commit(&made.batch);
-        {
+        if !direct {
             let _s = aqr_common::trace::span("write");
             match self.hold {
                 false => {
@@ -1292,6 +1306,27 @@ impl Writer {
         let (a, b) = (r.alternatives, made.alternatives);
         r.alternatives = (a.0 + b.0, a.1 + b.1, a.2 + b.2);
         Ok(())
+    }
+
+    /// Batch `i` of `files` of analysis `part` (below level 2: [`analyze_plain`]) written to `out`
+    /// as its blocks are made ([`SegmentWriter::batch_to`]), after the padding due, its streams
+    /// compressed beforehand. (A stop waits for the batch: what is written of one is not undone.)
+    fn put_direct<S: Source + ?Sized>(
+        &mut self,
+        i: usize,
+        files: &[File],
+        part: Analyzed,
+        cx: &Ctx<S>,
+        out: &mut Out,
+    ) -> io::Result<Made> {
+        let Analyzed { f, leaves, at, mut enc, memo: _, alternatives } = part;
+        enc.on_precompress(Some(cx.notes.encoding(i)));
+        let _s = aqr_common::trace::span("encode");
+        out.write_all(self.w.pad())?;
+        let batch = self.w.batch_to(&enc, &f, &leaves, out)?.expect("slices within their streams");
+        let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
+        cx.later.drop((enc, f));
+        Ok(Made { batch, at, files: reports, solid, sets, bad: Vec::new(), alternatives })
     }
 
     /// Closes the segment: the batches held back written, then the mirror blocks of the

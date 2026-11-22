@@ -11,7 +11,8 @@
 //! written: its blocks with the module and resource blocks before them make an archive of a
 //! single file, its leaves' outputs one after another. Its bytes are written as that archive
 //! from the first, in the store where one is set ([`aqr_formula::store::Writer`]), so that a batch of
-//! gigabytes is not held on the heap.
+//! gigabytes is not held on the heap. A batch not checked is written as it is made instead
+//! ([`SegmentWriter::batch_to`]): its blocks alone, to the archive, none of them held.
 //!
 //! The blocks of a batch alike (of a class and kind of stream) may take a dictionary trained
 //! for them ([`super::dict`]), whose block comes before all of the batch's; a batch checked
@@ -119,10 +120,15 @@ pub struct SegmentWriter {
 /// The blocks of a batch of leaves, to write after those before ([`SegmentWriter::commit`]).
 pub struct Batch {
     /// The archive of a single file of the batch ([`Batch::standalone`]), its blocks from
-    /// `front` to `end`.
+    /// `front` to `end`; none of a batch written as it was made ([`SegmentWriter::batch_to`]).
     archive: Bytes,
     front: usize,
     end: usize,
+    /// Bytes of its blocks.
+    len: usize,
+    /// Of a batch written as it was made, the bytes of each block of `added` (else none: they are
+    /// in `archive`).
+    added_bytes: Vec<Vec<u8>>,
     /// Where each leaf block is in the archive.
     pub leaf_at: Vec<usize>,
     pub layout: Layout,
@@ -137,9 +143,26 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Its blocks, to write after those before.
+    /// Its blocks, to write after those before (none of a batch written as it was made).
     pub fn blocks(&self) -> &[u8] {
         &self.archive[self.front..self.end]
+    }
+
+    /// Bytes of its blocks, written or to write.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The bytes of its `k`th module or resource block added.
+    fn added(&self, k: usize) -> &[u8] {
+        match self.added_bytes.get(k) {
+            Some(b) => b,
+            None => &self.blocks()[self.added[k].clone()],
+        }
     }
 
     /// An archive of a single file of the batch (the blocks so far not in it but the module and
@@ -157,16 +180,30 @@ impl Batch {
 }
 
 /// The bytes of a batch being made, after the head of its archive alone ([`Batch::standalone`]),
-/// as [`Out`] counts them: from the first of its blocks.
-struct Blocks {
-    w: aqr_formula::store::Writer,
+/// as [`Out`] counts them: from the first of its blocks; or its blocks alone, written to the
+/// archive as they are made ([`SegmentWriter::batch_to`]), those of the blocks `kept` also
+/// kept (the module and resource blocks added, for the archive's prefix).
+struct Blocks<'a> {
+    w: BlocksTo<'a>,
     front: usize,
     len: usize,
+    kept: Option<Vec<u8>>,
 }
 
-impl Out for Blocks {
+enum BlocksTo<'a> {
+    Held(aqr_formula::store::Writer),
+    Direct(&'a mut dyn Out),
+}
+
+impl Out for Blocks<'_> {
     fn put(&mut self, b: &[u8]) {
-        self.w.write(b);
+        match &mut self.w {
+            BlocksTo::Held(w) => w.write(b),
+            BlocksTo::Direct(w) => w.put(b),
+        }
+        if let Some(k) = &mut self.kept {
+            k.extend_from_slice(b);
+        }
         self.len += b.len();
     }
 
@@ -477,6 +514,33 @@ impl SegmentWriter {
     /// formula block makes every output of the applications it takes of, and takes them all
     /// (there is no instruction dropping one).
     pub fn batch(&self, enc: &Encoder, f: &Formula, leaves: &[Leaf]) -> Result<Batch> {
+        self.made(enc, f, leaves, None)
+    }
+
+    /// [`SegmentWriter::batch`], its blocks written to `out` as they are made rather than held
+    /// (nor the archive of a single file made of them: [`Batch::standalone`] and
+    /// [`Batch::blocks`] are empty), the module and resource blocks it adds alone kept, and
+    /// its streams compressed block by block as they are written where they were not
+    /// beforehand ([`Encoder::precompress`]): what it holds is a block's. Fails as
+    /// [`SegmentWriter::batch`] does (Ok(Err)), or as `out` fails (Err: what was written of it
+    /// left as it is).
+    pub fn batch_to(
+        &self,
+        enc: &Encoder,
+        f: &Formula,
+        leaves: &[Leaf],
+        out: &mut dyn std::io::Write,
+    ) -> std::io::Result<Result<Batch>> {
+        let mut w = super::blocks::Writing { out, len: 0, failed: None };
+        let made = self.made(enc, f, leaves, Some(&mut w));
+        match w.failed {
+            Some(e) => Err(e),
+            None => Ok(made),
+        }
+    }
+
+    /// [`SegmentWriter::batch`], or [`SegmentWriter::batch_to`] where `to` is given.
+    fn made(&self, enc: &Encoder, f: &Formula, leaves: &[Leaf], to: Option<&mut dyn Out>) -> Result<Batch> {
         // (the streams are looked at in `f`: not copied)
         let check = Formula {
             streams: Vec::new(),
@@ -547,19 +611,32 @@ impl SegmentWriter {
             groups[root].push(i);
         }
 
-        // the streams compressed at once, then laid out
+        // the streams compressed at once, then laid out (written as they are made: compressed as
+        // they are written, but those compressed beforehand)
         let written = written(f, &uses);
-        enc.precompress(&(0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect::<Vec<_>>())?;
+        let direct = to.is_some();
+        if !direct {
+            enc.precompress(
+                &(0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect::<Vec<_>>(),
+            )?;
+        }
 
         let level = enc.base_level();
-        let mut out =
-            Blocks { w: aqr_formula::store::Writer::new(None), front: HEADER_MAGIC.len() + self.prefix.len(), len: 0 };
-        out.w.write(&HEADER_MAGIC);
-        out.w.write(&self.prefix);
+        let mut out = match to {
+            Some(to) => Blocks { w: BlocksTo::Direct(to), front: 0, len: 0, kept: None },
+            None => {
+                let mut w = aqr_formula::store::Writer::new(None);
+                w.write(&HEADER_MAGIC);
+                w.write(&self.prefix);
+                Blocks { w: BlocksTo::Held(w), front: HEADER_MAGIC.len() + self.prefix.len(), len: 0, kept: None }
+            }
+        };
         let mut b = Batch {
             archive: Bytes::default(),
             front: out.front,
             end: 0,
+            len: 0,
+            added_bytes: Vec::new(),
             leaf_at: vec![0; leaves.len()],
             layout: Vec::new(),
             modules: Vec::new(),
@@ -615,7 +692,9 @@ impl SegmentWriter {
                 for &m in &uses[i].modules {
                     if !modules.contains(&m) {
                         let at = out.len();
+                        out.kept = direct.then(Vec::new);
                         enc.write_module(out, m, level)?;
+                        b.added_bytes.extend(out.kept.take());
                         b.layout.push((Placed::Module, out.len() - at));
                         b.added.push(at..out.len());
                         modules.push(m);
@@ -625,7 +704,9 @@ impl SegmentWriter {
                 for r in &uses[i].resources {
                     if !resources.contains(r) {
                         let at = out.len();
+                        out.kept = direct.then(Vec::new);
                         enc.resource_block(out, r)?;
+                        b.added_bytes.extend(out.kept.take());
                         b.layout.push((Placed::Resource, out.len() - at));
                         b.added.push(at..out.len());
                         resources.push(r.clone());
@@ -677,17 +758,25 @@ impl SegmentWriter {
             }
             non_leaf += blocks;
         }
-        b.end = b.front + out.len;
-        footer(out, b.end - HEADER_MAGIC.len());
-        // (one on the heap kept there, not copied to the store)
-        b.archive = std::mem::replace(&mut out.w, aqr_formula::store::Writer::new(Some(0))).into_bytes_in_place();
+        b.len = out.len;
+        if matches!(out.w, BlocksTo::Held(_)) {
+            b.end = b.front + out.len;
+            footer(out, b.end - HEADER_MAGIC.len());
+            let BlocksTo::Held(w) =
+                std::mem::replace(&mut out.w, BlocksTo::Held(aqr_formula::store::Writer::new(Some(0))))
+            else {
+                unreachable!()
+            };
+            // (one on the heap kept there, not copied to the store)
+            b.archive = w.into_bytes_in_place();
+        }
         Ok(b)
     }
 
     /// Takes batch `b` as written after the blocks so far.
     pub fn commit(&mut self, b: &Batch) {
-        for r in &b.added {
-            self.prefix.extend_from_slice(&b.blocks()[r.clone()]);
+        for k in 0..b.added.len() {
+            self.prefix.extend_from_slice(b.added(k));
         }
         // (the added blocks in the order of their kinds, modules and resources each in order)
         let mut adds = b.added.iter();
@@ -714,7 +803,7 @@ impl SegmentWriter {
         for &(i, d) in &b.leaf_dictionary {
             self.leaf_dictionary.insert(b.leaf_at[i], d);
         }
-        self.at += b.blocks().len();
+        self.at += b.len();
         self.mirrorable += (b.layout.iter())
             .filter(|(p, _)| matches!(p, Placed::Module | Placed::Resource | Placed::Dictionary | Placed::Formula(_)))
             .map(|&(_, n)| n)
