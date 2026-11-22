@@ -119,7 +119,7 @@ fn gzip_streams_of_others_made_again() {
     check::gzip(&x, &r5).unwrap();
     let b6 = aqr_flate::zlib::compress(&b, PARAMS).unwrap();
     assert_eq!(r5.len(), 2 * (16 + 8) + stream.len() + b6.len());
-    // (below level 4, where DEFLATE streams are kept as they are: kept, told why)
+    // (below level 3, where DEFLATE streams are kept as they are: kept, told why)
     let low = Options { level: aqr_archive::Level::LOW, ..Options::default() };
     assert!(matches!(rewrite(&x, &parse_any("coding").unwrap(), &low), Some((Rewrite::Kept { .. }, None))));
     // (data after the members: kept as it is, told why)

@@ -38,7 +38,7 @@ pub(crate) struct Cx {
     /// What the files archived together hold ([`Held`]), for an archive of several.
     pub(crate) held: Option<Arc<Held>>,
     /// The DEFLATE streams of the files archived together, kept as they are, that files holding
-    /// their data are made of ([`inflated`]), for an archive of several below level 4.
+    /// their data are made of ([`inflated`]), for an archive of several below level 3.
     pub(crate) bodies: Option<Arc<inflated::Bodies>>,
     /// The files archived together that `--lossy` rewrote ([`crate::lossy::Rewritten`]), whose
     /// DEFLATE streams are zlib's at level 6, coded so.

@@ -1,4 +1,4 @@
-//! Below level 4, where DEFLATE streams are not rebuilt ([`on`]): the files of an archive whose
+//! At level 2, where DEFLATE streams are not rebuilt ([`on`]): the files of an archive whose
 //! data is that of a DEFLATE stream archived along with them (the body of a ZIP archive's entry,
 //! a gzip member's or a zlib stream's) made of the stream by aqr-flate's module `flate-inflate`,
 //! the stream a slice of the file's formula. The container keeps the stream as it is, a slice
@@ -21,12 +21,15 @@ aqr_common::zopt! {
     /// The most bytes of data of a zlib stream inflated to tell what it holds (its checksum tells
     /// nothing of that).
     static ZLIB_MAX: Opt<usize> = Opt::size("inflated:zlib-max", 256 << 20, "the most bytes a zlib stream is inflated to, to tell what it holds");
-    /// The level below which DEFLATE streams are kept as they are (see [`on`]).
-    static MAX_LEVEL: Opt<u8> = Opt::value("inflated:max-level", 4, "DEFLATE streams are shared only below this level");
+    /// The level below which DEFLATE streams are kept as they are (see [`on`]). On 10gb, level
+    /// 3 rebuilding them is 109 MB (4.1%) smaller than keeping them, for 1.84 T instructions
+    /// more (+37%) and a decoding of 18.7 s rather than 11.9: half of what 4 takes more (the
+    /// streams of LZMA the other half).
+    static MAX_LEVEL: Opt<u8> = Opt::value("inflated:max-level", 3, "DEFLATE streams are shared only below this level");
 }
 
 /// Whether DEFLATE streams are kept as they are at the level of `opt`, and files holding their
-/// data made of them: below level 4, where anything is recompressed.
+/// data made of them: below level 3, where anything is recompressed.
 pub(crate) fn on(opt: &Options) -> bool {
     opt.recompresses() && opt.level.scale() < MAX_LEVEL.get()
 }

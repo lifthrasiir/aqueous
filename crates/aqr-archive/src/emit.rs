@@ -12,8 +12,13 @@ pub fn footer_bytes(blocks: usize) -> Vec<u8> {
 
 /// [`Encoder::how`] of a stream of `class` and `kind` at `level`.
 pub(crate) fn how_of(level: Level, class: &str, kind: Kind) -> How {
+    let at = match level {
+        Level::Of(n) => dense_level(n),
+        Level::Zstd(_) => None,
+    };
+    // (the stream of all of a batch's classes at its level from the dense level on only)
     let from = matches!(level, Level::Of(n) if n.clamp(1, Level::MAX) >= DENSE_FROM.get());
-    let dense = from
+    let dense = at.is_some()
         && DENSE_CLASSES.get().iter().any(|&c| match c {
             "text" => kind == Kind::Text,
             _ => match c.strip_suffix('/') {
@@ -24,7 +29,7 @@ pub(crate) fn how_of(level: Level, class: &str, kind: Kind) -> How {
     match kind {
         Kind::Compressed => How::Light,
         _ if from && class == TOGETHER => How::Dense(TOGETHER_LEVEL.get()),
-        _ if dense => How::Dense(DENSE_LEVEL.get()),
+        _ if dense => How::Dense(at.expect("a dense level")),
         _ => How::Usual,
     }
 }

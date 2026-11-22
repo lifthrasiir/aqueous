@@ -19,7 +19,7 @@ pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
         profile,
         params,
         zlib: aqr_flate::ZLIB.get(),
-        // (below level 4, no DEFLATE body rebuilt: files holding their data are made of them,
+        // (below level 3, no DEFLATE body rebuilt: files holding their data are made of them,
         // [`crate::inflated`])
         limit: if crate::inflated::on(opt) { 0 } else { cx.inflate_left() },
         kind: kind_by_name,

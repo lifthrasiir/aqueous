@@ -1212,7 +1212,7 @@ impl Writer {
             // (of a file alone in its batch: a file's share does not tell what the others take of
             // its streams, stored once for several, or held by others, which are lost kept as it
             // is: on 10gb at -5, of 10 files taken so (7 batches made again) the archive was
-            // 2,464,160,095 bytes rather than 2,437,777,215; nor below level 4, where files are
+            // 2,464,160,095 bytes rather than 2,437,777,215; nor below level 3, where files are
             // made of the DEFLATE streams kept, `inflated`; nor files coded against each other)
             let in_sets: HashSet<usize> = made.sets.iter().flatten().copied().collect();
             let costly: Vec<usize> = (0..files.len())
@@ -2089,7 +2089,7 @@ fn analyze(
     if crate::inflated::on(opt) {
         f.streams.iter_mut().for_each(|s| s.data.share());
         let files: Vec<Bytes> = f.streams.iter().map(|s| s.data.clone()).collect();
-        // (a bug of it finds none: the files are made as they would be above level 3)
+        // (a bug of it finds none: the files are made as they would be from level 3 on)
         let found = crate::caught("inflated", files.iter().map(|f| f.len()).sum(), || {
             crate::inflated::Bodies::of(&files, raw, opt.threads)
         });

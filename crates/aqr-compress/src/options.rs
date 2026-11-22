@@ -26,7 +26,8 @@ pub struct Options {
     /// The level of the archive of [`compress`] ([`aqr_archive::Encoder`]), and of the formulas sized
     /// for [`Options::smaller`]; and, by its [`Level::scale`], how hard data is recompressed:
     /// at 0 and 1 not at all (whatever [`Options::depth`]: at 0 every block uncompressed, at 1
-    /// zstd alone), from 7 on DEFLATE as [`Options::flate`] tells and with no `probe`.
+    /// zstd alone), at 2 DEFLATE streams kept as they are ([`crate::inflated`]), from 6 on with
+    /// the adaptive profile ([`Options::flate_profile`]) and from 7 on with no `probe`.
     pub level: Level,
     /// Keep a file raw, or the data where files are found, unless its formula archives
     /// smaller than it does raw ([`aqr_archive::Encoder::smaller`]).
@@ -179,16 +180,18 @@ impl Nest {
 
 impl Options {
     /// The aqr-flate profile that DEFLATE streams (of gzip, zlib and ZIP) are rebuilt with (zlib
-    /// emulation is tried at every level): up to level 6, the default profile;
-    /// from 7 on, the adaptive one with chain rules and zlib emulation (enwik8 by
+    /// emulation is tried at every level): up to level 5, the default profile;
+    /// from 6 on, the adaptive one with chain rules and zlib emulation (enwik8 by
     /// Info-ZIP 3.0 `-9`, 10 threads of a Ryzen 7 9700X: a record of 0.41% of the data rather
     /// than 2.6% with chain rules alone, split at 66 MB/s rather than 163, joined at 147 MB/s
     /// rather than 302; 2.8 KB with zlib emulation, split at 54 MB/s, joined at 165 MB/s, but at
     /// 25 MB/s on a thread: `enwik9.zip` alone some 40 s of decoding). Streams not of zlib's
-    /// cost nothing more: detection turns them down at once.
+    /// cost nothing more: detection turns them down at once. On 10gb, level 6 with it is 39 MB
+    /// (1.6%) smaller than with the default profile, for 1.87 T instructions more (+20%) and a
+    /// decoding of 43.6 s rather than 35.7; level 7 (no probe) 16 MB smaller again.
     pub fn flate_profile(&self) -> u16 {
         match self.level.scale() {
-            ..7 => aqr_flate::PROFILE.get(),
+            ..6 => aqr_flate::PROFILE.get(),
             _ => aqr_flate::ADAPTIVE,
         }
     }

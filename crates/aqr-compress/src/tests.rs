@@ -1464,9 +1464,9 @@ fn gzip_members_as_one() {
     assert!(f.streams.iter().any(|s| s.data.windows(12).any(|w| w == b"not a member")));
 }
 
-/// Level 1 recompresses nothing; levels 2 and 3 keep DEFLATE streams as they are
-/// ([`inflated`]); from 7 on, they are always deconstructed (no probe), with the adaptive
-/// profile.
+/// Level 1 recompresses nothing; level 2 keeps DEFLATE streams as they are ([`inflated`]);
+/// from 6 on, they are rebuilt with the adaptive profile, and from 7 on always deconstructed
+/// (no probe).
 #[test]
 fn levels() {
     let gz = |name: &str, d: &[u8], level| {
@@ -1486,23 +1486,31 @@ fn levels() {
     let text: Vec<u8> = (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
     // (DEFLATE at level 1 leaves much to the archive)
     let text = gz("text.txt", &text, 1);
-    for level in
-        [Level::Of(1), Level::LOW, Level::Of(3), Level::Of(4), Level::MID, Level::Of(7), Level::HIGH, Level::Of(9)]
-    {
+    for level in [
+        Level::Of(1),
+        Level::LOW,
+        Level::Of(3),
+        Level::Of(4),
+        Level::MID,
+        Level::Of(6),
+        Level::Of(7),
+        Level::HIGH,
+        Level::Of(9),
+    ] {
         let n = level.scale();
         // (noise turned down by the probe, or else after it is deconstructed)
         assert_eq!(made(&noise, level).0, (n >= 7) as usize, "{level:?}");
         let profile = match n {
-            ..4 => None,
-            4..7 => Some(aqr_flate::DEFAULT_PROFILE),
+            ..3 => None,
+            3..6 => Some(aqr_flate::DEFAULT_PROFILE),
             _ => Some(aqr_flate::ADAPTIVE),
         };
-        assert_eq!(made(&text, level), ((n >= 4) as usize, profile), "{level:?}");
+        assert_eq!(made(&text, level), ((n >= 3) as usize, profile), "{level:?}");
     }
 }
 
 /// PDF files at the archive's level: the records of their DEFLATE streams of aqr-flate's
-/// profile as [`Options::flate`] tells, and from level 7 on with no time budget (every
+/// profile as [`Options::flate_profile`] tells, and from level 7 on with no time budget (every
 /// FlateDecode stream inflated, none in the token mode or raw).
 #[test]
 fn pdf_levels() {
@@ -2259,7 +2267,7 @@ fn zstd_share_panic_falls_back() {
     assert!(a.archive.len() > ok.archive.len() + zst.len() / 2, "{} against {}", a.archive.len(), ok.archive.len());
 }
 
-/// A panic of the search for the files that hold the data of DEFLATE streams (below level 4)
+/// A panic of the search for the files that hold the data of DEFLATE streams (below level 3)
 /// loses the sharing, not the archive.
 #[test]
 fn inflated_panic_falls_back() {

@@ -111,8 +111,17 @@ aqr_common::zopt! {
     /// MB for some 200 s of a core; not so on other data (raw 1.006 at most). Not in estimates
     /// ([`Encoder::least`]): a probe goes by the level picked.
     pub(crate) static DENSE_LEVEL: Opt<i32> = Opt::value("zstd:dense-level", 16, "zstd level of dense streams (PE code, text)");
-    /// The archive level from which dense streams have a level of their own.
+    /// The archive level from which dense streams have the dense level ([`DENSE_LEVEL`]).
     pub(crate) static DENSE_FROM: Opt<u8> = Opt::value("zstd:dense-from", 8, "archive level from which dense streams get the dense level");
+    /// The zstd level of dense streams from [`LIGHT_DENSE_FROM`] up to [`DENSE_FROM`]: level 12
+    /// at level 7: on 10gb 12.6 MB smaller than with none for 0.39 T instructions more
+    /// (+3%), where 16 at 8 saves 17 MB more for 1.39 T.
+    pub(crate) static LIGHT_DENSE_LEVEL: Opt<i32> =
+        Opt::value("zstd:dense-light-level", 12, "zstd level of dense streams below zstd:dense-from");
+    /// The archive level from which dense streams have a level of their own: below
+    /// [`DENSE_FROM`], [`LIGHT_DENSE_LEVEL`].
+    pub(crate) static LIGHT_DENSE_FROM: Opt<u8> =
+        Opt::value("zstd:dense-light-from", 7, "archive level from which dense streams get zstd:dense-light-level");
     /// The streams that are dense: `text` (of the kind), a class's name, or the start of one
     /// (ending with `/`).
     pub(crate) static DENSE_CLASSES: Opt<&'static [&'static str]> =
@@ -142,11 +151,11 @@ pub(crate) struct Pick {
 }
 
 impl Pick {
-    /// Level 1: zstd level 1 alone. 2??: the base, level 1 where smaller, and as many of
+    /// Level 1: zstd level 1 alone. From 2 on: the base, level 1 where smaller, and as many of
     /// [`HIGHER`] as the level is above 2. From 6 on, the higher level by the sample alone, as a
     /// sample of chunks of 64 KiB does not see the matches from afar that a higher level's
-    /// larger window finds (10gb: some ??1 MB at 5's rate); from 8 on, the dense level for dense
-    /// streams, and at 9 for any where the sample is smaller so.
+    /// larger window finds (10gb: some ??1 MB at 5's rate); from 7 on, a dense level for dense
+    /// streams ([`dense_level`]), and at 9 the dense one for any where the sample is smaller so.
     /// (Level 0 compresses nothing, and picks nothing: taken as 1.)
     pub(crate) fn of(level: u8) -> Pick {
         let n = level.clamp(1, Level::MAX);
@@ -170,7 +179,7 @@ impl Pick {
                 })
                 .collect(),
             rate: if n >= 6 { 0.0 } else { MID_RATE.get() },
-            dense: (n >= DENSE_FROM.get()).then(|| DENSE_LEVEL.get()),
+            dense: dense_level(n),
         }
     }
 
@@ -180,14 +189,24 @@ impl Pick {
     }
 }
 
+/// The zstd level of dense streams at archive level `n` of [`Level::Of`], if they have one:
+/// [`DENSE_LEVEL`] from [`DENSE_FROM`] on, [`LIGHT_DENSE_LEVEL`] from [`LIGHT_DENSE_FROM`].
+pub(crate) fn dense_level(n: u8) -> Option<i32> {
+    match n.clamp(1, Level::MAX) {
+        n if n >= DENSE_FROM.get() => Some(DENSE_LEVEL.get()),
+        n if n >= LIGHT_DENSE_FROM.get() => Some(LIGHT_DENSE_LEVEL.get()),
+        _ => None,
+    }
+}
+
 /// How a stream is compressed, by what it is ([`Encoder::how`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum How {
     /// Of [`Kind::Compressed`]: stored as it is, unless all of it compresses at [`PROBE_LEVEL`].
     Light,
     Usual,
-    /// PE code or text, or the stream of [`TOGETHER`], at this zstd level where the [`Pick`] has
-    /// a dense level.
+    /// PE code or text ([`dense_level`]), or the stream of [`TOGETHER`] ([`TOGETHER_LEVEL`]), at
+    /// this zstd level where the [`Pick`] has a dense level.
     Dense(i32),
 }
 

@@ -7,7 +7,7 @@
 //!   sliced in between, a content stream (below). Of an NSIS installer, the files its data
 //!   stores as they are (`nsis`), each a content of its format, as deep as the installer.
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
-//!   record). Below level 4, DEFLATE streams (theirs and ZIP archives') are not rebuilt but
+//!   record). Below level 3, DEFLATE streams (theirs and ZIP archives') are not rebuilt but
 //!   kept as they are, each a slice of its own, and the files archived along with them that
 //!   hold their data are made of them by aqr-flate's `flate-inflate` (`inflated`).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.

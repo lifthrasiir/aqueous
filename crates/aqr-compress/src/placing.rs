@@ -110,7 +110,7 @@ impl Apart {
 /// Whether formula `f` of a content takes the place of its slice ([`nested`]): one of
 /// applications, or aqr-ppmd's, which only cuts the header off the data, so that the data is
 /// stored once where another file starts with it, or aqr-mkv's, which holds frames seen
-/// before once, or a gzip or zlib stream's below level 4, which cuts its DEFLATE stream off for
+/// before once, or a gzip or zlib stream's below level 3, which cuts its DEFLATE stream off for
 /// files made of it ([`inflated::is`]), or a PE image's, which cuts its resources apart for the
 /// same ones of other images to be stored once ([`exe::resources_apart`]).
 pub(crate) fn takes_place(f: &Formula) -> bool {

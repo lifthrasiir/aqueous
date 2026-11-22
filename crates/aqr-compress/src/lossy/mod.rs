@@ -10,7 +10,7 @@
 //! - `coding`: the DEFLATE streams of ZIP archives (`zip`) and gzip files (`gzip`) that zlib
 //!   does not give back made again by zlib's emulation ([`aqr_flate::zlib::compress`], level 6);
 //!   sizes, offsets and the rest of the container written again. Their records are then a few
-//!   bytes at any level ([`Rewritten`]); from level 4 on, where DEFLATE streams are rebuilt.
+//!   bytes at any level ([`Rewritten`]); from level 3 on, where DEFLATE streams are rebuilt.
 //!   And the LZMA streams of `.lzma` files (`lzma`) and the LZMA2 streams of `.xz` files (`xz`)
 //!   made again by [`aqr_lzma::canonical`], whose parse aqr-lzma's record predicts (some 3% of
 //!   XZ Utils' records; streams about XZ Utils `-3`'s). Their R is some 10% larger than XZ Utils
@@ -371,11 +371,11 @@ pub(crate) const PARAMS: aqr_flate::zlib::Params =
     aqr_flate::zlib::Params { level: 6, strategy: aqr_flate::zlib::Strategy::Default, wbits: 15, mem: 8 };
 
 /// Why the DEFLATE streams of a file are kept as they are at the level of `opt`, if they are:
-/// below level 4, where they are never rebuilt (`crate::inflated`).
+/// below level 3, where they are never rebuilt (`crate::inflated`).
 fn rebuilds(opt: &Options) -> Result<(), String> {
     match crate::inflated::on(opt) {
         false => Ok(()),
-        true => Err("below level 4, DEFLATE streams are kept as they are".into()),
+        true => Err("below level 3, DEFLATE streams are kept as they are".into()),
     }
 }
 

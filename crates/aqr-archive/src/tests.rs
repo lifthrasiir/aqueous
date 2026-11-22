@@ -1459,8 +1459,9 @@ fn mid_level() {
 }
 
 /// Levels by name and number; the zstd levels picked from grow with the level, and only
-/// from 8 on are dense streams (text, PE code) at the dense level (one no longer than a sample
-/// where that is smaller).
+/// from 7 on are dense streams (text, PE code) at a dense level of their own (one no longer
+/// than a sample where that is smaller): the light one at 7, the dense one from 8, where the
+/// stream of all of a batch's classes has its level too.
 #[test]
 fn levels() {
     for (s, l) in
@@ -1493,13 +1494,17 @@ fn levels() {
         apart: false,
         data: d.to_vec().into(),
     };
-    for (level, dense) in [(Level::MID, false), (Level::Of(7), false), (Level::HIGH, true), (Level::Of(9), true)] {
+    let (light, full) = (Some(LIGHT_DENSE_LEVEL.get()), Some(DENSE_LEVEL.get()));
+    for (level, dense, together) in
+        [(Level::MID, None, false), (Level::Of(7), light, false), (Level::HIGH, full, true), (Level::Of(9), full, true)]
+    {
         let enc = Encoder::new(level);
-        let d = How::Dense(DENSE_LEVEL.get());
-        assert_eq!(enc.how(&s(&long, Kind::Text, "raw")) == d, dense, "{level:?}");
-        assert_eq!(enc.how(&s(&long, Kind::Unknown, "x86/OP")) == d, dense, "{level:?}");
+        let dl = dense.unwrap_or(DENSE_LEVEL.get());
+        let d = How::Dense(dl);
+        assert_eq!(enc.how(&s(&long, Kind::Text, "raw")) == d, dense.is_some(), "{level:?}");
+        assert_eq!(enc.how(&s(&long, Kind::Unknown, "x86/OP")) == d, dense.is_some(), "{level:?}");
         let t = How::Dense(TOGETHER_LEVEL.get());
-        assert_eq!(enc.how(&s(&long, Kind::Unknown, TOGETHER)) == t, dense, "{level:?}");
+        assert_eq!(enc.how(&s(&long, Kind::Unknown, TOGETHER)) == t, together, "{level:?}");
         assert_eq!(enc.how(&s(&long, Kind::Unknown, "raw")), How::Usual);
         assert_eq!(enc.how(&s(&long, Kind::Compressed, "raw")), How::Light);
         let at = |d: &[u8], how| match enc.plan(key(&[d]), &[d], how).unwrap() {
@@ -1507,17 +1512,18 @@ fn levels() {
             Plan::Done(..) => 0,
             Plan::Probe => PROBE_LEVEL.get(),
         };
-        assert_eq!(at(&long, d) == DENSE_LEVEL.get(), dense, "{level:?}");
-        assert_eq!(at(&long, t) == TOGETHER_LEVEL.get(), dense, "{level:?}");
+        assert_eq!(at(&long, d) == dl, dense.is_some(), "{level:?}");
+        // (as a dense stream is, where [`Encoder::how`] tells so)
+        assert_eq!(at(&long, t) == TOGETHER_LEVEL.get(), dense.is_some(), "{level:?}");
         // (at 9, picked from as any other)
         assert_eq!(at(&long, How::Usual) == DENSE_LEVEL.get(), level == Level::Of(9), "{level:?}");
         // no longer than a sample: compressed whole, at the dense level where smaller so
         let Plan::Done(Some(c), _) = enc.plan(key(&[&text]), &[&text], d).unwrap() else {
             panic!("{level:?}: not compressed whole")
         };
-        let at_dense = compressed(&mut enc.cctx(), &[&text], DENSE_LEVEL.get(), 1).unwrap().unwrap();
-        assert!(at_dense.len() < c.len() || dense, "{level:?}: {} vs {}", at_dense.len(), c.len());
-        assert_eq!(c == at_dense, dense, "{level:?}");
+        let at_dense = compressed(&mut enc.cctx(), &[&text], dl, 1).unwrap().unwrap();
+        assert!(at_dense.len() < c.len() || dense.is_some(), "{level:?}: {} vs {}", at_dense.len(), c.len());
+        assert_eq!(c == at_dense, dense.is_some(), "{level:?}");
     }
     // archived dense, and smaller so
     let f = |kind| {

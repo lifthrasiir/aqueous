@@ -307,7 +307,7 @@ pub(crate) fn chm(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 }
 
 /// aqr-pdf's options at the level of `opt`: the records of its DEFLATE streams of the profile
-/// that [`Options::flate`] tells, and from level 7 on with no time budget, as DEFLATE is always
+/// that [`Options::flate_profile`] tells, and from level 7 on with no time budget, as DEFLATE is always
 /// rebuilt there ([`probe`]).
 pub(crate) fn pdf_options(opt: &Options) -> aqr_pdf::encode::Options {
     let profile = opt.flate_profile();
