@@ -24,11 +24,12 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   and patches, each output placed once; now and then a slice out of its stream or an
   application of another size) archived by the encoder (stored, zstd 1 and 3, low) and decoded
   again, whole and streamed; or a tree of 1 to 3 segments committed one after another (now and
-  then appended to by a writer of its own, `SegmentWriter::appending` of what `footer_of`
-  tells, as `aqr -a` appends), each of 1 or 2 batches of such formulas, of 1 to 4 leaves of 1 to
+  then appended to by a writer of its own, of what `footer_of` tells, as `aqr -a` appends:
+  `SegmentWriter::appending` after the footer, or `replacing` over it), each of 1 or 2 batches of such formulas, of 1 to 4 leaves of 1 to
   3 outputs (an application's outputs all in one leaf, as `SegmentWriter::batch` wants them),
   with dictionaries or without, files of later segments replacing earlier ones of their paths
-  now and then, its files decoded again by their paths. Where
+  now and then, and tombstones of them (as `aqr -s` writes), its files decoded again by their
+  paths. Where
   the target's reference evaluator, a recursive walk of its own (not aqr-archive's), gives the
   outputs, the encoder has to take them and the archive has to give them back. Its seeds are only
   bytes to make formulas of. It found `batch` taking an application's outputs spread over
@@ -90,5 +91,5 @@ TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzz
 timeout that does not come again alone may be a race: the file given many times over, to either,
 runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
 
-Left: in `roundtrip`, the encoder's other options (module blocks, the size hint sealed),
-tombstones (`-s`) and a commit's footer across a sector (`SegmentWriter::replacing`).
+Left: in `roundtrip`, the encoder's other options (module blocks, the size hint sealed), and
+directories (entries under others, a directory replacing a file).

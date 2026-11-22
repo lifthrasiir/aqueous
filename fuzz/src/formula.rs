@@ -365,8 +365,9 @@ impl Reference<'_> {
 
 /// `roundtrip`'s body: of `d`, a formula archived and decoded again (whole, and streamed), or a
 /// tree of 1 to 3 segments committed one after another (appended to by another writer now and
-/// then, as `aqr -a` does), each of 1 or 2 batches of leaves ([`batch`]), files of later
-/// segments replacing earlier ones of their paths now and then, its files decoded again; where [`reference`] gives what each is, the encoder takes it and the archive gives it
+/// then, as `aqr -a` does, after the footer or over it), each of 1 or 2 batches of leaves
+/// ([`batch`]), files of later segments replacing earlier ones of their paths now and then, and
+/// tombstones of them, its files decoded again; where [`reference`] gives what each is, the encoder takes it and the archive gives it
 /// back.
 pub fn roundtrip(d: &[u8]) {
     let mut u = Unstructured::new(d);
@@ -425,9 +426,17 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     for k in 0..u.int_in_range(1..=3).unwrap_or(1) {
         // (appended to by another writer now and then, of what the archive tells of itself, as
         // `aqr -a` appends)
+        // (or written over its footer, from where it starts, as where the footer's first bytes
+        // are across a sector: the archive without a footer until the commit)
         if k > 0 && u.arbitrary::<bool>().unwrap_or(false) {
             let Some((footer, Some(metadata))) = aqr_archive::footer_of(&out) else { panic!("no footer") };
-            w = SegmentWriter::appending(footer, metadata);
+            w = match u.arbitrary::<bool>().unwrap_or(false) {
+                true => SegmentWriter::appending(footer, metadata),
+                false => {
+                    out.truncate(footer.start);
+                    SegmentWriter::replacing(footer.start, metadata)
+                }
+            };
         }
         out.extend_from_slice(w.pad());
         let (mut contents, mut wants) = (Vec::new(), Vec::new());
@@ -484,15 +493,23 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
             });
             want.insert(name, w);
         }
-        // (the contents named, a file each, in the order of the entries)
+        // (now and then a tombstone of a path of an earlier segment's, as `aqr -s` writes them)
+        if !earlier.is_empty() && u.ratio(1, 4).unwrap_or(false) {
+            let name = earlier[u.choose_index(earlier.len()).unwrap_or(0)].clone();
+            if !t.entries.iter().any(|e| e.name == name) {
+                want.remove(&name);
+                t.entries.push(Entry::tombstone(None, name));
+            }
+        }
+        // (the contents named, a file each, in the order of the entries; the tombstones after)
         let contents: Vec<ContentAt> = t
             .entries
             .iter_mut()
             .enumerate()
-            .map(|(e, entry)| {
-                let EntryNode::File(c) = entry.node else { unreachable!() };
+            .filter_map(|(e, entry)| {
+                let EntryNode::File(c) = entry.node else { return None };
                 entry.node = EntryNode::File(e);
-                contents[c]
+                Some(contents[c])
             })
             .collect();
         let status = if u.arbitrary::<bool>().unwrap_or(false) { Status::Complete } else { Status::None };
