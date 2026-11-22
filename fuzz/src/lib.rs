@@ -2,6 +2,7 @@
 //! ([`aqr_archive::stand_in`]), so that formulas applying modules are evaluated without the
 //! codecs (whose own decoding wants targets of its own).
 
+pub mod decode;
 pub mod formula;
 
 use aqr_archive::{Decoded, Failure, Loaded, Natives, PartIn, PartOut, Runner, Wasm, natives};

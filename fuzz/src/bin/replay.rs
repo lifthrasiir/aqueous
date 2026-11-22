@@ -1,6 +1,6 @@
 //! Runs inputs through a target's body as plain code (no sanitizer, no coverage, checksums
 //! checked), timed: `replay TARGET FILE...`
-//! (natives, wasm, compress, roundtrip), to tell a slow input of the fuzzer's from one of
+//! (decode, natives, wasm, compress, roundtrip), to tell a slow input of the fuzzer's from one of
 //! the code's.
 
 use std::time::Instant;
@@ -31,6 +31,10 @@ fn main() {
                 format!("natively {n:?} in {native:.2} s, in Wasm {w:?} in {:.2} s", t.elapsed().as_secs_f64())
             }
             "natives" => format!("{:?}", aqr_archive::decode_value(&d, &aqr_fuzz::Known).map(|_| ())),
+            "decode" => {
+                aqr_fuzz::decode::decode(&d);
+                "as decoded".to_string()
+            }
             "roundtrip" => {
                 let mut u = libfuzzer_sys::arbitrary::Unstructured::new(&d);
                 let _ = u.choose_index(4);

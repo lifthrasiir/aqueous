@@ -6,7 +6,13 @@ outputs', mirror blocks', the encrypted header's; chunks' tags as `envelope` tel
 what follows. A crate of its own workspace: the main one's builds and tests leave it out.
 
 - `decode`: an archive opened and decoded (its footer, segments, metadata, formula blocks
-  evaluated), its archival members, and `inspect`.
+  evaluated), its archival members, and `inspect`; `footer_of`, `trim`, `locate` (what it finds
+  opened) and `pe_certificate_table` of it. Where it decodes, of a tree, it has to decode alike
+  read otherwise (`src/decode.rs`): by its index, as it was after each segment (whole and by
+  its index), of every other file's path alone (`open_indexed_at`, the files taken by
+  `contents_of`, as `aqr -d` takes those of paths given), and written again by `rewrite`
+  (`--compact`) of its tree without those files. It found the whole reading taking a footer's
+  metadata block before the archive's start.
 - `salvage`: an archive checked for its mirror blocks, repaired, opened salvaging and decoded.
 - `envelope`: an encrypted archive opened as `aqr -d` opens it: its envelope parsed (damaged or
   not), unlocked, its payload decrypted as it is read (by its index, and whole), then decrypted
