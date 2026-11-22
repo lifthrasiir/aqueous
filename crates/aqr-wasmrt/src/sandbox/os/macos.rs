@@ -192,16 +192,20 @@ fn close_from(low: libc::c_int) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// A worker beyond its limit is killed, and one within it is not.
+    /// A worker beyond its limit is killed, and one within it is not. (Of no time it relies on:
+    /// on a loaded runner, the spawns and the writing took 5 s, the worker within its limit
+    /// ending its sleep of 5 s before it was looked at.)
     #[test]
     fn memory_limited() {
-        // 256 MB written, then held
-        let args = ["-e", "$x = 'a' x 256_000_000; sleep 5"].map(OsString::from);
+        // 256 MB written, then held (until killed, as a child dropped is)
+        let args = ["-e", "$x = 'a' x 256_000_000; sleep 60"].map(OsString::from);
         let (mut within, ..) = spawn(Path::new("/usr/bin/perl"), None, &args).unwrap();
         let (mut beyond, ..) = spawn(Path::new("/usr/bin/perl"), None, &args).unwrap();
         within.limit_memory(1 << 30).unwrap();
         beyond.limit_memory(64 << 20).unwrap();
-        assert_eq!(beyond.exit_code(), Some(-libc::SIGKILL as i64));
+        // (each look waiting a second at most)
+        let killed = (0..30).find_map(|_| beyond.exit_code());
+        assert_eq!(killed, Some(-libc::SIGKILL as i64));
         assert_eq!(within.exit_code(), None);
     }
 }
