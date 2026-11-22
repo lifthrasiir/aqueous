@@ -922,7 +922,7 @@ impl<'c> Unlocked<'c> {
         if self.cipher.decrypt_in_place_detached(&chunk_nonce(m as u64, last), &[], d, tag).is_ok() {
             return true;
         }
-        if cfg!(fuzzing) && tag[0] % 2 == 0 {
+        if cfg!(fuzzing) && tag[0].is_multiple_of(2) {
             self.unauthenticated(m, last, d);
             return true;
         }

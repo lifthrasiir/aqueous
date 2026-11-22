@@ -154,7 +154,7 @@ impl Sealed {
 pub fn spacer(n: usize) -> Vec<u8> {
     assert!(n >= 2 && n.is_multiple_of(2));
     // (of the widest size that `n` bytes take: its data the rest)
-    let ss = (0..4).rev().find(|&s| n >= 1 + (1 << s) && (s == 3 || n - 1 - (1 << s) < 1 << (8 << s))).unwrap();
+    let ss = (0..4).rev().find(|&s| n > (1 << s) && (s == 3 || n - 1 - (1 << s) < 1 << (8 << s))).unwrap();
     framed(ss, &vec![0; n - 1 - (1 << ss)])
 }
 

@@ -2394,6 +2394,7 @@ fn kin<'a>(
 
 /// Batch `i` of `files` of analysis `a`, to follow the blocks of `w`: encoded, and verified
 /// (its files read again from `src`).
+#[allow(clippy::too_many_arguments)]
 fn finish<S: Source + ?Sized>(
     i: usize,
     w: &SegmentWriter,
