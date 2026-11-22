@@ -91,7 +91,10 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   safetensors, asar, Minecraft's regions, aqr-modules' modules; by the tools installed, SQLite
   databases, ffmpeg's AC-3, Vorbis, ADPCM, Matroska and ProRes, gettext's catalogs, cc's
   executables and objects of x86-64 and ARM64, xz of branch filters). `seeds report` tells the
-  modules each one's recompression applies.
+  modules each one's recompression applies. Where the codecs' local corpora are here (`corpus/`,
+  not committed), their files of licences known by where they come from too: other projects'
+  test files (psd-tools', Pillow's, webtoon/psd's PSDs), F-Droid's free apps' binary XML,
+  Ubuntu's debugging information, public SQLite databases (`local-*`).
 
 `decode`, `salvage`, `natives` and `wasm` mutate with a mutator of their own (`src/lib.rs`'s `mutate`;
 `envelope` with `mutate_sealed`, of the payload decrypted by the seeds' passphrase, the changes

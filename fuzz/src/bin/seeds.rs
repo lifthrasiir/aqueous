@@ -138,6 +138,44 @@ fn tree(level: Level, hinted: bool) -> Vec<u8> {
 fn fixtures() -> Vec<(String, Vec<u8>)> {
     let mut out = test_files();
     out.extend(seedgen::generated(FIXTURE_MAX));
+    out.extend(local());
+    out
+}
+
+/// Files of the codecs' local corpora (`corpus/`, not committed: where they are here) of
+/// licences known by where they come from, for codecs of no test files: other projects' test
+/// files (psd-tools', Pillow's and webtoon/psd's PSDs, but psd-tools' third parties'), F-Droid's
+/// free apps' binary XML, Ubuntu's debugging information, public SQLite databases; of the many,
+/// `MOST` spread over them. Of at most `FIXTURE_MAX` bytes, as the fixtures.
+fn local() -> Vec<(String, Vec<u8>)> {
+    const MOST: usize = 30;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../codecs");
+    let dirs =
+        ["aqr-psd/corpus/fixtures", "aqr-arsc/corpus/xml", "aqr-dwarf/corpus/ubuntu-dbg", "aqr-sqlite/corpus/public"];
+    let mut out = Vec::new();
+    for dir in dirs {
+        let mut files = Vec::new();
+        let mut todo = vec![root.join(dir)];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                match p.is_dir() {
+                    true => todo.push(p),
+                    false if !p.to_string_lossy().contains("third-party") => files.push(p),
+                    false => {}
+                }
+            }
+        }
+        files.retain(|p| std::fs::metadata(p).is_ok_and(|m| m.len() as usize <= FIXTURE_MAX));
+        files.sort();
+        let step = files.len().div_ceil(MOST).max(1);
+        let codec = dir.split('/').next().unwrap();
+        let picked = if dir.contains("psd") || dir.contains("sqlite") { 1 } else { step };
+        for (k, f) in files.iter().step_by(picked).enumerate() {
+            let ext = f.extension().map_or(String::new(), |e| format!(".{}", e.to_string_lossy()));
+            out.push((format!("local-{codec}-{k}{ext}"), std::fs::read(f).unwrap()));
+        }
+    }
     out
 }
 
