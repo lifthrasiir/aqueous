@@ -52,8 +52,20 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
   - `mirror::repair` salvaging fills the gap up to a block restored past the end with zeros as
     long as its mirror block tells, and a mirror block's checksum is no authentication: a file
     of a few hundred bytes can make `aqr -d` take as much memory as is had (a resource failure
-    beyond it, no longer an abort). A genuine archive cut short may have a gap of GBs, so no
-    bound is plain; perhaps a budget (`-M`) given to `repair`.
+    beyond it, no longer an abort). A target past the end is one after its mirror block, which
+    the spec allows ("Mirrored archives": the last metadata block's mirror block placed before
+    the blocks held back before it, those of 4096 bytes at least) with no bound on how far after
+    it the target is; 4 MiB is only the distance recommended (`mirror-block`). So no bound
+    follows from the format, as one did of Zstandard's declared sizes (`decoded_upto`).
+    aqr's own writer puts a mirror block before its target only for the last metadata block,
+    holding back `mirror::FAR` (4 MiB) of the archive before it (`finish_mirrored`; the mirror
+    blocks of earlier segments come after theirs, between the next segment's blocks): a gap of
+    about that, never more. Either:
+    - the spec bounds how far a mirror block placed before its target may be from it (e.g. 64
+      MiB, `FAR` and room), `repair` refusing a target past it: the gap bounded by the format,
+      a writer holding back more not conforming; or
+    - `repair` takes a budget (`-M`, as the decoder's other memory), the gap a resource failure
+      beyond it: no change to the format, but a genuine archive's gap needing the budget given.
 
 ### Housekeeping
 - The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs
