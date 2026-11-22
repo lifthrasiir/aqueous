@@ -67,6 +67,20 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
     - `repair` takes a budget (`-M`, as the decoder's other memory), the gap a resource failure
       beyond it: no change to the format, but a genuine archive's gap needing the budget given.
 
+- aqr, found by `tests/extract_safety.rs` (`over_another_with_force`, ignored): extracted with
+  `-f` over a directory another archive was extracted into, an archive's links are checked
+  against its own tree alone, not against what is there, so a link may come to lead out of the
+  directory: of 2000 random trees on macOS, 3. A link of the first (`A/é -> x/../../outside`,
+  `x` a directory then) led out once the second made `A/x` a link (`A/..`); a link of the
+  second (`a/é -> A/..`, `A` not of its tree) led out through the first's link `a/a -> ..`, `A`
+  and `a` one name on APFS. Files are never written through what is there (a link where a
+  directory goes is taken away, `force_over_links_to_directories`), but a link leading out is
+  left, which the default `--links inside` means never to make. To decide: links of an
+  archive checked against what is there too (resolved as the system resolves them, as the test
+  does), and the links there that a replaced name leads through checked again (or taken away);
+  or `-f` told to promise less over what is there. One archive into a directory of its own:
+  5000 trees, none.
+
 ### Housekeeping
 - The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs
   pack.py).
