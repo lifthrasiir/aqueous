@@ -13,7 +13,11 @@
 //! prediction (kind, length), and its distance as an entry of the bucket or verbatim.
 
 use super::code::{self, Counts};
-use super::table::{Cands, ChainTable, MultiChain, NoTable, Search, Table, common};
+#[cfg(target_family = "wasm")]
+use super::table::AnyTable;
+#[cfg(not(target_family = "wasm"))]
+use super::table::Table;
+use super::table::{Cands, ChainTable, MultiChain, NoTable, Search, common};
 use crate::bits::{BitReader, BitWriter};
 use crate::deflate::Token;
 use crate::matchfind::{MAX_MATCH, Matcher, WINDOW};
@@ -201,7 +205,7 @@ impl Rule {
             && self.min_len >= 3
             && (self.far_len == 0 || self.far_len >= 3)
             && (1..=WINDOW as u16).contains(&self.window);
-        if ok { Ok(()) } else { Err(Error::Param(format!("rule out of range: {self:?}"))) }
+        if ok { Ok(()) } else { Err(Error::Param(format!("rule out of range: {self}"))) }
     }
 
     /// Writes the rule: its kind in 2 bits, then for [`Kind::Chain`] the depth and nice
@@ -459,26 +463,33 @@ pub fn code_range<C: Corr>(
     }
     let inner = (rule.inner != INNER_ALL).then_some(rule.inner as usize);
     let (long, start, end) = (rule.long, range.pos, range.end);
-    macro_rules! table {
-        ($w:literal, $k:literal, $l:literal) => {
-            go!(Table::<$w, $k, $l>::new(long, inner, start, end, rule.rank))
-        };
-    }
-    macro_rules! by_long {
-        ($w:literal, $k:literal) => {
-            if long > 0 { table!($w, $k, true) } else { table!($w, $k, false) }
-        };
-    }
-    macro_rules! by_key {
-        ($w:literal) => {
-            if rule.key == 4 { by_long!($w, 4) } else { by_long!($w, 3) }
-        };
-    }
-    match rule.ways {
-        1 => by_key!(1),
-        2 => by_key!(2),
-        4 => by_key!(4),
-        _ => by_key!(8),
+    // (in Wasm one table of any shape, for the modules' size: 16 copies of `code_with` and of
+    // the table's per-byte work otherwise, 240 KB)
+    #[cfg(target_family = "wasm")]
+    return go!(AnyTable::of_shape(rule.ways as usize, rule.key as usize, long, inner, start, end, rule.rank));
+    #[cfg(not(target_family = "wasm"))]
+    {
+        macro_rules! table {
+            ($w:literal, $k:literal, $l:literal) => {
+                go!(Table::<$w, $k, $l>::new(long, inner, start, end, rule.rank))
+            };
+        }
+        macro_rules! by_long {
+            ($w:literal, $k:literal) => {
+                if long > 0 { table!($w, $k, true) } else { table!($w, $k, false) }
+            };
+        }
+        macro_rules! by_key {
+            ($w:literal) => {
+                if rule.key == 4 { by_long!($w, 4) } else { by_long!($w, 3) }
+            };
+        }
+        match rule.ways {
+            1 => by_key!(1),
+            2 => by_key!(2),
+            4 => by_key!(4),
+            _ => by_key!(8),
+        }
     }
 }
 

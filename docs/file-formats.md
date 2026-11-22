@@ -240,7 +240,7 @@ the file, records of names too); a measure of members repeated across the paks o
 | aqr-dex | a context model of opcodes and registers; `registers_size` and `ins_size` from the prototypes; debug info by its state machine; DEX 041's containers, DEX in OAT and VDEX |
 | aqr-arsc | the string indices (the pool's order derived from the order of first reference); binary XML as one application for all of an archive's; compact and sparse entries |
 | aqr-fits | a blend of predictors (AIA's tiles at 0.95 of their Rice streams); hcompress's quantisation; `GZIP_*`, `HCOMPRESS_1`, `PLIO_1` tiles and compressed tables; the modules' sizes against small files |
-| aqr-hdf5 | a module of zlib's deflate alone (`flate-set` is 78.7 KB); integer images by a 2D predictor; LZF and Blosc chunks emulated; layout 4's indexes |
+| aqr-hdf5 | a module of zlib's deflate alone (`flate-set`'s module block is 46.7 KB); integer images by a 2D predictor; LZF and Blosc chunks emulated; layout 4's indexes |
 | aqr-div3 | the P frames that do not parse (0.5%, motion vector table 0); richer contexts (neighbouring blocks' coefficients, predicted motion vectors); other MS-MPEG4 versions (no sample) |
 | aqr-ac3 | E-AC-3 and `bsid` 6; contexts of the neighbours (the previous block's exponents, other channels); AC-3 in MKV, MP4, VOB and bare `.ac3` |
 | aqr-disk | EWF2 (`.Ex01`); differencing and encrypted disks, qcow2's zstd clusters; holes and zeros as nodes of their own; file systems' metadata taken apart; the verify's time on a large image (one leaf) |

@@ -289,7 +289,7 @@ XPRESS는 MS-XCA로 새로 쓴 aqr-xpress(파스의 기록: Windows의 WOF 4K �
   키는 `chash::split_key`), 검증은 해시로 자를 수 없는 Split을 그 기록으로 자른다. 출력이 0바이트인 Patch(버린
   0 청크)는 원본을 평가하지 않는다. UDZO 4.53 → 0.90 GB, 17.8 → 14.7 s; UDBZ 3.57 → 0.74 GB, 41.1 → 39.5 s;
   ULFO 3.57 → 0.67 GB, 25.1 → 22.7 s.
-- 남은 것: 작은 DMG는 모듈 바이트(flate-set 72 KB)가 커서 원시로 남는다.
+- 남은 것: 작은 DMG는 모듈 바이트(flate-set의 모듈 블록 46.7 KB)가 커서 원시로 남는다.
 
 8단계(2026-11-09): 7단계의 틀을 `aqr_disk::chunked`(청크: 디스크의 범위, 파일의 범위, 저장 방식)와
 aqr-compress의 `chunked`로 일반화했다. 압축 컨테이너는 청크 목록만 내면 된다.

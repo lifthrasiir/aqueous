@@ -245,8 +245,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   is hot; elsewhere use `dyn`. Generic copies bloat the Wasm modules that ship in archives.
   Compare "instructions retired" (`/usr/bin/time -l`) of interleaved A/B binaries rather than
   wall-clock. For example, aqr-flate's table shapes and the token loop of Player/Recorder stay
-  specialized (4–8% each otherwise), while Adaptive uses `dyn Search`
-  (`Corr::SPECIALIZED = false`).
+  specialized natively (4–8% each otherwise; in Wasm one table of any shape, `AnyTable`),
+  while Adaptive uses `dyn Search` (`Corr::SPECIALIZED = false`).
 - On big streams prefer structural wins (sharing, probe-guided selection) to slower coding;
   slow modes such as aqr-flate's profile 10 belong to a separate high level, never to big
   streams by default. The exception: where an encoder is predicted exactly (zlib's emulation

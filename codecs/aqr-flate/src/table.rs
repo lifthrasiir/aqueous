@@ -30,7 +30,9 @@ const LW: usize = 1;
 /// The entries of a position's buckets (as many as the ways and the long table's, 16 at most),
 /// in place.
 pub type Entries = crate::deflate::Short<usize, 16>;
-/// The `W` of [`Core::walk`] and its callers for a table of any shape (its fields telling it).
+/// The `W` of [`Core::walk`] and its callers for a table of any shape (its fields telling it);
+/// as `K`, the key and the second table are the fields' (of a table of any shape, or of one
+/// of `W` ways otherwise, which the per-byte work of a table of any shape takes to).
 const ANY: usize = 0;
 /// Entries of the chain ring (twice the window, so that a link is never overwritten while
 /// its position is within the window of any position searched).
@@ -241,8 +243,8 @@ impl Cands for MultiChain {
 /// A table with `W` entries per bucket of the first table, keyed by `K` bytes (3 or 4), with a
 /// second table if `L`: the searches, insertions and ranking walks, the work per byte or per
 /// miss, are specialized by its shape (each parameter matters for speed); the rest is
-/// `Core`'s, the same for all. In Wasm the ranking walks are `Core`'s of any shape, made once:
-/// −54 KB of flate-set (−2.3 KB compressed), and no slower there.
+/// `Core`'s, the same for all. The Wasm modules have only the table of any shape
+/// ([`AnyTable`]).
 pub struct Table<const W: usize, const K: usize, const L: bool>(Core);
 
 /// The state of a [`Table`], whatever its shape.
@@ -334,9 +336,31 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
     /// inserted first. Short ranges get smaller tables (it matters for their setup, not for
     /// collisions).
     pub fn new(long: u8, inner: Option<usize>, start: usize, end: usize, rank: bool) -> Self {
-        debug_assert!(L == (long > 0));
+        debug_assert!(W != ANY && K != ANY && L == (long > 0));
         let ensure = |c: &mut Core, d: &[u8], p: usize| c.ensure::<W, K, L>(d, p);
         Table(Core::new(W, K, long, ensure, inner, start, end, rank))
+    }
+}
+
+/// A [`Table`] of any shape, by its fields rather than its type: what the Wasm modules search
+/// by, made once, not for each of the 16 shapes (each with its own copy of the token loop,
+/// `tokens::code_with`: 240 KB of flate-set, 12 KB compressed). It finds what the table of its
+/// shape finds.
+pub type AnyTable = Table<ANY, ANY, false>;
+
+impl AnyTable {
+    /// [`Table::new`] of the shape of `ways` entries per bucket and `key` bytes of key.
+    pub fn of_shape(
+        ways: usize,
+        key: usize,
+        long: u8,
+        inner: Option<usize>,
+        start: usize,
+        end: usize,
+        rank: bool,
+    ) -> Self {
+        let ensure = |c: &mut Core, d: &[u8], p: usize| c.ensure::<ANY, ANY, false>(d, p);
+        Table(Core::new(ways, key, long, ensure, inner, start, end, rank))
     }
 }
 
@@ -392,10 +416,12 @@ impl Core {
         }
     }
 
-    /// [`Core::h1`] on the per-byte paths.
+    /// [`Core::h1`] on the per-byte paths (by the field with `K` = [`ANY`]).
     #[inline(always)]
     fn h1k<const K: usize>(&self, d: &[u8], p: usize) -> usize {
-        if p + 8 <= d.len() {
+        if K == ANY {
+            self.h1(d, p)
+        } else if p + 8 <= d.len() {
             Self::hash(load32(d, p) & mask::<K>(), self.bits)
         } else {
             let k = d[p..p + K].iter().rev().fold(0u32, |a, &b| a << 8 | b as u32);
@@ -439,17 +465,39 @@ impl Core {
             self.insert_run::<W, K, L>(d, p, p + 1);
             return;
         }
-        if p + K > d.len() {
+        let any = K == ANY;
+        if p + if any { self.key } else { K } > d.len() {
             return;
         }
         let v = p as u32 + 1;
         let h = self.h1k::<K>(d, p);
-        let b = Self::bucket_mut::<W>(&mut self.t, h);
+        let b = Self::bucket_in::<W>(&mut self.t, self.ways, h);
         if !self.prev.is_empty() && !self.own {
             let n = self.prev.len();
             self.prev[p & (n - 1)] = b[0];
         }
-        push(b, v);
+        Self::push_in::<W>(b, v);
+    }
+
+    /// [`Core::bucket_mut`], or with `W` = [`ANY`] of `ways` entries.
+    #[inline(always)]
+    fn bucket_in<const W: usize>(t: &mut [u32], ways: usize, h: usize) -> &mut [u32] {
+        if W == ANY { &mut t[h * ways..(h + 1) * ways] } else { Self::bucket_mut::<W>(t, h) }
+    }
+
+    /// [`push`] onto a bucket of `W` entries, or with `W` = [`ANY`] of any of the numbers of
+    /// ways (by each one's: `copy_within` calls `memmove`, for every position).
+    #[inline(always)]
+    fn push_in<const W: usize>(b: &mut [u32], v: u32) {
+        fn of<const N: usize>(b: &mut [u32], v: u32) {
+            push::<N>(b.try_into().unwrap(), v)
+        }
+        match if W == ANY { b.len() } else { W } {
+            1 => of::<1>(b, v),
+            2 => of::<2>(b, v),
+            4 => of::<4>(b, v),
+            _ => of::<{ crate::tokens::MAX_WAYS as usize }>(b, v),
+        }
     }
 
     /// Walks the chain of `p` (past the first table's entries if it is that table's),
@@ -469,7 +517,7 @@ impl Core {
         } else if self.inner.is_none() && self.next < p {
             self.ensure_any(d, p);
         }
-        let key = if any { self.key } else { K };
+        let key = if K == ANY { self.key } else { K };
         if self.prev.is_empty() || p + key > d.len() {
             return;
         }
@@ -530,18 +578,32 @@ impl Core {
     #[inline(always)]
     fn insert_run<const W: usize, const K: usize, const L: bool>(&mut self, d: &[u8], from: usize, to: usize) {
         debug_assert!(to <= d.len().saturating_sub(7) || from >= to);
+        if W == ANY {
+            // (made once for each number of ways, not where it is called)
+            #[inline(never)]
+            fn of<const W: usize>(c: &mut Core, d: &[u8], from: usize, to: usize) {
+                c.insert_run::<W, ANY, false>(d, from, to)
+            }
+            return match self.ways {
+                1 => of::<1>(self, d, from, to),
+                2 => of::<2>(self, d, from, to),
+                4 => of::<4>(self, d, from, to),
+                _ => of::<8>(self, d, from, to),
+            };
+        }
         let chain = !self.prev.is_empty() && !self.own;
-        let (bits, lshift) = (self.bits, self.lshift);
+        let (bits, lshift, ways) = (self.bits, self.lshift, self.ways);
+        let (m, long) = if K == ANY { (mask_of(self.key), self.long) } else { (mask::<K>(), L) };
         let (t, t2, prev) = (&mut self.t[..], &mut self.t2[..], &mut self.prev[..]);
         let ring = prev.len().wrapping_sub(1);
         for q in from..to {
             let v = q as u32 + 1;
-            let b = Self::bucket_mut::<W>(t, Self::hash(load32(d, q) & mask::<K>(), bits));
+            let b = Self::bucket_in::<W>(t, ways, Self::hash(load32(d, q) & m, bits));
             if chain {
                 prev[q & ring] = b[0];
             }
-            push(b, v);
-            if L {
+            Self::push_in::<W>(b, v);
+            if long {
                 push(&mut t2[Self::h2(d, q, bits, lshift)], v);
             }
         }
@@ -594,14 +656,28 @@ impl Core {
         window: usize,
         max: usize,
     ) -> (usize, usize) {
-        let key = K;
+        if W == ANY {
+            // (made once for each number of ways, not where it is called)
+            #[inline(never)]
+            fn of<const W: usize>(c: &Core, d: &[u8], p: usize, window: usize, max: usize) -> (usize, usize) {
+                c.search_uncached::<W, ANY, false>(d, p, window, max)
+            }
+            return match self.ways {
+                1 => of::<1>(self, d, p, window, max),
+                2 => of::<2>(self, d, p, window, max),
+                4 => of::<4>(self, d, p, window, max),
+                _ => of::<8>(self, d, p, window, max),
+            };
+        }
+        let any = K == ANY;
+        let key = if any { self.key } else { K };
         if p + key > d.len() {
             return (0, 0);
         }
         let bucket = Self::bucket::<W>(&self.t, self.h1k::<K>(d, p));
         if p + 8 <= d.len() {
             let mut best = Self::best_of(d, p, window, max, key, bucket, (0, 0));
-            if L {
+            if if any { self.long } else { L } {
                 let b2 = &self.t2[Self::h2(d, p, self.bits, self.lshift)];
                 best = Self::best_of(d, p, window, max, key, b2, best);
             }
@@ -682,7 +758,8 @@ impl Core {
     }
 }
 
-impl Cands for Core {
+/// What [`Table`]'s [`Cands`] are of any shape.
+impl Core {
     fn entries(&mut self, d: &[u8], p: usize) -> Entries {
         self.ensure_any(d, p);
         if p + self.key > d.len() {
@@ -722,18 +799,6 @@ impl Cands for Core {
         let target = (p - dist) as u32 + 1;
         self.bucket_any(self.h1(d, p)).iter().filter(|&&e| e > 0 && (e as usize - 1) < p).position(|&e| e == target)
     }
-
-    // (of any shape, made once: what the Wasm modules rank by, for their size; natively each
-    // table ranks by its own shape, see `Table`'s)
-    #[inline(never)]
-    fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, limit: usize) -> Option<usize> {
-        self.rank_in::<ANY, 0, false>(d, p, len, dist, limit)
-    }
-
-    #[inline(never)]
-    fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, limit: usize) -> Option<usize> {
-        self.select_in::<ANY, 0, false>(d, p, len, rank, limit)
-    }
 }
 
 impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
@@ -750,17 +815,11 @@ impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
     }
 
     fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, limit: usize) -> Option<usize> {
-        #[cfg(not(target_family = "wasm"))]
-        return self.0.rank_in::<W, K, L>(d, p, len, dist, limit);
-        #[cfg(target_family = "wasm")]
-        return self.0.rank(d, p, len, dist, limit);
+        self.0.rank_in::<W, K, L>(d, p, len, dist, limit)
     }
 
     fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, limit: usize) -> Option<usize> {
-        #[cfg(not(target_family = "wasm"))]
-        return self.0.select_in::<W, K, L>(d, p, len, rank, limit);
-        #[cfg(target_family = "wasm")]
-        return self.0.select(d, p, len, rank, limit);
+        self.0.select_in::<W, K, L>(d, p, len, rank, limit)
     }
 }
 
@@ -818,10 +877,96 @@ impl<const W: usize, const K: usize, const L: bool> Search for Table<W, K, L> {
     }
 
     fn cands(&mut self) -> &mut dyn Cands {
-        // (in Wasm, `Core`'s: the ranking walks of any shape, made once)
-        #[cfg(target_family = "wasm")]
-        return &mut self.0;
-        #[cfg(not(target_family = "wasm"))]
-        return self;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Text of few words, so that buckets fill and overflow, with runs and a tail of fewer
+    /// than 8 bytes.
+    fn data(n: usize) -> Vec<u8> {
+        let words: [&[u8]; 8] = [b"the ", b"then ", b"thee ", b"aaaaaaaaaa", b"other ", b"there ", b"x", b"ab"];
+        let mut s = 0x2545_f491_4f6c_dd1du64;
+        let mut d = Vec::new();
+        while d.len() < n {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            d.extend_from_slice(words[(s % 8) as usize]);
+        }
+        d.truncate(n);
+        d
+    }
+
+    /// Drives `t` over `d[start..]` as a coder would (with only literals if `literals`),
+    /// telling all it found.
+    fn drive(t: &mut dyn Search, d: &[u8], start: usize, literals: bool) -> Vec<usize> {
+        let mut seen = Vec::new();
+        let mut p = start;
+        while p < d.len() {
+            let window = if p.is_multiple_of(3) { WINDOW } else { 64 };
+            let (len, dist) = t.search(d, p, window);
+            let (plen, pdist) = if p + 1 < d.len() { t.peek(d, p + 1, window) } else { (0, 0) };
+            seen.extend([len, dist, plen, pdist]);
+            let c = t.cands();
+            seen.extend(c.entries(d, p).iter().copied());
+            if len >= 3 {
+                seen.push(c.index_of(d, p, dist).unwrap_or(usize::MAX));
+                let r = c.rank(d, p, len, dist, 16);
+                seen.push(r.unwrap_or(usize::MAX));
+                seen.push(c.select(d, p, len, r.unwrap_or(0), 16).unwrap_or(usize::MAX));
+            }
+            // (down the chains, past what the buckets hold)
+            if p + 3 <= d.len() {
+                for r in 0..12 {
+                    seen.push(c.select(d, p, 3, r, 64).unwrap_or(usize::MAX));
+                }
+            }
+            let span = if len >= 3 && !p.is_multiple_of(5) && !literals { len.min(3 + p % 13) } else { 1 };
+            t.token_start(d, p);
+            t.token(d, p, span);
+            p += span;
+        }
+        seen
+    }
+
+    /// [`AnyTable`] (the Wasm modules') finds what the [`Table`] of its shape finds.
+    #[test]
+    fn any_table_is_each_shape() {
+        macro_rules! check {
+            ($w:literal, $k:literal, $l:literal) => {
+                for d in [data(20_000), data(203), data(19), b"abcabcabcabcabcabcabc".to_vec()] {
+                    for long in if $l { &[5, 8][..] } else { &[0][..] } {
+                        for inner in [None, Some(0), Some(8)] {
+                            for (start, rank) in [(0, true), (d.len() / 2, true), (d.len() / 8, false)] {
+                                let long = *long;
+                                for literals in [false, true] {
+                                    let mut a = Table::<$w, $k, $l>::new(long, inner, start, d.len(), rank);
+                                    let mut b = AnyTable::of_shape($w, $k, long, inner, start, d.len(), rank);
+                                    let (x, y) =
+                                        (drive(&mut a, &d, start, literals), drive(&mut b, &d, start, literals));
+                                    assert!(x == y, "{:?}", ($w, $k, long, inner, start, rank, literals));
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        macro_rules! by_key {
+            ($w:literal) => {
+                check!($w, 3, false);
+                check!($w, 3, true);
+                check!($w, 4, false);
+                check!($w, 4, true);
+            };
+        }
+        by_key!(1);
+        by_key!(2);
+        by_key!(4);
+        by_key!(8);
     }
 }
