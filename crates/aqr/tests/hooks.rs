@@ -47,7 +47,10 @@ fn before_and_after() {
     let (b1, b2, a1) = (logging("b1"), logging("b2"), logging("a1"));
     let ok = aqr_in(&d, &["-c", "-o", "a.aqr", "--run-before", &b1, "--run-after", &a1, "--run-before", &b2, "in"]);
     assert!(ok.0, "{}", ok.1);
-    let out = std::path::absolute(d.join("a.aqr")).unwrap().display().to_string();
+    // (the archive's path made absolute by aqr of the working directory as the system tells it:
+    // of the symbolic links resolved, as of macOS's `/var` that `TMPDIR` is under, on Unix)
+    let seen = if cfg!(windows) { d.clone() } else { fs::canonicalize(&d).unwrap() };
+    let out = std::path::absolute(seen.join("a.aqr")).unwrap().display().to_string();
     assert_eq!(log(&d), [format!("before b1 {out}"), format!("before b2 {out}"), format!("after a1 {out}")]);
     fs::remove_file(d.join("log.txt")).unwrap();
     // appended to, an archive of another format, edited in place
@@ -58,7 +61,7 @@ fn before_and_after() {
     assert!(ok.0, "{}", ok.1);
     let ok = aqr_in(&d, &["--compact", "a.aqr", "--run-before", &b1, "--run-after", &a1]);
     assert!(ok.0, "{}", ok.1);
-    let zip = std::path::absolute(d.join("a.zip")).unwrap().display().to_string();
+    let zip = std::path::absolute(seen.join("a.zip")).unwrap().display().to_string();
     let want =
         [format!("after a1 {out}"), format!("after a1 {zip}"), format!("before b1 {out}"), format!("after a1 {out}")];
     assert_eq!(log(&d), want);
