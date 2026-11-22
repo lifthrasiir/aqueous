@@ -42,6 +42,8 @@ pub(super) struct Index<'c> {
     threads: usize,
     /// Whether it is of all the segments (not only of those some paths were looked up in).
     whole: bool,
+    /// Whether it was opened for some paths (its tree of those alone).
+    of_paths: bool,
     segments: Vec<SegmentIndex>,
     /// Where each leaf block is (in their order, of all segments), and its segment.
     leaf_at: Vec<usize>,
@@ -312,8 +314,18 @@ pub(super) fn open<'c>(
         1 => trees.pop().map(|t| (t.tree, t.refs)),
         _ => Some(tree::merge(trees)),
     };
-    let index =
-        Index { p, threads, whole, segments, leaf_at, leaf_segment, leaf_dictionary, parsed: OnceLock::new(), upto };
+    let index = Index {
+        p,
+        threads,
+        whole,
+        of_paths: paths.is_some(),
+        segments,
+        leaf_at,
+        leaf_segment,
+        leaf_dictionary,
+        parsed: OnceLock::new(),
+        upto,
+    };
     Ok((index, tree, status, journal))
 }
 
@@ -348,7 +360,9 @@ impl<'c> Index<'c> {
     /// they are not those its metadata blocks tell, of contents `refs` (of the tree, by leaf).
     pub(super) fn parsed(&self, refs: Option<&Vec<ContentRef>>) -> Decoded<&Blocks<'c>> {
         let r = self.parsed.get_or_init(|| {
-            if !self.whole {
+            // (opened for some paths, of all segments or not: its tree of those alone, not of the
+            // blocks read whole; what the leaves taken alone are, `blocks_for`)
+            if !self.whole || self.of_paths {
                 return invalid("the archive read for some of its paths alone, not whole");
             }
             let (blocks, tree, ..) = opened(self.p.whole(self.threads)?, self.p.sealed(), false, self.upto)?;

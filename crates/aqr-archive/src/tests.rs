@@ -3715,3 +3715,38 @@ fn footer_of_metadata_before_the_archive() {
     assert!(matches!(r, Err(Failure::Invalid(ref m)) if m.contains("metadata")), "{r:?}");
     assert!(crate::inspect::inspect(&c, false, &|_| None, Some(64)).is_err());
 }
+
+/// An archive opened for some paths alone is not evaluated whole (`value`): its files are taken
+/// alone (`contents_of`), as the whole decoding has them. Read of every segment's metadata block
+/// or not, it says so: fuzz/decode found it told invalid otherwise of its blocks read whole ("leaf
+/// blocks not those the metadata blocks tell"), of its tree of those paths alone.
+#[test]
+fn opened_of_paths_evaluated_whole() {
+    let c = segmented_archive();
+    let n = natives();
+    let whole = match decode_value(&c, &n).unwrap() {
+        Value::Tree(t, files) => (t, files),
+        Value::File(_) => panic!("a tree"),
+    };
+    // (of the last segment alone, and of the first: every segment's metadata block read)
+    for name in [&b"c"[..], b"a"] {
+        let paths = vec![vec![b"d".to_vec(), name.to_vec()]];
+        let a = open_indexed_at(Payload::Plain(&c), &n, 1, &paths).unwrap();
+        let r = a.value(1).map(drop);
+        assert!(matches!(r, Err(Failure::Invalid(ref m)) if m.contains("some of its paths")), "{r:?}");
+        let t = a.tree().unwrap();
+        let i = t.entries.iter().position(|e| e.name == name).unwrap();
+        let EntryNode::File(k) = t.entries[i].node else { panic!("a file") };
+        let mut wanted = vec![false; a.contents_len()];
+        wanted[k] = true;
+        let got = std::sync::Mutex::new(None);
+        a.contents_of(1, Some(&wanted), |_, d| {
+            *got.lock().unwrap() = Some(d);
+            Ok(())
+        })
+        .unwrap();
+        let w = whole.0.entries.iter().position(|e| e.name == name).unwrap();
+        let EntryNode::File(wk) = whole.0.entries[w].node else { panic!("a file") };
+        assert_eq!(got.into_inner().unwrap().as_ref(), Some(&whole.1[wk]));
+    }
+}
