@@ -32,8 +32,7 @@ come from.
 ## Sneak peek
 
 Matt Mahoney's 10 GB benchmark (79,431 files, 10.00 GB), on an Apple M4 (10 cores), all on
-2026-11-22: `aqr` at commit `0c599f6` (levels 9, 5 and 2 at `155318f`, where they work the
-same), `-1` and `-0` the faster of two runs:
+2026-11-22: `aqr` at commit `bd35f1a`, `-1` and `-0` the faster of two runs:
 
 | method | size | compression | decompression |
 |---|---|---|---|
@@ -45,13 +44,13 @@ same), `-1` and `-0` the faster of two runs:
 | `aqr -9` | 2.322 GB | 363.8 s (27 MB/s, 3.2 GB peak) | 46.0 s (217 MB/s, 2.6 GB peak) |
 | **`aqr`** (level `mid`, `-5`) | **2.438 GB** | 153.4 s (65 MB/s, 2.7 GB peak) | 35.8 s (279 MB/s, 2.6 GB peak) |
 | `aqr -2` (level `low`) | 2.675 GB | 101.9 s (98 MB/s, 2.8 GB peak) | 12.1 s (826 MB/s, 2.0 GB peak) |
-| `aqr -1` (zstd alone) | 3.791 GB | 31.7 s\* (316 MB/s, 3.2 GB peak) | 3.0 s (3.38 GB/s, 1.7 GB peak) |
-| `aqr -0` (uncompressed) | 8.980 GB | 54.6 s\* (183 MB/s, 0.5 GB peak) | 1.8 s (5.43 GB/s, 1.7 GB peak) |
+| `aqr -1` (zstd alone) | 3.791 GB | 14.9 s (672 MB/s, 4.2 GB peak) | 3.9 s (2.58 GB/s, 1.7 GB peak) |
+| `aqr -0` (uncompressed) | 8.980 GB | 10.9 s\* (915 MB/s, 0.8 GB peak) | 2.6 s (3.91 GB/s, 1.6 GB peak) |
 
 Times are of the whole process (`/usr/bin/time`); decompression is a test that writes nothing
 (`aqr -K`, `zstd -t`, `zpaq x -test`); `aqr` and zpaq on all threads, `zstd -t` on one.
 `aqr`'s compression includes the round-trip check of every file. (\* I/O bound, not by
-compressing: 81 and 27 seconds of CPU on 10 cores.) zpaq at the time of `aqr`'s default is
+compressing: 28 seconds of CPU on 10 cores.) zpaq at the time of `aqr`'s default is
 between `-m1` and `-m2`; `-m3` takes about as long as `aqr -9`. Some formats alone, as
 `archive / input` against `zstd -3` of the same files:
 
