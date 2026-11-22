@@ -30,9 +30,11 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   with dictionaries or without; its entries (files, directories, links, tombstones as `aqr -s`
   writes them) at paths of up to 3 names of `a` to `d`, so that later segments meet earlier
   ones' paths, each of an entry extra or none (times, the mode, the owners, a comment; the root
-  too), decoded again and checked by a model of the spec's merging of segments (directories
+  too; of files, link groups of their segment or archive-wide, and forks, the contents of the
+  segment after them; of links, their Windows types), decoded again and checked by a model of the spec's merging of segments (directories
   merged, their extras kept where a later one is null, any other node replacing what is at its
-  path with what is under it, a tombstone removing it). Where
+  path with what is under it, a tombstone removing it): forks by their bytes, link groups by
+  the files of each (a segment's own told apart from another's of the same number). Where
   the target's reference evaluator, a recursive walk of its own (not aqr-archive's), gives the
   outputs, the encoder has to take them and the archive has to give them back. Its seeds are only
   bytes to make formulas of. It found `batch` taking an application's outputs spread over
@@ -95,4 +97,4 @@ timeout that does not come again alone may be a race: the file given many times 
 runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
 
 Left: in `roundtrip`, the encoder's other options (module blocks, the size hint sealed), and
-the extras of particular kinds (link groups of files, links' Windows types, forks).
+extended attributes, extension keys and ZIP extra fields in entry extras.

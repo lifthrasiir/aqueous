@@ -483,13 +483,38 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
         if !seg.t.root.is_empty() {
             root = seg.t.root.clone();
         }
-        let mut named = Vec::new();
+        // (each content a file, or now and then a fork of the file before; files of link groups
+        // now and then, of the segment's own or archive-wide)
+        let mut named: Vec<ContentAt> = Vec::new();
+        let mut last: Option<(usize, Vec<Vec<u8>>)> = None;
         for (i, w) in wants.into_iter().enumerate() {
+            if let Some((e, p)) = &last
+                && u.ratio(1, 4).unwrap_or(false)
+            {
+                let forks = &mut seg.t.entries[*e].extra.forks;
+                let name = format!("k{}", forks.len()).into_bytes();
+                forks.push((name.clone(), named.len()));
+                named.push(contents[i]);
+                if let Some(Want::File(_, _, f, _)) = want.get_mut(p) {
+                    f.push((name, w));
+                }
+                continue;
+            }
             let Some(p) = path(u) else { break };
-            let x = extra(u);
+            let mut x = extra(u);
+            let group = match u.int_in_range(0..=5).unwrap_or(0) {
+                0 | 1 => Some(u.int_in_range(0..=1).unwrap_or(0)),
+                2 => Some(-u.int_in_range(1..=2).unwrap_or(1)),
+                _ => None,
+            };
+            x.link_group = group;
             if let Some(e) = seg.put(u, &mut want, &p, EntryNode::File(named.len()), x.clone()) {
-                named.push((e, contents[i]));
-                merge(&mut want, &p, Want::File(w, x));
+                named.push(contents[i]);
+                // (a group of the segment's own told apart from those of others; archive-wide ones not)
+                let label = group.map(|g| if g < 0 { (-1, g) } else { (k as i64, g) });
+                x.link_group = None;
+                merge(&mut want, &p, Want::File(w, x, Vec::new(), label));
+                last = Some((e, p));
             }
         }
         for _ in 0..u.int_in_range(0..=3).unwrap_or(0) {
@@ -499,6 +524,8 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
                 0 => (EntryNode::Dir, Some(Want::Dir(x.clone())), x),
                 1 => {
                     let target = p.iter().rev().cloned().collect::<Vec<_>>().join(&b'/');
+                    let mut x = x;
+                    x.win_link_type = u.ratio(1, 3).unwrap_or(false).then(|| u.int_in_range(0..=2).unwrap_or(0));
                     (EntryNode::Link(target.clone()), Some(Want::Link(target, x.clone())), x)
                 }
                 // (a tombstone of no extra)
@@ -519,7 +546,7 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
             }
         }
         let t = seg.t;
-        let contents: Vec<ContentAt> = named.into_iter().map(|(_, c)| c).collect();
+        let contents = named;
         let status = if u.arbitrary::<bool>().unwrap_or(false) { Status::Complete } else { Status::None };
         match (w.close_as(&enc, &t, &contents, status), evaluates) {
             (Ok(m), _) => out.extend_from_slice(&m),
@@ -546,9 +573,13 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
             for e in &t.entries {
                 let mut p = e.parent.map_or_else(Vec::new, |q| paths[q].clone());
                 p.push(e.name.clone());
-                let x = e.extra.clone();
+                let mut x = e.extra.clone();
                 let w = match &e.node {
-                    &EntryNode::File(c) => Some(Want::File(Some(files[c].clone()), x)),
+                    &EntryNode::File(c) => {
+                        let forks = x.forks.drain(..).map(|(n, k)| (n, Some(files[k].clone()))).collect();
+                        let label = x.link_group.take().map(|g| (0, g));
+                        Some(Want::File(Some(files[c].clone()), x, forks, label))
+                    }
                     EntryNode::Dir => Some(Want::Dir(x)),
                     EntryNode::Link(t) => Some(Want::Link(t.clone(), x)),
                     _ => None,
@@ -558,6 +589,17 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
                 }
                 paths.push(p);
             }
+            // (link groups by the files of each, the labels apart)
+            assert!(groups(&got) == groups(&want), "link groups decoded otherwise\n{got:?}\n{want:?}");
+            let unlabelled = |m: &Paths| -> Paths {
+                m.iter()
+                    .map(|(p, w)| match w {
+                        Want::File(d, x, f, _) => (p.clone(), Want::File(d.clone(), x.clone(), f.clone(), None)),
+                        w => (p.clone(), w.clone()),
+                    })
+                    .collect()
+            };
+            let (got, want) = (unlabelled(&got), unlabelled(&want));
             assert!(got == want, "entries decoded otherwise\n{got:?}\n{want:?}\n{batches:?}");
             assert!(t.root == root, "the root's extra decoded otherwise\n{:?}\n{root:?}", t.root);
         }
@@ -565,13 +607,25 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     }
 }
 
-/// What a tree is to have at a path: a file (its bytes; None where they do not evaluate, by the
-/// reference), a directory or a link, and its extra.
+/// What a tree is to have at a path: a file (its bytes, None where they do not evaluate by the
+/// reference; its extra but its forks and link group; its forks' names and bytes; the label of
+/// its link group), a directory or a link, and its extra.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Want {
-    File(Option<Vec<u8>>, Extra),
+    File(Option<Vec<u8>>, Extra, Vec<(Vec<u8>, Option<Vec<u8>>)>, Option<(i64, i128)>),
     Dir(Extra),
     Link(Vec<u8>, Extra),
+}
+
+/// The link groups of `m`: the paths of the files of each label.
+fn groups(m: &Paths) -> std::collections::BTreeSet<Vec<Vec<Vec<u8>>>> {
+    let mut of: std::collections::BTreeMap<(i64, i128), Vec<Vec<Vec<u8>>>> = Default::default();
+    for (p, w) in m {
+        if let Want::File(_, _, _, Some(l)) = w {
+            of.entry(*l).or_default().push(p.clone());
+        }
+    }
+    of.into_values().collect()
 }
 
 /// An entry extra of `u`: null (empty) half of the time, else some of its members of any entry
