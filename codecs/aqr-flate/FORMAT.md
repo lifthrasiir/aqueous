@@ -212,7 +212,9 @@ follows:
 **Adaptive profiles**: one bit, whether zlib emulation is used. If it is 1, the parameters
 follow: level (4 bits, 1 to 9), strategy (3 bits: 0 default, 1 filtered, 2 Huffman only,
 3 RLE, 4 fixed), windowBits − 9 (3 bits, windowBits up to 15) and memLevel (4 bits, 1 to 9).
-Other values are invalid.
+Other values are invalid. Then one bit, whether the record is **exact**: every token is the
+emulation's prediction, so that the segments hold no corrections (see
+[zlib emulation](#zlib-emulation)).
 
 ### Segments
 
@@ -227,7 +229,8 @@ gamma(number of segments, at most `N + 1`), then for each segment:
   segment's first token would start were the stored blocks that come right before that token
   left out: the end of the previous token. The first segment's position is 0. Positions must
   not decrease.
-- gamma(length of its corrections in bytes, at most the record's length: 2 + the body's);
+- gamma(length of its corrections in bytes, at most the record's length: 2 + the body's),
+  except in an exact record, whose segments have no corrections (length 0, not written);
 - adaptive profiles with zlib emulation, for every segment but the first: one bit, whether
   the segment resumes the emulation, then if so its checkpoint (see
   [zlib emulation](#zlib-emulation)).
@@ -576,6 +579,14 @@ them. This section defines its behaviour completely.
 The first segment starts with a fresh emulator. Any other segment starts with the emulator
 rebuilt from its checkpoint, if it has one (a checkpoint that cannot be rebuilt makes the
 record invalid); otherwise it has no emulation.
+
+**Exact records.** In an exact record every segment has an emulator (every segment but the
+first a checkpoint), and each token is the emulator's prediction, decoded with no
+corrections: no flag is coded, the rule is never asked and its table is not kept. The record
+is invalid where a segment has no checkpoint, the emulator gives no prediction at `p`, or
+`commit` or `skip_to` fails before the segment's last token. An exact record rebuilds the
+same stream as one of the same tokens coded with flags that are all hits; the encoder writes
+one wherever its coding has no miss and its emulation never ends.
 
 **Parameters.** `w = 2^windowBits` and `MAX_DIST = w − 262`. Hash values have
 `b = memLevel + 7` bits, and `t = ceil(b / 3)`. zlib's configuration table gives
@@ -963,7 +974,8 @@ tables. `deconstruct` keeps to tighter limits; see [Domain](#domain).
 ## Formula module
 
 The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::apply` and `formula::decode`. The module is `flate-set`, version 4. It rebuilds one
+`formula::apply` and `formula::decode`. The module is `flate-set`, version 5 (version 4's
+records have no bit telling an exact record). It rebuilds one
 or more DEFLATE streams of one profile, each with its trailing bytes, as in
 [Rebuilding the stream](#rebuilding-the-stream), with the model data of its
 [resources](#resources) in place of the profile's files. Its output is the streams one after

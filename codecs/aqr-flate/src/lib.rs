@@ -219,6 +219,69 @@ pub struct ModelData<'a> {
     pub coding: Coding<'a>,
 }
 
+/// A segment to decode, as [`rebuild`] reads it: its tokens appended (of `data`, as `range` has
+/// them) by [`segment`], which gives the position after them.
+struct Job<'a> {
+    data: &'a [u8],
+    rule: Rule,
+    range: &'a Range<'a>,
+    body: &'a [u8],
+    misses: [usize; 2],
+    models: Option<&'a [code::Model; FIELDS]>,
+    priors: Option<&'a Priors>,
+    zlib: Option<zlib::Params>,
+    /// The emulator's state it starts from, and whether it is the first segment.
+    cp: Option<Checkpoint>,
+    first: bool,
+    exact: bool,
+}
+
+/// The tokens of a segment of any coding.
+fn segment(j: &Job, out: &mut Vec<Token>) -> Result<usize> {
+    if j.exact {
+        return emulated_segment(j, out);
+    }
+    match (j.models, j.priors) {
+        (Some(models), _) => {
+            let mut player = tokens::Player::new(j.body, models, j.misses)?;
+            let p = tokens::code_range(&mut player, j.data, j.rule, j.range, None, Some(out))?;
+            if !player.done() {
+                return Err(Error::Corrupt);
+            }
+            Ok(p)
+        }
+        (None, Some(priors)) => {
+            let emu = match (j.zlib, &j.cp) {
+                (Some(p), None) if j.first => Some(Emulator::new(j.data, p)),
+                (Some(p), Some(cp)) => Some(Emulator::resume(j.data, p, cp).ok_or(Error::Corrupt)?),
+                _ => None,
+            };
+            let mut a = adapt::Adaptive::new(adapt::Dec::new(j.body), priors, emu);
+            let p = tokens::code_range(&mut a, j.data, j.rule, j.range, None, Some(out))?;
+            if a.b.failed() {
+                return Err(Error::Corrupt);
+            }
+            Ok(p)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// The tokens of a segment of an exact record, zlib emulation's (resumed from the segment's
+/// checkpoint, which each segment but the first has): with no rule's table and no model of
+/// corrections.
+fn emulated_segment(j: &Job, out: &mut Vec<Token>) -> Result<usize> {
+    let Some(p) = j.zlib else {
+        return Err(Error::Corrupt);
+    };
+    let mut emu = match &j.cp {
+        None if j.first => Emulator::new(j.data, p),
+        Some(cp) => Emulator::resume(j.data, p, cp).ok_or(Error::Corrupt)?,
+        None => return Err(Error::Corrupt),
+    };
+    tokens::emulated(&mut emu, j.data, j.range, out)
+}
+
 #[derive(Clone, Copy)]
 pub enum Coding<'a> {
     Static(&'a [code::Model; FIELDS]),
@@ -630,6 +693,9 @@ pub struct Report {
     pub fingerprint: (u64, u64),
     /// zlib's parameters, if the corrections are coded with zlib emulation.
     pub zlib: Option<zlib::Params>,
+    /// Whether zlib emulation predicts every token, so that the record holds no corrections
+    /// (decoded by the emulation alone).
+    pub exact: bool,
     /// With [`Options::collect`]: per context of [`adapt`], its uses among the first
     /// [`adapt::FIRST`] of every segment and the ones among them.
     pub seen: Vec<[u32; 2]>,
@@ -975,6 +1041,8 @@ fn deconstruct_parsed(
     };
     let bodies = if let Some(AdaptiveChoice { zlib, segs, ranges, .. }) = choice {
         report.zlib = zlib;
+        let exact = zlib.is_some() && exact(&segs);
+        report.exact = exact;
         report.misses = segs.iter().map(|s| s.misses).sum();
         if opts.collect {
             report.seen = vec![[0; 2]; adapt::NUM];
@@ -993,6 +1061,7 @@ fn deconstruct_parsed(
                 w.bits(3, p.strategy as u32);
                 w.bits(3, p.wbits as u32 - 9);
                 w.bits(4, p.mem as u32);
+                w.bits(1, exact as u32);
             }
         }
         put_gamma(&mut w, ranges.len() as u64);
@@ -1001,7 +1070,10 @@ fn deconstruct_parsed(
             if i > 0 {
                 put_gamma(&mut w, r.pos as u64);
             }
-            put_gamma(&mut w, s.body.len() as u64);
+            // (an exact coding's corrections, every one a hit, not kept)
+            if !exact {
+                put_gamma(&mut w, s.body.len() as u64);
+            }
             if let (Some(p), true) = (zlib, i > 0) {
                 match &s.cp {
                     None => w.bits(1, 0),
@@ -1012,7 +1084,7 @@ fn deconstruct_parsed(
                 }
             }
         }
-        segs.into_iter().map(|s| s.body).collect::<Vec<_>>()
+        segs.into_iter().map(|s| if exact { Vec::new() } else { s.body }).collect::<Vec<_>>()
     } else {
         let segs = if streamed {
             code_streamed(raw, &f, rule, &ranges, threads)?
@@ -1124,8 +1196,9 @@ fn choose_adaptive<'a>(
         let segs = code_adaptive(f, rule, Some(p), Emulation::New, priors, &zr, threads, collect, (0, &ONCE))?;
         if segs.iter().all(|s| s.misses == 0) {
             // In a short stream the rule may predict as well, without zlib's parameters (ties
-            // go to the rule, as below).
-            if f.data.len() < HINT_RULE_BELOW.get() {
+            // go to the rule, as below); not where zlib's predict every token, which then take
+            // no corrections at all.
+            if f.data.len() < HINT_RULE_BELOW.get() && !exact(&segs) {
                 let alone =
                     code_adaptive(f, rule, None, Emulation::New, priors, &ranges, threads, collect, (0, &ONCE))?;
                 if size(&alone) <= size(&segs) {
@@ -1374,6 +1447,12 @@ struct AdaptiveSeg {
     emulated: bool,
     missed: Vec<(usize, Token)>,
     lost: bool,
+}
+
+/// Whether segments coded with zlib emulation are coded exactly: every token zlib's prediction
+/// (none missed, none the rule's), so that the record holds no corrections ([`Report::exact`]).
+fn exact(segs: &[AdaptiveSeg]) -> bool {
+    segs.iter().all(|s| s.emulated && !s.lost && s.misses == 0)
 }
 
 /// Where [`code_adaptive`] takes zlib emulation's predictions from.
@@ -2236,6 +2315,7 @@ fn rebuild(
     // The coding's parameters.
     let mut models = None;
     let mut zlib = None;
+    let mut exact = false;
     if adaptive {
         if r.bits(1)? == 1 {
             let p = zlib::Params {
@@ -2248,6 +2328,7 @@ fn rebuild(
                 return Err(Error::Corrupt);
             }
             zlib = Some(p);
+            exact = r.bits(1)? == 1;
         }
     } else {
         let mut m = Vec::with_capacity(FIELDS);
@@ -2265,7 +2346,7 @@ fn rebuild(
         let count = get_usize(r, n)?;
         let misses = if adaptive { [0, 0] } else { [get_usize(r, count)?, get_usize(r, count)?] };
         let pos = if i > 0 { get_usize(r, n)? } else { 0 };
-        let len = get_usize(r, meta.len())?;
+        let len = if exact { 0 } else { get_usize(r, meta.len())? };
         let cp = match zlib {
             Some(p) if i > 0 && r.bits(1)? == 1 => Some(get_checkpoint(r, pos, p.wbits, n)?),
             _ => None,
@@ -2324,31 +2405,20 @@ fn rebuild(
             Some(cp) => Some(cp.shifted(off).ok_or(Error::Corrupt)?),
             None => None,
         };
-        let p = match (&models, priors) {
-            (Some(models), _) => {
-                let mut player = tokens::Player::new(body, models, misses)?;
-                let p = tokens::code_range(&mut player, data, rule, &range, None, Some(out))?;
-                if !player.done() {
-                    return Err(Error::Corrupt);
-                }
-                p
-            }
-            (None, Some(priors)) => {
-                let emu = match (zlib, cp) {
-                    (Some(p), None) if i == 0 => Some(Emulator::new(data, p)),
-                    (Some(p), Some(cp)) => Some(Emulator::resume(data, p, &cp).ok_or(Error::Corrupt)?),
-                    _ => None,
-                };
-                let mut a = adapt::Adaptive::new(adapt::Dec::new(body), priors, emu);
-                let p = tokens::code_range(&mut a, data, rule, &range, None, Some(out))?;
-                if a.b.failed() {
-                    return Err(Error::Corrupt);
-                }
-                p
-            }
-            _ => unreachable!(),
+        let job = Job {
+            data,
+            rule,
+            range: &range,
+            body,
+            misses,
+            models: models.as_ref(),
+            priors,
+            zlib,
+            cp,
+            first: i == 0,
+            exact,
         };
-        Ok(p + off)
+        Ok(segment(&job, out)? + off)
     };
     #[cfg(not(target_family = "wasm"))]
     let decode = |i: usize, data: &[u8], off: usize| -> Result<(Vec<Token>, usize)> {

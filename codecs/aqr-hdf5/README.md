@@ -87,8 +87,11 @@ The default level's column is from before the adaptive profile was tried below l
 
 Left:
 
-- The archive of a single small file pays for `flate-set` (71.7 KB) to rebuild zlib's streams;
-  a module of zlib's deflate alone would be a fraction of it.
+- The archive of a single small file pays for `flate-set` (47.3 KB) to rebuild zlib's streams.
+  A module of exact records alone was measured (2026-11-23: 36.6 KB, without the rules, their
+  tables and the corrections' coding; what is left is the rebuilding itself) and not kept:
+  `flate-set` does all it does, an archive holding both pays for both, and 10 KB is little
+  where it alone is used.
 - The application bound is tested on the formula of each sample's stream alone (`encode_checked`),
   which is a lower bound of the whole: a set over the bound by a stream of the samples is found
   before the other chunks are made. A set over it by other streams (or by the float model, or

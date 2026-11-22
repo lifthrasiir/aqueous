@@ -55,6 +55,9 @@ pub struct Stream {
     adaptive: bool,
     /// The zlib emulator's window bits and memory level.
     zlib: Option<(u8, u8)>,
+    /// Whether the record is exact ([`crate::Report::exact`]): its tokens zlib emulation's,
+    /// decoded with no rule's table and no adaptive model.
+    pub exact: bool,
     blocks: u64,
     stored: u64,
     /// The most tokens of a block held until all are decoded (of fewer than [`crate::BIG`]),
@@ -82,12 +85,13 @@ impl Stream {
         let rule =
             if r.bits(1).ok()? == 1 { *m.rules.get(get_usize(r, 1 << 16).ok()?)? } else { Rule::read(r).ok()? };
         let layout = crate::read_blocks(r, nn).ok()?;
-        let mut zlib = None;
+        let (mut zlib, mut exact) = (None, false);
         if adaptive {
             if r.bits(1).ok()? == 1 {
                 r.bits(4).ok()?;
                 r.bits(3).ok()?;
                 zlib = Some((r.bits(3).ok()? as u8 + 9, r.bits(4).ok()? as u8));
+                exact = r.bits(1).ok()? == 1;
             }
         } else if let Coding::Static(defaults) = m.coding {
             for d in defaults {
@@ -104,7 +108,7 @@ impl Stream {
                 get_usize(r, count).ok()?;
             }
             let pos = if i > 0 { get_usize(r, nn).ok()? } else { 0 };
-            let len = get_usize(r, meta.len()).ok()?;
+            let len = if exact { 0 } else { get_usize(r, meta.len()).ok()? };
             let cp = matches!(zlib, Some((wbits, _)) if i > 0 && r.bits(1).ok()? == 1 && {
                 // (the checkpoint's fields: see get_checkpoint)
                 let ws = 1usize << wbits;
@@ -157,6 +161,7 @@ impl Stream {
             rule,
             adaptive,
             zlib,
+            exact,
             blocks: layout.blocks.len() as u64,
             stored,
             largest: largest as u64,
@@ -195,7 +200,7 @@ enum How {
 
 /// Bytes that decoding segment `s` of `st` takes at once besides its tokens (as `rebuild`'s
 /// `decode_into` takes them), of data from position `off` on, `len` bytes of it at hand: the
-/// emulator, the adaptive model, the table or chain.
+/// emulator, the adaptive model, the table or chain (of an exact record, the emulator alone).
 fn decoder(st: &Stream, s: &Seg, off: u64, len: u64) -> u64 {
     use crate::matchfind::{DIRECT_BITS, LINK_AHEAD, RING, WINDOW, head_slot_bits};
     use crate::table::{CHAIN, hash_bits};
@@ -203,6 +208,7 @@ fn decoder(st: &Stream, s: &Seg, off: u64, len: u64) -> u64 {
     let (start, end) = (s.pos - off, s.end - off);
     let rule = &st.rule;
     let table = match rule.kind {
+        _ if st.exact => 0,
         Kind::Literals | Kind::Runs => 0,
         Kind::Search => {
             let span = end.saturating_sub(start.saturating_sub(window)).max(1);
@@ -239,7 +245,7 @@ fn decoder(st: &Stream, s: &Seg, off: u64, len: u64) -> u64 {
         }
         _ => 0,
     };
-    let model = match st.adaptive {
+    let model = match st.adaptive && !st.exact {
         true => block(2 * crate::adapt::NUM as u64) + block(crate::adapt::NUM as u64),
         false => 0,
     };

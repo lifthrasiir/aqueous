@@ -293,8 +293,8 @@ pub static KNOWN: &[Known] = &[
     },
     Known {
         name: "flate-set",
-        version: 4,
-        sha512_256: hex("a8caeaffaec4d1a69d35008f62e84ebf1e7b53027f68d71e71b7aa2b4545306c"),
+        version: 5,
+        sha512_256: hex("0d9c3915d888717ee2b56a1050939411a5869c300db589001cd07963be8b5299"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {

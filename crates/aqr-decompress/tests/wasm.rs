@@ -942,6 +942,7 @@ fn flate_plans_hold() {
         // (the last with blocks of a hundred tokens, thousands of them: a round of blocks written
         // after the first batch, before the next one's tasks)
         let small = aqr_flate::zlib::Params { mem: 1, ..p };
+        let mut exact = Vec::new();
         let parts: Vec<(Vec<u8>, Vec<u8>, usize)> =
             [&text[..1000], &text[..], &mixed[..], &text[..30_000], &noise[..5000], &text[..], literals, literals]
                 .iter()
@@ -952,12 +953,15 @@ fn flate_plans_hold() {
                         7 => around_big.clone(),
                         _ => aqr_flate::zlib::compress(d, if i == 5 { small } else { p }).unwrap(),
                     };
-                    let (data, record) = aqr_flate::deconstruct_with(&raw, &o).unwrap();
+                    let (data, record, report) = aqr_flate::deconstruct_report(&raw, &o).unwrap();
                     assert_eq!(aqr_flate::reconstruct(&data, &record).unwrap(), raw);
+                    exact.push(report.exact);
                     (raw, (data, record))
                 })
                 .map(|(raw, (d, r))| (d, r, raw.len()))
                 .collect();
+        // (zlib's streams coded exactly where adaptive, most of them)
+        assert_eq!(exact.iter().filter(|&&e| e).count(), if profile >= aqr_flate::ADAPTIVE { 6 } else { 0 });
         let raws: Vec<Vec<u8>> = parts.iter().map(|(d, r, _)| aqr_flate::reconstruct(d, r).unwrap()).collect();
         for set in [&[0][..], &[1], &[0, 3, 4], &[3, 1, 0, 2], &[2], &[5], &[6], &[7, 3]] {
             for derived in [Derived::None, Derived::Zip, Derived::ZipBefore, Derived::Zlib, Derived::Gzip] {

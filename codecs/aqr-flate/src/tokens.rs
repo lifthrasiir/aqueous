@@ -545,6 +545,41 @@ fn code_with<C: Corr, T: Search + ?Sized>(
     Ok(p)
 }
 
+/// The tokens of `range` as zlib emulation `emu` predicts them, every one (an exact record:
+/// [`crate::Report::exact`]), appended to `out`: what [`code_range`] decodes of an adaptive
+/// coding of no misses, without a rule's table or a model of corrections. A token it does not
+/// predict, or that it cannot follow, is corrupt. Returns the position after the last token.
+pub fn emulated(emu: &mut crate::zlib::Emulator, d: &[u8], range: &Range, out: &mut Vec<Token>) -> Result<usize> {
+    let n = d.len().min(range.end);
+    let mut p = range.pos;
+    let skip0 = range.skips.partition_point(|s| s.0 < range.first);
+    let mut skips = range.skips[skip0..].iter().peekable();
+    for k in 0..range.count {
+        while let Some(&&(at, len)) = skips.peek()
+            && at == range.first + k
+        {
+            p += len;
+            skips.next();
+            if !emu.skip_to(p) {
+                return Err(Error::Corrupt);
+            }
+        }
+        if p >= n {
+            return Err(Error::Corrupt);
+        }
+        let tok = match emu.predict() {
+            Some((at, t)) if at == p => t,
+            _ => return Err(Error::Corrupt),
+        };
+        if !emu.commit(tok) {
+            return Err(Error::Corrupt);
+        }
+        p += tok.span();
+        out.push(tok);
+    }
+    Ok(p)
+}
+
 /// Codes the tokens of `range` (deconstructing, as [`code_range`] does) under several
 /// [`Kind::Chain`] rules at once, into one coder each, walking each chain once for all of
 /// them, with `m` (a matcher for the range, if one is at hand). The coders' own predictions

@@ -262,8 +262,9 @@ the old writer and would gain about as much).
 ## Memory of `flate-set`
 
 `flate-inflate` (the data of a raw stream, for streams archived along but not rebuilt) is a part
-module whose plan is the same whatever the lengths (`plan::inflate`). `flate-set` (version 4)
-is below.
+module whose plan is the same whatever the lengths (`plan::inflate`). `flate-set` (version 5)
+is below; an exact record (zlib emulation's tokens, every one) takes the emulator alone (no
+rule's table, no adaptive model).
 
 The module lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
 (`plan::plan`): the instance's memory taken block by block in the order the module takes it,

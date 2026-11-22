@@ -18,7 +18,7 @@ use crate::{ADAPTIVE, Coding, Result};
 use crate::module::RULE_BYTES;
 pub use crate::module::{Derived, decode, index, index_before, models_from_bytes, priors_from_bytes, rules_from_bytes};
 
-pub const MODULE: Module = Module::new("flate-set", 4).with_task_plan(memory).with_contents(&[0]);
+pub const MODULE: Module = Module::new("flate-set", 5).with_task_plan(memory).with_contents(&[0]);
 
 /// The memory of the module: its plan ([`crate::plan::plan`]).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<aqr_formula::Plan> {
@@ -183,6 +183,37 @@ mod tests {
         // Profiles share the default models, and 9 and 10 the catalog.
         assert_eq!(resources(0).unwrap()[1], resources(9).unwrap()[1]);
         assert_eq!(resources(9).unwrap()[0], resources(10).unwrap()[0]);
+    }
+
+    /// zlib's streams are coded exactly, with no corrections, in one segment or several, and
+    /// rebuilt; so the plan reads their records. A stream not coded with zlib emulation is not
+    /// exact.
+    #[test]
+    fn exact_records() {
+        use crate::{Options, deconstruct_report, zlib};
+        let mut data = Vec::new();
+        let mut x = 12345u32;
+        while data.len() < 700_000 {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            data.extend_from_slice(format!("word{} ", (x >> 16) % 400).as_bytes());
+        }
+        let p = zlib::Params { level: 6, strategy: zlib::Strategy::Default, wbits: 15, mem: 8 };
+        let raw = zlib::compress(&data, p).unwrap();
+        let res = resources(crate::ADAPTIVE).unwrap();
+        let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();
+        for (segment, threads, emulated) in
+            [(usize::MAX, 1, true), (100_000, 1, true), (100_000, 4, true), (100_000, 4, false)]
+        {
+            let mut o = Options::for_profile(crate::ADAPTIVE).unwrap();
+            (o.segment, o.threads, o.zlib) = (segment, threads, emulated);
+            let (d, r, report) = deconstruct_report(&raw, &o).unwrap();
+            assert_eq!(report.exact, emulated, "{segment} {threads}");
+            let inputs: [&[u8]; 3] = [&d, &r, &[]];
+            assert!(decode(&[], &res, &inputs, raw.len() as u64, threads).unwrap() == raw);
+            let s = crate::plan::Stream::parse(d.len() as u64, &r, crate::ADAPTIVE).unwrap();
+            assert_eq!(s.exact, emulated);
+            assert!(segment == usize::MAX || s.segs.len() > 3, "{}", s.segs.len());
+        }
     }
 
     /// The record is read as `reconstruct_into` reads it, and the plan covers the output.
