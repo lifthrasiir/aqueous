@@ -72,6 +72,12 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   were by their paths, and where the writer told nothing left out (all but ALZ's and EGG's of
   links), its directories and links too. Names not UTF-8 are left out (a reader takes their
   encoding as it guesses it).
+- `sfx`: what a self-extracting program reads of what follows its image, as its stub reads it
+  (aqr-sfx's portable part): the bundle of its blobs (zstd or LZMA2 frames, the x86 filter
+  undone) and the record of its settings at the start and at the end; a record read has to be
+  the same written again and read back. Its seeds are bundles of blobs made here and records of
+  several `sfx.toml`s, alone and after a bundle. It found the bundle's frames reserving what
+  they told (an abort) and the CBOR reader reading items again at each level above them.
 - `natives`: an archive of recompressed files decoded by aqr-decompress's native modules (a
   module not known fails: no Wasmtime), so each module's decoding of the params and streams an
   archive tells. Its seeds are the codecs' fixtures (`codecs/*/tests/data`, at most 256 KiB)
@@ -138,4 +144,5 @@ TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzz
 timeout that does not come again alone may be a race: the file given many times over, to either,
 runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
 
-Left: the SFX stub's reading of what follows its image (the bundle of blobs, its settings).
+Left: the rest of the SFX stub (placing the blobs, Windows alone), and the host's reading of
+the sandbox worker's replies (a few counts and byte strings, of bounds).

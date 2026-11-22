@@ -349,6 +349,7 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
         "envelope" => envelopes(),
         "unpack" => unpackable(),
         "modules" => modules(),
+        "sfx" => aqr_fuzz::sfx::seeds(),
         // (bytes to make trees of, of each format)
         "pack" => (0..32)
             .map(|i| (format!("noise-{i}"), [&[i as u8][..], &noise(2048 << (i % 4), i as u32)].concat()))
@@ -404,7 +405,7 @@ fn main() {
     let seeds = seeds(t);
     std::fs::create_dir_all(dir).unwrap();
     for (name, c) in &seeds {
-        let name = if name.ends_with(".aqr") || ["compress", "unpack", "modules", "pack"].contains(&t.as_str()) {
+        let name = if name.ends_with(".aqr") || ["compress", "unpack", "modules", "pack", "sfx"].contains(&t.as_str()) {
             name.clone()
         } else {
             format!("{name}.aqr")
