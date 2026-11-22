@@ -27,9 +27,11 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   then appended to by a writer of its own, of what `footer_of` tells, as `aqr -a` appends:
   `SegmentWriter::appending` after the footer, or `replacing` over it), each of 1 or 2 batches of such formulas, of 1 to 4 leaves of 1 to
   3 outputs (an application's outputs all in one leaf, as `SegmentWriter::batch` wants them),
-  with dictionaries or without, files of later segments replacing earlier ones of their paths
-  now and then, and tombstones of them (as `aqr -s` writes), its files decoded again by their
-  paths. Where
+  with dictionaries or without; its entries (files, directories, links, tombstones as `aqr -s`
+  writes them) at paths of up to 3 names of `a` to `d`, so that later segments meet earlier
+  ones' paths, decoded again and checked by a model of the spec's merging of segments
+  (directories merged, any other node replacing what is at its path with what is under it, a
+  tombstone removing it). Where
   the target's reference evaluator, a recursive walk of its own (not aqr-archive's), gives the
   outputs, the encoder has to take them and the archive has to give them back. Its seeds are only
   bytes to make formulas of. It found `batch` taking an application's outputs spread over
@@ -91,5 +93,6 @@ TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzz
 timeout that does not come again alone may be a race: the file given many times over, to either,
 runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
 
-Left: in `roundtrip`, the encoder's other options (module blocks, the size hint sealed), and
-directories (entries under others, a directory replacing a file).
+Left: in `roundtrip`, the encoder's other options (module blocks, the size hint sealed),
+entries' extras (and their merging: a directory's kept where a later one has none), and overlay
+archives.

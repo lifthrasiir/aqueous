@@ -417,8 +417,8 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     let runner = crate::toys();
     let mut w = SegmentWriter::new();
     let mut out = w.head().to_vec();
-    // by path, what the archive is to give (None: what does not evaluate, by the reference)
-    let mut want: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> = Default::default();
+    // by path, what the archive is to give, its segments merged
+    let mut want: Paths = Default::default();
     let mut batches = Vec::new();
     // (whether every output written evaluates, of files replaced or not named too: the archive
     // holds them still)
@@ -473,45 +473,44 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
         if contents.is_empty() {
             return;
         }
-        // its files: of paths of their own, or of an earlier segment's (replacing its file)
-        let earlier: Vec<Vec<u8>> = want.keys().cloned().collect();
+        // its entries: the files, directories, links and tombstones at paths of a few names
+        // (so that later segments meet earlier ones' paths), merged into what is to be
         evaluates &= wants.iter().all(Option::is_some);
-        let mut t = Tree::default();
+        let mut seg = Segment::default();
+        let mut named = Vec::new();
         for (i, w) in wants.into_iter().enumerate() {
-            let name = match earlier.is_empty() || !u.ratio(1, 4).unwrap_or(false) {
-                true => format!("s{k}f{i}").into_bytes(),
-                false => earlier[u.choose_index(earlier.len()).unwrap_or(0)].clone(),
+            let Some(p) = path(u) else { break };
+            if let Some(e) = seg.put(&p, EntryNode::File(named.len())) {
+                named.push((e, contents[i]));
+                merge(&mut want, &p, Want::File(w));
+            }
+        }
+        for _ in 0..u.int_in_range(0..=3).unwrap_or(0) {
+            let Some(p) = path(u) else { break };
+            let (node, w) = match u.int_in_range(0..=2).unwrap_or(0) {
+                0 => (EntryNode::Dir, Some(Want::Dir)),
+                1 => {
+                    let target = p.iter().rev().cloned().collect::<Vec<_>>().join(&b'/');
+                    (EntryNode::Link(target.clone()), Some(Want::Link(target)))
+                }
+                _ => (EntryNode::TOMBSTONE, None),
             };
-            if t.entries.iter().any(|e| e.name == name) {
-                continue;
-            }
-            t.entries.push(Entry {
-                parent: None,
-                name: name.clone(),
-                node: EntryNode::File(i),
-                extra: Extra::default(),
-            });
-            want.insert(name, w);
-        }
-        // (now and then a tombstone of a path of an earlier segment's, as `aqr -s` writes them)
-        if !earlier.is_empty() && u.ratio(1, 4).unwrap_or(false) {
-            let name = earlier[u.choose_index(earlier.len()).unwrap_or(0)].clone();
-            if !t.entries.iter().any(|e| e.name == name) {
-                want.remove(&name);
-                t.entries.push(Entry::tombstone(None, name));
+            if seg.put(&p, node).is_some() {
+                match w {
+                    Some(w) => merge(&mut want, &p, w),
+                    // (a tombstone: its parents declared, merged as directories; it and what is under
+                    // it removed)
+                    None => {
+                        for k in 1..p.len() {
+                            merge(&mut want, &p[..k], Want::Dir);
+                        }
+                        want.retain(|q, _| !q.starts_with(&p));
+                    }
+                }
             }
         }
-        // (the contents named, a file each, in the order of the entries; the tombstones after)
-        let contents: Vec<ContentAt> = t
-            .entries
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(e, entry)| {
-                let EntryNode::File(c) = entry.node else { return None };
-                entry.node = EntryNode::File(e);
-                Some(contents[c])
-            })
-            .collect();
+        let t = seg.t;
+        let contents: Vec<ContentAt> = named.into_iter().map(|(_, c)| c).collect();
         let status = if u.arbitrary::<bool>().unwrap_or(false) { Status::Complete } else { Status::None };
         match (w.close_as(&enc, &t, &contents, status), evaluates) {
             (Ok(m), _) => out.extend_from_slice(&m),
@@ -533,14 +532,88 @@ fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     }
     match got {
         Ok(Value::Tree(t, files)) => {
-            let mut by_path = std::collections::BTreeMap::new();
+            let mut paths: Vec<Vec<Vec<u8>>> = Vec::with_capacity(t.entries.len());
+            let mut got = std::collections::BTreeMap::new();
             for e in &t.entries {
-                if let EntryNode::File(c) = e.node {
-                    by_path.insert(e.name.clone(), Some(files[c].clone()));
+                let mut p = e.parent.map_or_else(Vec::new, |q| paths[q].clone());
+                p.push(e.name.clone());
+                let w = match &e.node {
+                    &EntryNode::File(c) => Some(Want::File(Some(files[c].clone()))),
+                    EntryNode::Dir => Some(Want::Dir),
+                    EntryNode::Link(t) => Some(Want::Link(t.clone())),
+                    _ => None,
+                };
+                if let Some(w) = w {
+                    got.insert(p.clone(), w);
                 }
+                paths.push(p);
             }
-            assert!(by_path == want, "files decoded otherwise\n{batches:?}");
+            assert!(got == want, "entries decoded otherwise\n{got:?}\n{want:?}\n{batches:?}");
         }
         r => panic!("an archive of a tree that evaluates does not decode: {:?}\n{batches:?}", r.map(|_| ())),
+    }
+}
+
+/// What a tree is to have at a path: a file (its bytes; None where they do not evaluate, by the
+/// reference), a directory or a link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Want {
+    File(Option<Vec<u8>>),
+    Dir,
+    Link(Vec<u8>),
+}
+
+type Paths = std::collections::BTreeMap<Vec<Vec<u8>>, Want>;
+
+/// A path of 1 to 3 names of `a` to `d`.
+fn path(u: &mut Unstructured) -> Option<Vec<Vec<u8>>> {
+    let n = u.int_in_range(1..=3).ok()?;
+    (0..n).map(|_| u.choose(&[b"a", b"b", b"c", b"d"]).ok().map(|n| n.to_vec())).collect()
+}
+
+/// Node `w` at path `p` merged into `paths` (spec, "Merging segments"): a directory merged with
+/// one there, its parents too (a segment declares them); any other node replacing what is there,
+/// with what is under it.
+fn merge(paths: &mut Paths, p: &[Vec<u8>], w: Want) {
+    for k in 1..p.len() {
+        merge(paths, &p[..k], Want::Dir);
+    }
+    if w == Want::Dir && paths.get(p) == Some(&Want::Dir) {
+        return;
+    }
+    paths.retain(|q, _| !q.starts_with(p));
+    paths.insert(p.to_vec(), w);
+}
+
+/// A segment's tree as it is made: by path, its entry.
+#[derive(Default)]
+struct Segment {
+    t: Tree,
+    at: std::collections::HashMap<Vec<Vec<u8>>, usize>,
+}
+
+impl Segment {
+    /// Node `node` at path `p`, its parents directories (declared where they are not): its
+    /// entry, or None where the path or a parent is taken by another node.
+    fn put(&mut self, p: &[Vec<u8>], node: EntryNode) -> Option<usize> {
+        let mut parent = None;
+        for k in 1..p.len() {
+            parent = Some(match self.at.get(&p[..k]) {
+                Some(&e) if self.t.entries[e].node == EntryNode::Dir => e,
+                Some(_) => return None,
+                None => self.push(parent, &p[..k], EntryNode::Dir),
+            });
+        }
+        if self.at.contains_key(p) {
+            return None;
+        }
+        Some(self.push(parent, p, node))
+    }
+
+    fn push(&mut self, parent: Option<usize>, p: &[Vec<u8>], node: EntryNode) -> usize {
+        let name = p.last().unwrap().clone();
+        self.t.entries.push(Entry { parent, name, node, extra: Extra::default() });
+        self.at.insert(p.to_vec(), self.t.entries.len() - 1);
+        self.t.entries.len() - 1
     }
 }
