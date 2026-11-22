@@ -301,20 +301,22 @@ footer a { color: var(--ink-2); }
   <div class="wrap">
     <h2>Smaller than the usual suspects</h2>
     <p class="sub">Matt Mahoney's <a href="https://mattmahoney.net/dc/10gb.html">10 GB benchmark</a>:
-      79,431 files, 10.00 GB of real-world data, on an Apple M4 with 10 cores.</p>
+      79,431 files, 10.00 GB of real-world data, on an Apple M4 with 10 cores (2026-11-22).</p>
     <div class="bench">
       <figure class="chart" style="margin:0">
         <h3>Archive size</h3>
         <p class="meta">GB, smaller is better</p>
         <ul class="bars">
-          <li class="bar" tabindex="0" style="--w:46.8%"><div class="lab"><code>tar | zstd -3 -T10</code><b>4.68</b></div><div class="track"><div class="fill"></div></div><span class="tip">4.68 GB · 33 s to compress</span></li>
-          <li class="bar" tabindex="0" style="--w:41.7%"><div class="lab"><code>zstd -3 --long=31</code><b>4.17</b></div><div class="track"><div class="fill"></div></div><span class="tip">4.17 GB · 36 s to compress</span></li>
-          <li class="bar" tabindex="0" style="--w:37.0%"><div class="lab"><span>zpaq 7.15</span><b>3.70</b></div><div class="track"><div class="fill"></div></div><span class="tip">3.70 GB</span></li>
-          <li class="bar us" tabindex="0" style="--w:24.98%"><div class="lab"><span><code>aqr</code> (level mid)</span><b>2.50</b></div><div class="track"><div class="fill"></div></div><span class="tip">2.498 GB · 164 s to compress, 38.8 s to extract</span></li>
+          <li class="bar" tabindex="0" style="--w:46.83%"><div class="lab"><code>tar | zstd -3 -T10</code><b>4.68</b></div><div class="track"><div class="fill"></div></div><span class="tip">4.683 GB · 39.7 s to compress, 6.2 s to decompress</span></li>
+          <li class="bar" tabindex="0" style="--w:41.74%"><div class="lab"><code>zstd -3 --long=31</code><b>4.17</b></div><div class="track"><div class="fill"></div></div><span class="tip">4.174 GB · 41.5 s to compress, 5.6 s to decompress</span></li>
+          <li class="bar us" tabindex="0" style="--w:37.91%"><div class="lab"><span><code>aqr -1</code> (zstd alone)</span><b>3.79</b></div><div class="track"><div class="fill"></div></div><span class="tip">3.791 GB · 31.7 s to compress, 3.0 s to decompress</span></li>
+          <li class="bar" tabindex="0" style="--w:34.85%"><div class="lab"><span>zpaq 7.15 <code>-m2</code></span><b>3.49</b></div><div class="track"><div class="fill"></div></div><span class="tip">3.485 GB · 206 s to compress, 103 s to decompress</span></li>
+          <li class="bar us" tabindex="0" style="--w:24.38%"><div class="lab"><span><code>aqr</code> (level mid)</span><b>2.44</b></div><div class="track"><div class="fill"></div></div><span class="tip">2.438 GB · 153 s to compress, 35.8 s to decompress</span></li>
         </ul>
         <div class="axis" aria-hidden="true"><span>0</span><span>2.5</span><span>5</span><span>7.5</span><span>10 GB (input)</span></div>
-        <p class="foot"><code>aqr</code> compresses at 61 MB/s, round-trip check of every file included, and
-          extracts at 258 MB/s. The archive includes its own decoder modules.</p>
+        <p class="foot">At its default level, <code>aqr</code> compresses at 65 MB/s, round-trip check of
+          every file included, and decompresses at 279 MB/s; zpaq <code>-m2</code> takes longer both ways.
+          With zstd alone (<code>-1</code>) it is both faster and smaller than <code>tar | zstd</code>. The archive includes its own decoder modules.</p>
       </figure>
       <div class="tablecard">
         <table>

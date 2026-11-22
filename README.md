@@ -31,22 +31,28 @@ come from.
 
 ## Sneak peek
 
-Matt Mahoney's 10 GB benchmark (79,431 files, 10.00 GB), on an Apple M4 (10 cores): `aqr` on
-2026-11-08 at commit `f6f22f7`, the others on 2026-10-27:
+Matt Mahoney's 10 GB benchmark (79,431 files, 10.00 GB), on an Apple M4 (10 cores), all on
+2026-11-22: `aqr` at commit `0c599f6` (levels 9, 5 and 2 at `155318f`, where they work the
+same), `-1` and `-0` the faster of two runs:
 
 | method | size | compression | decompression |
 |---|---|---|---|
-| `tar \| zstd -3 -T10` | 4.68 GB | 33 s | |
-| `tar \| zstd -3 -T10 --long=31` | 4.17 GB | 36 s | |
-| zpaq 7.15 | 3.70 GB | (as distributed) | |
-| `aqr -9` | 2.362 GB | 359 s (28 MB/s, 5.0 GB peak) | 38.6 s (259 MB/s, 2.6 GB peak) |
-| **`aqr`** (level `mid`) | **2.481 GB** | 167 s (60 MB/s, 2.5 GB peak) | 29.1 s (344 MB/s, 2.5 GB peak) |
-| `aqr -2` (level `low`) | 3.030 GB | 93.5 s (107 MB/s, 3.0 GB peak) | 12.1 s (824 MB/s, 2.0 GB peak) |
-| `aqr -1` (zstd alone) | 3.881 GB | 19.4 s\* (517 MB/s, 3.8 GB peak) | 4.7 s (2.12 GB/s, 1.6 GB peak) |
-| `aqr -0` (uncompressed) | 8.980 GB | 15.5 s\* (645 MB/s, 1.8 GB peak) | 3.3 s\* (2.99 GB/s, 1.8 GB peak) |
+| `tar \| zstd -3 -T10` | 4.683 GB | 39.7 s | 6.2 s |
+| `tar \| zstd -3 -T10 --long=31` | 4.174 GB | 41.5 s | 5.6 s |
+| zpaq 7.15 `-m1` | 3.800 GB | 48.2 s (1.3 GB peak) | 78.6 s (0.4 GB peak) |
+| zpaq 7.15 `-m2` | 3.485 GB | 206.0 s (8.0 GB peak) | 103.1 s (1.4 GB peak) |
+| zpaq 7.15 `-m3` | 3.036 GB | 335.2 s (6.1 GB peak) | 384.4 s (4.3 GB peak) |
+| `aqr -9` | 2.322 GB | 363.8 s (27 MB/s, 3.2 GB peak) | 46.0 s (217 MB/s, 2.6 GB peak) |
+| **`aqr`** (level `mid`, `-5`) | **2.438 GB** | 153.4 s (65 MB/s, 2.7 GB peak) | 35.8 s (279 MB/s, 2.6 GB peak) |
+| `aqr -2` (level `low`) | 2.675 GB | 101.9 s (98 MB/s, 2.8 GB peak) | 12.1 s (826 MB/s, 2.0 GB peak) |
+| `aqr -1` (zstd alone) | 3.791 GB | 31.7 s\* (316 MB/s, 3.2 GB peak) | 3.0 s (3.38 GB/s, 1.7 GB peak) |
+| `aqr -0` (uncompressed) | 8.980 GB | 54.6 s\* (183 MB/s, 0.5 GB peak) | 1.8 s (5.43 GB/s, 1.7 GB peak) |
 
-Compression includes the round-trip check of every file. (\* I/O bound: by reading the input
-(the archive, in decompression), not by compressing or decompressing.) Some formats alone, as
+Times are of the whole process (`/usr/bin/time`); decompression is a test that writes nothing
+(`aqr -K`, `zstd -t`, `zpaq x -test`); `aqr` and zpaq on all threads, `zstd -t` on one.
+`aqr`'s compression includes the round-trip check of every file. (\* I/O bound, not by
+compressing: 81 and 27 seconds of CPU on 10 cores.) zpaq at the time of `aqr`'s default is
+between `-m1` and `-m2`; `-m3` takes about as long as `aqr -9`. Some formats alone, as
 `archive / input` against `zstd -3` of the same files:
 
 | format | aqr | zstd -3 |
