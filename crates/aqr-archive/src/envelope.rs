@@ -249,7 +249,9 @@ impl<W: Write + Seek> Sealer<W> {
         let file_key: [u8; 16] = random()?;
         let mut fields = Fields([0; FIELDS]);
         fields.0[0] = work_factor;
-        fields.0[1..17].copy_from_slice(&random::<16>()?);
+        // (fuzzed, a salt of its own, so that scrypt's key is derived once: `Fields::kept`)
+        let salt = if cfg!(fuzzing) { [0; 16] } else { random::<16>()? };
+        fields.0[1..17].copy_from_slice(&salt);
         let mut body = file_key.to_vec();
         let wrap = ChaCha20Poly1305::new(&fields.wrapping(passphrase));
         let tag = wrap.encrypt_in_place_detached(&Nonce::default(), &[], &mut body).expect("a short key");

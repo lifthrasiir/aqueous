@@ -384,12 +384,36 @@ pub fn roundtrip(d: &[u8]) {
     }
 }
 
+/// A toy's stand-in written as its bytes, as a module block's data made beforehand, or as a
+/// shorthand module block of its hash (the toys' runner knows them: `crate::toys`).
+fn as_bytes(m: aqr_formula::Module) -> Option<aqr_archive::Wasm> {
+    Some(aqr_archive::Wasm::Bytes(aqr_archive::stand_in(m).into()))
+}
+
+fn as_block(m: aqr_formula::Module) -> Option<aqr_archive::Wasm> {
+    Some(aqr_archive::Wasm::Block(aqr_archive::module_block_data(&aqr_archive::stand_in(m)).ok()?.into()))
+}
+
+fn as_registered(m: aqr_formula::Module) -> Option<aqr_archive::Wasm> {
+    use sha2::Digest;
+    let hash = sha2::Sha512_256::digest(aqr_archive::stand_in(m)).into();
+    Some(aqr_archive::Wasm::Registered { hash, classes: 0 })
+}
+
 fn file_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     let Ok(f) = formula(u) else { return };
     let runner = crate::toys();
     let want = reference(&f);
     let sum = want.as_deref().filter(|_| summed).map(checksum);
-    let enc = Encoder::new(level);
+    // (its modules written by default, as their bytes, as blocks made beforehand, or by hash)
+    let modules = u.int_in_range(0..=3u8).unwrap_or(0);
+    let encoder = || match modules {
+        0 => Encoder::new(level),
+        1 => Encoder::new(level).with_modules(as_bytes),
+        2 => Encoder::new(level).with_modules(as_block),
+        _ => Encoder::new(level).with_modules(as_registered),
+    };
+    let enc = encoder();
     let c = match (enc.encode(&f, sum), &want) {
         (Ok(c), _) => c,
         (Err(e), Some(_)) => panic!("a formula that evaluates not archived: {e}\n{f:?}"),
@@ -409,6 +433,36 @@ fn file_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {
     })
     .unwrap();
     assert!(streamed == want, "streamed otherwise\n{f:?}");
+    // now and then sealed too (its size hint filled in by the sealer; its blocks mirrored or
+    // not), opened as `aqr -d` opens it: decrypted whole, and as it is read
+    if !u.ratio(1, 4).unwrap_or(false) {
+        return;
+    }
+    let (Ok(mirrored), Ok(headers)) = (u.arbitrary::<bool>(), u.arbitrary::<bool>()) else { return };
+    let a = encoder().with_size_hint(true).encode(&f, sum).expect("archived as it was without its size hint");
+    let a = match mirrored {
+        true => {
+            let mut m = aqr_archive::Mirroring::new(Vec::new(), true);
+            std::io::Write::write_all(&mut m, &a).unwrap();
+            m.into_inner()
+        }
+        false => a,
+    };
+    let (pass, wf) = (crate::PASSPHRASE, crate::WORK_FACTOR);
+    let mut s = aqr_archive::envelope::Sealer::new(std::io::Cursor::new(Vec::new()), pass, wf, headers).unwrap();
+    std::io::Write::write_all(&mut s, &a).unwrap();
+    let c = s.into_inner().unwrap().into_inner();
+    let unlocked = || aqr_archive::envelope::open(&c).and_then(|e| e.unlock(pass)).expect("unlocked");
+    let p = unlocked().decrypt(1).expect("decrypted");
+    match aqr_archive::open_payload(&p, &runner).and_then(|a| a.value(1)) {
+        Ok(Value::File(got)) => assert!(got == want, "sealed: decoded otherwise\n{f:?}"),
+        r => panic!("sealed: an archive of a formula that evaluates does not decode: {:?}\n{f:?}", r.map(|_| ())),
+    }
+    let d = unlocked().decrypting();
+    match aqr_archive::open_decrypting(&d, &runner).and_then(|a| a.value(1)) {
+        Ok(Value::File(got)) => assert!(got == want, "sealed: decoded otherwise as decrypted\n{f:?}"),
+        r => panic!("sealed: not decoded as decrypted: {:?}\n{f:?}", r.map(|_| ())),
+    }
 }
 
 fn tree_roundtrip(u: &mut Unstructured, level: Level, summed: bool) {

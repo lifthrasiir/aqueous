@@ -100,7 +100,18 @@ impl aqr_archive::Modules for Toys {
 }
 
 pub fn toys() -> Natives<'static, Toys> {
-    natives(&[REV, CUT, COPY], &Toys)
+    natives(&[REV, CUT, COPY], &Toys).registered_by(registered_toy)
+}
+
+/// The stand-in of the toy of SHA-512/256 `hash`: the toys as registered modules (for
+/// `roundtrip`'s archives of shorthand module blocks).
+fn registered_toy(hash: &[u8; 32]) -> Decoded<Vec<u8>> {
+    use sha2::Digest;
+    [REV, CUT, COPY]
+        .into_iter()
+        .map(aqr_archive::stand_in)
+        .find(|w| <[u8; 32]>::from(sha2::Sha512_256::digest(w)) == *hash)
+        .ok_or_else(|| Failure::Resource("not a toy registered".into()))
 }
 
 /// The modules of aqr-decompress run natively, and no other (a module not known fails rather

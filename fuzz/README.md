@@ -28,8 +28,11 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   to 3 applications of several outputs, of `cut`, a node or a patch split, and a root of slices,
   concatenations, packs, applications of `rev` and `copy` (now and then of resources), outputs
   and patches, each output placed once; now and then a slice out of its stream or an
-  application of another size) archived by the encoder (stored, zstd 1 and 3, low) and decoded
-  again, whole and streamed; or a tree of 1 to 3 segments committed one after another (now and
+  application of another size) archived by the encoder (stored, zstd 1 and 3, low; its modules
+  written by default, as their bytes, as blocks made beforehand or as shorthand blocks of their
+  hashes, the toys' runner knowing them) and decoded again, whole and streamed, and now and then
+  sealed too (its size hint filled in, its blocks mirrored or not, mirrored headers or not) and
+  decoded as `aqr -d` decodes it, decrypted whole and as it is read; or a tree of 1 to 3 segments committed one after another (now and
   then appended to by a writer of its own, of what `footer_of` tells, as `aqr -a` appends:
   `SegmentWriter::appending` after the footer, or `replacing` over it), each of 1 or 2 batches of such formulas, of 1 to 4 leaves of 1 to
   3 outputs (an application's outputs all in one leaf, as `SegmentWriter::batch` wants them),
@@ -126,4 +129,4 @@ TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzz
 timeout that does not come again alone may be a race: the file given many times over, to either,
 runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
 
-Left: in `roundtrip`, the encoder's other options (module blocks, the size hint sealed).
+Left: the SFX stub's reading of what follows its image (the bundle of blobs, its settings).
