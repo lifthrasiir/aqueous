@@ -346,7 +346,7 @@ fn compile(wasm: &[u8], released: bool, hash: [u8; 32]) -> Decoded<Compiled> {
         (false, []) => Vec::new(),
         (false, _) => return invalid(format!("{TASK_SLOTS} without tasks")),
     };
-    let module = Module::new(&ENGINE, wasm).map_err(|e| Failure::Invalid(format!("not compiled: {e}")))?;
+    let module = Module::new(&ENGINE, wasm).map_err(|e| Failure::Invalid(format!("not compiled: {e:#}")))?;
     let working_module = if cfg!(windows) {
         let m = Module::new(&ENGINE, memory_module(working));
         Some(m.map_err(|e| Failure::Resource(format!("the working memory not compiled: {e}")))?)
