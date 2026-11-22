@@ -1,6 +1,6 @@
 //! Runs inputs through a target's body as plain code (no sanitizer, no coverage, checksums
 //! checked), timed: `replay TARGET FILE...`
-//! (decode, unpack, modules, natives, wasm, compress, roundtrip), to tell a slow input of the fuzzer's from one of
+//! (decode, unpack, pack, modules, natives, wasm, compress, roundtrip), to tell a slow input of the fuzzer's from one of
 //! the code's.
 
 use std::time::Instant;
@@ -32,6 +32,10 @@ fn main() {
             }
             "natives" => format!("{:?}", aqr_archive::decode_value(&d, &aqr_fuzz::Known).map(|_| ())),
             "modules" => aqr_fuzz::modules::run(&d),
+            "pack" => {
+                aqr_fuzz::pack::pack(&d);
+                "read back alike".to_string()
+            }
             "unpack" => {
                 aqr_fuzz::unpack::unpack(&d);
                 "unpacked alike".to_string()

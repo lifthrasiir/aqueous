@@ -191,7 +191,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   workspace.
 - `scripts/` — helper scripts (Python uses the `.venv` at the root).
 - `fuzz/` — cargo-fuzz targets of the archive decoder (`decode`, `salvage`, `envelope`), of the
-  encoder's round trip (`roundtrip`) of archives of other formats (`unpack`), of modules not known (`modules`) and of the codecs (`natives`, `wasm`,
+  encoder's round trip (`roundtrip`) of archives of other formats (`unpack`, and written by aqr-pack: `pack`), of modules not known (`modules`) and of the codecs (`natives`, `wasm`,
   `compress`; nightly), a workspace of its own; aqr-archive skips its checksums
   under `cfg(fuzzing)` (`sum_holds`; encrypted chunks' tags as `Unlocked::opens` tells).
   `fuzz/run.sh TARGET` runs one with its seeds and dictionary (its README).

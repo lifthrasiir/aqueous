@@ -16,6 +16,7 @@ aqr-archive = { path = "../crates/aqr-archive" }
 aqr-compress = { path = "../crates/aqr-compress" }
 aqr-decompress = { path = "../crates/aqr-decompress" }
 aqr-formula = { path = "../crates/aqr-formula" }
+aqr-pack = { path = "../crates/aqr-pack" }
 aqr-testkit = { path = "../crates/aqr-testkit" }
 aqr-unpack = { path = "../crates/aqr-unpack" }
 aqr-wasmrt = { path = "../crates/aqr-wasmrt" }
@@ -71,6 +72,13 @@ bench = false
 [[bin]]
 name = "modules"
 path = "fuzz_targets/modules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pack"
+path = "fuzz_targets/pack.rs"
 test = false
 doc = false
 bench = false

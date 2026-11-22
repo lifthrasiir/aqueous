@@ -546,6 +546,7 @@ dependencies = [
  "aqr-compress",
  "aqr-decompress",
  "aqr-formula",
+ "aqr-pack",
  "aqr-testkit",
  "aqr-unpack",
  "aqr-wasmrt",
@@ -964,6 +965,26 @@ name = "aqr-ole"
 version = "0.1.0"
 dependencies = [
  "aqr-disk",
+]
+
+[[package]]
+name = "aqr-pack"
+version = "0.1.0"
+dependencies = [
+ "aqr-7z",
+ "aqr-alz",
+ "aqr-archive",
+ "aqr-bz2",
+ "aqr-common",
+ "aqr-egg",
+ "aqr-flate",
+ "aqr-foreign",
+ "aqr-formula",
+ "aqr-zip",
+ "encoding_rs",
+ "getrandom",
+ "liblzma",
+ "zstd",
 ]
 
 [[package]]

@@ -62,6 +62,13 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   grows that fail (the profile refuses them). Nothing is checked of what it gives (the decoder
   checks the outputs' sizes): that it fails or ends, and does not crash. Slow (Wasmtime
   compiling each module, instrumented).
+- `pack`: a tree made of the input (files, directories and links at paths of up to 3 names,
+  ASCII and Hangul) written by aqr-pack as an archive of another format (its first byte telling
+  which: ZIP, 7z, ALZ, EGG, tar alone or under each compressor, a single file's stream; a low
+  level; ZIP's and 7z's encrypted now and then) and read back by aqr-unpack: its files as they
+  were by their paths, and where the writer told nothing left out (all but ALZ's and EGG's of
+  links), its directories and links too. Names not UTF-8 are left out (a reader takes their
+  encoding as it guesses it).
 - `natives`: an archive of recompressed files decoded by aqr-decompress's native modules (a
   module not known fails: no Wasmtime), so each module's decoding of the params and streams an
   archive tells. Its seeds are the codecs' fixtures (`codecs/*/tests/data`, at most 256 KiB)
