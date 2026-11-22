@@ -45,6 +45,13 @@ what follows. A crate of its own workspace: the main one's builds and tests leav
   outputs, the encoder has to take them and the archive has to give them back. Its seeds are only
   bytes to make formulas of. It found `batch` taking an application's outputs spread over
   leaves, whose blocks then did not decode.
+- `unpack`: an archive of another format (its first byte telling which: ZIP, 7z, RAR, ALZ, EGG,
+  tar alone or under each compressor, a compressor's stream of a single file) read by
+  aqr-unpack as `aqr -d` reads it, unlocked by its seeds' passphrases where it is encrypted,
+  into a sink checking what it is told (each entry after its directory, each content of a file
+  or a fork told); where it unpacks, unpacked again of every other file's path alone, those
+  files as they were. Its seeds are aqr-unpack's test archives and the codecs' of those
+  formats. It found contents of files left out as they were added told still.
 - `natives`: an archive of recompressed files decoded by aqr-decompress's native modules (a
   module not known fails: no Wasmtime), so each module's decoding of the params and streams an
   archive tells. Its seeds are the codecs' fixtures (`codecs/*/tests/data`, at most 256 KiB)

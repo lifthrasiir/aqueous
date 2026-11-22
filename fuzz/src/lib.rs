@@ -4,6 +4,7 @@
 
 pub mod decode;
 pub mod formula;
+pub mod unpack;
 
 use aqr_archive::{Decoded, Failure, Loaded, Natives, PartIn, PartOut, Runner, Wasm, natives};
 use aqr_formula::{Apply, Error, Module, Result, Shared};

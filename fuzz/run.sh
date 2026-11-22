@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs fuzz target $1 (decode, salvage, envelope, roundtrip, natives,
-# wasm, compress) with its seeds (and the dictionary of
+# Runs fuzz target $1 (decode, salvage, envelope, roundtrip, unpack,
+# natives, wasm, compress) with its seeds (and the dictionary of
 # archives), further arguments to libFuzzer:
 # ./run.sh decode -max_total_time=600 -fork=8 -ignore_crashes=1
 set -eu
@@ -10,6 +10,7 @@ shift
 [ -d corpus/"$t" ] || cargo +nightly run -q --release --bin seeds -- "$t" corpus/"$t"
 case $t in
     compress) opts="-max_len=262144 -timeout=120" ;;
+    unpack) opts="-max_len=262145 -timeout=60" ;;
     roundtrip) opts="-max_len=16384 -timeout=10" ;;
     envelope) opts="-dict=aqr.dict -max_len=327680 -timeout=10" ;;
     wasm) opts="-dict=aqr.dict -max_len=524288 -timeout=60" ;;

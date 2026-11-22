@@ -222,6 +222,30 @@ fn envelopes() -> Vec<(String, Vec<u8>)> {
     seeds
 }
 
+/// The seeds of `unpack`: aqr-unpack's test archives and the codecs' archives of the formats
+/// it reads (of at most `FIXTURE_MAX` bytes), each after the byte of its format (by its name).
+fn unpackable() -> Vec<(String, Vec<u8>)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let dirs =
+        ["crates/aqr-unpack", "codecs/aqr-zip", "codecs/aqr-7z", "codecs/aqr-rar", "codecs/aqr-alz", "codecs/aqr-egg"];
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(files) = std::fs::read_dir(root.join(dir).join("tests/data")) else { continue };
+        let mut files: Vec<_> = files.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+        files.sort();
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().to_string();
+            let Some((format, _)) = aqr_unpack::by_name(name.as_bytes()) else { continue };
+            let d = std::fs::read(&f).unwrap();
+            if d.len() <= FIXTURE_MAX {
+                let label = format!("{}-{name}", Path::new(dir).file_name().unwrap().to_string_lossy());
+                out.push((label, [&[aqr_fuzz::unpack::format_byte(format)][..], &d].concat()));
+            }
+        }
+    }
+    out
+}
+
 /// The seeds of target `t`.
 fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
     match t {
@@ -249,6 +273,7 @@ fn seeds(t: &str) -> Vec<(String, Vec<u8>)> {
             seeds
         }
         "envelope" => envelopes(),
+        "unpack" => unpackable(),
         // (bytes that `src/formula.rs` makes formulas of)
         "roundtrip" => (0..16).map(|i| (format!("noise-{i}"), noise(64 << (i % 8), i as u32))).collect(),
         "compress" => fixtures(),
@@ -289,7 +314,11 @@ fn main() {
     let seeds = seeds(t);
     std::fs::create_dir_all(dir).unwrap();
     for (name, c) in &seeds {
-        let name = if name.ends_with(".aqr") || t == "compress" { name.clone() } else { format!("{name}.aqr") };
+        let name = if name.ends_with(".aqr") || t == "compress" || t == "unpack" {
+            name.clone()
+        } else {
+            format!("{name}.aqr")
+        };
         std::fs::write(Path::new(dir).join(name), c).unwrap();
     }
     eprintln!("{} seeds of {t}", seeds.len());
