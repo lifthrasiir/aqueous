@@ -360,3 +360,59 @@ fn volume_label() {
     assert!(listed.starts_with("Label: Backup of 2026-11-23\n") && listed.contains("b.txt"), "{listed}");
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// A ZIP archive of one file `a.txt` (stored, of `data`), its entry comment `note` and its
+/// archive comment `comment`.
+fn zip_commented(data: &[u8], note: &[u8], comment: &[u8]) -> Vec<u8> {
+    let crc = {
+        let mut c = !0u32;
+        for &b in data {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { (c >> 1) ^ 0xedb8_8320 } else { c >> 1 };
+            }
+        }
+        !c
+    };
+    let common = |v: &mut Vec<u8>| {
+        v.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0]);
+        v.extend_from_slice(&crc.to_le_bytes());
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(&[5, 0, 0, 0]);
+    };
+    let mut out = b"PK\x03\x04".to_vec();
+    common(&mut out);
+    out.extend_from_slice(b"a.txt");
+    out.extend_from_slice(data);
+    let start = out.len() as u32;
+    let mut cd = b"PK\x01\x02\x14\x03".to_vec();
+    common(&mut cd);
+    cd.extend_from_slice(&(note.len() as u16).to_le_bytes());
+    cd.extend_from_slice(&[0; 12]);
+    cd.extend_from_slice(b"a.txt");
+    cd.extend_from_slice(note);
+    out.extend_from_slice(&cd);
+    out.extend_from_slice(b"PK\x05\x06\0\0\0\0\x01\0\x01\0");
+    out.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+    out.extend_from_slice(comment);
+    out
+}
+
+/// A ZIP archive's comments converted: its archive comment as `archive-comment` (told by `-t`),
+/// its entry's as the entry's `comment` (in `-t --json`).
+#[test]
+fn zip_comments() {
+    let d = scratch("comments");
+    fs::write(d.join("c.zip"), zip_commented(b"hello", b"entry note", b"archive note")).unwrap();
+    ok(&d, &["-q", "--convert", "c.zip"]);
+    let o = aqr(&d, &["-t", "c.aqr"]);
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("Comment: archive note\n"), "{}", stderr(&o));
+    let o = aqr(&d, &["-t", "--json", "c.aqr"]);
+    let json = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(json.contains(r#""comment":"entry note""#) && json.contains(r#""comment":"archive note""#), "{json}");
+    assert_eq!(extracted(&d, "c.aqr", None), [("a.txt".to_string(), b"hello".to_vec())]);
+    fs::remove_dir_all(&d).unwrap();
+}

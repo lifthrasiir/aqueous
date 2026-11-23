@@ -2,7 +2,9 @@
 //! archive): the entries' names (UTF-8 where flagged or given by Info-ZIP's Unicode path field,
 //! else of no declared encoding, decided for the archive: [`Undeclared`]), kinds (directories, files, Unix's
 //! symbolic links), times (NTFS's field, else Info-ZIP's extended timestamp, else the MS-DOS
-//! time as local time), Unix modes and owners, and Windows' attributes; the contents decoded
+//! time as local time), Unix modes and owners, Windows' attributes, and comments (an entry's of
+//! Info-ZIP's Unicode comment field, UTF-8 where flagged, else decoded as the names are; the
+//! archive's of its end record, as [`Done::archive`]); the contents decoded
 //! by entry on the pool's threads (stored, DEFLATE, bzip2, LZMA, Zstandard, xz), their CRC-32s
 //! checked. Encrypted entries (the traditional encryption and WinZip's AES, [`aqr_foreign::crypt`])
 //! are decrypted by the passphrase given ([`Listing::unlock`]), else left out (told), as are
@@ -79,6 +81,8 @@ pub struct Listing<'d> {
     sealed: Vec<(Vec<Vec<u8>>, Extra, Unit)>,
     /// How the names of no declared encoding are taken.
     pub undeclared: Undeclared,
+    /// The archive's comment (of the end of central directory record), where it has one.
+    comment: Option<Vec<u8>>,
 }
 
 /// The blocks of extra field `x`: by id, the data.
@@ -159,6 +163,44 @@ fn owner(x: &mut Extra, central: &[u8], local: &[u8]) {
     }
 }
 
+/// The comment of a central header, `raw` (not empty): of Info-ZIP's Unicode comment field where
+/// it is of this comment, else UTF-8 where flagged, else of no declared encoding (spec, "Comments
+/// from ZIP"; Xceed's field of UTF-16 not read).
+fn entry_comment(raw: &[u8], flags: u16, central: &[u8]) -> Named {
+    for (id, f) in fields(central) {
+        if id == zipf::UNICODE_COMMENT
+            && f.len() >= 5
+            && f[0] == 1
+            && u32_at(f, 1) == crc32::hash(raw)
+            && let Named::Text(t) = Named::utf8(f[5..].to_vec())
+        {
+            return Named::Text(t);
+        }
+    }
+    match flags & zipf::UTF8 != 0 {
+        true => Named::utf8(raw.to_vec()),
+        false => Named::Bytes(raw.to_vec()),
+    }
+}
+
+/// The comment of the end of central directory record of `d`, where it is there and not empty:
+/// of the last record whose comment ends the archive, else of the last whose comment is within it.
+fn end_comment(d: &[u8]) -> Option<&[u8]> {
+    let low = d.len().saturating_sub(0xffff + 22);
+    let mut found = None;
+    let mut p = d.len();
+    while let Some(q) = d[low..p].windows(4).rposition(|w| w == z::END).map(|q| low + q) {
+        p = q;
+        let Some(n) = d.get(q + 20..q + 22).map(|n| u16::from_le_bytes([n[0], n[1]]) as usize) else { continue };
+        match q + 22 + n {
+            e if e == d.len() => return Some(&d[q + 22..e]).filter(|c| !c.is_empty()),
+            e if e < d.len() && found.is_none() => found = Some(&d[q + 22..e]),
+            _ => {}
+        }
+    }
+    found.filter(|c| !c.is_empty())
+}
+
 /// The path of a central header: UTF-8 where flagged, else that of Info-ZIP's Unicode path
 /// field where it is of this path, else of no declared encoding (spec, "Entry names from ZIP").
 fn entry_name(raw: &[u8], flags: u16, central: &[u8]) -> Named {
@@ -204,6 +246,7 @@ impl<'d> Listing<'d> {
             pass: None,
             sealed: Vec::new(),
             undeclared,
+            comment: end_comment(d).map(<[u8]>::to_vec),
         };
         for (c, name) in &headers {
             l.entry(c, name, base)?;
@@ -244,6 +287,10 @@ impl<'d> Listing<'d> {
         let mut x = Extra { mtime: time::from_dos(u16_at(f, 10), u16_at(f, 8)), ..Extra::default() };
         times(&mut x, cx, lx);
         owner(&mut x, cx, lx);
+        let comment = &d[c.comment.clone()];
+        if !comment.is_empty() {
+            x.comment = Some(self.text(&entry_comment(comment, flags, cx)).into());
+        }
         if mode != 0 {
             x.mode = Some(mode & 0o7777);
         }
@@ -318,6 +365,21 @@ impl<'d> Listing<'d> {
         };
         self.put(&names, node, x);
         Ok(())
+    }
+
+    /// Text `t` (a comment) decoded where it is of no declared encoding, as the names are
+    /// (else kept as bytes).
+    fn text(&self, t: &Named) -> Vec<u8> {
+        match t {
+            Named::Text(t) => t.clone(),
+            Named::Bytes(b) => self.undeclared.target(b, true),
+        }
+    }
+
+    /// What it tells of itself: its comment, decoded as the names are.
+    fn archive(&self) -> aqr_archive::ArchiveExtra {
+        let comment = self.comment.as_ref().map(|c| self.text(&Named::Bytes(c.clone())).into());
+        aqr_archive::ArchiveExtra { comment, ..Default::default() }
     }
 
     /// A file or link of `names` added ([`Builder::add_once`]), what it tells told.
@@ -430,7 +492,7 @@ impl<'d> Listing<'d> {
             r
         });
         made.into_iter().collect::<Result<(), String>>()?;
-        Ok(Done { tree, skipped: skipped + left.into_inner() as usize, archive: Default::default() })
+        Ok(Done { tree, skipped: skipped + left.into_inner() as usize, archive: self.archive() })
     }
 }
 
@@ -549,6 +611,86 @@ mod tests {
         out.extend_from_slice(&start.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out
+    }
+
+    /// An entry of [`zip_commented`]: its name, data (stored), comment and central extra fields.
+    type Commented<'a> = (&'a [u8], &'a [u8], &'a [u8], &'a [u8]);
+
+    /// A ZIP archive of `entries`, of `flags`, its archive comment `comment`.
+    fn zip_commented(entries: &[Commented], flags: u16, comment: &[u8]) -> Vec<u8> {
+        let (mut out, mut cd) = (Vec::new(), Vec::new());
+        for (name, data, note, extra) in entries {
+            let at = out.len() as u32;
+            let common = |v: &mut Vec<u8>, extra: usize| {
+                v.extend_from_slice(&20u16.to_le_bytes());
+                v.extend_from_slice(&flags.to_le_bytes());
+                v.extend_from_slice(&[0, 0, 0, 0, 0x21, 0]);
+                v.extend_from_slice(&crc32::hash(data).to_le_bytes());
+                v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                v.extend_from_slice(&(extra as u16).to_le_bytes());
+            };
+            out.extend_from_slice(&z::LOCAL);
+            common(&mut out, 0);
+            out.extend_from_slice(name);
+            out.extend_from_slice(data);
+            cd.extend_from_slice(&z::CENTRAL);
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            common(&mut cd, extra.len());
+            cd.extend_from_slice(&(note.len() as u16).to_le_bytes());
+            cd.extend_from_slice(&[0; 4]);
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&at.to_le_bytes());
+            cd.extend_from_slice(name);
+            cd.extend_from_slice(extra);
+            cd.extend_from_slice(note);
+        }
+        let (start, n) = (out.len() as u32, entries.len() as u16);
+        out.extend_from_slice(&cd);
+        out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        out.extend_from_slice(&start.to_le_bytes());
+        out.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        out.extend_from_slice(comment);
+        out
+    }
+
+    /// Comments (spec, "Comments from ZIP"): an entry's of Info-ZIP's Unicode comment field where
+    /// its CRC-32 is of the comment, else of the names' encoding guessed; the archive's of the
+    /// names' encoding, given as the archive's comment as it is unpacked.
+    #[test]
+    fn comments() {
+        let euc = |s: &str| encoding_rs::EUC_KR.encode(s).0.into_owned();
+        let (name, note) = (euc("사진/여름 휴가.jpg"), euc("메모"));
+        let field = |crc: u32, text: &str| {
+            let mut f = 0x6375u16.to_le_bytes().to_vec();
+            f.extend_from_slice(&(5 + text.len() as u16).to_le_bytes());
+            f.push(1);
+            f.extend_from_slice(&crc.to_le_bytes());
+            f.extend_from_slice(text.as_bytes());
+            f
+        };
+        let (good, bad) = (field(crc32::hash(&note), "고친 메모"), field(crc32::hash(b"other"), "다른 것"));
+        let entries: [Commented; 3] =
+            [(&name, b"x", &note, &good), (b"b.txt", b"y", &note, &bad), (b"c.txt", b"z", b"", b"")];
+        let zip = zip_commented(&entries, 0, &euc("보관 주석"));
+        let l = Listing::read(&zip, &Choice::Auto).unwrap();
+        let t = l.tree();
+        let comment = |n: &[u8]| t.entries.iter().find(|e| e.name == n).unwrap().extra.comment.clone();
+        assert_eq!(comment("여름 휴가.jpg".as_bytes()).as_deref(), Some("고친 메모".as_bytes()));
+        assert_eq!(comment(b"b.txt").as_deref(), Some("메모".as_bytes()));
+        assert_eq!(comment(b"c.txt"), None);
+        let kept = crate::testing::Kept::default();
+        let done = l.unpack(1, &kept, None).unwrap();
+        assert_eq!(done.archive.comment.as_deref(), Some("보관 주석".as_bytes()));
+        // (flagged UTF-8; of no comment, none)
+        let zip = zip_commented(&[(b"a", b"x", "설명".as_bytes(), b"")], 0x800, b"");
+        let l = Listing::read(&zip, &Choice::Auto).unwrap();
+        assert_eq!(l.tree().entries[0].extra.comment.as_deref(), Some("설명".as_bytes()));
+        assert_eq!(l.unpack(1, &kept, None).unwrap().archive.comment, None);
     }
 
     /// The paths of `t`'s entries, their names decoded (a name kept as bytes in `<>`), a

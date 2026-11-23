@@ -30,8 +30,8 @@
 //! converted) and comment are told first, a line each.
 //!
 //! `--json`: each archive's listing as a line of JSON instead ([`json`]): its entries with all
-//! their metadata (what `-v` tells too, but `-q`), the counts and totals, and its label and
-//! comment.
+//! their metadata (what `-v` tells too, but `-q`; and an entry's comment), the counts and
+//! totals, and its label and comment.
 //!
 //! A time is told as it is recorded ([`aqr_archive::Zone`]): `Z` of no time zone told, its offset where
 //! one is, none of a local time in an unknown time zone; the digits of a quantization interval
@@ -477,6 +477,9 @@ fn json(
         num("gid", x.gid);
         num("win_attrs", x.win_attrs.map(u64::from));
         num("mac_flags", x.mac_flags.map(u64::from));
+        if let Some(c) = &x.comment {
+            e.insert("comment".into(), text(c));
+        }
         if let Some(u) = &x.uname {
             e.insert("user".into(), text(u));
         }
