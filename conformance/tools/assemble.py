@@ -477,7 +477,9 @@ class Assembler:
             content["bytes"] = self.field(
                 w, v["compressed_data"], lambda w, x: self.compressed(w, x, self.dictionary, True)
             )
-        elif kind in ("module", "resource"):
+        elif kind == "module":
+            content["bytes"] = self.field(w, v["compressed_data"], lambda w, x: self.compressed(w, x, self.module, True))
+        elif kind == "resource":
             content["bytes"] = self.field(w, v["compressed_data"], lambda w, x: self.compressed(w, x, self.plain, True))
         elif kind == "import":
             sizes = []
@@ -596,6 +598,30 @@ class Assembler:
         return bytes(out) if known else None
 
     # --- Dictionary, import, formula and mirror blocks
+
+    def module(self, w, v):
+        """A module block's decoded data: the bytes of the stored form, or the split form."""
+        if not isinstance(v, Map):
+            return self.plain(w, v)
+        payload = self.unlabel(v["payload"])
+        streams = [self.bytes_of(x, "payload") for x in payload] if isinstance(payload, list) else None
+        if streams is not None and len(streams) != 14:
+            raise CaseError(f"payload: {len(streams)} streams, not 14")
+        self.put_num(w, v, "count", lambda n: ule(n, 1), 13)
+
+        def go(w, lst):
+            if is_infer(lst):
+                if streams is None:
+                    raise CaseError("lengths: give them for a payload of bytes")
+                lst = [len(x) for x in streams[:13]]
+            if is_raw(lst):
+                w.put(raw_bytes(lst))
+                return
+            for x in lst:
+                self.put_num(w, x, "lengths", leb128)
+
+        self.field(w, v.get("lengths", UNDEFINED), go)
+        self.field(w, v["payload"], lambda w, x: w.put(b"".join(streams) if streams is not None else self.bytes_of(x, "payload")))
 
     def dictionary(self, w, v):
         if is_raw(v):

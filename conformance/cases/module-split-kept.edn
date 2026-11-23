@@ -1,0 +1,51 @@
+# A module of the split form whose sections are all kept as they are.
+{
+  "title": "A split module of no section split",
+  "spec": ["#split-modules", "#split-sections", "#split-expressions", "#module-block"],
+  "level": 2,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # module, u16: 0110 00 01
+      {"type": 0x62, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"payload": [
+            h'0061736d01000000012202770303071e0a017b0010005e',   # skeleton,
+            h'0560057f7f7f7f7f017f60027f7f0060027f7f017f60047f7f7f7f0060037e7e7e0007036171720a6171725f6d656d6f7279020001036171720a6171725f696e70757430020400036171720b6171725f6f75747075743002040003617172096171725f737061776e0000036171720a6171725f726573756c74000103617172086171725f6a6f696e000203617172086171725f74616b650003020401020f6171725f6170706c795f77686f6c650004086171725f7461736b0005026301017f41800842004105fc0a0001410041800836020041044105360200410841800836020041004101410041004102100021032003410010021a20034100418010410510032003410110021a20034101418510410510034200418010410afc0a02000b150041800841c10020016a3a0000418008410510010b',   # sections,
+            h'0e6171725f7461736b5f736c6f747302046e616d65011c040005737061776e0106726573756c7402046a6f696e030474616b6502270204040006706172616d730105696e70757402066f7574707574030168050200036172670101690610030004776f726b0102696e02036f7574',   # custom,
+            h'',   # locals,
+            h'',   # op,
+            h'',   # local,
+            h'',   # label,
+            h'',   # brtable,
+            h'',   # blocktype,
+            h'',   # offset,
+            h'',   # i64,
+            h'',   # bytes,
+            h'',   # misc,
+            h'',   # data
+          ]}},
+      }}},
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "module_indices": [0],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'hello'},
+            {"opcode": "Apply", "apply_module": 0, "apply_resources": [], "apply_params": '', "apply_memory_limit": 196608, "apply_task_limits": [65536], "apply_num_inputs": 1, "apply_output_sizes": [10]},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [
+          {"entry_name": "a", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'AelloBello'}}}},
+}

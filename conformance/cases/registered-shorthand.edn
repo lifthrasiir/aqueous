@@ -1,0 +1,22 @@
+# A shorthand module block of a registered module (bcj-delta@1), known to the decompressor and
+# not applied: of level 0.
+{
+  "title": "A shorthand block of a registered module",
+  "spec": ["#registered-blocks", "#modules-registry", "#conformance-levels"],
+  "level": 0,
+  "requires": [h'2d07cd639eadb1f671367f73a37ef64270dc4e1b324604832ea22cb5194bb9c2'],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x60, "data": h'2d07cd639eadb1f671367f73a37ef64270dc4e1b324604832ea22cb5194bb9c2'},
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'x'}}}},
+}

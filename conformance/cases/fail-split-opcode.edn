@@ -1,0 +1,50 @@
+# An opcode not in the table of split expressions (06).
+{
+  "title": "An opcode not split",
+  "spec": ["#split-modules", "#split-sections", "#split-expressions", "#module-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # module, u16: 0110 00 01
+      {"type": 0x62, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"payload": [
+            h'0061736d01000000012202770303071e0a000200000010005e',   # skeleton,
+            h'0560057f7f7f7f7f017f60027f7f0060027f7f017f60047f7f7f7f0060037e7e7e0007036171720a6171725f6d656d6f7279020001036171720a6171725f696e70757430020400036171720b6171725f6f75747075743002040003617172096171725f737061776e0000036171720a6171725f726573756c74000103617172086171725f6a6f696e000203617172086171725f74616b650003020401020f6171725f6170706c795f77686f6c650004086171725f7461736b0005',   # sections,
+            h'0e6171725f7461736b5f736c6f747302046e616d65011c040005737061776e0106726573756c7402046a6f696e030474616b6502270204040006706172616d730105696e70757402066f7574707574030168050200036172670101690610030004776f726b0102696e02036f7574',   # custom,
+            h'01017f00',   # locals,
+            h'068008424105fc0a41004180083602004104410536020041084180083602004100410141004100410210002120410010021a2041004180104105100320410110021a2041014185104105100342418010410afc0a0b41800841c100206a3a0000418008410510010b',   # op,
+            h'060000000002',   # local,
+            h'',   # label,
+            h'',   # brtable,
+            h'',   # blocktype,
+            h'',   # offset,
+            h'0000',   # i64,
+            h'',   # bytes,
+            h'00010200',   # misc,
+            h'',   # data
+          ]}},
+      }}},
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "module_indices": [0],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'hello'},
+            {"opcode": "Apply", "apply_module": 0, "apply_resources": [], "apply_params": '', "apply_memory_limit": 196608, "apply_task_limits": [65536], "apply_num_inputs": 1, "apply_output_sizes": [10]},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [
+          {"entry_name": "a", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

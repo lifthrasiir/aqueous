@@ -8,6 +8,7 @@ archive written field by field in EDN, and the archive value or failure they int
 - `cases/data/` — contents too long to write in a case (`80003(path)`), and the modules of the
   cases: each `NAME.wat` with its `NAME.wasm`, made by `cargo run -r -p aqr-decompress --example
   aqr-decompress-wat2wasm -- cases/data/*.wat` (committed, so that the tools need no Rust).
+- `tools/wasmsplit.py` — the split form of a module: a splitter, and the join as the spec has it.
 - `tools/age.py` — what an encrypted archive takes of age v1, ChaCha20-Poly1305 in Python.
 - `tools/assemble.py CASE.edn [-o OUT]` — makes the bytes of a case (Python 3, no packages).
   Encrypted and unencrypted archives of every block but recovery blocks (given as their bytes); module blocks of
@@ -23,5 +24,5 @@ The cases are named by what they test, `fail-*` and `unsupported-*` those of a f
 that `aqr` doesn't pass is not wrong for that: `check.py` lists where `aqr` differs from the
 specification as well as where a case is wrong.
 
-Left: split modules, registered entries known, partial access,
+Left: registered modules applied, registered dictionaries, partial access,
 and the suites of extraction and of compressors.
