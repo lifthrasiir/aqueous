@@ -784,7 +784,7 @@ impl<'d> Listing<'d> {
             r
         });
         made.into_iter().collect::<Result<(), String>>()?;
-        Ok(Done { tree, skipped: skipped + notes.into_inner().unwrap() })
+        Ok(Done { tree, skipped: skipped + notes.into_inner().unwrap(), archive: Default::default() })
     }
 }
 

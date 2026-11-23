@@ -613,6 +613,8 @@ fn convert_foreign(a: &Args, input: &Path, map: &[u8], f: aqr_unpack::Format, su
         let n = done.skipped;
         return Err(err(&format!("{n} entr{} left out (told above): not converted", if n == 1 { "y" } else { "ies" })));
     }
+    // (what it tells of itself: a tar archive's volume label)
+    opt.archive = done.archive;
     let tree = done.tree;
     if tree.entries.is_empty() {
         return Err(err(&"nothing in it to archive"));

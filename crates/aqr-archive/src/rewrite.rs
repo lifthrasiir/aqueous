@@ -18,7 +18,7 @@
 //! Each segment's metadata block is made again: the entries whose contents are of it, at their
 //! paths in the tree, with the directories on the way (of no extra, which keeps theirs); the
 //! entries of no content (directories, links, ...) in the last. No tombstone is left. The
-//! archive-wide members (an `archive-comment`, extension keys) of the segments merged go in the
+//! archive-wide members (an `archive-comment`, an `archive-label`, extension keys) of the segments merged go in the
 //! last of them. Extension keys are carried as they are ([`Extra::extensions`]); members of
 //! integer keys of no meaning known would be lost, so an archive having any is not written
 //! again.
@@ -590,7 +590,7 @@ fn unknown_metadata(c: &[u8], journal: bool) -> Result<()> {
             return Err(Error::new("the journal's points would be lost in writing it again"));
         }
         let kept = |m: &super::tree::Member| {
-            m.extension || matches!(named(m), Some("segment-status" | "journal" | "archive-comment"))
+            m.extension || matches!(named(m), Some("segment-status" | "journal" | "archive-comment" | "archive-label"))
         };
         if let Some(m) = s.archive_extra.iter().find(|m| !kept(m)) {
             return Err(Error::new(format!("archive-wide metadata not kept in writing it again: {}", m.key_text)));
@@ -986,15 +986,23 @@ mod tests {
         assert_eq!((&e.extra.extensions, e.extra.mode), (&key, Some(0o601)));
     }
 
-    /// Archive-wide members (`archive-comment`, extension keys) of the segments merged into one
+    /// Archive-wide members (`archive-comment`, `archive-label`, extension keys) of the segments merged into one
     /// segment, each the latest of its key; entries' comments and ZIP extra fields kept.
     #[test]
     fn comments_and_archive_wide_kept() {
         use super::super::tree::ArchiveExtra;
         let ext = |k: &str, v: u8| -> super::super::tree::Extension { (k.as_bytes().into(), [v][..].into()) };
         let archive = [
-            ArchiveExtra { comment: Some(b"one"[..].into()), extensions: vec![ext("org.example.k", 1), ext("j", 0)] },
-            ArchiveExtra { comment: None, extensions: vec![ext("org.example.k", 2)] },
+            ArchiveExtra {
+                comment: Some(b"one"[..].into()),
+                extensions: vec![ext("org.example.k", 1), ext("j", 0)],
+                ..ArchiveExtra::default()
+            },
+            ArchiveExtra {
+                label: Some(b"vol"[..].into()),
+                extensions: vec![ext("org.example.k", 2)],
+                ..ArchiveExtra::default()
+            },
             ArchiveExtra::default(),
         ];
         let mut f = Formula::default();
@@ -1021,8 +1029,11 @@ mod tests {
                 _ => c.extend_from_slice(&w.close_as(&enc, &t, &contents, Status::None).unwrap()),
             }
         }
-        let merged =
-            ArchiveExtra { comment: Some(b"one"[..].into()), extensions: vec![ext("org.example.k", 2), ext("j", 0)] };
+        let merged = ArchiveExtra {
+            comment: Some(b"one"[..].into()),
+            label: Some(b"vol"[..].into()),
+            extensions: vec![ext("org.example.k", 2), ext("j", 0)],
+        };
         assert_eq!(opened(&c, false, false, None).unwrap().4, merged);
         // (the first file taken away: the segments of the others written again, the second
         // telling what the three told)
@@ -1042,7 +1053,7 @@ mod tests {
     }
 
     /// An archive of three segments (a file each, the last of a tombstone of the first's too),
-    /// the second telling a journal point and an archive comment.
+    /// the second telling a journal point, an archive comment and a label.
     fn segmented() -> Vec<u8> {
         segmented_of(20_000)
     }
@@ -1074,7 +1085,12 @@ mod tests {
             let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: size as u64 }];
             if k == 1 {
                 w.set_journal(vec![(1_700_000_000_000, "one".into())]).unwrap();
-                w.set_archive_extra(ArchiveExtra { comment: Some(b"hi"[..].into()), extensions: Vec::new() }).unwrap();
+                let a = ArchiveExtra {
+                    comment: Some(b"hi"[..].into()),
+                    label: Some(b"vol"[..].into()),
+                    ..ArchiveExtra::default()
+                };
+                w.set_archive_extra(a).unwrap();
             }
             match k {
                 2 => c.extend_from_slice(&w.finish_as(&enc, &t, &contents, Status::Complete).unwrap().0),

@@ -96,6 +96,10 @@ pub struct Options {
     /// the writing names: a time in milliseconds since the epoch (UTC) and a label. None by
     /// default; not told of a writing stopped.
     pub journal: Option<(u64, String)>,
+    /// Of an archive of several files: the archive-wide members (`archive-comment`,
+    /// `archive-label`, extension keys) its last segment tells (not of a writing stopped). None
+    /// by default.
+    pub archive: aqr_archive::ArchiveExtra,
     /// Of an archive of several files ([`compress_tree`]): what may be lost (docs/lossy-design.md,
     /// [`lossy`]): the files that a rewriter of it takes archived as files read the same, but
     /// for what their encoders chose ([`lossy::Class`]), and marked so ([`lossy::Mark`]). None,
@@ -227,6 +231,7 @@ impl Default for Options {
             spill: None,
             application_bound: None,
             journal: None,
+            archive: aqr_archive::ArchiveExtra::default(),
             lossy: None,
         }
     }

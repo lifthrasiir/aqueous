@@ -6,8 +6,9 @@
 구현(2026-11-23): 5절 1.1–1.5(용례 2, `crates/aqr/src/convert.rs`, `rewrite_layered`와
 `History::Whole`), 1.7(`rewrite_payload`: 온전한 암호화 입력은 데이터 블록을 4 MiB씩 복사하며
 복호화하고 지나간 청크를 놓는다. 손상된 입력만 전부 메모리에 푼다), 2의 A 중 다리(전부 푼 다음 압축: 내용은 spill에, 입력이나 출력이 암호화되면
-메모리에만; 목록이 앞에 있는 형식과 tar 모두 이 길이다)와 빠진 항목이 있으면 실패하기. 주석,
-볼륨 레이블, 진행 표시, 풀기와 압축을 겹치기는 아직이다. `--convert` 바깥의 `--no-passphrase`, `--no-archival`은 기본값을 뜻하므로
+메모리에만; 목록이 앞에 있는 형식과 tar 모두 이 길이다)와 빠진 항목이 있으면 실패하기, 볼륨
+레이블(spec "Labels from tar", `-t`의 `Label:`과 JSON의 `label`, `-I`). 주석, 진행 표시, 풀기와
+압축을 겹치기는 아직이다. `--convert` 바깥의 `--no-passphrase`, `--no-archival`은 기본값을 뜻하므로
 아무 일도 하지 않는다(`-P`, `-A`와 함께면 오류). 암호화된 아카이브의 `--history`도 읽는다
 (`--at`, `--diff`는 아직).
 

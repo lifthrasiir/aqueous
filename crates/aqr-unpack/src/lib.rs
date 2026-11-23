@@ -114,10 +114,12 @@ fn tell(notes: &[build::Note], s: Option<&Select>, sink: &dyn Sink) -> usize {
     told.map(|n| sink.note(&n.1)).count()
 }
 
-/// An archive extracted: its tree (whole), and the entries left out (told to [`Sink::note`]).
+/// An archive extracted: its tree (whole), the entries left out (told to [`Sink::note`]), and
+/// what it tells of itself as a whole (a tar archive's volume label).
 pub struct Done {
     pub tree: Tree,
     pub skipped: usize,
+    pub archive: aqr_archive::ArchiveExtra,
 }
 
 /// An archive opened ([`Opened::open`]): its listing read, where it has one.

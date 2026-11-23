@@ -57,9 +57,10 @@ pub(super) struct Index<'c> {
     upto: Option<usize>,
 }
 
-/// What [`open`] makes of an archive: its index, its tree and contents, its status and its
-/// journal points.
-pub(super) type Indexed<'c> = (Index<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>);
+/// What [`open`] makes of an archive: its index, its tree and contents, its status, its journal
+/// points and the archive-wide members of the metadata blocks read.
+pub(super) type Indexed<'c> =
+    (Index<'c>, Option<(Tree, Vec<ContentRef>)>, Option<Status>, Vec<JournalPoint>, tree::ArchiveExtra);
 
 /// The block of `p` at `at`, ending by `end`, by the generic structure: its type, its data and
 /// where it ends (after its padding).
@@ -286,6 +287,7 @@ pub(super) fn open<'c>(
     let mut prev = metas[0].0 - metas[0].2.prev as usize;
     let mut status = None;
     let mut journal = Vec::new();
+    let mut archive = tree::ArchiveExtra::default();
     for (k, (at, _, m, kept)) in metas.into_iter().enumerate() {
         if k == 0 && whole && m.entries.is_empty() {
             return invalid("the first segment of no entries");
@@ -296,6 +298,7 @@ pub(super) fn open<'c>(
             time: *time,
             label: label.clone(),
         }));
+        archive.merge(m.archive.clone());
         let mut leaf_of = |b: usize, dictionary: Option<u64>| -> Decoded<Option<(usize, Option<u64>)>> {
             let Ok(l) = leaf_at.binary_search(&b) else { return Ok(None) };
             if let Some(d) = dictionary {
@@ -326,7 +329,7 @@ pub(super) fn open<'c>(
         parsed: OnceLock::new(),
         upto,
     };
-    Ok((index, tree, status, journal))
+    Ok((index, tree, status, journal, archive))
 }
 
 /// The module, resource and dictionary blocks read as the leaves taken need them, by index

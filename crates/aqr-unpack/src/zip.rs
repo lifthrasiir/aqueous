@@ -430,7 +430,7 @@ impl<'d> Listing<'d> {
             r
         });
         made.into_iter().collect::<Result<(), String>>()?;
-        Ok(Done { tree, skipped: skipped + left.into_inner() as usize })
+        Ok(Done { tree, skipped: skipped + left.into_inner() as usize, archive: Default::default() })
     }
 }
 

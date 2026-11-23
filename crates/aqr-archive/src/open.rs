@@ -88,6 +88,8 @@ pub struct Archive<'c, 'n> {
     status: Option<Status>,
     /// The journal points of its segments, in the order of the segments ([`Archive::journal`]).
     journal: Vec<JournalPoint>,
+    /// Its archive-wide members ([`Archive::archive_extra`]).
+    archive: tree::ArchiveExtra,
     /// The budget the leaves evaluated take of by their weights ([`Archive::set_budget`]).
     budget: Option<&'n Budget>,
     /// Told how far the evaluation is ([`Archive::on_progress`]).
@@ -253,7 +255,7 @@ fn open_indexed_with<'c, 'n>(
     if footer.3 == 0 {
         return open_as(p.whole(threads)?, runner, p.sealed());
     }
-    let (index, tree, status, journal) = index::open(p, threads, footer, paths, upto)?;
+    let (index, tree, status, journal, archive) = index::open(p, threads, footer, paths, upto)?;
     let loaded = (0..index.modules_len()).map(|_| OnceLock::new()).collect();
     let kept = Archived::Indexed(Box::new(index));
     Ok(Archive {
@@ -263,6 +265,7 @@ fn open_indexed_with<'c, 'n>(
         tree,
         status,
         journal,
+        archive,
         budget: None,
         tell: None,
         items: Vec::new(),
@@ -324,7 +327,7 @@ fn open_with<'c, 'n>(
     salvaging: bool,
     upto: Option<usize>,
 ) -> Decoded<Archive<'c, 'n>> {
-    let (blocks, tree, status, journal, _) = opened(c, sealed, salvaging, upto)?;
+    let (blocks, tree, status, journal, archive) = opened(c, sealed, salvaging, upto)?;
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
     let kept = Archived::Parsed(Box::new(blocks));
     Ok(Archive {
@@ -334,6 +337,7 @@ fn open_with<'c, 'n>(
         tree,
         status,
         journal,
+        archive,
         budget: None,
         tell: None,
         items: Vec::new(),
@@ -493,6 +497,13 @@ impl<'c, 'n> Archive<'c, 'n> {
     /// those of the segments read.
     pub fn journal(&self) -> &[JournalPoint] {
         &self.journal
+    }
+
+    /// Its archive-wide members (`archive-comment`, `archive-label`, extension keys), its
+    /// segments' merged: of the metadata blocks read (opened for some paths alone, those read
+    /// back from the last as far as they were needed).
+    pub fn archive_extra(&self) -> &tree::ArchiveExtra {
+        &self.archive
     }
 
     /// Where the metadata block of each segment is, from the archive's header magic, in the

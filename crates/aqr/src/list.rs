@@ -26,8 +26,12 @@
 //!   `chflags` names them), the flags `@+=~`, its modification time, and the formula summarized
 //!   ([`aqr_archive::Listed::formula`]); and the total of the archive's data blocks and the rest.
 //!
+//! But with `-q`, the archive's label (`archive-label`: a volume label, as of a tar archive
+//! converted) and comment are told first, a line each.
+//!
 //! `--json`: each archive's listing as a line of JSON instead ([`json`]): its entries with all
-//! their metadata (what `-v` tells too, but `-q`), and the counts and totals.
+//! their metadata (what `-v` tells too, but `-q`), the counts and totals, and its label and
+//! comment.
 //!
 //! A time is told as it is recorded ([`aqr_archive::Zone`]): `Z` of no time zone told, its offset where
 //! one is, none of a local time in an unknown time zone; the digits of a quantization interval
@@ -251,6 +255,13 @@ fn listed(
             s.push('\n');
         }
         return Ok(s);
+    }
+    // (what the archive tells of itself: its label and comment, a line each)
+    let x = archive.archive_extra();
+    for (what, t) in [("Label", &x.label), ("Comment", &x.comment)] {
+        if let Some(t) = t {
+            s += &format!("{what}: {}\n", crate::term::name(&String::from_utf8_lossy(t)));
+        }
     }
     let files = rows.iter().filter(|r| r.listed.is_some()).count();
     let dirs = rows.iter().filter(|r| r.is_dir).count();
@@ -507,6 +518,12 @@ fn json(
         let data = archive.data_bytes().map_err(|e| err(&crate::exit::seen(e)))?;
         o["data"] = data.into();
         o["overhead"] = (len - data.min(len)).into();
+    }
+    let x = archive.archive_extra();
+    for (what, t) in [("label", &x.label), ("comment", &x.comment)] {
+        if let Some(t) = t {
+            o[what] = text(t);
+        }
     }
     o["archive"] = crate::stdio::shown(input).to_string().into();
     Ok(o.to_string() + "\n")

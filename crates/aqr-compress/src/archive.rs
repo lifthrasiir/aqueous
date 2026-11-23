@@ -576,6 +576,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
     if let Some(point) = &opt.journal {
         wr.w.set_journal(vec![point.clone()]).map_err(bad_tree)?;
     }
+    wr.w.set_archive_extra(opt.archive.clone()).map_err(bad_tree)?;
     if wr.commit.is_some() {
         let enc = aqr_archive::Encoder::with_threads(opt.level, opt.threads).with_modules(opt.modules);
         let meta = wr.w.close_as(&enc, tree, &contents, aqr_archive::Status::Complete).map_err(bad_tree)?;

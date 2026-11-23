@@ -71,7 +71,8 @@ pub fn unpack(
     fed?;
     p.end()?;
     sink.step(Step::Ended(0));
-    Ok(Done { tree: p.b.tree, skipped: p.skipped })
+    let archive = aqr_archive::ArchiveExtra { label: p.label.map(Into::into), ..Default::default() };
+    Ok(Done { tree: p.b.tree, skipped: p.skipped, archive })
 }
 
 /// What the parser waits for.
@@ -115,6 +116,9 @@ struct Parser<'s> {
     total: u64,
     packed: u64,
     told_types: Vec<u8>,
+    /// The volume label (of GNU tar's `--label`: a member of type `V`), the last one where there
+    /// are several.
+    label: Option<Vec<u8>>,
 }
 
 /// A member's header, with what pax headers and GNU long names before it told.
@@ -259,6 +263,7 @@ impl<'s> Parser<'s> {
             total,
             packed,
             told_types: Vec::new(),
+            label: None,
         }
     }
 
@@ -462,6 +467,11 @@ impl Parser<'_> {
                 self.long_link = Some(string(&body).to_vec());
                 return Ok(());
             }
+            // (the archive's volume label, of no path)
+            b'V' => {
+                self.label = Some(h.path.clone());
+                return Ok(());
+            }
             _ => {}
         }
         // (not selected: left out, and nothing told of it)
@@ -489,7 +499,6 @@ impl Parser<'_> {
             b'1' => return self.hard_link(&names, &h),
             b'3' | b'4' => EntryNode::Device { block: h.kind == b'4', major: h.major, minor: h.minor },
             b'6' => EntryNode::Fifo,
-            b'V' => return Ok(()),
             b'M' | b'N' => {
                 self.note(format!("{shown}: a part of a multi-volume archive, not extracted"));
                 return Ok(());
@@ -639,6 +648,38 @@ mod tests {
         assert_eq!(base64(b"aGVsbG8="), Some(b"hello".to_vec()));
         assert_eq!(base64(b"aGVsbG8"), Some(b"hello".to_vec()));
         assert_eq!(unescape(b"user.a%3Db"), b"user.a=b");
+    }
+
+    /// A ustar header of `name`, type `kind`, of a body of `size` bytes.
+    fn ustar(name: &[u8], kind: u8, size: usize) -> Vec<u8> {
+        let mut h = vec![0u8; BLOCK];
+        h[..name.len()].copy_from_slice(name);
+        h[100..108].copy_from_slice(b"0000644\0");
+        h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+        h[136..148].copy_from_slice(b"00000000000\0");
+        h[156] = kind;
+        h[257..265].copy_from_slice(b"ustar\x0000");
+        h[148..156].fill(b' ');
+        let sum: u32 = h.iter().map(|&b| b as u32).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        h
+    }
+
+    /// A volume label (GNU tar's `--label`, a member of type `V`) is the archive's label, not an
+    /// entry nor a note; the last one where there are several.
+    #[test]
+    fn volume_label() {
+        let mut t = ustar(b"first", b'V', 0);
+        t.extend(ustar(b"Backup 2026-11", b'V', 0));
+        t.extend(ustar(b"a.txt", b'0', 3));
+        t.extend(b"abc");
+        t.resize(t.len().next_multiple_of(BLOCK) + 2 * BLOCK, 0);
+        let kept = crate::testing::Kept::default();
+        let done = crate::Opened::open(crate::Format::Tar(None), &t).unwrap().unpack(1, &kept).unwrap();
+        assert_eq!(done.archive.label.as_deref(), Some(&b"Backup 2026-11"[..]));
+        assert_eq!((done.tree.entries.len(), done.skipped), (1, 0));
+        assert_eq!(done.tree.entries[0].name, b"a.txt");
+        assert!(kept.1.lock().unwrap().is_empty(), "{:?}", kept.1.lock().unwrap());
     }
 
     /// A body's padding past 2^64 fails, rather than wrapping to no body (the bytes after its

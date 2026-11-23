@@ -344,7 +344,7 @@ impl<'d> Listing<'d> {
             r
         });
         made.into_iter().collect::<Result<(), String>>()?;
-        Ok(Done { tree, skipped })
+        Ok(Done { tree, skipped, archive: Default::default() })
     }
 }
 

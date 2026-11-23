@@ -510,7 +510,9 @@ fn member(m: &Member, x: &Extra) -> Vec<String> {
 /// A member of the top-level map of the optional metadata.
 fn archive_member(m: &Member) -> String {
     match (m.key.and_then(aqr_archive::archive_key_name), &m.text) {
-        (Some(name), Some(t)) if name == "archive-comment" => format!("{name}: {}", quoted(t)),
+        (Some(name), Some(t)) if name == "archive-comment" || name == "archive-label" => {
+            format!("{name}: {}", quoted(t))
+        }
         (Some(name), _) => format!("{name}: {} (not read)", m.value),
         (None, _) => format!("{} (not known): {}", m.key_text, m.value),
     }

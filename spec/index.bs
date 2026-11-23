@@ -4983,6 +4983,7 @@ aqr-opt-metadata = {
   ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
   aqr-segment-status
   aqr-journal
+  aqr-archive-label
 
     * $$aqr-opt-metadata-member  ; For future extensions
     * aqr-extension-member
@@ -5290,12 +5291,18 @@ Timestamps from ZIP are discussed in [[#timestamps-from-zip]].
 `archive-comment` of `aqr-opt-metadata` and `comment` of `aqr-entry-extra`
 are free-form comments attached to the whole archive and to each entry respectively,
 e.g. an archive comment and a file comment of ZIP or RAR.
-Both are an `aqr-text`, which is a Unicode string,
+`archive-label` of `aqr-opt-metadata` is a label naming the whole archive,
+e.g. the volume label of a tar archive ([[#labels-from-tar]]).
+All of them are an `aqr-text`, which is a Unicode string,
 a WTF-8 [[!WTF-8]] string with lone surrogates, or a byte sequence in an unknown encoding:
 
 <pre class=cddl>
 aqr-archive-comment = (
   ? &(archive-comment: -1) => aqr-text
+)
+
+aqr-archive-label = (
+  ? &(archive-label: -5) => aqr-text
 )
 
 aqr-entry-comment = (
@@ -5316,6 +5323,17 @@ A `bstr` is not subject to these requirements even if it happens to be a valid U
 as its encoding is not known.
 
 Comments from ZIP are discussed in [[#comments-from-zip]].
+
+Like any other top-level member, `archive-comment` and `archive-label` of a later segment
+replace those of earlier segments ([[#segment-interpretation]]).
+A program that writes an archive again from another, merging its segments,
+SHOULD keep them in the segment that ends up with the members of the last segment merged.
+
+<div class=note>
+  A label is not a comment: it is a short name of the archive as a whole,
+  which a decompressor can show with the archive (as tar shows a volume label first),
+  while a comment can be long and is often not meant to be shown at all.
+</div>
 
 <h3 id=segment-status><code>segment-status</code>: Commits and the end of an archive</h3>
 
@@ -6852,6 +6870,17 @@ Otherwise, e.g. due to a clock error or a daylight saving time transition, the D
 If two sources for the same key disagree by more than their quantization intervals,
 a compressor can warn about it, and still uses the preferred source.
 
+<h3 id=labels-from-tar>Labels from tar</h3>
+
+A tar archive [[POSIX-PAX]] made by GNU tar with `--label` starts with a header of type `V` [[GNU-TAR]],
+whose name field holds the volume label and which has no content.
+A compressor converting a tar archive puts the name field of that header,
+up to its first NUL byte, into `archive-label`,
+and does not make an entry of it.
+If there are several such headers, e.g. after archives are concatenated, the last one is used.
+The encoding of the label is not specified by the archive,
+and the compressor can decode it as it decodes entry names of the same archive.
+
 <h3 id=comments-from-zip>Comments from ZIP</h3>
 
 A ZIP archive [[APPNOTE]] stores a comment for each entry in the central header only,
@@ -7150,6 +7179,11 @@ or discarded as only meaningful to the ZIP container.
     "doi": "10.6028/NIST.FIPS.180-4",
     "href": "https://csrc.nist.gov/pubs/fips/180-4/upd1/final"
   },
+  "GNU-TAR": {
+    "title": "GNU tar: Basic Tar Format",
+    "publisher": "Free Software Foundation",
+    "href": "https://www.gnu.org/software/tar/manual/html_node/Standard.html"
+  },
   "INFOZIP-EXTRAFLD": {
     "title": "Info-ZIP Extra Field Descriptions (proginfo/extrafld.txt in UnZip 6.0)",
     "publisher": "Info-ZIP",
@@ -7159,6 +7193,12 @@ or discarded as only meaningful to the ZIP container.
     "title": "PE Format",
     "publisher": "Microsoft",
     "href": "https://learn.microsoft.com/en-us/windows/win32/debug/pe-format"
+  },
+  "POSIX-PAX": {
+    "title": "pax - portable archive interchange",
+    "publisher": "IEEE and The Open Group",
+    "status": "IEEE Std 1003.1-2017",
+    "href": "https://pubs.opengroup.org/onlinepubs/9699919799/utilities/pax.html"
   },
   "RFC2119": {
     "title": "Key words for use in RFCs to Indicate Requirement Levels",

@@ -308,3 +308,55 @@ fn other_formats() {
     assert_eq!(got, want);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// A ustar header of `name`, type `kind`, of a body of `size` bytes.
+fn ustar(name: &[u8], kind: u8, size: usize) -> Vec<u8> {
+    let mut h = vec![0u8; 512];
+    h[..name.len()].copy_from_slice(name);
+    h[100..108].copy_from_slice(b"0000644\0");
+    h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+    h[136..148].copy_from_slice(b"00000000000\0");
+    h[156] = kind;
+    h[257..265].copy_from_slice(b"ustar\x0000");
+    h[148..156].fill(b' ');
+    let sum: u32 = h.iter().map(|&b| b as u32).sum();
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    h
+}
+
+/// A tar archive's volume label (GNU tar's `--label`) converted into `archive-label`: told by
+/// `-t` (and in its JSON) and `-I`, kept as the archive is converted and compacted.
+#[test]
+fn volume_label() {
+    let d = scratch("label");
+    let mut t = ustar(b"Backup of 2026-11-23", b'V', 0);
+    t.extend(ustar(b"a.txt", b'0', 5));
+    t.extend(b"hello");
+    t.resize(t.len().next_multiple_of(512) + 1024, 0);
+    fs::write(d.join("v.tar"), &t).unwrap();
+    ok(&d, &["-q", "--convert", "v.tar"]);
+    let label = |name: &str| {
+        let o = aqr(&d, &["-t", name]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    let listed = label("v.aqr");
+    assert!(listed.starts_with("Label: Backup of 2026-11-23\n"), "{listed}");
+    let json = aqr(&d, &["-t", "--json", "v.aqr"]);
+    assert!(String::from_utf8_lossy(&json.stdout).contains(r#""label":"Backup of 2026-11-23""#));
+    let info = aqr(&d, &["-I", "v.aqr"]);
+    let info = String::from_utf8_lossy(&info.stdout).into_owned() + &stderr(&info);
+    assert!(info.contains(r#"archive-label: "Backup of 2026-11-23""#), "{info}");
+    assert_eq!(extracted(&d, "v.aqr", None), [("a.txt".to_string(), b"hello".to_vec())]);
+    ok(&d, &["-q", "--convert", "-A", "v.aqr"]);
+    assert!(label("v.aqr").starts_with("Label: Backup of 2026-11-23\n"));
+    // (appended to, then its segments merged)
+    ok(&d, &["-q", "--convert", "--no-archival", "-o", "v2.aqr", "v.aqr"]);
+    fs::write(d.join("b.txt"), b"more").unwrap();
+    ok(&d, &["-q", "-a", "v2.aqr", "b.txt"]);
+    assert!(label("v2.aqr").starts_with("Label: Backup of 2026-11-23\n"));
+    ok(&d, &["-q", "--compact", "v2.aqr"]);
+    let listed = label("v2.aqr");
+    assert!(listed.starts_with("Label: Backup of 2026-11-23\n") && listed.contains("b.txt"), "{listed}");
+    fs::remove_dir_all(&d).unwrap();
+}

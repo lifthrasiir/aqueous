@@ -83,6 +83,8 @@ pub type Extension = (Arc<[u8]>, Arc<[u8]>);
 pub struct ArchiveExtra {
     /// `archive-comment` (as `aqr-text`'s bytes).
     pub comment: Option<Arc<[u8]>>,
+    /// `archive-label` (as `aqr-text`'s bytes): a volume label, as GNU tar's `--label`.
+    pub label: Option<Arc<[u8]>>,
     /// Extension keys, carried as they are, in the order read.
     pub extensions: Vec<Extension>,
 }
@@ -97,6 +99,9 @@ impl ArchiveExtra {
     pub fn merge(&mut self, later: ArchiveExtra) {
         if later.comment.is_some() {
             self.comment = later.comment;
+        }
+        if later.label.is_some() {
+            self.label = later.label;
         }
         for (k, v) in later.extensions {
             match self.extensions.iter_mut().find(|e| e.0 == k) {
@@ -811,7 +816,8 @@ fn optional(
     }
     let mut c = Vec::new();
     let members = last.is_some() as u64 + told as u64 + !journal.is_empty() as u64;
-    head(&mut c, 5, members + archive.comment.is_some() as u64 + archive.extensions.len() as u64);
+    let named = archive.comment.is_some() as u64 + archive.label.is_some() as u64;
+    head(&mut c, 5, members + named + archive.extensions.len() as u64);
     if let Some(comment) = &archive.comment {
         int(&mut c, ARCHIVE_COMMENT);
         text(&mut c, comment);
@@ -852,6 +858,10 @@ fn optional(
             head(&mut c, 3, label.len() as u64);
             c.extend_from_slice(label.as_bytes());
         }
+    }
+    if let Some(label) = &archive.label {
+        int(&mut c, ARCHIVE_LABEL);
+        text(&mut c, label);
     }
     extensions(&mut c, &archive.extensions);
     c
@@ -997,6 +1007,7 @@ const ARCHIVE_COMMENT: i128 = -1;
 const ENTRY_EXTRAS: i128 = -2;
 const SEGMENT_STATUS: i128 = -3;
 const JOURNAL: i128 = -4;
+const ARCHIVE_LABEL: i128 = -5;
 const INCOMPLETE_FILES: i128 = 0;
 const INCOMPLETE_BYTES: i128 = 1;
 const CRTIME: i128 = -1;
@@ -1577,6 +1588,7 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
         let told = k == Cbor::Int(SEGMENT_STATUS);
         let points = k == Cbor::Int(JOURNAL);
         let comment = k == Cbor::Int(ARCHIVE_COMMENT);
+        let label = k == Cbor::Int(ARCHIVE_LABEL);
         let extension: Option<Arc<[u8]>> = if let Cbor::Text(n) = &k { Some(n.as_ref().into()) } else { None };
         add_key(&mut keys, k)?;
         if told {
@@ -1592,6 +1604,8 @@ fn extras_given(d: &[u8], n: usize, wanted: Option<&[bool]>) -> Decoded<Extras> 
             let v = item(d, &mut at, 1)?;
             if comment {
                 archive.comment = Some(aqr_text(v)?.as_ref().into());
+            } else if label {
+                archive.label = Some(aqr_text(v)?.as_ref().into());
             } else if let Some(k) = extension {
                 archive.extensions.push((k, d[start..at].into()));
             }
@@ -1965,6 +1979,7 @@ pub fn archive_key_name(k: i128) -> Option<&'static str> {
         ENTRY_EXTRAS => Some("entry-extras"),
         SEGMENT_STATUS => Some("segment-status"),
         JOURNAL => Some("journal"),
+        ARCHIVE_LABEL => Some("archive-label"),
         _ => None,
     }
 }
@@ -2425,13 +2440,17 @@ mod tests {
         assert!(check(&t, 0).is_ok());
         let archive = ArchiveExtra {
             comment: Some("주석".as_bytes().into()),
+            label: Some(b"\xffvol"[..].into()),
             extensions: vec![(b"org.example.k"[..].into(), [0x01][..].into())],
         };
         let c = optional(&t, &[0], &|_| unreachable!(), Status::Complete, &[], &archive);
         let got = extras_given(&c, 1, None).unwrap();
         assert_eq!((&got.0[1], got.3, &got.5), (&x, Status::Complete, &archive));
-        // (the archive's comment a text string, the entry's a byte string)
-        assert_eq!(&c[..3], [0xa4, 0x20, 0x66]);
+        // (the archive's comment a text string, the entry's a byte string; the label, not UTF-8, a
+        // byte string after segment-status)
+        assert_eq!(&c[..3], [0xa5, 0x20, 0x66]);
+        let at = c.windows(2).position(|w| w == [0x24, 0x44]).expect("-5: h'ff766f6c'");
+        assert_eq!(&c[at + 2..at + 6], b"\xffvol");
         for bad in [(65536, &b""[..]), (-65537, b""), (0, &[0; ZIP_EXTRA_MAX + 1][..])] {
             t.entries[0].extra.zip_extras = vec![(bad.0, bad.1.into())];
             assert!(check(&t, 0).is_err());
@@ -2443,14 +2462,21 @@ mod tests {
         assert!(extras(&[0xa1, 0x21, 0x82, 0xf6, 0xa1, 0x38, 0x63, 0xa1, 0x1a, 0, 1, 0, 0, 0x40], 1).is_err());
         assert!(extras(&[0xa1, 0x21, 0x82, 0xf6, 0xa1, 0x38, 0x63, 0xa1, 0x01, 0x60], 1).is_err());
         assert!(extras(&[0xa1, 0x21, 0x82, 0xf6, 0xa1, 0x38, 0x63, 0xa1, 0x01, 0x40], 1).is_ok());
-        let mut a =
-            ArchiveExtra { comment: Some(b"a"[..].into()), extensions: vec![(b"k"[..].into(), [1][..].into())] };
+        let mut a = ArchiveExtra {
+            comment: Some(b"a"[..].into()),
+            extensions: vec![(b"k"[..].into(), [1][..].into())],
+            ..ArchiveExtra::default()
+        };
         a.merge(ArchiveExtra {
             comment: None,
+            label: Some(b"v"[..].into()),
             extensions: vec![(b"j"[..].into(), [2][..].into()), (b"k"[..].into(), [3][..].into())],
         });
         let want: Vec<Extension> = vec![(b"k"[..].into(), [3][..].into()), (b"j"[..].into(), [2][..].into())];
-        assert_eq!((a.comment.as_deref(), &a.extensions), (Some(&b"a"[..]), &want));
+        assert_eq!(
+            (a.comment.as_deref(), a.label.as_deref(), &a.extensions),
+            (Some(&b"a"[..]), Some(&b"v"[..]), &want)
+        );
     }
 
     #[test]
