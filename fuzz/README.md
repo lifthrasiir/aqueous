@@ -142,7 +142,9 @@ as `run.sh` sets it), and timed as plain code by `cargo +nightly run --release -
 `CARGO_TARGET_DIR` of its own, the checksums skipped as the fuzzer skips them). Instrumented,
 `compress` is about 12 times as slow (a seed of 3.7 s, `aqr-egg-azonumbers.egg`, took 44 s). A
 timeout that does not come again alone may be a race: the file given many times over, to either,
-runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs). `corpus/`, `artifacts/` and `target/` are not committed.
+runs it so many times in one process (`wasm`'s deadlock hung once in about 200 runs).
+`corpus/`, `artifacts/` and `target/` are not committed. The licences of the seeds, and so of the
+corpora, are in `SEEDS.md` (their texts in `licenses/`).
 
 Left: the rest of the SFX stub (placing the blobs, Windows alone), and the host's reading of
 the sandbox worker's replies (a few counts and byte strings, of bounds).
