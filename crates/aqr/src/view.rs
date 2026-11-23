@@ -12,6 +12,10 @@
 //!
 //! Before the probe, the files listed ([`Listing`]): a bar of no end known, and how many.
 //!
+//! An archive written again, nothing compressed again (`--convert`), has a bar of the bytes
+//! written ([`Copying`]); one converted from another format, the bar of decoding as it is
+//! unpacked, then that of an archive being made of [`Contents`] of its own.
+//!
 //! Driven by a frontend ([`crate::ipc`]), all tell it the same as `progress` events instead of
 //! drawing the bar.
 
@@ -39,7 +43,7 @@ const CELLS: usize = 32;
 const SLOW: Duration = Duration::from_secs(2);
 
 pub struct View<'g> {
-    g: &'g Gathered,
+    g: &'g dyn Contents,
     /// Whether the bar is drawn (standard error a terminal), and the files logged.
     bar: bool,
     log: bool,
@@ -61,7 +65,7 @@ struct State {
 }
 
 impl<'g> View<'g> {
-    pub fn new(g: &'g Gathered, bar: bool, log: bool) -> View<'g> {
+    pub fn new(g: &'g dyn Contents, bar: bool, log: bool) -> View<'g> {
         View { g, bar, log, state: Mutex::default() }
     }
 
@@ -110,7 +114,7 @@ impl<'g> View<'g> {
     /// The lines of the log of `contents`, written as of `r`, and the solid blocks, sets and
     /// contents kept raw that `r` has past those `logged`.
     fn log(&self, contents: &[usize], r: &Report, logged: &mut (usize, usize, usize)) -> Vec<String> {
-        let path = |c: usize| crate::term::name(&self.g.contents[c].0.display().to_string()).into_owned();
+        let path = |c: usize| crate::term::name(&self.g.path(c)).into_owned();
         let (solid, sets, raw) = *logged;
         let mut solid_of: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, s) in r.solid.iter().enumerate().skip(solid) {
@@ -177,8 +181,8 @@ impl<'g> View<'g> {
     fn progress(&self, s: &State) -> Value {
         let file = s.working.iter().min_by_key(|(_, t)| **t).map(|(&c, since)| {
             let mut f = json!({
-                "path": self.g.contents[c].0.display().to_string(),
-                "len": self.g.contents[c].2,
+                "path": self.g.path(c),
+                "len": self.g.len(c),
                 "seconds": since.elapsed().as_secs_f64(),
             });
             if let Some(&n) = s.reached.get(&c) {
@@ -199,8 +203,7 @@ impl<'g> View<'g> {
     fn slowest(&self, s: &State) -> Option<String> {
         let (&c, since) = s.working.iter().min_by_key(|(_, t)| **t)?;
         let t = since.elapsed();
-        let (path, len) =
-            (crate::term::name(&self.g.contents[c].0.display().to_string()).into_owned(), self.g.contents[c].2);
+        let (path, len) = (crate::term::name(&self.g.path(c)).into_owned(), self.g.len(c));
         let far = match s.reached.get(&c) {
             Some(&n) if len > 0 => format!(", {}%", (100 * n / len).min(99)),
             _ => String::new(),
@@ -231,6 +234,64 @@ pub fn takes_escapes() -> bool {
     }
     #[cfg(not(windows))]
     true
+}
+
+/// The contents of an archive being made, as [`View`] tells of them: each by its path and bytes.
+pub trait Contents: Sync {
+    fn path(&self, c: usize) -> String;
+    fn len(&self, c: usize) -> u64;
+}
+
+impl Contents for Gathered {
+    fn path(&self, c: usize) -> String {
+        self.contents[c].0.display().to_string()
+    }
+
+    fn len(&self, c: usize) -> u64 {
+        self.contents[c].2
+    }
+}
+
+/// What an archive being written again shows on standard error (`--convert` of an Aqueous
+/// archive, nothing compressed again): on a terminal, a bar of the bytes written of those it is
+/// to have, about. Driven by a frontend, the same as `progress` events (`written`).
+pub struct Copying {
+    bar: bool,
+    total: u64,
+    done: AtomicU64,
+    drawn: Mutex<usize>,
+}
+
+impl Copying {
+    pub fn new(bar: bool, total: u64) -> Copying {
+        Copying { bar, total, done: AtomicU64::new(0), drawn: Mutex::new(0) }
+    }
+
+    /// `n` bytes more written.
+    pub fn wrote(&self, n: u64) {
+        self.done.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
+impl Ticking for Copying {
+    fn shows(&self) -> bool {
+        self.bar || ipc::get().is_some()
+    }
+
+    fn tick(&self) {
+        let done = self.done.load(Ordering::Relaxed).min(self.total);
+        if ipc::get().is_some() {
+            ipc::tell(json!({"event": "progress", "written": [done, self.total]}));
+        }
+        if !self.bar {
+            return;
+        }
+        let x = share((done, self.total));
+        let line = fit(&format!("[{}] {}% of {} written", cells(&[('#', x)]), pc(x), size(self.total as f64)), WIDTH);
+        let mut drawn = self.drawn.lock().unwrap();
+        paint(&mut std::io::stderr().lock(), *drawn, &[line]);
+        *drawn = 1;
+    }
 }
 
 /// What an archive being decoded shows on standard error: on a terminal, a bar of how far it is.

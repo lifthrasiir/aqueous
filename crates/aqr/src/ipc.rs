@@ -25,7 +25,9 @@
 //!   while the files are listed (before any of the others), `listed` instead: `[files, bytes]`
 //!   found so far, with `read`, the files of them read once the directories are all walked
 //!   (null until then: their bytes not yet known), and `dir`, the directory being walked where
-//!   it takes long (`{"path", "seconds"}`, else null).
+//!   it takes long (`{"path", "seconds"}`, else null). Converting (`--convert`, `mode`
+//!   `convert`), an Aqueous archive written again tells `written` (`[bytes, of about so many]`);
+//!   an archive of another format, as decoding while it is unpacked, then as compressing.
 //! - `{"event":"end","output":O,"files":N,"read":R,"written":W,"seconds":S}`: an archive done
 //!   (`written` is what was decoded, decoding).
 //! - `{"event":"skipped","output":O}`: an archive not made, as the frontend answered.

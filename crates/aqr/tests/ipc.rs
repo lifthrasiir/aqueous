@@ -369,3 +369,44 @@ fn session() {
     assert!(c.wait().unwrap().success());
     assert!(d.join("a.aqr").exists());
 }
+
+/// `--convert` driven by a frontend: its begin and end, and how far it is as `progress` events,
+/// of the bytes written of an Aqueous archive written again, and of an archive of another format
+/// unpacked (`decompressed`) and compressed (`compression`).
+#[test]
+fn convert_progress() {
+    let d = scratch("convert");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let mut x = 1u64;
+    let noise: Vec<u8> = (0..3 << 20)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 56) as u8
+        })
+        .collect();
+    fs::write(src.join("n.bin"), &noise).unwrap();
+    let aqr = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr")).current_dir(&d).args(args).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
+    aqr(&["-q", "-o", "a.aqr", "src"]);
+    aqr(&["-q", "--format", "zip", "-o", "a.zip", "src"]);
+    for (input, keys) in [("a.aqr", &["written"][..]), ("a.zip", &["decompressed", "compression"])] {
+        let (from, to) = (d.join(input), d.join("b.aqr"));
+        let args: Vec<&std::ffi::OsStr> =
+            vec!["--convert".as_ref(), "-A".as_ref(), "-f".as_ref(), "-o".as_ref(), to.as_os_str(), from.as_os_str()];
+        let (mut c, lines) = start(&args, &["overwrite"]);
+        let all: Vec<Value> = lines.collect();
+        assert!(c.wait().unwrap().success());
+        let progress: Vec<&Value> = all.iter().filter(|v| v["event"] == "progress").collect();
+        for k in keys {
+            let last = progress.iter().rev().find(|v| v.get(*k).is_some()).unwrap_or_else(|| panic!("{input}: {k}"));
+            assert_eq!(last[*k][0], last[*k][1], "{input}: {last}");
+        }
+        let seen: Vec<&str> =
+            all.iter().filter(|v| v["event"] != "progress").filter_map(|v| v["event"].as_str()).collect();
+        assert_eq!((seen.first(), seen.last()), (Some(&"begin"), Some(&"end")), "{input}: {seen:?}");
+    }
+    fs::remove_dir_all(&d).unwrap();
+}

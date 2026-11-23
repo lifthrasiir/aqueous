@@ -30,6 +30,10 @@
 //! tells its format, `.aqr` after (`foo.tar.gz` -> `foo.aqr`), beside it, or `-o`; there already,
 //! as of `-c` (`-f`).
 //!
+//! How far it is is shown as `-c` and `-d` show it ([`crate::view`]): of an Aqueous archive, a bar
+//! of the bytes written; of another format, the bar of `-d` as it is unpacked, then that of
+//! `-c` (`-v` logging the files).
+//!
 //! The output is written beside where it goes (`NAME.PID.part`), read back (decrypted with the
 //! passphrase it was sealed with) and checked against the input's tree and journal, then put in
 //! its place by a rename: in place of the input without `-o`, so that the file is the archive
@@ -332,8 +336,13 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
             Some(d) if restored.is_none() => aqr_archive::Payload::Sealed(d),
             _ => aqr_archive::Payload::Plain(read),
         };
+        let copying = crate::view::Copying::new(crate::bars(), read.len() as u64);
         let rewrite = |w: &mut dyn Write| {
-            aqr_archive::rewrite_payload(payload, &tree, a.opt.level, threads, w, history, layers).map_err(|e| err(&e))
+            crate::ticking(a, &copying, || {
+                let mut w = Counted(w, &copying);
+                aqr_archive::rewrite_payload(payload, &tree, a.opt.level, threads, &mut w, history, layers)
+            })
+            .map_err(|e| err(&e))
         };
         let (r, opener) = match &sealing {
             Sealing::Same(p) | Sealing::New(p) => {
@@ -459,6 +468,8 @@ struct Holding<'p> {
     input: &'p Path,
     quiet: bool,
     contents: std::sync::Mutex<Vec<Option<aqr_formula::Bytes>>>,
+    /// Told how far it is, where it is shown.
+    view: Option<&'p crate::view::Decoding>,
 }
 
 impl aqr_unpack::Sink for Holding<'_> {
@@ -481,6 +492,12 @@ impl aqr_unpack::Sink for Holding<'_> {
             eprintln!("{}: {what}", self.input.display());
         }
     }
+
+    fn step(&self, s: aqr_archive::Step) {
+        if let Some(v) = self.view {
+            v.tell(s);
+        }
+    }
 }
 
 /// `d` as bytes shared (not copied as they are read), moved to the store where it is large and
@@ -494,10 +511,43 @@ fn held(d: Vec<u8>) -> aqr_formula::Bytes {
     }
 }
 
-/// The contents unpacked, as a [`aqr_compress::Source`]: each by the name of its first file.
+/// The contents unpacked, as a [`aqr_compress::Source`]: each by the name of its first file
+/// (and its path, as the bar shows it).
 struct Unpacked {
     names: Vec<Vec<u8>>,
+    paths: Vec<String>,
     contents: Vec<aqr_formula::Bytes>,
+}
+
+impl crate::view::Contents for Unpacked {
+    fn path(&self, c: usize) -> String {
+        self.paths.get(c).cloned().unwrap_or_default()
+    }
+
+    fn len(&self, c: usize) -> u64 {
+        self.contents[c].len() as u64
+    }
+}
+
+/// What is written of an archive written again, counted for its bar ([`crate::view::Copying`]).
+struct Counted<'w>(&'w mut dyn Write, &'w crate::view::Copying);
+
+impl Write for Counted<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.0.write(buf)?;
+        self.1.wrote(n as u64);
+        Ok(n)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.0.write_all(buf)?;
+        self.1.wrote(buf.len() as u64);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
 }
 
 impl aqr_compress::Source for Unpacked {
@@ -575,28 +625,41 @@ fn convert_foreign(a: &Args, input: &Path, map: &[u8], f: aqr_unpack::Format, su
     opt.size_hint = sealing.is_some();
 
     // a single file's stream: an archive of the file alone, of the kind of its name
+    let units = if !a.quiet && (crate::bars() || a.ipc) { opened.units() } else { Vec::new() };
+    let unpacking = crate::view::Decoding::new(crate::bars(), units);
+    let shown = (!a.quiet && crate::view::Ticking::shows(&unpacking)).then_some(&unpacking);
     if !opened.is_tree() {
         let mut w = aqr_formula::store::Writer::new(None);
-        opened
-            .decompress(
+        crate::ticking(a, &unpacking, || {
+            opened.decompress(
                 threads,
                 &mut |d| {
                     w.write(d);
                     Ok(())
                 },
-                &|_| {},
+                &|s| shown.into_iter().for_each(|v| v.tell(s)),
             )
-            .map_err(|e| err(&exit::seen(e)))?;
+        })
+        .map_err(|e| err(&exit::seen(e)))?;
         let d = w.into_bytes();
-        let kind = aqr_compress::kind_by_name(&name[..name.len() - suffix]);
-        let (n, _) = crate::write_whole(&out, force, |file| match &sealing {
-            None => aqr_compress::compress_formula_to(&d, kind, &opt, file, &|_| {}),
-            Some(p) => {
-                let mut s = crate::compress::sealer(file, p)?;
-                aqr_compress::compress_formula_to(&d, kind, &opt, &mut s, &|_| {})?;
-                s.finish()?;
-                Ok((file.metadata()?.len() as usize, aqr_compress::Formula::default()))
-            }
+        let stem = &name[..name.len() - suffix];
+        let kind = aqr_compress::kind_by_name(stem);
+        let one = Unpacked {
+            names: vec![stem.to_vec()],
+            paths: vec![String::from_utf8_lossy(stem).into_owned()],
+            contents: vec![d.clone()],
+        };
+        let view = crate::view::View::new(&one, crate::bars(), false);
+        let (n, _) = crate::write_whole(&out, force, |file| {
+            crate::viewed(a, &view, |tell| match &sealing {
+                None => aqr_compress::compress_formula_to(&d, kind, &opt, file, tell),
+                Some(p) => {
+                    let mut s = crate::compress::sealer(file, p)?;
+                    aqr_compress::compress_formula_to(&d, kind, &opt, &mut s, tell)?;
+                    s.finish()?;
+                    Ok((file.metadata()?.len() as usize, aqr_compress::Formula::default()))
+                }
+            })
         })?;
         if !a.quiet {
             crate::compress::summary(&out, 1, d.len(), n, start);
@@ -606,8 +669,8 @@ fn convert_foreign(a: &Args, input: &Path, map: &[u8], f: aqr_unpack::Format, su
     }
 
     // a tree: unpacked whole, then compressed
-    let sink = Holding { input, quiet: a.quiet, contents: Default::default() };
-    let done = opened.unpack(threads, &sink).map_err(|e| err(&exit::seen(e)))?;
+    let sink = Holding { input, quiet: a.quiet, contents: Default::default(), view: shown };
+    let done = crate::ticking(a, &unpacking, || opened.unpack(threads, &sink)).map_err(|e| err(&exit::seen(e)))?;
     if done.skipped > 0 {
         exit::note(exit::Code::Invalid);
         let n = done.skipped;
@@ -641,7 +704,9 @@ fn convert_foreign(a: &Args, input: &Path, map: &[u8], f: aqr_unpack::Format, su
         .map(|(c, b)| b.ok_or_else(|| err(&format!("content #{c} not unpacked"))))
         .collect::<Result<Vec<_>, String>>()?;
     names.resize(contents.len(), None);
-    let src = Unpacked { names: names.into_iter().map(Option::unwrap_or_default).collect(), contents };
+    let paths = crate::tree_content_paths(&tree);
+    let src = Unpacked { names: names.into_iter().map(Option::unwrap_or_default).collect(), paths, contents };
+    let view = crate::view::View::new(&src, crate::bars(), a.verbose);
     let total: u64 = src.contents.iter().map(|b| b.len() as u64).sum();
     if !a.batch_given {
         opt.batch = crate::compress::fitted_batch(opt.batch, total);
@@ -651,13 +716,17 @@ fn convert_foreign(a: &Args, input: &Path, map: &[u8], f: aqr_unpack::Format, su
             let w = std::io::BufWriter::with_capacity(8 << 20, crate::files::Held(&*file));
             let placed = std::sync::atomic::AtomicBool::new(false);
             let mut o = crate::files::FileOut { w, commits: false, once: false, base: 0, place: None, placed: &placed };
-            let r = aqr_compress::compress_tree_into(&tree, &src, &opt, &mut o, None, None, &|_| {})?;
+            let r = crate::viewed(a, &view, |tell| {
+                aqr_compress::compress_tree_into(&tree, &src, &opt, &mut o, None, None, tell)
+            })?;
             o.flush()?;
             Ok((r, false))
         }
         Some(p) => {
             let mut s = crate::files::Sealed(crate::compress::sealer(file, p)?);
-            let mut r = aqr_compress::compress_tree_into(&tree, &src, &opt, &mut s, None, None, &|_| {})?;
+            let mut r = crate::viewed(a, &view, |tell| {
+                aqr_compress::compress_tree_into(&tree, &src, &opt, &mut s, None, None, tell)
+            })?;
             drop(s);
             let len = file.metadata()?.len() as usize;
             (r.overhead, r.len) = (r.overhead + len - r.len, len);
