@@ -137,8 +137,8 @@ hook), even where the code catches them (a recompressor's, say). Builds take
 inventory's constructors in `__mod_init_func`, which ld then refuses ("initializer pointer has
 no target"). Crashes go to `artifacts/TARGET/`; one is run again by
 `target/aarch64-apple-darwin/release/TARGET FILE` (with `ASAN_OPTIONS=allocator_may_return_null=1`,
-as `run.sh` sets it), and timed as plain code by `cargo +nightly run --release --bin replay --
-TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzzing"` and a
+as `run.sh` sets it), and timed as plain code by `cargo +nightly run --release --features tools
+--bin replay -- TARGET FILE...` (natives, wasm, compress, roundtrip; with `RUSTFLAGS="--cfg fuzzing"` and a
 `CARGO_TARGET_DIR` of its own, the checksums skipped as the fuzzer skips them). Instrumented,
 `compress` is about 12 times as slow (a seed of 3.7 s, `aqr-egg-azonumbers.egg`, took 44 s). A
 timeout that does not come again alone may be a race: the file given many times over, to either,

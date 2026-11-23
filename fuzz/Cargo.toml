@@ -31,6 +31,11 @@ wat = "1"
 zstd = "0.13"
 libfuzzer-sys = "0.4"
 
+[features]
+# The tools run as plain code (`seeds`, `replay`), left out of `cargo fuzz build`, which builds
+# every binary of the package as a fuzz target and would find no `rust_fuzzer_test_input` in them.
+tools = []
+
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
@@ -111,6 +116,7 @@ bench = false
 [[bin]]
 name = "replay"
 path = "src/bin/replay.rs"
+required-features = ["tools"]
 test = false
 doc = false
 bench = false
@@ -118,6 +124,7 @@ bench = false
 [[bin]]
 name = "seeds"
 path = "src/bin/seeds.rs"
+required-features = ["tools"]
 test = false
 doc = false
 bench = false

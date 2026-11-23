@@ -7,7 +7,7 @@ set -eu
 cd "$(dirname "$0")"
 t=${1:?target}
 shift
-[ -d corpus/"$t" ] || cargo +nightly run -q --release --bin seeds -- "$t" corpus/"$t"
+[ -d corpus/"$t" ] || cargo +nightly run -q --release --features tools --bin seeds -- "$t" corpus/"$t"
 case $t in
     compress) opts="-max_len=262144 -timeout=120" ;;
     sfx) opts="-max_len=131072 -timeout=30" ;;
