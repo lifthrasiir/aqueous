@@ -322,7 +322,7 @@ encrypted-archive = {
   ? "chunks": ibytes,
   ? "file_key": bstr .size 16,
   ? "key_passphrase": passphrase,
-  ? "payload": unencrypted-archive / bytes,
+  ? "payload": unencrypted-archive / bytes / [+ (unencrypted-archive / bytes)],   ; a list: one after another
 }
 
 ; --- Archive value (#archive-model)

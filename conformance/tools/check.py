@@ -87,7 +87,12 @@ def check(path, aqr, work):
     f = os.path.join(work, name + ".aqr")
     with open(f, "wb") as o:
         o.write(data)
-    r = subprocess.run(aqr + ["-Z", "interpret", f], capture_output=True)
+    if "passphrase" in case:
+        pw = case["passphrase"]
+        pw = pw.encode("utf-8") if isinstance(pw, str) else pw
+        r = subprocess.run(aqr + ["-P", "-Z", "interpret", f], input=pw + b"\n", capture_output=True)
+    else:
+        r = subprocess.run(aqr + ["-Z", "interpret", f], stdin=subprocess.DEVNULL, capture_output=True)
     got = EXIT.get(r.returncode, f"exit {r.returncode}")
     err = r.stderr.decode(errors="replace").strip()
     want = case["interpreted"]

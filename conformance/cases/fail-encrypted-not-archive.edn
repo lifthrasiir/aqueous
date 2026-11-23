@@ -1,0 +1,16 @@
+# The payload decrypts to an unencrypted archive.
+{
+  "title": "A payload not an archive",
+  "spec": ["#encrypted-archive", "#interpretation"],
+  "passphrase": "correct horse",
+  "archive": {
+    "encrypted_header_magic": "ENCRYPTED_HEADER_MAGIC",
+    "lg_work_factor": 12,
+    "scrypt_ephemeral_secret": h'a1a2a3a4a5a6a7a8a9aaabacadaeafa0',
+    "payload_nonce": h'b1b2b3b4b5b6b7b8b9babbbcbdbebfb0',
+    "file_key": h'c1c2c3c4c5c6c7c8c9cacbcccdcecfc0',
+    "key_passphrase": "correct horse",
+    "payload": 'not an archive',
+  },
+  "interpreted": "invalid",
+}

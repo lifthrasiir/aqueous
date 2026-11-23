@@ -1,0 +1,22 @@
+# A damaged chunk doesn't authenticate.
+{
+  "title": "A damaged chunk",
+  "spec": ["#encrypted-archive", "#interpretation"],
+  "passphrase": "correct horse",
+  "archive": {
+    "encrypted_header_magic": "ENCRYPTED_HEADER_MAGIC",
+    "lg_work_factor": 12,
+    "scrypt_ephemeral_secret": h'a1a2a3a4a5a6a7a8a9aaabacadaeafa0',
+    "payload_nonce": h'b1b2b3b4b5b6b7b8b9babbbcbdbebfb0',
+    "chunks": h'3996706e097125024d8c60e14f80fd6ed05f25995db2910945ec28162030d8d8c1561127d1e092c1074226c9728d',
+    "file_key": h'c1c2c3c4c5c6c7c8c9cacbcccdcecfc0',
+    "key_passphrase": "correct horse",
+    "payload": {
+      "header_magic": "HEADER_MAGIC",
+      "size_hint_block": {"type": 4, "data": {}},
+      "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'secret'}}}],
+      "footer_magic": "FOOTER_MAGIC",
+    },
+  },
+  "interpreted": "invalid",
+}

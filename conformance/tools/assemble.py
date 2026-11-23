@@ -24,6 +24,9 @@ CONSTANTS = {
     "MIRROR_MAGIC": bytes.fromhex("02AAF5FEBA2BAE23"),
     "OVERLAY_MIRROR_MAGIC": bytes.fromhex("010534FABD11AF53"),
     "RECOVERY_MAGIC": bytes.fromhex("690AD179CD157AB6"),
+    "ENCRYPTED_HEADER_MAGIC": bytes.fromhex("F9CAF2A6D02A0100"),
+    "ENCRYPTED_MIRRORED_HEADER_MAGIC": bytes.fromhex("F9CAF2A6D02A0200"),
+    "ENCRYPTED_MIRROR_MAGIC": bytes.fromhex("78D73F690AFF4483"),
     "OVERLAY_RECOVERY_MAGIC": bytes.fromhex("45E73455EAF2E10D"),
 }
 
@@ -256,7 +259,8 @@ class Assembler:
             w.put(self.bytes_of(a, "archive"))
             return
         if "encrypted_header_magic" in a:
-            raise CaseError("encrypted archives are not assembled yet")
+            self.encrypted(w, a)
+            return
         self.magic(w, a, "header_magic")
         self.archive_start = len(w)
         self.segment = []
@@ -283,6 +287,93 @@ class Assembler:
         self.put_num(w, a, "footer_size", lambda n: ule(n, 2), len(tail))
         w.append(tail)
         self.put_num(w, a, "footer_size_copy", lambda n: ule(n, 2), len(tail))
+
+    def encrypted(self, w, a):
+        import age
+
+        def known_bytes(key, n=None):
+            v = self.unlabel(a.get(key, UNDEFINED))
+            if is_infer(v):
+                return None
+            b = self.bytes_of(v, key)
+            if n is not None and len(b) != n:
+                raise CaseError(f"{key}: {len(b)} bytes, not {n}")
+            return b
+
+        def passphrase():
+            v = self.unlabel(a.get("key_passphrase", UNDEFINED))
+            if isinstance(v, str):
+                return v.encode("utf-8")
+            if isinstance(v, bytes):
+                return v
+            raise CaseError("key_passphrase: give it to infer encrypted_file_key")
+
+        start = len(w)
+        self.magic(w, a, "encrypted_header_magic")
+        mirrored = bytes(w.buf[start:]) == CONSTANTS["ENCRYPTED_MIRRORED_HEADER_MAGIC"]
+        lg = self.put_num(w, a, "lg_work_factor", lambda n: ule(n, 1))
+        self.field(w, a["scrypt_ephemeral_secret"], lambda w, x: w.put(self.bytes_of(x, "scrypt_ephemeral_secret")))
+        salt = known_bytes("scrypt_ephemeral_secret")
+        file_key = known_bytes("file_key", 16)
+        wrapped = []
+
+        def go_key(w, x):
+            if is_infer(x):
+                if file_key is None or not isinstance(lg, int):
+                    raise CaseError("encrypted_file_key: give file_key (and lg_work_factor) to infer it")
+                wrapped.append(age.wrap_key(file_key, passphrase(), salt, lg))
+            else:
+                wrapped.append(self.bytes_of(x, "encrypted_file_key"))
+            w.put(wrapped[0])
+
+        self.field(w, a.get("encrypted_file_key", UNDEFINED), go_key)
+
+        def go_mac(w, x):
+            if is_infer(x):
+                if file_key is None:
+                    raise CaseError("age_header_mac: give file_key to infer it")
+                w.put(age.header_mac(file_key, salt, lg, wrapped[0]))
+            else:
+                w.put(self.bytes_of(x, "age_header_mac"))
+
+        self.field(w, a.get("age_header_mac", UNDEFINED), go_mac)
+        self.field(w, a["payload_nonce"], lambda w, x: w.put(self.bytes_of(x, "payload_nonce")))
+        nonce = known_bytes("payload_nonce")
+        fields = bytes(w.buf[start + 8 :])
+        if mirrored or "header_checksum" in a:
+            head = bytes(w.buf[start:])
+
+            def go_sum(w, x):
+                w.put(ule(xxh64(head), 8) if is_infer(x) else self.bytes_of(x, "header_checksum"))
+
+            self.field(w, a.get("header_checksum", UNDEFINED), go_sum)
+
+        def go_chunks(w, x):
+            if not is_infer(x):
+                w.put(self.bytes_of(x, "chunks"))
+                return
+            if file_key is None or "payload" not in a:
+                raise CaseError("chunks: give file_key and payload to infer them")
+            pw = Writer()
+            self.field(pw, a["payload"], self.payload)
+            self.commit(pw)
+            k = 0
+            for m, c in enumerate(age.encrypt_payload(file_key, nonce, bytes(pw.buf))):
+                if mirrored and (m + 1 in (2, 4, 8, 16, 32) or (m + 1) % 64 == 0):
+                    k += 1
+                    h = CONSTANTS["ENCRYPTED_MIRROR_MAGIC"] + ule(k, 4) + fields
+                    w.put(h + ule(xxh64(h), 8))
+                w.put(c)
+
+        self.field(w, a.get("chunks", UNDEFINED), go_chunks)
+
+    def payload(self, w, v):
+        """The plaintext of an encrypted archive: an unencrypted archive, bytes, or a list of them."""
+        for x in v if isinstance(v, list) else [v]:
+            if isinstance(x, Map):
+                self.field(w, x, self.archive)
+            else:
+                w.put(self.bytes_of(x, "payload"))
 
     def magic(self, w, a, key):
         def go(w, v):

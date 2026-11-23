@@ -1,0 +1,7 @@
+# An encrypted archive's header cut short.
+{
+  "title": "A truncated encrypted header",
+  "spec": ["#encrypted-archive", "#interpretation"],
+  "archive": h'F9CAF2A6D02A0100 0C a1a2a3a4',
+  "interpreted": "invalid",
+}
