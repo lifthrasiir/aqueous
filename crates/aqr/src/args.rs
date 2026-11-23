@@ -10,6 +10,9 @@ pub(crate) struct Args {
     pub(crate) list: bool,
     /// Telling all that an archive records (`-I`).
     pub(crate) info: bool,
+    /// Printing the archive value an archive is interpreted to (`-Z interpret`, of `info` too:
+    /// a command reading an archive alone, as `-I` is).
+    pub(crate) interpret: bool,
     pub(crate) output: Option<PathBuf>,
     /// Decompressing, a single entry at the top beside the archive, else a directory of its name.
     pub(crate) auto_dir: bool,
@@ -219,6 +222,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         test: false,
         list: false,
         info: false,
+        interpret: false,
         output: None,
         auto_dir: false,
         force: false,
@@ -309,18 +313,24 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
                 println!("aqr {}", env!("AQR_VERSION"));
                 std::process::exit(0);
             }
-            "-c" | "--compress" => (a.decompress, a.list, a.info) = (false, false, false),
-            "-d" | "--decompress" => (a.decompress, a.test, a.list, a.info) = (true, false, false, false),
-            "-K" | "--test" => (a.decompress, a.test, a.list, a.info) = (true, true, false, false),
-            "-t" | "--list" => (a.list, a.info) = (true, false),
-            "-I" | "--info" => (a.info, a.list) = (true, false),
+            "-c" | "--compress" => (a.decompress, a.list, a.info, a.interpret) = (false, false, false, false),
+            "-d" | "--decompress" => {
+                (a.decompress, a.test, a.list, a.info, a.interpret) = (true, false, false, false, false)
+            }
+            "-K" | "--test" => (a.decompress, a.test, a.list, a.info, a.interpret) = (true, true, false, false, false),
+            "-t" | "--list" => (a.list, a.info, a.interpret) = (true, false, false),
+            "-I" | "--info" => (a.info, a.list, a.interpret) = (true, false, false),
             "--delete" => a.edit = Some(edit::Edit::Delete),
             "--move" => a.edit = Some(edit::Edit::Move),
             "--compact" => a.compact = true,
             "--convert" => a.convert = true,
             "--no-passphrase" => a.no_passphrase = true,
             "--no-archival" => a.no_archival = true,
-            "-Z" => zopts.push(text(value("-Z")?)),
+            // (a command, not an option: none of aqr_common::zopt's)
+            "-Z" => match text(value("-Z")?) {
+                z if z == "interpret" => (a.info, a.list, a.interpret) = (true, false, true),
+                z => zopts.push(z),
+            },
             "-o" | "--output" => a.output = Some(value("-o")?.into()),
             "-C" | "--directory" => {
                 let to = dir.join(value("-C")?);
@@ -621,7 +631,13 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     }
     if a.info {
         if a.rm || a.each || a.dereference || a.output.is_some() || !renames.is_empty() || last_dir.is_some() {
-            return Err("-I takes an archive and its paths alone".into());
+            return Err(match a.interpret {
+                true => "-Z interpret takes an archive alone".into(),
+                false => "-I takes an archive and its paths alone".into(),
+            });
+        }
+        if a.interpret && a.inputs.len() > 1 {
+            return Err("-Z interpret takes an archive alone".into());
         }
         return Ok(a);
     }

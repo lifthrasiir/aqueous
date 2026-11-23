@@ -68,7 +68,7 @@ fn formats() -> Vec<String> {
 
 /// The developer options as given: `NAME`, `no-NAME` of a switch, `help` and `NS:help`.
 fn zopts() -> Vec<String> {
-    let mut v = vec!["help".to_string()];
+    let mut v = vec!["help".to_string(), "interpret".to_string()];
     v.extend(aqr_common::zopt::namespaces().into_iter().map(|n| format!("{}:help", n.0)));
     for o in aqr_common::zopt::all() {
         let usage = o.usage();

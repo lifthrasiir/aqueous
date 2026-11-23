@@ -117,6 +117,8 @@
 //! - `-I` (`--info`): all that an archive records, for debugging ([`info`]): of the archive
 //!   itself (its blocks and segments; of a single file, its formula too), or with paths, each
 //!   path's entry in every segment (those before an update too), its metadata and formula in full.
+//! - `-Z interpret ARCHIVE`: a verb, though of `-Z` (not stable): the archive value it is
+//!   interpreted to, in EDN, as the conformance suite writes it ([`interpret`]).
 //! - `--delete ARCHIVE PATH...`: the paths of the archive given (a directory with what is under
 //!   it) taken out of it in place, by a segment of tombstones appended and committed as `-a`
 //!   commits ([`edit`]); their bytes stay in the file. A path not in it is an error, before
@@ -307,6 +309,7 @@ mod foreign;
 mod gather;
 mod hooks;
 mod info;
+mod interpret;
 mod ipc;
 mod journal;
 mod list;
@@ -524,7 +527,9 @@ General:
   -Z NAME[=VALUE]       a developer option, not stable across versions (-Z help lists
                         them, -Z NS:help those of NS:; a switch also as -Z no-NAME):
                         -Z wasm runs every module as WebAssembly, -Z no-sandbox the
-                        Wasm modules in this process, not in workers locked down
+                        Wasm modules in this process, not in workers locked down;
+                        -Z interpret ARCHIVE, a command, prints the archive value an
+                        archive is interpreted to (the spec's Archive model) in EDN
   -h, --help            show this help
   -V, --version         show the version
       --setup-autocomplete[=SHELL]
@@ -616,6 +621,7 @@ fn main() -> ExitCode {
     let r = aqr_common::pool::run(|| match () {
         _ if args.convert => convert::convert_all(&args),
         _ if args.edit.is_some() || args.compact => edit::edit(&args),
+        _ if args.interpret => interpret::interpret(&args),
         _ if args.info => info::info(&args),
         _ if args.tag.is_some() => journal::tag_all(&args),
         _ if args.history => journal::history_all(&args),

@@ -1005,8 +1005,8 @@ fn text(out: &mut Vec<u8>, b: &[u8]) {
 
 const ARCHIVE_COMMENT: i128 = -1;
 const ENTRY_EXTRAS: i128 = -2;
-const SEGMENT_STATUS: i128 = -3;
-const JOURNAL: i128 = -4;
+pub(crate) const SEGMENT_STATUS: i128 = -3;
+pub(crate) const JOURNAL: i128 = -4;
 const ARCHIVE_LABEL: i128 = -5;
 const INCOMPLETE_FILES: i128 = 0;
 const INCOMPLETE_BYTES: i128 = 1;
@@ -1018,7 +1018,7 @@ const ARCTIME: i128 = -5;
 const COMMENT: i128 = -6;
 const LINK_GROUP: i128 = -7;
 const XATTRS: i128 = -10;
-const FORKS: i128 = -50;
+pub(crate) const FORKS: i128 = -50;
 const WIN_LINK_TYPE: i128 = -60;
 const WIN_ATTRS: i128 = -61;
 const UNIX_MODE: i128 = -70;
@@ -1225,7 +1225,7 @@ const CBOR_DEPTH: usize = 64;
 
 /// The head of a CBOR data item at `*at` of `d`, read: its major type, additional information
 /// and argument (`None` for an indefinite length).
-fn head_of(d: &[u8], at: &mut usize) -> Decoded<(u8, u8, Option<u64>)> {
+pub(crate) fn head_of(d: &[u8], at: &mut usize) -> Decoded<(u8, u8, Option<u64>)> {
     let bad = || invalid("bad CBOR in the optional metadata");
     let Some(&b) = d.get(*at) else { return bad() };
     *at += 1;
@@ -1246,7 +1246,7 @@ fn head_of(d: &[u8], at: &mut usize) -> Decoded<(u8, u8, Option<u64>)> {
 
 /// The number of items (`None`: up to a break) of an array or map of argument `arg` at `at` of
 /// `d`: no more than the bytes left.
-fn count(d: &[u8], at: usize, arg: Option<u64>) -> Decoded<Option<usize>> {
+pub(crate) fn count(d: &[u8], at: usize, arg: Option<u64>) -> Decoded<Option<usize>> {
     match arg {
         Some(n) => usize::try_from(n)
             .ok()
@@ -1259,7 +1259,7 @@ fn count(d: &[u8], at: usize, arg: Option<u64>) -> Decoded<Option<usize>> {
 
 /// Whether the array or map of `n` items ([`count`]) at `*at` of `d` ends after `k` of them:
 /// at a break (passed) where of an indefinite length.
-fn ended(d: &[u8], at: &mut usize, n: Option<usize>, k: usize) -> bool {
+pub(crate) fn ended(d: &[u8], at: &mut usize, n: Option<usize>, k: usize) -> bool {
     match n {
         Some(n) => k == n,
         None if d.get(*at) == Some(&0xff) => {
@@ -1273,7 +1273,7 @@ fn ended(d: &[u8], at: &mut usize, n: Option<usize>, k: usize) -> bool {
 /// Goes over the item at `*at` of `d` at `depth` by its heads alone, as an item not read is
 /// (spec, "Partial access"): well-formed as far as they tell, but neither its texts nor a map's
 /// keys checked.
-fn skip(d: &[u8], at: &mut usize, depth: usize) -> Decoded<()> {
+pub(crate) fn skip(d: &[u8], at: &mut usize, depth: usize) -> Decoded<()> {
     if depth > CBOR_DEPTH {
         return super::resource("optional metadata nested too deep");
     }
@@ -1866,6 +1866,9 @@ pub struct Member {
     pub extension: bool,
     pub key_text: String,
     pub value: String,
+    /// The key and the value as they are encoded, whole whatever `cut` is.
+    pub key_cbor: Vec<u8>,
+    pub value_cbor: Vec<u8>,
     /// The value's text, where it is an `aqr-text` (of a comment, say).
     pub text: Option<Vec<u8>>,
     /// The value's fields, where it is a map of integers to byte strings (`zip-extras`).
@@ -1903,7 +1906,9 @@ pub(crate) fn members(d: &[u8], n: usize, cut: Option<usize>) -> Decoded<(Vec<Me
             _ => None,
         };
         let text = aqr_text(v).ok().map(Cow::into_owned);
-        Ok((Member { key, extension, key_text: diagnostic(&d[k0..k1], cut), value, text, fields }, k))
+        let (key_cbor, value_cbor) = (d[k0..k1].to_vec(), d[k1..*at].to_vec());
+        let key_text = diagnostic(&key_cbor, cut);
+        Ok((Member { key, extension, key_text, value, key_cbor, value_cbor, text, fields }, k))
     };
     let mut at = 0;
     let (major, _, arg) = head_of(d, &mut at)?;
@@ -2093,7 +2098,7 @@ fn diag_item(d: &[u8], at: &mut usize, cut: Option<usize>, out: &mut String, dep
 }
 
 /// An IEEE 754 half-precision float's value.
-fn half(h: u16) -> f64 {
+pub(crate) fn half(h: u16) -> f64 {
     let (sign, exp, frac) = (if h >> 15 != 0 { -1.0 } else { 1.0 }, (h >> 10) & 0x1f, (h & 0x3ff) as f64);
     sign * match exp {
         0 => frac * 2f64.powi(-24),
@@ -2146,8 +2151,9 @@ pub(crate) enum Read {
         major: u64,
         minor: u64,
     },
-    /// A special entry this crate does not take (a tombstone or one undefined), by its kind.
-    Special(u64),
+    /// A special entry this crate does not take (a tombstone or one undefined), by its kind
+    /// and `special_data` (empty of a tombstone).
+    Special(u64, Vec<u8>),
 }
 
 /// Reads the internal structure of a metadata block.
@@ -2245,7 +2251,7 @@ pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec
                     q += t + 1;
                     Read::Link(target)
                 }
-                0 => Read::Special(0),
+                0 => Read::Special(0, Vec::new()),
                 2 => Read::Fifo,
                 kind @ 3..=4 => {
                     let major = super::leb(e, &mut q)?;
@@ -2253,8 +2259,9 @@ pub(crate) fn read_with(d: &[u8], wanted: &mut dyn FnMut(&Entries) -> Option<Vec
                     Read::Device { block: kind == 4, major, minor }
                 }
                 kind => {
+                    let data = e[q..].to_vec();
                     q = e.len();
-                    Read::Special(kind)
+                    Read::Special(kind, data)
                 }
             }
         };

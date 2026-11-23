@@ -357,7 +357,7 @@ fn entry_of(s: &mut String, i: &Inspection, k: usize, e: &Entry) -> aqr_archive:
             format!("a {} device {major},{minor}", if block { "block" } else { "character" })
         }
         Node::Tombstone => "a tombstone (removing what was there)".into(),
-        Node::Special(kind) => format!("a special entry of kind {kind}, not known"),
+        Node::Special(kind, _) => format!("a special entry of kind {kind}, not known"),
     };
     let _ = write!(s, "    {what}");
     if e.number > 0 {

@@ -157,8 +157,8 @@ pub enum Node {
         minor: u64,
     },
     Tombstone,
-    /// Of a kind undefined.
-    Special(u64),
+    /// Of a kind undefined, and its `special_data`.
+    Special(u64, Vec<u8>),
 }
 
 /// What an entry of a segment is in the archive as it is, segments merged
@@ -413,8 +413,8 @@ fn read_metadata(
             tree::Read::Link(t) => Node::Link(t),
             tree::Read::Fifo => Node::Fifo,
             tree::Read::Device { block, major, minor } => Node::Device { block, major, minor },
-            tree::Read::Special(0) => Node::Tombstone,
-            tree::Read::Special(kind) => Node::Special(kind),
+            tree::Read::Special(0, _) => Node::Tombstone,
+            tree::Read::Special(kind, data) => Node::Special(kind, data),
         };
         paths.push(names.clone());
         entry(seg, k, parent, node, names);

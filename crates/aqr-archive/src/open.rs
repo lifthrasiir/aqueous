@@ -1125,14 +1125,14 @@ pub(crate) fn tree_of(
             tree::Read::Link(target) => EntryNode::Link(target),
             tree::Read::Fifo => EntryNode::Fifo,
             tree::Read::Device { block, major, minor } => EntryNode::Device { block, major, minor },
-            tree::Read::Special(0) => {
+            tree::Read::Special(0, _) => {
                 if m.given[k] {
                     return invalid("a tombstone of an extra");
                 }
                 tombstones.push((parent_index, name));
                 continue;
             }
-            tree::Read::Special(kind) => EntryNode::Special(kind),
+            tree::Read::Special(kind, _) => EntryNode::Special(kind),
         };
         index[k] = Some(t.entries.len());
         given.push(m.given[k]);

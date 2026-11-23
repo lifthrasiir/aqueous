@@ -47,6 +47,7 @@ mod evaluate;
 pub mod fuzzing;
 mod index;
 pub mod inspect;
+pub mod interpret;
 mod level;
 mod listing;
 mod locate;
