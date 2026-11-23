@@ -177,7 +177,7 @@ pub(crate) fn located<'c>(c: &'c [u8], input: &Path, quiet: bool) -> &'c [u8] {
 }
 
 /// `n` bytes, told.
-fn bytes_of(n: u64) -> String {
+pub(crate) fn bytes_of(n: u64) -> String {
     if n == 1 { "1 byte".into() } else { format!("{n} bytes") }
 }
 

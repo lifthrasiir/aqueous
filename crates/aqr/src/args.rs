@@ -50,6 +50,14 @@ pub(crate) struct Args {
     /// it holds (`--compact`).
     pub(crate) edit: Option<edit::Edit>,
     pub(crate) compact: bool,
+    /// `--convert`: each input written again as an Aqueous archive ([`convert`]); `-P` and `-A`
+    /// put on, or taken off by `--no-passphrase` and `--no-archival`.
+    pub(crate) convert: bool,
+    pub(crate) no_passphrase: bool,
+    pub(crate) no_archival: bool,
+    /// The options given that change how the files are compressed (`-l`, `-S`, ...): not for an
+    /// Aqueous archive converted, which is not compressed again.
+    pub(crate) recompressing: Vec<&'static str>,
     /// `-L`: compressing, the links found (and given) followed, archived as what they lead to.
     pub(crate) dereference: bool,
     /// What is not commonly kept of the metadata kept too ([`meta`]).
@@ -88,8 +96,9 @@ pub(crate) struct Args {
     pub(crate) passphrase: bool,
     /// Compressing, what is left out of the inputs (`-x`).
     pub(crate) exclude: Exclude,
-    /// `--passphrase-from`: where `-P`'s passphrase is taken (implying it).
-    pub(crate) pass_from: Option<pass::Source>,
+    /// `--passphrase-from`: where `-P`'s passphrase is taken (implying it); of `--convert`, where
+    /// the input's and `-P`'s are, as many as are needed (not implying `-P`).
+    pub(crate) pass_from: Vec<pass::Source>,
     /// `--each`: decompressing or listing, every input an archive.
     each: bool,
     /// Decompressing (or listing) some paths of the archive: each path (names as the tree has them), and
@@ -230,6 +239,10 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         sync: false,
         edit: None,
         compact: false,
+        convert: false,
+        no_passphrase: false,
+        no_archival: false,
+        recompressing: Vec::new(),
         dereference: false,
         preserve: false,
         mark: None,
@@ -247,7 +260,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         format: Pack::Aqr,
         level: None,
         passphrase: false,
-        pass_from: None,
+        pass_from: Vec::new(),
         exclude: Exclude::default(),
         each: false,
         select: None,
@@ -304,6 +317,9 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "--delete" => a.edit = Some(edit::Edit::Delete),
             "--move" => a.edit = Some(edit::Edit::Move),
             "--compact" => a.compact = true,
+            "--convert" => a.convert = true,
+            "--no-passphrase" => a.no_passphrase = true,
+            "--no-archival" => a.no_archival = true,
             "-Z" => zopts.push(text(value("-Z")?)),
             "-o" | "--output" => a.output = Some(value("-o")?.into()),
             "-C" | "--directory" => {
@@ -336,7 +352,10 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "-v" | "--verbose" => a.verbose = true,
             "-T" | "--threads" => a.opt.threads = text(value("-T")?).parse().map_err(|_| "-T takes a number")?,
             "-M" | "--memory" => memory = Some(text(value("-M")?)),
-            "-l" | "--level" => a.level = Some(text(value("-l")?)),
+            "-l" | "--level" => {
+                a.level = Some(text(value("-l")?));
+                a.recompressing.push("-l");
+            }
             "--format" => {
                 sfx = false;
                 format = Some(match &*text(value("--format")?) {
@@ -354,21 +373,31 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
                     },
                 })
             }
-            "--depth" => a.opt.depth = text(value("--depth")?).parse().map_err(|_| "--depth takes a number")?,
+            "--depth" => {
+                a.recompressing.push("--depth");
+                a.opt.depth = text(value("--depth")?).parse().map_err(|_| "--depth takes a number")?
+            }
             "-B" | "--batch" => {
+                a.recompressing.push("-B");
                 a.opt.batch = size_of(&text(value("-B")?)).ok_or("-B takes a size (64M, 1G, ...)")?.max(1);
                 a.batch_given = true;
             }
             "-b" | "--block-size" => {
+                a.recompressing.push("-b");
                 a.opt.block = size_of(&text(value("-b")?)).ok_or("-b takes a size (64K, 1M, ...)")?.max(1)
             }
             "-S" | "--segment-size" => {
+                a.recompressing.push("-S");
                 a.opt.segment = size_of(&text(value("-S")?)).ok_or("-S takes a size (64M, 1G, ...)")?
             }
-            "-D" | "--dictionaries" => a.opt.dictionaries = true,
+            "-D" | "--dictionaries" => {
+                a.recompressing.push("-D");
+                a.opt.dictionaries = true
+            }
             "-A" | "--archival" => a.opt.mirrors = true,
             "--no-check" => a.opt.verify = false,
             "--lossy" => {
+                a.recompressing.push("--lossy");
                 lossy = Some(text(value("--lossy (what may be lost: CLASS[,CLASS...], of coding, slack, all)")?))
             }
             "--stats" => match inline.take() {
@@ -391,8 +420,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "--setup-autocomplete" => return Err("--setup-autocomplete is a command alone (no other argument)".into()),
             "-P" | "--passphrase" => a.passphrase = true,
             "--passphrase-from" => {
-                a.pass_from = Some(pass::Source::parse(&value("--passphrase-from")?)?);
-                a.passphrase = true;
+                a.pass_from = pass::Source::parse_list(&value("--passphrase-from")?)?;
             }
             "--each" => a.each = true,
             "-x" | "--exclude" => a.exclude.add(&value("-x")?)?,
@@ -415,12 +443,32 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "--bad-names" => a.names.bad = names::Opts::bad(&text(value("--bad-names")?))?,
             "--links" => a.links = extract::Links::parse(&text(value("--links")?))?,
             // -0 to -9, and whatever level of more digits there may be (one level, not several)
-            s if s.len() > 1 && s[1..].bytes().all(|b| b.is_ascii_digit()) => a.level = Some(s[1..].to_string()),
+            s if s.len() > 1 && s[1..].bytes().all(|b| b.is_ascii_digit()) => {
+                a.level = Some(s[1..].to_string());
+                a.recompressing.push("-l");
+            }
             s => return Err(format!("unknown option {s}")),
         }
         if inline.is_some() {
             return Err(format!("{s} takes no value"));
         }
+    }
+    // (`--passphrase-from` of one source implies `-P`, but of `--convert`, where `-P` tells
+    // whether a new one is needed: two are its alone)
+    if !a.convert && !a.pass_from.is_empty() {
+        if a.pass_from.len() > 1 {
+            return Err(
+                "--passphrase-from: two sources (apart by ;) are of --convert alone (a path of a ;: fd:N)".into()
+            );
+        }
+        a.passphrase = true;
+    }
+    // (elsewhere they ask for what is the default, but against -P and -A)
+    if a.passphrase && a.no_passphrase {
+        return Err("-P with --no-passphrase".into());
+    }
+    if a.opt.mirrors && a.no_archival {
+        return Err("-A with --no-archival".into());
     }
     // (compressing, there is no archive's mark to give, nor one to make)
     if !a.decompress
@@ -517,6 +565,10 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         if let Some((_, what)) = reading.iter().find(|m| m.0) {
             return Err(format!("{o} with {what} (it is of an archive written)"));
         }
+    }
+    if a.convert {
+        convert_args(&mut a, renames, last_dir.is_some())?;
+        return Ok(a);
     }
     if a.edit.is_some() || a.compact {
         edit_args(&mut a, renames, last_dir.is_some())?;
@@ -680,7 +732,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     if a.decompress && a.output.is_some() && a.inputs.len() > 1 && !a.auto_dir {
         return Err("-o with several archives to decompress".into());
     }
-    if list_stdin && (a.inputs.iter().any(|i| stdio::is(i)) || a.pass_from == Some(pass::Source::Stdin)) {
+    if list_stdin && (a.inputs.iter().any(|i| stdio::is(i)) || a.pass_from.contains(&pass::Source::Stdin)) {
         return Err("--files-from - with standard input taken otherwise too".into());
     }
     stdio_args(&mut a)?;
@@ -713,7 +765,7 @@ fn edit_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<
         (a.list, "-t"),
         (a.info, "-I"),
         (a.append, a.verb()),
-        (a.passphrase || a.pass_from.is_some(), "-P (an encrypted archive is not edited)"),
+        (a.passphrase, "-P (an encrypted archive is not edited: --convert takes its encryption off)"),
         (a.opt.mirrors, "-A"),
         (a.journal.is_some(), "-j"),
         (a.output.is_some(), "-o"),
@@ -756,6 +808,58 @@ fn edit_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<
         && let Some(k) = sel.paths.iter().position(|p| p.1.is_none())
     {
         return Err(format!("--move: {} without --rename TO after it", sel.shown(k)));
+    }
+    if let Some(l) = &a.level {
+        a.opt.level = l.parse()?;
+    }
+    Ok(())
+}
+
+/// Of [`parse`], converting archives ([`convert`]): the inputs, checked against the other options
+/// given (`dir`: `-C` given).
+fn convert_args(a: &mut Args, renames: Vec<(usize, PathBuf)>, dir: bool) -> Result<(), String> {
+    let modes = [
+        (a.decompress && !a.test, "-d"),
+        (a.test, "-K"),
+        (a.list, "-t"),
+        (a.info, "-I"),
+        (a.append, a.verb()),
+        (a.edit.is_some(), a.edit.map_or("", edit::Edit::option)),
+        (a.compact, "--compact (--convert keeps the archive as it is, but with --keep-since or --drop-history)"),
+        (a.tag.is_some(), "--tag"),
+        (a.history, "--history"),
+        (a.diff, "--diff"),
+        (a.at.is_some(), "--at"),
+        (a.from.is_some(), "--from"),
+        (a.journal.is_some(), "-j"),
+        (dir, "-C"),
+        (a.rm, "--rm"),
+        (a.each, "--each"),
+        (a.dereference, "-L"),
+        (a.auto_dir, "--auto-dir"),
+        (a.json, "--json"),
+        (!renames.is_empty(), "--rename"),
+        (hooks(a).is_some(), hooks(a).unwrap_or("")),
+        (a.format != Pack::Aqr, "--format (it writes Aqueous archives)"),
+        (!a.exclude.names.is_empty() || !a.exclude.paths.is_empty(), "-x"),
+    ];
+    if let Some((_, what)) = modes.iter().find(|m| m.0) {
+        return Err(format!("--convert with {what}"));
+    }
+    if a.keep_since.is_some() && a.drop_history {
+        return Err("--keep-since with --drop-history".into());
+    }
+    if a.pass_from.len() > 2 {
+        return Err("--passphrase-from: at most two sources (the input's;-P's)".into());
+    }
+    if a.inputs.iter().any(|i| stdio::is(i)) {
+        return Err("--convert: an archive in a file, not - (standard input)".into());
+    }
+    if a.output.as_ref().is_some_and(|o| stdio::is(o)) {
+        return Err("--convert: -o to a file, not - (standard output)".into());
+    }
+    if a.output.is_some() && a.inputs.len() > 1 {
+        return Err("--convert: -o with several inputs".into());
     }
     if let Some(l) = &a.level {
         a.opt.level = l.parse()?;
@@ -847,7 +951,7 @@ fn stdio_args(a: &mut Args) -> Result<(), String> {
     if a.stdin && a.rm {
         return Err("--rm with - (standard input)".into());
     }
-    if a.stdin && a.passphrase && a.pass_from.as_ref().is_none_or(|f| *f == pass::Source::Stdin) {
+    if a.stdin && a.passphrase && a.pass_from.first().is_none_or(|f| *f == pass::Source::Stdin) {
         // (a line of standard input, or the terminal: neither to be taken where it is the input)
         return Err("-P with - (standard input): the passphrase is read from it (--passphrase-from)".into());
     }

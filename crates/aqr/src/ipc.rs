@@ -55,6 +55,8 @@
 //!   or not), `null` to give up. Compressing with `-P` (`mode` `compress`, `path` null, to be
 //!   typed twice as `confirm` tells); decompressing, as `-P` begins (`path` null) or as archive
 //!   `path` needs one, `again` where the one before was wrong. An archive given up on fails.
+//!   Converting (`--convert`), the input's as decompressing (`mode` `decompress`, or
+//!   `convert` asked once of standard input), then `-P`'s (`mode` `convert-new`, `confirm`).
 //!
 //! Every question but `passphrase` has an option that answers it before it is asked (`overwrite`: `-f`), and an
 //! answer where nobody is asked (an error, as without `--ipc`): a frontend that does not take

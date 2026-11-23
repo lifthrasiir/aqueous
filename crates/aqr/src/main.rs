@@ -6,7 +6,8 @@
 //!
 //! aqr -d \[OPTIONS\] ARCHIVE [PATH [--rename TO]]...; aqr -d --each \[OPTIONS\] ARCHIVE...; aqr -t [-q | -v] ARCHIVE \[PATH\]...;
 //! aqr -t --each [-q | -v] ARCHIVE...; aqr --delete [--compact] [-q] ARCHIVE PATH...;
-//! aqr --move [-q | -v] ARCHIVE PATH --rename TO...; aqr --compact [-q | -v] ARCHIVE
+//! aqr --move [-q | -v] ARCHIVE PATH --rename TO...; aqr --compact [-q | -v] ARCHIVE;
+//! aqr --convert [-P | --no-passphrase] [-A | --no-archival] [-o OUTPUT] ARCHIVE...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -128,6 +129,15 @@
 //!   tombstones). Not of an archive of mirror blocks (`-A`) for now. Of an archive with journal
 //!   points, `--keep-since SPEC` keeps those from the one it picks on (the segments before it
 //!   written as one state, the others as they are), `--drop-history` none ([`aqr_archive::History`]).
+//! - `--convert ARCHIVE...`: each Aqueous archive written again ([`convert`],
+//!   `docs/convert-design.md`), nothing compressed again: encrypted (`-P`, a new passphrase
+//!   asked for after the input's) or decrypted (`--no-passphrase`), mirrored (`-A`) or not
+//!   (`--no-archival`), as the input is where neither is given; its segments and journal points as
+//!   they are (but as `--keep-since` and `--drop-history` tell, as of `--compact`); repaired
+//!   where damaged, its mirror blocks restoring what they can (what would lose a file is not
+//!   written). In place (beside it and checked first), or to `-o`; nothing to change, nothing
+//!   written. `--passphrase-from` gives as many sources as passphrases are needed, the input's
+//!   then `-P`'s apart by `;`. Of other formats, not yet.
 //! - `--move ARCHIVE PATH --rename TO...`: each path moved to its `TO` (in the order given, the
 //!   directories on the way made, without their metadata), the archive written again as
 //!   `--compact` writes it, as a segment cannot take the contents of another but by an import
@@ -141,7 +151,8 @@
 //!   (implying `-P`) takes it from a line of standard input (`stdin`), of a file descriptor
 //!   (`fd:N`) or of a file (any other path), or an environment variable's value (`env:NAME`),
 //!   nothing asked for (decompressing, the archives it does not open fail). An empty passphrase
-//!   is a passphrase too.
+//!   is a passphrase too. One source alone: two, apart by `;`, are `--convert`'s (a path of a
+//!   `;` is given as `fd:N`).
 //! - `-E`, `--normalize`, `--bad-names`: decompressing, how the archives' names are written
 //!   ([`names`], `docs/names-design.md`): names of no declared encoding decoded from the set
 //!   given, guessed (`auto`), or kept as bytes (`raw`); Unicode names composed (`auto`: but on
@@ -282,6 +293,7 @@ mod append;
 mod args;
 mod complete;
 mod compress;
+mod convert;
 mod decompress;
 mod edit;
 mod exit;
@@ -338,6 +350,7 @@ usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr --delete [--compact] [-q] ARCHIVE PATH...
        aqr --move [-q | -v] ARCHIVE PATH --rename TO...
        aqr --compact [-q | -v] [--keep-since SPEC | --drop-history] ARCHIVE
+       aqr --convert [-P | --no-passphrase] [-A | --no-archival] [-o OUTPUT] ARCHIVE...
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -365,6 +378,15 @@ Modes:
                         those from the one SPEC picks (as --at) on, with their states;
                         what was before is written as one state
       --drop-history    with --compact: keep no point, and none of the states between
+      --convert         write an Aqueous archive again (in place, or to -o), nothing
+                        compressed again: encrypted or decrypted, mirrored or not, as
+                        -P, --no-passphrase, -A and --no-archival tell (else as it is),
+                        repaired where damaged; --keep-since and --drop-history as of
+                        --compact; --passphrase-from SOURCE;SOURCE for the input's and
+                        -P's
+      --no-passphrase   with --convert: the archive written decrypted (else no -P)
+      --no-archival     with --convert: the archive written without mirror blocks (else
+                        no -A)
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -430,6 +452,7 @@ Compression:
                         -P, its passphrase a line of standard input (stdin), of a file
                         descriptor (fd:N) or of a file (a path; ./env:x for env:x), or
                         an environment variable's value (env:NAME); nothing asked
+                        (no ; in it: --convert's two sources are apart by one)
   -l, --level LEVEL, -0 ... -9
                         0 (uncompressed), 1 (zstd alone) to 9; low, mid (default), high
                         are 2, 5 and 8; zstdN is zstd level N with recompression as mid
@@ -569,7 +592,13 @@ fn main() -> ExitCode {
         },
         false => args,
     };
-    if let Err(e) = pass::init(args.passphrase, !args.decompress && !args.list && !args.info, args.pass_from.as_ref()) {
+    // (of --convert, asked for as each archive needs them: [`convert`])
+    let (given, from) = match args.convert {
+        true => (false, None),
+        false => (args.passphrase, args.pass_from.first()),
+    };
+    let compressing = !(args.decompress || args.list || args.info || args.history || args.diff || args.tag.is_some());
+    if let Err(e) = pass::init(given, compressing, from) {
         eprintln!("aqr: {e}");
         ipc::tell(serde_json::json!({"event": "error", "message": e}));
         // (none given: none to open an archive with)
@@ -581,6 +610,7 @@ fn main() -> ExitCode {
     }
     aqr_common::pool::init(args.opt.threads);
     let r = aqr_common::pool::run(|| match () {
+        _ if args.convert => convert::convert_all(&args),
         _ if args.edit.is_some() || args.compact => edit::edit(&args),
         _ if args.info => info::info(&args),
         _ if args.tag.is_some() => journal::tag_all(&args),

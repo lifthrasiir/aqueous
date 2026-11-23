@@ -205,7 +205,7 @@ pub fn at_of(spec: &str) -> Result<At, String> {
 pub fn upto(input: &Path, bytes: &[u8], at: &At, quiet: bool) -> Result<usize, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     if aqr_archive::envelope::is_encrypted(bytes) {
-        return Err(err(&"--at: an encrypted archive has no journal (it is not appended to)"));
+        return Err(err(&"--at: not of an encrypted archive yet (--convert --no-passphrase makes it plain)"));
     }
     let archive = aqr_archive::open(bytes, &aqr_archive::NoModules).map_err(|e| err(&e))?;
     let points = archive.journal();
@@ -389,7 +389,7 @@ pub fn diff_all(a: &crate::Args) -> Result<(), String> {
     let c = crate::map_archive(input, &input.display())?;
     let bytes = crate::located(&c, input, a.quiet);
     if aqr_archive::envelope::is_encrypted(bytes) {
-        return Err(err(&"an encrypted archive has no journal (it is not appended to)"));
+        return Err(err(&"--diff: not of an encrypted archive yet (--convert --no-passphrase makes it plain)"));
     }
     let whole = aqr_archive::open(bytes, &aqr_archive::NoModules).map_err(|e| err(&e))?;
     let points = whole.journal();
@@ -481,10 +481,16 @@ fn compare(
 /// The points of archive `bytes` (of `input`) listed, one on a line: its number, time and label.
 pub fn history(input: &Path, bytes: &[u8], json: bool) -> Result<String, String> {
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
-    if aqr_archive::envelope::is_encrypted(bytes) {
-        return Err(err(&"an encrypted archive has no journal (it is not appended to)"));
-    }
-    let archive = aqr_archive::open(bytes, &aqr_archive::NoModules).map_err(|e| err(&e))?;
+    // (an encrypted archive has the journal of the archive it was made of: `--convert -P`)
+    let decrypting = match aqr_archive::envelope::is_encrypted(bytes) {
+        true => Some(crate::decompress::unlock(bytes, input)?),
+        false => None,
+    };
+    let archive = match &decrypting {
+        Some(d) => aqr_archive::open_decrypting(d, &aqr_archive::NoModules),
+        None => aqr_archive::open(bytes, &aqr_archive::NoModules),
+    };
+    let archive = archive.map_err(|e| err(&e))?;
     if json {
         // (a line: the archive and its points, none maybe)
         let points: Vec<serde_json::Value> = (archive.journal().iter().enumerate())

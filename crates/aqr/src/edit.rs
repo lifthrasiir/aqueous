@@ -204,6 +204,19 @@ fn checked(a: &Args, part: &PathBuf, lead: usize, t: &Tree, sizes: &[u64], made:
         sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
     };
     let archive = aqr_archive::open(&c[lead..], &decoder).map_err(|e| e.to_string())?;
+    holds(a, &archive, t, sizes, made)
+}
+
+/// Whether `archive` (written again) holds tree `t` (its contents of `sizes`): its paths, their
+/// kinds and metadata, and the bytes of each content; and whether the leaves `made` again
+/// evaluate, their checksums verified.
+pub(crate) fn holds(
+    a: &Args,
+    archive: &aqr_archive::Archive,
+    t: &Tree,
+    sizes: &[u64],
+    made: &[usize],
+) -> Result<(), String> {
     if !made.is_empty() {
         let mut only = vec![false; archive.leaves_len()];
         made.iter().for_each(|&l| only[l] = true);

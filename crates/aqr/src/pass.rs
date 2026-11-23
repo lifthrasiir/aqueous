@@ -2,6 +2,9 @@
 //! asked for as an archive needs one, decompressing: on the terminal, its echo off, or of the
 //! frontend ([`crate::ipc`], the question `passphrase`). Without a terminal, `-P` takes a line
 //! of standard input; `--passphrase-from` takes it from where it tells instead ([`Source`]).
+//! `--convert` needs up to two: the input's (before), then `-P`'s (after: [`new`]), each asked
+//! for by a prompt of its own, read in that order from standard input, or from two sources
+//! given as `SOURCE;SOURCE` ([`Source::parse_list`]).
 //! Any passphrase is taken, an empty one too (as PDF's), and those that
 //! open an archive are tried first on the archives after it.
 
@@ -74,6 +77,15 @@ pub enum Source {
 }
 
 impl Source {
+    /// The sources of `--passphrase-from`, apart by `;` (the input's, then `-P`'s, of
+    /// `--convert`): a path with a semicolon is given as `fd:N`.
+    pub fn parse_list(v: &std::ffi::OsStr) -> Result<Vec<Source>, String> {
+        let b = v.as_encoded_bytes();
+        // SAFETY: split at ASCII, of an `OsStr`'s bytes
+        let part = |p: &[u8]| unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(p) }.to_owned();
+        b.split(|&c| c == b';').map(|p| Source::parse(&part(p))).collect()
+    }
+
     pub fn parse(v: &std::ffi::OsStr) -> Result<Source, String> {
         let b = v.as_encoded_bytes();
         Ok(if b == b"stdin" {
@@ -212,6 +224,52 @@ impl Keys {
         }
         Ok(None)
     }
+}
+
+/// Of `--convert`, what `open` gives of the passphrase of encrypted archive `path` (the one
+/// before): of `from` where it is given, else of a line of standard input where there is no
+/// terminal nor frontend, else as [`Keys::open`] has it (asked for again where wrong). `Ok(None)`
+/// where none opens it.
+pub fn before<T>(
+    path: &Path,
+    from: Option<&Source>,
+    mut open: impl FnMut(&[u8]) -> Result<Option<T>, String>,
+) -> Result<Option<T>, String> {
+    match (from, asker()) {
+        (Some(f), _) => open(&f.read()?),
+        (None, Asker::Input) => match ask(Asker::Input, Some(path), "convert", false, false)? {
+            Some(p) => open(&p),
+            None => Ok(None),
+        },
+        (None, _) => keys().open(path, open),
+    }
+}
+
+/// Of `--convert -P`, the new passphrase of archive `path` (the one after): of `from` where it
+/// is given, else asked for (twice on a terminal, by a prompt telling it apart from the one
+/// before, and for the frontend to confirm), or a line of standard input.
+pub fn new(path: &Path, from: Option<&Source>) -> Result<Vec<u8>, String> {
+    if let Some(f) = from {
+        return f.read();
+    }
+    let asker = asker();
+    let p = match asker {
+        Asker::Terminal => {
+            let mut got = None;
+            for _ in 0..TRIES {
+                let Some(p) = terminal::read(&format!("New passphrase for {}: ", path.display()))? else { break };
+                let Some(q) = terminal::read("New passphrase again: ")? else { break };
+                if p == q {
+                    got = Some(p);
+                    break;
+                }
+                eprintln!("the passphrases differ");
+            }
+            got
+        }
+        _ => ask(asker, Some(path), "convert-new", false, true)?,
+    };
+    p.ok_or_else(|| "no new passphrase given".into())
 }
 
 /// A passphrase asked for by `asker` (of archive `path`, where there is one), for `mode`;

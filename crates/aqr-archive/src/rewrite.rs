@@ -22,12 +22,18 @@
 //! last of them. Extension keys are carried as they are ([`Extra::extensions`]); members of
 //! integer keys of no meaning known would be lost, so an archive having any is not written
 //! again.
+//!
+//! Written again whole ([`History::Whole`]: `aqr --convert`), every segment is as it was, but for
+//! the blocks of no segment (spacer, mirror and size hint blocks) and the footer; what is around
+//! the blocks may then be changed ([`Layers`]): mirror blocks written as `aqr -c -A` writes them,
+//! and the size hint block of an encrypted archive's payload.
 
 use std::collections::HashMap;
 use std::io::Write;
 
 use aqr_common::varint;
 
+use super::mirror::{FAR, Mirroring};
 use super::segment::Copied;
 use super::tree::{Entry, EntryNode, Extra, Journal, SegmentInfo, Status, Tree};
 use super::{
@@ -65,6 +71,43 @@ pub enum History {
     /// whose metadata block is at `from` (the first point's) written again as one state, those
     /// after it as they are.
     Keep { from: usize, since: u64 },
+    /// Every segment written as it is (its entries, tombstones, `segment-status`, `journal` and
+    /// archive-wide members, its blocks all copied): the archive as it was, but for what is
+    /// around its blocks ([`Layers`]). The tree given is not used.
+    Whole,
+}
+
+/// What is written around the blocks of an archive written again ([`rewrite_layered`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Layers {
+    /// Mirror blocks, as `aqr -c -A` writes them ([`Mirroring`]; the last metadata block's before
+    /// the last [`FAR`] bytes, [`SegmentWriter::finish_mirrored`]).
+    pub mirrors: bool,
+    /// A size hint block after the header, to be filled in, as an encrypted archive's payload has
+    /// to begin ([`super::envelope::Sealer`]); its mirror blocks then placed as in a payload.
+    pub size_hint: bool,
+}
+
+/// Where [`rewrite_layered`] writes: as it is, or through [`Mirroring`].
+enum Sink<'a> {
+    Plain(&'a mut dyn Write),
+    Mirrored(Mirroring<&'a mut dyn Write>),
+}
+
+impl Write for Sink<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sink::Plain(w) => w.write(buf),
+            Sink::Mirrored(m) => m.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::Plain(w) => w.flush(),
+            Sink::Mirrored(m) => m.flush(),
+        }
+    }
 }
 
 /// What a block of the archive is, as it is written again.
@@ -80,9 +123,9 @@ enum Kind {
 
 /// Archive `c` (an unencrypted standalone archive of a tree, as it is located) written again
 /// to `out` of tree `t`: the archive's tree ([`super::Archive::tree`]), edited (entries taken
-/// away, moved, their extras changed), its contents those of the archive (module).
-/// Fails on an archive of mirror blocks, or of metadata this crate does not read, and on a tree
-/// of no entries.
+/// away, moved, their extras changed), its contents those of the archive (module). Its mirror
+/// blocks, if any, are left out. Fails on an archive of metadata this crate does not read, and on
+/// a tree of no entries.
 pub fn rewrite(c: &[u8], t: &Tree, level: Level, threads: usize, out: &mut dyn Write) -> Result<Rewritten> {
     rewrite_as(c, t, level, threads, out, History::Refuse)
 }
@@ -99,6 +142,21 @@ pub fn rewrite_as(
     out: &mut dyn Write,
     history: History,
 ) -> Result<Rewritten> {
+    rewrite_layered(c, t, level, threads, out, history, Layers::default())
+}
+
+/// [`rewrite_as`], what is around the blocks written as `layers` tells. [`Rewritten::len`] counts
+/// the mirror blocks too.
+pub fn rewrite_layered(
+    c: &[u8],
+    t: &Tree,
+    level: Level,
+    threads: usize,
+    out: &mut dyn Write,
+    history: History,
+    layers: Layers,
+) -> Result<Rewritten> {
+    let whole = history == History::Whole;
     let fail = |f: Failure| Error::new(f.to_string());
     if !c.starts_with(&HEADER_MAGIC) {
         return Err(Error::new("not a standalone archive"));
@@ -113,6 +171,10 @@ pub fn rewrite_as(
     // (the segments before the first point kept, as one state; and each segment as it is told)
     let mut infos: Vec<SegmentInfo> = Vec::new();
     let base_n = match keeping {
+        None if whole => {
+            opened_with(c, false, false, None, Some(&mut infos)).map_err(fail)?;
+            0
+        }
         Some((from, _)) => {
             opened_with(c, false, false, None, Some(&mut infos)).map_err(fail)?;
             let at = |s: &super::Segmented| s.metadata.as_ref().map(|m| m.0);
@@ -121,7 +183,7 @@ pub fn rewrite_as(
         }
         None => blocks.segments.len(),
     };
-    let t = if keeping.is_some() { &own } else { t };
+    let t = if keeping.is_some() || whole { &own } else { t };
     if t.entries.is_empty() {
         return Err(Error::new("nothing left in it"));
     }
@@ -148,9 +210,7 @@ pub fn rewrite_as(
             0x51..=0x57 => Kind::Aux(Copied::Dictionary),
             0x61..=0x63 => Kind::Aux(Copied::Module),
             0x64..=0x67 => Kind::Aux(Copied::Resource),
-            _ if super::mirror::is_mirror(ty) => {
-                return Err(Error::new("an archive of mirror blocks (-A) is not written again yet"));
-            }
+            _ if super::mirror::is_mirror(ty) => Kind::Dropped,
             0x00..=0x04 => Kind::Dropped,
             _ if !critical(ty) => Kind::Dropped,
             _ => return Err(Error::new(format!("a block of type {ty:#x} not written again"))),
@@ -199,7 +259,10 @@ pub fn rewrite_as(
             false => Err(Error::new("an entry of contents of several segments")),
         }
     };
-    let homes = all.iter().map(|cs| home(cs)).collect::<Result<Vec<usize>>>()?;
+    let homes = match whole {
+        true => Vec::new(),
+        false => all.iter().map(|cs| home(cs)).collect::<Result<Vec<usize>>>()?,
+    };
 
     let enc = Encoder::with_threads(level, threads);
     // (the segments written: those of the state, then those after it as they are, but for those
@@ -217,8 +280,9 @@ pub fn rewrite_as(
             Some(o) => (&mut o.status, &mut o.journal),
             None => (&mut base_status, &mut base_journal),
         };
-        let merged =
-            names_again(&blocks.segments[s], told) && told.journal.iter().all(|p| journal.iter().all(|q| q.0 != p.0));
+        let merged = !whole
+            && names_again(&blocks.segments[s], told)
+            && told.journal.iter().all(|p| journal.iter().all(|q| q.0 != p.0));
         match merged {
             true => {
                 journal.extend(told.journal.iter().cloned());
@@ -228,12 +292,26 @@ pub fn rewrite_as(
             false => outs.push(Out { s, status: told.status, journal: told.journal.clone() }),
         }
     }
-    let (base, total) = (kept.len().max(1), kept.len().max(1) + outs.len());
+    let base = if whole { 0 } else { kept.len().max(1) };
+    let total = base + outs.len();
     let mut r = Rewritten { segments: (total, blocks.segments.len()), ..Rewritten::default() };
-    let mut w = SegmentWriter::new();
+    let mut w = SegmentWriter::with_size_hint(layers.size_hint);
     let io = |e: std::io::Error| Error::new(e.to_string());
+    let mut out = match layers.mirrors {
+        true => Sink::Mirrored(Mirroring::new(out, layers.size_hint)),
+        false => Sink::Plain(out),
+    };
     out.write_all(w.head()).map_err(io)?;
+    // (the bytes written but for the mirror blocks, and those before the last metadata block's:
+    // [`Mirroring::added`] counts the others)
     let mut written = w.len() as u64;
+    let mut front_mirror = 0;
+    // (with mirror blocks, the last segment's blocks held back, the last [`FAR`] bytes of them, for
+    // the last metadata block's mirror block to come before them; and where the metadata block
+    // before ended, for those of the segments closed to come before the next one's)
+    let mut held: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+    let mut held_len = 0;
+    let mut metadata_end: Option<u64> = None;
     let mut leaf_at = vec![usize::MAX; blocks.leaves.len()];
     let mut leaves_written = 0;
     for n in 0..total {
@@ -319,12 +397,30 @@ pub fn rewrite_as(
                     Kind::Dropped => continue,
                 };
                 let bytes = made.as_deref().unwrap_or(bytes);
-                out.write_all(bytes).map_err(io)?;
                 w.copied(what, bytes.len());
                 written += bytes.len() as u64;
+                if layers.mirrors && n + 1 == total {
+                    held_len += bytes.len();
+                    held.push_back(bytes.to_vec());
+                    while let Some(b) = held.front()
+                        && (held_len - b.len()) as u64 >= FAR
+                    {
+                        out.write_all(b).map_err(io)?;
+                        held_len -= b.len();
+                        held.pop_front();
+                    }
+                } else {
+                    out.write_all(bytes).map_err(io)?;
+                }
             }
         }
         // the entries of the segment
+        if let (Some(end), Sink::Mirrored(m)) = (metadata_end, &mut out)
+            && n + 1 < total
+        {
+            let k = m.mirror_before(end).map_err(io)? as usize;
+            w.skip(k);
+        }
         let (st, contents) = match n < base {
             true => segment_tree(t, &homes, n, &|k| {
                 let (l, output, size) = refs[k];
@@ -338,6 +434,7 @@ pub fn rewrite_as(
         // (the writing's end and the points: of the segment ended at, for the one the state is
         // of; as they were, after it)
         let (status, journal) = match keeping {
+            None if whole => (outs[n].status, std::mem::take(&mut outs[n].journal)),
             None => (if n + 1 == total { Status::Complete } else { Status::None }, Vec::new()),
             Some(_) if n + 1 == base => (base_status, std::mem::take(&mut base_journal)),
             Some(_) if n < base => (Status::None, Vec::new()),
@@ -346,19 +443,39 @@ pub fn rewrite_as(
         w.set_journal(journal)?;
         // (the archive-wide members: those of the state, merged, in its last segment; as they were,
         // after it)
-        match n.cmp(&(base - 1)) {
+        match n.cmp(&base.wrapping_sub(1)) {
+            _ if whole => w.set_archive_extra(infos[outs[n].s].archive.clone())?,
             std::cmp::Ordering::Less => {}
             std::cmp::Ordering::Equal => w.set_archive_extra(std::mem::take(&mut archive))?,
             std::cmp::Ordering::Greater => w.set_archive_extra(infos[outs[n - base].s].archive.clone())?,
         }
-        let end = match n + 1 == total {
-            false => w.close_as(&enc, &st, &contents, status)?,
-            true => w.finish_as(&enc, &st, &contents, status)?.0,
+        if n + 1 < total {
+            let end = w.close_as(&enc, &st, &contents, status)?;
+            out.write_all(&end).map_err(io)?;
+            written += end.len() as u64;
+            metadata_end = Some(w.len() as u64);
+            continue;
+        }
+        let front = w.len() - held_len;
+        let mirrored = match layers.mirrors {
+            true => w.finish_mirrored(&enc, &st, &contents, front, layers.size_hint, status)?,
+            false => None,
         };
+        let (mirror, end) = match mirrored {
+            Some(m) => m,
+            None => (Vec::new(), w.finish_as(&enc, &st, &contents, status)?.0),
+        };
+        out.write_all(&mirror).map_err(io)?;
+        held.iter().try_for_each(|b| out.write_all(b)).map_err(io)?;
         out.write_all(&end).map_err(io)?;
-        written += end.len() as u64;
+        (written, front_mirror) = (written + end.len() as u64, mirror.len() as u64);
     }
-    r.len = written;
+    out.flush().map_err(io)?;
+    let added = match &out {
+        Sink::Mirrored(m) => m.added(),
+        Sink::Plain(_) => 0,
+    };
+    r.len = written + front_mirror + added;
     Ok(r)
 }
 
@@ -814,6 +931,91 @@ mod tests {
         for (e, k) in got.entries.iter().zip(1..) {
             assert_eq!(e.extra.comment.as_deref(), Some(format!("file {k}").as_bytes()));
             assert_eq!(e.extra.zip_extras, [(0x7075, vec![k as u8][..].into()), (-1 - 0x7075, Vec::new().into())]);
+        }
+    }
+
+    /// An archive of three segments (a file each, the last of a tombstone of the first's too),
+    /// the second telling a journal point and an archive comment.
+    fn segmented() -> Vec<u8> {
+        use super::super::tree::ArchiveExtra;
+        let mut f = Formula::default();
+        let names = ["a", "b", "c"];
+        let lits: Vec<Node> = names.iter().map(|n| f.push(*n, text(n.len() as u64 + 9, 20_000))).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut c = SegmentWriter::header().to_vec();
+        for (k, name) in names.iter().enumerate() {
+            let b = w.batch(&enc, &f, &[Leaf { outputs: vec![lits[k].clone()], sums: vec![None] }]).unwrap();
+            w.commit(&b);
+            c.extend_from_slice(b.blocks());
+            let file = Entry {
+                parent: None,
+                name: name.as_bytes().to_vec(),
+                node: EntryNode::File(0),
+                extra: Extra::default(),
+            };
+            let mut entries = vec![file];
+            if k == 2 {
+                entries.push(Entry::tombstone(None, b"a".to_vec()));
+            }
+            let t = Tree { root: Extra::default(), entries };
+            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 20_000 }];
+            if k == 1 {
+                w.set_journal(vec![(1_700_000_000_000, "one".into())]).unwrap();
+                w.set_archive_extra(ArchiveExtra { comment: Some(b"hi"[..].into()), extensions: Vec::new() }).unwrap();
+            }
+            match k {
+                2 => c.extend_from_slice(&w.finish_as(&enc, &t, &contents, Status::Complete).unwrap().0),
+                _ => c.extend_from_slice(&w.close_as(&enc, &t, &contents, Status::None).unwrap()),
+            }
+        }
+        c
+    }
+
+    fn whole(c: &[u8], layers: Layers) -> (Vec<u8>, Rewritten) {
+        let mut out = Vec::new();
+        let r = rewrite_layered(c, &Tree::default(), Level::Zstd(3), 1, &mut out, History::Whole, layers).unwrap();
+        assert_eq!(r.len, out.len() as u64);
+        (out, r)
+    }
+
+    /// Written again whole, an archive of several segments, a journal point and a tombstone is the
+    /// same, byte for byte; with mirror blocks, mirrored, and the same again once they are left out.
+    #[test]
+    fn whole_as_it_is() {
+        let c = segmented();
+        let (out, r) = whole(&c, Layers::default());
+        assert_eq!(out, c);
+        assert_eq!(r.segments, (3, 3));
+        let (m, _) = whole(&c, Layers { mirrors: true, size_hint: false });
+        assert!(m.len() > c.len());
+        let check = super::super::mirror::check(&m);
+        assert!(check.mirrored(&m, false), "{check:?}");
+        let Ok(Value::Tree(got, files)) = decode_value(&m, &natives()) else { panic!() };
+        let Ok(Value::Tree(want, files_want)) = decode_value(&c, &natives()) else { panic!() };
+        assert_eq!((got, files), (want, files_want));
+        assert_eq!(open(&m, &natives()).unwrap().journal().len(), 1);
+        assert_eq!(whole(&m, Layers::default()).0, c);
+        // (the metadata block's mirror block before the last segment's blocks, as `-c -A` has it)
+        let (_, meta) = footer_of(&m).unwrap();
+        let found = check.mirrors.iter().find(|f| Some(f.target) == meta).unwrap();
+        assert!(found.at < found.target, "{found:?}");
+    }
+
+    /// Of a size hint block, mirrored as in a payload, the archive sealed opens and decrypts to
+    /// an archive that is the one written again, as it was.
+    #[test]
+    fn whole_sealed() {
+        use super::super::envelope;
+        let c = segmented();
+        for mirrors in [false, true] {
+            let mut s = envelope::Sealer::new(std::io::Cursor::new(Vec::new()), b"p", 12, mirrors).unwrap();
+            let layers = Layers { mirrors, size_hint: true };
+            rewrite_layered(&c, &Tree::default(), Level::Zstd(3), 1, &mut s, History::Whole, layers).unwrap();
+            let sealed = s.into_inner().unwrap().into_inner();
+            let d = envelope::open(&sealed).unwrap().unlock(b"p").unwrap().decrypt(1).unwrap();
+            assert_eq!(super::super::mirror::check(&d).mirrored(&d, true), mirrors);
+            assert_eq!(whole(&d, Layers::default()).0, c);
         }
     }
 

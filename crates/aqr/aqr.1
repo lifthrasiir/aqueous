@@ -56,6 +56,12 @@
 .Fl -compact
 .Op Fl q | v
 .Ar archive
+.Nm
+.Fl -convert
+.Op Fl P | -no-passphrase
+.Op Fl A | -no-archival
+.Op Fl o Ar output
+.Ar archive ...
 .Nm unaqr
 .Op Ar options
 .Ar archive
@@ -192,8 +198,50 @@ Archives of mirror blocks
 are not written again yet.
 .Fl v
 tells the blocks left out.
-.Fl v
-gives the unknown metadata uncut.
+.It Fl -convert
+Write each Aqueous archive again, compressing nothing again: encrypted with a new passphrase
+.Pq Fl P ,
+asked for after the archive's own, or decrypted
+.Pq Fl -no-passphrase ,
+given mirror blocks
+.Pq Fl A
+or not
+.Pq Fl -no-archival ;
+what is not given is kept as the archive has it (an encrypted archive sealed again with its
+passphrase).
+Its segments and journal points are kept as they are, but as
+.Fl -keep-since
+and
+.Fl -drop-history
+tell, as of
+.Fl -compact .
+A damaged archive is repaired as it is written, from its mirror blocks; one that would lose a
+file so is not written
+.Pq Fl d No salvages what is left .
+It is written beside the archive, checked, and put in its place by a rename, or written to
+.Fl o ;
+with nothing to change, nothing is written.
+An archive after other bytes (a self-extracting program's) is not converted, nor are archives
+of other formats yet.
+.Fl -passphrase-from
+gives as many sources as passphrases are needed: the archive's, then
+.Fl P Ns 's ,
+apart by
+.Ql \&; .
+.It Fl -no-passphrase
+With
+.Fl -convert :
+write the archive decrypted.
+Elsewhere it does nothing (the default), but with
+.Fl P
+it is an error.
+.It Fl -no-archival
+With
+.Fl -convert :
+write the archive without mirror blocks.
+Elsewhere it does nothing (the default), but with
+.Fl A
+it is an error.
 .El
 .Ss Inputs
 .Bl -tag -width Ds
