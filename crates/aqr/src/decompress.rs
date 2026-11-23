@@ -953,7 +953,7 @@ pub(crate) fn unlock<'c>(c: &'c [u8], input: &Path) -> Result<aqr_archive::envel
     let unlocked = pass::keys().open(input, |p| match e.unlock(p) {
         Ok(u) => Ok(Some(u)),
         Err(Failure::Decryption(_)) => Ok(None),
-        Err(f) => Err(err(&f)),
+        Err(f) => Err(err(&exit::seen(f))),
     })?;
     match unlocked {
         Some(u) => Ok(u.decrypting()),
