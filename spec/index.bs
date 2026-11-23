@@ -1246,7 +1246,7 @@ An <dfn>archive value</dfn> is a [=struct=] with the following [=struct/items=]:
 
 * <dfn for="archive value">root</dfn>, either a [=directory node=] or a [=file node=].
     The latter represents a single unnamed file.
-* <dfn for="archive value">extra</dfn>, an [=ordered map=] from integers to CBOR data items [[!RFC8949]]
+* <dfn for="archive value">extra</dfn>, an [=ordered map=] from integers and text strings (the keys of `aqr-opt-metadata`) to CBOR data items [[!RFC8949]]
     representing the archive-wide part of the [[#optional-metadata|optional metadata]].
 
 A <dfn>file node</dfn> is a [=struct=] with the following [=struct/items=]:
