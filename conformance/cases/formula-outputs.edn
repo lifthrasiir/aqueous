@@ -1,0 +1,44 @@
+# A formula block of several outputs, numbered from the bottom of the stack; files take them by
+# file_offset + 1 and file_output.
+{
+  "title": "Outputs of a formula block",
+  "spec": ["#formula-evaluation", "#insn-split", "#insn-swap", "#insn-nop", "#metadata-block"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'onetwothree'},
+            {"opcode": "Split", "split_sizes": [3, 3, 5]},
+            {"opcode": "Swap", "swap_depth": 2},
+            {"opcode": "Nop"},
+            {"opcode": "Swap", "swap_depth": 0},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0, 0],
+        "file_params": [
+          {"file_offset": ["f", "meta"]},
+          {"file_offset": ["f", "meta", 1], "file_output": 0},
+          {"file_offset": ["f", "meta", 1], "file_output": 1},
+          {"file_offset": ["f", "meta", 1], "file_output": 1},
+        ],
+        "entries": [
+          {"entry_name": "x", "original_size": undefined},
+          {"entry_name": "y", "original_size": undefined},
+          {"entry_name": "z", "original_size": undefined},
+          {"entry_name": "z2", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "x": {"content": 'three'}, "y": {"content": 'two'}, "z": {"content": 'one'}, "z2": {"content": 'one'},
+  }}},
+}

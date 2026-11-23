@@ -1,0 +1,36 @@
+# Slices of the non-leaf blocks after a formula block, concatenated.
+{
+  "title": "Slices of non-leaf blocks",
+  "spec": ["#formula-data", "#insn-slice", "#insn-concat", "#content-blocks", "#block-order"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0, 0],
+          "instructions": [
+            {"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 7},
+            {"opcode": "Slice", "slice_block": 1, "slice_start": 10, "slice_length": 5},
+            {"opcode": "Concatenate", "concat_count": 2},
+          ],
+        }},
+      }}}]),
+      # non-leaf, uncompressed: 0100 00 00
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'Hello, '}}},
+      # non-leaf, Zstandard: 0100 01 00
+      {"type": 0x44, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": 'brave new world'},
+      }}},
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'Hello, world'}}}},
+}

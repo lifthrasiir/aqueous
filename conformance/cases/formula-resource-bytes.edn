@@ -1,0 +1,31 @@
+# ResourceBytes pushes the data of a resource block as stored, not its decoded data.
+{
+  "title": "ResourceBytes",
+  "spec": ["#insn-resource-bytes", "#resource-block"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x64, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": [{"block_type": "Raw_Block", "content": 'res'}],
+      }}},
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "resource_indices": [0],
+          "instructions": [{"opcode": "ResourceBytes", "resource_bytes_resource": 0}],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  # original_size_shrink 3, the window descriptor, the raw block and its XXH64
+  "interpreted": {"root": {"children": {"a": {"content": h'0003 00 190000 726573 e792f6ec3241f3ce'}}}},
+}

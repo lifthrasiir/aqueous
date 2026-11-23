@@ -1,0 +1,17 @@
+# A wtf-8 link target is valid WTF-8.
+{
+  "title": "A link target not WTF-8",
+  "spec": ["#archive-model", "#metadata-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [],
+        "entries": [{"entry_name": "l", "special_kind": 1, "link_target": 80000(h'2f ff')}],
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

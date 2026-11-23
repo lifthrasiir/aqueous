@@ -1,0 +1,30 @@
+# What committing an appending leaves: the old footer a spacer block, a segment after it.
+{
+  "title": "An archive appended to",
+  "spec": ["#appending", "#spacer-block", "#segments"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": '1'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": {-3: {}},
+      }}}}]),
+      # the old footer (10 bytes) and its padding, zeroed after its first 2 bytes
+      {"type": 0, "size": 10, "data": {}},
+      80001(["b2", {"type": 0x20, "data": {"uncompressed_data": {"data": '2'}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b2", "m2"]}],
+        "entries": [{"entry_name": "b", "original_size": undefined}],
+        "optional_metadata": {-3: true},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": '1'}, "b": {"content": '2'}}}},
+}

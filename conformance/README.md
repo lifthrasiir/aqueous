@@ -5,14 +5,21 @@ archive written field by field in EDN, and the archive value or failure they int
 
 - `case.cddl` — the case format and its notation (labels, differences, inference).
 - `cases/*.edn` — the cases.
+- `cases/data/` — contents too long to write in a case (`80003(path)`).
 - `tools/assemble.py CASE.edn [-o OUT]` — makes the bytes of a case (Python 3, no packages).
-  A prototype: unencrypted archives of spacer, size hint, metadata and data blocks; any other
-  block is given as its bytes.
+  Unencrypted archives of every block but recovery blocks (given as their bytes); module blocks of
+  the stored form. What it infers of a formula block (num_outputs, sizes, checksums) it takes from
+  running the formula on what it knows; a Compressed_Block tells what it decodes to (`decoded`).
 - `tools/check.py [CASE.edn...]` — checks the cases against `aqr -Z interpret` (through
   `cargo aqr`; `--aqr` for another command), which prints the archive value an archive is
   interpreted to in the notation of `case.cddl`: the failure by its exit code, an archive value
-  in full (extras, forks, the order of every map; link groups up to a renaming). A case given a
-  base is skipped.
+  in full (extras, forks, the order of every map; link groups up to a renaming). An overlay
+  archive given a base is skipped.
 
-Left: bases (overlay archives), encrypted archives, formulas and modules, imports, mirror and
-recovery blocks, partial access, and the suites of extraction and of compressors.
+The cases are named by what they test, `fail-*` and `unsupported-*` those of a failure. A case
+that `aqr` doesn't pass is not wrong for that: `check.py` lists where `aqr` differs from the
+specification as well as where a case is wrong.
+
+Left: encrypted archives, modules (Apply instructions, split modules, registered entries known),
+mirrored encrypted archives, recovery, partial access, and the suites of extraction and of
+compressors.

@@ -1,0 +1,56 @@
+# Patch decompresses Zstandard blocks with the source as a raw content dictionary: raw and RLE
+# blocks, a compressed block matching the source, and the empty final raw block that drops a source.
+{
+  "title": "Patch instructions",
+  "spec": ["#insn-patch"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": ''},
+            {"opcode": "Literal", "literal_data": h'290000 68656c6c6f'},    # raw, last: 'hello'
+            {"opcode": "Patch"},
+            {"opcode": "Literal", "literal_data": 'abc'},
+            {"opcode": "Literal", "literal_data": h'230000 7a'},            # RLE of 4, last
+            {"opcode": "Patch"},
+            {"opcode": "Literal", "literal_data": 'The quick brown fox jumps over the lazy dog. '},
+            {"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 18},
+            {"opcode": "Patch", "patch_size": 65},
+            {"opcode": "Literal", "literal_data": 'dropped'},
+            {"opcode": "Literal", "literal_data": h'010000'},
+            {"opcode": "Patch"},
+          ],
+        }},
+      }}}]),
+      # by zstd --patch-from, a compressed block
+      {"type": 0x40, "data": {"uncompressed_data": {"data": h'7d0000 38546361742e202102002051b0546c'}}},
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0, 0],
+        "file_params": [
+          {"file_offset": ["f", "meta"]},
+          {"file_offset": ["f", "meta", 1], "file_output": 0},
+          {"file_offset": ["f", "meta", 1], "file_output": 1},
+          {"file_offset": ["f", "meta", 1], "file_output": 2},
+        ],
+        "entries": [
+          {"entry_name": "raw", "original_size": undefined},
+          {"entry_name": "rle", "original_size": undefined},
+          {"entry_name": "compressed", "original_size": 65},
+          {"entry_name": "dropped", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "raw": {"content": 'hello'},
+    "rle": {"content": 'zzzz'},
+    "compressed": {"content": 'The quick brown fox jumps over the lazy cat. The quick brown fox!'},
+    "dropped": {"content": ''},
+  }}},
+}

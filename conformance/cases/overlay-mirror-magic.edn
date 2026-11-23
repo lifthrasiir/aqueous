@@ -1,0 +1,22 @@
+# An overlay archive's mirror blocks have OVERLAY_MIRROR_MAGIC; one of MIRROR_MAGIC is not intact,
+# which is no failure: mirror blocks don't affect interpreting.
+{
+  "title": "A standalone mirror block in an overlay archive",
+  "spec": ["#mirror-block", "#interpretation"],
+  "level": 0,
+  "base": {"root": {"children": {}}},
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+      80001(["m", {"type": 0xC10, "data": {"mirror_magic": "MIRROR_MAGIC", "target_offset": ["meta", "m"]}}]),
+    ],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'x'}}}},
+}

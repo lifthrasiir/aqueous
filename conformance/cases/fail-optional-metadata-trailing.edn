@@ -1,0 +1,19 @@
+# The optional metadata is a single CBOR item, without bytes after it.
+{
+  "title": "Bytes after the optional metadata",
+  "spec": ["#optional-metadata"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": 80000(h'a000'),
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

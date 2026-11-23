@@ -1,0 +1,19 @@
+# A key of zip-extras is a header ID (0..65535) or its central one (-65536..-1).
+{
+  "title": "A ZIP extra field of no header ID",
+  "spec": ["#optional-metadata", "#zip-extras"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": {-2: [null, {-100: {65536: h''}}]},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

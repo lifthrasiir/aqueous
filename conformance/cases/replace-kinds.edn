@@ -1,0 +1,47 @@
+# A later segment replaces nodes by nodes of other kinds: a directory by a file (losing its
+# children), a file by a directory, a directory by a link, a file by an unknown node.
+{
+  "title": "Nodes replaced by other kinds",
+  "spec": ["#segment-merging"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": '1'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 1, 0, 2, 0],
+        "file_params": [
+          {"file_offset": ["b1", "m1"]}, {"file_offset": ["b1", "m1"]},
+          {"file_offset": ["b1", "m1"]}, {"file_offset": ["b1", "m1"]},
+        ],
+        "entries": [
+          {"entry_name": "d"}, {"entry_name": "h"},
+          {"entry_name": "f", "original_size": undefined},
+          {"entry_name": "g", "original_size": undefined},
+          {"entry_name": "i", "original_size": undefined},
+          {"entry_name": "u", "original_size": undefined},
+        ],
+      }}}}]),
+      80001(["b2", {"type": 0x20, "data": {"uncompressed_data": {"data": '2'}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [0, 1, 0, 0],
+        "file_params": [{"file_offset": ["b2", "m2"]}, {"file_offset": ["b2", "m2"]}],
+        "entries": [
+          {"entry_name": "g"},
+          {"entry_name": "d", "original_size": undefined},
+          {"entry_name": "j", "original_size": undefined},
+          {"entry_name": "h", "special_kind": 1, "link_target": "d"},
+          {"entry_name": "u", "special_kind": 7, "special_data": 'seven'},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "d": {"content": '2'},
+    "h": {"target": "d"},
+    "g": {"children": {"j": {"content": '2'}}},
+    "u": {"kind": 7, "data": 'seven'},
+  }}},
+}

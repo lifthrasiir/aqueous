@@ -1,0 +1,14 @@
+# A size hint block is the first block after the header, if any.
+{
+  "title": "A size hint block not first",
+  "spec": ["#size-hint-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}},
+      {"type": 0x04, "data": {}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

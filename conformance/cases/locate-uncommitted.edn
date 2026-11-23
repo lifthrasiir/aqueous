@@ -1,0 +1,31 @@
+# A footer directly after a metadata block, other than the footer at the end, is what appending
+# leaves while it writes: the archive still ends there, and the segment after it is trailing bytes.
+{
+  "title": "An appending not committed",
+  "spec": ["#locating-an-archive", "#appending"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'committed'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": {-3: true},
+      }}}}]),
+      # the footer of the archive before the appending (no block: it ends the archive found)
+      h'fdaaaede8512020026220200',
+      80001(["b2", {"type": 0x20, "data": {"uncompressed_data": {"data": 'appended'}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b2", "m2"]}],
+        "entries": [{"entry_name": "b", "original_size": undefined}],
+        "optional_metadata": {-3: true},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'committed'}}}},
+}

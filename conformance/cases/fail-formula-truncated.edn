@@ -1,0 +1,27 @@
+# An instruction cut short at the end of the formula data.
+{
+  "title": "A truncated instruction",
+  "spec": ["#formula-data", "#insn-literal"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {
+        "num_outputs": 1,
+        "formula_data": {
+          "compression_params": {"window_descriptor": 0},
+          "data": {"decoded": {
+            "block_ordinal_deltas": [],
+            "instructions": h'01 05 616263',   # a Literal of 5 bytes, 3 there
+          }},
+        },
+      }}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": 5}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

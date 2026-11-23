@@ -1,0 +1,25 @@
+# A dictionary's content is 8 bytes at least.
+{
+  "title": "A dictionary of 7 bytes",
+  "spec": ["#dictionary-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x51, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"content": '7 bytes'}},
+      }}},
+      80001(["d", {"type": 0x30, "data": {
+        "dictionary_index": 0,
+        "compressed_data": {"compression_params": {"window_descriptor": 0}, "data": {"decoded": 'x'}},
+      }}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["d", "meta"]}],
+        "entries": [{"entry_name": "d", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

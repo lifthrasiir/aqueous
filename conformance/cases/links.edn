@@ -1,0 +1,32 @@
+# Link targets are paths of any form, never resolved: `..`, `.`, absolute, empty components,
+# raw bytes and lone surrogates.
+{
+  "title": "Link nodes",
+  "spec": ["#archive-model", "#metadata-block", "#windows-extras"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0, 0, 0],
+        "file_params": [],
+        "entries": [
+          {"entry_name": "up", "special_kind": 1, "link_target": "../a/./b"},
+          {"entry_name": "abs", "special_kind": 1, "link_target": "/etc//passwd"},
+          {"entry_name": "raw", "special_kind": 1, "link_target": h'ff2f'},
+          {"entry_name": "lone", "special_kind": 1, "link_target": 273(h'eda080')},
+          {"entry_name": "win", "special_kind": 1, "link_target": "C:/Windows"},
+        ],
+        "optional_metadata": {-2: [null, null, null, null, null, {-60: 1}]},
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "up": {"target": "../a/./b"},
+    "abs": {"target": "/etc//passwd"},
+    "raw": {"target": h'ff2f'},
+    "lone": {"target": 273(h'eda080')},
+    "win": {"target": "C:/Windows", "extra": {-60: 1}},
+  }}},
+}

@@ -1,0 +1,28 @@
+# A Split makes one piece at least, even of an empty item.
+{
+  "title": "A Split of no pieces",
+  "spec": ["#insn-split"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'abc'},
+            {"opcode": "Literal", "literal_data": ''},
+            {"opcode": "Split", "split_sizes": []},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

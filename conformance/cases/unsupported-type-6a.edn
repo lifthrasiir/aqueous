@@ -1,0 +1,14 @@
+# The reserved critical type 6A (after the type of the overlay header).
+{
+  "title": "A reserved critical block of type 6A",
+  "spec": ["#reserved-blocks", "#block-types"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x6A, "data": h'00'},
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "unsupported",
+}

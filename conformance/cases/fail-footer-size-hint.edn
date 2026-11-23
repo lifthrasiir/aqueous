@@ -1,0 +1,12 @@
+# The footer's size_hint has to be the length between the header and the footer.
+{
+  "title": "A wrong size hint in the footer",
+  "spec": ["#unencrypted-archive"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}],
+    "footer_magic": "FOOTER_MAGIC",
+    "size_hint": 2,
+  },
+  "interpreted": "invalid",
+}

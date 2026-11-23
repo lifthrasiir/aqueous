@@ -1,0 +1,14 @@
+# The reserved critical type 05 (after the size hint block).
+{
+  "title": "A reserved critical block of type 05",
+  "spec": ["#reserved-blocks", "#block-types"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x05, "data": h'00'},
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "unsupported",
+}

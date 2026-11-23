@@ -1,0 +1,30 @@
+# Zstandard data of raw, RLE and compressed blocks, and of a window of 2 KiB.
+{
+  "title": "Zstandard blocks",
+  "spec": ["#zstandard-compression-method", "#shared-external-structure", "#block-contents"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x2C, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": [
+          {"block_type": "Raw_Block", "content": 'ab'},
+          {"block_type": "RLE_Block", "block_size": 5, "content": 'c'},
+          # by zstd -19
+          {"block_type": "Compressed_Block", "content":
+              h'd86162632c2074686520717569636b2062726f776e20666f783b2061020024250f43e706',
+           "decoded": 'abcabcabcabcabcabcabcabcabcabc, the quick brown fox; abcabcabcabcabc'},
+          {"block_type": "Raw_Block", "content": 'z'},
+        ],
+      }}},
+      # Window_Size 2 KiB: a block of 1100 bytes
+      {"type": 0x28, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0x08},
+        "data": [{"block_type": "RLE_Block", "block_size": 1100, "content": '-'}],
+      }}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"content": 80003("data/zstd-blocks.bin")}},
+}

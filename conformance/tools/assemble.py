@@ -4,8 +4,8 @@
 
 Writes `leading`, the archive and `trailing` to OUT (CASE with `.aqr`, by default).
 
-A prototype: unencrypted archives of spacer, size hint, metadata and data blocks, and any block
-given as its bytes. Labels are resolved by assembling again until they stay where they were.
+A prototype: unencrypted archives of spacer, size hint, metadata, data, dictionary, import,
+module (the stored form), resource, formula and mirror blocks, and any block given as its bytes. Labels are resolved by assembling again until they stay where they were.
 """
 
 import os
@@ -21,6 +21,15 @@ CONSTANTS = {
     "OVERLAY_HEADER_MAGIC": bytes.fromhex("690D15AFF6B2"),
     "FOOTER_MAGIC": bytes.fromhex("FDAAAEDE8512"),
     "OVERLAY_FOOTER_MAGIC": bytes.fromhex("FC0F6E7B4BAC"),
+    "MIRROR_MAGIC": bytes.fromhex("02AAF5FEBA2BAE23"),
+    "OVERLAY_MIRROR_MAGIC": bytes.fromhex("010534FABD11AF53"),
+    "RECOVERY_MAGIC": bytes.fromhex("690AD179CD157AB6"),
+    "OVERLAY_RECOVERY_MAGIC": bytes.fromhex("45E73455EAF2E10D"),
+}
+
+OPCODES = {
+    "Nop": 0x00, "Literal": 0x01, "ModuleBytes": 0x02, "ResourceBytes": 0x03, "Swap": 0x0F, "Slice": 0x10,
+    "Concatenate": 0x12, "Pack": 0x13, "Split": 0x14, "Patch": 0x15, "Apply": 0x16, "Checksum": 0x20,
 }
 
 ZSTD_BLOCK_TYPES = {"Raw_Block": 0, "RLE_Block": 1, "Compressed_Block": 2, "Reserved": 3}
@@ -122,6 +131,8 @@ class Assembler:
             self.info = {}
             self.spaces = 0
             self.unresolved = False
+            self.info["blocks"] = {}
+            self.info["items"] = []
             out = self.case_bytes(case)
             if not self.unresolved and self.cur == self.prev and self.info == self.prev_info:
                 return out
@@ -249,6 +260,7 @@ class Assembler:
         self.magic(w, a, "header_magic")
         self.archive_start = len(w)
         self.segment = []
+        self.seg_no = 0
         self.last_meta = None
         self.prev_meta = None
         self.header_end = len(w)
@@ -296,13 +308,21 @@ class Assembler:
         tw = Writer()
         self.put_num(tw, b, "type", leb128)
         kind, info = classify(t) if isinstance(t, int) else ("given", {})
+        width = [1, 2, 4, 8][t % 4] if isinstance(t, int) else None
+        given_size = self.num(b.get("size", UNDEFINED), "size")
+
+        def header(n):
+            """The bytes of the type and size fields of `n` bytes of data, as they are written."""
+            n = given_size if isinstance(given_size, int) else n
+            return bytes(tw.buf) + ule(n, width)
 
         data = Writer()
         content = {}
-        self.field(data, b["data"], lambda d, v: self.block_data(d, v, t, kind, info, b, start, content))
+        self.field(
+            data, b["data"], lambda d, v: self.block_data(d, v, t, kind, info, b, start, content, header)
+        )
 
         w.append(tw)
-        width = [1, 2, 4, 8][t % 4] if isinstance(t, int) else None
         if width is None and is_infer(b.get("size", UNDEFINED)):
             raise CaseError("size: can't be inferred of a type given as bytes")
         self.put_num(w, b, "size", lambda n: ule(n, width), len(data))
@@ -310,14 +330,25 @@ class Assembler:
         odd = (len(w) - start) % 2 == 1
         if odd or "padding" in b:
             self.put_num(w, b, "padding", lambda n: ule(n, 1), 0)
+        self.info["blocks"][start] = (t if isinstance(t, int) else None, bytes(data.buf))
+        content["stored"] = bytes(data.buf)
         if kind == "metadata":
             self.last_meta = start
             self.prev_meta = start
             self.segment = []
+            self.seg_no += 1
+        elif kind == "shorthand":
+            self.segment.append((start, "dictionary" if t == 0x50 else "module", info, content))
         elif kind in ("data", "dictionary", "module", "resource", "formula", "import"):
             self.segment.append((start, kind, info, content))
+            if kind == "data" and not info["leaf"]:
+                d = content.get("bytes")
+                self.info["items"].append((self.seg_no, start, None if d is None else len(d), d))
+            elif kind == "import":
+                for size in content.get("imports", []):
+                    self.info["items"].append((self.seg_no, start, size, None))
 
-    def block_data(self, w, v, t, kind, info, b, start, content):
+    def block_data(self, w, v, t, kind, info, b, start, content, header):
         if is_raw(v) or (isinstance(v, Tag) and v.tag == EXT):
             w.put(self.bytes_of(v, "data"))
             content["unknown"] = True
@@ -343,12 +374,28 @@ class Assembler:
             if info["dictionary"]:
                 content["dictionary"] = self.put_num(w, v, "dictionary_index", leb128)
             if info["compressed"]:
-                d = self.field(w, v["compressed_data"], lambda w, x: self.compressed(w, x, self.plain, True))
+                d = self.field(
+                    w, v["compressed_data"], lambda w, x: self.compressed(w, x, self.plain, info["checksum"])
+                )
             else:
                 d = self.field(
                     w, v["uncompressed_data"], lambda w, x: self.uncompressed(w, x, self.plain, info["checksum"])
                 )
             content["bytes"] = d
+        elif kind == "dictionary":
+            content["bytes"] = self.field(
+                w, v["compressed_data"], lambda w, x: self.compressed(w, x, self.dictionary, True)
+            )
+        elif kind in ("module", "resource"):
+            content["bytes"] = self.field(w, v["compressed_data"], lambda w, x: self.compressed(w, x, self.plain, True))
+        elif kind == "import":
+            sizes = []
+            self.field(w, v["compressed_data"], lambda w, x: self.compressed(w, x, lambda w, m: self.imports(w, m, sizes), True))
+            content["imports"] = sizes
+        elif kind == "formula":
+            self.formula(w, v, info, start, content)
+        elif kind == "mirror":
+            self.mirror(w, v, t, start, header)
         else:
             raise CaseError(f"block type {t:#x}: give its data as bytes (not assembled yet)")
 
@@ -447,13 +494,298 @@ class Assembler:
                 size = len(c)
             w.put((size << 3 | bt << 1 | last).to_bytes(3, "little"))
             w.put(c)
-            if bt == 0:
+            if "decoded" in blk:
+                out += self.bytes_of(blk["decoded"], "decoded")
+            elif bt == 0:
                 out += c
             elif bt == 1:
                 out += c * size
             else:
                 known = False
         return bytes(out) if known else None
+
+    # --- Dictionary, import, formula and mirror blocks
+
+    def dictionary(self, w, v):
+        if is_raw(v):
+            w.put(raw_bytes(v))
+            return
+        if "entropy_tables" in v:
+            self.field(w, v["entropy_tables"], lambda w, x: w.put(self.bytes_of(x, "entropy_tables")))
+        if "repeat_offsets" in v:
+
+            def go(w, lst):
+                if is_raw(lst):
+                    w.put(raw_bytes(lst))
+                    return
+                for x in lst:
+                    self.put_num(w, x, "repeat_offsets", lambda n: ule(n, 4))
+
+            self.field(w, v["repeat_offsets"], go)
+        self.field(w, v["content"], lambda w, x: w.put(self.bytes_of(x, "content")))
+
+    def imports(self, w, m, sizes):
+        if is_raw(m):
+            w.put(raw_bytes(m))
+            return
+        lst = self.unlabel(m["imports"])
+        self.put_num(w, m, "num_imports", leb128, len(lst) if isinstance(lst, list) else None)
+
+        def go(w, lst):
+            if is_raw(lst):
+                w.put(raw_bytes(lst))
+                return
+            for imp in lst:
+                self.field(w, imp, lambda w, i: self.import_(w, i, sizes))
+
+        self.field(w, m["imports"], go)
+
+    def import_(self, w, i, sizes):
+        if is_raw(i):
+            w.put(raw_bytes(i))
+            sizes.append(None)
+            return
+        self.field(w, i["import_path"], lambda w, x: w.put(text_field(x)))
+        self.put_num(w, i, "import_path_sentinel", lambda n: ule(n, 1), 0)
+        self.put_num(w, i, "import_offset", leb128)
+        sizes.append(self.put_num(w, i, "import_size", leb128))
+
+        def go(w, x):
+            if is_infer(x):
+                raise CaseError("import_checksum: give it (it is not inferred from the preceding result yet)")
+            w.put(self.bytes_of(x, "import_checksum"))
+
+        self.field(w, i.get("import_checksum", UNDEFINED), go)
+
+    def formula(self, w, v, info, start, content):
+        if info["dictionary"]:
+            content["dictionary"] = self.put_num(w, v, "dictionary_index", leb128)
+        # the items following the formula block in its segment, as the previous pass found them
+        if "items" in self.prev_info:
+            items = [(n, d) for seg, s, n, d in self.prev_info["items"] if seg == self.seg_no and s > start]
+        else:
+            self.unresolved = True
+            items = []
+        state = {}
+        fd = Writer()
+        enc = lambda w, f: self.formula_data(w, f, items, state)
+        self.field(fd, v["formula_data"], lambda w, x: self.compressed(w, x, enc, True))
+        stack = state.get("stack")
+        self.put_num(w, v, "num_outputs", leb128, None if stack is None else len(stack))
+        w.append(fd)
+        content["outputs"] = stack
+
+    def formula_data(self, w, f, items, state):
+        if is_raw(f):
+            w.put(raw_bytes(f))
+            return
+        lists = {}
+        for count, key in (
+            ("num_blocks", "block_ordinal_deltas"),
+            ("num_resources", "resource_indices"),
+            ("num_modules", "module_indices"),
+        ):
+            lists[key] = self.put_list_field(w, f, count, key)
+
+        # the referenced items as (length, bytes), what is not known None
+        refs = []
+        o = -1
+        for delta in lists["block_ordinal_deltas"] or []:
+            o = o + 1 + delta if isinstance(delta, int) and o is not None else None
+            refs.append(items[o] if o is not None and 0 <= o < len(items) else (None, None))
+        auxiliary = {k: [c for _, kind, _, c in self.segment if kind == k] for k in ("module", "resource")}
+
+        def aux(kind, i):
+            idx = lists[kind + "_indices"]
+            if idx is None or not isinstance(i, int) or i >= len(idx) or not isinstance(idx[i], int):
+                return None
+            blocks = auxiliary[kind]
+            return blocks[idx[i]].get("stored") if idx[i] < len(blocks) else None
+
+        stack = [[]]
+
+        def go(w, insns):
+            if is_raw(insns):
+                w.put(raw_bytes(insns))
+                stack[0] = None
+                return
+            for insn in insns:
+                self.field(w, insn, lambda w, i: self.instruction(w, i, stack, refs, aux))
+
+        self.field(w, f["instructions"], go)
+        state["stack"] = stack[0]
+
+    def instruction(self, w, i, stack_ref, refs, aux):
+        """Writes an instruction, running it on the stack of (length, bytes) as far as they are known."""
+        stack = stack_ref[0]
+        if is_raw(i):
+            w.put(raw_bytes(i))
+            stack_ref[0] = None
+            return
+        op = i["opcode"]
+        if op not in OPCODES:
+            raise CaseError(f"unknown opcode {op!r}")
+        w.put(bytes([OPCODES[op]]))
+
+        def pop(n):
+            if stack is None or not isinstance(n, int) or len(stack) < n:
+                stack_ref[0] = None
+                return None
+            out = stack[len(stack) - n :]
+            del stack[len(stack) - n :]
+            return out
+
+        def push(*xs):
+            if stack_ref[0] is not None:
+                stack_ref[0].extend(xs)
+
+        def put(key, inferred=None):
+            return self.put_num(w, i, key, leb128, inferred)
+
+        def known_bytes(xs):
+            return xs is not None and all(d is not None for _, d in xs)
+
+        if op == "Nop":
+            pass
+        elif op == "Literal":
+            d = self.bytes_of(i["literal_data"], "literal_data")
+            put("literal_size", len(d))
+            self.field(w, i["literal_data"], lambda w, x: w.put(d))
+            push((len(d), d))
+        elif op in ("ModuleBytes", "ResourceBytes"):
+            kind = "module" if op == "ModuleBytes" else "resource"
+            idx = put(f"{kind}_bytes_{kind}")
+            d = aux(kind, idx)
+            n = put(f"{kind}_bytes_size", None if d is None else len(d))
+            push((n, d if d is not None and len(d) == n else None))
+        elif op == "Swap":
+            depth = put("swap_depth")
+            if stack is not None and isinstance(depth, int) and len(stack) > depth:
+                stack[-1], stack[-1 - depth] = stack[-1 - depth], stack[-1]
+            else:
+                stack_ref[0] = None
+        elif op == "Slice":
+            blk, st, n = put("slice_block"), put("slice_start"), put("slice_length")
+            d = None
+            if isinstance(blk, int) and blk < len(refs) and refs[blk][1] is not None and isinstance(st, int):
+                d = refs[blk][1][st : st + n]
+                d = d if len(d) == n else None
+            push((n, d))
+        elif op in ("Concatenate", "Pack"):
+            n = put("concat_count" if op == "Concatenate" else "pack_count")
+            xs = pop(n)
+            if xs is None:
+                return
+            if any(k is None for k, _ in xs):
+                push((None, None))
+            elif op == "Concatenate":
+                push((sum(k for k, _ in xs), b"".join(d for _, d in xs) if known_bytes(xs) else None))
+            else:
+                d = None
+                if known_bytes(xs):
+                    ends, e = [], 0
+                    for _, x in xs:
+                        e += len(x)
+                        ends.append(e)
+                    d = ule(len(xs), 8) + b"".join(ule(e, 8) for e in ends) + b"".join(x for _, x in xs)
+                push((8 * (len(xs) + 1) + sum(k for k, _ in xs), d))
+        elif op == "Split":
+            sizes = self.put_list_field(w, i, "split_count", "split_sizes")
+            xs = pop(1)
+            if xs is None or sizes is None:
+                stack_ref[0] = None
+                return
+            d, at = xs[0][1], 0
+            for n in sizes:
+                push((n, None if d is None or not isinstance(n, int) else d[at : at + n]))
+                at += n if isinstance(n, int) else 0
+        elif op == "Patch":
+            xs = pop(2)
+            out = unzstd_simple(xs[1][1], xs[0][1]) if known_bytes(xs) else None
+            n = put("patch_size", None if out is None else len(out))
+            push((n, out if out is not None and len(out) == n else None))
+        elif op == "Apply":
+            put("apply_module")
+            self.put_list_field(w, i, "apply_num_resources", "apply_resources")
+            params = self.bytes_of(i["apply_params"], "apply_params")
+            put("apply_params_size", len(params))
+            self.field(w, i["apply_params"], lambda w, x: w.put(params))
+            put("apply_memory_limit")
+            self.put_list_field(w, i, "apply_num_task_limits", "apply_task_limits")
+            n_in = put("apply_num_inputs")
+            outs = self.put_list_field(w, i, "apply_num_outputs", "apply_output_sizes")
+            if pop(n_in) is None or outs is None:
+                stack_ref[0] = None
+                return
+            push(*[(n, None) for n in outs])
+        elif op == "Checksum":
+            top = stack[-1] if stack else None
+
+            def go(w, x):
+                if is_infer(x):
+                    if top is None or top[1] is None:
+                        raise CaseError("checksum_value: the top of the stack is not known")
+                    w.put(ule(xxh64(top[1]), 8))
+                else:
+                    w.put(self.bytes_of(x, "checksum_value"))
+
+            self.field(w, i.get("checksum_value", UNDEFINED), go)
+
+    def put_list_field(self, w, m, count, key):
+        """Writes a count and its list of leb128, returning the numbers (None where given as bytes)."""
+        lst = self.unlabel(m.get(key, []))
+        self.put_num(w, m, count, leb128, len(lst) if isinstance(lst, list) else None)
+        got = []
+
+        def go(w, lst):
+            nonlocal got
+            if is_raw(lst):
+                w.put(raw_bytes(lst))
+                got = None
+                return
+            for x in lst:
+                got.append(self.put_num(w, x, key, leb128))
+
+        self.field(w, m.get(key, []), go)
+        return got
+
+    def mirror(self, w, v, t, start, header):
+        self.magic(w, v, "mirror_magic")
+        to = self.num(v["target_offset"], "target_offset")
+        target = None
+        if isinstance(to, int):
+            pos = start - to if to % 2 == 0 else start + to - 1
+            target = self.prev_info.get("blocks", {}).get(pos)
+            if target is None:
+                self.unresolved = True
+
+        def widened():
+            if target is None:
+                return 0
+            if t - 0xC00 == target[0]:
+                return 0
+            if t - 0xC01 == target[0]:
+                return 1
+            raise CaseError(f"archive_offset: a mirror block of type {t:#x} doesn't fit its target of {target[0]:#x}")
+
+        self.put_num(w, v, "archive_offset", leb128, lambda: start - self.archive_start + widened())
+        self.put_num(w, v, "target_offset", leb128)
+
+        def go(w, x):
+            if is_infer(x):
+                w.put(b"" if target is None else target[1])
+            else:
+                w.put(self.bytes_of(x, "target_data"))
+
+        self.field(w, v.get("target_data", UNDEFINED), go)
+
+        def go_sum(w, x):
+            if is_infer(x):
+                w.put(ule(xxh64(header(len(w) + 8) + bytes(w.buf)), 8))
+            else:
+                w.put(self.bytes_of(x, "mirror_checksum"))
+
+        self.field(w, v.get("mirror_checksum", UNDEFINED), go_sum)
 
     # --- Metadata block
 
@@ -511,6 +843,17 @@ class Assembler:
         d = known(counts["num_directories"], "num_directories")
         nd = counts["num_dictionaries"]
 
+        # lists that disagree with counts inferred are mistakes of the case, not what it tests
+        inferred = lambda key: is_infer(m.get(key, UNDEFINED))
+        if all(inferred(k) for k in ("num_directories", "num_files", "num_specials")) and isinstance(entries, list):
+            n = len(entries)
+            parents = self.unlabel(m["entry_parents"])
+            if isinstance(parents, list) and len(parents) != max(n - 1, 0):
+                raise CaseError(f"entry_parents: {len(parents)} for {n} entries (the entry 1 has none)")
+            fps = self.unlabel(m["file_params"])
+            if isinstance(fps, list) and len(fps) != kinds.count("file"):
+                raise CaseError(f"file_params: {len(fps)} for {kinds.count('file')} files")
+
         # entries first, for their size and offsets
         body = Writer()
         file_params = self.unlabel(m["file_params"])
@@ -520,12 +863,20 @@ class Assembler:
             fp = self.unlabel(file_params[k - d - 1])
             return self.num(fp["file_offset"], "file_offset")
 
+        def file_output_of(k):
+            fp = self.unlabel(file_params[k - d - 1])
+            n = self.num(fp.get("file_output", UNDEFINED), "file_output")
+            if not isinstance(n, int):
+                raise CaseError("file_output: give it")
+            return n
+
         def block_at(off):
             pos = start - (off & ~1)
             for s, k, i, c in segment:
                 if s == pos:
                     return k, i, c
-            if self.unresolved:
+            if self.unresolved or not self.prev:
+                self.unresolved = True
                 return "data", {}, {"bytes": b""}  # labels not known yet: assembled again
             raise CaseError(f"no content block of the segment at the relative offset {off}")
 
@@ -539,7 +890,7 @@ class Assembler:
             for idx, e in enumerate(es):
                 k = idx + 1
                 entry_starts.append(len(w))
-                self.field(w, e, lambda w, e: self.entry(w, e, k, kinds[idx], d, file_offset_of, block_at))
+                self.field(w, e, lambda w, e: self.entry(w, e, k, kinds[idx], d, file_offset_of, file_output_of, block_at))
 
         self.field(ew, entries, put_entries)
         entries_size = self.put_num(head, m, "entries_size", leb128, len(ew))
@@ -604,7 +955,7 @@ class Assembler:
         if "file_output" in fp or (isinstance(fo, int) and fo % 2 == 1):
             self.put_num(w, fp, "file_output", leb128)
 
-    def entry(self, w, e, k, kind, d, file_offset_of, block_at):
+    def entry(self, w, e, k, kind, d, file_offset_of, file_output_of, block_at):
         if is_raw(e):
             w.put(raw_bytes(e))
             return
@@ -616,9 +967,15 @@ class Assembler:
                 fo = file_offset_of(k)
                 if not isinstance(fo, int):
                     raise CaseError("original_size: the file_offset is not known")
-                _, _, c = block_at(fo)
+                kind, _, c = block_at(fo)
+                if kind == "formula":
+                    outs = c.get("outputs")
+                    o = 0 if fo % 2 == 0 else file_output_of(k) + 1
+                    if outs is None or o >= len(outs) or outs[o][0] is None:
+                        raise CaseError("original_size: the output's length is not known")
+                    return outs[o][0]
                 if fo % 2 or c.get("bytes") is None:
-                    raise CaseError("original_size: the content is not known without evaluating")
+                    raise CaseError("original_size: the content is not known")
                 return len(c["bytes"])
 
             self.put_num(w, e, "original_size", leb128, size)
@@ -661,6 +1018,26 @@ def text_field(v):
     raise CaseError(f"not a text: {v!r}")
 
 
+def unzstd_simple(patch, source):
+    """What Zstandard blocks decode to, if they are all raw and RLE blocks (None otherwise)."""
+    out, at = bytearray(), 0
+    while at + 3 <= len(patch):
+        h = int.from_bytes(patch[at : at + 3], "little")
+        last, bt, size = h & 1, (h >> 1) & 3, h >> 3
+        at += 3
+        if bt == 0:
+            out += patch[at : at + size]
+            at += size
+        elif bt == 1:
+            out += patch[at : at + 1] * size
+            at += 1
+        else:
+            return None
+        if last:
+            return bytes(out) if at == len(patch) else None
+    return None
+
+
 def classify(t):
     """The kind of a block type, and what its bits tell."""
     if t <= 3:
@@ -675,16 +1052,20 @@ def classify(t):
     if 0x40 <= t <= 0x4B:
         kk = (t >> 2) & 3
         return "data", {"leaf": False, "compressed": kk != 0, "dictionary": kk == 2, "checksum": True}
-    if 0x50 <= t <= 0x57:
+    if t in (0x50, 0x60):
+        return "shorthand", {}
+    if 0x51 <= t <= 0x57:
         return "dictionary", {}
     if 0x58 <= t <= 0x5F:
         return "import", {}
-    if 0x60 <= t <= 0x63:
+    if 0x61 <= t <= 0x63:
         return "module", {}
     if 0x64 <= t <= 0x67:
         return "resource", {}
     if 0x70 <= t <= 0x77:
-        return "formula", {}
+        return "formula", {"dictionary": bool(t & 4)}
+    if 0xC10 <= t <= 0xC17 or 0xC50 <= t <= 0xC67 or 0xC70 <= t <= 0xC77:
+        return "mirror", {}
     return "other", {}
 
 

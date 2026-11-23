@@ -1,0 +1,19 @@
+# A shorthand dictionary block of a hash not registered (nor known by anyone).
+{
+  "title": "A shorthand dictionary block not known",
+  "spec": ["#registered-blocks", "#interpretation"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x50, "data": h'00000000000000000000000000000000000000000000000000000000000000ff'},
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "unsupported",
+}

@@ -1,0 +1,20 @@
+# A base given with a standalone archive changes nothing.
+{
+  "title": "A standalone archive given a base",
+  "spec": ["#interpretation"],
+  "level": 0,
+  "base": {"root": {"children": {"x": {"content": 'from the base'}}}, "extra": {-1: "base"}},
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'x'}}}},
+}

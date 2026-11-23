@@ -1,0 +1,19 @@
+# A relative offset points to the start of a block.
+{
+  "title": "A file offset into a block",
+  "spec": ["#metadata-block", "#segment-interpretation"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # an uncompressed data block holding the bytes of another: 20 01 78 00
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": h'2001 7800'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0],
+        "file_params": [{"file_offset": ["blk", "meta"]}, {"file_dictionary": 0, "file_offset": ["blk", "meta", -2]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}, {"entry_name": "b", "original_size": 1}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

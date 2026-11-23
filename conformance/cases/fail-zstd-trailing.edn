@@ -1,0 +1,17 @@
+# Compressed data is Zstandard blocks without any other bytes.
+{
+  "title": "Bytes after the final Zstandard block",
+  "spec": ["#zstandard-compression-method"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x28, "data": {"compressed_data": {
+        "original_size_delta": 0, "original_size_shrink": 4,
+        "compression_params": {"window_descriptor": 0},
+        "data": [{"block_type": "Raw_Block", "last": true, "content": 'ab'}, h'00'],
+      }}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

@@ -1,0 +1,19 @@
+# Nor a map inside it.
+{
+  "title": "Duplicate keys in an entry extra",
+  "spec": ["#optional-metadata"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": 80000(h'a1 21 82 f6 a2 6178 01 6178 02'),
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

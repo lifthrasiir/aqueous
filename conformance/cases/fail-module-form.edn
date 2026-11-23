@@ -1,0 +1,22 @@
+# A module block's decoded data starts with 00 (the stored form) or 0D (the split form).
+{
+  "title": "A module block of neither form",
+  "spec": ["#module-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x61, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": h'0161736d01000000'},
+      }}},
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

@@ -1,0 +1,25 @@
+# A dictionary index names a dictionary block of the segment before the block.
+{
+  "title": "A dictionary index of no dictionary",
+  "spec": ["#data-block", "#block-order"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x51, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"content": 'the only dictionary'}},
+      }}},
+      80001(["d", {"type": 0x30, "data": {
+        "dictionary_index": 1,
+        "compressed_data": {"compression_params": {"window_descriptor": 0}, "data": {"decoded": 'x'}},
+      }}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_dictionary": 1, "file_offset": ["d", "meta"]}],
+        "entries": [{"entry_name": "d", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

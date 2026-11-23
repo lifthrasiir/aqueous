@@ -1,0 +1,34 @@
+# A base of a single file is no directory: an overlay archive of entries starts from an empty one,
+# yet an external import of the empty path reads the file.
+{
+  "title": "An overlay archive over a single file",
+  "spec": ["#interpretation", "#import-block", "#import-resolution"],
+  "level": 0,
+  "base": {"root": {"content": 'single'}, "extra": {"org.example.base": 1}},
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0],
+          "instructions": [{"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 6}],
+        }},
+      }}}]),
+      # external, u8: 0101 1 1 00
+      {"type": 0x5C, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"imports": [
+          {"import_path": 80000(h''), "import_offset": 0, "import_size": 6, "import_checksum": h'556e8d57bb7ec91a2ae12cd30edea341a7ce19f4530fb60b0b73e31a708fb363'},
+        ]}},
+      }}},
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'single'}}}, "extra": {"org.example.base": 1}},
+}

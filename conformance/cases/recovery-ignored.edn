@@ -1,0 +1,21 @@
+# Recovery blocks don't affect interpreting an archive, even when they are not what they should be.
+{
+  "title": "Recovery blocks not interpreted",
+  "spec": ["#recovery-sets", "#reserved-blocks"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+      {"type": 0xC1, "data": h'690AD179CD157AB6 00 00 00 0c 02 00 0000000000000000'},
+      {"type": 0xC4, "data": 'not an index block'},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'x'}}}},
+}

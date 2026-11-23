@@ -1,0 +1,25 @@
+# A formula block of a Literal instruction alone.
+{
+  "title": "A formula of a literal",
+  "spec": ["#formula-block", "#formula-data", "#insn-literal", "#formula-evaluation"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "instructions": [{"opcode": "Literal", "literal_data": 'Hello, world'}],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'Hello, world'}}}},
+}

@@ -1,0 +1,17 @@
+# A parent comes before its child, so that directories can't form a cycle.
+{
+  "title": "A parent after its child",
+  "spec": ["#metadata-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [3, 2],
+        "file_params": [],
+        "entries": [{"entry_name": "d1"}, {"entry_name": "d2"}, {"entry_name": "d3"}],
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

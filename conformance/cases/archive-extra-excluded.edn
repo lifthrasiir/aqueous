@@ -1,0 +1,31 @@
+# segment-status, journal and entry-extras are not archive-wide members.
+{
+  "title": "Members left out of the archive's extra",
+  "spec": ["#interpretation", "#segment-status", "#journal"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": '1'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": {-3: true, -4: {1700000000000: "first", 1700000000001: ""}, "org.example.k": "v",
+                              -2: [null, {-6: "a"}]},
+      }}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [],
+        "file_params": [],
+        "entries": [],
+        "optional_metadata": {-3: {0: 1, 1: 10}, -4: {}},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {
+    "root": {"children": {"a": {"content": '1', "extra": {-6: "a"}}}},
+    "extra": {"org.example.k": "v"},
+  },
+}

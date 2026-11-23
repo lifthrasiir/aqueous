@@ -1,0 +1,33 @@
+# Without a metadata block, every output of every leaf block, in order, makes the file.
+{
+  "title": "Formula blocks without a metadata block",
+  "spec": ["#interpretation", "#unencrypted-archive", "#formula-evaluation"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'A'}}},
+      {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'B'},
+            {"opcode": "Literal", "literal_data": 'C'},
+          ],
+        }},
+      }}},
+      {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0],
+          "instructions": [{"opcode": "Slice", "slice_block": 0, "slice_start": 1, "slice_length": 1}],
+        }},
+      }}},
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'xD'}}},
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'E'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"content": 'ABCDE'}},
+}

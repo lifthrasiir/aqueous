@@ -1,0 +1,12 @@
+# footer_size_copy has to repeat footer_size.
+{
+  "title": "A footer size copy not the footer size",
+  "spec": ["#unencrypted-archive"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}],
+    "footer_magic": "FOOTER_MAGIC",
+    "footer_size_copy": 3,
+  },
+  "interpreted": "invalid",
+}

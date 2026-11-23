@@ -125,6 +125,7 @@ zstd-block = {
   ? "last": bool / infer,         ; Last_Block: inferred true for the last block alone
   ? "block_size": inum,           ; Block_Size
   "content": bytes,               ; Block_Content (the byte repeated, for RLE_Block)
+  ? "decoded": bytes,             ; what a Compressed_Block decodes to, for inference only
 } / rawb
 
 ; --- Spacer and size hint blocks (#spacer-block, #size-hint-block)
@@ -327,7 +328,7 @@ encrypted-archive = {
 ; --- Archive value (#archive-model)
 ;
 ; A key left out is its default: `extra` null (an empty map for the archive's), `forks` and
-; `link_group` empty. Link groups are labels, compared up to a one-to-one renaming.
+; `link_group` empty. A content may be given as `#6.80003(path)`, the contents of a file. Link groups are labels, compared up to a one-to-one renaming.
 
 archive-value = {
   "root": directory-node / file-node,
@@ -343,7 +344,7 @@ node-common = (
 )
 
 directory-node = { "children": { * name => node }, node-common }
-file-node = { "content": bytes, ? "link_group": tstr / int / null, node-common }
+file-node = { "content": bytes / ext, ? "link_group": tstr / int / null, node-common }
 link-node = { "target": name, node-common }
 special-node = {
   "kind": "fifo" / "char-device" / "block-device",

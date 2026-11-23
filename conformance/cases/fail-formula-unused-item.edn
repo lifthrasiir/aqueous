@@ -1,0 +1,26 @@
+# Each item a formula block lists has to be used by an instruction.
+{
+  "title": "A listed item no instruction uses",
+  "spec": ["#formula-data"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0, 0],
+          "instructions": [{"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 1}],
+        }},
+      }}}]),
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'a'}}},
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'b'}}},
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

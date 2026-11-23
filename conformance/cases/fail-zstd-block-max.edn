@@ -1,0 +1,16 @@
+# A Zstandard block holds at most Block_Maximum_Size bytes: 1 KiB for the window descriptor 0.
+{
+  "title": "A Zstandard block beyond the window",
+  "spec": ["#zstandard-compression-method"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x28, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": [{"block_type": "RLE_Block", "block_size": 1025, "content": '-'}],
+      }}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

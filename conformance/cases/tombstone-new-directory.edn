@@ -1,0 +1,25 @@
+# A tombstone under a directory that didn't exist: the directory is made, the tombstone not kept.
+{
+  "title": "A tombstone in a new directory",
+  "spec": ["#segment-merging"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": '1'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [1],
+        "file_params": [],
+        "entries": [{"entry_name": "n"}, {"entry_name": "x", "special_kind": 0}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": '1'}, "n": {"children": {}}}}},
+}

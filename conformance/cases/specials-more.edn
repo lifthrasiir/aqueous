@@ -1,0 +1,28 @@
+# Devices of any numbers, an unknown node of no data, and one of a large kind.
+{
+  "title": "More special entries",
+  "spec": ["#metadata-block", "#segment-interpretation"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0, 0],
+        "file_params": [],
+        "entries": [
+          {"entry_name": "zero", "special_kind": 3, "device_major": 0, "device_minor": 0},
+          {"entry_name": "big", "special_kind": 4, "device_major": 4294967296, "device_minor": 18446744073709551615},
+          {"entry_name": "u5", "special_kind": 5},
+          {"entry_name": "u", "special_kind": 1000000, "special_data": h'00 ff 00'},
+        ],
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "zero": {"kind": "char-device", "device": [0, 0]},
+    "big": {"kind": "block-device", "device": [4294967296, 18446744073709551615]},
+    "u5": {"kind": 5, "data": h''},
+    "u": {"kind": 1000000, "data": h'00 ff 00'},
+  }}},
+}

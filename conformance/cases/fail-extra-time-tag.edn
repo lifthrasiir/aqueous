@@ -1,0 +1,19 @@
+# A timestamp is one of the forms of aqr-time; tag 127 is none.
+{
+  "title": "A timestamp of an unknown scale",
+  "spec": ["#optional-metadata", "#timestamps"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": {-2: [null, {-3: 127(1700000000)}]},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

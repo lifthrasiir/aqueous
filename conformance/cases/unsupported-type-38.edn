@@ -1,0 +1,14 @@
+# The reserved critical type 38: a leaf data block of the compression method 3.
+{
+  "title": "A data block of a compression method not defined",
+  "spec": ["#reserved-blocks", "#data-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x38, "data": h'00'},
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "unsupported",
+}

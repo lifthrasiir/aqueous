@@ -1,0 +1,28 @@
+# A patch's last Zstandard block is signalled as the final one.
+{
+  "title": "A patch without a final block",
+  "spec": ["#insn-patch"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": ''},
+            {"opcode": "Literal", "literal_data": h'280000 68656c6c6f'},   # raw, not last
+            {"opcode": "Patch", "patch_size": 5},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": 5}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

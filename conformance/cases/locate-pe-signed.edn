@@ -1,0 +1,18 @@
+# A self-extracting program signed after it was made: the archive between the PE image and its
+# certificate table, which starts at a multiple of 8 after zero bytes (6 of them here, and the
+# archive's footer ends with a zero byte too).
+{
+  "title": "An archive between a PE image and its signature",
+  "spec": ["#locating-an-archive"],
+  "level": 0,
+  # MZ, e_lfanew 64, PE, a PE32+ optional header of 16 data directories, the certificate table's
+  # entry (its offset and size) at 232
+  "leading": h'4d5a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000005045000000000000000000000000000000000000000000000b02000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000001801000011000000',
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'Hello, world!'}}}],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "trailing": h'00000000000008000000000202007369676e6174757265',
+  "interpreted": {"root": {"content": 'Hello, world!'}},
+}

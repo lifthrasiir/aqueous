@@ -1,0 +1,18 @@
+# win-link-type is 0, 1 or 2.
+{
+  "title": "A Windows link type not defined",
+  "spec": ["#windows-extras"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [],
+        "entries": [{"entry_name": "l", "special_kind": 1, "link_target": "t"}],
+        "optional_metadata": {-2: [null, {-60: 3}]},
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

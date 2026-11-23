@@ -1,0 +1,17 @@
+# The decompressed data has exactly the original size.
+{
+  "title": "Compressed data of another original size",
+  "spec": ["#shared-external-structure", "#block-contents"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x28, "data": {"compressed_data": {
+        "original_size_delta": 1,
+        "compression_params": {"window_descriptor": 0},
+        "data": [{"block_type": "RLE_Block", "block_size": 8, "content": '-'}],
+      }}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

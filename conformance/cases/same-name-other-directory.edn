@@ -1,0 +1,26 @@
+# The same name in different directories, and a name of one encoding beside the other.
+{
+  "title": "The same name in different directories",
+  "spec": ["#segment-interpretation", "#entry-names"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [1, 0, 1],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [
+          {"entry_name": "a"}, {"entry_name": "a"},
+          {"entry_name": "x", "original_size": undefined},
+          {"entry_name": h'61', "special_kind": 2},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "a": {"children": {"a": {"children": {}}, h'61': {"kind": "fifo"}}},
+    "x": {"content": 'x'},
+  }}},
+}

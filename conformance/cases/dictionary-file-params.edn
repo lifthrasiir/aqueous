@@ -1,0 +1,42 @@
+# file_dictionary is the dictionary the leaf block uses, 1-based, for each file.
+{
+  "title": "Files of blocks of dictionaries",
+  "spec": ["#metadata-block", "#dictionary-block", "#data-block"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x51, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"content": 'the first dictionary'}},
+      }}},
+      {"type": 0x51, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"content": 'dictionary content: hello, world, aqueous'}},
+      }}},
+      80001(["plain", {"type": 0x20, "data": {"uncompressed_data": {"data": 'plain'}}}]),
+      # leaf, Zstandard with a dictionary, XXH64: 001 10 1 00; by zstd -D with the second
+      80001(["d", {"type": 0x34, "data": {
+        "dictionary_index": 1,
+        "compressed_data": {
+          "compression_params": {"window_descriptor": 0},
+          "data": [{"block_type": "Compressed_Block", "content": h'18683b2002003a39447ab201',
+                    "decoded": 'hello, world, aqueous; hello, world'}],
+        },
+      }}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0],
+        "file_params": [{"file_offset": ["plain", "meta"]}, {"file_offset": ["d", "meta"]}],
+        "entries": [
+          {"entry_name": "plain", "original_size": undefined},
+          {"entry_name": "d", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "plain": {"content": 'plain'},
+    "d": {"content": 'hello, world, aqueous; hello, world'},
+  }}},
+}

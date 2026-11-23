@@ -1,0 +1,11 @@
+# A header magic of one bit wrong.
+{
+  "title": "A wrong header magic",
+  "spec": ["#unencrypted-archive", "#locating-an-archive"],
+  "archive": {
+    "header_magic": h'F804036AD6BF',
+    "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

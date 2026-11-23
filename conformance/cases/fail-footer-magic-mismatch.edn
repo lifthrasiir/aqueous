@@ -1,0 +1,11 @@
+# A standalone archive ends with FOOTER_MAGIC, not OVERLAY_FOOTER_MAGIC.
+{
+  "title": "An overlay footer after a standalone header",
+  "spec": ["#unencrypted-archive"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

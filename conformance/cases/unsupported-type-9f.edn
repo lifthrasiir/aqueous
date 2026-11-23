@@ -1,0 +1,14 @@
+# The reserved critical type 9F, the last critical type of two digits.
+{
+  "title": "A reserved critical block of type 9F",
+  "spec": ["#reserved-blocks", "#block-types"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x9F, "data": h'00'},
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "unsupported",
+}

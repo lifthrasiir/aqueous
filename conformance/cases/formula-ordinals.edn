@@ -1,0 +1,42 @@
+# Referenced items are numbered among the non-leaf items after each formula block, by deltas.
+{
+  "title": "Block ordinal deltas",
+  "spec": ["#formula-data", "#content-blocks"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f1", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0, 1],   # the items 0 and 2 after it
+          "instructions": [
+            {"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 1},
+            {"opcode": "Slice", "slice_block": 1, "slice_start": 0, "slice_length": 1},
+            {"opcode": "Concatenate", "concat_count": 2},
+          ],
+        }},
+      }}}]),
+      80001(["f2", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [1],      # the item 1 after it
+          "instructions": [{"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 1}],
+        }},
+      }}}]),
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'A'}}},
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'B'}}},
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'C'}}},
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0],
+        "file_params": [{"file_offset": ["f1", "meta"]}, {"file_offset": ["f2", "meta"]}],
+        "entries": [
+          {"entry_name": "a", "original_size": undefined},
+          {"entry_name": "b", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'AC'}, "b": {"content": 'B'}}}},
+}

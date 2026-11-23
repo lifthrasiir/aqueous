@@ -1,0 +1,50 @@
+# A formula block naming a dictionary, and a leaf data block compressed with it, each given by
+# file_dictionary.
+{
+  "title": "Dictionaries of leaf blocks",
+  "spec": ["#dictionary-block", "#formula-block", "#data-block", "#metadata-block"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # without entropy tables: 0101 0 0 01
+      {"type": 0x51, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"content": 'dictionary content: hello, world, aqueous'}},
+      }}},
+      # with a dictionary: 0111 0 1 00
+      80001(["f", {"type": 0x74, "data": {
+        "dictionary_index": 0,
+        "formula_data": {
+          "compression_params": {"window_descriptor": 0},
+          "data": {"decoded": {
+            "block_ordinal_deltas": [],
+            "instructions": [{"opcode": "Literal", "literal_data": 'formula'}],
+          }},
+        },
+      }}]),
+      # leaf, Zstandard with a dictionary, no checksum: 001 10 0 00; by zstd -D
+      80001(["d", {"type": 0x30, "data": {
+        "dictionary_index": 0,
+        "compressed_data": {
+          "compression_params": {"window_descriptor": 0},
+          "data": [{"block_type": "Compressed_Block", "content": h'18683b2002003a39447ab201',
+                    "decoded": 'hello, world, aqueous; hello, world'}],
+        },
+      }}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0],
+        "file_params": [{"file_offset": ["f", "meta"]}, {"file_offset": ["d", "meta"]}],
+        "entries": [
+          {"entry_name": "f", "original_size": undefined},
+          {"entry_name": "d", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "f": {"content": 'formula'},
+    "d": {"content": 'hello, world, aqueous; hello, world'},
+  }}},
+}

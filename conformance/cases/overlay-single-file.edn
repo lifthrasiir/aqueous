@@ -1,0 +1,13 @@
+# An overlay archive without a metadata block replaces its base by a single file.
+{
+  "title": "An overlay archive of a single file",
+  "spec": ["#interpretation", "#unencrypted-archive"],
+  "level": 0,
+  "base": {"root": {"children": {"x": {"content": 'from the base'}}}, "extra": {-1: "base"}},
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'patched'}}}],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"content": 'patched'}},
+}

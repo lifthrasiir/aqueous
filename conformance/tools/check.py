@@ -4,7 +4,8 @@
 
 Each case is assembled and interpreted: it must fail as `interpreted` says (by the exit code), or
 give the archive value it gives, compared in full (extras, forks and the order of every map; link
-groups up to a renaming). A case given a base is skipped: `aqr` takes no base.
+groups up to a renaming). An overlay archive given a base is skipped: `aqr` takes no base (a
+standalone archive's base changes nothing).
 """
 
 import argparse
@@ -19,7 +20,7 @@ import tempfile
 
 import assemble
 import edn
-from edn import Map, freeze
+from edn import Map, Tag, freeze
 
 # aqr's exit codes (crates/aqr/src/exit.rs)
 EXIT = {0: "value", 3: "invalid", 4: "decryption", 5: "resource", 6: "unsupported"}
@@ -63,11 +64,26 @@ def lines(v):
     return out
 
 
+def external(v, here):
+    """`v` with each `#6.80003(path)` replaced by the contents of the file at `path`."""
+    if isinstance(v, Tag) and v.tag == assemble.EXT and isinstance(v.value, str):
+        with open(os.path.join(here, v.value), "rb") as f:
+            return f.read()
+    if isinstance(v, Tag):
+        return Tag(v.tag, external(v.value, here))
+    if isinstance(v, list):
+        return [external(x, here) for x in v]
+    if isinstance(v, Map):
+        return Map((external(k, here), external(x, here)) for k, x in v.items)
+    return v
+
+
 def check(path, aqr, work):
     case, data = assemble.assemble(path)
     name = os.path.splitext(os.path.basename(path))[0]
-    if "base" in case:
-        return "skip", "given a base"
+    a = case["archive"]
+    if "base" in case and isinstance(a, Map) and a.get("header_magic") == "OVERLAY_HEADER_MAGIC":
+        return "skip", "an overlay archive given a base"
     f = os.path.join(work, name + ".aqr")
     with open(f, "wb") as o:
         o.write(data)
@@ -81,6 +97,7 @@ def check(path, aqr, work):
         return "ok", got
     if got != "value":
         return "fail", f"{got}: {err}"
+    want = external(want, os.path.dirname(os.path.abspath(path)))
     have, expect = lines(edn.loads(r.stdout.decode("utf-8", "surrogateescape"))), lines(want)
     if have != expect:
         diff = difflib.unified_diff(expect, have, "expected", "interpreted", lineterm="", n=0)
@@ -105,7 +122,7 @@ def main(argv):
     for c in cases:
         try:
             status, msg = check(c, aqr, work)
-        except assemble.CaseError as e:
+        except (assemble.CaseError, edn.EdnError) as e:
             status, msg = "error", str(e)
         failed += status in ("fail", "error")
         print(f"{status:5} {os.path.basename(c)}: {msg}")

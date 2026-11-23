@@ -1,0 +1,19 @@
+# Only the last Zstandard block is signalled as the final one.
+{
+  "title": "A final Zstandard block before the last",
+  "spec": ["#zstandard-compression-method"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x2C, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": [
+          {"block_type": "Raw_Block", "last": true, "content": 'ab'},
+          {"block_type": "Raw_Block", "content": 'cd'},
+        ],
+      }}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

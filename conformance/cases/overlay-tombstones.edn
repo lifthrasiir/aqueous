@@ -1,0 +1,23 @@
+# Tombstones remove nodes of the base with their descendants; a base directory keeps its extra.
+{
+  "title": "Tombstones over a base",
+  "spec": ["#segment-merging", "#interpretation"],
+  "level": 0,
+  "base": {"root": {"children": {
+    "d": {"children": {"x": {"content": 'x'}, "y": {"content": 'y'}}, "extra": {-6: "d"}},
+    "e": {"children": {"z": {"content": 'z'}}},
+  }, "extra": {-6: "root"}}},
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [1, 0],
+        "file_params": [],
+        "entries": [{"entry_name": "d"}, {"entry_name": "x", "special_kind": 0}, {"entry_name": "e", "special_kind": 0}],
+      }}}},
+    ],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"d": {"children": {"y": {"content": 'y'}}, "extra": {-6: "d"}}},
+                           "extra": {-6: "root"}}},
+}

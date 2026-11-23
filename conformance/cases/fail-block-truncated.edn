@@ -1,0 +1,13 @@
+# A block whose size reaches past the footer.
+{
+  "title": "A block running past the end",
+  "spec": ["#block", "#unencrypted-archive"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x20, "size": 40, "data": {"uncompressed_data": {"data": 'x'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

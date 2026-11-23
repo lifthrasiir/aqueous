@@ -1,0 +1,54 @@
+# An external import reads the base as given, an internal one the preceding result, which a
+# preceding segment has changed.
+{
+  "title": "External and internal imports of an overlay archive",
+  "spec": ["#import-block", "#import-resolution", "#interpretation"],
+  "level": 0,
+  "base": {"root": {"children": {"a": {"content": 'base content'}, "keep": {"content": 'k'}}}},
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'new'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0, 0, 0],
+          "instructions": [
+            {"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 4},
+            {"opcode": "Slice", "slice_block": 1, "slice_start": 0, "slice_length": 3},
+            {"opcode": "Slice", "slice_block": 2, "slice_start": 0, "slice_length": 1},
+            {"opcode": "Concatenate", "concat_count": 3},
+          ],
+        }},
+      }}}]),
+      {"type": 0x5C, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"imports": [
+          {"import_path": "a", "import_offset": 0, "import_size": 4, "import_checksum": h'5fef70d63fdf6ab64e91208cb3482ba6098fc5814061c5efcdeb5b624d033db4'},
+        ]}},
+      }}},
+      {"type": 0x58, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"imports": [
+          {"import_path": "a", "import_offset": 0, "import_size": 3, "import_checksum": h'0e4a434943b100a5e8ebe79a42078f9ef14e90cdc5fc586459f3fb5f74d81f21'},
+          {"import_path": "keep", "import_offset": 0, "import_size": 1, "import_checksum": h'a24ea1edafe277a52a378d4d7a1c6ccc321313238f110e34cde427102ec65f31'},
+        ]}},
+      }}},
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "m2"]}],
+        "entries": [{"entry_name": "b", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "a": {"content": 'new'}, "keep": {"content": 'k'}, "b": {"content": 'basenewk'},
+  }}},
+}

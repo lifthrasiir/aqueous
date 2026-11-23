@@ -1,0 +1,17 @@
+# A link target isn't empty.
+{
+  "title": "An empty link target",
+  "spec": ["#archive-model", "#metadata-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [],
+        "entries": [{"entry_name": "l", "special_kind": 1, "link_target": ""}],
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

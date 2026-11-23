@@ -1,0 +1,30 @@
+# slice_block has to be less than num_blocks.
+{
+  "title": "A slice of an item not listed",
+  "spec": ["#insn-slice"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0],
+          "instructions": [
+            {"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 1},
+            {"opcode": "Slice", "slice_block": 1, "slice_start": 0, "slice_length": 1},
+            {"opcode": "Concatenate", "concat_count": 2},
+          ],
+        }},
+      }}}]),
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'a'}}},
+      {"type": 0x40, "data": {"uncompressed_data": {"data": 'b'}}},
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": 2}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

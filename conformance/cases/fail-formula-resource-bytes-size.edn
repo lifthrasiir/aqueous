@@ -1,0 +1,29 @@
+# resource_bytes_size has to be the length of the resource block's data.
+{
+  "title": "A wrong resource_bytes_size",
+  "spec": ["#insn-resource-bytes"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x64, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": 'res'},
+      }}},
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "resource_indices": [0],
+          "instructions": [{"opcode": "ResourceBytes", "resource_bytes_resource": 0, "resource_bytes_size": 3}],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": 3}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

@@ -1,0 +1,37 @@
+# A directory of a null extra in a later segment keeps its extra and forks; an empty map replaces
+# both; the root directory is merged alike.
+{
+  "title": "The extras of merged directories",
+  "spec": ["#segment-merging", "#segment-interpretation", "#fork-streams"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["s", {"type": 0x20, "data": {"uncompressed_data": {"data": 'S'}}}]),
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": '1'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 1],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "d"}, {"entry_name": "e"}, {"entry_name": "x", "original_size": undefined}],
+        "optional_metadata": {-2: [
+          {-6: "root"},
+          {-6: "d", -50: {"s": [80000(["s", "m1"]), 0, 1]}},
+          {-6: "e", -50: {"s": [80000(["s", "m1"]), 0, 1]}},
+        ]},
+      }}}}]),
+      80001(["b2", {"type": 0x20, "data": {"uncompressed_data": {"data": '2'}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [0, 1],
+        "file_params": [{"file_offset": ["b2", "m2"]}],
+        "entries": [{"entry_name": "d"}, {"entry_name": "e"}, {"entry_name": "y", "original_size": undefined}],
+        "optional_metadata": {-2: [null, null, {}]},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "d": {"children": {"x": {"content": '1'}, "y": {"content": '2'}}, "extra": {-6: "d"}, "forks": {"s": 'S'}},
+    "e": {"children": {}, "extra": {}},
+  }, "extra": {-6: "root"}}},
+}

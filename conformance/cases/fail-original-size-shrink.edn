@@ -1,0 +1,17 @@
+# original_size_shrink is at most the compressed size.
+{
+  "title": "An original size below zero",
+  "spec": ["#shared-external-structure"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x28, "data": {"compressed_data": {
+        "original_size_delta": 0, "original_size_shrink": 7,
+        "compression_params": {"window_descriptor": 0},
+        "data": [{"block_type": "Raw_Block", "content": 'ab'}],
+      }}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

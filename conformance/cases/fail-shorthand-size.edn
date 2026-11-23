@@ -1,0 +1,19 @@
+# A shorthand block is 32 bytes; of any other size it is invalid, not unsupported.
+{
+  "title": "A shorthand block not of 32 bytes",
+  "spec": ["#registered-blocks", "#interpretation"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x60, "data": h'000000000000000000000000000000000000000000000000000000000000ff'},
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

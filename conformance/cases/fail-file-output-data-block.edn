@@ -1,0 +1,21 @@
+# A data block has the output 0 alone.
+{
+  "title": "Another output of a data block",
+  "spec": ["#block-contents", "#metadata-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'abc'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0],
+        "file_params": [{"file_offset": ["blk", "meta"]}, {"file_offset": ["blk", "meta", 1], "file_output": 0}],
+        "entries": [
+          {"entry_name": "a", "original_size": undefined},
+          {"entry_name": "b", "original_size": 3},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

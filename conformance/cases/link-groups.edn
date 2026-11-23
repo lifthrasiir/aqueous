@@ -1,0 +1,44 @@
+# Link groups: a non-negative value is of its segment alone, a negative one of the archive; on a
+# directory it is only a member of the extra. The extra keeps link-group.
+{
+  "title": "Link groups",
+  "spec": ["#link-groups", "#segment-interpretation", "#archive-model"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": '1'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0, 0],
+        "file_params": [{"file_offset": ["b1", "m1"]}, {"file_offset": ["b1", "m1"]}, {"file_offset": ["b1", "m1"]}],
+        "entries": [
+          {"entry_name": "dd"},
+          {"entry_name": "a", "original_size": undefined},
+          {"entry_name": "b", "original_size": undefined},
+          {"entry_name": "c", "original_size": undefined},
+        ],
+        "optional_metadata": {-2: [null, {-7: 5}, {-7: 1}, {-7: 1}, {-7: -1}]},
+      }}}}]),
+      80001(["b2", {"type": 0x20, "data": {"uncompressed_data": {"data": '1'}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [0],
+        "file_params": [{"file_offset": ["b2", "m2"]}, {"file_offset": ["b2", "m2"]}],
+        "entries": [
+          {"entry_name": "d", "original_size": undefined},
+          {"entry_name": "e", "original_size": undefined},
+        ],
+        "optional_metadata": {-2: [null, {-7: 1}, {-7: -1}]},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "dd": {"children": {}, "extra": {-7: 5}},
+    "a": {"content": '1', "link_group": "first", "extra": {-7: 1}},
+    "b": {"content": '1', "link_group": "first", "extra": {-7: 1}},
+    "c": {"content": '1', "link_group": "archive", "extra": {-7: -1}},
+    "d": {"content": '1', "link_group": "second", "extra": {-7: 1}},
+    "e": {"content": '1', "link_group": "archive", "extra": {-7: -1}},
+  }}},
+}

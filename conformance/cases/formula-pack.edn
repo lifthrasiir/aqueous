@@ -1,0 +1,43 @@
+# Pack makes a packed byte sequence, of no items too; Concatenate of no items is empty.
+{
+  "title": "Pack and Concatenate",
+  "spec": ["#insn-pack", "#packed-byte-sequences", "#insn-concat"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'ab'},
+            {"opcode": "Literal", "literal_data": 'c'},
+            {"opcode": "Pack", "pack_count": 2},
+            {"opcode": "Pack", "pack_count": 0},
+            {"opcode": "Concatenate", "concat_count": 0},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0],
+        "file_params": [
+          {"file_offset": ["f", "meta"]},
+          {"file_offset": ["f", "meta", 1], "file_output": 0},
+          {"file_offset": ["f", "meta", 1], "file_output": 1},
+        ],
+        "entries": [
+          {"entry_name": "p", "original_size": undefined},
+          {"entry_name": "q", "original_size": undefined},
+          {"entry_name": "r", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "p": {"content": h'0200000000000000 0200000000000000 0300000000000000 616263'},
+    "q": {"content": h'0000000000000000'},
+    "r": {"content": ''},
+  }}},
+}
