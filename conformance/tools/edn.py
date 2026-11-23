@@ -2,7 +2,7 @@
 
 EDN (RFC 8610 Appendix G, draft-ietf-cbor-edn-literals): numbers (decimal, 0x, 0b, 0o, negative),
 "text" with JSON escapes, h'hex' and 'text' byte strings, [arrays], {maps}, tags N(item),
-true/false/null/undefined, comments `/ ... /` and `# ...` to the end of the line.
+floats (and NaN, Infinity), true/false/null/undefined, simple(N), comments `/ ... /` and `# ...` to the end of the line.
 Maps keep their order and may have keys of any kind (`Map`, a list of pairs).
 """
 
@@ -81,6 +81,24 @@ class Map:
 
     def keys(self):
         return [k for k, _ in self.items]
+
+
+class Simple:
+    """A simple value other than false, true, null and undefined."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+    def __repr__(self):
+        return f"simple({self.value})"
+
+    def __eq__(self, other):
+        return isinstance(other, Simple) and self.value == other.value
+
+    def __hash__(self):
+        return hash(("simple", self.value))
 
 
 def same(a, b):
@@ -190,9 +208,19 @@ class _Reader:
                 return bytes.fromhex("".join(hexd))
             except ValueError:
                 raise self.error("bad hex in h''")
+        if s.startswith("-Infinity", self.i):
+            self.i += len("-Infinity")
+            return -math.inf
         if c == "-" or c.isdigit():
             return self.number()
-        for word, val in (("true", True), ("false", False), ("null", None), ("undefined", UNDEFINED)):
+        if s.startswith("simple(", self.i):
+            self.i += len("simple(")
+            n = self.number()
+            self.expect(")")
+            return Simple(n)
+        words = (("true", True), ("false", False), ("null", None), ("undefined", UNDEFINED), ("NaN", math.nan))
+        words += (("Infinity", math.inf),)
+        for word, val in words:
             if s.startswith(word, self.i) and not (s[self.i + len(word) : self.i + len(word) + 1].isalnum()):
                 self.i += len(word)
                 return val
@@ -206,8 +234,18 @@ class _Reader:
         k = j
         while k < len(s) and (s[k].isalnum() or s[k] in "._"):
             k += 1
+        if k < len(s) and s[k] in "+-" and s[k - 1] in "eE" and not tok_is_hex(s[self.i : k]):
+            # an exponent's sign
+            k += 1
+            while k < len(s) and s[k].isdigit():
+                k += 1
         tok = s[self.i : k]
         try:
+            if not tok_is_hex(tok) and any(c in tok for c in ".eE"):
+                # (an encoding indicator, `_1` to `_3`, tells the width alone)
+                f = float(tok.split("_")[0])
+                self.i = k
+                return f
             n = int(tok.replace("_", ""), 0)
         except ValueError:
             raise self.error(f"bad number {tok!r}")
@@ -249,6 +287,10 @@ class _Reader:
             else:
                 out.append(c)
                 self.i += 1
+
+
+def tok_is_hex(tok):
+    return tok.lstrip("-")[:2].lower() == "0x"
 
 
 def loads(text):
