@@ -74,7 +74,7 @@ LZMA 1.22%; AZO 1.03%.
 
 ## Tests
 
-- `tests/formula.rs`: the fixtures of `tests/data` (EggDotNet's, MIT: DEFLATE, LZMA, AZO of
+- `tests/formula.rs`: the fixtures of `tests/data` (EggDotNet's, MIT, `tests/data/NOTICE.md`: DEFLATE, LZMA, AZO of
   text and of digits, solid, a comment of the archive, a name of a locale, an encrypted file)
   rebuilt; a solid block's contents by kind; bzip2 and stored blocks among others kept (archives
   written by `egg::write`); the budget, bzip2 turned down, archives cut at every 97th byte; an

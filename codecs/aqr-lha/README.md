@@ -83,7 +83,7 @@ Much of Aminet's archives is already compressed (pictures, sounds, stored files)
 
 ## Tests
 
-- `tests/recons.rs`: the streams of the fixtures of `tests/data` (lhasa's: LHa for UNIX, LHA
+- `tests/recons.rs`: the streams of the fixtures of `tests/data` (lhasa's, ISC, `tests/data/NOTICE.md`: LHa for UNIX, LHA
   2.55e, LhA for AmigaOS, LHA for OS/2) decoded, checked by their CRC-16, every header as
   predicted, split and joined; random parses (matches neither the nearest nor whole, of any
   method) in blocks of random sizes, headers written otherwise, padding and bytes after it,

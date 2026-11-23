@@ -121,7 +121,8 @@ at every threshold: the tree's tables learn from both cases).
 cargo rt -p aqr-gif    # fixtures of encoders, test encoders of every choice, cut files, damaged records
 ```
 
-The fixtures are `scripts/gen-fixtures.py`'s, and `dup-box2.gif`, Apache's icon `box2.gif` (in the
+The fixtures are `scripts/gen-fixtures.py`'s (of ImageMagick's built-in images, under the
+ImageMagick License: `tests/data/NOTICE.md`), and `dup-box2.gif`, Apache's icon `box2.gif` (in the
 public domain, as its comment says), of an encoder that defines codes again.
 
 `cargo test` (debug) catches an overflow from a damaged record as a panic. aqr-compress's
