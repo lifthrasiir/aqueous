@@ -1,0 +1,26 @@
+;; A gang class of one slot: the instance makes a channel, spawns a gang of one task, which sends
+;; 'hi' to it and ends, closing it; the output is what the instance receives, then nothing
+;; (the channel closed, aqr_recv returns -1, else it traps).
+(module
+  (import "aqr" "aqr_memory" (memory $work 1))
+  (import "aqr" "aqr_output0" (memory $out i64 0))
+  (import "aqr" "aqr_spawn" (func $spawn (param i32 i32 i32 i32 i32) (result i32)))
+  (import "aqr" "aqr_join" (func $join (param i32 i32) (result i32)))
+  (import "aqr" "aqr_take" (func $take (param i32 i32 i32 i32)))
+  (import "aqr" "aqr_chan" (func $chan (param i32) (result i32)))
+  (import "aqr" "aqr_send" (func $send (param i32 i32 i32)))
+  (import "aqr" "aqr_recv" (func $recv (param i32 i32 i32) (result i32)))
+  (@custom "aqr_task_slots" "\81")
+  (func (export "aqr_apply_whole") (param $params i64) (param $output i64)
+    (local $c i32) (local $h i32) (local $n i32)
+    (local.set $c (call $chan (i32.const 1)))
+    (local.set $h (call $spawn (i32.const 0) (i32.const 0) (i32.const 0) (local.get $c) (i32.const 1)))
+    (local.set $n (call $recv (local.get $c) (i32.const 2048) (i32.const 16)))
+    (if (i32.ne (call $recv (local.get $c) (i32.const 4096) (i32.const 16)) (i32.const -1))
+      (then unreachable))
+    (drop (call $join (local.get $h) (i32.const 0)))
+    (call $take (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0))
+    (memory.copy $out $work (i64.const 0) (i32.const 2048) (local.get $n)))
+  (func (export "aqr_task") (param $c i32) (param $i i32)
+    (i32.store16 (i32.const 100) (i32.const 0x6968))
+    (call $send (local.get $c) (i32.const 100) (i32.const 2))))

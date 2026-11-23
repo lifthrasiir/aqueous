@@ -23,5 +23,5 @@ The cases are named by what they test, `fail-*` and `unsupported-*` those of a f
 that `aqr` doesn't pass is not wrong for that: `check.py` lists where `aqr` differs from the
 specification as well as where a case is wrong.
 
-Left: part modules, tasks and channels, split modules, registered entries known, partial access,
+Left: split modules, registered entries known, partial access,
 and the suites of extraction and of compressors.
