@@ -699,7 +699,10 @@ impl aqr_pack::Contents for Gathered {
 
 /// An archive written to `file`, encrypted with passphrase `p` ([`aqr_archive::envelope`]): with
 /// mirrored headers, at age's work factor.
-fn sealer<'f>(file: &'f mut fs::File, p: &[u8]) -> std::io::Result<aqr_archive::envelope::Sealer<&'f mut fs::File>> {
+pub(crate) fn sealer<'f>(
+    file: &'f mut fs::File,
+    p: &[u8],
+) -> std::io::Result<aqr_archive::envelope::Sealer<&'f mut fs::File>> {
     aqr_archive::envelope::Sealer::new(file, p, aqr_archive::envelope::WORK_FACTOR, true)
 }
 
@@ -828,7 +831,7 @@ pub(crate) fn ticked<T>(on: bool, tick: &(dyn Fn() + Sync), work: impl FnOnce() 
     })
 }
 
-fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
+pub(crate) fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
     let t = start.elapsed().as_secs_f64();
     eprintln!(
         "{}: {files} file{}, {} -> {} ({}) in {}, {:.1} MB/s",

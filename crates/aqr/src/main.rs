@@ -137,7 +137,10 @@
 //!   where damaged, its mirror blocks restoring what they can (what would lose a file is not
 //!   written). In place (beside it and checked first), or to `-o`; nothing to change, nothing
 //!   written. `--passphrase-from` gives as many sources as passphrases are needed, the input's
-//!   then `-P`'s apart by `;`. Of other formats, not yet.
+//!   then `-P`'s apart by `;`. An archive of another format (as `-d` takes them by name) is
+//!   written as an Aqueous archive of the same tree as aqr-unpack reads it, its files
+//!   compressed as `-c` compresses them (its options taken), into its name without the format's
+//!   suffix and `.aqr` (or `-o`); an entry left out fails it.
 //! - `--move ARCHIVE PATH --rename TO...`: each path moved to its `TO` (in the order given, the
 //!   directories on the way made, without their metadata), the archive written again as
 //!   `--compact` writes it, as a segment cannot take the contents of another but by an import
@@ -383,7 +386,8 @@ Modes:
                         -P, --no-passphrase, -A and --no-archival tell (else as it is),
                         repaired where damaged; --keep-since and --drop-history as of
                         --compact; --passphrase-from SOURCE;SOURCE for the input's and
-                        -P's
+                        -P's. Of another format (.zip, .7z, .tar.gz, ... as -d takes
+                        them): an Aqueous archive of its tree, compressed as -c does
       --no-passphrase   with --convert: the archive written decrypted (else no -P)
       --no-archival     with --convert: the archive written without mirror blocks (else
                         no -A)

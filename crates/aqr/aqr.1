@@ -221,8 +221,17 @@ file so is not written
 It is written beside the archive, checked, and put in its place by a rename, or written to
 .Fl o ;
 with nothing to change, nothing is written.
-An archive after other bytes (a self-extracting program's) is not converted, nor are archives
-of other formats yet.
+An archive after other bytes (a self-extracting program's) is not converted.
+An archive of another format, as
+.Fl d
+takes them by their names, is written as an Aqueous archive of the same tree (read as it is,
+not through the disk), its files compressed as
+.Fl c
+compresses them, with its options; into the input's name without the format's suffix and
+.Pa .aqr ,
+or
+.Fl o .
+An entry left out (encrypted without its passphrase, of a method not known) fails it.
 .Fl -passphrase-from
 gives as many sources as passphrases are needed: the archive's, then
 .Fl P Ns 's ,

@@ -4,7 +4,9 @@
 정책(P3), 3.3절(하지 않음), 4절의 옵션과 암호, 복구는 정했다. 남은 것은 6절에 있다.
 
 구현(2026-11-23): 5절 1.1–1.5(용례 2, `crates/aqr/src/convert.rs`, `rewrite_layered`와
-`History::Whole`). `--convert` 바깥의 `--no-passphrase`, `--no-archival`은 기본값을 뜻하므로
+`History::Whole`), 2의 A 중 다리(전부 푼 다음 압축: 내용은 spill에, 입력이나 출력이 암호화되면
+메모리에만; 목록이 앞에 있는 형식과 tar 모두 이 길이다)와 빠진 항목이 있으면 실패하기. 주석,
+볼륨 레이블, 진행 표시, 풀기와 압축을 겹치기는 아직이다. `--convert` 바깥의 `--no-passphrase`, `--no-archival`은 기본값을 뜻하므로
 아무 일도 하지 않는다(`-P`, `-A`와 함께면 오류). 암호화된 아카이브의 `--history`도 읽는다
 (`--at`, `--diff`는 아직).
 

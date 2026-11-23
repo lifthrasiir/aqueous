@@ -252,3 +252,46 @@ fn repaired() {
     assert_eq!(fs::read(d.join("a.aqr")).unwrap(), damaged);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// Archives of other formats (as aqr writes them) converted, of the same tree: ZIP, 7z, tar.gz,
+/// a single file's gzip stream (an archive of the file alone, named without `.gz`); an encrypted
+/// ZIP by its passphrase, the output encrypted by another; without its passphrase, not written.
+#[test]
+fn other_formats() {
+    let d = scratch("other");
+    let want = archive(&d);
+    let mut mixed = text(5, 30_000);
+    mixed.extend_from_slice(&text(6, 30_000));
+    fs::write(d.join("one.txt"), &mixed).unwrap();
+    for f in ["zip", "7z", "tar.gz"] {
+        let name = format!("x.{f}");
+        ok(&d, &["-q", "--format", f, "-o", &name, "src"]);
+        let t = ok(&d, &["--convert", &name]);
+        assert!(t.contains("x.aqr: 5 files"), "{f}: {t}");
+        // (the files under src/, as aqr wrote them)
+        let got: Vec<_> = extracted(&d, "x.aqr", None)
+            .into_iter()
+            .map(|(p, b)| (p.strip_prefix("src/").unwrap().to_owned(), b))
+            .collect();
+        assert_eq!(got, want, "{f}");
+        assert!(fails(&d, &["--convert", &name]).contains("exists"), "{f}");
+        fs::remove_file(d.join("x.aqr")).unwrap();
+    }
+    ok(&d, &["-q", "--format", "gz", "-o", "one.txt.gz", "one.txt"]);
+    ok(&d, &["-q", "--convert", "one.txt.gz"]);
+    ok(&d, &["-q", "-d", "-o", "back.txt", "one.txt.aqr"]);
+    assert_eq!(fs::read(d.join("back.txt")).unwrap(), mixed);
+
+    ok(&d, &["-q", "--format", "zip", "-P", "--passphrase-from", "env:PA", "-o", "e.zip", "src"]);
+    let t = fails(&d, &["--convert", "e.zip"]);
+    assert!(t.contains("no passphrase given opens it"), "{t}");
+    assert!(!d.join("e.aqr").exists());
+    ok(&d, &["-q", "--convert", "-P", "--passphrase-from", "env:PA;env:PB", "e.zip"]);
+    assert!(encrypted(&d, "e.aqr"));
+    let got: Vec<_> = extracted(&d, "e.aqr", Some("env:PB"))
+        .into_iter()
+        .map(|(p, b)| (p.strip_prefix("src/").unwrap().to_owned(), b))
+        .collect();
+    assert_eq!(got, want);
+    fs::remove_dir_all(&d).unwrap();
+}
