@@ -26,7 +26,9 @@
 //! Written again whole ([`History::Whole`]: `aqr --convert`), every segment is as it was, but for
 //! the blocks of no segment (spacer, mirror and size hint blocks) and the footer; what is around
 //! the blocks may then be changed ([`Layers`]): mirror blocks written as `aqr -c -A` writes them,
-//! and the size hint block of an encrypted archive's payload.
+//! and the size hint block of an encrypted archive's payload. An encrypted archive's payload is
+//! read decrypting as it goes ([`rewrite_payload`]): its data blocks decrypted as they are copied,
+//! and let go of after, so that not all of it is in memory at once.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -37,8 +39,8 @@ use super::mirror::{FAR, Mirroring};
 use super::segment::Copied;
 use super::tree::{Entry, EntryNode, Extra, Journal, SegmentInfo, Status, Tree};
 use super::{
-    ContentAt, Encoder, Failure, HEADER_MAGIC, LeafBlock, Level, Reader, SegmentWriter, always_compressed, critical,
-    decoded_with, footer_of, formula_block, frame, inspect, opened, opened_with,
+    ContentAt, Encoder, Failure, HEADER_MAGIC, LeafBlock, Level, Payload, Reader, SegmentWriter, always_compressed,
+    critical, decoded_with, decrypt_framing, footer_of, formula_block, frame, inspect, opened, opened_with,
 };
 use aqr_formula::{Error, Result};
 
@@ -58,6 +60,61 @@ pub struct Rewritten {
     /// The leaf blocks made again (formula blocks), by their indices among those written: to be
     /// evaluated to check them.
     pub made: Vec<usize>,
+}
+
+/// A block written again: copied of the archive read (its bytes there), or made again.
+enum Piece {
+    Copied(std::ops::Range<usize>),
+    Made(Vec<u8>),
+}
+
+impl Piece {
+    fn len(&self) -> usize {
+        match self {
+            Piece::Copied(r) => r.len(),
+            Piece::Made(b) => b.len(),
+        }
+    }
+}
+
+/// What writes the blocks of archive `c` ([`Piece`]), in the order they are in it: of an encrypted
+/// archive's payload being decrypted (`sealed`), a piece of [`COPIED`] bytes at a time, decrypted
+/// as it is copied (on `threads` threads), the chunks of what is copied let go of after it (those before `released`).
+struct Copier<'c> {
+    c: &'c [u8],
+    sealed: Option<&'c super::envelope::Decrypting<'c>>,
+    released: usize,
+    threads: usize,
+}
+
+/// The bytes of a block copied at once ([`Copier`]).
+const COPIED: usize = 4 << 20;
+
+impl Copier<'_> {
+    fn write(&mut self, out: &mut dyn Write, p: &Piece) -> Result<()> {
+        let io = |e: std::io::Error| Error::new(e.to_string());
+        let r = match p {
+            Piece::Made(b) => return out.write_all(b).map_err(io),
+            Piece::Copied(r) => r.clone(),
+        };
+        let mut from = r.start;
+        while from < r.end {
+            let to = (from + COPIED).min(r.end);
+            if let Some(d) = self.sealed {
+                d.get_on(from..to, self.threads).map_err(|f| Error::new(f.to_string()))?;
+            }
+            out.write_all(&self.c[from..to]).map_err(io)?;
+            if let Some(d) = self.sealed {
+                // SAFETY: of what is copied: the blocks are copied in order, and what is read of
+                // those after (their formulas, metadata) is read before them; the chunk of what
+                // follows not let go of
+                unsafe { d.release(self.released..to) };
+                self.released = to / super::mirror::CHUNK as usize * super::mirror::CHUNK as usize;
+            }
+            from = to;
+        }
+        Ok(())
+    }
 }
 
 /// What becomes of the journal points of an archive written again ([`rewrite_as`]).
@@ -156,8 +213,48 @@ pub fn rewrite_layered(
     history: History,
     layers: Layers,
 ) -> Result<Rewritten> {
+    rewrite_payload(Payload::Plain(c), t, level, threads, out, history, layers)
+}
+
+/// [`rewrite_layered`] of archive `p`: of an encrypted archive's payload being decrypted, what
+/// tells its blocks decrypted first ([`decrypt_framing`]), each data block as it is copied, and
+/// the chunks of what is copied let go of (given back, as nothing reads them again). A chunk that
+/// does not authenticate fails it.
+pub fn rewrite_payload(
+    p: Payload,
+    t: &Tree,
+    level: Level,
+    threads: usize,
+    out: &mut dyn Write,
+    history: History,
+    layers: Layers,
+) -> Result<Rewritten> {
     let whole = history == History::Whole;
     let fail = |f: Failure| Error::new(f.to_string());
+    let sealed = match p {
+        Payload::Plain(_) => None,
+        Payload::Sealed(d) => {
+            decrypt_framing(d).map_err(fail)?;
+            Some(d)
+        }
+    };
+    let c: &[u8] = match p {
+        Payload::Plain(c) => c,
+        // SAFETY: what is read of it but its data blocks is got above, and each data block is got
+        // before it is read (`ensure`); the chunks let go of are behind what is copied, never read
+        // again
+        Payload::Sealed(d) => unsafe { d.unread() },
+    };
+    // (a block's bytes, of `c`, decrypted where they are not yet)
+    let ensure = |b: &[u8]| -> Result<()> {
+        match sealed {
+            None => Ok(()),
+            Some(d) => {
+                let r = d.range_of(b).ok_or_else(|| Error::new("a block not of the payload"))?;
+                d.get(r).map(drop).map_err(fail)
+            }
+        }
+    };
     if !c.starts_with(&HEADER_MAGIC) {
         return Err(Error::new("not a standalone archive"));
     }
@@ -309,7 +406,8 @@ pub fn rewrite_layered(
     // (with mirror blocks, the last segment's blocks held back, the last [`FAR`] bytes of them, for
     // the last metadata block's mirror block to come before them; and where the metadata block
     // before ended, for those of the segments closed to come before the next one's)
-    let mut held: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+    let mut held: std::collections::VecDeque<Piece> = std::collections::VecDeque::new();
+    let mut copier = Copier { c, sealed, released: 0, threads };
     let mut held_len = 0;
     let mut metadata_end: Option<u64> = None;
     let mut leaf_at = vec![usize::MAX; blocks.leaves.len()];
@@ -344,7 +442,7 @@ pub fn rewrite_layered(
                 }
                 // (those a file taken away sliced too: of the bytes still sliced alone)
                 for i in (0..keep.len()).filter(|&i| keep[i] && dead[i]) {
-                    if let Some(p) = pack(&blocks, nl + i, &mut sliced[i], &enc)? {
+                    if let Some(p) = pack(&blocks, nl + i, &mut sliced[i], &enc, &ensure)? {
                         packed.insert(nl + i, p);
                     }
                 }
@@ -357,7 +455,6 @@ pub fn rewrite_layered(
             }
             let rank_of = |o: usize| rank[o - nl];
             for &(at, size, kind) in &segments[s] {
-                let bytes = &c[at..at + size];
                 let (what, made) = match kind {
                     Kind::Aux(a) => (a, None),
                     Kind::Leaf(l) if !live[l] => {
@@ -396,21 +493,24 @@ pub fn rewrite_layered(
                     },
                     Kind::Dropped => continue,
                 };
-                let bytes = made.as_deref().unwrap_or(bytes);
-                w.copied(what, bytes.len());
-                written += bytes.len() as u64;
+                let piece = match made {
+                    Some(b) => Piece::Made(b),
+                    None => Piece::Copied(at..at + size),
+                };
+                w.copied(what, piece.len());
+                written += piece.len() as u64;
                 if layers.mirrors && n + 1 == total {
-                    held_len += bytes.len();
-                    held.push_back(bytes.to_vec());
+                    held_len += piece.len();
+                    held.push_back(piece);
                     while let Some(b) = held.front()
                         && (held_len - b.len()) as u64 >= FAR
                     {
-                        out.write_all(b).map_err(io)?;
+                        copier.write(&mut out, b)?;
                         held_len -= b.len();
                         held.pop_front();
                     }
                 } else {
-                    out.write_all(bytes).map_err(io)?;
+                    copier.write(&mut out, &piece)?;
                 }
             }
         }
@@ -466,7 +566,7 @@ pub fn rewrite_layered(
             None => (Vec::new(), w.finish_as(&enc, &st, &contents, status)?.0),
         };
         out.write_all(&mirror).map_err(io)?;
-        held.iter().try_for_each(|b| out.write_all(b)).map_err(io)?;
+        held.iter().try_for_each(|b| copier.write(&mut out, b))?;
         out.write_all(&end).map_err(io)?;
         (written, front_mirror) = (written + end.len() as u64, mirror.len() as u64);
     }
@@ -655,8 +755,15 @@ fn slices(d: &[u8], at: usize, blocks: usize) -> super::Decoded<Vec<SliceAt>> {
 /// Non-leaf block `o` made again of its bytes in `sliced` (the ranges sliced of it, sorted and
 /// merged here), compressed at the level of `enc` without a dictionary: none where they are all
 /// of it.
-fn pack(blocks: &super::Blocks, o: usize, sliced: &mut Vec<(u64, u64)>, enc: &Encoder) -> Result<Option<Packed>> {
+fn pack(
+    blocks: &super::Blocks,
+    o: usize,
+    sliced: &mut Vec<(u64, u64)>,
+    enc: &Encoder,
+    ensure: &dyn Fn(&[u8]) -> Result<()>,
+) -> Result<Option<Packed>> {
     let (data, zstd, dict) = blocks.non_leaf[o];
+    ensure(data)?;
     let d =
         decoded_with(data, zstd, true, dict.map(|i| &blocks.dictionaries[i])).map_err(|f| Error::new(f.to_string()))?;
     sliced.retain(|r| r.0 < r.1);
@@ -937,10 +1044,15 @@ mod tests {
     /// An archive of three segments (a file each, the last of a tombstone of the first's too),
     /// the second telling a journal point and an archive comment.
     fn segmented() -> Vec<u8> {
+        segmented_of(20_000)
+    }
+
+    /// [`segmented`] of files of `n` bytes.
+    fn segmented_of(size: usize) -> Vec<u8> {
         use super::super::tree::ArchiveExtra;
         let mut f = Formula::default();
         let names = ["a", "b", "c"];
-        let lits: Vec<Node> = names.iter().map(|n| f.push(*n, text(n.len() as u64 + 9, 20_000))).collect();
+        let lits: Vec<Node> = (names.iter().zip(9..)).map(|(n, k)| f.push(*n, text(k, size))).collect();
         let enc = Encoder::new(Level::Zstd(3));
         let mut w = SegmentWriter::new();
         let mut c = SegmentWriter::header().to_vec();
@@ -959,7 +1071,7 @@ mod tests {
                 entries.push(Entry::tombstone(None, b"a".to_vec()));
             }
             let t = Tree { root: Extra::default(), entries };
-            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 20_000 }];
+            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: size as u64 }];
             if k == 1 {
                 w.set_journal(vec![(1_700_000_000_000, "one".into())]).unwrap();
                 w.set_archive_extra(ArchiveExtra { comment: Some(b"hi"[..].into()), extensions: Vec::new() }).unwrap();
@@ -1016,6 +1128,53 @@ mod tests {
             let d = envelope::open(&sealed).unwrap().unlock(b"p").unwrap().decrypt(1).unwrap();
             assert_eq!(super::super::mirror::check(&d).mirrored(&d, true), mirrors);
             assert_eq!(whole(&d, Layers::default()).0, c);
+        }
+    }
+
+    /// Of an encrypted archive's payload decrypted as it is read, the archive written again is
+    /// the one written of the payload decrypted whole: as it is, and with a file taken away (a
+    /// block solid with it packed again, of its bytes decrypted as it is read).
+    #[test]
+    fn decrypting_as_read() {
+        use super::super::envelope;
+        let seal = |c: &[u8]| {
+            let mut s = envelope::Sealer::new(std::io::Cursor::new(Vec::new()), b"p", 12, false).unwrap();
+            let layers = Layers { mirrors: false, size_hint: true };
+            rewrite_layered(c, &Tree::default(), Level::Zstd(3), 1, &mut s, History::Whole, layers).unwrap();
+            s.into_inner().unwrap().into_inner()
+        };
+        let (g, _) = grouped();
+        let mut t = open(&g, &natives()).unwrap().tree().unwrap().clone();
+        t.entries.retain(|e| e.name != b"y");
+        for (c, t, history) in [(segmented_of(300_000), Tree::default(), History::Whole), (g, t, History::Refuse)] {
+            let sealed = seal(&c);
+            assert!(history != History::Whole || sealed.len() > 4 * super::super::mirror::CHUNK as usize);
+            let e = envelope::open(&sealed).unwrap();
+            let u = e.unlock(b"p").unwrap();
+            let plain = u.decrypt(1).unwrap();
+            let mut want = Vec::new();
+            rewrite_layered(&plain, &t, Level::Zstd(3), 1, &mut want, history, Layers::default()).unwrap();
+            let d = e.unlock(b"p").unwrap().decrypting();
+            let mut got = Vec::new();
+            let r = rewrite_payload(Payload::Sealed(&d), &t, Level::Zstd(3), 1, &mut got, history, Layers::default());
+            assert_eq!(r.unwrap().len, got.len() as u64);
+            assert_eq!(got, want);
+            // (a chunk that does not authenticate: an error)
+            let mut bad = sealed.clone();
+            let n = bad.len();
+            bad[n / 2] ^= 1;
+            let e = envelope::open(&bad).unwrap();
+            let d = e.unlock(b"p").unwrap().decrypting();
+            let r = rewrite_payload(
+                Payload::Sealed(&d),
+                &t,
+                Level::Zstd(3),
+                1,
+                &mut Vec::new(),
+                history,
+                Layers::default(),
+            );
+            assert!(r.is_err());
         }
     }
 

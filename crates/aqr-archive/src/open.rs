@@ -278,6 +278,20 @@ fn open_indexed_with<'c, 'n>(
 /// [`Archive::write_file`] and [`Archive::hashed`] evaluate them), and let go of once read,
 /// decrypted again where it is read again: not all of the payload in memory at once.
 pub fn open_decrypting<'c, 'n>(d: &'c envelope::Decrypting<'c>, runner: &'n dyn Runner) -> Decoded<Archive<'c, 'n>> {
+    decrypt_framing(d)?;
+    // SAFETY: what is read of the payload but data blocks is got above; a data block is got as it
+    // is read (`Contents::ensure`), and let go of after (`Contents::read`)
+    let mut a = open_as(unsafe { d.unread() }, runner, true)?;
+    a.sealed = Some(d);
+    Ok(a)
+}
+
+/// Of the payload `d` of an encrypted archive, what tells where the blocks are and what they are
+/// decrypted ([`open_decrypting`]): every block but the data blocks, and of those their heads,
+/// the start and the end of their data; the footer too. What reads the payload ([`open`],
+/// [`super::rewrite_payload`], [`super::mirror::check_sealed`]) reads no more of it, but the data
+/// blocks it gets as it reads them.
+pub fn decrypt_framing(d: &envelope::Decrypting) -> Decoded<()> {
     let p = Payload::Sealed(d);
     let (_, archive_end, _, _) = footer_fields(p)?;
     let mut at = HEADER_MAGIC.len();
@@ -293,11 +307,7 @@ pub fn open_decrypting<'c, 'n>(d: &'c envelope::Decrypting<'c>, runner: &'n dyn 
         }
         at = next;
     }
-    // SAFETY: what is read of the payload but data blocks is got above; a data block is got as it
-    // is read (`Contents::ensure`), and let go of after (`Contents::read`)
-    let mut a = open_as(unsafe { d.unread() }, runner, true)?;
-    a.sealed = Some(d);
-    Ok(a)
+    Ok(())
 }
 
 /// [`open`] of an archive, the payload of an encrypted one where `sealed`.

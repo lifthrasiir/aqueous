@@ -1128,6 +1128,19 @@ impl<'c> Decrypting<'c> {
         Ok(unsafe { std::slice::from_raw_parts(self.buf.as_ptr().add(r.start), r.len()) })
     }
 
+    /// [`Decrypting::get`], the chunks decrypted on up to `threads` threads.
+    pub fn get_on(&self, r: std::ops::Range<usize>, threads: usize) -> Decoded<&[u8]> {
+        if threads > 1 && r.start < r.end && r.end <= self.len {
+            let first = r.start / CHUNK;
+            let n = (r.end - 1) / CHUNK + 1 - first;
+            let ok = aqr_common::pool::par_map(n, threads, |k| self.chunk(first + k));
+            if let Some(k) = ok.iter().position(|&ok| !ok) {
+                return invalid(format!("encrypted chunk {} does not authenticate", first + k));
+            }
+        }
+        self.get(r)
+    }
+
     /// The whole payload, the chunks not decrypted yet decrypted on up to `threads` threads.
     pub fn all(&self, threads: usize) -> Decoded<&[u8]> {
         /// Chunks decrypted by a task: 4 MiB.

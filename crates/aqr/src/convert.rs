@@ -9,8 +9,10 @@
 //! is ([`aqr_archive::History::Whole`]: its segments, entries replaced, tombstones, journal
 //! points), but where `--keep-since` or `--drop-history` tell, as `--compact` has them.
 //!
-//! The input is opened as `-d` opens it, locked against another writer: decrypted into memory
-//! (at most [`IN_MEMORY`] bytes), and repaired where it is damaged ([`aqr_archive::mirror::repair`]:
+//! The input is opened as `-d` opens it, locked against another writer: an encrypted one
+//! decrypted as it is copied, a chunk at a time ([`aqr_archive::rewrite_payload`]), where what
+//! tells its blocks authenticates and its mirror blocks are as their blocks; else decrypted whole
+//! into memory (at most [`IN_MEMORY`] bytes), and repaired where it is damaged ([`aqr_archive::mirror::repair`]:
 //! blocks restored from their mirror blocks, a footer made again), not salvaged: a repair that
 //! would lose a file, which every file decoding tells, fails. A repair is a change too: an
 //! archive damaged is written again repaired with nothing else given. With nothing to change,
@@ -43,8 +45,8 @@ use aqr_archive::{History, Layers, Tree};
 
 use crate::{Args, exit, pass, plural, stop};
 
-/// The most bytes of an archive converted held in memory: an encrypted archive's payload
-/// decrypted, or an archive repaired (until blocks are read and decrypted as they are copied).
+/// The most bytes of an archive converted held in memory: a damaged encrypted archive's payload
+/// decrypted whole, or an archive repaired.
 const IN_MEMORY: u64 = 16 << 30;
 
 /// Converts each input ([module](self)).
@@ -117,16 +119,15 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
         )));
     }
     crate::begin("convert", &[input.to_owned()], a.output.as_deref().or(Some(input)));
-    // the archive's bytes: the payload decrypted, its chunks that do not authenticate erased
+    // the archive's bytes: the payload decrypted as it is read where it is sound, else whole (its
+    // chunks that do not authenticate erased), to be repaired
+    let mut streaming: Option<envelope::Decrypting> = None;
     let mut decrypted = None;
     let mut erased = Vec::new();
     let mut header_from = None;
     let mut old_pass = None;
     let plain: &[u8] = match sealed {
         true => {
-            if map.len() as u64 > IN_MEMORY {
-                return Err(err(&format!("an encrypted archive over {} is not converted yet", bytes(IN_MEMORY))));
-            }
             let (e, opened) = envelope::open_damaged(map).map_err(|e| err(&exit::seen(e)))?;
             header_from = opened.header_from;
             if let Some(k) = header_from {
@@ -142,18 +143,42 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
                 return Err(err(&"encrypted, and no passphrase given opens it"));
             };
             old_pass = Some(p);
-            let mut d = memmap2::MmapMut::map_anon(u.len().max(1)).map_err(|e| err(&exit::seen(e)))?;
-            let (failed, cut) = u.decrypt_lossy(&mut d[..u.len()], threads);
-            if cut {
-                exit::note(exit::Code::Invalid);
-                return Err(err(&"cut short after an encrypted chunk: what came after it is lost (not converted)"));
+            let mut d = u.decrypting();
+            // SAFETY: of the file mapped read only
+            unsafe { d.let_go_read() };
+            // (sound: what tells its blocks authenticates, read to its footer, every mirror block
+            // as its block; a data block that does not authenticate fails it as it is copied, as it
+            // would not be repaired either)
+            let sound = header_from.is_none() && !opened.cut && aqr_archive::decrypt_framing(&d).is_ok() && {
+                // SAFETY: what is read of it got by `decrypt_framing`
+                let p = unsafe { d.unread() };
+                let c = aqr_archive::mirror::check_sealed(p, &[], false);
+                c.walked && c.differing(p).next().is_none()
+            };
+            if sound {
+                streaming = Some(d);
+                &[]
+            } else {
+                if map.len() as u64 > IN_MEMORY {
+                    return Err(err(&format!(
+                        "a damaged encrypted archive over {} is not repaired yet",
+                        bytes(IN_MEMORY)
+                    )));
+                }
+                let u = d.unlocked();
+                let mut m = memmap2::MmapMut::map_anon(u.len().max(1)).map_err(|e| err(&exit::seen(e)))?;
+                let (failed, cut) = u.decrypt_lossy(&mut m[..u.len()], threads);
+                if cut {
+                    exit::note(exit::Code::Invalid);
+                    return Err(err(&"cut short after an encrypted chunk: what came after it is lost (not converted)"));
+                }
+                if !failed.is_empty() {
+                    tell(&format!("{} encrypted chunk{} not authenticating", failed.len(), plural(failed.len())));
+                }
+                erased = failed.iter().map(|&m| u.chunk_range(m)).collect();
+                decrypted = Some((m, u.len()));
+                &[]
             }
-            if !failed.is_empty() {
-                tell(&format!("{} encrypted chunk{} not authenticating", failed.len(), plural(failed.len())));
-            }
-            erased = failed.iter().map(|&m| u.chunk_range(m)).collect();
-            decrypted = Some((d, u.len()));
-            &[]
         }
         false => match aqr_archive::locate(map) {
             Some(r) if r.start > 0 => {
@@ -173,9 +198,12 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
             None => map,
         },
     };
-    let plain = match &decrypted {
-        Some((d, n)) => &d[..*n],
-        None => plain,
+    let plain = match (&decrypted, &streaming) {
+        (Some((d, n)), _) => &d[..*n],
+        // SAFETY: what is read of it but its data blocks got by `decrypt_framing`, those read only
+        // by `rewrite_payload`, which gets them
+        (None, Some(d)) => unsafe { d.unread() },
+        (None, None) => plain,
     };
     // repaired where it is damaged, not salvaged
     let check = match sealed {
@@ -300,8 +328,12 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
             .map_err(|e| perr(&e))?;
     let layers = Layers { mirrors, size_hint: !matches!(sealing, Sealing::None) };
     let r = (|| -> Result<(aqr_archive::Rewritten, Option<envelope::Opener>), String> {
+        let payload = match &streaming {
+            Some(d) if restored.is_none() => aqr_archive::Payload::Sealed(d),
+            _ => aqr_archive::Payload::Plain(read),
+        };
         let rewrite = |w: &mut dyn Write| {
-            aqr_archive::rewrite_layered(read, &tree, a.opt.level, threads, w, history, layers).map_err(|e| err(&e))
+            aqr_archive::rewrite_payload(payload, &tree, a.opt.level, threads, w, history, layers).map_err(|e| err(&e))
         };
         let (r, opener) = match &sealing {
             Sealing::Same(p) | Sealing::New(p) => {
@@ -380,11 +412,30 @@ fn checked(
 ) -> Result<(), String> {
     // SAFETY: a file of this process, not written to any more
     let map = unsafe { memmap2::Mmap::map(out) }.map_err(|e| e.to_string())?;
-    let decrypted = match opener {
-        Some(o) => Some(o.unseal(&map).and_then(|u| u.decrypt(a.opt.threads)).map_err(|e| e.to_string())?),
+    // (an encrypted one decrypted as it is read: what tells its blocks, then its data as it is
+    // evaluated)
+    let decrypting = match opener {
+        Some(o) => {
+            let mut d = o.unseal(&map).map_err(|e| e.to_string())?.decrypting();
+            // SAFETY: of the file mapped read only
+            unsafe { d.let_go_read() };
+            Some(d)
+        }
         None => None,
     };
-    let c = decrypted.as_deref().unwrap_or(&map);
+    let decoder = crate::Decoder {
+        native: aqr_decompress::Native { threads: a.opt.threads },
+        wasm: crate::WASM.get(),
+        sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
+    };
+    let archive = match &decrypting {
+        Some(d) => aqr_archive::open_decrypting(d, &decoder),
+        None => aqr_archive::open(&map, &decoder),
+    };
+    let archive = archive.map_err(|e| e.to_string())?;
+    // SAFETY: what the mirror blocks are checked by (their blocks, and those mirrored) got as it
+    // was opened
+    let c = decrypting.as_ref().map_or(&map[..], |d| unsafe { d.unread() });
     let check = match opener {
         Some(_) => aqr_archive::mirror::check_sealed(c, &[], false),
         None => aqr_archive::mirror::check(c),
@@ -392,16 +443,6 @@ fn checked(
     if check.mirrored(c, opener.is_some()) != mirrors || check.broken > 0 {
         return Err("the archive written is not mirrored as meant (left as it was)".into());
     }
-    let decoder = crate::Decoder {
-        native: aqr_decompress::Native { threads: a.opt.threads },
-        wasm: crate::WASM.get(),
-        sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
-    };
-    let archive = match opener {
-        Some(_) => aqr_archive::open_payload(c, &decoder),
-        None => aqr_archive::open(c, &decoder),
-    };
-    let archive = archive.map_err(|e| e.to_string())?;
     if let Some(j) = back.journal {
         let got: Vec<(u64, String)> = archive.journal().iter().map(|p| (p.time, p.label.clone())).collect();
         if got != j {

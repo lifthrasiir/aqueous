@@ -239,6 +239,19 @@ fn repaired() {
     assert!(!t.contains("restored") && t.contains("mirrored archive: yes"), "{t}");
     assert_eq!(extracted(&d, "a.aqr", None), want);
 
+    // encrypted, its last chunk damaged (of the mirror blocks and the footer): decrypted whole,
+    // and repaired
+    ok(&d, &["-q", "--convert", "-P", "--passphrase-from", "env:PA", "-o", "e.aqr", "a.aqr"]);
+    let mut e = fs::read(d.join("e.aqr")).unwrap();
+    let n = e.len();
+    e[n - 3] ^= 1;
+    fs::write(d.join("e.aqr"), &e).unwrap();
+    let t = ok(&d, &["--convert", "--passphrase-from", "env:PA", "e.aqr"]);
+    assert!(t.contains("1 encrypted chunk not authenticating") && t.contains("repaired"), "{t}");
+    let t = ok(&d, &["-K", "--passphrase-from", "env:PA", "e.aqr"]);
+    assert!(!t.contains("authenticating") && t.contains("mirrored archive: yes"), "{t}");
+    assert_eq!(extracted(&d, "e.aqr", Some("env:PA")), want);
+
     // a leaf data block's damage (no mirror block of it)
     let a = fs::read(d.join("a.aqr")).unwrap();
     let leaf = blocks(&a).into_iter().find(|b| (0x20..0x38).contains(&b.1)).unwrap().2;
