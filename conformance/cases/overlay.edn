@@ -1,0 +1,37 @@
+# An overlay archive adds to its base and removes from it; a directory of no extra keeps the base's.
+{
+  "title": "An overlay archive",
+  "spec": ["#interpretation", "#segment-merging"],
+  "level": 0,
+  "base": {
+    "root": {"children": {
+      "keep": {"content": 'k'},
+      "gone": {"content": 'g'},
+      "d": {"children": {"old": {"content": 'o'}}, "extra": {-6: "kept"}},
+    }},
+    "extra": {-1: "base comment"},
+  },
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'n'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [1, 0],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [
+          {"entry_name": "d"},
+          {"entry_name": "new", "original_size": undefined},
+          {"entry_name": "gone", "special_kind": 0},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": {
+    "root": {"children": {
+      "keep": {"content": 'k'},
+      "d": {"children": {"old": {"content": 'o'}, "new": {"content": 'n'}}, "extra": {-6: "kept"}},
+    }},
+    "extra": {-1: "base comment"},
+  },
+}

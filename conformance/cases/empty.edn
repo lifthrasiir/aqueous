@@ -1,0 +1,12 @@
+# An archive of no blocks is an empty file.
+{
+  "title": "An archive of no blocks",
+  "spec": ["#unencrypted-archive", "#interpretation"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"content": h''}},
+}

@@ -1,0 +1,13 @@
+# A checksum is of the decoded data, and has to match.
+{
+  "title": "A data block of a wrong checksum",
+  "spec": ["#block-contents", "#xxh64-checksum-method"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x24, "data": {"uncompressed_data": {"data": 'Hello', "checksum": h'0000000000000000'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

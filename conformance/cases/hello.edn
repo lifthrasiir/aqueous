@@ -1,0 +1,29 @@
+# A file in a directory, with its Unix metadata.
+{
+  "title": "A named file and its entry extra",
+  "spec": ["#metadata-block", "#segment-interpretation", "#optional-metadata", "#unix-metadata"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x2C, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": [{"block_type": "Raw_Block", "content": 'Hello, world'}],
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "뷁", "original_size": undefined}],
+        "optional_metadata": {
+          -2: [null, {-70: 0o644, -71: 1000, -72: 1000, -73: "user", -74: "user"}],
+        },
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {
+    "root": {"children": {
+      "뷁": {"content": 'Hello, world', "extra": {-70: 0o644, -71: 1000, -72: 1000, -73: "user", -74: "user"}},
+    }},
+  },
+}

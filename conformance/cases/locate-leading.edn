@@ -1,0 +1,15 @@
+# An archive is located after leading bytes, from the end of the file.
+{
+  "title": "An archive after leading bytes",
+  "spec": ["#locating-an-archive"],
+  "level": 0,
+  "leading": 'MZ, but not a PE image',
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'Hello, world'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"content": 'Hello, world'}},
+}

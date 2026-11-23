@@ -1,0 +1,11 @@
+# An overlay archive is interpreted against a base, and fails without one.
+{
+  "title": "An overlay archive without its base",
+  "spec": ["#interpretation", "#unencrypted-archive"],
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": "base",
+}

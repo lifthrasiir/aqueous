@@ -1,0 +1,15 @@
+# The first metadata block has an entry other than the root.
+{
+  "title": "A first segment of no entries",
+  "spec": ["#metadata-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [], "file_params": [], "entries": [],
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

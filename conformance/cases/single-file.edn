@@ -1,0 +1,22 @@
+# Without a metadata block, the leaf blocks make one unnamed file in the order they appear.
+{
+  "title": "Leaf blocks without a metadata block",
+  "spec": ["#unencrypted-archive", "#interpretation", "#data-block"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # uncompressed, no checksum: 001 00 0 00
+      {"type": 0x20, "data": {"uncompressed_data": {"data": 'Hello, '}}},
+      # Zstandard, XXH64: 001 01 1 00
+      {"type": 0x2C, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": 'world'},
+      }}},
+      # uncompressed, XXH64: 001 00 1 00
+      {"type": 0x24, "data": {"uncompressed_data": {"data": '!'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"content": 'Hello, world!'}},
+}

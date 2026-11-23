@@ -1,0 +1,15 @@
+# A critical block not defined is an unsupported failure, ahead of anything invalid:
+# the data block's checksum is wrong too.
+{
+  "title": "A reserved critical block, ahead of an invalid one",
+  "spec": ["#reserved-blocks", "#interpretation"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x05, "data": h''},
+      {"type": 0x24, "data": {"uncompressed_data": {"data": 'Hello', "checksum": h'0000000000000000'}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "unsupported",
+}

@@ -1,0 +1,355 @@
+; Aqueous conformance suite: the case format.
+;
+; A case is a single EDN document (one CBOR data item) of `aqr-case`. Its `archive` describes
+; the bytes of an archive in the structures of the specification, field by field under the
+; specification's names; `interpreted` gives what interpreting those bytes results in.
+; (Tags are written as CDDL has them here, `#6.80001(x)`; in EDN they are `80001(x)`.)
+;
+; Notation, everywhere in `archive` except where the specification takes a CBOR data item
+; (optional metadata, and what is inside it):
+;
+; * A text string is a constant (`"HEADER_MAGIC"`, an opcode's name) or a key.
+;   Where a field holds text (an entry name, a link target, an import path) it is an aqr-text
+;   instead: `tstr` for a "wtf-8" name that is valid UTF-8, `#6.273(bstr)` for one with lone
+;   surrogates, `bstr` for a "raw" name; the field's encoding (C1 for "raw") is made from it.
+; * An unsigned integer is a number, encoded as the field's type says (leb128, u8, u16le, u(n), ...).
+; * A byte string is the bytes of the field as they are, in place of whatever the field would
+;   hold (a number, a structure, a list); `#6.80000(bstr)` says the same and is the only way to
+;   do so where a byte string means something else (an aqr-text, a CBOR item).
+; * `undefined` or `#6.80000(undefined)` is a value inferred from the rest of the case.
+;   A key whose value is to be inferred may be left out, except for a field that is optional
+;   (`cond/Optional` in the specification: `size_hint_block`), which is then absent.
+;   Inference is a computation (sizes, counts, checksums, offsets to the blocks of a kind, the
+;   bytes a mirror copies), never a choice: where a value can't be computed (which block a
+;   file starts at, a module's outputs) it is an error.
+; * `#6.80001([label, x])` is `x` that records the position of its first byte as `label`, and
+;   `#6.80002([x, label])` that of the byte after its last. A position belongs to the innermost
+;   byte sequence it is in: the file, the encrypted payload, or the decoded data of an external
+;   structure. Labels are taken out before a case is checked against this schema.
+; * `[a, b]` or `#6.80000([a, b])` is the position labelled `b` minus the one labelled `a`, and
+;   `[a, b, k]` adds `k`. Both labels have to be of the same byte sequence, and `a` not after `b`.
+;   A difference may not depend on its own encoding (a mirror block before its target): write
+;   such an offset as a number.
+; * `#6.80003(path)` is the contents of the file at `path`, relative to the case.
+;
+; Inside a CBOR data item everything is as it is, but for the tags 80000 to 80003.
+; A case needing the tag 80000 to 80003 itself as data uses another number instead.
+
+aqr-case = {
+  ? "title": tstr,
+  ? "spec": [+ tstr],                 ; anchors of the sections tested, e.g. "#insn-apply"
+  ? "level": 0..2,                    ; the conformance level needed to get `interpreted`
+  ? "requires": [* registered-hash],  ; registry entries a decompressor has to know
+  ? "leading": bytes,                 ; bytes before the archive in the file (locating an archive)
+  "archive": unencrypted-archive / encrypted-archive / rawb,
+  ? "trailing": bytes,                ; bytes after the archive
+  ? "passphrase": passphrase,         ; given to the decompressor
+  ? "base": archive-value,            ; given to the decompressor
+  "interpreted": archive-value / failure,
+}
+
+; A resource failure is allowed of any case but this one; it is expected only where the case
+; exceeds a limit the archive declares.
+failure = "invalid" / "unsupported" / "decryption" / "base" / "resource"
+
+registered-hash = bstr .size 32
+passphrase = tstr / bstr
+
+; --- Values of the notation
+
+raw = #6.80000(bstr)
+rawb = bstr / raw
+infer = undefined / #6.80000(undefined)
+diff = [tstr, tstr, ? int] / #6.80000([tstr, tstr, ? int])
+ext = #6.80003(tstr)
+
+num = uint / diff / rawb          ; a number to be given
+inum = num / infer                ; a number that may be inferred
+bytes = bstr / raw / ext
+ibytes = bytes / infer
+nums = [* num] / rawb
+inums = [* inum] / infer / rawb
+
+; An aqr-text made into the bytes of a field (entry_name, link_target, import_path).
+text-field = tstr / #6.273(bstr) / bstr / raw
+
+; --- Unencrypted archive (#unencrypted-archive)
+
+unencrypted-archive = {
+  "header_magic": "HEADER_MAGIC" / "OVERLAY_HEADER_MAGIC" / rawb,
+  ? "size_hint_block": block,
+  "blocks": [* block],
+  "footer_magic": "FOOTER_MAGIC" / "OVERLAY_FOOTER_MAGIC" / rawb,
+  ? "footer_size": inum,
+  ? "size_hint": inum,
+  ? "metadata_backward_offset": inum,
+  ? "footer_size_copy": inum,
+}
+
+; --- Block (#block)
+;
+; What `data` is follows from `type`; the alternatives below are by `type`.
+; A shorthand block (50, 60) and a block of a type not defined have `data` as bytes.
+
+block = {
+  "type": num,
+  ? "size": inum,
+  "data": spacer / size-hint / metadata / data-block / dictionary-block / import-block
+        / module-block / resource-block / formula-block / mirror-block / recovery-block / rawb,
+  ? "padding": inum,
+} / rawb
+
+; --- Shared external structure (#shared-external-structure)
+
+compressed-data<D> = {
+  ? "original_size_delta": inum,
+  ? "original_size_shrink": inum,
+  "compression_params": zstd-params / rawb,
+  "data": zstd-data<D>,
+  ? "checksum": ibytes,
+}
+
+uncompressed-data<D> = {
+  "data": D,
+  ? "checksum": ibytes,
+}
+
+zstd-params = { "window_descriptor": num }
+
+; Zstandard blocks (#zstandard-compression-method). `decoded` stores D as raw blocks, each of
+; Block_Maximum_Size but the last: the same bytes whatever the encoder.
+zstd-data<D> = { "decoded": D } / [+ zstd-block] / rawb
+
+zstd-block = {
+  "block_type": "Raw_Block" / "RLE_Block" / "Compressed_Block" / "Reserved",
+  ? "last": bool / infer,         ; Last_Block: inferred true for the last block alone
+  ? "block_size": inum,           ; Block_Size
+  "content": bytes,               ; Block_Content (the byte repeated, for RLE_Block)
+} / rawb
+
+; --- Spacer and size hint blocks (#spacer-block, #size-hint-block)
+
+spacer = { ? "space": ibytes }                ; inferred: zero bytes of `size`
+size-hint = { ? "size_hint": inum }
+
+; --- Metadata block (#metadata-block)
+
+metadata = { "compressed_data": compressed-data<meta> } / { "uncompressed_data": uncompressed-data<meta> }
+
+; Each entry is a directory, a file or a special entry by its number; the counts are inferred
+; from the keys of `entries` (`original_size` for a file, `special_kind` for a special entry),
+; so a file entry keeps `original_size` even when it is inferred.
+meta = {
+  ? "previous_metadata_offset": inum,
+  ? "num_modules": inum,
+  ? "num_resources": inum,
+  ? "num_dictionaries": inum,
+  ? "num_directories": inum,
+  ? "num_files": inum,
+  ? "num_specials": inum,
+  ? "entries_size": inum,
+  ? "optional_metadata_size": inum,
+  ? "module_offsets": inums,          ; inferred: the blocks of the kind in the segment, in order
+  ? "resource_offsets": inums,
+  ? "dictionary_offsets": inums,
+  "entry_parents": nums,
+  "file_params": [* file-param] / rawb,
+  ? "entry_offsets": inums,
+  "entries": [* entry] / rawb,
+  ? "optional_metadata": cbor-item,   ; left out: none (optional_metadata_size 0)
+} / rawb
+
+file-param = {
+  ? "file_dictionary": inum,          ; inferred from the block at file_offset
+  "file_offset": num,
+  ? "file_output": num,
+} / rawb
+
+entry = {
+  "entry_name": text-field,
+  ? "entry_name_sentinel": inum,
+  ? "original_size": inum,
+  ? "special_kind": num,
+  ? "link_target": text-field,
+  ? "link_target_sentinel": inum,
+  ? "device_major": num,
+  ? "device_minor": num,
+  ? "special_data": bytes,
+} / rawb
+
+; The optional metadata as a CBOR item (#optional-metadata), or its bytes.
+cbor-item = any / raw
+
+; --- Data block (#data-block)
+
+data-block = {
+  ? "dictionary_index": num,
+  ( "compressed_data": compressed-data<bytes> // "uncompressed_data": uncompressed-data<bytes> ),
+}
+
+; --- Dictionary block (#dictionary-block)
+
+dictionary-block = { "compressed_data": compressed-data<dictionary> }
+
+dictionary = {
+  ? "entropy_tables": bytes,
+  ? "repeat_offsets": [3*3 num] / rawb,
+  "content": bytes,
+} / rawb
+
+; --- Import block (#import-block)
+
+import-block = { "compressed_data": compressed-data<imports> }
+
+imports = {
+  ? "num_imports": inum,
+  "imports": [+ import] / rawb,
+} / rawb
+
+import = {
+  "import_path": text-field,
+  ? "import_path_sentinel": inum,
+  "import_offset": num,
+  "import_size": num,
+  ? "import_checksum": ibytes,        ; inferred from the base or the preceding result
+} / rawb
+
+; --- Module and resource blocks (#module-block, #split-modules, #resource-block)
+
+module-block = { "compressed_data": compressed-data<module> }
+
+; The stored form is the bytes of the module.
+module = bytes / split-form
+
+split-form = {
+  ? "count": inum,
+  ? "lengths": inums,
+  "payload": bytes / [14*14 bytes],   ; the streams, the lengths inferred from them
+}
+
+resource-block = { "compressed_data": compressed-data<bytes> }
+
+; --- Formula block (#formula-block, #formula-data)
+
+formula-block = {
+  ? "dictionary_index": num,
+  ? "num_outputs": inum,
+  "formula_data": compressed-data<formula-data>,
+}
+
+formula-data = {
+  ? "num_blocks": inum,
+  "block_ordinal_deltas": nums,
+  ? "num_resources": inum,
+  "resource_indices": nums,
+  ? "num_modules": inum,
+  "module_indices": nums,
+  "instructions": [* instruction] / rawb,
+} / rawb
+
+; Sizes that only an evaluation tells (patch_size, checksum_value) are inferred where the stack
+; is known without applying a module, and are an error otherwise.
+instruction = insn-nop / insn-literal / insn-module-bytes / insn-resource-bytes / insn-swap
+            / insn-slice / insn-concat / insn-pack / insn-split / insn-patch / insn-apply
+            / insn-checksum / rawb
+
+insn-nop = { "opcode": "Nop" }
+insn-literal = { "opcode": "Literal", ? "literal_size": inum, "literal_data": bytes }
+insn-module-bytes = { "opcode": "ModuleBytes", "module_bytes_module": num, ? "module_bytes_size": inum }
+insn-resource-bytes = { "opcode": "ResourceBytes", "resource_bytes_resource": num, ? "resource_bytes_size": inum }
+insn-swap = { "opcode": "Swap", "swap_depth": num }
+insn-slice = { "opcode": "Slice", "slice_block": num, "slice_start": num, "slice_length": num }
+insn-concat = { "opcode": "Concatenate", "concat_count": num }
+insn-pack = { "opcode": "Pack", "pack_count": num }
+insn-split = { "opcode": "Split", ? "split_count": inum, "split_sizes": nums }
+insn-patch = { "opcode": "Patch", ? "patch_size": inum }
+insn-apply = {
+  "opcode": "Apply",
+  "apply_module": num,
+  ? "apply_num_resources": inum,
+  "apply_resources": nums,
+  ? "apply_params_size": inum,
+  "apply_params": bytes,
+  "apply_memory_limit": num,
+  ? "apply_num_task_limits": inum,
+  "apply_task_limits": nums,
+  "apply_num_inputs": num,
+  ? "apply_num_outputs": inum,
+  "apply_output_sizes": nums,
+}
+insn-checksum = { "opcode": "Checksum", ? "checksum_value": ibytes }
+
+; --- Mirror block (#mirror-block)
+
+mirror-block = {
+  "mirror_magic": "MIRROR_MAGIC" / "OVERLAY_MIRROR_MAGIC" / rawb,
+  ? "archive_offset": inum,           ; inferred with the widened bit from the two types
+  "target_offset": num,
+  ? "target_data": ibytes,            ; inferred: the data of the target block
+  ? "mirror_checksum": ibytes,
+}
+
+; --- Recovery blocks (#recovery-sets)
+
+recovery-block = {
+  "recovery_magic": "RECOVERY_MAGIC" / "OVERLAY_RECOVERY_MAGIC" / rawb,
+  ? "archive_offset": inum,
+  "range_offset": num,
+  "range_length": num,
+  "lg_slice_size": num,
+  "parity_count": num,
+  ? "shard_index": num,               ; a parity block
+  ? "shard": ibytes,                  ; a parity block: inferred from the range
+  ? "slice_hashes": [* ibytes] / infer / rawb,   ; an index block
+  ? "recovery_checksum": ibytes,
+}
+
+; --- Encrypted archive (#encrypted-archive)
+;
+; `file_key`, `key_passphrase` and `payload` are not fields: they are what the inferred fields
+; are made of. `chunks` is inferred by encrypting `payload` with `file_key` from `payload_nonce`,
+; with the mirrored headers where `encrypted_header_magic` tells.
+
+encrypted-archive = {
+  "encrypted_header_magic": "ENCRYPTED_HEADER_MAGIC" / "ENCRYPTED_MIRRORED_HEADER_MAGIC" / rawb,
+  "lg_work_factor": num,
+  "scrypt_ephemeral_secret": bytes,
+  ? "encrypted_file_key": ibytes,     ; inferred from file_key and key_passphrase
+  ? "age_header_mac": ibytes,         ; inferred from file_key
+  "payload_nonce": bytes,
+  ? "header_checksum": ibytes,
+  ? "chunks": ibytes,
+  ? "file_key": bstr .size 16,
+  ? "key_passphrase": passphrase,
+  ? "payload": unencrypted-archive / bytes,
+}
+
+; --- Archive value (#archive-model)
+;
+; A key left out is its default: `extra` null (an empty map for the archive's), `forks` and
+; `link_group` empty. Link groups are labels, compared up to a one-to-one renaming.
+
+archive-value = {
+  "root": directory-node / file-node,
+  ? "extra": { * (int / tstr) => any },
+}
+
+; An entry name as an aqr-text: tstr or #6.273(bstr) for "wtf-8", bstr for "raw".
+name = tstr / #6.273(bstr) / bstr
+
+node-common = (
+  ? "extra": any / null,              ; aqr-entry-extra without `forks`
+  ? "forks": { * any => bytes },      ; fork names as the CBOR items they are
+)
+
+directory-node = { "children": { * name => node }, node-common }
+file-node = { "content": bytes, ? "link_group": tstr / int / null, node-common }
+link-node = { "target": name, node-common }
+special-node = {
+  "kind": "fifo" / "char-device" / "block-device",
+  ? "device": [uint, uint] / null,
+  node-common,
+}
+unknown-node = { "kind": uint .gt 4, "data": bytes, node-common }
+
+node = directory-node / file-node / link-node / special-node / unknown-node

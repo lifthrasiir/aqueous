@@ -1,0 +1,13 @@
+# A block type takes the shortest LEB128 encoding: 80 00 is not a spacer block.
+{
+  "title": "A block type not in its shortest encoding",
+  "spec": ["#block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      h'8000 00 00',  # type 0 in 2 bytes, size 0, padding
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

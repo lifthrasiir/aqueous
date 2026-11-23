@@ -1,0 +1,53 @@
+# Directories, files sharing a block, a link group, comments of the root and of the archive.
+{
+  "title": "A tree of directories and files",
+  "spec": ["#metadata-block", "#segment-interpretation", "#link-groups", "#comments"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["bx", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x\n'}}}]),
+      80001(["by", {"type": 0x20, "data": {"uncompressed_data": {"data": 'yy\n'}}}]),
+      # Zstandard metadata: 0001 0 1 00
+      80001(["meta", {"type": 0x14, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          # entries: 1 a/, 2 a/b/, 3 a/x, 4 a/b/y, 5 z, 6 l -> a/x
+          "entry_parents": [1, 1, 2, 0, 0],
+          "file_params": [
+            {"file_offset": ["bx", "meta"]},
+            {"file_offset": ["by", "meta"]},
+            {"file_offset": ["bx", "meta"]},
+          ],
+          "entries": [
+            {"entry_name": "a"},
+            {"entry_name": "b"},
+            {"entry_name": "x", "original_size": undefined},
+            {"entry_name": "y", "original_size": undefined},
+            {"entry_name": "z", "original_size": undefined},
+            {"entry_name": "l", "special_kind": 1, "link_target": "a/x"},
+          ],
+          "optional_metadata": {
+            -1: "an archive comment",
+            -2: [{-6: "the root"}, null, null, {-7: 0}, null, {-7: 0}],
+          },
+        }},
+      }}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {
+    "root": {
+      "extra": {-6: "the root"},
+      "children": {
+        "a": {"children": {
+          "b": {"children": {"y": {"content": 'yy\n'}}},
+          "x": {"content": 'x\n', "link_group": "g", "extra": {-7: 0}},
+        }},
+        "z": {"content": 'x\n', "link_group": "g", "extra": {-7: 0}},
+        "l": {"target": "a/x"},
+      },
+    },
+    "extra": {-1: "an archive comment"},
+  },
+}
