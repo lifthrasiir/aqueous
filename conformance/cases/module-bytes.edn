@@ -1,0 +1,35 @@
+# ModuleBytes pushes a module block's data as stored, not applying it: of level 0.
+{
+  "title": "ModuleBytes",
+  "spec": ["#insn-module-bytes", "#module-block", "#conformance-levels"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # module, u16: 0110 00 01
+      {"type": 0x61, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": 80003("data/copy.wasm")},
+      }}},
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "module_indices": [0],
+          "instructions": [
+            {"opcode": "ModuleBytes", "module_bytes_module": 0},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [
+          {"entry_name": "m", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"m": {"content": h'0003004905000061736d0100000001070160037e7e7e00023803036171720a6171725f6d656d6f7279020000036171720a6171725f696e70757430020400036171720b6171725f6f757470757430020400030201000713010f6171725f6170706c795f77686f6c6500000a0e010c00420042002002fc0a02010b0033046e616d65021a0100030006706172616d730105696e70757402066f75747075740610030004776f726b0102696e02036f7574789143f42749b672'}}}},
+}

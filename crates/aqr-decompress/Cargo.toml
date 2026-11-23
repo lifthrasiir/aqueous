@@ -110,6 +110,10 @@ path = "src/bin/worker.rs"
 required-features = ["sandbox"]
 
 [[example]]
+name = "aqr-decompress-wat2wasm"
+path = "examples/wat2wasm.rs"
+
+[[example]]
 name = "aqr-decompress-modules"
 path = "examples/modules.rs"
 

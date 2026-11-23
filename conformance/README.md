@@ -5,9 +5,12 @@ archive written field by field in EDN, and the archive value or failure they int
 
 - `case.cddl` — the case format and its notation (labels, differences, inference).
 - `cases/*.edn` — the cases.
-- `cases/data/` — contents too long to write in a case (`80003(path)`).
+- `cases/data/` — contents too long to write in a case (`80003(path)`), and the modules of the
+  cases: each `NAME.wat` with its `NAME.wasm`, made by `cargo run -r -p aqr-decompress --example
+  aqr-decompress-wat2wasm -- cases/data/*.wat` (committed, so that the tools need no Rust).
+- `tools/age.py` — what an encrypted archive takes of age v1, ChaCha20-Poly1305 in Python.
 - `tools/assemble.py CASE.edn [-o OUT]` — makes the bytes of a case (Python 3, no packages).
-  Unencrypted archives of every block but recovery blocks (given as their bytes); module blocks of
+  Encrypted and unencrypted archives of every block but recovery blocks (given as their bytes); module blocks of
   the stored form. What it infers of a formula block (num_outputs, sizes, checksums) it takes from
   running the formula on what it knows; a Compressed_Block tells what it decodes to (`decoded`).
 - `tools/check.py [CASE.edn...]` — checks the cases against `aqr -Z interpret` (through
@@ -20,6 +23,5 @@ The cases are named by what they test, `fail-*` and `unsupported-*` those of a f
 that `aqr` doesn't pass is not wrong for that: `check.py` lists where `aqr` differs from the
 specification as well as where a case is wrong.
 
-Left: encrypted archives, modules (Apply instructions, split modules, registered entries known),
-mirrored encrypted archives, recovery, partial access, and the suites of extraction and of
-compressors.
+Left: part modules, tasks and channels, split modules, registered entries known, partial access,
+and the suites of extraction and of compressors.
