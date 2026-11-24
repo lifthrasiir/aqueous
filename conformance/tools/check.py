@@ -4,8 +4,9 @@
 
 Each case is assembled and interpreted: it must fail as `interpreted` says (by the exit code), or
 give the archive value it gives, compared in full (extras, forks and the order of every map; link
-groups up to a renaming). An overlay archive given a base is skipped: `aqr` takes no base (a
-standalone archive's base changes nothing).
+groups up to a renaming), or else as `partial` gives where the case has it. A resource failure
+not expected is told apart (`resource`): any case allows it. An overlay archive given a base is
+skipped: `aqr` takes no base (a standalone archive's base changes nothing).
 """
 
 import argparse
@@ -95,15 +96,27 @@ def check(path, aqr, work):
         r = subprocess.run(aqr + ["-Z", "interpret", f], stdin=subprocess.DEVNULL, capture_output=True)
     got = EXIT.get(r.returncode, f"exit {r.returncode}")
     err = r.stderr.decode(errors="replace").strip()
-    want = case["interpreted"]
+    here = os.path.dirname(os.path.abspath(path))
+    status, msg = compare(case["interpreted"], got, err, r.stdout, here)
+    if status == "fail" and "partial" in case:
+        # also conforming: not detecting a failure where nothing of the value depends on it
+        p_status, p_msg = compare(case["partial"], got, err, r.stdout, here)
+        if p_status == "ok":
+            return "ok", f"{p_msg} (partial; in full: {case['interpreted'] if isinstance(case['interpreted'], str) else 'value'})"
+    if status == "fail" and got == "resource":
+        return "resource", err
+    return status, msg
+
+
+def compare(want, got, err, stdout, here):
     if isinstance(want, str):
         if got != want:
             return "fail", f"{got}, not {want}: {err}"
         return "ok", got
     if got != "value":
         return "fail", f"{got}: {err}"
-    want = external(want, os.path.dirname(os.path.abspath(path)))
-    have, expect = lines(edn.loads(r.stdout.decode("utf-8", "surrogateescape"))), lines(want)
+    want = external(want, here)
+    have, expect = lines(edn.loads(stdout.decode("utf-8", "surrogateescape"))), lines(want)
     if have != expect:
         diff = difflib.unified_diff(expect, have, "expected", "interpreted", lineterm="", n=0)
         sep = "\n      "
@@ -130,7 +143,7 @@ def main(argv):
         except (assemble.CaseError, edn.EdnError) as e:
             status, msg = "error", str(e)
         failed += status in ("fail", "error")
-        print(f"{status:5} {os.path.basename(c)}: {msg}")
+        print(f"{status:8} {os.path.basename(c)}: {msg}")
     if not a.work:
         shutil.rmtree(work, ignore_errors=True)
     return 1 if failed else 0

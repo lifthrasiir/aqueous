@@ -40,5 +40,9 @@
     ],
     "footer_magic": "FOOTER_MAGIC",
   },
+  "partial": {"root": {"children": {
+    "dir": {"children": {"a": {"content": 'Hello, world'}}},
+    "b": {"content": 'world, Hello'},
+  }}},
   "interpreted": "invalid",
 }

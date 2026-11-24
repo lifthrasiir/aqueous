@@ -46,10 +46,15 @@ aqr-case = {
   ? "passphrase": passphrase,         ; given to the decompressor
   ? "base": archive-value,            ; given to the decompressor
   "interpreted": archive-value / failure,
+  ? "partial": archive-value / failure,   ; also conforming: see below
 }
 
 ; A resource failure is allowed of any case but this one; it is expected only where the case
 ; exceeds a limit the archive declares.
+;
+; `partial` is the result of a decompressor that doesn't read what is at fault, which no part of
+; the archive value depends on (a block no file refers to, a module block no formula applies): it
+; need not detect a failure there (spec, "Partial access"), and either result conforms.
 failure = "invalid" / "unsupported" / "decryption" / "base" / "resource"
 
 registered-hash = bstr .size 32

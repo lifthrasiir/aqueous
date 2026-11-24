@@ -15,5 +15,6 @@
     ],
     "footer_magic": "FOOTER_MAGIC",
   },
+  "partial": {"root": {"children": {"a": {"content": 'x'}}}},
   "interpreted": "unsupported",
 }

@@ -20,7 +20,10 @@ archive written field by field in EDN, and the archive value or failure they int
   in full (extras, forks, the order of every map; link groups up to a renaming). An overlay
   archive given a base is skipped.
 
-The cases are named by what they test, `fail-*` and `unsupported-*` those of a failure. A case
+The cases are named by what they test, `fail-*` and `unsupported-*` those of a failure. Where
+nothing of the archive value depends on what is at fault (a block no file refers to, a module block
+never applied), a decompressor needn't read it, and `partial` gives the result of one that doesn't:
+either conforms. A case
 that `aqr` doesn't pass is not wrong for that: `check.py` lists where `aqr` differs from the
 specification as well as where a case is wrong.
 
