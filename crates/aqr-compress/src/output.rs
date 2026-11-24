@@ -363,14 +363,27 @@ fn direct_min() -> usize {
 /// a spacer block after it. Not where the archive is mirrored (the mirror blocks' places are
 /// not planned with the room).
 fn direct_room(d: &[u8], kind: Kind, opt: &Options, enc: &aqr_archive::Encoder) -> Option<u64> {
+    if d.len() < direct_min() || opt.mirrors || !opt.recompresses() {
+        return None;
+    }
+    // (data of no header that a hint tells tensors of, all of the file: its layout's bound)
+    let told = match kind {
+        Kind::Hint(i) => {
+            let h = crate::hints::get(i);
+            let all = h.format == crate::hints::Told::As(Format::Tensors) && h.param("offset").is_none();
+            all.then(|| crate::told_tensors(d, &h)).flatten()
+        }
+        _ => None,
+    };
     let tensors = [Format::Gguf, Format::Pth, Format::Safetensors];
     let taken = detect(d)
         .filter(|f| tensors.contains(f))
         .is_some_and(|f| (kind == Kind::Unknown || kind == Kind::Format(f.name())) && format_on(f, opt));
-    if d.len() < direct_min() || opt.mirrors || !opt.recompresses() || !taken {
-        return None;
-    }
-    let bound = aqr_tensors::formula::formula_bound(d)?;
+    let bound = match &told {
+        Some(g) => aqr_tensors::formula::formula_bound_layout(d, g)?,
+        None if taken => aqr_tensors::formula::formula_bound(d)?,
+        None => return None,
+    };
     // (the data compressed at most: Zstandard's raw blocks, its frame and the block's header)
     let formula = bound + bound / 128 + 64;
     let modules = enc.module_len(aqr_tensors::formula::MODULE).ok()?;

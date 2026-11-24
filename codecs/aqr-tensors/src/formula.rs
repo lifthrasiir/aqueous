@@ -930,7 +930,11 @@ fn quant(
 /// slices of each input over two blocks, a run kept as it is a slice of each block it is over,
 /// and a byte listing each block. None where [`encode`] takes no formula of it.
 pub fn formula_bound(input: &[u8]) -> Option<usize> {
-    let g = tensors::parse(input)?;
+    formula_bound_layout(input, &tensors::parse(input)?)
+}
+
+/// [`formula_bound`] of the formula of `input` of layout `g` ([`encode_layout`]).
+pub fn formula_bound_layout(input: &[u8], g: &Tensors) -> Option<usize> {
     if g.tensors.is_empty() {
         return None;
     }
@@ -948,7 +952,7 @@ pub fn formula_bound(input: &[u8]) -> Option<usize> {
     let n = 1024 + over(g.data) * SLICE + ITEM + over(input.len()) * 4;
     // (of each piece, its bound: a copy's those of the pieces it is again)
     let mut bounds: Vec<usize> = Vec::new();
-    for p in pieces(input, &g, SEGMENT_BYTES.get()) {
+    for p in pieces(input, g, SEGMENT_BYTES.get()) {
         let b = ITEM
             + match p {
                 Piece::Long(a, b) => over(b - a) * SLICE + 1 + NUM,

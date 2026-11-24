@@ -178,7 +178,8 @@ README에 적는다. 이 문서는 모양만 정한다.
 - 보고는 거절("turned it down"), 공식이 데이터보다 작지 않았음("made it no smaller", 스캔의 `smaller`가
   버린 것, `Cx::lost`), 비슷해서 배치가 고르도록 곁에 둠("about as small")을 나눈다. 뒤의 것이 배치에서
   결국 골라졌는지는 보고하지 않는다
-- 큰 헤더 없는 텐서 파일을 직접 쓰기(`direct_room`은 GGUF, `.pth`, safetensors만 본다)
+- 큰 헤더 없는 텐서 파일(1 GiB부터)도 GGUF처럼 혼자 파일로 쓸 때 직접 쓴다(`direct_room`이 힌트의
+  레이아웃으로 공식의 상한을 잰다, `formula_bound_layout`). `aqr-offset`이 있으면 직접 쓰지 않는다
 - `linguist-*`는 아직 아무도 읽지 않는다
 
 ## 5. 예: loupe의 가중치

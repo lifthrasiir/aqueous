@@ -604,7 +604,7 @@ formats! {
     /// `aqr-dtype`, `aqr-layout`, docs/hints-design.md §3.3; aqr-tensors): of no magic bytes,
     /// never detected.
     Tensors = "tensors" {
-        recompressor: Cx(crate::tensors_told),
+        recompressor: PureWith(crate::tensors_told),
         heap: 0.0,
         cost: 4,
     }

@@ -238,7 +238,9 @@ they are taken where the attributes say so (docs/hints-design.md), `aqr-format=t
 
 The tensors are coded as those of a container are (`tensors::headerless`, the container
 `Headerless`; its header class `tensors/header`, empty). A layout gives each tensor its own
-tables, which pays: loupe's F16 weights below (aqr-compress's `tensors_told`).
+tables, which pays: loupe's F16 weights below (aqr-compress's `tensors_told`). A file of 1 GiB
+or more archived alone is written directly as the containers' are, its formula's bound that of
+the layout told (`formula_bound_layout`).
 
 ## Status
 

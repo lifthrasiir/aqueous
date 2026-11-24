@@ -2558,3 +2558,58 @@ fn tensor_layouts() {
         assert_eq!(crate::layout(bad, None).unwrap_err(), why);
     }
 }
+
+/// [`gguf_direct`] of data of no header that a hint tells tensors of (`aqr-format=tensors`): its
+/// formula's bound by the layout told, archived directly, its segments sealed as they are made;
+/// the same whatever the threads.
+#[test]
+fn headerless_tensors_direct() {
+    use crate::attributes::{Attributes, Origin};
+    let mut x = 3u64;
+    let d: Vec<u8> = (0..1_000_000u32)
+        .flat_map(|i| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let v: u16 = match (x >> 60) % 4 {
+                0 => 0,
+                _ => ((x >> 40) as u16 & 0x8000) | ((9 + (i / 4096) % 3) as u16) << 10 | (x >> 20) as u16 & 0x3ff,
+            };
+            v.to_le_bytes()
+        })
+        .collect();
+    let mut a = Attributes::new();
+    a.add(Origin::Given, b"", "w.bin aqr-format=tensors aqr-dtype=f16\n", "attributes", None, true);
+    let hints = crate::Hints::new(a);
+    let kind = hints.kind(b"w.bin", Kind::Unknown);
+    assert!(matches!(kind, Kind::Hint(_)));
+    let path = std::env::temp_dir().join(format!("aqr-compress-headerless-{}.aqr", std::process::id()));
+    let archived = |threads: usize, min: usize, room: Option<u64>| {
+        DIRECT_MIN.set(Some(min));
+        DIRECT_ROOM.set(room);
+        TENSORS_SEGMENT.set(Some(64 << 10));
+        let opt = Options { threads, ..Options::default() };
+        let mut file =
+            std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+        let before = DIRECTED.get();
+        let (n, _) = compress_with(&d, kind, &opt, false, None, &mut file).unwrap();
+        drop(file);
+        let c = std::fs::read(&path).unwrap();
+        assert_eq!(n, c.len());
+        (c, DIRECTED.get() - before)
+    };
+    let (one, directed) = archived(1, 0, None);
+    assert_eq!(directed, 1);
+    assert!(aqr_decompress::decompress(&one, 1).unwrap() == d);
+    let (four, _) = archived(4, 0, None);
+    assert!(four == one, "the same whatever the threads");
+    // (the room too small: the blocks moved after the formula, as large as held)
+    let (moved, _) = archived(2, 0, Some(2));
+    assert!(aqr_decompress::decompress(&moved, 1).unwrap() == d);
+    let (held, directed) = archived(2, usize::MAX, None);
+    assert_eq!(directed, 0);
+    assert!(aqr_decompress::decompress(&held, 1).unwrap() == d);
+    // (each segment sealed apart, its streams blocks of their own: larger than held, of segments
+    // as short as these)
+    assert!(one.len() < d.len() * 8 / 10 && held.len() < d.len() * 7 / 10, "{} {}", one.len(), held.len());
+    assert!(hints.report().is_empty(), "{:?}", hints.report());
+    _ = std::fs::remove_file(&path);
+}

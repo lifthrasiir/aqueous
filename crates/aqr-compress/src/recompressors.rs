@@ -19,6 +19,9 @@ pub(crate) struct Pure<'a> {
     pub(crate) seal: Option<&'a seal::Order>,
     /// Where those parts are evaluated beforehand ([`Cx::pre`]).
     pub(crate) pre: Option<&'a verify::Prevalidator>,
+    /// The hint of the data, where it is of one ([`crate::hints::within`]): of a format of no
+    /// header, what it is ([`tensors_told`]).
+    pub(crate) hint: Option<&'a crate::hints::Hint>,
 }
 
 impl Pure<'_> {
@@ -42,6 +45,12 @@ impl Pure<'_> {
 /// aqr-tensors' formula of `d`, each segment coded sealed as it is made where `p` tells, else its
 /// streams spilled.
 pub(crate) fn tensors(d: &[u8], p: &Pure) -> Option<Formula> {
+    tensors_of(d, None, p)
+}
+
+/// [`tensors`] of the layout `g` where given (data of no header), else of its container's.
+fn tensors_of(d: &[u8], g: Option<aqr_tensors::tensors::Tensors>, p: &Pure) -> Option<Formula> {
+    use aqr_tensors::formula::{encode_in, encode_layout, encode_layout_sealing, encode_sealing};
     let segment = aqr_tensors::formula::SEGMENT_BYTES.get();
     #[cfg(test)]
     let segment = tests::TENSORS_SEGMENT.get().unwrap_or(segment);
@@ -51,18 +60,30 @@ pub(crate) fn tensors(d: &[u8], p: &Pure) -> Option<Formula> {
             let mut seal = |part: &mut Formula, _: &[u8], ready| {
                 choose::kept_in(part, |part| order.sink().seal_ready(part, ready)).expect("sealed")
             };
-            aqr_tensors::formula::encode_sealing(d, p.opt.threads, segment, &made, &mut seal)
+            match g {
+                Some(g) => encode_layout_sealing(d, g, p.opt.threads, segment, &made, &mut seal),
+                None => encode_sealing(d, p.opt.threads, segment, &made, &mut seal),
+            }
         }
-        None => aqr_tensors::formula::encode_in(d, p.opt.threads, segment),
+        None => match g {
+            Some(g) => encode_layout(d, g, p.opt.threads, segment),
+            None => encode_in(d, p.opt.threads, segment),
+        },
     }
 }
 
 /// aqr-tensors' formula of `d`, data of no header whose tensors the hint of its attributes tells
-/// (`aqr-format=tensors`, [`crate::hints`]): `aqr-dtype=TYPE`, all of it a tensor of TYPE (the
-/// bytes after the last whole element as they are), or `aqr-layout=FILE`, the tensors FILE tells
-/// ([`layout`]). None where the hint tells neither, or what it tells does not hold.
-pub(crate) fn tensors_told(d: &[u8], _: Kind, opt: &Options, _: u32, cx: &Cx) -> Option<Formula> {
-    let h = crate::hints::within(d, cx)?;
+/// (`aqr-format=tensors`, [`crate::hints`], given by `p`; [`told_tensors`]). None where it tells
+/// none.
+pub(crate) fn tensors_told(d: &[u8], p: &Pure) -> Option<Formula> {
+    tensors_of(d, Some(told_tensors(d, p.hint?)?), p)
+}
+
+/// The layout of `d`, data of no header, that hint `h` tells: `aqr-dtype=TYPE`, all of it a tensor
+/// of TYPE (the bytes after the last whole element as they are), or `aqr-layout=FILE`, the tensors
+/// FILE tells ([`layout`]). None where the hint tells neither, or what it tells does not hold
+/// (told of).
+pub(crate) fn told_tensors(d: &[u8], h: &crate::hints::Hint) -> Option<aqr_tensors::tensors::Tensors> {
     let coded = match (h.param("layout"), h.param("dtype")) {
         (Some(file), _) => {
             let p = h.file(file);
@@ -87,11 +108,7 @@ pub(crate) fn tensors_told(d: &[u8], _: Kind, opt: &Options, _: u32, cx: &Cx) ->
             return None;
         }
     };
-    let g = aqr_tensors::tensors::headerless(d, coded);
-    let segment = aqr_tensors::formula::SEGMENT_BYTES.get();
-    #[cfg(test)]
-    let segment = tests::TENSORS_SEGMENT.get().unwrap_or(segment);
-    aqr_tensors::formula::encode_layout(d, g, opt.threads, segment)
+    Some(aqr_tensors::tensors::headerless(d, coded))
 }
 
 /// aqr-raw's formula of `d`, PCM samples of no header as the hint of its attributes tells
@@ -571,8 +588,16 @@ pub(crate) fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(
     // (each may take all of `opt.threads`: the pool gives it the workers free, and those given
     // back as the others finish)
     let words = cx.words.borrow().clone();
-    let p =
-        Pure { opt, depth, words: words.as_deref(), once: &cx.once, held: cx.held.as_deref(), seal: None, pre: None };
+    let p = Pure {
+        opt,
+        depth,
+        words: words.as_deref(),
+        once: &cx.once,
+        held: cx.held.as_deref(),
+        seal: None,
+        pre: None,
+        hint: None,
+    };
     let files = cx.files.as_deref();
     let made = aqr_common::pool::par_map(jobs.len(), workers, |i| {
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));

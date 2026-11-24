@@ -462,7 +462,9 @@ fn recompress_sealed(
                 // evaluated beforehand on its own)
                 let order = sealing_parts(sealing);
                 let (seal, pre) = (order.as_deref(), cx.pre.as_deref());
-                pure(format, d, &Pure { opt, depth, words, once: &cx.once, held, seal, pre }).flatten()
+                let hint = crate::hints::within(d, cx);
+                let hint = hint.as_deref();
+                pure(format, d, &Pure { opt, depth, words, once: &cx.once, held, seal, pre, hint }).flatten()
             }
         },
     };
