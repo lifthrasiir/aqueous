@@ -1,0 +1,18 @@
+;; A gang's task closing its channel and then sending to it.
+(module
+  (import "aqr" "aqr_memory" (memory $work 1))
+  (import "aqr" "aqr_spawn" (func $spawn (param i32 i32 i32 i32 i32) (result i32)))
+  (import "aqr" "aqr_join" (func $join (param i32 i32) (result i32)))
+  (import "aqr" "aqr_take" (func $take (param i32 i32 i32 i32)))
+  (import "aqr" "aqr_chan" (func $chan (param i32) (result i32)))
+  (import "aqr" "aqr_send" (func $send (param i32 i32 i32)))
+  (import "aqr" "aqr_close" (func $close (param i32)))
+  (@custom "aqr_task_slots" "\81")
+  (func (export "aqr_apply_whole") (param $params i64) (param $output i64)
+    (local $h i32)
+    (local.set $h (call $spawn (i32.const 0) (i32.const 0) (i32.const 0) (call $chan (i32.const 1)) (i32.const 1)))
+    (drop (call $join (local.get $h) (i32.const 0)))
+    (call $take (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0)))
+  (func (export "aqr_task") (param $c i32) (param $i i32)
+    (call $close (local.get $c))
+    (call $send (local.get $c) (i32.const 0) (i32.const 1))))
