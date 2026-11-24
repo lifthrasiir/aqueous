@@ -190,6 +190,12 @@ Left:
   10.77 -> 10.72), worth about 1–2% of those files more, for a coder of alphabets past 16
   symbols. The signs are at their entropy. The trellis types (ik_llama.cpp's KT) are kept as
   they are.
+- Sparse tensors: a float that is 0 is an exponent symbol and its mantissa as it is, so a
+  tensor half of zeros (pruned) codes no better than one of none. On the F16 weights of an OCR
+  model (`docs/hints-design.md` section 5, wrapped as safetensors), the largest tensors half
+  zeros and 1.1–1.4 bits of order-0 entropy a 16-bit value, xz -6 comes to 5% less than
+  aqr-tensors (13.28 against 14.01 MB of 30.98); on its other model (13–14 bits a value) to
+  2.5% less. Not looked into yet: zeros as a symbol of their own, say.
 - The heap peak of the encoder reaches the budget on files of Q4_K and Q6_K (2.0–2.16 GB): the
   symbols of every segment in flight (17 of 16 MiB) and their words.
 - Files of tens of GB in an archive of several files: a file is one leaf there, its batch held
