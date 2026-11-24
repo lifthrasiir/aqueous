@@ -1,6 +1,7 @@
 """What an encrypted archive takes of age v1 (age-encryption.org/v1): the scrypt recipient stanza,
-the header MAC and the STREAM payload, with ChaCha20-Poly1305 (RFC 8439) in Python alone. Slow,
-but the cases are small.
+the header MAC and the STREAM payload, with ChaCha20-Poly1305 (RFC 8439): of the package
+`cryptography` where it is installed (the root's .venv), else in Python alone, which is slow
+(minutes for a case of 4 MiB).
 """
 
 import base64
@@ -69,7 +70,19 @@ def _mac_data(aad, ct):
     return pad(aad) + pad(ct) + struct.pack("<QQ", len(aad), len(ct))
 
 
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+except ImportError:
+    ChaCha20Poly1305 = None
+
+
 def seal(key, nonce, plaintext, aad=b""):
+    if ChaCha20Poly1305 is not None:
+        return ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad or None)
+    return seal_python(key, nonce, plaintext, aad)
+
+
+def seal_python(key, nonce, plaintext, aad=b""):
     otk = _block(key, 0, nonce)[:32]
     ct = chacha20(key, 1, nonce, plaintext)
     return ct + poly1305(otk, _mac_data(aad, ct))
@@ -140,7 +153,8 @@ if __name__ == "__main__":
     aad = bytes.fromhex("50515253c0c1c2c3c4c5c6c7")
     pt = (b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, "
           b"sunscreen would be it.")
-    sealed = seal(key, nonce, pt, aad)
+    sealed = seal_python(key, nonce, pt, aad)
     assert sealed[-16:].hex() == "1ae10b594f09e26a7e902ecbd0600691", sealed[-16:].hex()
+    assert seal(key, nonce, pt, aad) == sealed
     assert open_(key, nonce, sealed, aad) == pt
     print("ok")

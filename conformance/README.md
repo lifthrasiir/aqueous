@@ -9,7 +9,9 @@ archive written field by field in EDN, and the archive value or failure they int
   cases: each `NAME.wat` with its `NAME.wasm`, made by `cargo run -r -p aqr-decompress --example
   aqr-decompress-wat2wasm -- cases/data/*.wat` (committed, so that the tools need no Rust).
 - `tools/wasmsplit.py` — the split form of a module: a splitter, and the join as the spec has it.
-- `tools/age.py` — what an encrypted archive takes of age v1, ChaCha20-Poly1305 in Python.
+- `tools/age.py` — what an encrypted archive takes of age v1. ChaCha20-Poly1305 is the
+  package `cryptography`'s where it is installed (`.venv/Scripts/python tools/check.py`, the
+  root's venv), else Python's alone, which takes minutes for the cases of several MiB.
 - `tools/assemble.py CASE.edn [-o OUT]` — makes the bytes of a case (Python 3, no packages).
   Encrypted and unencrypted archives of every block but recovery blocks (given as their bytes); module blocks of
   the stored form. What it infers of a formula block (num_outputs, sizes, checksums) it takes from
