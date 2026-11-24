@@ -152,10 +152,12 @@ Models of embeddings tied to the output's weights (`tie_word_embeddings`) are of
 both, `lm_head.weight` the same bytes as `model.embed_tokens.weight`: Qwen3-0.6B's 311 MB of
 1.50 GB, Qwen3-1.7B's 622 MB of 4.06 GB (in its second shard). A tensor of the same bytes as one
 before it in the file is that one's applications again (FORMAT.md §2), and a tensor of a
-segment's bytes or more makes segments of its own, the same wherever it is, for the archive to
-store their streams once when the files are in one batch. Qwen3-0.6B, through `aqr -c` (Ryzen 7
-9700X, 2026-11-24): 997,171,204 -> 791,437,270 B (0.6633 -> 0.5265), 1.54 -> 1.52 s; `aqr -K`
-3.34 -> 3.62 GB/s.
+segment's bytes or more makes segments of its own, the same wherever it is: aqr-compress puts
+files of such a tensor in common in one batch (`shared_keys`, up to 16 GiB together), where the
+archive stores their streams once. Through `aqr -c` (Ryzen 7 9700X, 2026-11-24), Qwen3-0.6B:
+997,171,204 -> 791,437,270 B (0.6633 -> 0.5265), 1.54 -> 1.52 s, `aqr -K` 3.34 -> 3.62 GB/s;
+Qwen3-1.7B's two shards: 2,685,508,834 -> 2,277,827,611 B (0.6609 -> 0.5606),
+12.1 -> 11.0 s, `aqr -K` 5.5 -> 4.8 s.
 
 ## Conversions
 

@@ -1627,6 +1627,10 @@ aqr_common::zopt! {
 aqr_common::zopt! {
     /// The most bytes of contents put in one batch for holding each other ([`together`]).
     static TOGETHER_MAX: Opt<usize> = Opt::size("together:max", 2 << 30, "the most bytes of contents put in one batch for holding each other");
+    /// The most bytes of files of tensors put in one batch for a tensor in common ([`together`]):
+    /// the shards of a model, its embeddings in one and the same as the output's weights in
+    /// another, are each larger than [`TOGETHER_MAX`] mostly.
+    static TENSORS_MAX: Opt<usize> = Opt::size("together:tensors-max", 16 << 30, "the most bytes of files of tensors put in one batch for a tensor in common");
 }
 
 aqr_common::zopt! {
@@ -1649,7 +1653,10 @@ aqr_common::zopt! {
 /// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB, or
 /// two or more of its pieces, [`probe::chunks`]; the same file, longer or shorter, or edited),
 /// and contents of the same bytes (of at least [`SAME_MIN`] bytes, of a size others have, read
-/// whole), for a segment not to make again one of another's.
+/// whole), for a segment not to make again one of another's; and files of tensors of a large
+/// tensor in common (`aqr_tensors::formula::shared_keys`: the shards of a model, its embeddings
+/// in one and the output's weights of the same bytes in another), whose applications of it are
+/// made alike, to [`TENSORS_MAX`] bytes together.
 /// Of the contents of at least [`TOGETHER_MIN`] bytes, which are read at their start (and the
 /// archives at their end, the contents of the sizes of entries whole); together, no more than
 /// [`TOGETHER_MAX`] bytes. Returns them, and the contents found
@@ -1665,13 +1672,15 @@ fn together<S: Source + ?Sized>(
     let (together_min, together_max, member_min) =
         (TOGETHER_MIN.get() as u64, TOGETHER_MAX.get() as u64, MEMBER_MIN.get() as u64);
     let (fsb_sample_min, same_min) = (FSB_SAMPLE_MIN.get() as u64, SAME_MIN.get() as u64);
+    let (tensors_min, tensors_max) = (aqr_tensors::formula::SEGMENT_BYTES.get() as u64, TENSORS_MAX.get() as u64);
     let (chunk_common, same_heads) = (CHUNK_COMMON.get(), SAME_HEADS.get());
     let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= together_min).collect();
     notes.send(Note::More(large.len() as u64));
     // of each: the hash of its start and those of its start's pieces, the CRC-32 and size of
     // the entries it holds, and whether it only bundles files (whose members are known once it
     // is read whole) or is a PE file
-    type Looked = (u64, Vec<u64>, Vec<(u32, u64)>, bool, bool);
+    // (and of a file of tensors, the keys of its large tensors: `aqr_tensors::formula::shared_keys`)
+    type Looked = (u64, Vec<u64>, Vec<(u32, u64)>, bool, bool, Vec<u64>);
     let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<Looked> {
         let (c, size) = (large[i], src.size(large[i]));
         let head = src.read_range(c, 0..head_len)?;
@@ -1731,9 +1740,17 @@ fn together<S: Source + ?Sized>(
             held.extend(aqr_fsb::fsb5::sample_sums(&src.read(c)?, fsb_sample_min));
         }
         let bundle = format.is_some_and(detect::Format::is_bundle);
+        // (read whole: mapped, of a file this large, and only a few pages of each tensor touched)
+        let tensors = [detect::Format::Gguf, detect::Format::Pth, detect::Format::Safetensors];
+        let keys = match format {
+            Some(f) if tensors.contains(&f) && opt.recompresses() && size >= tensors_min => {
+                aqr_tensors::formula::shared_keys(&src.read(c)?)
+            }
+            _ => Vec::new(),
+        };
         notes.send(Note::Looked);
         let (hash, chunks) = (xxhash_rust::xxh3::xxh3_64(&head), probe::chunks(&head));
-        Ok((hash, chunks, held, bundle, matches!(format, Some(detect::Format::Pe | detect::Format::Elf))))
+        Ok((hash, chunks, held, bundle, matches!(format, Some(detect::Format::Pe | detect::Format::Elf)), keys))
     });
     let mut parent: Vec<usize> = (0..n).collect();
     let mut bytes: Vec<u64> = (0..n).map(|c| src.size(c)).collect();
@@ -1743,9 +1760,9 @@ fn together<S: Source + ?Sized>(
         }
         c
     }
-    let mut join = |a: usize, b: usize| {
+    let mut join = |a: usize, b: usize, max: u64| {
         let (a, b) = (root(&mut parent, a), root(&mut parent, b));
-        if a != b && bytes[a].saturating_add(bytes[b]) <= together_max {
+        if a != b && bytes[a].saturating_add(bytes[b]) <= max {
             let (a, b) = (a.min(b), a.max(b));
             parent[b] = a;
             bytes[a] += bytes[b];
@@ -1760,9 +1777,11 @@ fn together<S: Source + ?Sized>(
     let mut same: HashMap<usize, (u64, u64)> = HashMap::new();
     let mut sizes: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut by_entry: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
+    let mut by_tensor: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut exes = Vec::new();
     for (&c, l) in large.iter().zip(looked) {
-        let (head, chunks, mut entries, bundle, is_exe) = l?;
+        let (head, chunks, mut entries, bundle, is_exe, keys) = l?;
+        keys.into_iter().for_each(|k| by_tensor.entry(k).or_default().push(c));
         if is_exe {
             exes.push(c);
         }
@@ -1779,8 +1798,15 @@ fn together<S: Source + ?Sized>(
     for c in (0..n).filter(|&c| src.size(c) >= member_min) {
         sizes.entry(src.size(c)).or_default().push(c);
     }
+    // files of tensors of a large tensor in common, first (each larger than a batch for holding
+    // each other, mostly), in an order of their own
+    let mut shared: Vec<&Vec<usize>> = by_tensor.values().filter(|cs| cs.len() > 1).collect();
+    shared.sort_unstable();
+    for cs in shared {
+        cs.iter().for_each(|&c| join(cs[0], c, tensors_max));
+    }
     for cs in heads.values().filter(|cs| (2..=same_heads).contains(&cs.len())) {
-        cs.iter().for_each(|&c| join(cs[0], c));
+        cs.iter().for_each(|&c| join(cs[0], c, together_max));
     }
     // and by pieces of their starts, two or more in common ([`probe::chunks`]: the same start
     // but for some bytes, or shifted), but those that many files have (a common header, the
@@ -1797,7 +1823,7 @@ fn together<S: Source + ?Sized>(
     // (in an order of their own, as joins stop at what a batch may hold)
     let mut alike: Vec<(usize, usize)> = common.into_iter().filter(|e| e.1 >= 2).map(|e| e.0).collect();
     alike.sort_unstable();
-    alike.into_iter().for_each(|(a, b)| join(a, b));
+    alike.into_iter().for_each(|(a, b)| join(a, b, together_max));
     // a git pack and its index and reverse index, by the pack's trailer that theirs repeat
     // ([`crate::git::sets`])
     let git: Vec<(usize, u64)> = (0..n)
@@ -1816,7 +1842,7 @@ fn together<S: Source + ?Sized>(
         let mut by_trailer: HashMap<Vec<u8>, usize> = HashMap::new();
         for (&(c, _), t) in git.iter().zip(trailers) {
             let first = *by_trailer.entry(t?).or_insert(c);
-            join(first, c);
+            join(first, c, together_max);
         }
     }
     let wanted: Vec<usize> = {
@@ -1839,7 +1865,7 @@ fn together<S: Source + ?Sized>(
     let mut entries = HashSet::new();
     for (e, archives) in &by_entry {
         let alike = by_sum.get(e).map_or(&[][..], |cs| &cs[..]);
-        archives.iter().chain(alike).for_each(|&c| join(archives[0], c));
+        archives.iter().chain(alike).for_each(|&c| join(archives[0], c, together_max));
         entries.extend(alike);
     }
     // contents of the same bytes, for those after the first to be stored as the same as it rather
@@ -1864,7 +1890,7 @@ fn together<S: Source + ?Sized>(
     let mut by_hash: HashMap<(u128, u64), usize> = HashMap::new();
     for (&c, hash) in wanted.iter().zip(hashes) {
         let first = *by_hash.entry((hash?, src.size(c))).or_insert(c);
-        join(first, c);
+        join(first, c, together_max);
     }
     Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries, exes))
 }

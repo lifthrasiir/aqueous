@@ -90,6 +90,33 @@ enum Piece {
     Copy(std::ops::Range<usize>, usize, usize),
 }
 
+/// 64 bytes of `b` (not empty) spread from its first to its last: what tells tensors apart that
+/// are not the same, mostly.
+fn probe(b: &[u8]) -> [u8; 64] {
+    std::array::from_fn(|k| b[(b.len() - 1) / 63 * k])
+}
+
+/// Keys of the tensors of file `d` that are segments of their own ([`ALIGN`], [`pieces`]): of
+/// their type and a few of their bytes, the same for the same tensor in another file. Files of
+/// a key in common are for one batch of the archive, which stores the streams of their
+/// applications made alike once. Empty where `d` is not taken.
+pub fn shared_keys(d: &[u8]) -> Vec<u64> {
+    use std::hash::{Hash, Hasher};
+    let Some(g) = tensors::parse(d) else { return Vec::new() };
+    let align = ALIGN.get().min(SEGMENT_BYTES.get()) as u64;
+    let mut keys: Vec<u64> = (g.tensors.iter().filter(|t| t.data.len() >= align))
+        .map(|t| {
+            let b = &d[t.start..t.start + t.data.len() as usize];
+            let mut h = std::hash::DefaultHasher::new();
+            (t.data, probe(b), &b[..4096.min(b.len())]).hash(&mut h);
+            h.finish()
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
 /// Of each tensor of `g` (of file `d`), the one before it of the same bytes, if any, of at least
 /// [`COPY_MIN`] bytes (a model's embeddings, tied to its output's weights, stored as both).
 fn copies(d: &[u8], g: &Tensors) -> Vec<Option<usize>> {
@@ -100,8 +127,7 @@ fn copies(d: &[u8], g: &Tensors) -> Vec<Option<usize>> {
     let mut out = vec![None; g.tensors.len()];
     for (i, t) in g.tensors.iter().enumerate().filter(|(_, t)| t.data.len() >= min) {
         let b = bytes(t);
-        let probe: [u8; 64] = std::array::from_fn(|k| b[(b.len() - 1) / 63 * k]);
-        let earlier = alike.entry((t.data, probe)).or_default();
+        let earlier = alike.entry((t.data, probe(b))).or_default();
         match earlier.iter().find(|&&j| bytes(&g.tensors[j]) == b) {
             Some(&j) => out[i] = Some(j),
             None => earlier.push(i),
@@ -742,7 +768,7 @@ pub fn encode_sealing<T: Send>(
     threads: usize,
     segment_bytes: usize,
     made: &(dyn Fn(&mut Formula, &[u8]) -> T + Sync),
-    seal: &mut dyn FnMut(&mut Formula, &[u8], T),
+    seal: &mut (dyn FnMut(&mut Formula, &[u8], T) + Send),
 ) -> Option<Formula> {
     let g = tensors::parse(input)?;
     if g.tensors.is_empty() {
@@ -782,7 +808,7 @@ pub fn encode_sealing<T: Send>(
     };
     // (of each piece put, its node in `nodes`)
     let mut node_of: Vec<usize> = Vec::with_capacity(pieces.len());
-    let mut put = |piece: &Piece, c: Option<Made<T>>| {
+    let put = |piece: &Piece, c: Option<Made<T>>| {
         let (c, r) = match (piece, c) {
             (Piece::Long(a, b), _) => {
                 aqr_common::progress::done(&input[*a..*b]);
@@ -816,30 +842,64 @@ pub fn encode_sealing<T: Send>(
         // (read again only where it is archived as it is, or compared)
         aqr_formula::store::let_go(&input[r]);
     };
-    // (the segments coded on the workers in order, as many at once as there are, each written
-    // once those before it are: no wait for the slowest of a batch)
-    aqr_common::pool::scope(threads.max(1), |s| {
-        let workers = s.workers();
-        let mut ahead = std::collections::VecDeque::new();
-        for p in &pieces {
-            if workers == 0 {
-                put(p, if let Piece::Segment(spans) = p { Some(code(spans)) } else { None });
-                continue;
+    // (the segments coded on the pool's threads, those given back as others finish taken in too
+    // (`par_map`: a scope reserves only the workers free as it starts, none where another file of
+    // the batch took them, a shard of 3.4 GB then coded on one thread), each put by the thread
+    // that coded the last of those before it, and at most `threads` ahead of those put, so many
+    // segments' symbols held at once: no wait for the slowest of a batch)
+    let ahead = threads.max(1);
+    // (the next piece to put, those coded waiting for it, whether one failed, and whether one is
+    // putting: one at a time, outside the lock, as the others go on)
+    let order = std::sync::Mutex::new((0usize, std::collections::BTreeMap::new(), false, false));
+    let put = std::sync::Mutex::new(put);
+    let turn = std::sync::Condvar::new();
+    // (a piece that panics fails those waiting for it: they would wait for ever)
+    struct Failed<'a, P>(&'a std::sync::Mutex<P>, &'a std::sync::Condvar, fn(&mut P));
+    impl<P> Drop for Failed<'_, P> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                (self.2)(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()));
+                self.1.notify_all();
             }
-            if ahead.len() > workers {
-                let (p, h): (&Piece, Option<aqr_common::pool::Handle<_>>) = ahead.pop_front().unwrap();
-                put(p, h.map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))));
-            }
-            let h = match p {
-                Piece::Segment(spans) => Some(s.spawn(|| code(spans))),
-                Piece::Long(..) | Piece::Copy(..) => None,
-            };
-            ahead.push_back((p, h));
         }
-        for (p, h) in ahead {
-            put(p, h.map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))));
+    }
+    aqr_common::pool::par_map(pieces.len(), ahead, |i| {
+        let _failed = Failed(&order, &turn, |o| o.2 = true);
+        let mut o = order.lock().unwrap();
+        while i >= o.0 + ahead && !o.2 {
+            // (waking to give up with the others where the attempt is over its heap: the piece
+            // waited for may be one its check stopped before it began)
+            o = turn.wait_timeout(o, std::time::Duration::from_millis(20)).unwrap().0;
+            aqr_common::allowance::check();
         }
+        if o.2 {
+            return;
+        }
+        drop(o);
+        let c = match &pieces[i] {
+            Piece::Segment(spans) => Some(code(spans)),
+            Piece::Long(..) | Piece::Copy(..) => None,
+        };
+        let mut o = order.lock().unwrap();
+        o.1.insert(i, c);
+        if o.3 {
+            return;
+        }
+        o.3 = true;
+        while let Some(c) = {
+            let n = o.0;
+            o.1.remove(&n)
+        } {
+            let n = o.0;
+            drop(o);
+            (put.lock().unwrap())(&pieces[n], c);
+            o = order.lock().unwrap();
+            o.0 += 1;
+            turn.notify_all();
+        }
+        o.3 = false;
     });
+    drop(order);
     if !any {
         return None;
     }

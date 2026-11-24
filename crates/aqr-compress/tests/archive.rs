@@ -2260,3 +2260,46 @@ fn tree_of_one_as_alone() {
         alone.len()
     );
 }
+
+/// A safetensors file of BF16 tensors `(name, row, data)`, one after another.
+fn safetensors_of(ts: &[(&str, u64, &[u8])]) -> Vec<u8> {
+    let mut h = String::from("{");
+    let (mut at, mut body) = (0usize, Vec::new());
+    for (i, (name, row, d)) in ts.iter().enumerate() {
+        let sep = if i > 0 { "," } else { "" };
+        let (n, b) = (d.len() as u64 / 2 / row, at + d.len());
+        h += &format!(r#"{sep}"{name}":{{"dtype":"BF16","shape":[{n},{row}],"data_offsets":[{at},{b}]}}"#);
+        at = b;
+        body.extend_from_slice(d);
+    }
+    h.push('}');
+    while !h.len().is_multiple_of(8) {
+        h.push(' ');
+    }
+    [&(h.len() as u64).to_le_bytes()[..], h.as_bytes(), &body].concat()
+}
+
+/// `n` BF16 weights of seed `seed`.
+fn weights(seed: u64, n: usize) -> Vec<u8> {
+    let mut r = aqr_common::rng::Rng::new(seed);
+    (0..n)
+        .flat_map(|_| {
+            let x = (r.below(20_000) as f32 - 10_000.0) * 1e-5;
+            ((x.to_bits() >> 16) as u16).to_le_bytes()
+        })
+        .collect()
+}
+
+/// The shards of a model of tied embeddings saved as both (Qwen3-1.7B's): the embeddings in the
+/// first, the same bytes as the output's weights alone in the second, each a batch of its own by
+/// its size. Put in one batch for the tensor in common, the second costs next to nothing.
+#[test]
+fn shards_of_a_tensor_together() {
+    let emb = weights(1, 9 << 20);
+    let one = safetensors_of(&[("layer", 1000, &weights(2, 1_000_000)), ("embed", 1024, &emb)]);
+    let two = safetensors_of(&[("head", 1024, &emb)]);
+    let opt = Options { batch: 4 << 20, ..Options::default() };
+    let (alone, _) = archived(&[("model-1.safetensors", one.clone())], &opt);
+    let (c, _) = archived(&[("model-1.safetensors", one), ("model-2.safetensors", two)], &opt);
+    assert!(c.len() < alone.len() + (64 << 10), "{} against {} of the first alone", c.len(), alone.len());
+}
