@@ -2099,12 +2099,13 @@ mod tests {
             .collect();
         assert_eq!(
             got,
+            // (each replaced in the place of what it replaced: children are an ordered map)
             [
-                (&b"h1"[..], rev("h1"), Some(0)),
-                (b"h2", rev("h1"), Some(0)),
+                (&b"d"[..], rev("d"), Some(-5)),
                 (b"x", rev("x2"), None),
+                (b"h1", rev("h1"), Some(0)),
+                (b"h2", rev("h1"), Some(0)),
                 (b"h3", rev("h3"), Some(1)),
-                (b"d", rev("d"), Some(-5)),
             ]
         );
         assert!(t.entries.iter().all(|e| e.parent.is_none()));

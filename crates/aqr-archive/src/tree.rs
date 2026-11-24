@@ -508,6 +508,11 @@ pub(crate) fn resolve(roots: &[bool], segments: &[Vec<Shape>], dropped: &mut dyn
         extra: Origin,
         dir: bool,
         alive: bool,
+        /// The entry made in its place, which replaced it (children are an ordered map: a key
+        /// set again keeps its place).
+        by: Option<usize>,
+        /// Whether it replaced one, in whose place it goes.
+        replaces: bool,
     }
     // the entries made, in their order: each after its parent
     let mut made: Vec<Made> = Vec::new();
@@ -546,11 +551,13 @@ pub(crate) fn resolve(roots: &[bool], segments: &[Vec<Shape>], dropped: &mut dyn
             }
             if let Some(x) = existing {
                 made[x].alive = false;
+                made[x].by = Some(made.len());
                 dropped(made[x].node, Fate::Replaced(o));
             }
             at.insert(key, made.len());
             index.push(Some(made.len()));
-            made.push(Made { parent, node: o, extra: o, dir: sh.kind == Kind::Dir, alive: true });
+            let (dir, replaces) = (sh.kind == Kind::Dir, existing.is_some());
+            made.push(Made { parent, node: o, extra: o, dir, alive: true, by: None, replaces });
         }
     }
     // those left (not taken away, nor under one taken away)
@@ -558,7 +565,13 @@ pub(crate) fn resolve(roots: &[bool], segments: &[Vec<Shape>], dropped: &mut dyn
     // (by entry made, the nearest of it and those above it taken away)
     let mut gone: Vec<Option<usize>> = vec![None; made.len()];
     let mut entries = Vec::new();
-    for (k, m) in made.iter().enumerate() {
+    // each in the place of those it replaced (after its parent all the same: the parent of
+    // what it replaced, made before it)
+    let order = (0..made.len()).filter(|&k| !made[k].replaces).flat_map(|k| {
+        std::iter::successors(Some(k), |&j| made[j].by)
+    });
+    for k in order {
+        let m = &made[k];
         let above = m.parent.and_then(|p| gone[p]);
         gone[k] = if m.alive { above } else { Some(k) };
         match above {
@@ -2766,14 +2779,50 @@ mod tests {
         let want: [(&str, EntryNode); 5] = [
             ("d", EntryNode::Dir),
             ("d/a", EntryNode::File(0)),
-            ("n", EntryNode::Dir),
+            // (in the place of the directory it replaced, by way of a link)
             ("l", EntryNode::Dir),
+            ("n", EntryNode::Dir),
             ("l/g", EntryNode::File(1)),
         ];
         assert_eq!(paths, want.iter().map(|(p, n)| (p.to_string(), n)).collect::<Vec<_>>());
         assert_eq!(t.root.mode, Some(0o700));
         // (of the first segment's first content, and the third's)
         assert_eq!(refs, [(0, 0, 0), (0, 0, 0)]);
+    }
+
+    /// An entry replaced keeps the place of the one it replaces among its siblings, through
+    /// replacements one after another and by another kind (children an ordered map, spec
+    /// "Merging segments"); one taken away and made again goes last.
+    #[test]
+    fn replaced_in_place() {
+        let e =
+            |parent, name: &str, node| Entry { parent, name: name.as_bytes().to_vec(), node, extra: Extra::default() };
+        let seg = |entries: Vec<Entry>, tombstones: Vec<(Option<usize>, &str)>| SegmentTree {
+            given: std::iter::once(false).chain(entries.iter().map(|_| false)).collect(),
+            refs: entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).map(|_| (0, 0, 0)).collect(),
+            tree: Tree { root: Extra::default(), entries },
+            tombstones: tombstones.into_iter().map(|(p, n)| (p, n.as_bytes().to_vec())).collect(),
+        };
+        let (t, _) = merge(vec![
+            seg(
+                vec![e(None, "a", EntryNode::File(0)), e(None, "b", EntryNode::File(1)), e(None, "c", EntryNode::File(2))],
+                vec![],
+            ),
+            seg(
+                vec![
+                    e(None, "c", EntryNode::Dir),
+                    e(Some(0), "x", EntryNode::File(0)),
+                    e(None, "d", EntryNode::File(1)),
+                    e(None, "b", EntryNode::File(2)),
+                ],
+                vec![(None, "a")],
+            ),
+            seg(vec![e(None, "a", EntryNode::File(0)), e(None, "b", EntryNode::Link(b"t".to_vec()))], vec![]),
+        ]);
+        let names: Vec<(Option<usize>, &str)> =
+            t.entries.iter().map(|x| (x.parent, std::str::from_utf8(&x.name).unwrap())).collect();
+        assert_eq!(names, [(None, "b"), (None, "c"), (Some(1), "x"), (None, "d"), (None, "a")]);
+        assert_eq!(t.entries[0].node, EntryNode::Link(b"t".to_vec()));
     }
 
     /// The segments of [`merged`] resolved: what became of each entry not left, and where the
@@ -2823,9 +2872,10 @@ mod tests {
             [
                 (None, o(1, 0), o(0, 0)),
                 (Some(0), o(0, 1), o(0, 1)),
-                (None, o(1, 2), o(1, 2)),
+                // (in the place of the directory it replaced, by way of a link)
                 (None, o(2, 0), o(2, 0)),
-                (Some(3), o(2, 1), o(2, 1)),
+                (None, o(1, 2), o(1, 2)),
+                (Some(2), o(2, 1), o(2, 1)),
             ]
         );
     }
