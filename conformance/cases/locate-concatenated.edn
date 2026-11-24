@@ -1,0 +1,20 @@
+# Archives concatenated are not one: the first is located, the second is trailing bytes.
+{
+  "title": "Two archives one after the other",
+  "spec": ["#locating-an-archive"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'first'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "f1", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "trailing": h'f804036ad6be20067365636f6e64101609000000000100040008663100063e39982fd552417bfdaaaede8512020020200200',
+  "interpreted": {"root": {"children": {"f1": {"content": 'first'}}}},
+}

@@ -1,0 +1,27 @@
+# A node other than a directory is replaced as a whole: of a null extra, its extra is null.
+{
+  "title": "A file's extra replaced with it",
+  "spec": ["#segment-merging"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'one'}}}]),
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "f", "original_size": undefined}],
+        "optional_metadata": {-2: [null, {-6: "kept?"}]},
+      }}}}]),
+      80001(["b2", {"type": 0x20, "data": {"uncompressed_data": {"data": 'two'}}}]),
+      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["m1", "m2"],
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b2", "m2"]}],
+        "entries": [{"entry_name": "f", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"f": {"content": 'two'}}}},
+}

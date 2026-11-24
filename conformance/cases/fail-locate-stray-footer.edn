@@ -1,0 +1,21 @@
+# A footer before the one at the end, not after a metadata block, makes the archive found from
+# the end invalid: reading forward ends the archive there, before its metadata block.
+{
+  "title": "A footer amid the blocks",
+  "spec": ["#locating-an-archive", "#unencrypted-archive"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'one'}}}]),
+      # a footer, not after a metadata block
+      h'fdaaaede851202001e200200',
+      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "entries": [{"entry_name": "f1", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

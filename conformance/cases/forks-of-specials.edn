@@ -1,0 +1,31 @@
+# Forks of a link, a FIFO and an unknown node: of any node, not only of files and directories.
+{
+  "title": "Forks of special nodes",
+  "spec": ["#fork-streams", "#archive-model"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["s", {"type": 0x20, "data": {"uncompressed_data": {"data": 'fork'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0],
+        "file_params": [],
+        "entries": [
+          {"entry_name": "l", "special_kind": 1, "link_target": "t"},
+          {"entry_name": "p", "special_kind": 2},
+          {"entry_name": "u", "special_kind": 9, "special_data": 'nine'},
+        ],
+        "optional_metadata": {-2: [null,
+          {-50: {"s": [80000(["s", "meta"]), 0, 4]}},
+          {-50: {"s": [80000(["s", "meta"]), 0, 4]}},
+          {-6: "u", -50: {"s": [80000(["s", "meta"]), 0, 4]}}]},
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "l": {"target": "t", "extra": {}, "forks": {"s": 'fork'}},
+    "p": {"kind": "fifo", "extra": {}, "forks": {"s": 'fork'}},
+    "u": {"kind": 9, "data": 'nine', "extra": {-6: "u"}, "forks": {"s": 'fork'}},
+  }}},
+}

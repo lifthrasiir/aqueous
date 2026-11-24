@@ -1,0 +1,29 @@
+# Names of dots that are neither `.` nor `..`, and names differing in case alone, are names.
+{
+  "title": "Names of dots and of cases",
+  "spec": ["#entry-names"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0, 0, 0],
+        "file_params": [{"file_offset": ["blk", "meta"]}, {"file_offset": ["blk", "meta"]},
+                        {"file_offset": ["blk", "meta"]}, {"file_offset": ["blk", "meta"]},
+                        {"file_offset": ["blk", "meta"]}],
+        "entries": [
+          {"entry_name": "...", "original_size": undefined},
+          {"entry_name": ".a", "original_size": undefined},
+          {"entry_name": "a.", "original_size": undefined},
+          {"entry_name": "A", "original_size": undefined},
+          {"entry_name": "a", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "...": {"content": 'x'}, ".a": {"content": 'x'}, "a.": {"content": 'x'}, "A": {"content": 'x'}, "a": {"content": 'x'},
+  }}},
+}

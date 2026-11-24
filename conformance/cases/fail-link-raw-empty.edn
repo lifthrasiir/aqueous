@@ -1,0 +1,17 @@
+# A raw link target has bytes after its C1.
+{
+  "title": "An empty raw link target",
+  "spec": ["#archive-model", "#metadata-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [],
+        "entries": [{"entry_name": "l", "special_kind": 1, "link_target": 80000(h'c1')}],
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}

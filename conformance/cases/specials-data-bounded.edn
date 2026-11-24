@@ -1,0 +1,24 @@
+# An unknown node's data ends where the next entry starts, as entry_offsets tell.
+{
+  "title": "Special data amid the entries",
+  "spec": ["#metadata-block"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [0, 0],
+        "file_params": [],
+        "entries": [
+          {"entry_name": "u", "special_kind": 5, "special_data": h'00 70 02'},
+          {"entry_name": "v", "special_kind": 6, "special_data": h''},
+          {"entry_name": "p", "special_kind": 2},
+        ],
+      }}}},
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {
+    "u": {"kind": 5, "data": h'00 70 02'}, "v": {"kind": 6, "data": h''}, "p": {"kind": "fifo"},
+  }}},
+}
