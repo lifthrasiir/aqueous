@@ -278,3 +278,94 @@ fn grid_runs() {
         }
     }
 }
+
+/// A safetensors file of tensors `(name, dtype, row, data)`, one after another.
+fn safetensors_of(ts: &[(&str, &str, u64, &[u8])]) -> Vec<u8> {
+    let mut h = String::from("{");
+    let (mut at, mut body) = (0usize, Vec::new());
+    for (i, (name, ty, row, d)) in ts.iter().enumerate() {
+        let sep = if i > 0 { "," } else { "" };
+        let (n, b) = (d.len() as u64 / ty_bytes(ty) / row, at + d.len());
+        h += &format!(r#"{sep}"{name}":{{"dtype":"{ty}","shape":[{n},{row}],"data_offsets":[{at},{b}]}}"#);
+        at = b;
+        body.extend_from_slice(d);
+    }
+    h.push('}');
+    while !h.len().is_multiple_of(8) {
+        h.push(' ');
+    }
+    [&(h.len() as u64).to_le_bytes()[..], h.as_bytes(), &body].concat()
+}
+
+fn ty_bytes(ty: &str) -> u64 {
+    match ty {
+        "F32" => 4,
+        _ => 2,
+    }
+}
+
+/// `n` BF16 weights of seed `seed`.
+fn weights(seed: u64, n: usize) -> Vec<u8> {
+    let mut r = aqr_common::rng::Rng::new(seed);
+    (0..n)
+        .flat_map(|_| {
+            let x = (r.below(20_000) as f32 - 10_000.0) * 1e-5;
+            ((x.to_bits() >> 16) as u16).to_le_bytes()
+        })
+        .collect()
+}
+
+/// The bytes of the streams of `f` but its header's.
+fn coded_bytes(f: &Formula) -> usize {
+    f.streams.iter().filter(|s| !s.class.ends_with("/header")).map(|s| s.data.len()).sum()
+}
+
+/// A tensor of the same bytes as one before it in the file (tied embeddings stored twice) is that
+/// one's applications again: no more streams than without it, and rebuilt; a small one (under
+/// 64 KiB) and one of other bytes alike coded as they are.
+#[test]
+fn copies() {
+    let (emb, other, small) = (weights(1, 300_000), weights(2, 100_000), weights(3, 1000));
+    let without = safetensors_of(&[
+        ("embed", "BF16", 1000, &emb),
+        ("other", "BF16", 1000, &other),
+        ("small", "BF16", 100, &small),
+    ]);
+    let with = safetensors_of(&[
+        ("embed", "BF16", 1000, &emb),
+        ("other", "BF16", 1000, &other),
+        ("small", "BF16", 100, &small),
+        ("head", "BF16", 1000, &emb),
+        ("small2", "BF16", 100, &small),
+    ]);
+    for segment in [1 << 16, formula::SEGMENT] {
+        let (a, b) =
+            (formula::encode_in(&without, 3, segment).unwrap(), formula::encode_in(&with, 3, segment).unwrap());
+        assert_eq!(eval(&b), with, "{segment}");
+        let (ca, cb) = (coded_bytes(&a), coded_bytes(&b));
+        assert!(cb <= ca + small.len() + 4096, "{segment}: {cb} against {ca} without the copy");
+        // (the same whatever the threads)
+        assert!(formula::encode_in(&with, 1, segment).unwrap() == b, "{segment}: threads");
+    }
+}
+
+/// A tensor of a segment's bytes or more makes the same applications wherever it is: in two files
+/// of other tensors around it, at other places (the shards of a model, the archive storing their
+/// streams once).
+#[test]
+fn aligned() {
+    let segment = 1 << 16;
+    let x = weights(4, 150_000);
+    let (a, b, c) = (weights(5, 7777), weights(6, 20_000), weights(7, 3333));
+    let one = safetensors_of(&[("a", "BF16", 1111, &a), ("x", "BF16", 1000, &x), ("b", "BF16", 1000, &b)]);
+    let two = safetensors_of(&[("c", "BF16", 1111, &c), ("x", "BF16", 1000, &x)]);
+    let (f1, f2) = (formula::encode_in(&one, 2, segment).unwrap(), formula::encode_in(&two, 2, segment).unwrap());
+    assert_eq!(eval(&f1), one);
+    assert_eq!(eval(&f2), two);
+    let made = |f: &Formula| -> Vec<(Vec<u8>, Vec<Vec<u8>>, u64)> {
+        apps(f).iter().map(|a| (a.params.clone(), inputs(f, a).iter().map(|i| i.to_vec()).collect(), a.len)).collect()
+    };
+    let (m1, m2) = (made(&f1), made(&f2));
+    let same: u64 = m2.iter().filter(|m| m1.contains(m)).map(|m| m.2).sum();
+    assert_eq!(same, x.len() as u64, "of the tensor's bytes, those of the same applications");
+}

@@ -72,6 +72,14 @@ The formula is the concatenation of the header, then the tensor data to the end 
   (§4) are the tensors' parts and the bytes between them in turn: a tensor is cut between
   segments at its chunks (§4.2 to §4.5). The streams of each application are `tensors/syms` and
   `tensors/raw` (compressed already) and `tensors/side`, each kept apart (a block of its own).
+- a tensor of 16 MiB or more (or of a segment's bytes, where the segments are shorter) starts a
+  segment and ends its last one, so that the same tensor makes the same applications (their
+  parameters and streams) wherever it is: in another file, the archive's streams of the same
+  bytes are stored once;
+- a tensor of 64 KiB or more of the same bytes as one before it in the file (of the same type)
+  is that one's applications again, not coded again; that one is then segments of its own as
+  above, whatever its size. Of a model's embeddings tied to its output's weights and stored as
+  both (`lm_head.weight` of `model.embed_tokens.weight`), the second costs nothing.
 
 A tensor's part of fewer than 4096 bytes is a run of bytes as they are (§4.1), and so is one
 whose coded form is estimated (by the tables' costs) at 98.5% of its bytes or more: noise, or

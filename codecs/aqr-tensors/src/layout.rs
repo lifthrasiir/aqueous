@@ -7,7 +7,7 @@ use crate::rans::{LANES, Table};
 use crate::{Result, corrupt};
 
 /// A float of the tensors: its bytes, bits of its exponent and of its mantissa (and a sign).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Float {
     Bf16,
     F16,
@@ -263,7 +263,7 @@ impl Part {
 }
 
 /// A type of quantised blocks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Quant {
     Q4_0,
     Q4_1,

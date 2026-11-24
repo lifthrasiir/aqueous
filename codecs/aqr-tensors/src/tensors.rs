@@ -6,7 +6,7 @@ use crate::layout::{Float, Quant};
 use crate::{gguf, pth, safetensors};
 
 /// What a tensor's bytes are, where they are coded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Data {
     /// `n` floats.
     Float(Float, u64),

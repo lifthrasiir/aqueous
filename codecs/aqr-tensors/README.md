@@ -146,6 +146,17 @@ Its F32 come to their exponents' entropy (8 bits to about 2.6) and the 24 bits o
 mantissa as they are (no mantissa's low bits are zero throughout): `aqr-tensors-bench`, 213 MB of
 symbols and 1923 MB raw of 2564.5 MB, coding at 4.1 GB/s, decoding at 5.2 GB/s (16 threads).
 
+## Tensors stored twice
+
+Models of embeddings tied to the output's weights (`tie_word_embeddings`) are often saved with
+both, `lm_head.weight` the same bytes as `model.embed_tokens.weight`: Qwen3-0.6B's 311 MB of
+1.50 GB, Qwen3-1.7B's 622 MB of 4.06 GB (in its second shard). A tensor of the same bytes as one
+before it in the file is that one's applications again (FORMAT.md §2), and a tensor of a
+segment's bytes or more makes segments of its own, the same wherever it is, for the archive to
+store their streams once when the files are in one batch. Qwen3-0.6B, through `aqr -c` (Ryzen 7
+9700X, 2026-11-24): 997,171,204 -> 791,437,270 B (0.6633 -> 0.5265), 1.54 -> 1.52 s; `aqr -K`
+3.34 -> 3.62 GB/s.
+
 ## Conversions
 
 Measured 2026-11-12 on a Ryzen 7 9700X (16 threads), through `aqr -c` (the default level,

@@ -42,6 +42,15 @@ aqr_common::zopt! {
         Opt::size("tensors:long-raw", 1 << 20, "bytes between coded tensors left out of the applications");
     /// A tensor (or a part of one in a segment) of fewer bytes is not coded.
     static MIN_CODED: Opt<usize> = Opt::size("tensors:min-coded", 4096, "tensors of fewer bytes are not coded");
+    /// A tensor of at least this many bytes (or of a segment's, where that is less) starts a
+    /// segment and ends its last one, so that the same tensor makes the same applications wherever
+    /// it is ([`pieces`]): of another file, the archive stores their streams once.
+    static ALIGN: Opt<usize> =
+        Opt::size("tensors:align", SEGMENT, "tensors of at least this many bytes are segments of their own");
+    /// A tensor of at least this many bytes of the same bytes as one before it in the file is
+    /// that one's applications again, not coded again ([`copies`]).
+    static COPY_MIN: Opt<usize> =
+        Opt::size("tensors:copy-min", 64 << 10, "tensors of the same bytes as one before, of at least this, are not coded again");
     /// Whether coding comes to less than this share of the bytes as they are (of their 8 bits
     /// each), for a run to be coded.
     static PAYS: Opt<f64> = Opt::value("tensors:pays", 0.985, "a run is coded where under this share of its raw bits");
@@ -73,15 +82,46 @@ impl Span {
     }
 }
 
-/// A piece of the root: the header, a long run as it is, or a segment.
+/// A piece of the root: a long run as it is, a segment, or a tensor of the same bytes as one before
+/// it, of its bytes: the pieces of that one (an index range of them) again.
 enum Piece {
     Long(usize, usize),
     Segment(Vec<Span>),
+    Copy(std::ops::Range<usize>, usize, usize),
+}
+
+/// Of each tensor of `g` (of file `d`), the one before it of the same bytes, if any, of at least
+/// [`COPY_MIN`] bytes (a model's embeddings, tied to its output's weights, stored as both).
+fn copies(d: &[u8], g: &Tensors) -> Vec<Option<usize>> {
+    let min = COPY_MIN.get() as u64;
+    let bytes = |t: &Tensor| &d[t.start..t.start + t.data.len() as usize];
+    // (of each tensor, its type and length and a few of its bytes, those before it alike)
+    let mut alike: std::collections::HashMap<(Data, [u8; 64]), Vec<usize>> = Default::default();
+    let mut out = vec![None; g.tensors.len()];
+    for (i, t) in g.tensors.iter().enumerate().filter(|(_, t)| t.data.len() >= min) {
+        let b = bytes(t);
+        let probe: [u8; 64] = std::array::from_fn(|k| b[(b.len() - 1) / 63 * k]);
+        let earlier = alike.entry((t.data, probe)).or_default();
+        match earlier.iter().find(|&&j| bytes(&g.tensors[j]) == b) {
+            Some(&j) => out[i] = Some(j),
+            None => earlier.push(i),
+        }
+    }
+    out
 }
 
 /// The pieces of the file after the header: the tensors coded cut into segments of about
-/// `segment` bytes (at chunks), with the bytes between them.
-fn pieces(len: usize, g: &Tensors, segment: usize) -> Vec<Piece> {
+/// `segment` bytes (at chunks), with the bytes between them. A tensor of [`ALIGN`] bytes or more,
+/// or of copies, starts a segment and ends its last one; a copy ([`copies`]) is a [`Piece::Copy`].
+fn pieces(d: &[u8], g: &Tensors, segment: usize) -> Vec<Piece> {
+    let len = d.len();
+    let copies = copies(d, g);
+    // (or of a segment, where that is less: of the tests' short ones)
+    let align = ALIGN.get().min(segment) as u64;
+    let mut copied = vec![false; g.tensors.len()];
+    copies.iter().flatten().for_each(|&j| copied[j] = true);
+    // (of each tensor that is a segment of its own, its pieces)
+    let mut own: Vec<Option<std::ops::Range<usize>>> = vec![None; g.tensors.len()];
     let mut out = Vec::new();
     let mut seg: Vec<Span> = Vec::new();
     let mut seg_len = 0usize;
@@ -108,6 +148,18 @@ fn pieces(len: usize, g: &Tensors, segment: usize) -> Vec<Piece> {
     for (ti, t) in g.tensors.iter().enumerate() {
         let (start, data) = (t.start, t.data);
         raw(at, start, &mut seg, &mut seg_len, &mut out);
+        if let Some(j) = copies[ti] {
+            close(&mut seg, &mut seg_len, &mut out);
+            let of = own[j].clone().expect("a segment of its own");
+            at = start + data.len() as usize;
+            out.push(Piece::Copy(of, start, at));
+            continue;
+        }
+        let alone = copied[ti] || data.len() >= align;
+        if alone {
+            close(&mut seg, &mut seg_len, &mut out);
+        }
+        let first = out.len();
         // (cut at chunks: of floats, a chunk; of blocks, a chunk's blocks; of lanes, a chunk's
         // elements)
         let (unit, unit_bytes) = match data {
@@ -130,6 +182,10 @@ fn pieces(len: usize, g: &Tensors, segment: usize) -> Vec<Piece> {
             if seg_len >= segment - unit_bytes.min(segment as u64 / 2) as usize {
                 close(&mut seg, &mut seg_len, &mut out);
             }
+        }
+        if alone {
+            close(&mut seg, &mut seg_len, &mut out);
+            own[ti] = Some(first..out.len());
         }
         at = p;
     }
@@ -643,15 +699,19 @@ pub fn formula_bound(input: &[u8]) -> Option<usize> {
     const APPLY: usize = 1 + 4 * NUM + 2 * NUM + 2 * SLICE + (2 * SLICE + 1 + NUM);
     let block = aqr_archive::BLOCK;
     let over = |len: usize| len / block + 2;
-    let mut n = 1024 + over(g.data) * SLICE + ITEM + over(input.len()) * 4;
-    for p in pieces(input.len(), &g, SEGMENT_BYTES.get()) {
-        n += ITEM
+    let n = 1024 + over(g.data) * SLICE + ITEM + over(input.len()) * 4;
+    // (of each piece, its bound: a copy's those of the pieces it is again)
+    let mut bounds: Vec<usize> = Vec::new();
+    for p in pieces(input, &g, SEGMENT_BYTES.get()) {
+        let b = ITEM
             + match p {
                 Piece::Long(a, b) => over(b - a) * SLICE + 1 + NUM,
                 Piece::Segment(spans) => APPLY + spans.len() * SPAN + 2,
+                Piece::Copy(of, _, _) => bounds[of].iter().sum(),
             };
+        bounds.push(b);
     }
-    Some(n)
+    Some(n + bounds.iter().sum::<usize>())
 }
 
 /// A segment coded ([`encode_sealing`]): its formula and what was made of it, None where none of
@@ -688,7 +748,7 @@ pub fn encode_sealing<T: Send>(
     if g.tensors.is_empty() {
         return None;
     }
-    let pieces = pieces(input.len(), &g, segment_bytes.max(1 << 16));
+    let pieces = pieces(input, &g, segment_bytes.max(1 << 16));
     // (each tensor's model, of a sample of it, made by the first segment of it that needs it)
     let models: Vec<std::sync::OnceLock<Model>> = g.tensors.iter().map(|_| std::sync::OnceLock::new()).collect();
     let mut f = Formula::default();
@@ -720,15 +780,27 @@ pub fn encode_sealing<T: Send>(
         aqr_common::progress::done(&input[a..b]);
         (part, a..b)
     };
+    // (of each piece put, its node in `nodes`)
+    let mut node_of: Vec<usize> = Vec::with_capacity(pieces.len());
     let mut put = |piece: &Piece, c: Option<Made<T>>| {
         let (c, r) = match (piece, c) {
             (Piece::Long(a, b), _) => {
                 aqr_common::progress::done(&input[*a..*b]);
                 (None, *a..*b)
             }
+            (Piece::Copy(of, a, b), _) => {
+                // (the nodes of the pieces it is again, their streams the same)
+                let again: Vec<Node> = node_of[of.clone()].iter().map(|&k| nodes[k].clone()).collect();
+                node_of.push(nodes.len());
+                nodes.push(Node::concat(again));
+                aqr_common::progress::done(&input[*a..*b]);
+                aqr_formula::store::let_go(&input[*a..*b]);
+                return;
+            }
             (Piece::Segment(_), Some(c)) => c,
             (Piece::Segment(_), None) => unreachable!("coded first"),
         };
+        node_of.push(nodes.len());
         match c {
             Some((mut part, t)) => {
                 any = true;
@@ -760,7 +832,7 @@ pub fn encode_sealing<T: Send>(
             }
             let h = match p {
                 Piece::Segment(spans) => Some(s.spawn(|| code(spans))),
-                Piece::Long(..) => None,
+                Piece::Long(..) | Piece::Copy(..) => None,
             };
             ahead.push_back((p, h));
         }
