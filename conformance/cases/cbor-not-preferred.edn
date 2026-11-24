@@ -1,0 +1,22 @@
+# The optional metadata is any well-formed CBOR, of the preferred serialization or not:
+# indefinite lengths, integers longer than they need, a half float, simple values, a tag of no
+# meaning here; it is taken as the data items it encodes.
+{
+  "title": "CBOR not of the preferred serialization",
+  "spec": ["#optional-metadata"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+        "optional_metadata": 80000(h'bf38007f6161ff6d6f72672e6578616d706c652e789f1801f0f93e00f7d903e74100ffff'),
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'x'}}}, "extra": {-1: "a", "org.example.x": [1, simple(16), 1.5, undefined, 999(h'00')]}},
+}

@@ -949,7 +949,10 @@ class Assembler:
             return v
 
         head = Writer()
-        P = known(self.put_num(head, m, "previous_metadata_offset", leb128, inferred_prev), "previous_metadata_offset")
+        P = self.put_num(head, m, "previous_metadata_offset", leb128, inferred_prev)
+        if P is None and is_raw(self.unlabel(m["previous_metadata_offset"])):
+            P = unleb(raw_bytes(self.unlabel(m["previous_metadata_offset"])))
+        P = known(P, "previous_metadata_offset")
         counts = {}
         for key, kind in (("num_modules", "module"), ("num_resources", "resource"), ("num_dictionaries", "dictionary")):
             lst = self.unlabel(m.get(kind + "_offsets", UNDEFINED))
@@ -1133,6 +1136,14 @@ def text_field(v):
     if isinstance(v, Tag) and v.tag == RAW and isinstance(v.value, bytes):
         return v.value
     raise CaseError(f"not a text: {v!r}")
+
+
+def unleb(b):
+    """The value of a leb128 given as its bytes (for the widths it sets)."""
+    v = 0
+    for i, x in enumerate(b):
+        v |= (x & 0x7F) << (7 * i)
+    return v
 
 
 def unzstd_simple(patch, source):

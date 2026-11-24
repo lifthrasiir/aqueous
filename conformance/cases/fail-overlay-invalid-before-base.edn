@@ -1,0 +1,12 @@
+# An overlay archive that doesn't parse is invalid, before the base failure of being given none.
+{
+  "title": "An invalid overlay archive without its base",
+  "spec": ["#interpretation", "#overlays"],
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [{"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+    "size_hint": 2,
+  },
+  "interpreted": "invalid",
+}

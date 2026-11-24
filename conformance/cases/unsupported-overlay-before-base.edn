@@ -1,0 +1,11 @@
+# An unsupported block comes before the base failure of an overlay archive given no base.
+{
+  "title": "An unsupported block in an overlay archive without its base",
+  "spec": ["#interpretation", "#overlays"],
+  "archive": {
+    "header_magic": "OVERLAY_HEADER_MAGIC",
+    "blocks": [{"type": 0x05, "data": h'00'}, {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}],
+    "footer_magic": "OVERLAY_FOOTER_MAGIC",
+  },
+  "interpreted": "unsupported",
+}

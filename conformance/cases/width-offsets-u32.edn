@@ -1,0 +1,29 @@
+# Relative offsets of u32le, past 64 KiB.
+{
+  "title": "Offsets of four bytes",
+  "spec": ["#types", "#metadata-block"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      {"type": 2, "size": 70000, "data": {}},
+      {"type": 0x61, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": 80003("data/copy.wasm")},
+      }}},
+      {"type": 0x64, "data": {"compressed_data": {"compression_params": {"window_descriptor": 0}, "data": {"decoded": 'res'}}}},
+      {"type": 0x51, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {"content": 'a dictionary nobody uses'}},
+      }}},
+      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": undefined}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'x'}}}},
+}

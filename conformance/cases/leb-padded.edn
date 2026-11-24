@@ -1,0 +1,27 @@
+# A leb128 may be longer than it needs, but for a block type: here a previous_metadata_offset,
+# num_files, original_size, original_size_delta and original_size_shrink, each padded with
+# groups of zero bits.
+{
+  "title": "LEB128s not in the shortest form",
+  "spec": ["#types"],
+  "level": 0,
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["blk", {"type": 0x28, "data": {"compressed_data": {
+        "original_size_delta": h'80 80 00', "original_size_shrink": h'83 00',
+        "compression_params": {"window_descriptor": 0},
+        "data": [{"block_type": "RLE_Block", "block_size": 1, "content": 'x'}],
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": 80000(h'8d80 00'),
+        "num_files": h'81 80 80 00',
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": h'81 00'}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": {"root": {"children": {"a": {"content": 'x'}}}},
+}
