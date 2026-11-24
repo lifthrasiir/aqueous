@@ -5,7 +5,7 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["d", {"type": 0x30, "data": {
+      80001(["@d", {"type": 0x30, "data": {
         "dictionary_index": 0,
         "compressed_data": {"compression_params": {"window_descriptor": 0}, "data": {"decoded": 'x'}},
       }}]),
@@ -13,9 +13,9 @@
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {"content": 'a dictionary too late'}},
       }}},
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_dictionary": 1, "file_offset": ["d", "meta"]}],
+        "file_params": [{"file_dictionary": 1, "file_offset": ["@d", "@meta"]}],
         "entries": [{"entry_name": "d", "original_size": undefined}],
       }}}}]),
     ],

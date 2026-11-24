@@ -7,7 +7,7 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["f", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [],
@@ -20,13 +20,13 @@
           ],
         }},
       }}}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [0, 0, 0],
         "file_params": [
-          {"file_offset": ["f", "meta"]},
-          {"file_offset": ["f", "meta", 1], "file_output": 0},
-          {"file_offset": ["f", "meta", 1], "file_output": 1},
-          {"file_offset": ["f", "meta", 1], "file_output": 1},
+          {"file_offset": ["@f", "@meta"]},
+          {"file_offset": ["@f", "@meta", 1], "file_output": 0},
+          {"file_offset": ["@f", "@meta", 1], "file_output": 1},
+          {"file_offset": ["@f", "@meta", 1], "file_output": 1},
         ],
         "entries": [
           {"entry_name": "x", "original_size": undefined},

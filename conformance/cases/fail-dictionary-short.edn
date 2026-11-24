@@ -9,13 +9,13 @@
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {"content": '7 bytes'}},
       }}},
-      80001(["d", {"type": 0x30, "data": {
+      80001(["@d", {"type": 0x30, "data": {
         "dictionary_index": 0,
         "compressed_data": {"compression_params": {"window_descriptor": 0}, "data": {"decoded": 'x'}},
       }}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["d", "meta"]}],
+        "file_params": [{"file_offset": ["@d", "@meta"]}],
         "entries": [{"entry_name": "d", "original_size": undefined}],
       }}}}]),
     ],

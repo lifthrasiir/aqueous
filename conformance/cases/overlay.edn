@@ -14,10 +14,10 @@
   "archive": {
     "header_magic": "OVERLAY_HEADER_MAGIC",
     "blocks": [
-      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'n'}}}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'n'}}}]),
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [1, 0],
-        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "file_params": [{"file_offset": ["@blk", "@meta"]}],
         "entries": [
           {"entry_name": "d"},
           {"entry_name": "new", "original_size": undefined},

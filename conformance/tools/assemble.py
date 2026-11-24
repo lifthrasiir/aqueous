@@ -96,7 +96,11 @@ def raw_bytes(v):
 def is_diff(v):
     if isinstance(v, Tag) and v.tag == RAW:
         v = v.value
-    return isinstance(v, list) and len(v) in (2, 3) and all(isinstance(x, str) for x in v[:2])
+    return isinstance(v, list) and len(v) in (2, 3) and all(is_label(x) for x in v[:2])
+
+
+def is_label(x):
+    return isinstance(x, str) and x.startswith("@") and len(x) > 1
 
 
 class Writer:
@@ -174,6 +178,9 @@ class Assembler:
         while isinstance(v, Tag) and v.tag in (LABEL_START, LABEL_END):
             if not (isinstance(v.value, list) and len(v.value) == 2):
                 raise CaseError(f"bad label {v!r}")
+            name = v.value[0] if v.tag == LABEL_START else v.value[1]
+            if not is_label(name):
+                raise CaseError(f"label {name!r}: a label starts with @")
             if v.tag == LABEL_START:
                 starts.append(v.value[0])
                 v = v.value[1]

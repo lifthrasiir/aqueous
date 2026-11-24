@@ -4,9 +4,9 @@
   "spec": ["#unencrypted-archive"],
   "archive": {
     "header_magic": "HEADER_MAGIC",
-    "blocks": [80002([80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]), "end"])],
+    "blocks": [80002([80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]), "@end"])],
     "footer_magic": "FOOTER_MAGIC",
-    "metadata_backward_offset": ["blk", "end", 8],
+    "metadata_backward_offset": ["@blk", "@end", 8],
   },
   "interpreted": "invalid",
 }

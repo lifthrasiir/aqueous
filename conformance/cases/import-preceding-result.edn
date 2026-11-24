@@ -6,14 +6,14 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'old'}}}]),
-      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'old'}}}]),
+      80001(["@m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "file_params": [{"file_offset": ["@b1", "@m1"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
       }}}}]),
-      80001(["b2", {"type": 0x20, "data": {"uncompressed_data": {"data": 'new'}}}]),
-      80001(["f", {"type": 0x70, "data": {"formula_data": {
+      80001(["@b2", {"type": 0x20, "data": {"uncompressed_data": {"data": 'new'}}}]),
+      80001(["@f", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [0],
@@ -26,10 +26,10 @@
           {"import_path": "a", "import_offset": 0, "import_size": 3, "import_checksum": h'4165464149de713c9ddb42096b638c7e9c4d6c54ca5a85e353409a2a560715c4'},
         ]}},
       }}},
-      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
-        "previous_metadata_offset": ["m1", "m2"],
+      80001(["@m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["@m1", "@m2"],
         "entry_parents": [0],
-        "file_params": [{"file_offset": ["b2", "m2"]}, {"file_offset": ["f", "m2"]}],
+        "file_params": [{"file_offset": ["@b2", "@m2"]}, {"file_offset": ["@f", "@m2"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}, {"entry_name": "kept", "original_size": undefined}],
       }}}}]),
     ],

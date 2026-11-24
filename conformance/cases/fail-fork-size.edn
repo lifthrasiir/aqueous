@@ -5,13 +5,13 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["rsrc", {"type": 0x20, "data": {"uncompressed_data": {"data": 'RSRC'}}}]),
-      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@rsrc", {"type": 0x20, "data": {"uncompressed_data": {"data": 'RSRC'}}}]),
+      80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "file_params": [{"file_offset": ["@blk", "@meta"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
-        "optional_metadata": {-2: [null, {-50: {"s": [80000(["rsrc", "meta"]), 0, 5]}}]},
+        "optional_metadata": {-2: [null, {-50: {"s": [80000(["@rsrc", "@meta"]), 0, 5]}}]},
       }}}}]),
     ],
     "footer_magic": "FOOTER_MAGIC",

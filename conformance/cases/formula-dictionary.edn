@@ -13,7 +13,7 @@
         "data": {"decoded": {"content": 'dictionary content: hello, world, aqueous'}},
       }}},
       # with a dictionary: 0111 0 1 00
-      80001(["f", {"type": 0x74, "data": {
+      80001(["@f", {"type": 0x74, "data": {
         "dictionary_index": 0,
         "formula_data": {
           "compression_params": {"window_descriptor": 0},
@@ -24,7 +24,7 @@
         },
       }}]),
       # leaf, Zstandard with a dictionary, no checksum: 001 10 0 00; by zstd -D
-      80001(["d", {"type": 0x30, "data": {
+      80001(["@d", {"type": 0x30, "data": {
         "dictionary_index": 0,
         "compressed_data": {
           "compression_params": {"window_descriptor": 0},
@@ -32,9 +32,9 @@
                     "decoded": 'hello, world, aqueous; hello, world'}],
         },
       }}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [0],
-        "file_params": [{"file_offset": ["f", "meta"]}, {"file_offset": ["d", "meta"]}],
+        "file_params": [{"file_offset": ["@f", "@meta"]}, {"file_offset": ["@d", "@meta"]}],
         "entries": [
           {"entry_name": "f", "original_size": undefined},
           {"entry_name": "d", "original_size": undefined},

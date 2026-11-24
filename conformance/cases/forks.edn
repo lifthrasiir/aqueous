@@ -7,18 +7,18 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["rsrc", {"type": 0x20, "data": {"uncompressed_data": {"data": 'RSRC'}}}]),
-      80001(["ads", {"type": 0x20, "data": {"uncompressed_data": {"data": 'ZoneId'}}}]),
-      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'data'}}}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@rsrc", {"type": 0x20, "data": {"uncompressed_data": {"data": 'RSRC'}}}]),
+      80001(["@ads", {"type": 0x20, "data": {"uncompressed_data": {"data": 'ZoneId'}}}]),
+      80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'data'}}}]),
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [0],
-        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "file_params": [{"file_offset": ["@blk", "@meta"]}],
         "entries": [{"entry_name": "d"}, {"entry_name": "f", "original_size": undefined}],
         "optional_metadata": {-2: [
           null,
-          {-50: {"Zone.Identifier": [80000(["ads", "meta"]), 0, 6]}},
-          {-6: "c", -50: {"AFP_Resource": [80000(["rsrc", "meta"]), 0, 4], h'01': [80000(["blk", "meta"]), 0, 4],
-                          273(h'eda080'): [80000(["ads", "meta"]), 0, 6]}},
+          {-50: {"Zone.Identifier": [80000(["@ads", "@meta"]), 0, 6]}},
+          {-6: "c", -50: {"AFP_Resource": [80000(["@rsrc", "@meta"]), 0, 4], h'01': [80000(["@blk", "@meta"]), 0, 4],
+                          273(h'eda080'): [80000(["@ads", "@meta"]), 0, 6]}},
         ]},
       }}}}]),
     ],

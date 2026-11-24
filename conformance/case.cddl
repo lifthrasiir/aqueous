@@ -25,9 +25,10 @@
 ; * `#6.80001([label, x])` is `x` that records the position of its first byte as `label`, and
 ;   `#6.80002([x, label])` that of the byte after its last. A position belongs to the innermost
 ;   byte sequence it is in: the file, the encrypted payload, or the decoded data of an external
-;   structure. Labels are taken out before a case is checked against this schema.
+;   structure. A label is a text string starting with `@` (`"@meta"`), so that it is never
+;   taken for anything else. Labels are taken out before a case is checked against this schema.
 ; * `[a, b]` or `#6.80000([a, b])` is the position labelled `b` minus the one labelled `a`, and
-;   `[a, b, k]` adds `k`. Both labels have to be of the same byte sequence, and `a` not after `b`.
+;   `[a, b, k]` adds `k` (`["@blk", "@meta"]`). Both labels have to be of the same byte sequence, and `a` not after `b`.
 ;   A difference may not depend on its own encoding (a mirror block before its target): write
 ;   such an offset as a number.
 ; * `#6.80003(path)` is the contents of the file at `path`, relative to the case.
@@ -65,7 +66,8 @@ passphrase = tstr / bstr
 raw = #6.80000(bstr)
 rawb = bstr / raw
 infer = undefined / #6.80000(undefined)
-diff = [tstr, tstr, ? int] / #6.80000([tstr, tstr, ? int])
+label = tstr .regexp "@.+"
+diff = [label, label, ? int] / #6.80000([label, label, ? int])
 ext = #6.80003(tstr)
 
 num = uint / diff / rawb          ; a number to be given

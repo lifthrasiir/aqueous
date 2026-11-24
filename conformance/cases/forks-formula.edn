@@ -6,7 +6,7 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["f", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [],
@@ -16,11 +16,11 @@
           ],
         }},
       }}}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["f", "meta"]}],
+        "file_params": [{"file_offset": ["@f", "@meta"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
-        "optional_metadata": {-2: [null, {-50: {"s": [80000(["f", "meta"]), 1, 4]}}]},
+        "optional_metadata": {-2: [null, {-50: {"s": [80000(["@f", "@meta"]), 1, 4]}}]},
       }}}}]),
     ],
     "footer_magic": "FOOTER_MAGIC",

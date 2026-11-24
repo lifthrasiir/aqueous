@@ -6,18 +6,18 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
       # not intact: no magic, no checksum
       {"type": 0xC10, "data": 'not a mirror block'},
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "file_params": [{"file_offset": ["@blk", "@meta"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
       }}}}]),
       # unwidened, after its target (the metadata block)
-      80001(["m1", {"type": 0xC10, "data": {"mirror_magic": "MIRROR_MAGIC", "target_offset": ["meta", "m1"]}}]),
+      80001(["@m1", {"type": 0xC10, "data": {"mirror_magic": "MIRROR_MAGIC", "target_offset": ["@meta", "@m1"]}}]),
       # widened: of the type C11 (a u16 size) for a block of the type 10
-      80001(["m2", {"type": 0xC11, "data": {"mirror_magic": "MIRROR_MAGIC", "target_offset": ["meta", "m2"]}}]),
+      80001(["@m2", {"type": 0xC11, "data": {"mirror_magic": "MIRROR_MAGIC", "target_offset": ["@meta", "@m2"]}}]),
     ],
     "footer_magic": "FOOTER_MAGIC",
   },

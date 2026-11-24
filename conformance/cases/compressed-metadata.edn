@@ -6,13 +6,13 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
       # Zstandard, u8: 0001 0 1 00
-      80001(["meta", {"type": 0x14, "data": {"compressed_data": {
+      80001(["@meta", {"type": 0x14, "data": {"compressed_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "entry_parents": [],
-          "file_params": [{"file_offset": ["blk", "meta"]}],
+          "file_params": [{"file_offset": ["@blk", "@meta"]}],
           "entries": [{"entry_name": "a", "original_size": undefined}],
         }},
       }}}]),

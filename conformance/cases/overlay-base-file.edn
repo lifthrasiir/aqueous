@@ -8,7 +8,7 @@
   "archive": {
     "header_magic": "OVERLAY_HEADER_MAGIC",
     "blocks": [
-      80001(["f", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [0],
@@ -22,9 +22,9 @@
           {"import_path": 80000(h''), "import_offset": 0, "import_size": 6, "import_checksum": h'556e8d57bb7ec91a2ae12cd30edea341a7ce19f4530fb60b0b73e31a708fb363'},
         ]}},
       }}},
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["f", "meta"]}],
+        "file_params": [{"file_offset": ["@f", "@meta"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
       }}}}]),
     ],

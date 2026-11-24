@@ -6,10 +6,10 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "file_params": [{"file_offset": ["@blk", "@meta"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
         "optional_metadata": {-2: [null, {-1: 1700000000, -2: 121(850000000), -3: [126(1700000000123456789), 36], -4: 100(19675), -5: [1700000000], -6: 273(h'61eda080'), -10: {"user.x": h'01', 273(h'eda080'): h''}, -61: 32, -70: 0o755, -71: 0, -72: 0, -73: "root", -74: h'ff', -80: 0, -100: {1: h'0000', -2: h''}, "org.example.ext": [1, {"any": null}]}]},
       }}}}]),

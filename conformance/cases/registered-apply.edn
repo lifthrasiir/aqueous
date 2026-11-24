@@ -9,7 +9,7 @@
     "header_magic": "HEADER_MAGIC",
     "blocks": [
       {"type": 0x60, "data": h'2d07cd639eadb1f671367f73a37ef64270dc4e1b324604832ea22cb5194bb9c2'},
-      80001(["f", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [],
@@ -22,9 +22,9 @@
           ],
         }},
       }}}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["f", "meta"]}],
+        "file_params": [{"file_offset": ["@f", "@meta"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
       }}}}]),
     ],

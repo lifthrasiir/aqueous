@@ -9,16 +9,16 @@
     "blocks": [
       {"type": 0xBF, "data": h'01'},
       {"type": 0xC0, "data": h'02'},
-      80001(["blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
+      80001(["@blk", {"type": 0x20, "data": {"uncompressed_data": {"data": 'x'}}}]),
       {"type": 0xC8, "data": h'03'},
       {"type": 0xD0, "data": h'04'},
       {"type": 0xA01, "data": h'05'},
       {"type": 0xC00, "data": h'06'},
       {"type": 0xC18, "data": h'07'},
       {"type": 0xDFF, "data": h'08'},
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["blk", "meta"]}],
+        "file_params": [{"file_offset": ["@blk", "@meta"]}],
         "entries": [{"entry_name": "a", "original_size": undefined}],
       }}}}]),
       {"type": 0xF002, "data": h'09'},

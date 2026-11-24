@@ -6,16 +6,16 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["b8", {"type": 0x20, "data": {"uncompressed_data": {"data": 'u8'}}}]),
-      80001(["b16", {"type": 0x21, "data": {"uncompressed_data": {"data": 'u16'}}}]),
-      80001(["b32", {"type": 0x22, "data": {"uncompressed_data": {"data": 'u32'}}}]),
-      80001(["b64", {"type": 0x23, "data": {"uncompressed_data": {"data": 'u64'}}}]),
+      80001(["@b8", {"type": 0x20, "data": {"uncompressed_data": {"data": 'u8'}}}]),
+      80001(["@b16", {"type": 0x21, "data": {"uncompressed_data": {"data": 'u16'}}}]),
+      80001(["@b32", {"type": 0x22, "data": {"uncompressed_data": {"data": 'u32'}}}]),
+      80001(["@b64", {"type": 0x23, "data": {"uncompressed_data": {"data": 'u64'}}}]),
       # uncompressed, u64le: 0001 0 0 11
-      80001(["meta", {"type": 0x13, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x13, "data": {"uncompressed_data": {"data": {
         "entry_parents": [0, 0, 0],
         "file_params": [
-          {"file_offset": ["b8", "meta"]}, {"file_offset": ["b16", "meta"]},
-          {"file_offset": ["b32", "meta"]}, {"file_offset": ["b64", "meta"]},
+          {"file_offset": ["@b8", "@meta"]}, {"file_offset": ["@b16", "@meta"]},
+          {"file_offset": ["@b32", "@meta"]}, {"file_offset": ["@b64", "@meta"]},
         ],
         "entries": [
           {"entry_name": "8", "original_size": undefined},

@@ -14,9 +14,9 @@
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {"content": 'dictionary content: hello, world, aqueous'}},
       }}},
-      80001(["plain", {"type": 0x20, "data": {"uncompressed_data": {"data": 'plain'}}}]),
+      80001(["@plain", {"type": 0x20, "data": {"uncompressed_data": {"data": 'plain'}}}]),
       # leaf, Zstandard with a dictionary, XXH64: 001 10 1 00; by zstd -D with the second
-      80001(["d", {"type": 0x34, "data": {
+      80001(["@d", {"type": 0x34, "data": {
         "dictionary_index": 1,
         "compressed_data": {
           "compression_params": {"window_descriptor": 0},
@@ -24,9 +24,9 @@
                     "decoded": 'hello, world, aqueous; hello, world'}],
         },
       }}]),
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [0],
-        "file_params": [{"file_offset": ["plain", "meta"]}, {"file_offset": ["d", "meta"]}],
+        "file_params": [{"file_offset": ["@plain", "@meta"]}, {"file_offset": ["@d", "@meta"]}],
         "entries": [
           {"entry_name": "plain", "original_size": undefined},
           {"entry_name": "d", "original_size": undefined},

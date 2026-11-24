@@ -7,7 +7,7 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["f", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [0],
@@ -29,13 +29,13 @@
       }}}]),
       # by zstd --patch-from, a compressed block
       {"type": 0x40, "data": {"uncompressed_data": {"data": h'7d0000 38546361742e202102002051b0546c'}}},
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [0, 0, 0],
         "file_params": [
-          {"file_offset": ["f", "meta"]},
-          {"file_offset": ["f", "meta", 1], "file_output": 0},
-          {"file_offset": ["f", "meta", 1], "file_output": 1},
-          {"file_offset": ["f", "meta", 1], "file_output": 2},
+          {"file_offset": ["@f", "@meta"]},
+          {"file_offset": ["@f", "@meta", 1], "file_output": 0},
+          {"file_offset": ["@f", "@meta", 1], "file_output": 1},
+          {"file_offset": ["@f", "@meta", 1], "file_output": 2},
         ],
         "entries": [
           {"entry_name": "raw", "original_size": undefined},

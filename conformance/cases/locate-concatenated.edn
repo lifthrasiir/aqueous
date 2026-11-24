@@ -6,10 +6,10 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'first'}}}]),
-      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'first'}}}]),
+      80001(["@m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [],
-        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "file_params": [{"file_offset": ["@b1", "@m1"]}],
         "entries": [{"entry_name": "f1", "original_size": undefined}],
       }}}}]),
     ],

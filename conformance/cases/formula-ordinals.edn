@@ -6,7 +6,7 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["f1", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f1", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [0, 1],   # the items 0 and 2 after it
@@ -17,7 +17,7 @@
           ],
         }},
       }}}]),
-      80001(["f2", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f2", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [1],      # the item 1 after it
@@ -27,9 +27,9 @@
       {"type": 0x40, "data": {"uncompressed_data": {"data": 'A'}}},
       {"type": 0x40, "data": {"uncompressed_data": {"data": 'B'}}},
       {"type": 0x40, "data": {"uncompressed_data": {"data": 'C'}}},
-      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [0],
-        "file_params": [{"file_offset": ["f1", "meta"]}, {"file_offset": ["f2", "meta"]}],
+        "file_params": [{"file_offset": ["@f1", "@meta"]}, {"file_offset": ["@f2", "@meta"]}],
         "entries": [
           {"entry_name": "a", "original_size": undefined},
           {"entry_name": "b", "original_size": undefined},

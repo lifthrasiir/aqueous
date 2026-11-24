@@ -6,13 +6,13 @@
   "archive": {
     "header_magic": "HEADER_MAGIC",
     "blocks": [
-      80001(["b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'Hello, world'}}}]),
-      80001(["m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+      80001(["@b1", {"type": 0x20, "data": {"uncompressed_data": {"data": 'Hello, world'}}}]),
+      80001(["@m1", {"type": 0x10, "data": {"uncompressed_data": {"data": {
         "entry_parents": [1],
-        "file_params": [{"file_offset": ["b1", "m1"]}],
+        "file_params": [{"file_offset": ["@b1", "@m1"]}],
         "entries": [{"entry_name": h'ff'}, {"entry_name": "a", "original_size": undefined}],
       }}}}]),
-      80001(["f", {"type": 0x70, "data": {"formula_data": {
+      80001(["@f", {"type": 0x70, "data": {"formula_data": {
         "compression_params": {"window_descriptor": 0},
         "data": {"decoded": {
           "block_ordinal_deltas": [0],
@@ -25,10 +25,10 @@
           {"import_path": 80000(h'c1ff 2f 61'), "import_offset": 7, "import_size": 5, "import_checksum": h'b8007fc640bef3e2f10ea7ad9681f6fdbd132887406960f365452ba0a15e65e2'},
         ]}},
       }}},
-      80001(["m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
-        "previous_metadata_offset": ["m1", "m2"],
+      80001(["@m2", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "previous_metadata_offset": ["@m1", "@m2"],
         "entry_parents": [],
-        "file_params": [{"file_offset": ["f", "m2"]}],
+        "file_params": [{"file_offset": ["@f", "@m2"]}],
         "entries": [{"entry_name": "b", "original_size": undefined}],
       }}}}]),
     ],
