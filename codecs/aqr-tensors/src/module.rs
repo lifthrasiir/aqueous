@@ -7,7 +7,7 @@ use aqr_api::stream::{In, Pull, Put, Reader, Slice, Written};
 
 use crate::layout::{
     self, ESCAPED, FLOAT_CHUNK, FloatRun, GridRun, GridValues, LanesRun, MAX_CHUNK_RAW, MAX_CHUNK_SIDE, MAX_CHUNK_SYMS,
-    MAX_GRID, MAX_TILES, Run,
+    MAX_GRID, MAX_ROW_CLASSES, MAX_TILES, Run,
 };
 use crate::rans::{Decoder, HEAD, Kernel, LANES, Table};
 use crate::{Error, Result, corrupt};
@@ -272,7 +272,11 @@ fn float(
     let f = r.f;
     let fb = f.bytes();
     let (t, rb, shift) = (r.t, r.raw_bits(), r.shift);
-    let eb = if r.whole { fb } else { f.exp_bytes() };
+    let eb = r.escape_bytes();
+    // (of row classes: the column of the next float, and the class of its row)
+    let mut col = r.rows.as_ref().map_or(0, |rc| rc.col);
+    let mut cls = 0u8;
+    let mut first = true;
     let mut left = r.n;
     while left > 0 {
         let e = left.min(FLOAT_CHUNK as u64) as usize;
@@ -280,10 +284,55 @@ fn float(
         words.fill();
         let (a, b) = sc.syms.split_at_mut(FLOAT_CHUNK);
         let a = &mut a[..e];
-        symbols(dec, &r.exp, words, a);
+        match &r.rows {
+            None => symbols(dec, &r.exp, words, a),
+            Some(rc) => {
+                // (the classes of the rows starting in the chunk, and of the run's first; of each
+                // float its row's, after the symbols of its class's)
+                let row = rc.row;
+                // (in 128 bits: a row of the params may be of any length)
+                let starts = ((first || col == 0) as u128 + (col as u128 + e as u128 - 1) / row as u128) as usize;
+                side.exact(&mut sc.side[..starts]).ok_or_else(corrupt)?;
+                let k = rc.tables.len() as u8 + 1;
+                let (syms, of) = b.split_at_mut(FLOAT_CHUNK);
+                let mut count = [0usize; MAX_ROW_CLASSES];
+                let mut j = 0;
+                for c in of[..e].iter_mut() {
+                    if first || col == 0 {
+                        cls = sc.side[j];
+                        j += 1;
+                        if cls >= k {
+                            return Err(corrupt());
+                        }
+                        first = false;
+                    }
+                    *c = cls;
+                    count[cls as usize] += 1;
+                    col += 1;
+                    if col == row {
+                        col = 0;
+                    }
+                }
+                let mut cur = [0usize; MAX_ROW_CLASSES];
+                let mut o = 0;
+                for (c, tab) in std::iter::once(&r.exp).chain(&rc.tables).enumerate() {
+                    cur[c] = o;
+                    symbols(dec, tab, words, &mut syms[o..o + count[c]]);
+                    o += count[c];
+                }
+                for (s, &c) in a.iter_mut().zip(&of[..e]) {
+                    *s = syms[cur[c as usize]];
+                    cur[c as usize] += 1;
+                }
+            }
+        }
         let mut start = [0; 4];
         if t > 0 {
             start = by_class(dec, &r.man, &r.class, a, words, b);
+        }
+        if r.fine {
+            fine(r, a, b, start, raw, side, &mut sc.raw, &mut sc.side, out.chunk(e * fb)?)?;
+            continue;
         }
         let nr = (e * rb as usize).div_ceil(8);
         raw.exact(&mut sc.raw[..nr]).ok_or_else(corrupt)?;
@@ -346,6 +395,80 @@ fn float(
                 j += 1;
             }
         }
+    }
+    Ok(())
+}
+
+/// A chunk of a run of floats of codes (FORMAT.md §4.2, `fine`) put into `dst`: its symbols `a`,
+/// the top bits `b` of each class from `start`; its escapes' codes read from `side` (into `sb`),
+/// then its raw bits (into `rw`), as many as its floats' codes keep.
+#[allow(clippy::too_many_arguments)]
+fn fine(
+    r: &FloatRun,
+    a: &[u8],
+    b: &[u8],
+    start: [usize; 4],
+    raw: &mut Reader,
+    side: &mut Reader,
+    rw: &mut [u8],
+    sb: &mut [u8],
+    dst: &mut [u8],
+) -> Result<()> {
+    let (f, shift, t, m) = (r.f, r.shift, r.t, r.m);
+    let (fb, eb) = (f.bytes(), r.escape_bytes());
+    let esc = a.iter().filter(|&&s| s >= m).count();
+    side.exact(&mut sb[..esc * eb]).ok_or_else(corrupt)?;
+    // (each float's code and the bits of its mantissa kept; the escapes' checked)
+    let mut mans = [0u8; 16];
+    for (s, c) in r.map[..m as usize].iter().enumerate() {
+        mans[s] = layout::code_man(f, shift, *c as u32).ok_or_else(corrupt)? as u8;
+    }
+    let code_of = |i: usize, j: &mut usize| -> Result<(u32, u32)> {
+        let s = a[i];
+        if s < m {
+            return Ok((r.map[s as usize] as u32, mans[s as usize] as u32));
+        }
+        let mut x = [0u8; 4];
+        x[..eb].copy_from_slice(&sb[eb * *j..eb * (*j + 1)]);
+        *j += 1;
+        let c = u32::from_le_bytes(x);
+        Ok((c, layout::code_man(f, shift, c).ok_or_else(corrupt)?))
+    };
+    let mut bits = 0usize;
+    let mut j = 0;
+    for i in 0..a.len() {
+        let k = 1 + code_of(i, &mut j)?.1;
+        bits += (k - k.min(t)) as usize;
+    }
+    let nr = bits.div_ceil(8);
+    raw.exact(&mut rw[..nr]).ok_or_else(corrupt)?;
+    rw[nr..nr + 8].fill(0);
+    let (mut cur, mut at, mut j) = (start, 0usize, 0);
+    for i in 0..a.len() {
+        let (c, mb) = code_of(i, &mut j)?;
+        let k = 1 + mb;
+        let top = if t > 0 {
+            let cl = r.class[a[i] as usize] as usize;
+            let v = b[cur[cl]] as u64;
+            cur[cl] += 1;
+            v
+        } else {
+            0
+        };
+        let kept = if k >= t {
+            let rb = k - t;
+            let v = top << rb | layout::get_bits(rw, at, rb);
+            at += rb as usize;
+            v
+        } else {
+            // (fewer bits kept than the top's: they are its top, the rest 0)
+            if top & ((1 << (t - k)) - 1) != 0 {
+                return Err(corrupt());
+            }
+            top >> (t - k)
+        };
+        let v = layout::code_float(f, shift, c, mb, kept);
+        dst[fb * i..fb * (i + 1)].copy_from_slice(&v.to_le_bytes()[..fb]);
     }
     Ok(())
 }

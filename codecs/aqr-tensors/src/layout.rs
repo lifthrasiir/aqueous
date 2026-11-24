@@ -51,9 +51,14 @@ impl Float {
         }
     }
 
-    /// Bytes of an escape's exponent in the side bytes.
-    pub const fn exp_bytes(self) -> usize {
-        (self.exp_bits() as usize).div_ceil(8)
+    /// Bytes of an escape's exponent in the side bytes (of its code where `fine`: one bit more).
+    pub const fn exp_bytes(self, fine: bool) -> usize {
+        (self.exp_bits() as usize + fine as usize).div_ceil(8)
+    }
+
+    /// The codes of a run where `fine` ([`code`]): below this.
+    pub const fn codes(self) -> u32 {
+        (1 << self.exp_bits()) + self.man_bits()
     }
 
     /// Its tag in the parameters (of a run of floats; of a grid's output, FORMAT.md §4.5).
@@ -88,6 +93,55 @@ pub fn kept_float(f: Float, shift: u32, e: u64, kept: u64) -> u64 {
     let m = f.man_bits();
     let ms = m - shift;
     (kept >> ms) << (f.exp_bits() + m) | e << m | (kept & ((1 << ms) - 1)) << shift
+}
+
+/// The code of float `v` of a run of `fine` codes (FORMAT.md §4.2): its exponent where that is not
+/// 0; of exponent 0, 0 where it is a zero (of either sign), else `2^E + p`, `p` the top bit of its
+/// mantissa (a subnormal).
+#[inline(always)]
+pub fn code(f: Float, v: u64) -> u32 {
+    let e = f.exp(v);
+    let man = v & ((1 << f.man_bits()) - 1);
+    if e != 0 || man == 0 { e } else { (1 << f.exp_bits()) + 63 - man.leading_zeros() }
+}
+
+/// Bits of the mantissa of a float of code `c` of a run of `fine` codes, `shift` its low bits left
+/// out, that are kept: of a normal float `M − shift`, of a zero none, of a subnormal those below its
+/// top bit (`p − shift`); None where the code is not one (or a subnormal's top bit below `shift`).
+#[inline(always)]
+pub fn code_man(f: Float, shift: u32, c: u32) -> Option<u32> {
+    let ne = 1 << f.exp_bits();
+    match c {
+        0 => Some(0),
+        c if c < ne => Some(f.man_bits() - shift),
+        c => (c - ne).checked_sub(shift).filter(|_| c < f.codes()),
+    }
+}
+
+/// The bits a float of code `c` keeps (its sign, then [`code_man`]'s bits of its mantissa), of a
+/// run of `fine` codes.
+#[inline(always)]
+pub fn code_kept(f: Float, shift: u32, c: u32, v: u64) -> u64 {
+    let sign = v >> (f.exp_bits() + f.man_bits()) & 1;
+    let mb = code_man(f, shift, c).unwrap_or(0);
+    sign << mb | (v >> shift) & ((1 << mb) - 1)
+}
+
+/// The float of code `c` and the bits kept `kept` ([`code_kept`]), `mb` the bits of its mantissa
+/// kept ([`code_man`]).
+#[inline(always)]
+pub fn code_float(f: Float, shift: u32, c: u32, mb: u32, kept: u64) -> u64 {
+    let (e, m) = (f.exp_bits(), f.man_bits());
+    let sign = (kept >> mb) << (e + m);
+    let low = (kept & ((1 << mb) - 1)) << shift;
+    let ne = 1 << e;
+    if c == 0 {
+        sign
+    } else if c < ne {
+        sign | (c as u64) << m | low
+    } else {
+        sign | 1 << (c - ne) | low
+    }
 }
 
 /// `bits` bits of `v` put at bit `at` of `out` (little-endian bits; `out` zero there, with 8
@@ -413,7 +467,14 @@ pub const LANES_CHUNK: usize = 8192;
 pub const MAX_CHUNK_SYMS: usize = 16 << 10;
 /// Side bytes of a chunk at most: a chunk of floats' escapes (whole floats of F64), or of blocks'
 /// side parts. (A grid reads its side bytes as it goes.)
-pub const MAX_CHUNK_SIDE: usize = 8 * FLOAT_CHUNK;
+pub const MAX_CHUNK_SIDE: usize = 8 * FLOAT_CHUNK + MAX_ROW_STARTS;
+/// Rows of a run of floats of row classes at least this many elements each (FORMAT.md §4.2).
+pub const MIN_CLASS_ROW: u64 = 16;
+/// Rows of a chunk of floats (of row classes) starting in it at most, and its first: of each its
+/// class's byte in the side bytes.
+pub const MAX_ROW_STARTS: usize = FLOAT_CHUNK / MIN_CLASS_ROW as usize + 1;
+/// Row classes of a run of floats at most.
+pub const MAX_ROW_CLASSES: usize = 8;
 /// Raw bytes of a chunk at most, with 8 past them for the bits read 8 bytes at a time: a chunk of
 /// F64's 53 bits each, or of lanes all raw.
 pub const MAX_CHUNK_RAW: usize = 16 << 10;
@@ -442,9 +503,28 @@ pub struct FloatRun {
     pub class: [u8; 16],
     /// The tables of the top bits, one for each class (none where `t` is 0).
     pub man: Vec<Table>,
+    /// Whether the symbols are of codes ([`code`]: zeros and subnormals apart), not exponents.
+    pub fine: bool,
+    /// The classes of rows, each its table of the exponents' symbols, where there are.
+    pub rows: Option<RowClasses>,
+}
+
+/// Rows of a run of floats in classes, each class its own table of the exponents' symbols
+/// (FORMAT.md §4.2): the elements of a row, the column of the run's first float, and the tables
+/// of the classes from 1 on (class 0's the run's `exp`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowClasses {
+    pub row: u64,
+    pub col: u64,
+    pub tables: Vec<Table>,
 }
 
 impl FloatRun {
+    /// Bytes of an escape in the side bytes.
+    pub fn escape_bytes(&self) -> usize {
+        if self.whole { self.f.bytes() } else { self.f.exp_bytes(self.fine) }
+    }
+
     /// Bits kept of each float.
     pub fn kept(&self) -> u32 {
         1 + self.f.man_bits() - self.shift
@@ -647,19 +727,32 @@ impl Run {
             }
             let n = num(p, at)?;
             let mb = byte(p, at)?;
-            let (m, whole) = (mb & 0x7f, mb & 0x80 != 0);
-            if !(1..=16).contains(&m) {
+            let (m, whole, fine, has_rows) = (mb & 0x1f, mb & 0x80 != 0, mb & 0x40 != 0, mb & 0x20 != 0);
+            if !(1..=16).contains(&m) || fine && whole {
                 return Err(corrupt());
             }
             let mut map = [0u16; 16];
             for v in map.iter_mut().take(m as usize) {
                 let e = num(p, at)?;
-                if e >= 1 << f.exp_bits() {
+                let ok = match fine {
+                    true => e < f.codes() as u64 && code_man(f, shift, e as u32).is_some(),
+                    false => e < 1 << f.exp_bits(),
+                };
+                if !ok {
                     return Err(corrupt());
                 }
                 *v = e as u16;
             }
             let exp = table(p, at, 16)?;
+            let mut rows = None;
+            if has_rows {
+                let (row, col, k) = (num(p, at)?, num(p, at)?, byte(p, at)? as usize);
+                if row < MIN_CLASS_ROW || col >= row || !(2..=MAX_ROW_CLASSES).contains(&k) {
+                    return Err(corrupt());
+                }
+                let tables = (1..k).map(|_| table(p, at, 16)).collect::<Result<_>>()?;
+                rows = Some(RowClasses { row, col, tables });
+            }
             let t = byte(p, at)? as u32;
             if t > 4 || t > 1 + f.man_bits() - shift {
                 return Err(corrupt());
@@ -670,7 +763,7 @@ impl Run {
                 (c, class) = classes(p, at)?;
                 man = (0..c).map(|_| table(p, at, 1 << t)).collect::<Result<_>>()?;
             }
-            return Ok(Run::Float(FloatRun { f, shift, n, map, m, whole, exp, t, class, man }));
+            return Ok(Run::Float(FloatRun { f, shift, n, map, m, whole, exp, t, class, man, fine, rows }));
         }
         if let Some(&q) = Quant::ALL.iter().find(|q| q.tag() == tag) {
             let blocks = num(p, at)?;
@@ -740,11 +833,17 @@ impl Run {
             Run::Float(r) => {
                 out.push(r.shift as u8);
                 varint::put(out, r.n);
-                out.push(r.m | (r.whole as u8) << 7);
+                out.push(r.m | (r.whole as u8) << 7 | (r.fine as u8) << 6 | (r.rows.is_some() as u8) << 5);
                 for &e in &r.map[..r.m as usize] {
                     varint::put(out, e as u64);
                 }
                 put_table(out, &r.exp);
+                if let Some(rc) = &r.rows {
+                    varint::put(out, rc.row);
+                    varint::put(out, rc.col);
+                    out.push(rc.tables.len() as u8 + 1);
+                    rc.tables.iter().for_each(|t| put_table(out, t));
+                }
                 out.push(r.t as u8);
                 if r.t > 0 {
                     put_classes(out, r.man.len(), &r.class);
@@ -1229,6 +1328,36 @@ mod tests {
         }
     }
 
+    /// A float of a run of codes back from its code and the bits it keeps: every float of 8 and
+    /// 16 bits, at every shift its mantissa allows, and some of the wider; codes not of a float
+    /// (a subnormal's top bit below the shift, past the codes) not taken.
+    #[test]
+    fn codes_back() {
+        let mut r = aqr_common::rng::Rng::new(5);
+        for f in Float::ALL {
+            let w = 8 * f.bytes() as u32;
+            let vs: Vec<u64> = match w {
+                8 | 16 => (0..1u64 << w).collect(),
+                _ => (0..100_000).map(|_| r.u64() >> (r.below(64) as u32) & (u64::MAX >> (64 - w))).collect(),
+            };
+            for v in vs {
+                let c = code(f, v);
+                assert!(c < f.codes());
+                let tz = ((v & ((1 << f.man_bits()) - 1)) | 1 << f.man_bits()).trailing_zeros();
+                for shift in 0..=tz.min(f.man_bits()) {
+                    let mb = code_man(f, shift, c).unwrap();
+                    let kept = code_kept(f, shift, c, v);
+                    assert!(kept < 1 << (1 + mb), "{f:?} {shift} {v:x}");
+                    assert_eq!(code_float(f, shift, c, mb, kept), v, "{f:?} {shift} {v:x}");
+                }
+            }
+            let ne = 1 << f.exp_bits();
+            assert_eq!(code_man(f, 0, f.codes()), None);
+            assert_eq!(code_man(f, 1, ne), None);
+            assert_eq!(code_man(f, 1, ne + 1), Some(0));
+        }
+    }
+
     #[test]
     fn bits() {
         let mut d = vec![0u8; 256];
@@ -1289,6 +1418,22 @@ mod tests {
                 t: 2,
                 class: [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
                 man: vec![t4, t4],
+                fine: false,
+                rows: None,
+            }),
+            Run::Float(FloatRun {
+                f: Float::F16,
+                shift: 0,
+                n: 5000,
+                map: [0, 15, 32 + 9, 14, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                m: 5,
+                whole: false,
+                exp: t,
+                t: 3,
+                class: [0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                man: vec![t4, t4],
+                fine: true,
+                rows: Some(RowClasses { row: 100, col: 37, tables: vec![t, t4] }),
             }),
             Run::Lanes(LanesRun { w: 4, n: 9, nib: 0b1001, tables: vec![t; 4] }),
             Run::Grid(GridRun {

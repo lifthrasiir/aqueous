@@ -1,12 +1,17 @@
 //! `aqr-tensors-bench FILE [MAX_BYTES]`: the formula of a file of tensors (or of its first
 //! MAX_BYTES of tensor data, cut there), its streams' sizes, and the speed of making it and of decoding its
-//! applications natively (on all threads, as the archive's decoder would, and on one).
+//! applications natively (on all threads, as the archive's decoder would, and on one). `AQR_Z`
+//! sets developer options as `aqr -Z` does, separated by spaces.
 
 use std::time::Instant;
 
 use aqr_formula::Node;
 
 fn main() {
+    // (developer options, as `aqr -Z` takes them: `AQR_Z="tensors:fine-gain=1 …"`)
+    if let Ok(z) = std::env::var("AQR_Z") {
+        aqr_common::zopt::apply(&z.split_whitespace().collect::<Vec<_>>()).unwrap();
+    }
     let args: Vec<String> = std::env::args().collect();
     let path = &args[1];
     let file = std::fs::File::open(path).unwrap();

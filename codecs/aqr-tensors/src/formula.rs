@@ -11,7 +11,7 @@ use crate::tensors::{self, Data, Tensor, Tensors};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("tensors-recons", 2).with_plan(plan);
+pub const MODULE: Module = Module::new("tensors-recons", 3).with_plan(plan);
 
 /// The memory of the module: its plan ([`crate::module::plan`]).
 fn plan(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -63,6 +63,13 @@ aqr_common::zopt! {
     /// The windows of the sample, spread over the tensor (at least 2).
     pub(crate) static SAMPLE_WINDOWS: Opt<usize> =
         Opt::value("tensors:man-windows", 8, "windows of a sample for models and grids, at least 2");
+    /// The least gain of codes (zeros and subnormals apart), as a share of the run's bits, for them
+    /// to be taken.
+    static FINE_GAIN: Opt<f64> = Opt::value("tensors:fine-gain", 0.01, "least gain of codes, as a share of a run's bits");
+    /// A run of floats of rows of fewer elements is not of row classes.
+    static ROW_MIN: Opt<u64> = Opt::value("tensors:row-min", 64, "rows of fewer floats are not in classes");
+    /// The least gain of row classes, as a share of the run's bits, for them to be taken.
+    static ROW_GAIN: Opt<f64> = Opt::value("tensors:row-gain", 0.02, "least gain of row classes, as a share of a run's bits");
 }
 
 /// A span of the file in a segment: bytes as they are, or of a tensor coded (its index in the
@@ -299,6 +306,9 @@ fn mantissa_pays(f: Float, d: &[u8]) -> bool {
     gain >= MAN_GAIN.get() * float_bits
 }
 
+/// Rounds of the classes of rows made better ([`cluster_rows`]) at most.
+const ROW_ROUNDS: usize = 8;
+
 /// What a segment comes to: the parameters, and its coded symbols, raw and side bytes.
 #[derive(Default)]
 struct Coded {
@@ -353,7 +363,8 @@ fn segment(d: &[u8], spans: &[Span], g: &Tensors, models: &[std::sync::OnceLock<
                     _ => None,
                 };
                 let man = matches!(model, Model::Float { man: true });
-                gr.or_else(|| float(f, n as usize, bytes, man, &mut enc, &mut tables, &mut c.raw, &mut c.side))
+                let rows = (t.outer > 0).then(|| (t.outer, ((at - t.start) / f.bytes()) as u64 % t.outer));
+                gr.or_else(|| float(f, n as usize, bytes, man, rows, &mut enc, &mut tables, &mut c.raw, &mut c.side))
             }
             Span::Coded(_, Data::Quant(q, n), _) => {
                 quant(q, n as usize, bytes, &mut enc, &mut tables, &mut c.raw, &mut c.side)
@@ -386,23 +397,26 @@ fn pays(bits: f64, bytes: usize) -> bool {
 }
 
 /// A run of `n` floats `d` coded (FORMAT.md §4.2), the top bits of their mantissas symbols where
-/// `man` and they come to enough less; None where it would not come to less.
+/// `man` and they come to enough less, its rows in classes where `rows` (the elements of a row and
+/// the column of the first float) and that comes to enough less; None where it would not come to
+/// less.
 #[allow(clippy::too_many_arguments)]
 fn float(
     f: Float,
     n: usize,
     d: &[u8],
     man: bool,
+    rows: Option<(u64, u64)>,
     enc: &mut Encoder,
     tables: &mut Vec<Table>,
     raw: &mut Vec<u8>,
     side: &mut Vec<u8>,
 ) -> Option<Run> {
     match f.bytes() {
-        1 => float_of::<1>(f, n, d, man, enc, tables, raw, side),
-        2 => float_of::<2>(f, n, d, man, enc, tables, raw, side),
-        4 => float_of::<4>(f, n, d, man, enc, tables, raw, side),
-        _ => float_of::<8>(f, n, d, man, enc, tables, raw, side),
+        1 => float_of::<1>(f, n, d, man, rows, enc, tables, raw, side),
+        2 => float_of::<2>(f, n, d, man, rows, enc, tables, raw, side),
+        4 => float_of::<4>(f, n, d, man, rows, enc, tables, raw, side),
+        _ => float_of::<8>(f, n, d, man, rows, enc, tables, raw, side),
     }
 }
 
@@ -414,6 +428,22 @@ fn get<const FB: usize>(d: &[u8], i: usize) -> u64 {
     u64::from_le_bytes(b)
 }
 
+/// How a run of floats takes them apart (FORMAT.md §4.2), and what that comes to.
+struct FloatPlan {
+    bits: f64,
+    shift: u32,
+    whole: bool,
+    fine: bool,
+    map: [u16; 16],
+    m: usize,
+    /// Of each exponent (or code, where `fine`), its symbol.
+    sym: Vec<u8>,
+    escapes: u64,
+    exp: Table,
+    /// Of each count of bits kept, the floats.
+    by_kept: Vec<u64>,
+}
+
 /// [`float`] of floats of `FB` bytes (the loops over every float specialised: they are most of
 /// the encoder's time).
 #[allow(clippy::too_many_arguments)]
@@ -422,6 +452,7 @@ fn float_of<const FB: usize>(
     n: usize,
     d: &[u8],
     man: bool,
+    rows: Option<(u64, u64)>,
     enc: &mut Encoder,
     tables: &mut Vec<Table>,
     raw: &mut Vec<u8>,
@@ -429,23 +460,25 @@ fn float_of<const FB: usize>(
 ) -> Option<Run> {
     let (m_bits, e_bits) = (f.man_bits(), f.exp_bits());
     let ne = 1usize << e_bits;
+    let nc = f.codes() as usize;
     let mmask = (1u64 << m_bits) - 1;
-    // (of each count of trailing zero bits of the mantissa, M for a mantissa of zero, the
-    // exponents counted; in parts, the counts of a part in 32 bits)
+    // (of each count of trailing zero bits of the mantissa, M for a mantissa of zero, the codes
+    // counted, whose exponents are the codes below 2^E, 0 of the others; in parts, the counts of
+    // a part in 32 bits)
     let tz = |v: u64| ((v & mmask) | 1 << m_bits).trailing_zeros() as usize;
-    let mut hist = vec![0u64; (m_bits as usize + 1) * ne];
-    let mut part_hist = vec![0u32; (m_bits as usize + 1) * ne];
+    let mut hist = vec![0u64; (m_bits as usize + 1) * nc];
+    let mut part_hist = vec![0u32; (m_bits as usize + 1) * nc];
     for part in d.chunks(FB * (1 << 20)) {
         for i in 0..part.len() / FB {
             let v = get::<FB>(part, i);
-            part_hist[tz(v) * ne + f.exp(v) as usize] += 1;
+            part_hist[tz(v) * nc + layout::code(f, v) as usize] += 1;
         }
         for (h, p) in hist.iter_mut().zip(part_hist.iter_mut()) {
             *h += *p as u64;
             *p = 0;
         }
     }
-    let by_tz: Vec<u64> = hist.chunks(ne).map(|h| h.iter().sum()).collect();
+    let by_tz: Vec<u64> = hist.chunks(nc).map(|h| h.iter().sum()).collect();
     // (the floats with fewer zeros than a shift: escapes whole, as many as there are; else the
     // escapes are of the exponents, the shift that of all floats)
     let short = |s: u32| by_tz[..s as usize].iter().sum::<u64>();
@@ -455,55 +488,77 @@ fn float_of<const FB: usize>(
     let best = (0..=m_bits)
         .max_by_key(|&s| (n as i64 * s as i64 - short(s) as i64 * (8 * FB as i64 + 8), std::cmp::Reverse(s)))?;
     // the cost of each way: its table, escapes and bits kept
-    let plan = |shift: u32, whole: bool| {
-        let kept = 1 + m_bits - shift;
-        let mut ex = vec![0u64; ne];
-        for h in hist.chunks(ne).skip(shift as usize) {
-            for e in 0..ne {
-                ex[e] += h[e];
+    let plan = |shift: u32, whole: bool, fine: bool| {
+        let keys = if fine { nc } else { ne };
+        let key = |c: usize| if fine || c < ne { c } else { 0 };
+        let kept = |c: usize| match fine {
+            true => 1 + layout::code_man(f, shift, c as u32).unwrap_or(0),
+            false => 1 + m_bits - shift,
+        };
+        let mut ex = vec![0u64; keys];
+        for h in hist.chunks(nc).skip(shift as usize) {
+            for c in 0..nc {
+                ex[key(c)] += h[c];
             }
         }
         let short = short(shift);
-        let mut order: Vec<usize> = (0..ne).filter(|&e| ex[e] > 0).collect();
+        let mut order: Vec<usize> = (0..keys).filter(|&e| ex[e] > 0).collect();
         order.sort_by_key(|&e| (std::cmp::Reverse(ex[e]), e));
         let m = if order.len() <= 16 && short == 0 { order.len() } else { order.len().min(15) };
         let mut map = [0u16; 16];
-        let mut sym = vec![15u8; ne];
+        let mut sym = vec![15u8; keys];
         for (s, &e) in order.iter().take(m).enumerate() {
             map[s] = e as u16;
             sym[e] = s as u8;
         }
         let mut a = [0u64; 16];
-        for e in 0..ne {
+        let mut by_kept = vec![0u64; m_bits as usize + 2];
+        for e in 0..keys {
             a[sym[e] as usize] += ex[e];
+            by_kept[kept(e) as usize] += ex[e];
         }
         a[15] += short;
+        by_kept[(1 + m_bits - shift) as usize] += short;
         let escapes = if m < 16 { a[15] } else { 0 };
         let exp = Table::of_counts(&a);
-        let eb = if whole { FB } else { f.exp_bytes() } as u64;
-        let bits = exp.cost(&a) + 8.0 * (escapes * eb) as f64 + (n as u64 * kept as u64) as f64 + 400.0;
-        (bits, shift, map, m, sym, escapes, exp)
+        let eb = if whole { FB } else { f.exp_bytes(fine) } as u64;
+        let kept_bits: u64 = by_kept.iter().enumerate().map(|(k, &c)| k as u64 * c).sum();
+        let bits = exp.cost(&a) + 8.0 * (escapes * eb) as f64 + kept_bits as f64 + 400.0;
+        FloatPlan { bits, shift, whole, fine, map, m, sym, escapes, exp, by_kept }
     };
-    let (bits, shift, map, m, sym, escapes, exp, whole) = {
-        let a = plan(all_zero, false);
-        let b = plan(best, true);
-        match b.0 < a.0 {
-            true => (b.0, b.1, b.2, b.3, b.4, b.5, b.6, true),
-            false => (a.0, a.1, a.2, a.3, a.4, a.5, a.6, false),
-        }
-    };
+    // (of codes only where that saves enough: their decoding is slower)
+    let (a, b, c) = (plan(all_zero, false, false), plan(best, true, false), plan(all_zero, false, true));
+    let p = if b.bits < a.bits { b } else { a };
+    let p = if c.bits < (1.0 - FINE_GAIN.get()) * p.bits { c } else { p };
+    let FloatPlan { mut bits, shift, whole, fine, map, m, ref sym, escapes, mut exp, ref by_kept } = p;
     let kept = 1 + m_bits - shift;
     let low = (1u64 << shift) - 1;
-    // (a float's symbol: of its exponent, or the escape where it is short)
-    let symbol = |v: u64| if v & low != 0 { 15 } else { sym[f.exp(v) as usize] };
+    // (a float's symbol: of its exponent or code, or the escape where it is short)
+    let symbol = |v: u64| match fine {
+        true => sym[layout::code(f, v) as usize],
+        false if v & low != 0 => 15,
+        false => sym[f.exp(v) as usize],
+    };
+    // (the bits a float keeps, and how many)
+    let kept_of = |v: u64| match fine {
+        true => {
+            let c = layout::code(f, v);
+            let k = 1 + layout::code_man(f, shift, c).unwrap();
+            (layout::code_kept(f, shift, c, v), k)
+        }
+        false => (layout::kept_bits(f, shift, v), kept),
+    };
+    // (the top `t` bits of bits kept `k` of `k` bits, as a symbol: the bits shifted up where fewer)
+    let top = |k: u64, kb: u32, t: u32| if kb >= t { k >> (kb - t) } else { k << (t - kb) };
     // the top bits of the mantissa: of each exponent symbol, the top 4 bits (or all) counted
-    let (mut t, mut class, mut man_tables, mut bits) = (0u32, [0u8; 16], Vec::new(), bits);
+    let (mut t, mut class, mut man_tables) = (0u32, [0u8; 16], Vec::new());
     if man {
         let t4 = kept.min(4);
         let mut counts = [[0u64; 16]; 16];
         for i in 0..n {
             let v = get::<FB>(d, i);
-            counts[symbol(v) as usize][(layout::kept_bits(f, shift, v) >> (kept - t4)) as usize] += 1;
+            let (k, kb) = kept_of(v);
+            counts[symbol(v) as usize][top(k, kb, t4) as usize] += 1;
         }
         for tt in 1..=t4 {
             let mut c = [[0u64; 16]; 16];
@@ -513,10 +568,45 @@ fn float_of<const FB: usize>(
                 }
             }
             let (_, cl, ts, b) = grid::class_tables(&c, 1 << tt);
-            let b = bits - (n as u64 * tt as u64) as f64 + b;
+            let saved: u64 = by_kept.iter().enumerate().map(|(k, &c)| (k as u64).min(tt as u64) * c).sum();
+            let b = bits - saved as f64 + b;
             if b < bits.min(if t == 0 { 0.99 * bits } else { f64::INFINITY }) {
                 (t, class, man_tables, bits) = (tt, cl, ts, b);
             }
+        }
+    }
+    // the rows in classes, each its own table of the symbols
+    let mut row_classes: Option<(u64, u64, Vec<u8>, Vec<Table>)> = None;
+    if let Some((row, col)) = rows
+        && row >= ROW_MIN.get().max(layout::MIN_CLASS_ROW)
+        && (n as u64 + col) / row >= 4
+    {
+        let count = (col + n as u64).div_ceil(row) as usize;
+        let mut h = vec![[0u64; 16]; count];
+        for i in 0..n {
+            h[((col + i as u64) / row) as usize][symbol(get::<FB>(d, i)) as usize] += 1;
+        }
+        let mag: Vec<f64> = (0..16)
+            .map(|s| {
+                let c = map[s] as i64;
+                match fine {
+                    _ if s >= m => 0.0,
+                    true if c as usize >= ne => (c - ne as i64 - m_bits as i64) as f64,
+                    true if c == 0 => -(m_bits as f64) - 2.0,
+                    _ => c as f64,
+                }
+            })
+            .collect();
+        let whole_cost = exp.cost(&h.iter().fold([0u64; 16], |mut a, r| {
+            (0..16).for_each(|s| a[s] += r[s]);
+            a
+        }));
+        if let Some((cls, ts, b)) = cluster_rows(&h, &mag)
+            && b < whole_cost - ROW_GAIN.get() * bits
+        {
+            bits += b - whole_cost;
+            exp = ts[0];
+            row_classes = Some((row, col, cls, ts[1..].to_vec()));
         }
     }
     if !pays(bits, d.len()) {
@@ -524,18 +614,42 @@ fn float_of<const FB: usize>(
     }
     let te = tables.len() as u32;
     tables.push(exp);
+    let k_rows = match &row_classes {
+        Some((_, _, _, ts)) => {
+            tables.extend_from_slice(ts);
+            ts.len() + 1
+        }
+        None => 1,
+    };
     let tm = tables.len() as u32;
     tables.extend_from_slice(&man_tables);
     let rb = kept - t;
     let mut sa = [0u8; FLOAT_CHUNK];
     let mut sb: Vec<Vec<u8>> = vec![Vec::with_capacity(FLOAT_CHUNK); man_tables.len()];
-    let mut bits_buf = vec![0u8; (FLOAT_CHUNK * rb as usize).div_ceil(8) + 16];
+    let mut by_row: Vec<Vec<u8>> = vec![Vec::with_capacity(FLOAT_CHUNK); k_rows];
+    let mut bits_buf = vec![0u8; (FLOAT_CHUNK * kept as usize).div_ceil(8) + 16];
     raw.reserve((n * rb as usize).div_ceil(8));
     for c in (0..n).step_by(FLOAT_CHUNK) {
         let e = (n - c).min(FLOAT_CHUNK);
         let chunk = &d[FB * c..FB * (c + e)];
-        let nr = (e * rb as usize).div_ceil(8);
-        if t == 0 && rb == 8 {
+        if fine {
+            bits_buf.fill(0);
+            sb.iter_mut().for_each(|b| b.clear());
+            let mut at = 0;
+            for (i, sym) in sa[..e].iter_mut().enumerate() {
+                let v = get::<FB>(chunk, i);
+                let s = symbol(v);
+                *sym = s;
+                let (k, kb) = kept_of(v);
+                if t > 0 {
+                    sb[class[s as usize] as usize].push(top(k, kb, t) as u8);
+                }
+                let r = kb - kb.min(t);
+                layout::put_bits(&mut bits_buf, at, r, k & ((1u64 << r) - 1));
+                at += r as usize;
+            }
+            raw.extend_from_slice(&bits_buf[..at.div_ceil(8)]);
+        } else if t == 0 && rb == 8 {
             let at = raw.len();
             raw.resize(at + e, 0);
             let r = &mut raw[at..];
@@ -556,6 +670,7 @@ fn float_of<const FB: usize>(
                 r[i * k..i * k + k].copy_from_slice(&layout::kept_bits(f, shift, v).to_le_bytes()[..k]);
             }
         } else {
+            let nr = (e * rb as usize).div_ceil(8);
             bits_buf[..nr + 8].fill(0);
             sb.iter_mut().for_each(|b| b.clear());
             for (i, sym) in sa[..e].iter_mut().enumerate() {
@@ -570,20 +685,125 @@ fn float_of<const FB: usize>(
             }
             raw.extend_from_slice(&bits_buf[..nr]);
         }
+        // (the classes of the rows starting in the chunk, and of the run's first, then the escapes)
+        if let Some((row, col, cls, _)) = &row_classes {
+            by_row.iter_mut().for_each(|b| b.clear());
+            for (i, &s) in sa[..e].iter().enumerate() {
+                let at = col + (c + i) as u64;
+                let r = (at / row) as usize;
+                if c + i == 0 || at.is_multiple_of(*row) {
+                    side.push(cls[r]);
+                }
+                by_row[cls[r] as usize].push(s);
+            }
+        }
         if escapes > 0 {
             for i in (0..e).filter(|&i| sa[i] as usize >= m) {
-                match whole {
-                    true => side.extend_from_slice(&chunk[FB * i..FB * i + FB]),
-                    false => side.extend_from_slice(&f.exp(get::<FB>(chunk, i)).to_le_bytes()[..f.exp_bytes()]),
+                let v = get::<FB>(chunk, i);
+                match (whole, fine) {
+                    (true, _) => side.extend_from_slice(&chunk[FB * i..FB * i + FB]),
+                    (false, true) => side.extend_from_slice(&layout::code(f, v).to_le_bytes()[..f.exp_bytes(true)]),
+                    (false, false) => side.extend_from_slice(&f.exp(v).to_le_bytes()[..f.exp_bytes(false)]),
                 }
             }
         }
-        grid::put(enc, te, &sa[..e]);
+        match &row_classes {
+            Some(_) => by_row.iter().enumerate().for_each(|(k, b)| grid::put(enc, te + k as u32, b)),
+            None => grid::put(enc, te, &sa[..e]),
+        }
         for (k, b) in sb.iter().enumerate() {
             grid::put(enc, tm + k as u32, b);
         }
     }
-    Some(Run::Float(FloatRun { f, shift, n: n as u64, map, m: m as u8, whole, exp, t, class, man: man_tables }))
+    let rows = row_classes.map(|(row, col, _, tables)| layout::RowClasses { row, col, tables });
+    let run = FloatRun { f, shift, n: n as u64, map, m: m as u8, whole, exp, t, class, man: man_tables, fine, rows };
+    Some(Run::Float(run))
+}
+
+/// The rows of histograms `h` of symbols in classes (2, 4 or 8, the best), `mag` the magnitude of
+/// each symbol (the classes started by it): of each row its class, the tables of the classes,
+/// and the bits they come to (the tables' and the rows' classes counted); None where there are
+/// too few rows.
+fn cluster_rows(h: &[[u64; 16]], mag: &[f64]) -> Option<(Vec<u8>, Vec<Table>, f64)> {
+    let rows = h.len();
+    if rows < 4 {
+        return None;
+    }
+    // (each row's mean magnitude, the rows in order of it)
+    let mean = |r: &[u64; 16]| {
+        let t: u64 = r.iter().sum();
+        (0..16).map(|s| r[s] as f64 * mag[s]).sum::<f64>() / t.max(1) as f64
+    };
+    let mut order: Vec<usize> = (0..rows).collect();
+    let means: Vec<f64> = h.iter().map(mean).collect();
+    order.sort_by(|&a, &b| means[a].total_cmp(&means[b]).then(a.cmp(&b)));
+    let mut best: Option<(Vec<u8>, Vec<Table>, f64)> = None;
+    for k in [2usize, 4, 8] {
+        if rows < 2 * k {
+            break;
+        }
+        let mut cls = vec![0u8; rows];
+        for (j, &r) in order.iter().enumerate() {
+            cls[r] = (j * k / rows) as u8;
+        }
+        for _ in 0..ROW_ROUNDS {
+            // (each class's costs of a symbol, of its counts made a little smoother; each row to
+            // the class it costs least in)
+            let mut sum = vec![[0u64; 16]; k];
+            for (r, &c) in h.iter().zip(&cls) {
+                (0..16).for_each(|s| sum[c as usize][s] += r[s]);
+            }
+            let cost: Vec<[f64; 16]> = sum
+                .iter()
+                .map(|c| {
+                    let t = c.iter().sum::<u64>() as f64 + 16.0 * 0.5;
+                    std::array::from_fn(|s| (t / (c[s] as f64 + 0.5)).log2())
+                })
+                .collect();
+            let mut moved = false;
+            for (r, c) in h.iter().zip(cls.iter_mut()) {
+                let of = |j: usize| (0..16).filter(|&s| r[s] > 0).map(|s| r[s] as f64 * cost[j][s]).sum::<f64>();
+                let mut pick = *c as usize;
+                let mut low = of(pick);
+                for j in 0..k {
+                    let x = of(j);
+                    if x < low {
+                        (pick, low) = (j, x);
+                    }
+                }
+                moved |= pick != *c as usize;
+                *c = pick as u8;
+            }
+            if !moved {
+                break;
+            }
+        }
+        // (the classes of no rows left out, the others numbered in turn)
+        let mut sum = vec![[0u64; 16]; k];
+        for (r, &c) in h.iter().zip(&cls) {
+            (0..16).for_each(|s| sum[c as usize][s] += r[s]);
+        }
+        let mut renum = [u8::MAX; 8];
+        let mut used = 0u8;
+        for j in 0..k {
+            if sum[j].iter().any(|&x| x > 0) {
+                renum[j] = used;
+                used += 1;
+            }
+        }
+        if used < 2 {
+            continue;
+        }
+        cls.iter_mut().for_each(|c| *c = renum[*c as usize]);
+        let tables: Vec<Table> = sum.iter().filter(|c| c.iter().any(|&x| x > 0)).map(Table::of_counts).collect();
+        let bits = sum.iter().filter(|c| c.iter().any(|&x| x > 0)).zip(&tables).map(|(c, t)| t.cost(c)).sum::<f64>()
+            + 300.0 * tables.len() as f64
+            + rows as f64 * (1.0 + (used as f64).log2());
+        if best.as_ref().is_none_or(|b| bits < b.2) {
+            best = Some((cls, tables, bits));
+        }
+    }
+    best
 }
 
 /// A run of `n` elements `d` of lanes of `w` bytes (FORMAT.md §4.4): the lanes whose nibbles come

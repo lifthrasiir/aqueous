@@ -158,7 +158,7 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
         if key == b"__metadata__" {
             return j.skip(2);
         }
-        let (mut dtype, mut offsets, mut last) = (None, None, 0u64);
+        let (mut dtype, mut offsets, mut last, mut first) = (None, None, 0u64, None);
         j.object(|j, k| match k {
             b"dtype" => j.string().map(|s| dtype = Some(s)),
             b"shape" => {
@@ -168,6 +168,7 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
                 }
                 loop {
                     last = j.uint()?;
+                    first.get_or_insert(last);
                     if j.eat(b',').is_none() {
                         break j.eat(b']');
                     }
@@ -193,7 +194,7 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
                 Data::Lanes(..) if elem > 0 => last,
                 _ => 0,
             };
-            coded.push(((data as u64).checked_add(a)?, what, row));
+            coded.push(((data as u64).checked_add(a)?, what, row, first.unwrap_or(0)));
         }
         Some(())
     })?;

@@ -29,3 +29,5 @@ aqr-formula.workspace = true
 memmap2.workspace = true
 zstd.workspace = true
 aqr-testkit.workspace = true
+# (the registry of `-Z`, for the bench's AQR_Z)
+aqr-common = { workspace = true, features = ["registry"] }

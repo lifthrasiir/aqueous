@@ -6713,8 +6713,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/sqlite-recons.wasm" title="crates/aqr-modules/wasm/sqlite-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md" title="codecs/aqr-sqlite/FORMAT.md">R</a>
     <tr>
-      <td><code>9b46a81e6b86836750b2adcf1babd36ec39dbb81f9a04872b992a7af0459d11c</code>
-      <td>tensors-recons@2
+      <td><code>8706d42fffd8c21d785954650f430449abe81db6d01f44e1be720b482def0dc1</code>
+      <td>tensors-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/tensors-recons.wasm" title="crates/aqr-modules/wasm/tensors-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tensors/FORMAT.md" title="codecs/aqr-tensors/FORMAT.md">R</a>
     <tr>

@@ -369,3 +369,63 @@ fn aligned() {
     let same: u64 = m2.iter().filter(|m| m1.contains(m)).map(|m| m.2).sum();
     assert_eq!(same, x.len() as u64, "of the tensor's bytes, those of the same applications");
 }
+
+/// `rows` rows of `row` F16 weights, each row of its own scale (as a normalisation folded into
+/// the weights makes them), from 2^-30 to 1: the rows of small scales mostly zeros of either sign
+/// and subnormals; of seed `seed`. Where `skewed`, the mantissas' top bits far from uniform.
+fn scaled_rows(seed: u64, rows: usize, row: usize, skewed: bool) -> Vec<u8> {
+    let mut r = aqr_common::rng::Rng::new(seed);
+    let mut out = Vec::with_capacity(2 * rows * row);
+    for _ in 0..rows {
+        let scale = (-(r.below(31) as f32)).exp2();
+        for _ in 0..row {
+            let u = r.below(1 << 20) as f32 / (1 << 20) as f32;
+            let m = if skewed { 1.0 + u * u * u } else { 1.0 + u };
+            let x = m * (-(r.below(6) as f32)).exp2() * if r.below(2) == 0 { 1.0 } else { -1.0 };
+            let v = aqr_tensors::layout::round_f32(Float::F16, x * scale) as u16;
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// F16 weights of rows of their own scales, many zeros (of either sign) and subnormals (a
+/// detector's weights, loupe's; `docs/hints-design.md` §5): coded as codes, zeros and subnormals
+/// apart, the rows in classes, to well under what the exponents and the bits as they are come to
+/// (12.3 bits a weight before; 10.3); rebuilt whole and cut in segments (rows cut between them).
+#[test]
+fn zeros_and_scaled_rows() {
+    let (a, b) = (scaled_rows(1, 300, 700, false), scaled_rows(2, 200, 512, true));
+    let d = safetensors_of(&[("a", "F16", 700, &a), ("b", "F16", 512, &b)]);
+    for segment in [formula::SEGMENT, 100_000] {
+        let f = formula::encode_in(&d, 3, segment).unwrap();
+        assert_eq!(eval(&f), d, "{segment}");
+        let floats: Vec<_> =
+            runs(&f).into_iter().filter_map(|r| if let Run::Float(r) = r { Some(r) } else { None }).collect();
+        assert!(floats.iter().filter(|r| r.n >= 8192).all(|r| r.fine && r.rows.is_some()), "{segment}: {floats:?}");
+        assert!(floats.iter().any(|r| r.t > 0), "{segment}: no top bits");
+        let cut = floats.iter().any(|r| r.rows.as_ref().unwrap().col > 0);
+        assert_eq!(cut, segment < formula::SEGMENT, "{segment}: runs from a row's middle");
+        let n = (a.len() + b.len()) / 2;
+        let bits = 8 * coded_bytes(&f);
+        assert!(bits < n * 11, "{segment}: {:.2} bits a weight", bits as f64 / n as f64);
+        // (damaged: an input cut short told; any byte of the params changed, no panic)
+        for a in apps(&f) {
+            let ins = inputs(&f, a);
+            for k in 0..3 {
+                let mut cut: Vec<&[u8]> = ins.clone();
+                if let Some((_, rest)) = cut[k].split_last() {
+                    cut[k] = rest;
+                    assert!(decode(&a.params, &cut, a.len, 1).is_err(), "{segment}: truncated {k}");
+                }
+            }
+            for at in (0..a.params.len()).step_by(a.params.len() / 200 + 1) {
+                for x in [1, 0x20, 0x40, 0xff] {
+                    let mut p = a.params.clone();
+                    p[at] ^= x;
+                    let _ = decode(&p, &ins, a.len, 1);
+                }
+            }
+        }
+    }
+}

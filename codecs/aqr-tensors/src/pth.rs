@@ -334,7 +334,7 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
         if n.checked_mul(elem) != Some(e.len as u64) || !seen.insert(key) {
             continue;
         }
-        coded.push((e.start as u64, what, 0));
+        coded.push((e.start as u64, what, 0, 0));
     }
     let data = coded.iter().map(|c| c.0 as usize).min()?;
     Some(tensors::apart(Container::Pth, d, data, coded))

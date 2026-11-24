@@ -122,35 +122,36 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
             return None;
         }
         // (the first dimension the row's)
-        let (mut n, mut row) = (1u64, 0);
+        let (mut n, mut row, mut first) = (1u64, 0, 0);
         for k in 0..dims {
             let ne = c.u64()?;
             if k == 0 {
                 row = ne;
             }
+            first = ne;
             n = n.checked_mul(ne)?;
         }
         let t = c.u32()?;
         let off = c.u64()?;
-        info.push((off, t, n, row));
+        info.push((off, t, n, row, first));
     }
     let data = c.at.div_ceil(align as usize).checked_mul(align as usize)?;
     if data > d.len() {
         return None;
     }
     let mut coded = Vec::new();
-    for (off, t, n, row) in info {
-        let (what, row) = if let Some(what) = data_of(t, n) {
-            (what, row)
+    for (off, t, n, row, first) in info {
+        let (what, row, first) = if let Some(what) = data_of(t, n) {
+            (what, row, first)
         } else if let Some(q) = Quant::of_ggml(t) {
             if n % q.weights() as u64 != 0 {
                 continue;
             }
-            (Data::Quant(q, n / q.weights() as u64), 0)
+            (Data::Quant(q, n / q.weights() as u64), 0, 0)
         } else {
             continue;
         };
-        coded.push(((data as u64).checked_add(off)?, what, row));
+        coded.push(((data as u64).checked_add(off)?, what, row, first));
     }
     Some(tensors::apart(Container::Gguf, d, data, coded))
 }

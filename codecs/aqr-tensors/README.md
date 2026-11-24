@@ -11,7 +11,11 @@ aqr-gguf and the module `gguf-recons`), in which
   signs and mantissas go as they are, without the low bits that are zero in all of them (F16 of
   BF16's precision: 3 bits; the few floats that are not, subnormals, are escapes whole), but
   the top 4 bits or fewer (with the sign) are symbols by the exponent's class where a sample of
-  the tensor says they would come to 1.5% less (of FP8, of a lower precision converted);
+  the tensor says they would come to 1.5% less (of FP8, of a lower precision converted); where
+  that comes to 1% less, zeros and subnormals are symbols of their own (a zero keeping its sign
+  alone, a subnormal the mantissa's bits below its top one), and where it comes to 2% less, the
+  rows of the tensor's first dimension (its output channels) are in up to 8 classes, each its
+  own table of the exponents (below, "Zeros and rows of their own scale");
 - floats that are a grid's values scaled by tiles (weights converted from a lower precision:
   NVFP4, MXFP4, FP8 of blocks, NF4, GPTQ's and AWQ's INT4, INT8 of rows, to BF16, F16 or F32) are
   found by a sample of the tensor and coded as the grid's indices (symbols) and the tiles'
@@ -193,6 +197,31 @@ of 16 values at most: on an M4, `gridval::timing::speed`'s spans of 16 of BF16 1
 elements/s, of F16 0.67 -> 2.33, spans of 128 of F32 2.98 -> 4.57). Through `aqr`, the NVFP4 file's compressing is held by the archive's verification on
 one thread (1.9 of 4.3 s) and the grids' coding (33 thread-seconds, 17 before).
 
+## Zeros and rows of their own scale
+
+The F16 weights of an OCR model's two networks (PP-OCR's detector and recogniser, a browser
+extension's: `docs/hints-design.md` section 5, wrapped as safetensors) are of a normalisation
+folded into each output channel: rows of their own scale, the detector's largest tensors 97–99%
+zeros (most rows all of them, of either sign: their values underflowed) and the rest many
+subnormals. Coded as other floats, a zero was its exponent symbol and its 11 bits of sign and
+mantissa, and every row's exponents of one table; xz -6 came to 5% and 2.5% less. Now a zero is
+a symbol of its own and keeps its sign alone, a subnormal is a symbol by the top bit of its
+mantissa and keeps the bits below it (the codes of FORMAT.md §4.2, `fine`), and the rows are in
+up to 8 classes by their exponents, each its own table (`rows`). Through `cargo aqr -c`
+(2026-11-24):
+
+| | det (30,999,306 B) | rec (38,244,272 B) |
+|---|---|---|
+| before | 14,005,585 | 31,747,761 |
+| now | 12,480,081 (−10.9%) | 29,601,597 (−6.8%) |
+| xz -6 | 13,285,052 | 30,962,616 |
+
+They decode at 400–600 MB/s on 16 threads (`aqr-tensors-bench`; 580 and 1320 MB/s before): a
+float of codes is put together one at a time. Natural weights take neither (their zeros and
+subnormals too few, their rows' exponents alike): on Llama-3.2-1B's BF16, row classes at a
+threshold of 0.5% would have saved 0.18% for 16% of the decoding speed, so they are taken only
+where they save 2% of a run; it codes to the same 1637.7 MB as before.
+
 ## Status
 
 Left:
@@ -203,12 +232,6 @@ Left:
   10.77 -> 10.72), worth about 1–2% of those files more, for a coder of alphabets past 16
   symbols. The signs are at their entropy. The trellis types (ik_llama.cpp's KT) are kept as
   they are.
-- Sparse tensors: a float that is 0 is an exponent symbol and its mantissa as it is, so a
-  tensor half of zeros (pruned) codes no better than one of none. On the F16 weights of an OCR
-  model (`docs/hints-design.md` section 5, wrapped as safetensors), the largest tensors half
-  zeros and 1.1–1.4 bits of order-0 entropy a 16-bit value, xz -6 comes to 5% less than
-  aqr-tensors (13.28 against 14.01 MB of 30.98); on its other model (13–14 bits a value) to
-  2.5% less. Not looked into yet: zeros as a symbol of their own, say.
 - The heap peak of the encoder reaches the budget on files of Q4_K and Q6_K (2.0–2.16 GB): the
   symbols of every segment in flight (17 of 16 MiB) and their words.
 - Files of tens of GB in an archive of several files: a file is one leaf there, its batch held

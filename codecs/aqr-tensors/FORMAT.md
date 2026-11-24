@@ -34,7 +34,9 @@ A file is taken where its container's structure holds as below, and at least one
 type coded. A tensor is coded where all of it is within the file and it does not overlap the one
 before it (by their places); the bytes before the first one coded are the file's *header*. Its
 *row* is the elements of its last dimension (GGUF's first), where the container tells it and it
-divides the tensor's elements (0 otherwise): of floats, its tiles' rows (§4.5).
+divides the tensor's elements (0 otherwise): of floats, its tiles' rows (§4.5). Its *slice* is
+the elements of a slice of its first dimension (GGUF's last), where the container tells it (not
+`torch.save`'s) and it divides them: of floats, the rows of their classes (§4.2).
 
 - **GGUF**: a file starting with `GGUF` and a version of 2 or 3, its header (the metadata, of
   which only `general.alignment` is read, and the tensors' infos) within the file. Its tensors
@@ -142,7 +144,7 @@ their outputs one after another. A run is a byte `tag`, then:
 | tag | run | then |
 |---|---|---|
 | 0 | bytes as they are (§4.1) | `varint n` |
-| 1 to 6 | floats: BF16, F16, F32, F64, FP8 E4M3, FP8 E5M2 (§4.2) | `u8 shift`, `varint n`, `u8 m` (and the flag `whole`), `m` varints `map`, a table `exp`, `u8 t`, and where `t > 0` classes and their tables |
+| 1 to 6 | floats: BF16, F16, F32, F64, FP8 E4M3, FP8 E5M2 (§4.2) | `u8 shift`, `varint n`, `u8 m` (and the flags `whole`, `fine`, `rows`), `m` varints `map`, a table `exp`, where `rows` `varint row`, `varint col`, `u8 k` and `k − 1` tables, then `u8 t`, and where `t > 0` classes and their tables |
 | 8 | lanes (§4.4) | `u8 w`, `varint n`, `u8 nib`, two tables for each lane of nibbles |
 | 9 | a grid (§4.5) | `u8 type`, `varint n`, `start`, `row`, `br`, `bc`, `u8 mode`, `varint k` and `k` values, tables |
 | 0x10 + `q` | blocks of type `q` (§4.3) | `varint blocks`, a table for each part of symbols |
@@ -177,39 +179,68 @@ first:
 | 5 | FP8 E4M3 | 1 | 4 | 3 |
 | 6 | FP8 E5M2 | 1 | 5 | 2 |
 
+A float's *code* is its exponent, but in a run of `fine` codes: there, of a float of exponent
+0, it is 0 where its mantissa is 0 (a zero, of either sign), else `2^E + p`, `p` the top bit
+set of its mantissa (a subnormal); of other exponents, the exponent. Codes are below `2^E + M`.
+
 Of a float, the bits *kept* are its sign then its mantissa's bits above the lowest `shift`
-(`shift ≤ M`): `r = 1 + M − shift` bits. Their top `t` bits (`t ≤ 4`, `t ≤ r`) are a symbol, of
-the table of the class of the float's exponent symbol (§4); the `r − t` below them are *raw
-bits*. The byte `m` is `m' | whole << 7`, `1 ≤ m' ≤ 16`.
+(`shift ≤ M`), `k = 1 + M − shift` bits; in a run of `fine` codes, of a float of code 0 its sign
+alone (`k = 1`), and of a subnormal of top bit `p` its sign then its mantissa's bits below `p`
+and above the lowest `shift` (`k = 1 + p − shift`; a code of `p < shift` is an error). Their top
+`t` bits (`t ≤ 4`, `t ≤ 1 + M − shift`) are a symbol, of the table of the class of the float's
+exponent symbol (§4); the `k − t` below them are *raw bits*. Where `k < t`, the symbol is the
+`k` bits shifted up by `t − k` (an error where its `t − k` low bits are not 0), and the float
+has no raw bits.
+
+The byte `m` is `m' | rows << 5 | fine << 6 | whole << 7`, `1 ≤ m' ≤ 16` (`fine` and `whole` not
+both). Where `rows`, the floats are of rows of `row` elements (`row ≥ 16`), the first float at
+column `col` (`col < row`), and each row is of a *class* from 0 to `k − 1` (`2 ≤ k ≤ 8`), class
+0's table of the exponents' symbols `exp`, class `j`'s the `j`-th of the `k − 1` tables after it.
 
 The `n` floats are in *chunks* of 2048 (the last perhaps shorter). Of a chunk of `e` floats:
 
 - the groups of the exponents' symbols, the `i`-th symbol of the chunk the `i`-th float's (of
-  table `exp`), and where `t > 0` the top symbols that go with them by their classes (§4);
-- in `raw`, `ceil(e (r − t) / 8)` bytes: the floats' raw bits, float `i`'s at bit `i (r − t)`
-  of the chunk's bytes (bit `j` of byte `k` bit `8k + j`, the lowest of a float's first), the
-  bits past the last float 0;
-- in `side`, for each float whose exponent symbol `s` is `m'` or more (an *escape*), in turn:
-  where `whole`, the float's `W` bytes; else its exponent, `ceil(E / 8)` bytes (below `2^E`).
+  table `exp`); where `rows`, of each class in turn the symbols of the chunk's floats of rows of
+  that class, in their order, in groups of that class's table; and where `t > 0` the top symbols
+  that go with them by their classes (§4);
+- in `raw`, the floats' raw bits one after another, float `i`'s from bit `i (k − t)` of the
+  chunk's bytes (but in a run of `fine` codes, from the sum of the raw bits of those before it;
+  bit `j` of byte `k` bit `8k + j`, the lowest of a float's first), in as many bytes as they
+  take, the bits past the last float 0;
+- in `side`, where `rows`, a byte for the run's first float and for each float at column 0, in
+  turn: the class of its row (below `k`); then for each float whose exponent symbol `s` is `m'`
+  or more (an *escape*), in turn: where `whole`, the float's `W` bytes; else its code,
+  `ceil(E / 8)` bytes, or where `fine` `ceil((E + 1) / 8)` (an error where it is not a code).
 
-`map` gives the exponents of the symbols below `m'`, each below `2^E`. A float is
+`map` gives the codes of the symbols below `m'` (each a code, below `2^E` where not `fine`). A
+float of code `c` (`map[s]` for `s < m'`, else the escape's) is
 
 ```text
-e     = map[s] for s < m', else the escape's exponent
-kept  = top << (r − t) | its raw bits
-float = (kept >> (M − shift)) << (E + M) | e << M | (kept mod 2^(M − shift)) << shift
+kept  = top << (k − t) | its raw bits          (top >> (t − k) where k < t)
+b     = k − 1                                  (the mantissa's bits kept)
+float = (kept >> b) << (E + M) | c << M | (kept mod 2^b) << shift           (c < 2^E, c > 0 or not fine)
+float = (kept >> b) << (E + M)                                              (c = 0, fine)
+float = (kept >> b) << (E + M) | 2^p | (kept mod 2^b) << shift              (c = 2^E + p)
 ```
 
 put as `W` bytes, or where it is an escape and `whole`, its `W` bytes of `side` instead.
 
 *(encoder)* Of the counts of the trailing zero bits of the mantissas, `shift` is either that of
 all floats (the escapes their exponents) or the one saving most bits with the floats of fewer
-zeros whole (`whole`), whichever comes to less. `map` is the 16 commonest exponents of the run,
-or where it has more than 16, the 15 commonest, the rest escapes, the commonest first (the
-smaller first on a tie). `t` is 0 but where the tensor's sample says the top bits pay (§2); then
-of 1 to 4, the one of the fewest bits, the classes of the exponent symbols merged greedily
-from one for each (the pair costing least more merged, at most 4 kept, a table counted 300
-bits), where it saves 1% of the run's bits.
+zeros whole (`whole`), whichever comes to less; codes (`fine`, `shift` that of all floats) where
+they come to 1% less than that: of weights of a small range converted to F16, or pruned, their
+zeros (whose signs are what they were) and subnormals many. `map` is the 16 commonest exponents
+(or codes) of the run, or where it has more than 16, the 15 commonest, the rest escapes, the
+commonest first (the smaller first on a tie). `t` is 0 but where the tensor's sample says the
+top bits pay (§2); then of 1 to 4, the one of the fewest bits, the classes of the exponent
+symbols merged greedily from one for each (the pair costing least more merged, at most 4 kept,
+a table counted 300 bits), where it saves 1% of the run's bits. The rows are the tensor's
+slices (§2: an output channel's weights, of their own scale where a normalisation is folded
+into them), where of 64 elements or more and the run of 4 rows or more: in 2, 4 or 8
+classes, the rows first in order of their mean magnitude, then each to the class whose table
+codes it in fewest bits, the tables counted again, 8 rounds at most; the number of classes
+coming to fewest bits (a table counted 300 bits, a row `1 + log2 k`), where it saves 2% of the
+run's bits.
 
 ### 4.3 Blocks
 
@@ -375,7 +406,7 @@ Of the indices of more than 16 values, the classes of the high nibbles are made 
 
 ## 5. `tensors-recons`
 
-- **Module**: name `tensors-recons`, version 2. A part module: its inputs are read and its output
+- **Module**: name `tensors-recons`, version 3 (2 had no codes nor rows of floats, §4.2). A part module: its inputs are read and its output
   written in order, through windows of 16 pages each.
 - **Params**: the runs (§4), at most 2^20 bytes.
 - **Resources**: none.
@@ -385,5 +416,5 @@ Of the indices of more than 16 values, the classes of the high nibbles are made 
 
 *(encoder)* The memory plan is constant beyond the params: the params, a buffer of 128 KiB of
 the coded symbols, pieces of 64 KiB of `raw`, `side` and the output, a chunk's symbols, raw
-and side bytes (16 KiB each), and of a grid, of each column of tiles its scale, zero point and
+and side bytes (16 KiB each, the side bytes 129 more), and of a grid, of each column of tiles its scale, zero point and
 row of tiles (16384 × 16 bytes), and its values (1 KiB).

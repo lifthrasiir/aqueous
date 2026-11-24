@@ -67,13 +67,15 @@ impl Container {
     }
 }
 
-/// A tensor coded: where it is, what it is, and the elements of its rows (its last dimension;
-/// 0 where it is not known).
+/// A tensor coded: where it is, what it is, the elements of its rows (its last dimension; 0
+/// where it is not known) and of a slice of its first (outermost) dimension (an output channel's
+/// weights, say; 0 where it is not known).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tensor {
     pub start: usize,
     pub data: Data,
     pub row: u64,
+    pub outer: u64,
 }
 
 /// A file's layout: its container, where its tensor data starts (the bytes before it its
@@ -109,14 +111,14 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
     }
 }
 
-/// The layout of the tensors `coded` (their places in the file, what they are and their rows'
-/// elements) from `data` on: those past the file's end, empty or overlapping the one before them
+/// The layout of the tensors `coded` (their places in the file, what they are, their rows'
+/// elements and their first dimension) from `data` on: those past the file's end, empty or overlapping the one before them
 /// (by their places) left out.
-pub(crate) fn apart(container: Container, d: &[u8], data: usize, mut coded: Vec<(u64, Data, u64)>) -> Tensors {
+pub(crate) fn apart(container: Container, d: &[u8], data: usize, mut coded: Vec<(u64, Data, u64, u64)>) -> Tensors {
     coded.sort_by_key(|t| t.0);
     let mut end = data as u64;
     let mut tensors = Vec::with_capacity(coded.len());
-    for (start, what, row) in coded {
+    for (start, what, row, first) in coded {
         // (as many floats or blocks as there are bytes at most: their length does not overflow)
         if what.count() > d.len() as u64 {
             continue;
@@ -128,7 +130,8 @@ pub(crate) fn apart(container: Container, d: &[u8], data: usize, mut coded: Vec<
         end = e;
         // (a row that does not divide the tensor's elements is not told)
         let row = if row > 0 && what.count() % row == 0 { row } else { 0 };
-        tensors.push(Tensor { start: start as usize, data: what, row });
+        let outer = if first > 0 && what.count() % first == 0 { what.count() / first } else { 0 };
+        tensors.push(Tensor { start: start as usize, data: what, row, outer });
     }
     Tensors { container, data, tensors }
 }
