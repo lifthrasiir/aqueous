@@ -1,0 +1,34 @@
+# Outside the profile of modules: a table of 64-bit addresses (not allowed). (data/profile-table64.wat)
+{
+  "title": "A module of a 64-bit table",
+  "spec": ["#module-execution", "#module-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # module, u16: 0110 00 01
+      {"type": 0x61, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": 80003("data/profile-table64.wasm")},
+      }}},
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "module_indices": [0],
+          "instructions": [
+            {"opcode": "Apply", "apply_module": 0, "apply_resources": [], "apply_params": '', "apply_memory_limit": 1048576, "apply_task_limits": [], "apply_num_inputs": 0, "apply_output_sizes": [1]},
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [
+          {"entry_name": "a", "original_size": undefined},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}
