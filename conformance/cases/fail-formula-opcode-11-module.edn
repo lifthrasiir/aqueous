@@ -1,0 +1,38 @@
+# Opcode 11, the earlier Apply instruction, is invalid, here of a module of no release
+# (data/copy.wat): what aqr accepts of it for the modules of its releases is outside the spec.
+{
+  "title": "The earlier Apply of a module",
+  "spec": ["#insn-apply", "#module-execution", "#module-block"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      # module, u16: 0110 00 01
+      {"type": 0x61, "data": {"compressed_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": 80003("data/copy.wasm")},
+      }}},
+      80001(["f", {"type": 0x70, "data": {"num_outputs": 1, "formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [],
+          "module_indices": [0],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'hello'},
+            # the earlier Apply: module 0, no resources, no parameters, the memory limit 1 MiB, one
+            # input, one output of 5 bytes; no task limits
+            h'11 00 00 00 808040 01 01 05',
+          ],
+        }},
+      }}}]),
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [
+          {"entry_name": "a", "original_size": 5},
+        ],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}
