@@ -584,6 +584,14 @@ formats! {
         exts: &["safetensors"],
         cost: 4,
     }
+    /// Tensors of data of no header, as the hint of its attributes tells (`aqr-format=tensors`:
+    /// `aqr-dtype`, `aqr-layout`, docs/hints-design.md §3.3; aqr-tensors): of no magic bytes,
+    /// never detected.
+    Tensors = "tensors" {
+        recompressor: Cx(crate::tensors_told),
+        heap: 0.0,
+        cost: 4,
+    }
     /// Android DEX file (aqr-dex), known by its header: at the start of data only.
     Dex = "dex" {
         recompressor: Pure(aqr_dex::formula::encode),

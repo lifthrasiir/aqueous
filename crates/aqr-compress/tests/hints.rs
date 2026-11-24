@@ -214,3 +214,60 @@ fn containers() {
     assert!(r.files[3].archived >= 0.9 * gz_members as f64);
     assert_eq!(hints.report(), ["attributes:5: a.gz: matched no file"]);
 }
+
+/// F16 weights of no header, `n` of them: most zeros, the rest small values of a few scales.
+fn f16_weights(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed;
+    let mut d = Vec::with_capacity(2 * n);
+    for i in 0..n {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let v: u16 = match (x >> 60) % 4 {
+            0 | 1 => 0,
+            // (sign, an exponent of a few around 2^-6, the mantissa's top bits)
+            _ => ((x >> 40) as u16 & 0x8000) | ((9 + (i / 4096) % 3) as u16) << 10 | (x >> 20) as u16 & 0x3ff,
+        };
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d
+}
+
+fn module_of(r: &Report, c: usize, name: &str) -> bool {
+    r.files[c].modules.iter().any(|m| m.name == name)
+}
+
+/// `aqr-format=tensors`: data of no header as one tensor of `aqr-dtype`, or the tensors of the
+/// file `aqr-layout` names (relative to the attributes' directory); a value not known leaves the
+/// file to detection, and is told.
+#[test]
+fn tensors_told() {
+    let dir = std::env::temp_dir().join(format!("aqr-hints-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut layout = String::from("dtype = \"f16\"\n");
+    for (k, n) in [4096usize, 65536, 30000].iter().enumerate() {
+        let shape = if k == 1 { format!("[256, {}]", n / 256) } else { format!("[{n}]") };
+        layout += &format!("\n[[tensor]]\nname = \"t{k}\"\nshape = {shape}\n");
+    }
+    std::fs::write(dir.join("layout.toml"), layout).unwrap();
+    let files = [
+        ("one.bin", f16_weights(100_000, 1)),
+        ("laid.bin", f16_weights(99_632, 2)),
+        ("bad.bin", f16_weights(100_000, 3)),
+        ("plain.bin", f16_weights(100_000, 4)),
+    ];
+    let mut a = Attributes::new();
+    let text = "one.bin aqr-format=tensors aqr-dtype=f16\n\
+                laid.bin aqr-format=tensors aqr-layout=layout.toml\n\
+                bad.bin aqr-format=tensors aqr-dtype=f12\n";
+    assert!(a.add(Origin::Aqr, b"", text, "attributes", Some(dir.clone()), true).is_empty());
+    let hints = Hints::new(a);
+    let (_, r) = archived(&files, Some(hints.clone()));
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(module_of(&r, 0, "tensors-recons"), "{:?}", r.files[0]);
+    assert!(module_of(&r, 1, "tensors-recons"), "{:?}", r.files[1]);
+    assert!(!module_of(&r, 2, "tensors-recons") && !module_of(&r, 3, "tensors-recons"));
+    assert!(r.files[0].archived < 0.95 * r.files[3].archived, "{} {}", r.files[0].archived, r.files[3].archived);
+    assert_eq!(
+        hints.report(),
+        ["bad.bin: aqr-dtype=f12: not a type of tensors", "bad.bin: aqr-format=tensors turned it down"]
+    );
+}

@@ -164,7 +164,7 @@ impl Hints {
         h
     }
 
-    fn warn(&self, w: String) {
+    pub(crate) fn warn(&self, w: String) {
         self.report.lock().unwrap().warnings.insert(w);
     }
 

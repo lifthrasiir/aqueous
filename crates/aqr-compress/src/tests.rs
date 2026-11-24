@@ -2529,3 +2529,32 @@ fn table_choice_at_the_boundaries() {
     let _ = pick_table(Some(10), Some(5), || asked.replace(true) as usize, true, 100);
     assert!(!asked.get());
 }
+
+/// The layouts of tensors that hints name (`aqr-layout`): each tensor where the one before ends
+/// unless its offset is told, of its type or the file's.
+#[test]
+fn tensor_layouts() {
+    use aqr_tensors::layout::Float;
+    use aqr_tensors::tensors::Data;
+    let text = "dtype = \"f16\"\n[[tensor]]\nname = \"a\"\nshape = [4, 8]\n\
+                [[tensor]]\noffset = 100\ndtype = \"f32\"\ncount = 10\n[[tensor]]\nshape = [3]\n";
+    let l = crate::layout(text, None).unwrap();
+    assert_eq!(
+        l,
+        [
+            (0, Data::Float(Float::F16, 32), 8, 4),
+            (100, Data::Float(Float::F32, 10), 0, 0),
+            (140, Data::Float(Float::F16, 3), 0, 0)
+        ]
+    );
+    assert_eq!(crate::layout("[[tensor]]\nshape = [2]\n", Some("bf16")).unwrap()[0].1, Data::Float(Float::Bf16, 2));
+    for (bad, why) in [
+        ("[[tensor]]\nshape = [2]\n", "tensor 0: no dtype"),
+        ("dtype = \"f16\"\n[[tensor]]\nname = \"x\"\n", "tensor 0: no shape nor count"),
+        ("dtype = \"f12\"\n[[tensor]]\nshape = [2]\n", "tensor 0: dtype f12: not a type of tensors"),
+        ("dtype = \"f16\"\n", "no [[tensor]]"),
+        ("dtype = \"f16\"\n[[tensor]]\nshape = [-2]\n", "tensor 0: shape: not a count"),
+    ] {
+        assert_eq!(crate::layout(bad, None).unwrap_err(), why);
+    }
+}

@@ -57,6 +57,119 @@ pub(crate) fn tensors(d: &[u8], p: &Pure) -> Option<Formula> {
     }
 }
 
+/// aqr-tensors' formula of `d`, data of no header whose tensors the hint of its attributes tells
+/// (`aqr-format=tensors`, [`crate::hints`]): `aqr-dtype=TYPE`, all of it a tensor of TYPE (the
+/// bytes after the last whole element as they are), or `aqr-layout=FILE`, the tensors FILE tells
+/// ([`layout`]). None where the hint tells neither, or what it tells does not hold.
+pub(crate) fn tensors_told(d: &[u8], _: Kind, opt: &Options, _: u32, cx: &Cx) -> Option<Formula> {
+    let h = crate::hints::within(d, cx)?;
+    let coded = match (h.param("layout"), h.param("dtype")) {
+        (Some(file), _) => {
+            let p = h.file(file);
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()));
+            match text.and_then(|t| layout(&t, h.param("dtype"))) {
+                Ok(c) => c,
+                Err(e) => {
+                    h.bad_param("layout", &e);
+                    return None;
+                }
+            }
+        }
+        (None, Some(t)) => match dtype(t) {
+            Some(data) => vec![(0, data.with_count(d.len() as u64 / data.with_count(1).len()), 0, 0)],
+            None => {
+                h.bad_param("dtype", "not a type of tensors");
+                return None;
+            }
+        },
+        (None, None) => {
+            h.hints.warn(format!("{}: aqr-format=tensors: no aqr-dtype nor aqr-layout", h.path()));
+            return None;
+        }
+    };
+    let g = aqr_tensors::tensors::headerless(d, coded);
+    let segment = aqr_tensors::formula::SEGMENT_BYTES.get();
+    #[cfg(test)]
+    let segment = tests::TENSORS_SEGMENT.get().unwrap_or(segment);
+    aqr_tensors::formula::encode_layout(d, g, opt.threads, segment)
+}
+
+/// The type of tensors of `aqr-dtype`'s name `name` (lowercase): of floats (`bf16`, `f16`,
+/// `f32`, `f64`, `e4m3`, `e5m2`) or of integers (`i8` to `u64`, lanes of bytes), of one element.
+fn dtype(name: &str) -> Option<aqr_tensors::tensors::Data> {
+    use aqr_tensors::layout::Float;
+    use aqr_tensors::tensors::Data;
+    Some(match name {
+        "bf16" => Data::Float(Float::Bf16, 1),
+        "f16" => Data::Float(Float::F16, 1),
+        "f32" => Data::Float(Float::F32, 1),
+        "f64" => Data::Float(Float::F64, 1),
+        "e4m3" => Data::Float(Float::E4m3, 1),
+        "e5m2" => Data::Float(Float::E5m2, 1),
+        "i8" | "u8" => Data::Lanes(1, 1),
+        "i16" | "u16" => Data::Lanes(2, 1),
+        "i32" | "u32" => Data::Lanes(4, 1),
+        "i64" | "u64" => Data::Lanes(8, 1),
+        _ => return None,
+    })
+}
+
+/// The tensors of a layout (`aqr-layout`'s file, TOML): `[[tensor]]` each, of `shape` (its
+/// dimensions, outermost first) or `count` (its elements), `dtype` (else the file's `dtype`, else
+/// `default`, as [`dtype`] names them) and `offset` (in bytes; else where the one before ends);
+/// anything else (`name`) left. Each as [`aqr_tensors::tensors::headerless`] takes them: its place,
+/// what it is, the elements of its rows (its last dimension) and its first dimension.
+pub(crate) fn layout(
+    text: &str,
+    default: Option<&str>,
+) -> Result<Vec<(u64, aqr_tensors::tensors::Data, u64, u64)>, String> {
+    let t: toml::Table = text.parse().map_err(|e: toml::de::Error| e.message().to_owned())?;
+    let int = |v: &toml::Value, what: &str| {
+        v.as_integer().and_then(|n| u64::try_from(n).ok()).ok_or(format!("{what}: not a count"))
+    };
+    let top = match t.get("dtype") {
+        Some(v) => Some(v.as_str().ok_or("dtype: not a name")?),
+        None => default,
+    };
+    let tensors = match t.get("tensor") {
+        Some(toml::Value::Array(a)) => a,
+        _ => return Err("no [[tensor]]".into()),
+    };
+    let mut out = Vec::with_capacity(tensors.len());
+    let mut at = 0u64;
+    for (i, e) in tensors.iter().enumerate() {
+        let e = e.as_table().ok_or(format!("tensor {i}: not a table"))?;
+        let name = match e.get("dtype") {
+            Some(v) => v.as_str().ok_or(format!("tensor {i}: dtype: not a name"))?,
+            None => top.ok_or(format!("tensor {i}: no dtype"))?,
+        };
+        let data = dtype(name).ok_or(format!("tensor {i}: dtype {name}: not a type of tensors"))?;
+        let shape: Vec<u64> = match e.get("shape") {
+            Some(toml::Value::Array(s)) => {
+                s.iter().map(|v| int(v, &format!("tensor {i}: shape"))).collect::<Result<_, _>>()?
+            }
+            Some(_) => return Err(format!("tensor {i}: shape: not a list")),
+            None => Vec::new(),
+        };
+        let count = match (e.get("count"), &shape[..]) {
+            (Some(v), _) => int(v, &format!("tensor {i}: count"))?,
+            (None, []) => return Err(format!("tensor {i}: no shape nor count")),
+            (None, s) => {
+                s.iter().try_fold(1u64, |n, &d| n.checked_mul(d)).ok_or(format!("tensor {i}: shape: too large"))?
+            }
+        };
+        let start = match e.get("offset") {
+            Some(v) => int(v, &format!("tensor {i}: offset"))?,
+            None => at,
+        };
+        let data = data.with_count(count);
+        at = start.checked_add(data.len()).ok_or(format!("tensor {i}: too large"))?;
+        let row = if shape.len() >= 2 { *shape.last().unwrap() } else { 0 };
+        out.push((start, data, row, shape.first().copied().filter(|_| shape.len() >= 2).unwrap_or(0)));
+    }
+    Ok(out)
+}
+
 /// The formula that the recompressor of `format` makes of `d` (its `formula` module, see its
 /// FORMAT.md), if it makes one, where it is a function of `d` alone (it looks for no files in
 /// its data, and takes nothing of a budget) and of what `p` gives: `None` for the other formats

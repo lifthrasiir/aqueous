@@ -59,7 +59,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     blocks, `src/eval.rs`), metadata trees, segments, envelopes, mirroring, released modules.
     Of the codecs' libraries only aqr-mkv (`description_bound`) and aqr-tensors (`BLOCK`) take
     it; their tests and tools (`examples/aqr-NAME.rs`) take it as a dev-dependency.
-  - `aqr-compress` — picks a recompressor by magic bytes, makes the formula, stores the archive.
+  - `aqr-compress` — picks a recompressor by magic bytes, makes the formula, stores the archive;
+    the hints of attributes by path (`attributes`, `hints`: `--attributes`, `.aqr/attributes`,
+    `.gitattributes`; docs/hints-design.md) steer it, a hinted file's kind `Kind::Hint`.
   - `aqr-decompress` — runs the formulas' modules natively and extracts archives.
   - `aqr-native` — how each module runs natively (`NATIVE`, by module name: its native decoding
     of whole inputs, threaded where it is, or its part entry point, and when to stream), from the

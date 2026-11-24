@@ -222,6 +222,24 @@ subnormals too few, their rows' exponents alike): on Llama-3.2-1B's BF16, row cl
 threshold of 0.5% would have saved 0.18% for 16% of the decoding speed, so they are taken only
 where they save 2% of a run; it codes to the same 1637.7 MB as before.
 
+## Data of no header
+
+Tensors in a file of no header (an app's weights as they are) are found by no magic bytes:
+they are taken where the attributes say so (docs/hints-design.md), `aqr-format=tensors` with
+
+- `aqr-dtype=TYPE`: all of the file one tensor of `TYPE` (`bf16`, `f16`, `f32`, `f64`, `e4m3`,
+  `e5m2`, or `i8` to `u64` as lanes of bytes), the bytes after its last whole element as they
+  are;
+- `aqr-layout=FILE`: the tensors that `FILE` (TOML, relative to the directory of the attributes)
+  tells, each a `[[tensor]]` of `shape` (outermost first; its rows the last dimension, its first
+  the rows' classes) or `count`, `dtype` (else the file's top-level `dtype`, else
+  `aqr-dtype`'s) and `offset` in bytes (else where the one before ends); other keys (`name`) are
+  left. Tensors past the file's end or overlapping the one before are left out, as of a header.
+
+The tensors are coded as those of a container are (`tensors::headerless`, the container
+`Headerless`; its header class `tensors/header`, empty). A layout gives each tensor its own
+tables, which pays: loupe's F16 weights below (aqr-compress's `tensors_told`).
+
 ## Status
 
 Left:

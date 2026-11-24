@@ -23,7 +23,8 @@ aqr-compress는 파일을 앞부분의 바이트(`detect`, `crates/aqr-compress/
 ### 2.1 어디서 읽는가
 
 1. `-Z` 옵션(지금 있는 `-Z format:no-NAME` 등)
-2. `--attributes FILE`(여러 번): 트리를 고칠 수 없을 때. 패턴은 입력의 루트를 기준으로 한다
+2. `--attributes FILE`(여러 번): 트리를 고칠 수 없을 때. 패턴은 입력의 루트를 기준으로 하고, 값이
+   가리키는 파일(§3.4)은 그 파일의 디렉터리를 기준으로 한다(트리 밖에 있으므로)
 3. 입력 트리의 `.aqr/attributes`: 각 입력의 루트에 있는 것만 읽는다
 4. 입력 트리의 `.gitattributes`: 디렉터리마다 있는 것을 읽는다(git과 같이)
 5. 감지(`detect`)와 이름(`kind_by_name`)
@@ -51,6 +52,8 @@ aqr-compress는 파일을 앞부분의 바이트(`detect`, `crates/aqr-compress/
   `.gitattributes`에서도 허용하므로, `.gitattributes`의 macro도 읽는다)
 - 패턴은 C 식으로 따옴표를 쳐도 된다(`"a b.bin"`). 값에는 공백을 넣을 수 없다. 값이 길어지면 파일을
   가리킨다(§3.4)
+
+패턴과 이름은 시스템과 관계없이 대소문자를 구별한다. git의 `core.ignorecase`에 해당하는 것은 없다.
 
 파서는 직접 쓴다. gix-attributes는 MIT/Apache이지만 gix의 다른 crate들을 끌고 온다. 문법이 작아서
 직접 쓰는 편이 싸다.
@@ -109,14 +112,15 @@ README에 적는다. 이 문서는 모양만 정한다.
 - `aqr-format`이 맞는 파일에서만 읽는다. 다른 포맷의 파라미터는 무시한다
 - 모르는 값이면 경고하고 그 힌트를 버린다(감지로 돌아간다)
 
-처음 정의할 것은 §5의 예에 필요한 것들이다.
+처음 정의할 것은 §5의 예에 필요한 것들이다. `tensors`의 것은 구현했고(aqr-tensors의 README, "Data of no
+header"), 나머지는 아직이다.
 
 | 포맷 | 파라미터 | 뜻 |
 |---|---|---|
 | `tensors` | `aqr-dtype=bf16\|f16\|f32\|…` | 헤더 없는 텐서 한 개로 본다. 원소 수는 길이/원소 크기 |
-| `tensors` | `aqr-layout=FILE` | 텐서들의 경계와 dtype(§3.4) |
-| `raw` | `aqr-bits`, `aqr-channels`, `aqr-endian` | 헤더 없는 PCM 표본 |
-| `zlib`, `deflate` | `aqr-offset` | 그 오프셋에서 시작하는 스트림 |
+| `tensors` | `aqr-layout=FILE` | 텐서들의 경계와 dtype(§3.4). TOML의 `[[tensor]]`마다 `shape`, `dtype`, `offset` |
+| `raw` | `aqr-bits`, `aqr-channels`, `aqr-endian` | 헤더 없는 PCM 표본(아직) |
+| `zlib`, `deflate` | `aqr-offset` | 그 오프셋에서 시작하는 스트림(아직) |
 
 ### 3.4 무거운 데이터는 파일로
 
@@ -141,20 +145,38 @@ README에 적는다. 이 문서는 모양만 정한다.
 
 `.aqr/attributes`에서는 이 속성들을 읽지 않는다. aqr의 파일에는 aqr의 이름만 쓴다.
 
-## 4. 구현 지점
+## 4. 구현
 
-- 트리의 파일: `crates/aqr-compress/src/archive.rs`의 `File::of(…, kind_by_name(src.name(c)), …)`
-  두 곳(896, 1150행 무렵)이 이름에서 Kind를 얻는다. 여기서 속성을 먼저 본다. 파일 하나는
-  `crates/aqr/src/compress.rs`의 `kind_by_name(&name)`
-- 컨테이너의 멤버: recompressor들은 Kind를 `kind: fn(&[u8]) -> Kind`로 받는다(aqr-alz, aqr-egg의
-  `Options`, aqr-bundle packs의 `encode_with`). 이것을 컨테이너의 경로를 품은 `&dyn Fn(&[u8]) -> Hint`로
-  바꾼다. `>`의 깊이는 이 클로저가 한 층씩 들고 내려간다
-- `Kind::Format(&'static str)`은 파라미터를 싣지 못한다. 힌트는 `Kind`와 별도의 `Hint`(포맷, 파라미터,
-  힌트에서 왔다는 표시)로 `Cx`를 따라 넘기고, `Kind`에는 지금과 같이 이름만 남긴다
-- 보고: 힌트가 맞았는데 recompressor가 거절했거나 실패한 파일, 맞는 파일이 없었던 패턴을 `--stats`의
-  "what stands out"에 적는다. 이것이 없으면 사용자가 힌트를 디버그할 수 없다
-- 시험: 패턴(특히 `>`와 git의 디렉터리 규칙), 우선순위, 거절 후 감지로 돌아가는 경로, 그리고 힌트 없이
-  만든 아카이브와 힌트를 준 아카이브가 같은 내용으로 풀리는지
+- 문법과 우선순위: aqr-compress의 `attributes`(`Attributes::add`가 파일을 받고, `resolve`가 경로 사슬 —
+  트리의 경로, 그리고 컨테이너마다 그 안의 경로, 이름 없는 내용은 빈 경로 — 에 대해 답한다). 해석은
+  `hints`(`Hints`). aqr는 `crates/aqr/src/attributes.rs`에서 모은 파일들을 읽어 내용마다 Kind를 정한다
+  (`Source::kind`). 파일 하나는 `--attributes`만 읽는다
+- 힌트가 있는 파일의 Kind는 `Kind::Hint(i)`(aqr-formula)다. `i`는 프로세스에 하나인 표의 번호이고,
+  표는 힌트(경로 사슬, 이름의 Kind, 포맷, 파라미터, 하위 경로가 있는지)를 가진다. `Kind::Format`이
+  파라미터를 싣지 못하는 문제를 이렇게 풀었다. 스트림이 Kind를 들고 가므로, recompressor가 만든
+  멤버의 스트림도 힌트를 그대로 들고 간다. `Nest::of`는 이것을 `Nest::Hint(i)`로 만들고 `hints::made`가
+  만든다. 아카이브를 인코딩하기 전에 `hints::settle`이 스트림의 Kind를 힌트가 없었을 때의 것으로 되돌린다
+- 거절되면: 포맷이 말한 것으로 먼저 만들어 보고(`Nest::As`), 안 되면 감지로 간다. 이때 이름이 말하는
+  포맷(`.png`)도 버린다. `aqr-not`과 `binary`는 감지의 스레드 국소 마스크로 한다(그 파일을 만드는 스레드만.
+  풀의 다른 스레드에서 만드는 그 내용들에는 걸리지 않는다)
+- 컨테이너의 멤버: codec crate들의 `kind: fn(&[u8]) -> Kind`를 `aqr_formula::Kinds`(클로저)로 바꿨다.
+  aqr-compress는 recompressor를 부를 때 그 데이터가 힌트를 가진 파일이면(`Cx::within`, 데이터의 주소로
+  가린다) 스레드 국소로 그 힌트를 두고, `hints::kinds()`가 멤버마다 사슬을 한 층 늘인 힌트를 준다.
+  이름 없는 내용 하나만 있는 포맷(gzip, zlib, LZ4, LZMA, xz, lzop, LZFSE/LZVN, bzip2)은 그 내용에 빈 경로를
+  준다. 힌트를 받은 내용은 미리 만드는 순수 포맷의 병렬 처리(`pure_contents`)에서 빠진다
+- 보고(`Hints::report`): 알아듣지 못한 속성, 포맷이 거절한 파일, 맞는 파일이 없었던 줄. `-v`와
+  `--stats`의 "what stands out", JSON의 `hints`에 나온다
+- 시험: aqr-compress의 `attributes`(문법, 우선순위, macro, `>`), `tests/hints.rs`(트리의 파일,
+  `.gitattributes`, tar의 멤버, gzip의 내용, 두 층 아래의 멤버, 텐서의 `aqr-dtype`과 `aqr-layout`, 모르는
+  값). 모든 시험은 아카이브가 파일을 그대로 돌려주는지도 본다
+
+남은 것:
+
+- `raw`와 `zlib`/`deflate`의 파라미터(§3.3)
+- "힌트를 받은 recompressor가 zstd보다 못했다"는 보고(§5). 지금은 그런 공식은 `smaller`가 버리므로
+  거절과 같이 보고된다
+- 큰 헤더 없는 텐서 파일을 직접 쓰기(`direct_room`은 GGUF, `.pth`, safetensors만 본다)
+- `linguist-*`는 아직 아무도 읽지 않는다
 
 ## 5. 예: loupe의 가중치
 
@@ -181,6 +203,27 @@ rec 14 KB를 그대로 둔 것이다). `cargo aqr` 기본 레벨, 2026-11-24.
 [attr]f16-tensors aqr-format=tensors aqr-dtype=f16
 *_f16.bin            f16-tensors
 loupe.zip>*_f16.bin  f16-tensors
+```
+
+구현한 뒤에 힌트로 직접 잰 것(감싸지 않고, 헤더 없이). 레이아웃은 manifest에서 스크립트로 만든 TOML이고,
+`--attributes`로 트리 밖에서 주었다. 모두 `-t`로 확인했다. `cargo aqr` 기본 레벨, 2026-11-24.
+
+| | det | rec |
+|---|---|---|
+| 힌트 없이 | 14,797,379 | 32,401,955 |
+| `aqr-dtype=f16` | 14,053,139 (−5.0%) | 31,941,115 (−1.4%) |
+| `aqr-layout` | 12,476,817 (−15.7%) | 29,599,423 (−8.6%) |
+
+트리 전체(`-x .git`, 17개 파일, 117.21 MB)는 48,526,012 -> 43,403,172(−10.6%), 1.77 -> 1.58 s다.
+`loupe.zip>`로 zip 안의 두 파일도 aqr-tensors로 가고, 트리의 같은 파일과 스트림을 함께 쓴다.
+
+```
+# --attributes에 준 파일(레이아웃은 그 파일의 디렉터리를 기준으로)
+*_f16.bin                      aqr-format=tensors aqr-dtype=f16
+loupe.zip>*_f16.bin            aqr-format=tensors aqr-dtype=f16
+det_weights_f16.bin            aqr-layout=loupe/.aqr/layouts/det.toml
+loupe.zip>det_weights_f16.bin  aqr-layout=loupe/.aqr/layouts/det.toml
+...
 ```
 
 알게 된 것:

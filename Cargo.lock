@@ -385,6 +385,7 @@ dependencies = [
  "memmap2",
  "sha1",
  "sha2",
+ "toml",
  "xxhash-rust",
  "zstd",
 ]

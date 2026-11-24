@@ -990,7 +990,25 @@ pub fn encode_sealing<T: Send>(
     made: &(dyn Fn(&mut Formula, &[u8]) -> T + Sync),
     seal: &mut (dyn FnMut(&mut Formula, &[u8], T) + Send),
 ) -> Option<Formula> {
-    let g = tensors::parse(input)?;
+    encode_layout_sealing(input, tensors::parse(input)?, threads, segment_bytes, made, seal)
+}
+
+/// [`encode_in`] of `input` of layout `g` as whoever gives it tells (data of no header,
+/// [`tensors::headerless`]).
+pub fn encode_layout(input: &[u8], g: Tensors, threads: usize, segment_bytes: usize) -> Option<Formula> {
+    let made = |part: &mut Formula, _: &[u8]| aqr_formula::store::spill_streams(part);
+    encode_layout_sealing(input, g, threads, segment_bytes, &made, &mut |_, _, ()| {})
+}
+
+/// [`encode_sealing`] of `input` of layout `g`.
+pub fn encode_layout_sealing<T: Send>(
+    input: &[u8],
+    g: Tensors,
+    threads: usize,
+    segment_bytes: usize,
+    made: &(dyn Fn(&mut Formula, &[u8]) -> T + Sync),
+    seal: &mut (dyn FnMut(&mut Formula, &[u8], T) + Send),
+) -> Option<Formula> {
     if g.tensors.is_empty() {
         return None;
     }

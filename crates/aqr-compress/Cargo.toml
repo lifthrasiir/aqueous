@@ -29,6 +29,8 @@ aqr-dwarf = { workspace = true, default-features = true }
 aqr-pdb = { workspace = true, default-features = true }
 aqr-fasta = { workspace = true, default-features = true }
 aqr-tensors = { workspace = true, default-features = true }
+# (the layouts of tensors that hints name, `aqr-layout`)
+toml.workspace = true
 aqr-wasm = { workspace = true, default-features = true }
 aqr-fsb.workspace = true
 aqr-wwise.workspace = true

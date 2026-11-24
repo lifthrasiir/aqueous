@@ -54,6 +54,8 @@ pub enum Container {
     Pth,
     /// Hugging Face's safetensors: a header of JSON, then the data.
     Safetensors,
+    /// No header: tensors that whoever gives the data tells ([`headerless`]).
+    Headerless,
 }
 
 impl Container {
@@ -63,6 +65,7 @@ impl Container {
             Container::Gguf => "gguf/header",
             Container::Pth => "pth/header",
             Container::Safetensors => "safetensors/header",
+            Container::Headerless => "tensors/header",
         }
     }
 }
@@ -108,7 +111,16 @@ pub fn parse(d: &[u8]) -> Option<Tensors> {
         Container::Gguf => gguf::parse(d),
         Container::Pth => pth::parse(d),
         Container::Safetensors => safetensors::parse(d),
+        // (never what data starts like)
+        Container::Headerless => None,
     }
+}
+
+/// The layout of data `d` of no header whose tensors are `coded` (each its place, what it is, the
+/// elements of its rows and of its first dimension, 0 where not known), as [`apart`] takes them:
+/// those past its end or overlapping the one before them left out.
+pub fn headerless(d: &[u8], coded: Vec<(u64, Data, u64, u64)>) -> Tensors {
+    apart(Container::Headerless, d, 0, coded)
 }
 
 /// The layout of the tensors `coded` (their places in the file, what they are, their rows'
