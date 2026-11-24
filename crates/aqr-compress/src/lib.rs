@@ -128,6 +128,7 @@
 
 mod aqueous;
 mod archive;
+pub mod attributes;
 mod bundle;
 mod choose;
 mod chunked;
