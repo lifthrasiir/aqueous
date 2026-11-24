@@ -89,6 +89,9 @@ pub(crate) struct Cx {
     pub(crate) defer_budget: usize,
     /// The data (where it is) of a hint being made, and the hint ([`crate::hints::within`]).
     pub(crate) within: Cell<Option<(usize, u32)>>,
+    /// Whether a scan's formula was left as no smaller than its data ([`scanned`]): for a hint to
+    /// tell that its format's formula lost rather than that it was turned down.
+    pub(crate) lost: Cell<bool>,
 }
 
 /// A decoding a recompressor asks to be undone ([`undo`]): the application at `coded` of the data,
@@ -237,6 +240,7 @@ impl Cx {
             kept_beside: Cell::new(0),
             defer_budget: (n as f64 * DEFER_BUDGET.get().max(0.0)) as usize,
             within: Cell::new(None),
+            lost: Cell::new(false),
         }
     }
 

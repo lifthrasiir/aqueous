@@ -112,15 +112,18 @@ README에 적는다. 이 문서는 모양만 정한다.
 - `aqr-format`이 맞는 파일에서만 읽는다. 다른 포맷의 파라미터는 무시한다
 - 모르는 값이면 경고하고 그 힌트를 버린다(감지로 돌아간다)
 
-처음 정의할 것은 §5의 예에 필요한 것들이다. `tensors`의 것은 구현했고(aqr-tensors의 README, "Data of no
-header"), 나머지는 아직이다.
+처음 정의할 것은 §5의 예에 필요한 것들이다. 아래는 모두 구현했다(`tensors`는 aqr-tensors의 README,
+"Data of no header"; `raw`와 `deflate`는 aqr-raw와 aqr-flate의 README).
+`aqr-offset`은 포맷마다가 아니라 모든 포맷의 것으로 했다. 그 앞의 바이트는 다른 데이터처럼 스캔한다.
+헤더가 없는 것을 받는 이름(`tensors`, `pcm`, `deflate`)은 감지하지 않는 포맷이다. `aqr-format=raw`에
+레이아웃 파라미터가 있으면 `pcm`이 된다(보고에도 그 이름이 나온다).
 
 | 포맷 | 파라미터 | 뜻 |
 |---|---|---|
 | `tensors` | `aqr-dtype=bf16\|f16\|f32\|…` | 헤더 없는 텐서 한 개로 본다. 원소 수는 길이/원소 크기 |
 | `tensors` | `aqr-layout=FILE` | 텐서들의 경계와 dtype(§3.4). TOML의 `[[tensor]]`마다 `shape`, `dtype`, `offset` |
-| `raw` | `aqr-bits`, `aqr-channels`, `aqr-endian` | 헤더 없는 PCM 표본(아직) |
-| `zlib`, `deflate` | `aqr-offset` | 그 오프셋에서 시작하는 스트림(아직) |
+| `raw` | `aqr-bits`(8/16/24/32), `aqr-channels`, `aqr-endian`(le/be), `aqr-sign` | 헤더 없는 PCM 표본. 기본은 16비트, 2채널, le, 8비트만 unsigned |
+| 모든 포맷 | `aqr-offset=N`(10진 또는 `0x`) | 그 오프셋에서 시작하는 파일(`zlib`, 헤더 없는 `deflate` 등) |
 
 ### 3.4 무거운 데이터는 파일로
 
@@ -172,9 +175,9 @@ header"), 나머지는 아직이다.
 
 남은 것:
 
-- `raw`와 `zlib`/`deflate`의 파라미터(§3.3)
-- "힌트를 받은 recompressor가 zstd보다 못했다"는 보고(§5). 지금은 그런 공식은 `smaller`가 버리므로
-  거절과 같이 보고된다
+- 보고는 거절("turned it down"), 공식이 데이터보다 작지 않았음("made it no smaller", 스캔의 `smaller`가
+  버린 것, `Cx::lost`), 비슷해서 배치가 고르도록 곁에 둠("about as small")을 나눈다. 뒤의 것이 배치에서
+  결국 골라졌는지는 보고하지 않는다
 - 큰 헤더 없는 텐서 파일을 직접 쓰기(`direct_room`은 GGUF, `.pth`, safetensors만 본다)
 - `linguist-*`는 아직 아무도 읽지 않는다
 

@@ -271,3 +271,77 @@ fn tensors_told() {
         ["bad.bin: aqr-dtype=f12: not a type of tensors", "bad.bin: aqr-format=tensors turned it down"]
     );
 }
+
+/// `aqr-offset`: a raw DEFLATE stream (`aqr-format=deflate`, never detected) after bytes of a
+/// header of its own, the header and what follows as they are; an offset past the end told.
+#[test]
+fn deflate_at_offset() {
+    let file = |seed: u8| {
+        let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(1));
+        e.write_all(&words(300_000, seed as u64)).unwrap();
+        [&[seed; 100][..], &e.finish().unwrap(), b"trailer"].concat()
+    };
+    let files = [("at.dat", file(1)), ("hex.dat", file(2)), ("none.dat", file(3)), ("far.dat", file(4))];
+    let hints = hints_of(
+        Origin::Aqr,
+        "at.dat aqr-format=deflate aqr-offset=100\n\
+         hex.dat aqr-format=deflate aqr-offset=0x64\n\
+         far.dat aqr-format=deflate aqr-offset=99999999\n",
+    );
+    let (_, plain) = archived(&files, None);
+    let (_, r) = archived(&files, Some(hints.clone()));
+    assert!(module_names(&plain, 0).is_empty(), "{:?}", plain.files[0]);
+    assert!(module_names(&r, 0).contains(&"flate-set".to_string()), "{:?}", r.files[0]);
+    assert!(module_names(&r, 1).contains(&"flate-set".to_string()));
+    assert!(module_names(&r, 2).is_empty() && module_names(&r, 3).is_empty());
+    assert!(r.files[0].archived < 0.8 * plain.files[0].archived, "{} {}", r.files[0].archived, plain.files[0].archived);
+    assert_eq!(
+        hints.report(),
+        ["far.dat: aqr-offset=99999999: not an offset within the file", "far.dat: aqr-format=deflate turned it down"]
+    );
+}
+
+/// `aqr-format=raw` with a layout: PCM samples of no header (16-bit stereo here, noisy tones).
+#[test]
+fn pcm_told() {
+    let pcm = |phase: f64| -> Vec<u8> {
+        let mut d = Vec::new();
+        let mut x = phase.to_bits();
+        for i in 0..200_000 {
+            let t = i as f64 / 44100.0;
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let noise = ((x >> 40) % 400) as f64 - 200.0;
+            let l = (8000.0 * (t * 440.0 * std::f64::consts::TAU + phase).sin() + noise) as i16;
+            let r = (6000.0 * (t * 663.0 * std::f64::consts::TAU).sin() + noise / 2.0) as i16;
+            d.extend_from_slice(&l.to_le_bytes());
+            d.extend_from_slice(&r.to_le_bytes());
+        }
+        d
+    };
+    let mut x = 5u64;
+    let noise: Vec<u8> = (0..400_000)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 56) as u8
+        })
+        .collect();
+    let files = [("a.pcm", pcm(0.0)), ("b.pcm", pcm(1.0)), ("c.pcm", pcm(2.0)), ("d.pcm", noise)];
+    let hints = hints_of(
+        Origin::Aqr,
+        "a.pcm aqr-format=raw aqr-bits=16 aqr-channels=2\n\
+         c.pcm aqr-format=raw aqr-bits=12\n\
+         d.pcm aqr-format=raw aqr-bits=16\n",
+    );
+    let (_, r) = archived(&files, Some(hints.clone()));
+    assert_eq!(module_names(&r, 0), ["pcm-recons"], "{:?}", r.files[0]);
+    assert!(!module_names(&r, 1).contains(&"pcm-recons".to_string()));
+    assert!(r.files[0].archived < 0.9 * r.files[1].archived, "{} {}", r.files[0].archived, r.files[1].archived);
+    assert_eq!(
+        hints.report(),
+        [
+            "c.pcm: aqr-bits=12: not 8, 16, 24 or 32",
+            "c.pcm: aqr-format=pcm turned it down",
+            "d.pcm: aqr-format=pcm made it about as small as it is"
+        ]
+    );
+}

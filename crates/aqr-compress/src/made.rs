@@ -138,6 +138,7 @@ pub(crate) fn scanned(m: Option<Made>, d: &[u8], opt: &Options, cx: &Cx) -> (Opt
     if !only_kept && smaller(&m.f, m.gaps.as_deref(), d, opt, cx) {
         return (Some(m), None);
     }
+    cx.lost.set(true);
     let close = (cx.defers.get() && !m.f.eithers().is_empty()).then(|| Made { close: Some((0, d.len())), ..m });
     (None, close)
 }

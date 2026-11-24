@@ -94,6 +94,45 @@ pub(crate) fn tensors_told(d: &[u8], _: Kind, opt: &Options, _: u32, cx: &Cx) ->
     aqr_tensors::formula::encode_layout(d, g, opt.threads, segment)
 }
 
+/// aqr-raw's formula of `d`, PCM samples of no header as the hint of its attributes tells
+/// (`aqr-format=raw`, [`crate::hints`]): `aqr-bits` (8, 16, 24 or 32; 16 by default),
+/// `aqr-channels` (2 by default), `aqr-endian` (`le`, the default, or `be`) and `aqr-sign`
+/// (`signed`, the default but of 8 bits, or `unsigned`); the bytes after the last whole frame as
+/// they are. None where a value is not one of those, or the samples are not coded.
+pub(crate) fn pcm_told(d: &[u8], _: Kind, opt: &Options, _: u32, cx: &Cx) -> Option<Formula> {
+    let h = crate::hints::within(d, cx)?;
+    let bad = |p: &str, why: &str| {
+        h.bad_param(p, why);
+        None
+    };
+    let bytes = match h.param("bits").unwrap_or("16") {
+        "8" => 1,
+        "16" => 2,
+        "24" => 3,
+        "32" => 4,
+        _ => return bad("bits", "not 8, 16, 24 or 32"),
+    };
+    let Some(channels) = h.param("channels").unwrap_or("2").parse::<usize>().ok() else {
+        return bad("channels", "not a count");
+    };
+    let big_endian = match h.param("endian").unwrap_or("le") {
+        "le" => false,
+        "be" => true,
+        _ => return bad("endian", "not le or be"),
+    };
+    let unsigned = match h.param("sign") {
+        None => bytes == 1,
+        Some("signed") => false,
+        Some("unsigned") => true,
+        Some(_) => return bad("sign", "not signed or unsigned"),
+    };
+    let fmt = aqr_raw::audio::pcm::Format { channels, bytes, big_endian, unsigned };
+    if !fmt.valid() {
+        return bad("channels", "not a count of channels aqr-raw takes");
+    }
+    aqr_raw::formula::encode_samples(d, aqr_raw::container::Layout::Pcm(fmt), opt.threads)
+}
+
 /// The type of tensors of `aqr-dtype`'s name `name` (lowercase): of floats (`bf16`, `f16`,
 /// `f32`, `f64`, `e4m3`, `e5m2`) or of integers (`i8` to `u64`, lanes of bytes), of one element.
 fn dtype(name: &str) -> Option<aqr_tensors::tensors::Data> {

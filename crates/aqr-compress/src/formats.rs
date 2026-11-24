@@ -222,6 +222,15 @@ formats! {
         cost: 160,
     }
     /// gzip member (aqr-flate on its DEFLATE stream).
+    /// A raw DEFLATE stream (aqr-flate), what follows it as it is: of no header, never detected;
+    /// taken where the hint of its attributes tells (`aqr-format=deflate`, with `aqr-offset` where
+    /// it is in other data).
+    Deflate = "deflate" {
+        recompressor: Cx(crate::flate::deflate),
+        heap: 8.0,
+        extent: crate::flate::deflate_len,
+        cost: 370,
+    }
     Gzip = "gzip" {
         recompressor: Cx(crate::flate::gzip),
         // the data written out as it is decoded, and rebuilt in verification a batch at a time:
@@ -353,6 +362,13 @@ formats! {
     }
     /// Uncompressed samples in a trivial container (aqr-raw): WAV or AIFF anywhere, BMP, PNM,
     /// TIFF or DICOM at the start of a file.
+    /// PCM samples of no header (aqr-raw's `pcm-recons`), as the hint of its attributes tells
+    /// (`aqr-format=raw` with `aqr-bits`, `aqr-channels`, `aqr-endian`, `aqr-sign`): never
+    /// detected.
+    Pcm = "pcm" {
+        recompressor: Cx(crate::pcm_told),
+        heap: 12.0,
+    }
     Raw = "raw" {
         recompressor: Pure(aqr_raw::formula::encode),
         heap: 12.0,

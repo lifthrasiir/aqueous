@@ -31,6 +31,10 @@ to 0.96× to 1.80× of the record, 1.14× in all; the first 128 KiB alone came t
 (the fuzzing input). aqr-compress and aqr-zip use it to rebuild only the streams that may pay
 (`aqr_formula::probe`).
 
+A raw DEFLATE stream of no container is found by nothing; `aqr` takes one where the attributes
+say so (docs/hints-design.md): `aqr-format=deflate`, with `aqr-offset=N` where it starts within
+the file (aqr-compress's format `deflate`, never detected; what follows the stream as it is).
+
 ## Profiles
 
 - **0-9: static codes**, built for speed: at least 100 MB/s of plain text on one core both

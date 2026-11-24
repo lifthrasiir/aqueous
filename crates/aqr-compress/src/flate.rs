@@ -136,6 +136,20 @@ pub(crate) fn zlib(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx)
     wrap("zlib", d, 2, checked, contents, &hints, opt, depth, cx)
 }
 
+/// A raw DEFLATE stream at the start of `d` (RFC 1951), its data of kind `contents`, what follows
+/// it as it is: as the hint of its attributes tells it (`aqr-format=deflate`), never detected.
+pub(crate) fn deflate(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    if crate::inflated::on(opt) {
+        return None;
+    }
+    wrap("deflate", d, 0, |_, _| true, contents, &Hints::default(), opt, depth, cx)
+}
+
+/// Bytes of the raw DEFLATE stream at the start of `d`.
+pub(crate) fn deflate_len(d: &[u8]) -> Option<usize> {
+    inflate(d, &mut Skip)
+}
+
 /// The name of the file (FNAME) of the gzip member at the start of `d`, if it has one.
 fn gzip_name(d: &[u8]) -> Option<&[u8]> {
     let flg = *d.get(3)?;

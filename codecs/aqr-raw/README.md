@@ -87,6 +87,11 @@ aqr-raw info FILE...                                            # the container 
 `-r LAYOUT` takes the input as headerless samples: PCM as `s16le:2` (sign, bits,
 endianness, channels), or a raster as `640x480x3` (width, height, channels).
 
+`aqr` takes headerless PCM where the attributes say so (docs/hints-design.md): `aqr-format=raw`
+with `aqr-bits` (8, 16, 24 or 32; 16 by default), `aqr-channels` (2), `aqr-endian` (`le` or
+`be`; `le`) and `aqr-sign` (`signed` or `unsigned`; unsigned of 8 bits alone), the bytes after
+the last whole frame as they are (aqr-compress's format `pcm`, never detected).
+
 ```rust
 use aqr_raw::formula;
 // A container taken apart (None where it is not one):

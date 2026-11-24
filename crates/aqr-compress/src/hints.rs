@@ -31,8 +31,12 @@ pub struct Hints {
 #[derive(Default)]
 struct Report {
     warnings: BTreeSet<String>,
-    /// The paths whose format told turned them down, with the format.
-    turned_down: BTreeSet<(String, &'static str)>,
+    /// The paths whose format told turned them down, with the format, and whether it made a
+    /// formula that was no smaller than the data as it is (zstd's).
+    turned_down: BTreeSet<(String, &'static str, bool)>,
+    /// The paths whose format told made a formula about as large as the data, kept beside it for
+    /// the batch to choose ([`Made::close`]), with the format.
+    close: BTreeSet<(String, &'static str)>,
 }
 
 /// The format a file is told it is of.
@@ -161,6 +165,12 @@ impl Hints {
                 _ => {}
             }
         }
+        // (`raw` of a layout told: the samples of no header)
+        if h.format == Told::As(Format::Raw)
+            && ["bits", "channels", "endian", "sign"].iter().any(|p| h.param(p).is_some())
+        {
+            h.format = Told::As(Format::Pcm);
+        }
         h
     }
 
@@ -174,7 +184,11 @@ impl Hints {
     pub fn report(&self) -> Vec<String> {
         let r = self.report.lock().unwrap();
         let mut out: Vec<String> = r.warnings.iter().cloned().collect();
-        out.extend(r.turned_down.iter().map(|(p, f)| format!("{p}: aqr-format={f} turned it down")));
+        out.extend(r.turned_down.iter().map(|(p, f, lost)| match lost {
+            false => format!("{p}: aqr-format={f} turned it down"),
+            true => format!("{p}: aqr-format={f} made it no smaller than it is"),
+        }));
+        out.extend(r.close.iter().map(|(p, f)| format!("{p}: aqr-format={f} made it about as small as it is")));
         out.extend(self.attrs.unmatched().into_iter().map(|l| format!("{l}: matched no file")));
         out
     }
@@ -293,14 +307,32 @@ pub(crate) fn made(i: u32, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Opti
 
 fn made_hinted(h: &Hint, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
     if let Told::As(format) = h.format {
-        if crate::format_on(format, opt) {
-            let m = crate::made_alone(d, opt, depth, Nest::As(format), cx);
-            if m.is_some() {
-                return m;
+        // (`aqr-offset`: the file of the format from there on, the bytes before it data)
+        let at = match h.param("offset").map(offset) {
+            None => Some(0),
+            Some(Some(o)) if o < d.len() => Some(o),
+            Some(_) => {
+                h.bad_param("offset", "not an offset within the file");
+                None
+            }
+        };
+        let outer = cx.lost.replace(false);
+        if let Some(at) = at.filter(|_| crate::format_on(format, opt)) {
+            let m = match at {
+                0 => crate::made_alone(d, opt, depth, Nest::As(format), cx),
+                at => made_from(at, format, d, opt, depth, cx),
+            };
+            if let Some(m) = m {
+                cx.lost.set(outer);
+                if m.close.is_some() {
+                    h.hints.report.lock().unwrap().close.insert((h.path(), format.name()));
+                }
+                return Some(m);
             }
         }
+        let lost = cx.lost.replace(outer);
         let mut r = h.hints.report.lock().unwrap();
-        r.turned_down.insert((h.path(), format.name()));
+        r.turned_down.insert((h.path(), format.name(), lost));
     }
     let mut not = h.not.clone();
     // (not text: no format of text looked for)
@@ -319,6 +351,33 @@ fn made_hinted(h: &Hint, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option
         n => n,
     };
     detect::without(&not, || crate::made_alone(d, opt, depth, nest, cx))
+}
+
+/// `aqr-offset`'s value `v`, decimal or hexadecimal (`0x`).
+fn offset(v: &str) -> Option<usize> {
+    match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        Some(h) => usize::from_str_radix(h, 16).ok(),
+        None => v.parse().ok(),
+    }
+}
+
+/// `d` as data up to `at` (scanned as any) and a file of `format` from there on ([`made_hinted`]),
+/// where the format takes it: the hint the file's (its recompressor's parameters, [`within`]).
+fn made_from(at: usize, format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
+    let (head, tail) = d.split_at(at);
+    let hint = cx.within.get().map(|w| w.1);
+    let outer = cx.within.replace(hint.map(|i| (tail.as_ptr() as usize, i)));
+    let m = crate::made_alone(tail, opt, depth, Nest::As(format), cx);
+    cx.within.set(outer);
+    let tail = m?.cut(tail);
+    let mut f = Formula::default();
+    let head = match crate::made_alone(head, opt, depth, Nest::Scan, cx) {
+        Some(m) => f.embed(m.cut(head)),
+        None => f.push("raw", head.to_vec()),
+    };
+    let tail = f.embed(tail);
+    f.root = aqr_formula::Node::concat([head, tail]);
+    Some(Made::from(f))
 }
 
 /// The hint of `d` where it is the data of one being made ([`made`]): for its format's
