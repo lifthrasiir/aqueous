@@ -81,6 +81,37 @@ tool (sqlite3, ffmpeg) or the SFX pack fail without it, and those needing a corp
   or `-f` told to promise less over what is there. One archive into a directory of its own:
   5000 trees, none.
 
+### Found by the conformance suite (`conformance/`, 2026-11-24)
+`conformance/tools/check.py` (through the root's .venv, for its `cryptography`) runs the cases
+against `aqr -Z interpret`: of 342, 309 pass, 24 fail, 1 is a resource failure and 8 are
+skipped (overlay archives given a base). Where aqr differs from the spec:
+- Import blocks (58-5F) are not taken: `import-*`, `fail-import-*` (14 cases, their expectations
+  not checked by any decoder yet).
+- Overlay archives are not taken: `overlay-no-base`, `encrypted-overlay`,
+  `unsupported-overlay-before-base` (and `fail-overlay-invalid-before-base` passes only because
+  of that); the 8 overlay cases given a base are skipped, as `aqr` takes no base.
+- Timestamps (`aqr-time`) are not checked: `fail-extra-time-tag`, `-time-float`, `-time-offset`,
+  `fail-extra-date-offset`.
+- `segment-status`'s map takes keys other than 0 and 1: `fail-segment-status-key` (a positive
+  key not known, an error as integer keys were meant to be; see below).
+- A table of 64-bit addresses passes the module profile: `fail-profile-table64`.
+- A passphrase from standard input is read as UTF-8: `encrypted-bytes-passphrase` (see below).
+- A shorthand block of a registered dictionary is a resource failure ("not supported yet"), not
+  unsupported where the hash is not known: `unsupported-shorthand-dictionary`.
+
+To decide, in the spec:
+- "Partial access": a failure in what a decompressor doesn't read is exempt, of any kind, and
+  for one computing the full result too (a block no part of the value depends on). The cases
+  give that result as `partial`; the spec's wording (and "Semantics and failures", the step 2
+  of interpreting) still asks every decompressor to detect them.
+- Integer keys of the optional metadata not known: meant to be an error where positive and
+  skipped where negative; neither is what the metadata now does for negative ones.
+- A passphrase: a byte sequence (age takes bytes; rage takes UTF-8)? Then aqr takes standard
+  input's line as bytes.
+- An empty fork name: the archive model forbids it, `aqr-entry-forks`'s CDDL doesn't.
+- A text string of bad UTF-8 in the optional metadata: well-formed CBOR, not valid; the spec
+  asks for well-formed only.
+
 ### Housekeeping
 - The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs
   pack.py).
