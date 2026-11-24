@@ -1,0 +1,30 @@
+# A Patch's matches reach no further back than its source and the output so far: the patch of
+# formula-patch.edn (by zstd --patch-from) of its source cut short.
+{
+  "title": "A patch reaching past its source",
+  "spec": ["#insn-patch"],
+  "archive": {
+    "header_magic": "HEADER_MAGIC",
+    "blocks": [
+      80001(["f", {"type": 0x70, "data": {"formula_data": {
+        "compression_params": {"window_descriptor": 0},
+        "data": {"decoded": {
+          "block_ordinal_deltas": [0],
+          "instructions": [
+            {"opcode": "Literal", "literal_data": 'over the lazy dog. '},
+            {"opcode": "Slice", "slice_block": 0, "slice_start": 0, "slice_length": 18},
+            {"opcode": "Patch", "patch_size": 65},
+          ],
+        }},
+      }}}]),
+      {"type": 0x40, "data": {"uncompressed_data": {"data": h'7d0000 38546361742e202102002051b0546c'}}},
+      80001(["meta", {"type": 0x10, "data": {"uncompressed_data": {"data": {
+        "entry_parents": [],
+        "file_params": [{"file_offset": ["f", "meta"]}],
+        "entries": [{"entry_name": "a", "original_size": 65}],
+      }}}}]),
+    ],
+    "footer_magic": "FOOTER_MAGIC",
+  },
+  "interpreted": "invalid",
+}
