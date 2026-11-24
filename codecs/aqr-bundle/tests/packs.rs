@@ -20,7 +20,7 @@ fn taken(pack: Pack, d: &[u8]) -> Vec<(String, Vec<Range<usize>>)> {
 fn formula(pack: Pack, d: &[u8]) -> Vec<String> {
     let kind = |n: &[u8]| if n.ends_with(b".txt") { Kind::Text } else { Kind::Unknown };
     assert_eq!(packs::detect(d), Some(pack));
-    let f = packs::encode_with(pack, d, kind).expect("a formula");
+    let f = packs::encode_with(pack, d, &aqr_formula::Kinds::new(kind)).expect("a formula");
     rebuilds(&f, d);
     f.streams.iter().map(|s| s.class.to_string()).collect()
 }
@@ -285,11 +285,11 @@ fn source_vpks() {
     assert_eq!(names, [b"data/b.bin"]);
     assert_eq!(&archive[files[0].extents[0].clone()], &c[3].1[..]);
     // (its one file all of it: no formula, which would give the same data again)
-    assert!(packs::encode_files(Pack::SourceVpk, &archive, &files, |_| Kind::Unknown).is_none());
+    assert!(packs::encode_files(Pack::SourceVpk, &archive, &files, &Default::default()).is_none());
     // with bytes the tree tells of no file after it, the file a content of its own
     let mut longer = archive.clone();
     longer.extend_from_slice(b"padding no file holds");
-    let f = packs::encode_files(Pack::SourceVpk, &longer, &files, |_| Kind::Unknown).unwrap();
+    let f = packs::encode_files(Pack::SourceVpk, &longer, &files, &Default::default()).unwrap();
     rebuilds(&f, &longer);
 }
 

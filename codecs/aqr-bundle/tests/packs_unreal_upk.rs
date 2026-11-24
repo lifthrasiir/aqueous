@@ -304,10 +304,10 @@ fn a_chunk_alone_has_no_formula() {
     let lzo: &[u8] = &[0x11; 300];
     let one = chunk(0x20000, &[(lzo, 0x2000)]);
     assert_eq!(files(&one).map(|f| f.len()), Some(1));
-    assert!(packs::encode_with(Pack::UnrealUpk, &one, |_| aqr_formula::Kind::Unknown).is_none());
+    assert!(packs::encode_with(Pack::UnrealUpk, &one, &Default::default()).is_none());
     let mut two = one.clone();
     two.extend_from_slice(&chunk(0x20000, &[(lzo, 0x2000)]));
-    assert!(packs::encode_with(Pack::UnrealUpk, &two, |_| aqr_formula::Kind::Unknown).is_some());
+    assert!(packs::encode_with(Pack::UnrealUpk, &two, &Default::default()).is_some());
 }
 
 /// The blocks of a file of LZO chunks alone, in order with their data's sizes: a chunk whose

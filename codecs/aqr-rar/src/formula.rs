@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use aqr_formula::{Apply, Formula, Kind, Module, Node};
+use aqr_formula::{Apply, Formula, Kind, Kinds, Module, Node};
 
 use crate::{rar4, rar5, recons3, recons5};
 
@@ -65,7 +65,7 @@ pub struct Options {
     pub limit: u64,
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
     /// Whether streams with PPMd blocks are taken (else kept as they are, turned down at their
     /// first PPMd block): rebuilding PPMd is slow, and its data seldom compresses better apart.
     pub ppmd: bool,
@@ -78,7 +78,7 @@ aqr_common::zopt! {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, limit: u64::MAX, kind: |_| Kind::Unknown, ppmd: PPMD.get() }
+        Options { threads: 1, limit: u64::MAX, kind: Kinds::default(), ppmd: PPMD.get() }
     }
 }
 
@@ -250,7 +250,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     for (i, file) in files.iter().enumerate() {
         if let Some(Made::Stored) = made[i] {
             kept.0.extend_from_slice(&input[file.data.clone()]);
-            kept.1.push(((opt.kind)(&input[file.name.clone()]), kept.0.len()));
+            kept.1.push((opt.kind.of(&input[file.name.clone()]), kept.0.len()));
             kept_sizes.push(file.data.len() as u64);
         }
     }
@@ -260,7 +260,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         for &i in &groups[*gi].files {
             let n = files[i].size as usize;
             split.0.extend_from_slice(&sp.data[at..at + n]);
-            split.1.push(((opt.kind)(&input[files[i].name.clone()]), split.0.len()));
+            split.1.push((opt.kind.of(&input[files[i].name.clone()]), split.0.len()));
             at += n;
             split_sizes.push(files[i].data.len() as u64);
         }

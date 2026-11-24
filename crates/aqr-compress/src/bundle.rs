@@ -6,16 +6,17 @@
 
 use aqr_formula::Formula;
 
-use crate::kind_by_name;
-
 pub(crate) fn bundle(d: &[u8]) -> Option<Formula> {
-    aqr_bundle::formula::encode_with(d, &aqr_bundle::formula::Options { kind: kind_by_name, ..Default::default() })
+    aqr_bundle::formula::encode_with(
+        d,
+        &aqr_bundle::formula::Options { kind: crate::hints::kinds(), ..Default::default() },
+    )
 }
 
 /// The formula of game pack `d` of `pack` (aqr-bundle's `packs`: aqr-disk's formula, of the
 /// classes of the pack's name).
 pub(crate) fn pack(pack: aqr_bundle::packs::Pack, d: &[u8]) -> Option<Formula> {
-    aqr_bundle::packs::encode_with(pack, d, kind_by_name)
+    aqr_bundle::packs::encode_with(pack, d, &crate::hints::kinds())
 }
 
 /// The formula of an Unreal 3 package or texture cache `d`: where it is compressed chunks alone
@@ -37,7 +38,7 @@ fn is_rest(class: &str) -> bool {
 }
 
 pub(crate) fn asar(d: &[u8]) -> Option<Formula> {
-    aqr_asar::formula::encode_with(d, &aqr_asar::formula::Options { kind: kind_by_name, ..Default::default() })
+    aqr_asar::formula::encode_with(d, &aqr_asar::formula::Options { kind: crate::hints::kinds(), ..Default::default() })
 }
 
 /// The file systems of disk images read: ISO 9660 and UDF, FAT, exFAT, NTFS, ext2/3/4, APFS, HFS+,
@@ -48,7 +49,12 @@ pub(crate) const FILE_SYSTEMS: &[aqr_disk::FileSystem] =
 pub(crate) fn disk(d: &[u8], threads: usize) -> Option<Formula> {
     aqr_disk::formula::encode_with(
         d,
-        &aqr_disk::formula::Options { file_systems: FILE_SYSTEMS, kind: kind_by_name, threads, ..Default::default() },
+        &aqr_disk::formula::Options {
+            file_systems: FILE_SYSTEMS,
+            kind: crate::hints::kinds(),
+            threads,
+            ..Default::default()
+        },
     )
 }
 

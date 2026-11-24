@@ -176,7 +176,7 @@ fn extension_records() {
     );
     let opt = aqr_disk::formula::Options {
         file_systems: &[aqr_ntfs::FS],
-        kind: |_| aqr_formula::Kind::Unknown,
+        kind: aqr_formula::Kinds::default(),
         ..Default::default()
     };
     let f = aqr_disk::formula::encode_with(&d, &opt).unwrap();

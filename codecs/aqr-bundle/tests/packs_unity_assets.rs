@@ -314,7 +314,7 @@ fn textures() {
     // a serialized file of both, and the resource file
     let (d, _) = build(21, false, true, &[(1, 1, b"GameObject"), (2, 28, &inline), (3, 28, &streamed_obj)]);
     assert_eq!(objects(&d).unwrap().engine, (2019, 4));
-    let f = encode_with(&d, |_| aqr_formula::Kind::Unknown, 1).unwrap();
+    let f = encode_with(&d, &Default::default(), 1).unwrap();
     assert_eq!(f.applies().len(), 1);
     assert!(eval(&f) == d);
     let mut ress = vec![0x33u8; at as usize];
@@ -374,11 +374,11 @@ fn bundle_resources() {
     let mut ress = vec![0x44u8; 16];
     ress.extend(&blocks);
     let d = bundle(&[("CAB-0123", &cab), ("CAB-0123.resS", &ress)]);
-    let f = aqr_bundle::packs::unity::encode_with(&d, |_| aqr_formula::Kind::Unknown, 1).unwrap();
+    let f = aqr_bundle::packs::unity::encode_with(&d, &Default::default(), 1).unwrap();
     assert_eq!(f.applies().len(), 1);
     assert!(eval(&f) == d);
     let plain = bundle(&[("CAB-0123", &cab), ("other.resS", &ress)]);
-    assert!(aqr_bundle::packs::unity::encode_with(&plain, |_| aqr_formula::Kind::Unknown, 1).is_none());
+    assert!(aqr_bundle::packs::unity::encode_with(&plain, &Default::default(), 1).is_none());
 }
 
 /// A texture streamed from an offset so far that offset + size wraps: none taken.

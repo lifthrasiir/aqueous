@@ -721,7 +721,7 @@ formats! {
     /// are, known by its header: at the start of data only.
     UnityBundle = "unity-bundle" {
         recompressor: Cx(|d, _, opt, _, _| {
-            aqr_bundle::packs::unity::encode_with(d, crate::kind_by_name, opt.threads)
+            aqr_bundle::packs::unity::encode_with(d, &crate::hints::kinds(), opt.threads)
                 .or_else(|| crate::bundle::pack(aqr_bundle::packs::Pack::UnityBundle, d))
         }),
         // slices of the input, the blocks' table decompressed; the textures of its resource files'
@@ -773,7 +773,7 @@ formats! {
     /// start of data only.
     XactXwb = "xact-xwb" {
         recompressor: Cx(|d, _, _, _, _| {
-            aqr_bundle::packs::xact_xwb::encode_with(d, crate::kind_by_name)
+            aqr_bundle::packs::xact_xwb::encode_with(d, &crate::hints::kinds())
                 .or_else(|| crate::bundle::pack(aqr_bundle::packs::Pack::XactXwb, d))
         }),
         // slices of the input
@@ -866,7 +866,7 @@ formats! {
     /// their objects (aqr-bundle's `packs`): at the start of data only.
     UnityAssets = "unity-assets" {
         recompressor: Cx(|d, _, opt, _, _| {
-            aqr_bundle::packs::unity_assets::encode_with(d, crate::kind_by_name, opt.threads)
+            aqr_bundle::packs::unity_assets::encode_with(d, &crate::hints::kinds(), opt.threads)
                 .or_else(|| crate::bundle::pack(aqr_bundle::packs::Pack::UnityAssets, d))
         }),
         // the objects copied and the textures' coded streams, a texture coded at a time (aqr-tex

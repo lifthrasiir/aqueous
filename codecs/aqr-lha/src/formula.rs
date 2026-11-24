@@ -6,7 +6,7 @@
 //! whoever takes the formula may recompress them in turn and store them once where the same
 //! files are archived along with it.
 
-use aqr_formula::{Apply, Formula, Kind, Module, Node};
+use aqr_formula::{Apply, Formula, Kind, Kinds, Module, Node};
 
 use crate::lha::{self, Entry};
 use crate::lzh::Method;
@@ -57,12 +57,12 @@ pub struct Options {
     pub limit: u64,
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, limit: u64::MAX, kind: |_| Kind::Unknown }
+        Options { threads: 1, limit: u64::MAX, kind: Kinds::default() }
     }
 }
 
@@ -154,7 +154,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let (mut records, mut lens) = (Vec::new(), Vec::new());
     let mut inflated = 0;
     for (e, m) in a.entries.iter().zip(&mut made) {
-        let kind = (opt.kind)(&input[e.name.clone()]);
+        let kind = opt.kind.of(&input[e.name.clone()]);
         let put = |(data, ends): &mut (Vec<u8>, Vec<(Kind, usize)>), d: &[u8]| {
             data.extend_from_slice(d);
             ends.push((kind, data.len()));

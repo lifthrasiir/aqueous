@@ -8,7 +8,7 @@
 
 use aqr_bz2::module::StreamParams;
 use aqr_flate::formula::Derived;
-use aqr_formula::{Formula, Kind, Node};
+use aqr_formula::{Formula, Kind, Kinds, Node};
 
 use crate::alz::{self, BZIP2, DEFLATE, Entry, STORED};
 
@@ -40,18 +40,12 @@ pub struct Options {
     pub limit: u64,
     /// What an entry's contents are by its name: the contents of each [`Kind`] are a stream of
     /// their own, sliced in order. By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options {
-            threads: 1,
-            profile: aqr_flate::DEFAULT_PROFILE,
-            zlib: true,
-            limit: u64::MAX,
-            kind: |_| Kind::Unknown,
-        }
+        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, zlib: true, limit: u64::MAX, kind: Kinds::default() }
     }
 }
 
@@ -159,7 +153,7 @@ pub fn encode_with(
     let (mut records, mut lens, mut params) = (Vec::new(), Vec::new(), Vec::new());
     let mut inflated = 0;
     for (e, m) in a.entries.iter().zip(&mut made) {
-        let kind = (opt.kind)(&input[e.name.clone()]);
+        let kind = opt.kind.of(&input[e.name.clone()]);
         let put = |(data, ends): &mut (Vec<u8>, Vec<(Kind, usize)>), d: &[u8]| {
             data.extend_from_slice(d);
             ends.push((kind, data.len()));

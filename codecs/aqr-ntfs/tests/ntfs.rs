@@ -14,7 +14,10 @@ fn modules() -> aqr_decompress::Native {
 }
 
 fn encode(d: &[u8]) -> Option<Formula> {
-    formula::encode_with(d, &Options { file_systems: &[aqr_ntfs::FS], kind: |_| Kind::Unknown, ..Default::default() })
+    formula::encode_with(
+        d,
+        &Options { file_systems: &[aqr_ntfs::FS], kind: aqr_formula::Kinds::default(), ..Default::default() },
+    )
 }
 
 /// The files of `d` read, by name, with their contents and their extents.
@@ -114,7 +117,7 @@ fn damaged() {
 #[test]
 fn windows_volume() {
     let d = fixture("windows.vhd");
-    let opt = Options { file_systems: &[aqr_ntfs::FS], kind: |_| Kind::Unknown, ..Default::default() };
+    let opt = Options { file_systems: &[aqr_ntfs::FS], kind: aqr_formula::Kinds::default(), ..Default::default() };
     let files = aqr_disk::files(&d, opt.file_systems);
     let got = |name: &str| -> Option<(Vec<u8>, usize)> {
         let f = files.iter().find(|f| f.name == name.as_bytes())?;

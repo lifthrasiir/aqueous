@@ -608,7 +608,7 @@ fn contents_by_kind() {
     es.push(entry("image.png", text(2000)));
     es.push(Entry { method: 0, ..entry("tail.png", noise(3000)) });
     let d = archive(es).bytes();
-    let opt = Options { kind, ..Options::default() };
+    let opt = Options { kind: aqr_formula::Kinds::new(kind), ..Options::default() };
     let f = formula::encode_with(&d, &opt).unwrap().formula;
     let classes: Vec<_> = f.streams.iter().map(|s| (&*s.class, s.kind)).collect();
     assert_eq!(

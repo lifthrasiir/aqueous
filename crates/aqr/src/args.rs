@@ -99,6 +99,8 @@ pub(crate) struct Args {
     pub(crate) passphrase: bool,
     /// Compressing, what is left out of the inputs (`-x`).
     pub(crate) exclude: Exclude,
+    /// Compressing, the files of attributes given (`--attributes`, docs/hints-design.md).
+    pub(crate) attributes: Vec<PathBuf>,
     /// `--passphrase-from`: where `-P`'s passphrase is taken (implying it); of `--convert`, where
     /// the input's and `-P`'s are, as many as are needed (not implying `-P`).
     pub(crate) pass_from: Vec<pass::Source>,
@@ -266,6 +268,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         passphrase: false,
         pass_from: Vec::new(),
         exclude: Exclude::default(),
+        attributes: Vec::new(),
         each: false,
         select: None,
         names: names::Opts::default(),
@@ -434,6 +437,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             }
             "--each" => a.each = true,
             "-x" | "--exclude" => a.exclude.add(&value("-x")?)?,
+            "--attributes" => a.attributes.push(value("--attributes")?.into()),
             "--null" => null = true,
             "--files-from" => {
                 let from = value("--files-from")?;
@@ -654,6 +658,9 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     }
     if (!a.exclude.names.is_empty() || !a.exclude.paths.is_empty()) && (a.decompress || a.list || a.info) {
         return Err("-x is for compressing".into());
+    }
+    if !a.attributes.is_empty() && (a.decompress || a.list || a.info) {
+        return Err("--attributes is for compressing".into());
     }
     if a.dereference && (a.decompress || a.list) {
         return Err("-L is for compressing".into());

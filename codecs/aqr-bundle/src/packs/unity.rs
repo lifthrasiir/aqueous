@@ -124,7 +124,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
 /// serialized files taken apart in turn, as aqr-compress takes contents), the rest the stream
 /// `unity-bundle/rest`. None where no node has such textures (the bundle is then aqr-disk's
 /// formula).
-pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usize) -> Option<aqr_formula::Formula> {
+pub fn encode_with(d: &[u8], kind: &aqr_formula::Kinds, threads: usize) -> Option<aqr_formula::Formula> {
     use super::unity_assets;
     let mut nodes = files(d)?;
     let textures: Vec<_> = nodes

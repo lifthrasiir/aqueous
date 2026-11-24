@@ -5,7 +5,7 @@
 
 use aqr_formula::Formula;
 
-use crate::{Cx, Options, kind_by_name};
+use crate::{Cx, Options};
 
 pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     // (an archive `--lossy` rewrote: its bodies zlib's, their records a few bytes, which pays)
@@ -22,7 +22,7 @@ pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
         // (below level 3, no DEFLATE body rebuilt: files holding their data are made of them,
         // [`crate::inflated`])
         limit: if crate::inflated::on(opt) { 0 } else { cx.inflate_left() },
-        kind: kind_by_name,
+        kind: crate::hints::kinds(),
         probe: crate::probe(opt, depth).filter(|_| rewritten.is_none()),
         held: cx.held.clone().map(|h| {
             let except = h.owner(d);

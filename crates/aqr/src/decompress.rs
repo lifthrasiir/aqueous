@@ -793,6 +793,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
             overhead: None,
             contents,
             fallbacks: Vec::new(),
+            hints: Vec::new(),
             trace: rec.finish(),
         });
     }

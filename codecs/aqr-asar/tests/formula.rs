@@ -236,7 +236,7 @@ fn not_taken() {
 fn kinds() {
     let kind = |n: &[u8]| if n.ends_with(b".js") || n.ends_with(b".txt") { Kind::Text } else { Kind::Unknown };
     let d = pack(&tree(), Some(4 << 20));
-    let (f, _) = roundtrip_with(&d, &Options { kind, ..Default::default() });
+    let (f, _) = roundtrip_with(&d, &Options { kind: aqr_formula::Kinds::new(kind), ..Default::default() });
     let classes: Vec<&str> = f.streams.iter().map(|s| &s.class[..]).collect();
     assert_eq!(classes, ["raw", formula::HEADER, formula::INDEX, "asar/text"]);
     // package.json and the noise are raw, the text all the rest

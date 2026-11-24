@@ -8,7 +8,7 @@
 //! recompress them in turn and store them once where the same files are archived along with it.
 
 use aqr_flate::formula::Derived;
-use aqr_formula::{Apply, Formula, Kind, Node};
+use aqr_formula::{Apply, Formula, Kind, Kinds, Node};
 
 use crate::cab::{self, Cab, Folder};
 use crate::chm;
@@ -56,7 +56,7 @@ pub struct Options {
     pub limit: u64,
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
     /// Whether LZX folders are taken (by default, yes): their split is slow (a stream on one
     /// thread, about 22 MB/s of data) and an LZX CAB alone gains little.
     pub lzx: bool,
@@ -69,7 +69,7 @@ impl Default for Options {
             profile: aqr_flate::PROFILE.get(),
             zlib: aqr_flate::ZLIB.get(),
             limit: u64::MAX,
-            kind: |_| Kind::Unknown,
+            kind: Kinds::default(),
             lzx: true,
         }
     }
@@ -228,7 +228,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     for (i, m) in made.into_iter().enumerate() {
         let Some(m) = m else { continue };
         let folder = &c.folders[i];
-        let ends = file_ends(&c, i, m.data().len(), opt.kind);
+        let ends = file_ends(&c, i, m.data().len(), &opt.kind);
         for (k, b) in folder.blocks.iter().enumerate() {
             kept.extend_from_slice(&input[b.start..b.payload.start]);
             let k_len = b.payload.start - b.start;
@@ -340,7 +340,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
 
 /// The kinds of the contents of the files of folder `i` of `c` and their ends in its `len` bytes
 /// of data, gaps between them unknown; one unknown piece where they overlap or run past the data.
-fn file_ends(c: &Cab, i: usize, len: usize, kind: fn(&[u8]) -> Kind) -> Vec<(Kind, usize)> {
+fn file_ends(c: &Cab, i: usize, len: usize, kind: &Kinds) -> Vec<(Kind, usize)> {
     let mut files: Vec<&cab::File> = c.files_of(i).collect();
     files.sort_by_key(|f| f.offset);
     let mut ends = Vec::with_capacity(files.len() + 1);
@@ -353,7 +353,7 @@ fn file_ends(c: &Cab, i: usize, len: usize, kind: fn(&[u8]) -> Kind) -> Vec<(Kin
         if start > at {
             ends.push((Kind::Unknown, start));
         }
-        ends.push((kind(&f.name), end));
+        ends.push((kind.of(&f.name), end));
         at = end;
     }
     if at < len || ends.is_empty() {
@@ -434,7 +434,7 @@ pub fn encode_chm_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         if e.offset > at {
             ends.push((Kind::Unknown, e.offset as usize));
         }
-        ends.push(((opt.kind)(&e.name), end as usize));
+        ends.push((opt.kind.of(&e.name), end as usize));
         at = end;
     }
     if (at as usize) < z.len {

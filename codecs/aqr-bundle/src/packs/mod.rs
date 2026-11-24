@@ -15,7 +15,7 @@ pub mod cri_utf;
 mod ue;
 
 use aqr_disk::{Compressed, File};
-use aqr_formula::{Formula, Kind};
+use aqr_formula::{Formula, Kind, Kinds};
 
 /// The packs, each `Variant = "name", module;` (its reader `module::starts` and `module::files`):
 /// the enum, [`Pack::ALL`], [`Pack::name`], [`Pack::starts`] and [`Pack::files`].
@@ -132,20 +132,20 @@ pub fn detect(d: &[u8]) -> Option<Pack> {
 /// The formula of pack `d` of `pack`, the contents of its files of their kinds by `kind`
 /// (aqr-disk's [`aqr_disk::formula::Options::kind`]); None where it is not one, or no file of
 /// it has contents in it.
-pub fn encode_with(pack: Pack, d: &[u8], kind: fn(&[u8]) -> Kind) -> Option<Formula> {
+pub fn encode_with(pack: Pack, d: &[u8], kind: &Kinds) -> Option<Formula> {
     encode_files(pack, d, &pack.files(d)?, kind)
 }
 
 /// [`encode_with`] of `files` of `d`, as another file tells them (a VPK's archive, by its
 /// directory file: [`vpk::archive_files`]).
-pub fn encode_files(pack: Pack, d: &[u8], files: &[File], kind: fn(&[u8]) -> Kind) -> Option<Formula> {
+pub fn encode_files(pack: Pack, d: &[u8], files: &[File], kind: &Kinds) -> Option<Formula> {
     let pieces = aqr_disk::pieces(d, files);
     // (none where no file has contents, or one file is all of it: its contents would be the pack
     // again, detected again, without end, as a chunk of Unreal's starts as a file of chunks does)
     if !pieces.iter().any(|p| p.file.is_some()) || matches!(&pieces[..], [p] if p.file.is_some()) {
         return None;
     }
-    let opt = aqr_disk::formula::Options { kind, prefix: pack.name(), ..Default::default() };
+    let opt = aqr_disk::formula::Options { kind: kind.clone(), prefix: pack.name(), ..Default::default() };
     Some(aqr_disk::formula::build(d, files, &pieces, &opt))
 }
 
@@ -226,18 +226,18 @@ pub struct Pieces<'a> {
     d: &'a [u8],
     pub f: Formula,
     prefix: &'static str,
-    kind: fn(&[u8]) -> Kind,
+    kind: Kinds,
     rest: Vec<u8>,
     parts: Vec<aqr_formula::Node>,
     at: usize,
 }
 
 impl<'a> Pieces<'a> {
-    pub fn new(d: &'a [u8], prefix: &'static str, kind: fn(&[u8]) -> Kind) -> Pieces<'a> {
+    pub fn new(d: &'a [u8], prefix: &'static str, kind: &Kinds) -> Pieces<'a> {
         let mut f = Formula::default();
         f.push_content("raw", Kind::Unknown, Vec::new());
         f.push(aqr_disk::formula::rest(prefix), Vec::new());
-        Pieces { d, f, prefix, kind, rest: Vec::new(), parts: Vec::new(), at: 0 }
+        Pieces { d, f, prefix, kind: kind.clone(), rest: Vec::new(), parts: Vec::new(), at: 0 }
     }
 
     /// Where the pieces are up to.
@@ -263,7 +263,7 @@ impl<'a> Pieces<'a> {
     /// The bytes of `r` (from where the pieces are) a content of the kind of `name`.
     pub fn content(&mut self, name: &[u8], r: std::ops::Range<usize>) {
         self.rest_to(r.start);
-        let k = (self.kind)(name);
+        let k = self.kind.of(name);
         let class = match k {
             Kind::Unknown => "raw".to_string(),
             Kind::Format(n) => format!("{}/{n}", self.prefix),

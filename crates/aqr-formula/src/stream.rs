@@ -47,7 +47,7 @@ impl ByKind {
         let from = self.lens[k];
         self.writers[k].write(d);
         self.lens[k] += len;
-        let open = !matches!(kind, Kind::Format(_)) && len < self.own;
+        let open = !matches!(kind, Kind::Format(_) | Kind::Hint(_)) && len < self.own;
         match self.parts.last_mut() {
             _ if len == 0 => {}
             Some(p) if p.0 == k && p.3 && open => p.2 += len,
@@ -158,6 +158,39 @@ pub enum Kind {
     /// recompressor turns it down (but for the parts of it the recompressor tells, [`Region`]).
     /// A name not known is taken as [`Kind::Unknown`].
     Format(&'static str),
+    /// What the encoder was told of the data (aqr-compress's hints, docs/hints-design.md), by its
+    /// index in a table of the encoder's own: given by the encoder to a recompressor for the kinds
+    /// of its entries, it is the encoder's to take. Whoever does not know the table takes it as
+    /// [`Kind::Unknown`]; the archive encoder is not given it.
+    Hint(u32),
+}
+
+/// What the entries of an archive are by their names (paths in it), as a recompressor of
+/// archives is told: by default all of [`Kind::Unknown`].
+#[derive(Clone)]
+pub struct Kinds(std::sync::Arc<dyn Fn(&[u8]) -> Kind + Send + Sync>);
+
+impl Kinds {
+    pub fn new(f: impl Fn(&[u8]) -> Kind + Send + Sync + 'static) -> Kinds {
+        Kinds(std::sync::Arc::new(f))
+    }
+
+    /// The kind of the entry named `name`.
+    pub fn of(&self, name: &[u8]) -> Kind {
+        (self.0)(name)
+    }
+}
+
+impl Default for Kinds {
+    fn default() -> Kinds {
+        Kinds::new(|_| Kind::Unknown)
+    }
+}
+
+impl fmt::Debug for Kinds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Kinds")
+    }
 }
 
 impl fmt::Display for Kind {
@@ -170,6 +203,7 @@ impl fmt::Display for Kind {
             Kind::Table => f.write_str("table"),
             Kind::Compressed => f.write_str("compressed"),
             Kind::Format(name) => write!(f, "format={name}"),
+            Kind::Hint(_) => f.write_str("hint"),
         }
     }
 }

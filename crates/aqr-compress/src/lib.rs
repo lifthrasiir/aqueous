@@ -141,6 +141,7 @@ mod flate;
 mod formats;
 mod git;
 mod hdf5;
+mod hints;
 mod inflated;
 pub mod lossy;
 mod lzma;
@@ -189,6 +190,7 @@ pub use archive::{
 };
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
+pub use hints::Hints;
 pub use progress::Event;
 
 use aqr_archive::Evaluate;

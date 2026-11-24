@@ -164,6 +164,9 @@ pub enum Nest {
     /// recompressor takes it, as [`Nest::Scan`] would, the data after it scanned; else looked
     /// into by its parts where the recompressor tells them ([`Region`]), or kept raw.
     As(Format),
+    /// As the hint of [`Kind::Hint`] of this index tells ([`crate::hints::made`]): as data of the
+    /// format told where its recompressor takes it, else as it would be without the hint.
+    Hint(u32),
 }
 
 impl Nest {
@@ -178,6 +181,7 @@ impl Nest {
             Kind::Text => Some(Nest::As(Format::Text)),
             Kind::Pixels | Kind::Font | Kind::Table | Kind::Compressed => None,
             Kind::Format(name) => Some(Format::from_name(name).map_or(self, Nest::As)),
+            Kind::Hint(i) => crate::hints::nest(i, self),
         }
     }
 }

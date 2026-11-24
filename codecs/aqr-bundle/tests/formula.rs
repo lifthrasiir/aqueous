@@ -272,7 +272,10 @@ fn concatenated_cpio() {
 #[test]
 fn kinds() {
     let d = fixture("py-gnu.tar");
-    let opt = Options { kind: |n| if n.ends_with(b".txt") { Kind::Text } else { Kind::Unknown }, ..Options::default() };
+    let opt = Options {
+        kind: aqr_formula::Kinds::new(|n: &[u8]| if n.ends_with(b".txt") { Kind::Text } else { Kind::Unknown }),
+        ..Options::default()
+    };
     let (f, _) = roundtrip_with(&d, &opt);
     let classes: Vec<&str> = f.streams.iter().map(|s| &s.class[..]).collect();
     assert_eq!(classes, ["raw", "bundle/layout", "bundle/text"]);

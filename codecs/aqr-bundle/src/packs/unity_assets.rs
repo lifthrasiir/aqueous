@@ -519,7 +519,7 @@ pub fn texture(o: &[u8], engine: (u32, u32), big: bool) -> Option<Texture> {
 /// (and the headers, the table, the padding) the stream `unity-assets/rest`, stream 1 (as
 /// aqr-disk's formula has it), the other objects contents of their kinds by `kind`, a stream
 /// each. None where no texture's blocks are in it (the file is then aqr-disk's formula).
-pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind, threads: usize) -> Option<aqr_formula::Formula> {
+pub fn encode_with(d: &[u8], kind: &aqr_formula::Kinds, threads: usize) -> Option<aqr_formula::Formula> {
     let o = objects(d)?;
     let mut objects: Vec<(Object, Option<Texture>)> = o
         .objects
@@ -583,7 +583,7 @@ pub fn encode_resource(
     textures: &[(std::ops::Range<u64>, Pixels)],
     threads: usize,
 ) -> Option<aqr_formula::Formula> {
-    let mut p = super::Pieces::new(d, "unity-ress", |_| aqr_formula::Kind::Unknown);
+    let mut p = super::Pieces::new(d, "unity-ress", &Default::default());
     (resource_pieces(&mut p, 0..d.len(), textures, threads) > 0).then(|| p.finish())
 }
 

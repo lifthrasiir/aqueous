@@ -88,7 +88,7 @@ fn solid_contents_by_kind() {
     let a = egg::parse(&d).unwrap();
     assert!(a.solid && a.entries.len() == 2 && a.entries[0].blocks.is_empty());
     let opt = formula::Options {
-        kind: |n| if n.ends_with(b"2.txt") { Kind::Compressed } else { Kind::Unknown },
+        kind: aqr_formula::Kinds::new(|n| if n.ends_with(b"2.txt") { Kind::Compressed } else { Kind::Unknown }),
         ..Default::default()
     };
     let f = formula::encode_with(&d, &opt, &mut |_, _, _| true).unwrap().formula;

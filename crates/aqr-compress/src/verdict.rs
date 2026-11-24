@@ -31,6 +31,10 @@ pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
     let look = |kind| match Nest::Scan.of(kind) {
         None | Some(Nest::As(Format::Text)) => Look::No,
         Some(Nest::As(f)) if !f.is_bundle() => Look::Whole,
+        Some(Nest::Hint(i)) => match crate::hints::get(i).format {
+            crate::hints::Told::As(f) if !f.is_bundle() => Look::Whole,
+            _ => Look::Scan,
+        },
         Some(_) => Look::Scan,
     };
     let starts = |d: &[u8]| detect(d).is_some();

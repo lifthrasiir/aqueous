@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use aqr_flate::formula::Derived;
 use aqr_flate::{Hints, Parsed};
 use aqr_formula::probe::{self, Held, Probe};
-use aqr_formula::{ByKind, Bytes, Formula, Kind, Module, Node};
+use aqr_formula::{ByKind, Bytes, Formula, Kind, Kinds, Module, Node};
 
 use crate::layout::{self, Made, Writer};
 use crate::zip::{self, DEFLATED, ENCRYPTED, Rec, STORED};
@@ -53,7 +53,7 @@ pub struct Options {
     /// What an entry's contents are by its name (in the local header): the contents of each
     /// [`Kind`] are a stream of their own (those of [`Kind::Unknown`] the stream `raw`, the
     /// others after the four inputs), sliced in order. By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
     /// Where given, the DEFLATE bodies of at least [`PROBE_MIN`] bytes are rebuilt from their
     /// data only where the probe tells that it may pay (their contents of the kind of their
     /// names); the others are kept as they are. By default all are rebuilt.
@@ -72,7 +72,7 @@ impl Default for Options {
             zlib: aqr_flate::ZLIB.get(),
             params: None,
             limit: u64::MAX,
-            kind: |_| Kind::Unknown,
+            kind: Kinds::default(),
             probe: None,
             held: None,
         }
@@ -219,7 +219,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             parsed.into_iter().collect::<Option<_>>()?;
         if let Some(probe) = &opt.probe {
             let enc = (probe.archiver)(opt.threads);
-            let kinds: Vec<Kind> = jobs.iter().map(|&(i, _)| (opt.kind)(&input[locals[i].name.clone()])).collect();
+            let kinds: Vec<Kind> = jobs.iter().map(|&(i, _)| opt.kind.of(&input[locals[i].name.clone()])).collect();
             // what each holds of the others of its kind, for each kind once where asked
             let shares: RefCell<Vec<Option<f64>>> = RefCell::new(vec![None; jobs.len()]);
             let shared = |j: usize| {
@@ -384,7 +384,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             Rec::Local(_) => {
                 let (((l, m), body), crc) = locals.next().unwrap();
                 w.local(l, m, crc);
-                let kind = (opt.kind)(&input[l.name.clone()]);
+                let kind = opt.kind.of(&input[l.name.clone()]);
                 match (m, body.take()) {
                     (Made::Stored, _) => {
                         stored.add(kind, &input[l.body.clone()]);

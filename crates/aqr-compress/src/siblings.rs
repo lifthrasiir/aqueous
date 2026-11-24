@@ -21,7 +21,7 @@ use aqr_disk::File;
 use aqr_formula::{Formula, Kind};
 
 use crate::archive::Source;
-use crate::{Cx, Format, Options, kind_by_name};
+use crate::{Cx, Format, Options};
 
 /// What a content is planned to be taken apart into.
 pub(crate) enum Planned {
@@ -134,9 +134,9 @@ pub(crate) fn plan<S: Source + ?Sized>(src: &S) -> Plan {
 /// The formula of a content planned ([`plan`]); else of a VPK's directory file.
 pub(crate) fn encode(d: &[u8], _: Kind, opt: &Options, _: u32, cx: &Cx) -> Option<Formula> {
     match cx.siblings.as_ref().and_then(|p| p.get(d)) {
-        Some(Planned::Vpk(files)) => aqr_bundle::packs::encode_files(Pack::SourceVpk, d, files, kind_by_name),
+        Some(Planned::Vpk(files)) => aqr_bundle::packs::encode_files(Pack::SourceVpk, d, files, &crate::hints::kinds()),
         Some(Planned::Ress(textures)) => unity_assets::encode_resource(d, textures, opt.threads),
-        None => aqr_bundle::packs::encode_with(Pack::SourceVpk, d, kind_by_name),
+        None => aqr_bundle::packs::encode_with(Pack::SourceVpk, d, &crate::hints::kinds()),
     }
 }
 

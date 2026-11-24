@@ -82,6 +82,12 @@ pub trait Source: Sync {
     /// A name telling the kind of content `c` ([`kind_by_name`]), and its order.
     fn name(&self, c: usize) -> &[u8];
 
+    /// The kind of content `c`: by its name ([`kind_by_name`]), or of the hints its attributes
+    /// give ([`crate::Hints::kind`]).
+    fn kind(&self, c: usize) -> Kind {
+        kind_by_name(self.name(c))
+    }
+
     /// Bytes of content `c`, as it is to be read (for the batches: it may be read otherwise).
     fn size(&self, c: usize) -> u64;
 
@@ -893,7 +899,7 @@ impl Reader {
             let d = src.read(c)?;
             let hash = xxhash_rust::xxh3::xxh3_128(&d);
             let f = (!first.contains_key(&(hash, d.len())))
-                .then(|| File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c)));
+                .then(|| File::of(c, &d, hash, src.kind(c), cx.entries.contains(&c)));
             Ok::<_, io::Error>((d, hash, f))
         });
         let mut files: Vec<File> = Vec::with_capacity(batch.len());
@@ -1147,7 +1153,7 @@ impl Writer {
                 let c = again[k];
                 let d = src.read(c)?;
                 let hash = xxhash_rust::xxh3::xxh3_128(&d);
-                let mut f = File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c));
+                let mut f = File::of(c, &d, hash, src.kind(c), cx.entries.contains(&c));
                 f.rewritten = cx.rewritten(c);
                 Ok::<_, io::Error>((d, f))
             });
@@ -2319,6 +2325,7 @@ fn laid(mut f: Formula, files: &[File], enc: aqr_archive::Encoder, memo: verify:
     // the streams of a class together, within a block each; but those that do not compress,
     // which would gain nothing and only make a file read alone read more, unless they compress
     // after others of their class and kind ([`kin`])
+    crate::hints::settle(&mut f);
     let merge_probe = MERGE_PROBE.get();
     let probed: Vec<usize> = (0..f.streams.len())
         .filter(|&s| f.streams[s].kind != Kind::Compressed && f.streams[s].data.len() >= merge_probe)

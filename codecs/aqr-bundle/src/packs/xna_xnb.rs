@@ -141,7 +141,7 @@ pub fn files(d: &[u8]) -> Option<Vec<File>> {
 /// The formula of `d`: its mipmaps' pixels or its samples rebuilt, the rest the stream
 /// `xna-xnb/rest`. None where it holds no asset taken.
 pub fn encode_with(d: &[u8], threads: usize) -> Option<aqr_formula::Formula> {
-    let mut p = super::Pieces::new(d, "xna-xnb", |_| aqr_formula::Kind::Unknown);
+    let mut p = super::Pieces::new(d, "xna-xnb", &Default::default());
     match asset(d)? {
         Asset::Texture(mips) => {
             for (r, pixels) in mips {

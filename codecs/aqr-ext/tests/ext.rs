@@ -1,6 +1,6 @@
 use aqr_archive::Evaluate;
 use aqr_disk::formula::{self, Options};
-use aqr_formula::{Formula, Kind};
+use aqr_formula::Formula;
 
 /// Fixture `name` of tests/data (`scripts/gen-fixtures.sh`), decompressed.
 fn fixture(name: &str) -> Vec<u8> {
@@ -13,7 +13,10 @@ fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 }
 
 fn encode(d: &[u8]) -> Option<Formula> {
-    formula::encode_with(d, &Options { file_systems: &[aqr_ext::FS], kind: |_| Kind::Unknown, ..Default::default() })
+    formula::encode_with(
+        d,
+        &Options { file_systems: &[aqr_ext::FS], kind: aqr_formula::Kinds::default(), ..Default::default() },
+    )
 }
 
 /// The files of `d` read, by name, with their contents and their extents.

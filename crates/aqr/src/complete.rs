@@ -116,6 +116,7 @@ pub const OPTIONS: &[Opt] = &[
     many(None, Some("rename"), Value::File, "archive the input before (extract or move the path before) at TO"),
     many(Some('x'), Some("exclude"), Value::Text, "leave out the entries of NAME, or of a path"),
     many(None, Some("files-from"), Value::File, "the inputs listed in FILE"),
+    many(None, Some("attributes"), Value::File, "hints by path in FILE, as .aqr/attributes gives them"),
     opt(None, Some("null"), Value::None, "the lists of --files-from ended by NUL"),
     opt(Some('L'), Some("dereference"), Value::None, "follow links, archiving what they lead to"),
     opt(None, Some("format"), Value::Of(formats), "the format of the archives made"),

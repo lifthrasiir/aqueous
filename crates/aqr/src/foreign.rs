@@ -200,6 +200,7 @@ pub(crate) fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_un
             overhead: None,
             contents,
             fallbacks: Vec::new(),
+            hints: Vec::new(),
             trace: rec.finish(),
         });
     }

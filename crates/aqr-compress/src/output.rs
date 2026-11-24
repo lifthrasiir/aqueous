@@ -318,6 +318,7 @@ pub(crate) fn compress_with(
     let _item = aqr_common::trace::item(Some(0));
     let analyzing = aqr_common::trace::span("analyze");
     let mut f = recompress_at(d, opt, 0, kind, &cx);
+    crate::hints::settle(&mut f);
     // (what the file's parts hold of each other, as a batch's files: the same body in two ZIP
     // archives in a tar archive, say)
     f.share_slices(archive::SLICE_MIN.get());

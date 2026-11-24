@@ -1095,8 +1095,11 @@ fn taken_beside_sets() {
         files.push(aqr_disk::File { name: name.to_vec(), extents: vec![span.clone()], rank: 0, compressed: None });
         pieces.push(aqr_disk::Piece { span, file: Some((i, 0)) });
     }
-    let opt =
-        aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
+    let opt = aqr_disk::formula::Options {
+        file_systems: bundle::FILE_SYSTEMS,
+        kind: aqr_formula::Kinds::new(kind_by_name),
+        ..Default::default()
+    };
     let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
     let opt = Options { threads: 2, shared_modules: true, ..Options::default() };
     let cx = Cx::new(&d, &opt);
@@ -1360,8 +1363,11 @@ fn files_in_pieces_taken() {
         aqr_disk::File { name: b"t.txt".to_vec(), extents: vec![t..e], rank: 0, compressed: None },
     ];
     let pieces = aqr_disk::pieces(&d, &files);
-    let opt =
-        aqr_disk::formula::Options { file_systems: bundle::FILE_SYSTEMS, kind: kind_by_name, ..Default::default() };
+    let opt = aqr_disk::formula::Options {
+        file_systems: bundle::FILE_SYSTEMS,
+        kind: aqr_formula::Kinds::new(kind_by_name),
+        ..Default::default()
+    };
     let mut f = aqr_disk::formula::build(&d, &files, &pieces, &opt);
     assert_eq!(f.shared.len(), 1);
     let opt = Options { threads: 2, shared_modules: true, ..Options::default() };

@@ -28,7 +28,7 @@ fn check(pack: Pack, d: &[u8]) -> bool {
             assert!(e.start <= e.end && e.end <= d.len(), "{} extent {e:?} of {}", pack.name(), d.len());
         }
     }
-    if let Some(f) = packs::encode_with(pack, d, kind) {
+    if let Some(f) = packs::encode_with(pack, d, &aqr_formula::Kinds::new(kind)) {
         assert!(f.eval(&none).unwrap() == d, "{} formula", pack.name());
     }
     true
@@ -245,7 +245,7 @@ fn quake_pak(files: &[(&str, u32, u32)], data: &[u8]) -> Vec<u8> {
 }
 
 fn rebuilds(p: Pack, d: &[u8]) -> Option<usize> {
-    let f = packs::encode_with(p, d, kind)?;
+    let f = packs::encode_with(p, d, &aqr_formula::Kinds::new(kind))?;
     assert!(f.eval(&none).unwrap() == d);
     let c = aqr_archive::encode(&f, None, aqr_archive::Level::LOW).unwrap();
     let runner = aqr_archive::natives(&[], &none);
@@ -289,7 +289,7 @@ fn a_pack_whose_one_file_is_a_pack() {
     assert_eq!(whole.len(), 12 + 4 + 64);
     assert!(Pack::QuakePak.starts(&whole));
     assert_eq!(Pack::QuakePak.files(&whole).unwrap().len(), 1);
-    assert!(packs::encode_with(Pack::QuakePak, &whole, kind).is_none());
+    assert!(packs::encode_with(Pack::QuakePak, &whole, &aqr_formula::Kinds::new(kind)).is_none());
     let outer = quake_pak(&[("inner.pak", 12, inner.len() as u32), ("y", 12, 3)], &inner);
     assert_eq!(packs::detect(&outer), Some(Pack::QuakePak));
     let files = Pack::QuakePak.files(&outer).unwrap();

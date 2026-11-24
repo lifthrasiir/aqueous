@@ -11,7 +11,7 @@
 use aqr_bz2::Framing;
 use aqr_bz2::module::StreamParams;
 use aqr_flate::formula::Derived;
-use aqr_formula::{Formula, Kind, Node};
+use aqr_formula::{Formula, Kind, Kinds, Node};
 use aqr_lzma::{lzma, recons};
 
 use crate::egg::{self, AZO, BZIP2, Block, DEFLATE, Egg, LZMA, LZMA_HEADER, STORED};
@@ -44,18 +44,12 @@ pub struct Options {
     pub limit: u64,
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options {
-            threads: 1,
-            profile: aqr_flate::DEFAULT_PROFILE,
-            zlib: true,
-            limit: u64::MAX,
-            kind: |_| Kind::Unknown,
-        }
+        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, zlib: true, limit: u64::MAX, kind: Kinds::default() }
     }
 }
 
@@ -146,11 +140,11 @@ fn take_lzma(body: &[u8], size: u32, threads: usize) -> Option<Made> {
 /// The kinds of the contents of each block, by the names of their files: the ends of the
 /// contents of each kind in the block's data. The block of a solid archive holds the files before
 /// it that have none of their own too, where their sizes add up to its size.
-fn kinds(a: &Egg, input: &[u8], kind: fn(&[u8]) -> Kind) -> Vec<Vec<(Kind, usize)>> {
+fn kinds(a: &Egg, input: &[u8], kind: &Kinds) -> Vec<Vec<(Kind, usize)>> {
     let mut out = Vec::new();
     let mut pending: Vec<usize> = Vec::new();
     for (i, e) in a.entries.iter().enumerate() {
-        let k = kind(&input[e.name.clone()]);
+        let k = kind.of(&input[e.name.clone()]);
         if e.blocks.is_empty() {
             pending.push(i);
             continue;
@@ -164,7 +158,7 @@ fn kinds(a: &Egg, input: &[u8], kind: fn(&[u8]) -> Kind) -> Vec<Vec<(Kind, usize
                     let mut at = 0;
                     for (&p, s) in pending.iter().zip(sizes).filter(|(_, s)| *s > 0) {
                         at += s as usize;
-                        ends.push((kind(&input[a.entries[p].name.clone()]), at));
+                        ends.push((kind.of(&input[a.entries[p].name.clone()]), at));
                     }
                 }
             }
@@ -257,7 +251,7 @@ pub fn encode_with(
         return None;
     }
 
-    let kinds = kinds(&a, input, opt.kind);
+    let kinds = kinds(&a, input, &opt.kind);
     let mut f = Formula::default();
     f.push("egg", Vec::new());
     // the contents of each method's blocks with their kinds and ends; the records and their

@@ -37,7 +37,7 @@ fn main() {
             }
         }
         let checked = match d.len() <= 2 << 30 {
-            true => match packs::encode_with(pack, &d, |_| aqr_formula::Kind::Unknown) {
+            true => match packs::encode_with(pack, &d, &Default::default()) {
                 Some(f) => {
                     if f.eval(&none).is_ok_and(|e| e == d) {
                         "rebuilt"

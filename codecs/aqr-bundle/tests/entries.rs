@@ -105,7 +105,7 @@ fn run(pack: Pack, build: fn(Entries) -> Vec<u8>) {
         assert!(pack.starts(&d), "{} {i}", pack.name());
         within(LIMIT, || {
             assert!(check(pack, &d), "{} {i} read", pack.name());
-            if let Some(f) = packs::encode_with(pack, &d, kind) {
+            if let Some(f) = packs::encode_with(pack, &d, &aqr_formula::Kinds::new(kind)) {
                 rebuilds(&f, &d);
             }
         })

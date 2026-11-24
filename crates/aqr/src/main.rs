@@ -22,6 +22,10 @@
 //!   end), with what is under them ([`Exclude`]); as given, no wildcards. `--files-from FILE`
 //!   takes the inputs (decompressing, the paths of the archive) listed in `FILE` (`-`: standard
 //!   input) where it is given, a line each, or ended by NUL each after `--null`.
+//! - `--attributes FILE`: compressing, hints by path (docs/hints-design.md) in `FILE`, before
+//!   those of the `.aqr/attributes` of each input that is a directory and of the
+//!   `.gitattributes` under it ([`attributes`]): its patterns from the root of each input, the
+//!   files its values name from its own directory.
 //! - `-L` (`--dereference`), as bsdtar's: compressing, the links given and found followed, each
 //!   archived (at its own name) as what it leads to, read there; a link leading nowhere, or to a
 //!   directory it is in, kept as a link and told. Without it a link is archived as a link, one
@@ -296,6 +300,7 @@ macro_rules! eprint {
 
 mod append;
 mod args;
+mod attributes;
 mod complete;
 mod compress;
 mod convert;
@@ -406,6 +411,8 @@ Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
       --files-from FILE the inputs (or decompressing, PATHs) listed in FILE (- standard
                         input), a line each
       --null            the lists of --files-from after it ended by NUL each, not lines
+      --attributes FILE hints by path in FILE (as an input's .aqr/attributes, before it;
+                        its patterns from the root of each input)
   -L, --dereference     follow links (given or found), archiving what they lead to;
                         those leading nowhere or to a directory they are in kept
       --format FORMAT   aqr (the default), zip, 7z, alz, egg, tar, tar.gz, tar.bz2,

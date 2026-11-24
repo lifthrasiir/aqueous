@@ -62,7 +62,7 @@ fn fixtures_rebuilt() {
 #[test]
 fn contents_by_kind() {
     let d = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/unix_h0_lh5.lzh")).unwrap();
-    let opt = formula::Options { threads: 2, kind: |_| Kind::Text, ..Default::default() };
+    let opt = formula::Options { threads: 2, kind: aqr_formula::Kinds::new(|_| Kind::Text), ..Default::default() };
     let e = formula::encode_with(&d, &opt).unwrap();
     assert_eq!(e.inflated, 18092);
     assert!(e.formula.streams.iter().any(|s| s.kind == Kind::Text && s.data.len() == 18092));

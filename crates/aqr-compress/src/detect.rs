@@ -1,6 +1,7 @@
 //! Picking a recompressor by the magic bytes at the start of the data, and what data is by
 //! the name of its file ([`kind_by_name`]).
 
+use std::cell::Cell;
 use std::fmt;
 use std::sync::LazyLock;
 
@@ -72,9 +73,40 @@ static OFF: LazyLock<[bool; Format::ALL.len()]> =
 /// the first row of [`ROWS`] that tells it (of those looked for there).
 fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     let off = &*OFF;
+    let not = NOT.with(Cell::get);
     ROWS.iter()
-        .find(|r| (start || r.anywhere.is_some()) && !off[r.format as usize] && r.test.holds(d))
+        .find(|r| {
+            (start || r.anywhere.is_some())
+                && !off[r.format as usize]
+                && (not == 0 || not >> r.format as usize & 1 == 0)
+                && r.test.holds(d)
+        })
         .map(|r| r.format)
+}
+
+const _: () = assert!(Format::ALL.len() <= 128, "formats of a mask of 128 bits");
+
+thread_local! {
+    /// The formats not recognised on this thread ([`without`]), a bit for each.
+    static NOT: Cell<u128> = const { Cell::new(0) };
+}
+
+/// What `f` gives, `formats` not recognised by their bytes meanwhile on this thread (a hint's
+/// `aqr-not`, [`crate::hints`]): data of them is taken as of no format, or of another that tells it.
+pub(crate) fn without<T>(formats: &[Format], f: impl FnOnce() -> T) -> T {
+    let mask = formats.iter().fold(0u128, |m, &f| m | 1 << f as usize);
+    if mask == 0 {
+        return f();
+    }
+    let outer = NOT.with(|n| n.replace(n.get() | mask));
+    struct Back(u128);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            NOT.with(|n| n.set(self.0));
+        }
+    }
+    let _back = Back(outer);
+    f()
 }
 
 /// How a row of [`ROWS`] tells a file of its format.

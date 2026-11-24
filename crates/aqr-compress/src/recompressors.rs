@@ -187,7 +187,7 @@ pub(crate) fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
         profile,
         zlib: aqr_flate::ZLIB.get(),
         limit: cx.inflate_left(),
-        kind: kind_by_name,
+        kind: crate::hints::kinds(),
     };
     let e = aqr_alz::formula::encode_with(d, &o, &mut bz2_pays(d, opt, depth, cx.held.as_deref()))?;
     cx.inflate(e.inflated);
@@ -222,7 +222,7 @@ pub(crate) fn egg(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
         profile,
         zlib: aqr_flate::ZLIB.get(),
         limit: cx.inflate_left(),
-        kind: kind_by_name,
+        kind: crate::hints::kinds(),
     };
     let e = aqr_egg::formula::encode_with(d, &o, &mut bz2_pays(d, opt, depth, cx.held.as_deref()))?;
     cx.inflate(e.inflated);
@@ -234,7 +234,7 @@ pub(crate) fn egg(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
 /// ([`kind_by_name`]). Its streams decode within what is left of the budget
 /// ([`Options::expansion`]).
 pub(crate) fn lha(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    let o = aqr_lha::formula::Options { threads: opt.threads, limit: cx.inflate_left(), kind: kind_by_name };
+    let o = aqr_lha::formula::Options { threads: opt.threads, limit: cx.inflate_left(), kind: crate::hints::kinds() };
     let e = aqr_lha::formula::encode_with(d, &o)?;
     cx.inflate(e.inflated);
     Some(e.formula)
@@ -248,7 +248,7 @@ pub(crate) fn rar(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let o = aqr_rar::formula::Options {
         threads: opt.threads,
         limit: cx.inflate_left(),
-        kind: kind_by_name,
+        kind: crate::hints::kinds(),
         ppmd: ppmd_on(opt),
     };
     let e = aqr_rar::formula::encode_with(d, &o)?;
@@ -264,7 +264,7 @@ pub(crate) fn sevenz(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let o = aqr_7z::formula::Options {
         threads: opt.threads,
         limit: cx.inflate_left(),
-        kind: kind_by_name,
+        kind: crate::hints::kinds(),
         ..Default::default()
     };
     let e = aqr_7z::formula::encode_with(d, &o)?;
@@ -283,7 +283,7 @@ pub(crate) fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
         profile,
         zlib: aqr_flate::ZLIB.get(),
         limit: cx.inflate_left(),
-        kind: kind_by_name,
+        kind: crate::hints::kinds(),
         lzx: lzx_on(opt),
     };
     let e = aqr_mszip::formula::encode_with(d, &o)?;
@@ -298,7 +298,7 @@ pub(crate) fn chm(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let o = aqr_mszip::formula::Options {
         threads: opt.threads,
         limit: cx.inflate_left(),
-        kind: kind_by_name,
+        kind: crate::hints::kinds(),
         ..Default::default()
     };
     let e = aqr_mszip::formula::encode_chm_with(d, &o)?;

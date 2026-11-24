@@ -2,7 +2,7 @@
 //! rebuilt from the contents of its members and its layout. `FORMAT.md` specifies it. The
 //! contents may be recompressed in turn.
 
-use aqr_formula::{Formula, Kind, Module, Node};
+use aqr_formula::{Formula, Kind, Kinds, Module, Node};
 
 use crate::layout::{self, Rec, Role, Writer};
 use crate::{ar, cpio, tar};
@@ -78,14 +78,14 @@ pub struct Options {
     /// What a member's contents are by its name: the contents of each [`Kind`] are a stream of
     /// their own (those of [`Kind::Unknown`] the stream `raw`, the others after the layout),
     /// sliced in order. By default all are unknown. Symbol tables are [`Kind::Table`].
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
     /// Bodies of at least this many bytes are slices of their own; by default [`OWN_MIN`].
     pub own: usize,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { kind: |_| Kind::Unknown, own: OWN_MIN.get() }
+        Options { kind: Kinds::default(), own: OWN_MIN.get() }
     }
 }
 
@@ -109,7 +109,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
         data.extend_from_slice(&input[span.clone()]);
         let kind = match role {
             Role::Table => Kind::Table,
-            _ => (opt.kind)(&recs[*i].body().expect("a member").name),
+            _ => opt.kind.of(&recs[*i].body().expect("a member").name),
         };
         kinds.push((kind, data.len()));
     }

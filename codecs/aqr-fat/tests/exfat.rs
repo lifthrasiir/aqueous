@@ -1,5 +1,5 @@
 use aqr_archive::Evaluate;
-use aqr_formula::{Apply, Formula, Kind};
+use aqr_formula::{Apply, Formula};
 
 fn fixture(name: &str) -> Vec<u8> {
     let z = std::fs::read(format!("{}/tests/data/{name}.img.zst", env!("CARGO_MANIFEST_DIR"))).unwrap();
@@ -13,7 +13,11 @@ fn none(_: &Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 fn encode(d: &[u8]) -> Option<Formula> {
     aqr_disk::formula::encode_with(
         d,
-        &aqr_disk::formula::Options { file_systems: &[aqr_fat::EXFAT], kind: |_| Kind::Unknown, ..Default::default() },
+        &aqr_disk::formula::Options {
+            file_systems: &[aqr_fat::EXFAT],
+            kind: aqr_formula::Kinds::default(),
+            ..Default::default()
+        },
     )
 }
 

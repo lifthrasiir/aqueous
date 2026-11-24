@@ -138,7 +138,7 @@ fn contiguous_flood() {
     }
     let opt = aqr_disk::formula::Options {
         file_systems: &[aqr_fat::EXFAT],
-        kind: |_| aqr_formula::Kind::Unknown,
+        kind: aqr_formula::Kinds::default(),
         ..Default::default()
     };
     let f = within(Duration::from_secs(20), || aqr_disk::formula::encode_with(&d, &opt)).unwrap();

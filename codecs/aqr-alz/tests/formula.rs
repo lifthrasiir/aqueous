@@ -67,7 +67,9 @@ fn fixtures_rebuilt() {
 fn contents_by_kind() {
     let d = &fixtures().into_iter().find(|f| f.0 == "deflate_empty").unwrap().1;
     let opt = formula::Options {
-        kind: |n| if n.ends_with(b".gz") { aqr_formula::Kind::Compressed } else { aqr_formula::Kind::Unknown },
+        kind: aqr_formula::Kinds::new(|n| {
+            if n.ends_with(b".gz") { aqr_formula::Kind::Compressed } else { aqr_formula::Kind::Unknown }
+        }),
         ..Default::default()
     };
     let f = formula::encode_with(d, &opt, &mut |_, _, _| true).unwrap().formula;

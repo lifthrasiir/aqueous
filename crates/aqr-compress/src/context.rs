@@ -87,6 +87,8 @@ pub(crate) struct Cx {
     /// Bytes of the formulas kept beside their data so far, of at most [`Cx::defer_budget`].
     pub(crate) kept_beside: Cell<usize>,
     pub(crate) defer_budget: usize,
+    /// The data (where it is) of a hint being made, and the hint ([`crate::hints::within`]).
+    pub(crate) within: Cell<Option<(usize, u32)>>,
 }
 
 /// A decoding a recompressor asks to be undone ([`undo`]): the application at `coded` of the data,
@@ -234,6 +236,7 @@ impl Cx {
             closed: Cell::new(None),
             kept_beside: Cell::new(0),
             defer_budget: (n as f64 * DEFER_BUDGET.get().max(0.0)) as usize,
+            within: Cell::new(None),
         }
     }
 

@@ -38,7 +38,7 @@ pub fn check(pack: Pack, d: &[u8]) -> bool {
             assert!(e.start <= e.end && e.end <= d.len(), "{} extent {e:?} of {}", pack.name(), d.len());
         }
     }
-    if let Some(f) = packs::encode_with(pack, d, kind) {
+    if let Some(f) = packs::encode_with(pack, d, &aqr_formula::Kinds::new(kind)) {
         assert!(f.eval(&none).unwrap() == d, "{} formula", pack.name());
     }
     true

@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use aqr_bcj::bcj2;
 use aqr_bcj::formula::{self as bcj, Filter};
-use aqr_formula::{Apply, Formula, Kind, Node};
+use aqr_formula::{Apply, Formula, Kind, Kinds, Node};
 use aqr_lzma::formula::{self as lz, LIMIT};
 use aqr_lzma::{lzma, lzma2, recons};
 
@@ -36,14 +36,14 @@ pub struct Options {
     pub limit: u64,
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
     /// Contents of at least this many bytes are slices of their own; by default [`OWN_MIN`].
     pub own: usize,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, limit: u64::MAX, kind: |_| Kind::Unknown, own: OWN_MIN.get() }
+        Options { threads: 1, limit: u64::MAX, kind: Kinds::default(), own: OWN_MIN.get() }
     }
 }
 
@@ -379,7 +379,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                 .enumerate()
                 .map(|(k, &n)| {
                     end += n as usize;
-                    (names.get(firsts[i] + k).map_or(Kind::Unknown, |n| (opt.kind)(n)), end)
+                    (names.get(firsts[i] + k).map_or(Kind::Unknown, |n| opt.kind.of(n)), end)
                 })
                 .collect();
             if ends.is_empty() {

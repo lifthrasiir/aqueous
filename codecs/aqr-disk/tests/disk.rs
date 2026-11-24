@@ -69,7 +69,7 @@ fn options() -> Options {
         true => Kind::Text,
         false => Kind::Unknown,
     };
-    Options { file_systems: &[TOY], kind, ..Default::default() }
+    Options { file_systems: &[TOY], kind: aqr_formula::Kinds::new(kind), ..Default::default() }
 }
 
 fn none(_: &aqr_formula::Apply, _: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {

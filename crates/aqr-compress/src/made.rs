@@ -73,7 +73,7 @@ fn made_by(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Opti
     f.map(|f| Made { f, gaps: None, close })
 }
 
-fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
+pub(crate) fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
     // (the data of a DEFLATE stream archived along with it, kept as it is: made of it)
     if depth < opt.depth
         && let Some(f) = cx.bodies.as_ref().and_then(|b| b.formula(d))
@@ -85,6 +85,7 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
         // a file of no header taken apart by another archived along (a VPK's archive by its
         // directory file, a resource file by its serialized file), whatever its first bytes are
         _ if let Some(format) = siblings::format(d, cx) => made_by(format, d, opt, depth, cx),
+        Nest::Hint(i) => crate::hints::made(i, d, opt, depth, cx),
         Nest::Exact => detect(d).and_then(|format| made_by(format, d, opt, depth, cx)),
         // text with base64 or hexadecimal blocks or quoted-printable bodies where aqr-b2t takes
         // them (and it is [`smaller`]), of any length: the text without them and each block's
@@ -445,6 +446,8 @@ fn recompress_sealed(
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let ready = cx.ready.borrow_mut().remove(&(d.as_ptr() as usize, d.len(), format));
     let prepared = ready.is_some();
+    // (the hint of the data, of what its entries are, for its recompressor)
+    let entered = crate::hints::enter(d, cx);
     let words = cx.words.borrow().clone();
     let (words, held) = (words.as_deref(), cx.held.as_deref());
     // (the undos of this recompressor's formula, those of formulas within it its own)
@@ -468,6 +471,8 @@ fn recompress_sealed(
     let sealed = f.streams.iter().any(|s| s.data.sunk_in().is_some());
     let mut f = f;
     f.mark_contents();
+    crate::hints::nameless(&mut f, format, &entered);
+    drop(entered);
     // (an application over the bound: this recompression is not used, as if the recompressor did
     // not take the data; a formula of data not made yet is not looked at)
     if !f.streams.iter().any(|s| s.data.is_lazy())

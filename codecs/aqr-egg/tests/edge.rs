@@ -128,7 +128,7 @@ fn solid_of_many_files() {
     assert_eq!((a.entries.len(), a.solid, a.ended), (5, true, true));
     assert_eq!(a.entries.iter().filter(|e| e.blocks.is_empty()).count(), 4);
     let kind = |n: &[u8]| if n == b"e" { aqr_formula::Kind::Compressed } else { aqr_formula::Kind::Unknown };
-    let opt = formula::Options { kind, ..Default::default() };
+    let opt = formula::Options { kind: aqr_formula::Kinds::new(kind), ..Default::default() };
     // (the file e is its own size: the block holds all the files' contents, so its size is the
     // sum of the sizes; here the header of e says its own)
     let f = formula::encode_with(&d, &opt, &mut |_, _, _| true).unwrap().formula;

@@ -119,7 +119,7 @@ fn adpcm_waves() {
     ];
     assert_eq!(adpcm_layout(waves[0].format), aqr_msadpcm::codec::Layout::new(2, 140));
     let d = bank(&waves, None, 4);
-    let f = encode_with(&d, |_| aqr_formula::Kind::Unknown).unwrap();
+    let f = encode_with(&d, &Default::default()).unwrap();
     assert_eq!(f.applies().len(), 2);
     let out = f.eval(&|a: &aqr_formula::Apply, inputs: &[&[u8]]| {
         assert_eq!(a.module, aqr_msadpcm::formula::MODULE);
@@ -128,7 +128,7 @@ fn adpcm_waves() {
     assert!(out.unwrap() == d);
     assert!(f.streams[1].class == "xact-xwb/rest");
     let pcm = [Wave { format: 1 << 2 | 44100 << 5, data: noise(1000) }];
-    assert!(encode_with(&bank(&pcm, None, 4), |_| aqr_formula::Kind::Unknown).is_none());
+    assert!(encode_with(&bank(&pcm, None, 4), &Default::default()).is_none());
 }
 
 #[test]

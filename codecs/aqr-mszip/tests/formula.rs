@@ -59,7 +59,8 @@ fn folders_in_place() {
 fn contents_by_kind() {
     let d = fixture("mszip");
     let kind = |n: &[u8]| if n.ends_with(b".txt") { aqr_formula::Kind::Text } else { aqr_formula::Kind::Unknown };
-    let e = formula::encode_with(&d, &formula::Options { kind, ..Default::default() }).unwrap();
+    let e = formula::encode_with(&d, &formula::Options { kind: aqr_formula::Kinds::new(kind), ..Default::default() })
+        .unwrap();
     assert!(eval(&e.formula) == d);
     let text: usize = e.formula.streams.iter().filter(|s| s.class == "cab/text").map(|s| s.data.len()).sum();
     assert_eq!(text, 105_000);

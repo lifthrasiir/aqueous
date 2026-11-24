@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use aqr_formula::{Formula, Kind, Module, Node};
+use aqr_formula::{Formula, Kind, Kinds, Module, Node};
 
 use crate::json::{self, Value};
 use crate::layout::{self, BLOCKS, Body, HASH, HOLE, OFFSET, PREFIX, SIZE};
@@ -39,14 +39,14 @@ pub struct Options {
     /// writes them): the contents of each [`Kind`] are a stream of their own (those of
     /// [`Kind::Unknown`] the stream `raw`, the others after the index), sliced in order. By
     /// default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
     /// Bodies of at least this many bytes are slices of their own; by default [`OWN_MIN`].
     pub own: usize,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { kind: |_| Kind::Unknown, own: OWN_MIN.get() }
+        Options { kind: Kinds::default(), own: OWN_MIN.get() }
     }
 }
 
@@ -224,7 +224,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
             true => *seen.entry(&data[r.clone()]).or_insert(pieces.len()),
             false => pieces.len(),
         };
-        pieces.push((r, (opt.kind)(&e.name), (first < pieces.len()).then_some(first)));
+        pieces.push((r, opt.kind.of(&e.name), (first < pieces.len()).then_some(first)));
     }
     if end < data.len() {
         pieces.push((end..data.len(), Kind::Unknown, None));

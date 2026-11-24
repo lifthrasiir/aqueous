@@ -598,6 +598,10 @@ impl<S: Source + ?Sized> Source for Rewriting<'_, S> {
         self.src.name(c)
     }
 
+    fn kind(&self, c: usize) -> aqr_formula::Kind {
+        self.src.kind(c)
+    }
+
     fn size(&self, c: usize) -> u64 {
         self.src.size(c)
     }

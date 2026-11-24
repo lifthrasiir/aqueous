@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 
 use aqr_formula::store::Writer;
-use aqr_formula::{Bytes, Formula, Kind, Node};
+use aqr_formula::{Bytes, Formula, Kind, Kinds, Node};
 
 use crate::compressed::{By, STREAM_DATA};
 use crate::{File, FileSystem, Piece};
@@ -30,7 +30,7 @@ pub struct Options {
     /// What a file's contents are by its path: the contents of each [`Kind`] are a content
     /// stream of their own (those of [`Kind::Unknown`] the stream `raw`, the others after it,
     /// `{prefix}/{kind}`, or `{prefix}/{name}` for a format). By default all are unknown.
-    pub kind: fn(&[u8]) -> Kind,
+    pub kind: Kinds,
     /// Threads the files stored compressed are taken apart on.
     pub threads: usize,
     /// The prefix of the streams' classes (`{prefix}/rest`, `{prefix}/kept`, of the kinds):
@@ -40,7 +40,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { file_systems: &[], kind: |_| Kind::Unknown, threads: 1, prefix: "disk" }
+        Options { file_systems: &[], kind: Kinds::default(), threads: 1, prefix: "disk" }
     }
 }
 
@@ -111,7 +111,7 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
         }
         let kind = match files[i].compressed.is_some() && datas[i].is_none() {
             true => Kind::Compressed,
-            false => (opt.kind)(&files[i].name),
+            false => opt.kind.of(&files[i].name),
         };
         match kinds.iter_mut().find(|k| k.0 == kind) {
             Some(k) => k.1.push(i),

@@ -288,6 +288,31 @@ a line each, where the option is given.
 The lists of
 .Fl -files-from
 after it have each path ended by NUL, not by a line's end.
+.It Fl -attributes Ar file
+Hints by path in
+.Ar file ,
+of the syntax of
+.Xr gitattributes 5 :
+the format a file is of
+.Pq Ql aqr-format= Ns Ar name ,
+or none
+.Pq Ql -aqr-format ,
+its kind
+.Pq Ql aqr-kind= ,
+the formats not to look for in it
+.Pq Ql aqr-not= ,
+its format's parameters, and with
+.Ql >
+the members of a container
+.Pq Ql loupe.zip>*.bin .
+Its patterns are from the root of each input, before those of the
+.Pa .aqr/attributes
+at the root of an input that is a directory, which come before the
+.Pa .gitattributes
+under it.
+A format told that turns the file down leaves it to detection; nothing of the hints is in
+the archive but the files.
+May be given more than once.
 .It Fl L , Fl -dereference
 Follow links, given or found, archiving what they lead to; a link leading nowhere or to a
 directory it is in is kept as a link.

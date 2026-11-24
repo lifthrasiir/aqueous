@@ -146,6 +146,8 @@ pub(crate) struct Gathered {
     /// The archive appended to (`-a`, its path as canonicalized), not archived into itself where
     /// it is among the inputs (a file Windows has locked as it is appended to).
     pub(crate) itself: Option<PathBuf>,
+    /// By content, the kind its attributes give it, where there are any ([`attributes::hints`]).
+    pub(crate) kinds: Option<Vec<aqr_formula::Kind>>,
 }
 
 /// The access times of the paths read as they were before (`-p`, as they are archived), put
@@ -183,6 +185,7 @@ impl Gathered {
             gone: None,
             atimes: Atimes(preserve.then(Vec::new)),
             itself: None,
+            kinds: None,
         }
     }
 
@@ -223,6 +226,13 @@ impl aqr_compress::Source for Gathered {
 
     fn name(&self, c: usize) -> &[u8] {
         &self.contents[c].1
+    }
+
+    fn kind(&self, c: usize) -> aqr_formula::Kind {
+        match &self.kinds {
+            Some(k) => k[c],
+            None => kind_by_name(self.name(c)),
+        }
     }
 
     fn size(&self, c: usize) -> u64 {
@@ -390,7 +400,9 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
             false => aqr_formula::store::known(&d),
         };
         let name = os_bytes(input.as_os_str());
-        let kind = kind_by_name(&name);
+        let names = archive_names(&inputs.given[0], None)?;
+        let hinted = attributes::hints_alone(a, &name_from(&os_bytes(names.last().unwrap())), kind_by_name(&name))?;
+        let kind = hinted.as_ref().map_or_else(|| kind_by_name(&name), |h| h.1);
         let mut g = Gathered::new(mapper, a.preserve).unmarked(a.mark == Some(meta::Marks::Never));
         g.contents.push((input.clone(), name, d.len() as u64));
         let view = view::View::new(&g, bars(), false);
@@ -409,8 +421,10 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
             Ok(r)
         })?;
         let fallbacks = aqr_compress::fallbacks();
+        let told = hinted.as_ref().map(|h| h.0.report()).unwrap_or_default();
         if !a.quiet && a.verbose {
             tell_fallbacks(&fallbacks);
+            told.iter().for_each(|t| eprintln!("attributes: {t}"));
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();
             let format = detect(&d).map_or("-", |f| f.name());
             eprintln!(
@@ -450,6 +464,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
                     lossy: None,
                 }],
                 fallbacks: fallbacks.clone(),
+                hints: told,
                 trace: rec.finish(),
             });
         }
@@ -470,6 +485,13 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
         return Err(format!("nothing to archive in {}", inputs.paths[0].display()));
     }
     g.link_groups();
+    let hinted = attributes::hints(a, inputs, &g)?;
+    if let Some(h) = &hinted {
+        if !a.quiet {
+            h.warnings.iter().for_each(|w| eprintln!("{w}"));
+        }
+        g.kinds = Some(h.kinds.clone());
+    }
     drop(gathering);
     if !a.quiet {
         for s in &g.skipped {
@@ -587,9 +609,11 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
             lossy: f.lossy.clone(),
         })
         .collect();
+    let told = hinted.as_ref().map(|h| h.hints.report()).unwrap_or_default();
     if !a.quiet {
         if a.verbose {
             tell_fallbacks(&fallbacks);
+            told.iter().for_each(|t| eprintln!("attributes: {t}"));
         }
         // (what --lossy did: those turned down with -v; a check failed always)
         if opt.lossy.is_some() {
@@ -618,6 +642,7 @@ fn compress_aqr(a: &Args, inputs: Inputs, out: &Path, force: bool) -> Result<Vec
             overhead: Some(r.overhead as u64),
             contents,
             fallbacks: fallbacks.clone(),
+            hints: told,
             trace: rec.finish(),
         });
     }

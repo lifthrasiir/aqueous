@@ -42,6 +42,8 @@
 //!   kept over the bound, each `module` (of a recompression given up for its heap or for a panic,
 //!   the format), `needed` and `bytes`, `kept`, `heap` and `panicked` (whether a recompression
 //!   panicked: its `message` follows, and its `needed` is 0; none in JSON of aqr before it);
+//! - `hints` (compressing only): what came of the hints of the attributes, as lines
+//!   (`aqr_compress::Hints::report`; none in JSON of aqr before it);
 //! - `trace`: `interval` (seconds between samples, as it ended), `workers`, `labels` (by id:
 //!   name and whether of waiting), `stacks` (by id: label ids, the outermost first; 0 is none,
 //!   idle), `threads` (name and whether a worker of the pool; the others are the threads of part
@@ -168,6 +170,7 @@ impl Stats {
                 overhead: None,
                 contents: Vec::new(),
                 fallbacks: Vec::new(),
+                hints: Vec::new(),
                 trace: c.watch.trace(),
             };
             runs.push(json(&run, true));
@@ -296,6 +299,8 @@ pub struct Run {
     /// `--application-bound`, and the recompressions given up for their heap
     /// and for a panic ([`aqr_compress::fallbacks`]).
     pub fallbacks: Vec<aqr_compress::Fallback>,
+    /// Compressing: what came of the hints of the attributes ([`aqr_compress::Hints::report`]).
+    pub hints: Vec<String>,
     pub trace: Trace,
 }
 
@@ -717,6 +722,10 @@ fn outliers(run: &Run) -> String {
     for line in lossy_lines(&run.contents, true) {
         say(&mut out, line);
     }
+    // what came of the hints of the attributes (docs/hints-design.md §4)
+    for h in &run.hints {
+        say(&mut out, format!("attributes: {h}"));
+    }
     if said == 0 {
         out += "  nothing stands out\n";
     }
@@ -884,6 +893,8 @@ fn json(run: &Run, partial: bool) -> String {
         o.push('}');
     });
     if run.mode == "compress" {
+        o += ",\"hints\":";
+        array(&mut o, &run.hints, |o, h| string(o, h));
         o += ",\"fallbacks\":";
         array(&mut o, &run.fallbacks, |o, f| {
             *o += "{\"module\":";
@@ -1055,6 +1066,7 @@ mod tests {
                     message: if i == 3 { "boom".into() } else { String::new() },
                 })
                 .collect(),
+            hints: vec!["x.bin: aqr-format=png turned it down".into()],
             trace,
         }
     }
@@ -1100,6 +1112,7 @@ mod tests {
             overhead: None,
             contents: Vec::new(),
             fallbacks: Vec::new(),
+            hints: Vec::new(),
             trace: Trace::default(),
         };
         let text = outliers(&run);

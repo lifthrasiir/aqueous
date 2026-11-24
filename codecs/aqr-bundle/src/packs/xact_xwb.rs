@@ -107,7 +107,7 @@ pub fn waves(d: &[u8]) -> Option<Vec<(File, u32)>> {
 /// of their kinds by `kind` (a stream each), the rest (headers, tables, padding, a wave's partial
 /// block) the stream `xact-xwb/rest`, stream 1, as aqr-disk's formula has it. None where no wave
 /// is of such ADPCM (the bank is then aqr-disk's formula).
-pub fn encode_with(d: &[u8], kind: fn(&[u8]) -> aqr_formula::Kind) -> Option<aqr_formula::Formula> {
+pub fn encode_with(d: &[u8], kind: &aqr_formula::Kinds) -> Option<aqr_formula::Formula> {
     let mut waves = waves(d)?;
     if !waves.iter().any(|w| adpcm_layout(w.1).is_some()) {
         return None;
