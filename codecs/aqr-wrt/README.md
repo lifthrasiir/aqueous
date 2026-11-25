@@ -26,6 +26,14 @@ Measured 2026-10-26 on an Apple M4 (10 cores), through `aqr` at level `mid`.
 | `enwik9` alone (1 GB) | 283.9 MB | 253.5 MB (−10.7%) | 3.8 → 6.8 s | 1.15 → 3.44 s |
 | the 10gb corpus | 2.775 GB | 2.739 GB (−35.8 MB) | 111 → 133 s | not measured |
 
+- 2026-11-26: a word with no entry coded as its longest start with one (FORMAT.md §5,
+  "Coding"; `-Z wrt:prefix`), and the codes of three bytes in order of their entries' bytes:
+  `enwik9` 234.73 → 233.35 MB through `aqr` (−0.59%, the starts alone; instructions retired
+  361.1 → 361.9 G). At fixed levels (`aqr-wrt-bench`), `enwik8` 27.167 → 26.923 MB at zstd -9
+  (−0.90%: the dictionary 311 → 268 KB, the text 26.86 → 26.65 MB) and 29.90 → 29.51 MB at
+  -3; `bible.txt`, `dickens` and `webster` −0.5%, −0.6% and −1.0% at -9. Coding the rest of
+  such a word by entries too (after NOSP) gained nothing more, nor starts of 3 or 4 letters
+  at least, nor sorting the codes of two bytes (the text grew more than the dictionary shrank).
 - In the 10gb corpus, the files taken come to −36.7 MB. Of that, −30.4 MB is `enwik9` with
   `enwik9.zip`, which hold the same text and are stored once still. The files not taken come
   to −0.6 MB. Their shares of the solid blocks move both ways, by about 350 B a file, as the
@@ -94,4 +102,5 @@ Not done:
 
 `cargo test --release -p aqr-wrt` covers round trips, dictionaries shared and of pieces, and
 inputs it rejects. aqr-compress `text_words` and `held_once` cover the archive.
-`aqr-wrt-bench FILE...` takes `LEVEL`, `LONG` and `THREADS`.
+`aqr-wrt-bench FILE...` takes `LEVEL`, `LONG`, `THREADS` and `Z` (`-Z` options, separated by
+spaces).

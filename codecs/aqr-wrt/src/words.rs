@@ -18,6 +18,9 @@ aqr_common::zopt! {
     static MAX_TOKEN: Opt<usize> = Opt::value("wrt:max-token", 48, "longest word or markup coded, in bytes (at most 256)");
     /// Words and markup seen fewer times than this are left as they are.
     static MIN_COUNT: Opt<u32> = Opt::value("wrt:min-count", 4, "words and markup seen fewer times than this are left as they are");
+    /// A word with no entry is coded as the longest of its starts of at least this many letters
+    /// that has one, and the rest of its letters as they are (0: not at all).
+    static PREFIX: Opt<usize> = Opt::value("wrt:prefix", 2, "a word with no entry coded as its longest start of at least this many letters with one (0: not)");
 }
 
 /// [`MAX_TOKEN`], checked against the size of the buffers.
@@ -360,7 +363,13 @@ impl Dictionary {
         let counts: Vec<u64> = entries.iter().map(|e| e.1 as u64).collect();
         let layout = layout(&bytes, &counts);
         entries.truncate(layout.capacity() as usize);
-        let entries: Vec<Box<[u8]>> = entries.into_iter().map(|e| e.0).collect();
+        let mut entries: Vec<Box<[u8]>> = entries.into_iter().map(|e| e.0).collect();
+        // (the codes of three bytes in order of their bytes, within each first byte: their order
+        // there costs the coded text nothing, and the resource compresses better)
+        let three = layout.one.len() + layout.two.len() * 256;
+        if three < entries.len() {
+            entries[three..].chunks_mut(65536).for_each(<[_]>::sort_unstable);
+        }
         let index = entries.iter().enumerate().map(|(i, e)| (e.clone(), i as u32)).collect();
         Some(Dictionary { layout, entries, index })
     }
@@ -417,26 +426,47 @@ impl Dictionary {
             }
         };
         let (mut at, mut buf, max) = (0, [0; TOKEN_CAP], max_token());
-        tokens(d, |s, e, word| {
-            let Some((t, case)) = entry(&d[s..e], word, max, &mut buf) else { return };
-            let Some(&i) = self.index.get(t) else { return };
-            let gap = &d[at..s];
-            match gap.strip_suffix(b" ") {
-                Some(gap) if word => lit(&mut text, gap),
-                _ => {
-                    lit(&mut text, gap);
-                    if word {
-                        text.push(layout.flags[NOSP]);
-                    }
+        let prefix = PREFIX.get();
+        // (the entry of the token from `s` to `e`, its case and where it ends: the token, or the
+        // longest start of a word with one ([`PREFIX`]), the rest of its letters left as they are)
+        let find = |s: usize, e: usize, word: bool, buf: &mut [u8; TOKEN_CAP]| {
+            if let Some((t, case)) = entry(&d[s..e], word, max, buf)
+                && let Some(&i) = self.index.get(t)
+            {
+                return Some((i, case, e));
+            }
+            if !word || prefix == 0 || e - s <= prefix {
+                return None;
+            }
+            for l in (prefix..(e - s).min(max + 1)).rev() {
+                if let Some((t, case)) = entry(&d[s..s + l], true, max, buf)
+                    && let Some(&i) = self.index.get(t)
+                {
+                    return Some((i, case, s + l));
                 }
             }
-            match case {
-                Case::Lower => {}
-                Case::Cap => text.push(layout.flags[CAP]),
-                Case::Up => text.push(layout.flags[UP]),
+            None
+        };
+        tokens(d, |s, e, word| {
+            if let Some((i, case, end)) = find(s, e, word, &mut buf) {
+                let gap = &d[at..s];
+                match gap.strip_suffix(b" ") {
+                    Some(gap) if word => lit(&mut text, gap),
+                    _ => {
+                        lit(&mut text, gap);
+                        if word {
+                            text.push(layout.flags[NOSP]);
+                        }
+                    }
+                }
+                match case {
+                    Case::Lower => {}
+                    Case::Cap => text.push(layout.flags[CAP]),
+                    Case::Up => text.push(layout.flags[UP]),
+                }
+                layout.put_code(&mut text, i as usize);
+                at = end;
             }
-            layout.put_code(&mut text, i as usize);
-            at = e;
         });
         lit(&mut text, &d[at..]);
         text
@@ -838,6 +868,50 @@ mod tests {
         let ca = back_with(&dict, &a);
         let cb = back_with(&dict, &[&a[..], b"\nmore of the text"].concat());
         assert!(cb.starts_with(&ca));
+    }
+
+    /// A word with no entry is coded as its longest start that has one, in its case, and the rest
+    /// of its letters as they are.
+    #[test]
+    fn starts_of_words() {
+        let dict = Dictionary::of(&[&times("nation national ", 4)], 1).unwrap();
+        // (a code and a flag of a byte each: entries `nation` and `national`)
+        for (text, coded) in [
+            (" nationality", 1 + 3),
+            (" Nationalist", 2 + 3),
+            (" NATIONS", 2 + 1),
+            (" nationAL", 1 + 2),
+            ("Nationhood", 3 + 4),
+            (" na", 3),
+        ] {
+            assert_eq!(back_with(&dict, text.as_bytes()).len(), coded, "{text}");
+        }
+        // the entries' order is the counts': a start does not count
+        assert_eq!(entries(&dict), b"nation\nnational\n");
+    }
+
+    /// The codes of three bytes are in order of their entries' bytes within each first byte;
+    /// the others in order of their counts.
+    #[test]
+    fn order_of_entries() {
+        let mut d = Vec::new();
+        for i in 0..70000u32 {
+            let w: String = format!("{i:05}").bytes().map(|c| (b'a' + c - b'0') as char).collect();
+            // (counts in another order than the bytes': the first ones the more the later, the
+            // others by `i % 3`)
+            for _ in 0..if i < 300 { 304 + i } else { 4 + i % 3 } {
+                d.extend_from_slice(w.as_bytes());
+                d.push(b' ');
+            }
+        }
+        let dict = Dictionary::of(&[&d], 4).unwrap();
+        let three = dict.layout.one.len() + dict.layout.two.len() * 256;
+        assert!(three < dict.len(), "{:?}", dict.layout);
+        assert!(dict.entries[..300.min(three)].windows(2).all(|w| w[0] > w[1]));
+        for g in dict.entries[three..].chunks(65536) {
+            assert!(g.is_sorted());
+        }
+        back_with(&dict, &d);
     }
 
     #[test]

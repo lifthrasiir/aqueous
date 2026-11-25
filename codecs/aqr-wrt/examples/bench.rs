@@ -3,7 +3,8 @@
 //! For each text file: its size by zstd (at `LEVEL`, by default 9; with `LONG` set, with long
 //! distance matching and a window of 2^27) as it is and as the dictionary and the text coded
 //! (each alone), the module's encoding and decoding speeds (of the file's bytes, on `THREADS`
-//! threads, by default 1), and that it decodes back.
+//! threads, by default 1), and that it decodes back. `Z` sets `-Z` options, as aqr takes them
+//! (separated by spaces).
 
 use std::time::Instant;
 
@@ -17,6 +18,10 @@ fn zstd(d: &[u8], level: i32, long: bool) -> usize {
 }
 
 fn main() {
+    // (-Z options, as aqr takes them: `Z="wrt:min-count=3 ..."`)
+    if let Ok(z) = std::env::var("Z") {
+        aqr_common::zopt::apply(&z.split_whitespace().collect::<Vec<_>>()).unwrap();
+    }
     let level = std::env::var("LEVEL").map_or(9, |l| l.parse().unwrap());
     let long = std::env::var("LONG").is_ok();
     let threads = std::env::var("THREADS").map_or(1, |l| l.parse().unwrap());
@@ -30,16 +35,39 @@ fn main() {
             continue;
         };
         let e = t.elapsed().as_secs_f64();
-        let aqr_formula::Node::Apply(a) = &f.root else { unreachable!() };
-        let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-        let dict = &a.resources[0];
+        // (an application, or segments' one after another, all of one dictionary)
+        let applies: Vec<&aqr_formula::Apply> = match &f.root {
+            aqr_formula::Node::Apply(a) => vec![&**a],
+            aqr_formula::Node::Concat(ns) => ns
+                .iter()
+                .map(|n| match n {
+                    aqr_formula::Node::Apply(a) => &**a,
+                    _ => unreachable!(),
+                })
+                .collect(),
+            _ => unreachable!(),
+        };
+        let dict = &applies[0].resources[0];
         let t = Instant::now();
-        let out = if a.module == aqr_wrt::formula::HANGUL {
-            aqr_wrt::formula::decode_hangul(&a.params, &[dict], &inputs, d.len() as u64, threads)
-        } else {
-            aqr_wrt::formula::decode(&a.params, &[dict], &inputs, d.len() as u64, threads)
+        let mut out = Vec::with_capacity(d.len());
+        for a in &applies {
+            let inputs: Vec<&[u8]> = a
+                .inputs
+                .iter()
+                .map(|n| match n {
+                    &aqr_formula::Node::Slice { stream, start, len } => {
+                        &f.streams[stream].data[start as usize..][..len as usize]
+                    }
+                    _ => unreachable!(),
+                })
+                .collect();
+            let decode = if a.module == aqr_wrt::formula::HANGUL {
+                aqr_wrt::formula::decode_hangul
+            } else {
+                aqr_wrt::formula::decode
+            };
+            out.extend(decode(&a.params, &[&a.resources[0]], &inputs, a.len, threads).unwrap());
         }
-        .unwrap();
         let dt = t.elapsed().as_secs_f64();
         assert!(out == d, "{path}: not given back");
         let before = zstd(&d, level, long);

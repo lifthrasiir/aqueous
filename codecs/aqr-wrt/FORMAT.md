@@ -122,7 +122,10 @@ The piece's text ends where its coded text does. A step must not be cut by the e
     Words of mixed case have no entry.
   - Markup of at most 48 bytes is its own entry.
 - **Dictionary.** The entries that the texts it is made of have at least 4 times, most common
-  first (ties by their bytes), as many as the layout has codes for.
+  first (ties by their bytes), as many as the layout has codes for. Then the entries of the
+  codes of three bytes are put in order of their bytes, within each first byte of their codes:
+  there the order costs the coded text nothing (its bytes are as many, and spread alike), and
+  the resource compresses better (on `enwik8`, 311 → 268 KB at zstd -9).
 - **Layout.**
   - The flags and code bytes are the bytes that are not letters, the rarest in the texts first
     (ties by value). The first 4 are the flags, and the next ones are `one`, `two` and `three`.
@@ -141,6 +144,11 @@ The piece's text ends where its coded text does. A step must not be cut by the e
     one replaced are written before it, a special byte among them preceded by ESC.
   - For a word, a space that ends those bytes is dropped. If there is no such space, NOSP is
     written. After that comes CAP or UP for its case.
+  - A word whose entry is not in the dictionary (or that has none: of mixed case, or longer
+    than 48 letters) is coded as the longest of its starts of 2 letters or more, but not all of
+    it, whose entry is, as that start would be, and the rest of its letters follow as bytes
+    (letters are never special): `Nationalist` is CAP, the code of `national` and `ist`.
+    Starts are not counted for the dictionary.
   - A text longer than 16 MiB is coded in pieces of about 16 MiB on threads of their own, each
     ending with a byte that is neither a space nor in any token (such as LF, `"` or `,`). The
     pieces then code to the same bytes as the whole, minified JSON among them, and the params
