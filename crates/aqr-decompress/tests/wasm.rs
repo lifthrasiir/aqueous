@@ -1909,6 +1909,9 @@ const MEMORIES: &str = r#"
     (import "aqr" "aqr_output0" (memory i64 0))
 "#;
 
+/// What a trap's failure says, of either engine (Wasmtime names the instruction, WAH does not).
+const TRAP: &str = "trap: ";
+
 fn invalid<T>(r: aqr_archive::Decoded<T>, what: &str) {
     match r {
         Err(Failure::Invalid(m)) => assert!(m.contains(what), "{m}"),
@@ -1933,7 +1936,7 @@ fn whole() {
     );
     assert_eq!(apply(&cat, &[b"abc"], &[5], u64::MAX).unwrap(), [b"abcpp"]);
     assert_eq!(apply(&cat, &[&[7; 70_000]], &[70_002], u64::MAX).unwrap()[0].len(), 70_002);
-    invalid(apply(&cat, &[b"abc"], &[4], u64::MAX), "unreachable");
+    invalid(apply(&cat, &[b"abc"], &[4], u64::MAX), TRAP);
     invalid(apply(&cat, &[b"abc"], &[4], u64::MAX), "failed");
     // an access out of bounds, of a 32-bit memory: a fault on its guard pages, caught
     let oob = format!(
@@ -2071,7 +2074,7 @@ fn large() {
         let out = apply(&cat, &[&d[..n]], &[n as u64 + 2], u64::MAX).unwrap();
         assert!(out == [cat_of(n)], "{n}");
     }
-    invalid(apply(&cat, &[&d[..1 << 20]], &[1 << 20], u64::MAX), "unreachable");
+    invalid(apply(&cat, &[&d[..1 << 20]], &[1 << 20], u64::MAX), TRAP);
     assert!(apply(&cat, &[&d[..1 << 20]], &[(1 << 20) + 2], u64::MAX).unwrap() == [cat_of(1 << 20)]);
     // checked before anything is made
     let r = apply(&cat, &[b"abc"], &[1 << 50], 1 << 30);
@@ -2524,13 +2527,13 @@ fn flood(spawns: &[usize], chans: usize) -> String {
 fn spawn_and_chan_limits() {
     let (tasks, chans) = (aqr_api::MAX_TASKS, aqr_api::MAX_CHANNELS);
     let run = |spawns: &[usize], chans: usize| apply_v2(&flood(spawns, chans), &[b""], &[0], u64::MAX, &[u64::MAX]);
-    invalid(run(&[tasks], 0), "unreachable");
+    invalid(run(&[tasks], 0), TRAP);
     assert!(matches!(run(&[tasks + 1], 0), Err(Failure::Resource(_))));
     // all the tasks of the application not taken
-    invalid(run(&[tasks / 2, tasks / 2], 0), "unreachable");
+    invalid(run(&[tasks / 2, tasks / 2], 0), TRAP);
     assert!(matches!(run(&[tasks / 2, tasks / 2 + 1], 0), Err(Failure::Resource(_))));
     // (the channels, none given to a gang: the earlier Apply's would take them with no gang)
-    invalid(run(&[], chans), "unreachable");
+    invalid(run(&[], chans), TRAP);
     assert!(matches!(run(&[], chans + 1), Err(Failure::Resource(_))));
 }
 
