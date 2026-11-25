@@ -12,7 +12,7 @@ crate-type = ["dylib"]
 aqr-dll-rt = { path = "../rt" }
 aqr-common = { path = "../../../aqr-common", default-features = false }
 cfg-if = { version = "=1.0.5", default-features = false }
-crc32fast = { version = "=1.5.2", default-features = false }
+crc32fast = { version = "=1.5.6", default-features = false }
 crossbeam-deque = { version = "=0.8.8", default-features = false }
 crossbeam-epoch = { version = "=0.9.21", default-features = false }
 crossbeam-utils = { version = "=0.8.23", default-features = false }

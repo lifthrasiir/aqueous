@@ -372,7 +372,7 @@ pub static KNOWN: &[Known] = &[
     Known {
         name: "lz4-recons",
         version: 2,
-        sha512_256: hex("57fc6a5976a9a38769a7ad6b2482df4e3fbdaed065dd37207d3731f7bc99676e"),
+        sha512_256: hex("b792dad11a5b170c135b782d4feb87954bf573b895dd0c8574e1ad229dab0757"),
         block: include_bytes!("../wasm/lz4-recons.block"),
     },
     Known {

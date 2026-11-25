@@ -10,4 +10,4 @@ crate-type = ["dylib"]
 
 [dependencies]
 aqr-dll-rt = { path = "../rt" }
-xxhash-rust = { version = "=0.8.19", default-features = false }
+xxhash-rust = { version = "=0.8.21", default-features = false }
