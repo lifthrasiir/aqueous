@@ -567,9 +567,8 @@ pub(crate) fn resolve(roots: &[bool], segments: &[Vec<Shape>], dropped: &mut dyn
     let mut entries = Vec::new();
     // each in the place of those it replaced (after its parent all the same: the parent of
     // what it replaced, made before it)
-    let order = (0..made.len()).filter(|&k| !made[k].replaces).flat_map(|k| {
-        std::iter::successors(Some(k), |&j| made[j].by)
-    });
+    let order =
+        (0..made.len()).filter(|&k| !made[k].replaces).flat_map(|k| std::iter::successors(Some(k), |&j| made[j].by));
     for k in order {
         let m = &made[k];
         let above = m.parent.and_then(|p| gone[p]);
@@ -2805,7 +2804,11 @@ mod tests {
         };
         let (t, _) = merge(vec![
             seg(
-                vec![e(None, "a", EntryNode::File(0)), e(None, "b", EntryNode::File(1)), e(None, "c", EntryNode::File(2))],
+                vec![
+                    e(None, "a", EntryNode::File(0)),
+                    e(None, "b", EntryNode::File(1)),
+                    e(None, "c", EntryNode::File(2)),
+                ],
                 vec![],
             ),
             seg(

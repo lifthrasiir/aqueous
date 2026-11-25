@@ -1,6 +1,6 @@
 use aqr_archive::Evaluate;
 use aqr_disk::formula::{self, Options};
-use aqr_formula::{Formula, Kind};
+use aqr_formula::Formula;
 
 /// Fixture `name` of tests/data (`scripts/gen-fixtures.sh`), decompressed.
 fn fixture(name: &str) -> Vec<u8> {
