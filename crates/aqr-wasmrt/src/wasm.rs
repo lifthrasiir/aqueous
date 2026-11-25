@@ -1,8 +1,9 @@
 //! Modules run as WebAssembly, as the spec's "Module execution" defines (with the feature
-//! `wasm`): by Wasmtime, linked (feature `wasmtime`, [`engine`]: always where the system is not
-//! Windows), or by the interpreter blob, Wasmtime built of this same crate, that the program
-//! places at run time ([`interp`], Windows x86-64: aqr carries the blob, and links no Wasmtime of
-//! its own). What reads a module's bytes alone, and the bound of the applications' memories, is
+//! `wasm`): by an engine linked (feature `engine`: always where the system is not Windows) — WAH
+//! ([`wah_engine`], feature `wah`), Wasmtime ([`engine`], feature `wasmtime`), or both, which
+//! [`both`] picks between — or by the interpreter blob, an engine built of this same crate, that
+//! the program places at run time ([`interp`], Windows x86-64: aqr carries the blob, and links no
+//! engine of its own). What reads a module's bytes alone, and the bound of the applications' memories, is
 //! here for both.
 
 use std::sync::Mutex;
@@ -11,26 +12,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aqr_archive::Failure;
 use wasmparser as wp;
 
+#[cfg(all(feature = "wasmtime", feature = "wah"))]
+mod both;
 #[cfg(feature = "wasmtime")]
 mod engine;
-#[cfg(all(feature = "wasmtime", feature = "sandbox"))]
-pub use engine::warm_up;
-#[cfg(feature = "wasmtime")]
-pub(crate) use engine::{Shared, compiled};
-#[cfg(feature = "wasmtime")]
-pub use engine::{load, load_bounded, load_released};
+#[cfg(feature = "wah")]
+mod wah_engine;
+#[cfg(all(feature = "wasmtime", feature = "wah"))]
+use both as linked;
+#[cfg(all(feature = "wasmtime", not(feature = "wah")))]
+use engine as linked;
+#[cfg(all(feature = "engine", feature = "sandbox"))]
+pub use linked::warm_up;
+#[cfg(all(feature = "engine", feature = "sandbox"))]
+pub(crate) use linked::{Shared, compiled};
+#[cfg(feature = "engine")]
+pub use linked::{load, load_bounded, load_released};
+#[cfg(all(feature = "wah", not(feature = "wasmtime")))]
+use wah_engine as linked;
 
-#[cfg(not(feature = "wasmtime"))]
+#[cfg(not(feature = "engine"))]
 mod interp;
-#[cfg(all(not(feature = "wasmtime"), feature = "sandbox"))]
+#[cfg(all(not(feature = "engine"), feature = "sandbox"))]
 pub(crate) use interp::{interpreter_given, worker_main};
-#[cfg(not(feature = "wasmtime"))]
+#[cfg(not(feature = "engine"))]
 pub use interp::{load, load_bounded, load_released, set_interpreter, warm_up};
 
 pub(crate) type Decoded<T> = std::result::Result<T, Failure>;
 
 /// The custom section of a module's task slots.
-#[cfg(feature = "wasmtime")]
+#[cfg(feature = "engine")]
 pub(crate) const TASK_SLOTS: &str = "aqr_task_slots";
 
 /// A memory imported by a module.
@@ -86,16 +97,17 @@ static BOUND: AtomicU64 = AtomicU64::new(u64::MAX);
 /// even at 1 with a resource failure before it starts.
 pub fn set_application_bound(bytes: u64) {
     BOUND.store(bytes, Ordering::Relaxed);
-    #[cfg(not(feature = "wasmtime"))]
+    #[cfg(not(feature = "engine"))]
     interp::bound_set(bytes);
 }
 
-/// Where the interpreter blob comes from, for running modules without Wasmtime linked
+/// Where the interpreter blob comes from, for running modules without an engine linked
 /// ([`interp`]); nothing where it is.
-#[cfg(feature = "wasmtime")]
+#[cfg(feature = "engine")]
 pub fn set_interpreter(_: fn() -> Result<Vec<u8>, String>) {}
 
 /// The bound set ([`set_application_bound`]).
+#[cfg(any(feature = "sandbox", not(feature = "engine")))]
 pub(crate) fn application_bound_set() -> u64 {
     BOUND.load(Ordering::Relaxed)
 }

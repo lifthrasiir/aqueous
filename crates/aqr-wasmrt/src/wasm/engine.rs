@@ -40,13 +40,6 @@ fn invalid<T>(msg: impl Into<String>) -> Decoded<T> {
     Err(Failure::Invalid(msg.into()))
 }
 
-#[cfg(windows)]
-aqr_common::zopt! {
-    /// Whether the working memories of tasks are copied on write (Windows, where the system has
-    /// placeholders), else copied.
-    static COW: Opt<bool> = Opt::flag("wasm:cow", true, "copy working memories of tasks on write (Windows)");
-}
-
 static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     let mut c = Config::new();
     // WebAssembly 2.0, with multiple memories and 64-bit addresses, deterministic (the rest of
@@ -65,7 +58,7 @@ static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     // the working memories (as defined by `Compiled::working_module`) copied on write over,
     // where the system has placeholders (else copied)
     #[cfg(windows)]
-    if COW.get() && crate::cow::placeholders() {
+    if crate::cow::placeheld() {
         c.with_host_memory(Arc::new(crate::cow::Creator));
     }
     Engine::new(&c).expect("the configuration of Wasmtime")

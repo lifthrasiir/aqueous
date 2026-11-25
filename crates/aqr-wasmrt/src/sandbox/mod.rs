@@ -1,5 +1,5 @@
 //! Modules run as WebAssembly in worker processes locked down by the system (with the feature
-//! `sandbox`), so that a module escaping Wasmtime finds nothing it could reach: no files, no
+//! `sandbox`), so that a module escaping its engine finds nothing it could reach: no files, no
 //! network, no other processes (`os` for what each system does).
 //!
 //! A worker is a program of the host's: the host's own, invoked with arguments it recognizes,
@@ -14,12 +14,12 @@
 //! runner it stands for gives, failures included, or else a resource failure where a worker could
 //! not be started or ended unexpectedly.
 
-// (with no Wasmtime linked, the worker's side of them is the interpreter blob's, not this one's)
-#[cfg_attr(not(feature = "wasmtime"), allow(dead_code, unused_imports))]
+// (with no engine linked, the worker's side of them is the interpreter blob's, not this one's)
+#[cfg_attr(not(feature = "engine"), allow(dead_code, unused_imports))]
 mod os;
-#[cfg_attr(not(feature = "wasmtime"), allow(dead_code, unused_imports))]
+#[cfg_attr(not(feature = "engine"), allow(dead_code, unused_imports))]
 mod proto;
-#[cfg(feature = "wasmtime")]
+#[cfg(feature = "engine")]
 mod worker;
 
 use std::collections::HashSet;
@@ -65,8 +65,8 @@ pub fn worker_main() -> ! {
     // the pool would take them later of the locked-down token, which opens no file.
     #[cfg(windows)]
     let _ = std::collections::hash_map::RandomState::new();
-    // (with no Wasmtime linked, the interpreter blob's worker serves: its engine's)
-    #[cfg(not(feature = "wasmtime"))]
+    // (with no engine linked, the interpreter blob's worker serves: its engine's)
+    #[cfg(not(feature = "engine"))]
     crate::wasm::worker_main();
     // what Linux's `top` shows by default (`comm`, of 15 bytes), as `argv[0]` is not
     #[cfg(target_os = "linux")]
@@ -74,7 +74,7 @@ pub fn worker_main() -> ! {
     unsafe {
         libc::prctl(libc::PR_SET_NAME, c"aqr-sandbox".as_ptr())
     };
-    #[cfg(feature = "wasmtime")]
+    #[cfg(feature = "engine")]
     std::process::exit(match worker::serve() {
         Ok(()) => 0,
         Err(_) => 1,
@@ -136,9 +136,9 @@ impl Sandbox {
         let mut w = match idle {
             Some(w) => w,
             None => Worker::start(self).map_err(|e| {
-                // (with no Wasmtime linked, a worker runs by the interpreter blob: where the
+                // (with no engine linked, a worker runs by the interpreter blob: where the
                 // program has none to give, that is what is said)
-                #[cfg(not(feature = "wasmtime"))]
+                #[cfg(not(feature = "engine"))]
                 if let Err(f) = crate::wasm::interpreter_given() {
                     return f;
                 }

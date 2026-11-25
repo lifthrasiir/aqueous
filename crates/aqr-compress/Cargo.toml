@@ -97,8 +97,8 @@ zstd.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-# (the tests run modules by Wasmtime, linked)
-aqr-wasmrt = { workspace = true, features = ["wasmtime"] }
+# (the tests run modules by an engine linked)
+aqr-wasmrt = { workspace = true, features = ["wah"] }
 # (DEFLATE streams of other encoders than zlib, for `lossy`'s tests)
 flate-zoo.workspace = true
 aqr-testkit.workspace = true

@@ -25,7 +25,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     into a record of CBOR before the archive, and the stub's icon, `VERSIONINFO`, manifest and
     subsystem written by its `pe`, as a section after UPX's). What it bundles is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and packs (`sfx.pack`, the blobs as
-    bundles of LZMA2, ~4.4 MB: only aqr reads it); it is no part of aqr's build but written into
+    bundles of LZMA2, ~2.9 MB: only aqr reads it); it is no part of aqr's build but written into
     the linked executable as resources (`aqr-sfx-pack --embed DIR EXE`, aqr-sfx's `resource`, read
     in place as it runs): `cargo aqr` writes it into the binary it keeps (`pack.id` in its
     manifest), aqr's tests/sfx.rs into a copy of theirs. Each blob is used only for the hash it
@@ -96,17 +96,19 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     target, cutting a shared library's exports to a list (`AQR_LD_EXPORTS`, made by `exports`) so
     that `/OPT:REF` drops the rest, its import library still of every export; libraries
     linked with no entry point (`/NOENTRY`: the C runtime's DLL startup and its imports left out).
-  - `aqr-wasmrt` — runs the Wasm modules of aqr natively by Wasmtime (`wasm::load`), in the
-    process or in a sandbox worker (`sandbox::Sandbox`), with no native codecs linked. Shared by
-    aqr-decompress (for modules it does not know natively) and the self-extracting interpreter
-    blob. `Sandboxed` (native where known, else a worker) stays in aqr-decompress, which has the
-    native modules. Wasmtime is linked only with the feature `wasmtime` (`wasm/engine.rs`; always
-    but on Windows x86-64 —
-    aqr-decompress enabling it there, and in the tests' dev-dependencies);
-    else `wasm/interp.rs` runs the modules by the interpreter blob the program gives
+  - `aqr-wasmrt` — runs the Wasm modules of aqr natively by WAH or Wasmtime (`wasm::load`), in
+    the process or in a sandbox worker (`sandbox::Sandbox`, told the `-Z wasm:` options set), with
+    no native codecs linked. Shared by aqr-decompress (for modules it does not know natively) and
+    the self-extracting interpreter blob. `Sandboxed` (native where known, else a worker) stays in
+    aqr-decompress, which has the native modules. An engine is linked only with the feature `wah`
+    (`wasm/wah_engine.rs`, WAH from crates.io) or `wasmtime` (`wasm/engine.rs`), or both
+    (`wasm/both.rs`: `-Z wasm:engine`, Wasmtime by default as the faster linked; the feature
+    `engine` is either); WAH always but on Windows x86-64 — aqr-decompress enabling it there, and
+    in the tests' dev-dependencies (`--features wasmtime` for both). Else `wasm/interp.rs` runs the
+    modules by the interpreter blob the program gives
     (`wasm::set_interpreter`, aqr: its pack's), placed at run time (`aqr_blob::load`), a worker
-    served by the blob's own (`worker_main`). aqr.exe on Windows links no Wasmtime (41.9 ->
-    30.4 MB). What reads a module's bytes alone, and the bound, is `wasm.rs`'s, for both.
+    served by the blob's own (`worker_main`). aqr.exe on Windows links no engine (41.9 ->
+    30.4 MB). What reads a module's bytes alone, and the bound, is `wasm.rs`'s, for all.
   - `aqr-blob` — blobs: their format (aqr-ld makes them), `load` placing a set in memory at run
     time (Windows x86-64: relocated, imports between them and from system libraries bound,
     exception tables registered), and (feature `runner`) the interpreter blob's client: its
@@ -139,7 +141,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     stub and aqr. `pack.py` gathers what aqr embeds (the stub, packed by UPX `-9` where `AQR_UPX` or
     `upx` is found, the blobs of the modules and of the shared libraries) and packs it
     (`aqr-sfx-pack`: `sfx.pack`).
-  - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-archive + aqr-sfx, no codecs or Wasmtime,
+  - `aqr-sfx-shim` — the self-extracting stub (lean: aqr-archive + aqr-sfx, no codecs or engine,
     0.78 MB, 0.35 MB packed by UPX: the profile `sfx`, panic=abort): the small executable that `aqr --format sfx` appends a bundle
     of blobs and an archive to (or that `aqr-ld merge` fills with blobs). It takes the bundle, the
     settings and the archive from right after its image (else it scans itself from the end for
@@ -150,8 +152,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     the folder picked, `src/folder.rs`).
   - `aqr-interp` — the interpreter blob: a module library (`aqr_interp_vtable`, aqr-blob's
     `Vtable`: load, apply, apply_part, and for aqr the loads of aqr-wasmrt, the bound and the
-    sandbox's worker) that runs any Wasm module handed to it by Wasmtime (`aqr-wasmrt`), no codecs
-    linked (~12 MB).
+    sandbox's worker) that runs any Wasm module handed to it by WAH (`aqr-wasmrt`; Wasmtime with
+    `--no-default-features --features wasmtime`), no codecs linked (2.5 MB; 12.3 MB of Wasmtime).
     Built for the no-TLS target (`NOTLS`) it is mergeable into a stub: the fallback for modules the
     stub has no native blob for.
   - `aqr-dll` — a module's binary built as a native library (`AQR_DLL_MODULE`; `build.py` builds
@@ -280,7 +282,7 @@ optimization picked by hash.
   (run build.py by hand otherwise); a test in aqr-decompress catches stale ones. If you don't
   rebuild, say so in the commit message.
 - aqr-decompress: a known hash runs natively when the application's declared limits hold its
-  plan (`needed_by`: the same function the encoder declares with), anything else in wasmtime.
+  plan (`needed_by`: the same function the encoder declares with), anything else as WebAssembly.
 - Whole modules take their inputs at once; part modules (`entry! … windows(…)`, spec "Module
   execution") stream them through windows of fixed pages, so their memory does not grow with
   the data. Big streams' modules are part modules (lzma, bz2, lz4, snappy, git, exe, png, flac,

@@ -3,18 +3,33 @@
 //! system can, else by `memcpy` of the pages that are not all zeros (a new memory being of zeros
 //! already).
 //!
-//! - macOS: `vm_copy` of whole pages, over the mappings of Wasmtime (which makes the memories of
+//! - macOS: `vm_copy` of whole pages, over the engine's mappings (Wasmtime makes the memories of
 //!   the host with its own allocator, whatever `Config::with_host_memory` is).
 //! - Windows: the snapshot is a section of the paging file, mapped over the working memory
-//!   copied on write ([`win`]). Wasmtime reserves its mappings as no placeholders, so the working
-//!   memories are made as a module defines them, by [`Creator`] (of placeholders).
+//!   copied on write ([`win`]). Neither engine reserves its mappings as placeholders, so the
+//!   memories are made by [`Creator`] (of placeholders): Wasmtime's as a module defines them,
+//!   WAH's every memory of a store.
 
 use std::ops::Range;
 
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub use win::{Creator, available as placeholders};
+pub use win::Creator;
+
+#[cfg(windows)]
+aqr_common::zopt! {
+    /// Whether the working memories of tasks are copied on write (Windows, where the system has
+    /// placeholders), else copied.
+    static COW: Opt<bool> = Opt::flag("wasm:cow", true, "copy working memories of tasks on write (Windows)");
+}
+
+/// Whether the working memories are made of placeholders ([`Creator`]), to be copied on write:
+/// where the system has them, unless `-Z wasm:no-cow`.
+#[cfg(windows)]
+pub fn placeheld() -> bool {
+    COW.get() && win::available()
+}
 
 /// The pages of zeros skipped are of this many bytes.
 const PAGE: usize = 4096;

@@ -11,7 +11,6 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use wasmtime::{LinearMemory, MemoryCreator, MemoryType};
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
@@ -222,52 +221,44 @@ impl Drop for Placeheld {
     }
 }
 
-// SAFETY: page-aligned, a multiple of pages, and guarded by the placeholder after it
-unsafe impl LinearMemory for Placeheld {
-    fn byte_size(&self) -> usize {
+impl Placeheld {
+    fn size(&self) -> usize {
         self.0.lock().unwrap().size
     }
 
-    fn byte_capacity(&self) -> usize {
+    fn capacity(&self) -> usize {
         self.0.lock().unwrap().capacity
     }
 
-    fn grow_to(&mut self, new_size: usize) -> wasmtime::Result<()> {
+    /// The accessible part grown to `new_size` bytes (a multiple of grains, within the capacity).
+    fn grow(&mut self, new_size: usize) -> Result<(), String> {
         let mut m = self.0.lock().unwrap();
         if new_size > m.capacity || !new_size.is_multiple_of(GRAIN) {
-            wasmtime::bail!("a memory of {new_size} bytes, of {} at most", m.capacity);
+            return Err(format!("a memory of {new_size} bytes, of {} at most", m.capacity));
         }
         if new_size > m.size {
             let (at, len) = (m.base + m.size, new_size - m.size);
             // SAFETY: of the placeholder after the accessible part
             if !unsafe { m.split(at, len) && m.commit(at, len) } {
-                return Err(std::io::Error::last_os_error().into());
+                return Err(format!("a memory grown to {new_size} bytes: {}", std::io::Error::last_os_error()));
             }
             m.size = new_size;
         }
         Ok(())
     }
 
-    fn as_ptr(&self) -> *mut u8 {
-        self.1 as *mut u8
-    }
-}
-
-/// Makes the memories modules define of placeholders.
-pub struct Creator;
-
-// SAFETY: memories of zeros, reserved as asked and guarded
-unsafe impl MemoryCreator for Creator {
-    fn new_memory(
-        &self,
-        _: MemoryType,
+    /// A memory of `minimum` bytes and a capacity of `reserved`, else `maximum`, else
+    /// `unbounded`, guarded by `guard` bytes after it.
+    fn new(
         minimum: usize,
         maximum: Option<usize>,
         reserved: Option<usize>,
+        unbounded: usize,
         guard: usize,
-    ) -> Result<Box<dyn LinearMemory>, String> {
-        let capacity = reserved.unwrap_or(maximum.unwrap_or(minimum)).max(minimum).next_multiple_of(GRAIN);
-        let total = capacity + guard.next_multiple_of(GRAIN);
+    ) -> Result<Placeheld, String> {
+        let capacity = reserved.unwrap_or(maximum.unwrap_or(unbounded)).max(minimum).next_multiple_of(GRAIN);
+        // (a placeholder of a grain at least: memories of no byte too)
+        let total = (capacity + guard.next_multiple_of(GRAIN)).max(GRAIN);
         // SAFETY: a new placeholder
         let base = unsafe {
             (placeholders().virtual_alloc2)(
@@ -286,9 +277,84 @@ unsafe impl MemoryCreator for Creator {
         let base = base as usize;
         let pieces = Arc::new(Mutex::new(Pieces { base, reserved: total, capacity, size: 0, pieces: Vec::new() }));
         let mut m = Placeheld(pieces.clone(), base);
-        m.grow_to(minimum).map_err(|e| e.to_string())?;
+        m.grow(minimum)?;
         MEMORIES.lock().unwrap().insert(base, pieces);
-        Ok(Box::new(m))
+        Ok(m)
+    }
+}
+
+/// Makes the memories modules define of placeholders, for Wasmtime and WAH.
+pub struct Creator;
+
+// SAFETY: page-aligned, a multiple of pages, and guarded by the placeholder after it
+#[cfg(feature = "wasmtime")]
+unsafe impl wasmtime::LinearMemory for Placeheld {
+    fn byte_size(&self) -> usize {
+        self.size()
+    }
+
+    fn byte_capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn grow_to(&mut self, new_size: usize) -> wasmtime::Result<()> {
+        self.grow(new_size).map_err(wasmtime::Error::msg)
+    }
+
+    fn as_ptr(&self) -> *mut u8 {
+        self.1 as *mut u8
+    }
+}
+
+// SAFETY: memories of zeros, reserved as asked and guarded
+#[cfg(feature = "wasmtime")]
+unsafe impl wasmtime::MemoryCreator for Creator {
+    fn new_memory(
+        &self,
+        _: wasmtime::MemoryType,
+        minimum: usize,
+        maximum: Option<usize>,
+        reserved: Option<usize>,
+        guard: usize,
+    ) -> Result<Box<dyn wasmtime::LinearMemory>, String> {
+        Ok(Box::new(Placeheld::new(minimum, maximum, reserved, minimum, guard)?))
+    }
+}
+
+// SAFETY: as Wasmtime's
+#[cfg(feature = "wah")]
+unsafe impl wah::LinearMemory for Placeheld {
+    fn byte_size(&self) -> usize {
+        self.size()
+    }
+
+    fn byte_capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn grow_to(&mut self, new_size: usize) -> wah::Result<()> {
+        self.grow(new_size).map_err(wah::Error::msg)
+    }
+
+    fn as_ptr(&self) -> *mut u8 {
+        self.1 as *mut u8
+    }
+}
+
+// SAFETY: as Wasmtime's
+#[cfg(feature = "wah")]
+unsafe impl wah::MemoryCreator for Creator {
+    fn new_memory(
+        &self,
+        ty: wah::MemoryType,
+        minimum: usize,
+        maximum: Option<usize>,
+        reserved: Option<usize>,
+        guard: usize,
+    ) -> Result<Box<dyn wah::LinearMemory>, String> {
+        // (WAH reserves nothing without guard pages: a 32-bit memory of no maximum reserves 4 GiB)
+        let unbounded = if ty.is_64() { minimum } else { 1 << 32 };
+        Ok(Box::new(Placeheld::new(minimum, maximum, reserved, unbounded, guard)?))
     }
 }
 

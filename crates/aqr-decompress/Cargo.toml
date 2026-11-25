@@ -7,12 +7,14 @@ publish = false
 
 [features]
 default = ["wasm", "sandbox"]
-# Modules that are not known run as WebAssembly, by Wasmtime.
+# Modules that are not known run as WebAssembly, by an engine.
 wasm = ["aqr-wasmrt/wasm"]
 # ... or so in worker processes locked down by the system (`sandbox`).
 sandbox = ["wasm", "aqr-wasmrt/sandbox"]
-# Wasmtime linked, rather than the modules run by the interpreter blob that the program gives
-# (`set_interpreter`); always but on Windows x86-64, where the blob runs.
+# An engine linked, WAH or Wasmtime (both: `-Z wasm:engine` picks), rather than the modules run by
+# the interpreter blob that the program gives (`set_interpreter`); WAH always but on Windows
+# x86-64, where the blob runs.
+wah = ["wasm", "aqr-wasmrt/wah"]
 wasmtime = ["wasm", "aqr-wasmrt/wasmtime"]
 
 [dependencies]
@@ -83,13 +85,13 @@ aqr-sqlite = { workspace = true, default-features = true }
 aqr-tex = { workspace = true, default-features = true }
 aqr-wrt = { workspace = true, default-features = true }
 
-# (Wasmtime, where the interpreter blob does not run: but on Windows x86-64)
+# (WAH, where the interpreter blob does not run: but on Windows x86-64)
 [target.'cfg(not(all(windows, target_arch = "x86_64")))'.dependencies]
-aqr-wasmrt = { workspace = true, features = ["wasmtime"] }
+aqr-wasmrt = { workspace = true, features = ["wah"] }
 
 [dev-dependencies]
-# (the tests run modules by Wasmtime, linked)
-aqr-wasmrt = { workspace = true, features = ["wasmtime", "sandbox", "probe"] }
+# (the tests run modules by an engine linked: WAH, or both with the feature `wasmtime`)
+aqr-wasmrt = { workspace = true, features = ["wah", "sandbox", "probe"] }
 aqr-7z.workspace = true
 aqr-alz.workspace = true
 aqr-egg.workspace = true

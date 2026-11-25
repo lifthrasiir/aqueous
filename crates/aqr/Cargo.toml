@@ -5,6 +5,12 @@ edition = "2024"
 description = "Command-line tools over the aqr-* recompressors and Aqueous archives"
 publish = false
 
+[features]
+# An engine linked in place of the interpreter blob (Windows x86-64; elsewhere WAH always): both
+# with both, `-Z wasm:engine` picking.
+wasmtime = ["aqr-decompress/wasmtime"]
+wah = ["aqr-decompress/wah"]
+
 [dependencies]
 aqr-common = { workspace = true, features = ["registry"] }
 aqr-compress.workspace = true

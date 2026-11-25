@@ -1911,6 +1911,7 @@ dependencies = [
  "aqr-formula",
  "libc",
  "sha2",
+ "wah",
  "wasmparser 0.258.3",
  "wasmtime",
  "windows-sys",
@@ -3561,6 +3562,24 @@ checksum = "fb067e4cbd1ff067d1df46c9194b5de0e98efd2810bbc95c5d5e5f25a3231150"
 dependencies = [
  "cc",
  "libc",
+]
+
+[[package]]
+name = "wah"
+version = "2690.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c662b7bcd5148ed85e13e79776ce77066aaf787aa8aed047ecc0255148b313aa"
+dependencies = [
+ "wah-sys",
+]
+
+[[package]]
+name = "wah-sys"
+version = "2690.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87b8de24fa082daa96919e22274d54a910d43c4db9e987ed812104c23ffda535"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

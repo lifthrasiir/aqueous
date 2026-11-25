@@ -1,7 +1,7 @@
-//! Modules run by the interpreter blob (aqr-interp: this crate's [`super::engine`] built as a
-//! library of its own, with Wasmtime), which the program gives as bytes ([`set_interpreter`])
+//! Modules run by the interpreter blob (aqr-interp: this crate's engine built as a
+//! library of its own, with an engine), which the program gives as bytes ([`set_interpreter`])
 //! and this places in memory on first use (`aqr_blob::load`, Windows x86-64): the program links no
-//! Wasmtime. What is loaded and applied goes through the blob's entry points; the bound of the
+//! engine. What is loaded and applied goes through the blob's entry points; the bound of the
 //! applications' memories is the program's, given to the blob as it is set.
 
 use std::sync::OnceLock;

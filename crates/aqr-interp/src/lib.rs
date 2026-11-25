@@ -1,7 +1,7 @@
-//! The interpreter blob: a module library that runs any Wasm module handed to it, by Wasmtime
-//! (`aqr_wasmrt`), with no native codecs linked. A self-extracting stub merges it in and sends it
-//! the modules it has no native code for; Wasmtime sandboxes each module (its own memory, no host
-//! access), and the engine is made on first use.
+//! The interpreter blob: a module library that runs any Wasm module handed to it, by WAH (or
+//! Wasmtime: the feature `wasmtime`, `aqr_wasmrt`), with no native codecs linked. A self-extracting
+//! stub merges it in and sends it the modules it has no native code for; the engine sandboxes each
+//! module (its own memory, no host access), and is made on first use.
 //!
 //! It exports, over the C ABI:
 //! - `aqr_interp_load` and `aqr_interp_load_with`: a Wasm module made ready to apply, returning an
@@ -12,7 +12,7 @@
 //! - `aqr_interp_apply_part`: an application of a part module, its inputs pulled and its outputs
 //!   pushed as it runs.
 //! - `aqr_interp_set_application_bound`, `aqr_interp_warm_up` and `aqr_interp_worker_main`:
-//!   `aqr_wasmrt`'s, for the programs that have no Wasmtime of their own.
+//!   `aqr_wasmrt`'s, for the programs that have no engine of their own.
 //! - `aqr_interp_vtable`: all of these, in one [`Vtable`] (what the stub merges in looks for).
 
 use core::ffi::c_void;

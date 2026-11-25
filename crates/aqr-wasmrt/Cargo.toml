@@ -2,21 +2,24 @@
 name = "aqr-wasmrt"
 version = "0.1.0"
 edition = "2024"
-description = "Runs the Wasm modules of aqr natively (Wasmtime), in the process or in a sandbox worker; shared by aqr-decompress and the self-extracting interpreter blob"
+description = "Runs the Wasm modules of aqr natively (WAH or Wasmtime), in the process or in a sandbox worker; shared by aqr-decompress and the self-extracting interpreter blob"
 publish = false
 
 [features]
-default = ["wasm", "sandbox", "wasmtime"]
-# Modules run as WebAssembly: by Wasmtime (`wasmtime`), else by the interpreter blob the program
-# gives (Windows x86-64).
+default = ["wasm", "sandbox", "wah"]
+# Modules run as WebAssembly: by an engine linked (`wah`, `wasmtime`), else by the interpreter blob
+# the program gives (Windows x86-64).
 wasm = ["dep:wasmparser", "dep:windows-sys", "dep:aqr-blob"]
 # ... or so in worker processes locked down by the system (`sandbox`).
 sandbox = ["wasm"]
 # The workers answer a probe of what they can do, for the tests (`Sandbox::probe`): left out of
 # the programs, as connecting brings in Windows sockets (ws2_32) for that alone.
 probe = ["sandbox"]
-# Wasmtime linked (needed but on Windows x86-64: a crate enables it there).
-wasmtime = ["wasm", "dep:wasmtime"]
+# An engine linked (needed but on Windows x86-64: a crate enables one there), WAH or Wasmtime;
+# with both, `-Z wasm:engine` picks (Wasmtime by default, the faster).
+engine = ["wasm"]
+wah = ["engine", "dep:wah"]
+wasmtime = ["engine", "dep:wasmtime"]
 
 [dependencies]
 aqr-api = { workspace = true, default-features = true }
@@ -27,6 +30,7 @@ aqr-archive.workspace = true
 sha2 = { workspace = true, default-features = true }
 wasmparser = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
+wah = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

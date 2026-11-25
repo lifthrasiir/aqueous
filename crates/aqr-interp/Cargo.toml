@@ -2,8 +2,15 @@
 name = "aqr-interp"
 version = "0.1.0"
 edition = "2024"
-description = "The interpreter blob: runs a Wasm module given to it (Wasmtime, aqr-wasmrt), merged into a self-extracting stub for the modules it has no native code for"
+description = "The interpreter blob: runs a Wasm module given to it (WAH or Wasmtime, aqr-wasmrt), merged into a self-extracting stub for the modules it has no native code for"
 publish = false
+
+[features]
+# The engine the blob runs modules by: WAH by default (`--no-default-features --features
+# wasmtime` for Wasmtime).
+default = ["wah"]
+wah = ["aqr-wasmrt/wah"]
+wasmtime = ["aqr-wasmrt/wasmtime"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -13,5 +20,5 @@ aqr-api = { workspace = true, default-features = true }
 aqr-blob = { workspace = true, features = ["runner"] }
 aqr-formula.workspace = true
 aqr-archive.workspace = true
-aqr-wasmrt = { workspace = true, default-features = true }
+aqr-wasmrt = { workspace = true, features = ["sandbox"] }
 sha2 = { workspace = true, default-features = true }
