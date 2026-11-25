@@ -3247,6 +3247,7 @@ a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <d
         and the sum of the task limits (a [=concurrency=] of 1 for each class, the least it can choose)
         exceed what the implementation has, which is implementation-defined, but only for an application whose [=minimal bound=] is over 512 MiB (see below).
     6. Instantiate |module| with the memories and the host functions below.
+        If its tables exceed the memory limit (see below), return a [=resource failure=].
     7. Invoke the [=entry point=] with the arguments of type `i64`, in order:
         the length of |params|, the length of the [=stored content=] of each item of |resources|,
         the length of each item of |inputs| and each item of |sizes|.
@@ -3263,9 +3264,14 @@ a [=list=] of declared output sizes |sizes|, a memory limit and a [=list=] of <d
     10. Return |outputs|.
 </ol>
 
-A `memory.grow` instruction exceeds the memory limit when the total size to which that limit applies would exceed it
+The tables an instance defines count toward the total size of its memories:
+16 bytes for each of their elements, less 65,536 bytes (those of 4,096 elements) for all the tables of the instance together,
+and nothing where they have fewer elements.
+(This bounds what a module's tables may take; the tables of modules built for a function table of their own come under the 4,096 elements.)
+
+A `memory.grow` or `table.grow` instruction exceeds the memory limit when the total size to which that limit applies would exceed it
 (the memory limit, or the task limit of the class of the task executing it, for the unit it belongs to; see step 5 above),
-and MUST succeed otherwise if the maximum of the import type of the [=working memory=] allows.
+and MUST succeed otherwise if the maximum of the import type of the [=working memory=] (or of the type of the table) allows.
 
 The <dfn>minimal bound</dfn> of an application is its memory limit plus the sum of its task limits:
 the most its memories come to at a [=concurrency=] of 1 for each class.

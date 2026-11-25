@@ -813,8 +813,10 @@ struct State {
     c: Shared,
     app: Arc<App>,
     id: u64,
-    /// The bytes of the memories of this instance, in the total of `app`.
+    /// The bytes of the memories of this instance (and of its tables, as counted), in the total of `app`.
     mine: u64,
+    /// The elements of the tables of the instance (counted past the first 4,096: `tables_counted`).
+    tables: u64,
     working: Option<Memory>,
     /// The inputs of a part module.
     inputs: Vec<Input>,
@@ -855,6 +857,7 @@ impl State {
             app,
             id,
             mine: 0,
+            tables: 0,
             working: None,
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -907,23 +910,34 @@ impl Drop for State {
     }
 }
 
-impl ResourceLimiter for State {
-    fn memory_growing(&mut self, current: usize, desired: usize, _: Option<usize>) -> wasmtime::Result<bool> {
-        let mine = self.mine - current as u64 + desired as u64;
+impl State {
+    /// What the instance counts toward its limit grown from `current` to `desired` bytes.
+    fn grow(&mut self, current: u64, desired: u64) -> wasmtime::Result<()> {
+        let mine = self.mine - current + desired;
         match &self.unit {
             // (a task under its class's limit, with the other tasks of its gang and its channels)
-            Some(u) => u.memory(&self.app, desired as u64, current as u64)?,
-            None => self.app.account(desired as u64, current as u64)?,
+            Some(u) => u.memory(&self.app, desired, current)?,
+            None => self.app.account(desired, current)?,
         }
         self.mine = mine;
         match self.task {
             true => self.app.task_peaks[self.class].fetch_max(self.mine, Ordering::Relaxed),
             false => self.app.instance_peak.fetch_max(self.mine, Ordering::Relaxed),
         };
+        Ok(())
+    }
+}
+
+impl ResourceLimiter for State {
+    fn memory_growing(&mut self, current: usize, desired: usize, _: Option<usize>) -> wasmtime::Result<bool> {
+        self.grow(current as u64, desired as u64)?;
         Ok(true)
     }
 
-    fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> wasmtime::Result<bool> {
+    fn table_growing(&mut self, current: usize, desired: usize, _: Option<usize>) -> wasmtime::Result<bool> {
+        let tables = self.tables - current as u64 + desired as u64;
+        self.grow(tables_counted(self.tables), tables_counted(tables))?;
+        self.tables = tables;
         Ok(true)
     }
 }

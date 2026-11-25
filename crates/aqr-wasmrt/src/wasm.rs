@@ -44,6 +44,15 @@ pub(crate) type Decoded<T> = std::result::Result<T, Failure>;
 #[cfg(feature = "engine")]
 pub(crate) const TASK_SLOTS: &str = "aqr_task_slots";
 
+/// What the memory limit counts of an instance's tables of `elements` elements in all (spec,
+/// "Module execution"): 16 bytes an element, but for the first 4,096. (Of Wasmtime alone until WAH 2691.)
+#[cfg(feature = "wasmtime")]
+pub(crate) fn tables_counted(elements: u64) -> u64 {
+    const ELEMENT: u64 = 16;
+    const ALLOWANCE: u64 = 4096 * ELEMENT;
+    elements.saturating_mul(ELEMENT).saturating_sub(ALLOWANCE)
+}
+
 /// A memory imported by a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mem {

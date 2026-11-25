@@ -719,3 +719,37 @@ fn native_threads_do_not_matter() {
         }
     }
 }
+
+/// Tables count toward the memory limit, 16 bytes an element past the 4,096 of an instance, as they
+/// are made and as they grow (spec, "Module execution"). (By Wasmtime alone until WAH 2691, whose
+/// limiter is told of tables.)
+#[cfg(feature = "wasmtime")]
+#[test]
+fn table_limits() {
+    let wat = |table: u64, grow: u64| {
+        format!(
+            r#"(module
+                (import "aqr" "aqr_memory" (memory 1))
+                (import "aqr" "aqr_params" (memory i64 0))
+                (import "aqr" "aqr_input0" (memory i64 0))
+                (import "aqr" "aqr_output0" (memory i64 0))
+                (table {table} funcref)
+                (func (export "aqr_apply_whole") (param i64 i64 i64)
+                    (if (i32.eq (table.grow (ref.null func) (i32.const {grow})) (i32.const -1)) (then unreachable))))"#
+        )
+    };
+    let run = |table, grow, limit| apply_with(&wat(table, grow), 0, limit, &[], None);
+    // within the allowance a table takes nothing: the working memory's page alone
+    assert!(run(4096, 0, PAGE).is_ok());
+    resource(run(4097, 0, PAGE), "limit");
+    assert!(run(4096 + PAGE / 16, 0, 2 * PAGE).is_ok());
+    resource(run(4097 + PAGE / 16, 0, 2 * PAGE), "limit");
+    // grown, the tables of the instance together
+    assert!(run(2048, 2048, PAGE).is_ok());
+    resource(run(2048, 2049, PAGE), "limit");
+    assert!(run(4096, PAGE / 16, 2 * PAGE).is_ok());
+    resource(run(4096, PAGE / 16 + 1, 2 * PAGE), "limit");
+    // 2 GiB of a table under 64 MiB, made or grown
+    resource(run(1 << 27, 0, 64 << 20), "limit");
+    resource(run(0, 1 << 27, 64 << 20), "limit");
+}
