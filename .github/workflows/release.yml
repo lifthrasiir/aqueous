@@ -27,7 +27,9 @@ name: release
 # Windows' VERSIONINFO, the app's Info.plist); a run not for a tag, `git describe`'s of the
 # shallow clone (0.0.0-gHASH).
 #
-# Assets, STEM being the tag without `v0.0.` (v0.0.20261031 -> 20261031):
+# Assets, STEM being the tag's version (v0.1.0 -> 0.1.0), but a date alone of v0.0.YYYYMMDD
+# (v0.0.20261031 -> 20261031) as the first releases' assets were named; scripts/release-env.sh
+# tells, and fails on a tag not of a version:
 #   aqr-STEM.exe                  Windows 7 on, x86_64 (cargo +NIGHTLY win7; packed by UPX)
 #   aqr-STEM-win-install.exe      the installer, aqr.exe and aqr-win.exe (crates/aqr-win-install)
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
@@ -150,8 +152,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
+      - run: sh scripts/release-env.sh >> "$GITHUB_ENV"
       - run: |
           echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
           rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
@@ -181,11 +182,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - run: |
-          s=${GITHUB_REF_NAME#v0.0.}
-          [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
-          echo "STEM=${s#v}" >> "$GITHUB_ENV"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
+      - run: sh scripts/release-env.sh >> "$GITHUB_ENV"
       - run: |
           echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
           rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
@@ -270,8 +267,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
+      - run: sh scripts/release-env.sh >> "$GITHUB_ENV"
       - env:
           TARGET: ${{ matrix.target }}
         run: rustup toolchain install && rustup target add "$TARGET"
@@ -309,10 +305,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - run: |
-          s=${GITHUB_REF_NAME#v0.0.}
-          [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
-          echo "STEM=${s#v}" >> "$GITHUB_ENV"
+      - run: sh scripts/release-env.sh >> "$GITHUB_ENV"
       - run: rustup toolchain install
       - uses: actions/download-artifact@v8.0.2
         with:
@@ -360,11 +353,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - run: |
-          s=${GITHUB_REF_NAME#v0.0.}
-          [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
-          echo "STEM=${s#v}" >> "$GITHUB_ENV"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
+      - run: sh scripts/release-env.sh >> "$GITHUB_ENV"
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2.9.3
         # (a tag's run takes no cache)
