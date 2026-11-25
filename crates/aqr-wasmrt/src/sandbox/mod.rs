@@ -249,6 +249,11 @@ impl Worker {
         };
         w.to.write_all(HELLO)?;
         put_u64(&mut w.to, s.threads.unwrap_or_else(aqr_common::pool::size).max(1) as u64)?;
+        let opts = wasm_options();
+        put_u64(&mut w.to, opts.len() as u64)?;
+        for o in &opts {
+            put_bytes(&mut w.to, o.as_bytes())?;
+        }
         w.to.flush()?;
         let mut ready = [0; 8];
         w.from.read_exact(&mut ready).map_err(|e| w.ended(e))?;
