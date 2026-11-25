@@ -961,7 +961,7 @@ fn failure(store: &Store<State>, e: wasmtime::Error) -> Failure {
 async fn instantiate<'a>(
     store: &mut Store<State>,
     c: &Compiled,
-    mem: &mut (dyn FnMut(Mem) -> (MemoryType, Option<&'a [u8]>) + Send),
+    mem: &mut (dyn FnMut(Mem) -> wasmtime::Result<(MemoryType, Option<&'a [u8]>)> + Send),
 ) -> Decoded<(Instance, Vec<Option<Memory>>)> {
     let over = |e: wasmtime::Error| match e.downcast_ref::<OverLimit>() {
         Some(_) => over_limit(),
@@ -972,7 +972,7 @@ async fn instantiate<'a>(
     for i in &c.imports {
         externs.push(match *i {
             Import::Memory(m) => {
-                let (ty, init) = mem(m);
+                let (ty, init) = mem(m).map_err(over)?;
                 let memory = match (m, &c.working_module) {
                     (Mem::Working, Some(wm)) => defined(store, wm, ty.minimum()).await.map_err(over)?,
                     _ => Memory::new(&mut *store, ty).map_err(over)?,
@@ -1255,16 +1255,16 @@ impl Shared {
         let run = async move {
             // the memories, holding their data
             let (instance, outputs) = instantiate(&mut store, c, &mut |m| match m {
-                Mem::Working => (MemoryType::new(c.working.0 as u32, c.working.1.map(|m| m as u32)), None),
+                Mem::Working => Ok((MemoryType::new(c.working.0 as u32, c.working.1.map(|m| m as u32))?, None)),
                 Mem::Params => sized(params.len() as u64, Some(params)),
                 Mem::Resource(i) => sized(resources[i as usize].len() as u64, Some(&resources[i as usize])),
                 Mem::Input(k) => {
                     let pages = c.pages(m, lens[k as usize]);
-                    (MemoryType::new64(pages, Some(pages)), data[k as usize].filter(|_| !c.part))
+                    Ok((MemoryType::new64(pages, Some(pages))?, data[k as usize].filter(|_| !c.part)))
                 }
                 Mem::Output(j) => {
                     let pages = c.pages(m, sizes[j as usize]);
-                    (MemoryType::new64(pages, Some(pages)), None)
+                    Ok((MemoryType::new64(pages, Some(pages))?, None))
                 }
             })
             .await?;
@@ -1346,8 +1346,8 @@ impl Job {
         } as u32;
         // every memory but the working one empty
         let (instance, _) = instantiate(&mut store, c, &mut |m| match m {
-            Mem::Working => (MemoryType::new(pages, c.working.1.map(|m| m as u32)), None),
-            _ => (MemoryType::new64(0, Some(0)), None),
+            Mem::Working => Ok((MemoryType::new(pages, c.working.1.map(|m| m as u32))?, None)),
+            _ => Ok((MemoryType::new64(0, Some(0))?, None)),
         })
         .await?;
         // the working memory a copy of the snapshot (on write where the system can), over
@@ -1382,9 +1382,9 @@ impl Compiled {
 }
 
 /// The type of a memory sized to fit `len` bytes, with its data.
-fn sized(len: u64, data: Option<&[u8]>) -> (MemoryType, Option<&[u8]>) {
+fn sized(len: u64, data: Option<&[u8]>) -> wasmtime::Result<(MemoryType, Option<&[u8]>)> {
     let pages = len.div_ceil(65536);
-    (MemoryType::new64(pages, Some(pages)), data)
+    Ok((MemoryType::new64(pages, Some(pages))?, data))
 }
 
 /// The range `at..at + len` of the working memory of `c`, if within it.

@@ -116,10 +116,10 @@ unicode-normalization = "0.1"
 wah = { version = "2690", default-features = false, features = [
     "jit", "wasm2", "memory64", "multi-memory",
 ] }
-walrus = "0.27"
+walrus = "0.28"
 # aqr-ld takes the version walrus does.
-wasmparser = "0.258"
-wasmtime = { version = "49", default-features = false, features = [
+wasmparser = "0.263"
+wasmtime = { version = "51", default-features = false, features = [
     "cranelift", "runtime", "std", "parallel-compilation", "async",
 ] }
 wat = "1"
