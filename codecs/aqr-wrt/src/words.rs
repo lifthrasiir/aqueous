@@ -383,12 +383,17 @@ impl Dictionary {
         self.entries.is_empty()
     }
 
-    /// The dictionary as the module's resource: the layout, then each entry followed by LF.
+    /// The dictionary as the module's resource: the layout, then each entry as the count of its
+    /// first bytes that are the entry before's (a byte), the rest of it and LF.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = self.layout.params();
+        let mut prev: &[u8] = &[];
         for e in &self.entries {
-            out.extend_from_slice(e);
+            let k = e.iter().zip(prev).take_while(|(a, b)| a == b).count().min(255);
+            out.push(k as u8);
+            out.extend_from_slice(&e[k..]);
             out.push(b'\n');
+            prev = e;
         }
         out
     }
@@ -523,11 +528,12 @@ fn layout(bytes: &[u64; 256], counts: &[u64]) -> Layout {
     }
 }
 
-/// A dictionary as the decoder takes it: the layout, and where each entry is in the resource
-/// (which `piece` is given again) and whether it is a word.
+/// A dictionary as the decoder takes it: the layout, the entries' bytes one after another, and
+/// where each entry is in them and whether it is a word.
 struct Parsed {
     layout: Layout,
     entries: Vec<(usize, usize, bool)>,
+    bytes: Vec<u8>,
 }
 
 /// Bytes of an entry of `Parsed` on WebAssembly (32-bit pointers), checked there by an
@@ -537,38 +543,67 @@ pub const ENTRY: u64 = 12;
 #[cfg(target_family = "wasm")]
 const _: () = assert!(size_of::<(usize, usize, bool)>() as u64 == ENTRY);
 
-/// The lengths of the layout's three lists and the count of entries of the dictionary
-/// `bytes`, as `Parsed` holds them: what the module's memory plan follows.
-pub fn shape(bytes: &[u8]) -> Result<([usize; 3], usize)> {
-    let p = Parsed::of(bytes)?;
-    Ok(([p.layout.one.len(), p.layout.two.len(), p.layout.three.len()], p.entries.len()))
+/// The shape of a dictionary, as `Parsed` holds it: what the module's memory plan follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Shape {
+    /// The count of entries.
+    pub entries: usize,
+    /// The bytes of the entries, all of them.
+    pub bytes: usize,
+    /// The lengths of the layout's three lists.
+    pub lists: [usize; 3],
+}
+
+/// The shape of the dictionary `res`.
+pub fn shape(res: &[u8]) -> Result<Shape> {
+    let p = Parsed::of(res)?;
+    let lists = [p.layout.one.len(), p.layout.two.len(), p.layout.three.len()];
+    Ok(Shape { entries: p.entries.len(), bytes: p.bytes.len(), lists })
 }
 
 impl Parsed {
-    fn of(bytes: &[u8]) -> Result<Parsed> {
+    fn of(res: &[u8]) -> Result<Parsed> {
         let mut at = 0;
-        let layout = Layout::read(bytes, &mut at)?;
-        // (reserved for them all: as many as lines' ends)
-        let mut entries = Vec::with_capacity(bytes[at..].iter().filter(|&&b| b == b'\n').count());
-        while at < bytes.len() {
-            let e = at + bytes[at..].iter().position(|&b| b == b'\n').ok_or_else(corrupt)?;
-            let t = &bytes[at..e];
+        let layout = Layout::read(res, &mut at)?;
+        // (each entry: the count of the bytes it shares with the one before, the rest, its end)
+        let next = |at: usize| -> Result<(usize, usize)> {
+            let e = at + 1 + res[at + 1..].iter().position(|&b| b == b'\n').ok_or_else(corrupt)?;
+            Ok((res[at] as usize, e))
+        };
+        // (the entries and their bytes counted first, so that both are taken at once)
+        let (mut n, mut total, mut prev, mut i) = (0usize, 0usize, 0usize, at);
+        while i < res.len() {
+            let (shared, e) = next(i)?;
+            if shared > prev {
+                return Err(corrupt());
+            }
+            prev = shared + (e - i - 1);
+            (n, total, i) = (n + 1, total + prev, e + 1);
+        }
+        if n as u64 > layout.capacity() {
+            return Err(corrupt());
+        }
+        let mut entries = Vec::with_capacity(n);
+        let mut bytes = Vec::with_capacity(total);
+        let mut last = 0;
+        while at < res.len() {
+            let (shared, e) = next(at)?;
+            let s = bytes.len();
+            bytes.extend_from_within(last..last + shared);
+            bytes.extend_from_slice(&res[at + 1..e]);
+            let t = &bytes[s..];
             let word = t.iter().all(u8::is_ascii_lowercase);
             if t.is_empty() || !word && t[0].is_ascii_alphabetic() {
                 return Err(corrupt());
             }
-            entries.push((at, e, word));
-            at = e + 1;
+            entries.push((s, bytes.len(), word));
+            (last, at) = (s, e + 1);
         }
-        if entries.len() as u64 > layout.capacity() {
-            return Err(corrupt());
-        }
-        Ok(Parsed { layout, entries })
+        Ok(Parsed { layout, entries, bytes })
     }
 
-    /// The text `out` from the coded text `text` of a piece, which must fill all of `out`;
-    /// `dict` is the resource this was parsed of.
-    fn piece(&self, dict: &[u8], text: &[u8], out: &mut [u8]) -> Result<()> {
+    /// The text `out` from the coded text `text` of a piece, which must fill all of `out`.
+    fn piece(&self, text: &[u8], out: &mut [u8]) -> Result<()> {
         let (layout, entries) = (&self.layout, &self.entries);
         let (class, place) = layout.classes();
         let (n1, n2) = (layout.one.len(), layout.two.len() * 256);
@@ -626,7 +661,7 @@ impl Parsed {
                 _ => return Err(corrupt()),
             };
             let &(s, e, word) = entries.get(k).ok_or_else(corrupt)?;
-            let t = &dict[s..e];
+            let t = &self.bytes[s..e];
             if !word {
                 if nosp || case != Case::Lower {
                     return Err(corrupt());
@@ -688,9 +723,9 @@ pub(crate) fn put_at(out: &mut [u8], o: &mut usize, s: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The parameters of `wrt-recons`: the shape of the dictionary `dict` (its count of entries and
-/// the lengths of its layout's three lists, which the module's memory plan goes by), then the
-/// coded and text lengths of the pieces (each a pair of varints).
+/// The parameters of `wrt-recons`: the shape of the dictionary `dict` (its count of entries, of
+/// their bytes, and the lengths of its layout's three lists, which the module's memory plan goes
+/// by), then the coded and text lengths of the pieces (each a pair of varints).
 pub fn params(dict: &[u8], lens: &[(usize, usize)]) -> Vec<u8> {
     [head(dict), params_of(lens)].concat()
 }
@@ -699,8 +734,8 @@ pub fn params(dict: &[u8], lens: &[(usize, usize)]) -> Vec<u8> {
 /// applications of segments that share it.
 pub fn head(dict: &[u8]) -> Vec<u8> {
     let mut p = Vec::new();
-    let (lists, entries) = shape(dict).unwrap_or_default();
-    for n in [entries, lists[0], lists[1], lists[2]] {
+    let s = shape(dict).unwrap_or_default();
+    for n in [s.entries, s.bytes, s.lists[0], s.lists[1], s.lists[2]] {
         varint::put(&mut p, n as u64);
     }
     p
@@ -716,13 +751,13 @@ pub(crate) fn params_of(lens: &[(usize, usize)]) -> Vec<u8> {
     p
 }
 
-/// The shape that `params` tell of the dictionary (its count of entries and the lengths of the
-/// layout's lists) and the rest of them, the pieces'.
-pub fn header(params: &[u8]) -> Result<(usize, [usize; 3], &[u8])> {
+/// The shape that `params` tell of the dictionary, and the rest of them, the pieces'.
+pub fn header(params: &[u8]) -> Result<(Shape, &[u8])> {
     let mut at = 0;
     let mut get = || varint::get(params, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
-    let (entries, a, b, c) = (get()?, get()?, get()?, get()?);
-    Ok((entries, [a, b, c], &params[at..]))
+    let (entries, bytes) = (get()?, get()?);
+    let lists = [get()?, get()?, get()?];
+    Ok((Shape { entries, bytes, lists }, &params[at..]))
 }
 
 /// Calls `f` with the coded and text lengths of each piece of `params` ([`params`]), in order.
@@ -789,14 +824,15 @@ pub(crate) fn in_pieces(
 /// ([`Dictionary::to_bytes`]), in pieces of `params` ([`params`]), decoded on up to `threads`
 /// threads.
 pub fn decode(params: &[u8], dict: &[u8], text: &[u8], len: usize, threads: usize) -> Result<Vec<u8>> {
-    let (entries, lists, params) = header(params)?;
+    let (s, params) = header(params)?;
     let p = parsed(dict)?;
     let p: &Parsed = std::borrow::Borrow::borrow(&p);
     // (what the memory plan went by)
-    if p.entries.len() != entries || [p.layout.one.len(), p.layout.two.len(), p.layout.three.len()] != lists {
+    let lists = [p.layout.one.len(), p.layout.two.len(), p.layout.three.len()];
+    if (p.entries.len(), p.bytes.len(), lists) != (s.entries, s.bytes, s.lists) {
         return Err(corrupt());
     }
-    in_pieces(params, text, len, threads, |x, o| p.piece(dict, x, o))
+    in_pieces(params, text, len, threads, |x, o| p.piece(x, o))
 }
 
 #[cfg(test)]
@@ -994,15 +1030,25 @@ mod tests {
         let decode = |r: &[u8], text: &[u8], len: usize| decode(&params(r, &[(text.len(), len)]), r, text, len, 1);
         let bad = |entries: &[u8], text: &[u8]| decode(&[&p[..], entries].concat(), text, d.len()).is_err();
         // an entry empty, unterminated or of letters not all lower case; a code past the entries
-        assert!(!bad(b"cat\nthe\nand\n", &text));
-        assert!(bad(b"cat\n\n", &text));
-        assert!(bad(b"cat\nthe\nand", &text));
-        assert!(bad(b"cat\nThe\nand\n", &text));
-        assert!(bad(b"cat\nthe\n", &text));
+        assert!(!bad(b"\0cat\n\0the\n\0and\n", &text));
+        assert!(bad(b"\0cat\n\0\n", &text));
+        assert!(bad(b"\0cat\n\0the\n\0and", &text));
+        assert!(bad(b"\0cat\n\0The\n\0and\n", &text));
+        assert!(bad(b"\0cat\n\0the\n", &text));
+        // more bytes shared than the entry before has, an entry of no bytes but its count
+        assert!(bad(b"\x01cat\n\0the\n\0and\n", &text));
+        assert!(bad(b"\0cat\n\x04he\n\0and\n", &text));
+        assert!(bad(b"\0cat\n\0the\n\0and\n\0", &text));
+        // bytes shared: the same entries, and their codes
+        assert!(!bad(b"\0cat\n\0the\n\0and\n", &text));
+        let shared = [&p[..], b"\0cat\n\x02r\n\x03\n"].concat();
+        let one = |i: usize| [l.flags[NOSP], l.one[i]];
+        assert_eq!(decode(&shared, &[one(0), one(1), one(2)].concat(), 9).unwrap(), b"catcarcar");
         // a flag at the end, an escape of a byte not of the layout, flags before markup
-        assert!(bad(&entries(&dict), &[l.flags[NOSP]]));
-        assert!(bad(&entries(&dict), &[l.flags[ESC], b'a']));
-        let r = [&p[..], b"<a\n"].concat();
+        let coded = &dict.to_bytes()[p.len()..];
+        assert!(bad(coded, &[l.flags[NOSP]]));
+        assert!(bad(coded, &[l.flags[ESC], b'a']));
+        let r = [&p[..], b"\0<a\n"].concat();
         assert!(decode(&r, &[l.flags[CAP], l.one[0]], 2).is_err());
         assert_eq!(decode(&r, &[l.one[0]], 2).unwrap(), b"<a");
         assert!(decode(&p[..3], &[], 0).is_err());

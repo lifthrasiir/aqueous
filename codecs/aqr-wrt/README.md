@@ -34,6 +34,11 @@ Measured 2026-10-26 on an Apple M4 (10 cores), through `aqr` at level `mid`.
   -3; `bible.txt`, `dickens` and `webster` −0.5%, −0.6% and −1.0% at -9. Coding the rest of
   such a word by entries too (after NOSP) gained nothing more, nor starts of 3 or 4 letters
   at least, nor sorting the codes of two bytes (the text grew more than the dictionary shrank).
+- 2026-11-26, version 4: each entry of the dictionary written as the count of its first bytes
+  shared with the entry before and the rest (FORMAT.md §3): `enwik9` 233.35 → 233.04 MB
+  through `aqr` (−0.13%); at zstd -9, the dictionary of `enwik8` 268 → 207 KB (26.923 →
+  26.862 MB in all), of `webster` 144 → 117 KB, of `dickens` 53 → 48 KB. The module's block
+  grows 4,045 → 4,295 bytes. Sorting the codes of two bytes too, with that, came to ±12 KB.
 - In the 10gb corpus, the files taken come to −36.7 MB. Of that, −30.4 MB is `enwik9` with
   `enwik9.zip`, which hold the same text and are stored once still. The files not taken come
   to −0.6 MB. Their shares of the solid blocks move both ways, by about 350 B a file, as the

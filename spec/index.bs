@@ -6739,8 +6739,8 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wrt-recons-hangul.wasm" title="crates/aqr-modules/wasm/wrt-recons-hangul.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md" title="codecs/aqr-wrt/FORMAT.md">R</a>
     <tr>
-      <td><code>d7a2ad763a9c9ef48cfb8a35ba24b6654e03fa8fbe2879f50109750c8dacc8f8</code>
-      <td>wrt-recons@3
+      <td><code>d0c9c7c168a5961eb03ab1de640dcc5b14e8031006eec5eb360025bf203df1fd</code>
+      <td>wrt-recons@4
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wrt-recons.wasm" title="crates/aqr-modules/wasm/wrt-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md" title="codecs/aqr-wrt/FORMAT.md">R</a>
     <tr>

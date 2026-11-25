@@ -4857,7 +4857,7 @@ fn wrt_plans_hold() {
         let entries = if hangul {
             aqr_wrt::hangul::entries_of(&a.resources[0]).unwrap()
         } else {
-            aqr_wrt::words::shape(&a.resources[0]).unwrap().1
+            aqr_wrt::words::shape(&a.resources[0]).unwrap().entries
         };
         assert!(entries > 40_000, "{what}: {entries}");
         plan_holds(&format!("wrt big dictionary {what}"), f, &d);

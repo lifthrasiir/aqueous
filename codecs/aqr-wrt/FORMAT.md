@@ -29,10 +29,10 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `wrt-recons`, version 3.
-- **Params**: first the shape of the dictionary, four varints: its count of entries (§3), then
-  the lengths of the layout's three lists (one, two and three bytes); the module fails where
-  they are not the dictionary's. A memory plan goes by them, as a resource's contents are not at
+- **Module**: name `wrt-recons`, version 4.
+- **Params**: first the shape of the dictionary, five varints: its count of entries (§3), the
+  sum of their lengths, then the lengths of the layout's three lists (one, two and three
+  bytes); the module fails where they are not the dictionary's. A memory plan goes by them, as a resource's contents are not at
   hand for it. Then the pieces of the coded text, one or more, each a pair of varints: the
   length of its coded text, then the length of its text. The coded texts of the pieces follow each other
   in the input, and their lengths must add up to the input's length. The lengths of their texts
@@ -44,7 +44,8 @@ Contents:
   piece giving a text of a length other than its own.
 
 Version 1 had no params: the coded text was one piece, of the declared length. Version 2 had
-the pieces alone; version 3 the shape before them.
+the pieces alone; version 3 the shape before them, without the sum of the entries' lengths,
+and its dictionary had each entry as it is, followed by LF.
 
 ## 3. The dictionary
 
@@ -58,12 +59,17 @@ varint  n2                    the first bytes of the codes of two bytes
 u8      two[n2]
 varint  n3                    the first bytes of the codes of three bytes
 u8      three[n3]
-entries                       each followed by LF, to the end of the resource
+entries                       to the end of the resource, each:
+  u8    shared                the count of its first bytes that are those of the entry before
+  u8    rest[]                the rest of its bytes
+  u8    LF
 ```
 
 - The 4 + n1 + n2 + n3 bytes of the flags and the lists must be distinct, and none of them may
   be a letter. A byte of these is a *special* byte.
-- An entry is not empty and does not contain LF.
+- An entry is its `shared` first bytes of the entry before it, then `rest`. `shared` is at most
+  the length of the entry before (0 for the first entry), and `rest` does not contain LF.
+- An entry is not empty.
   - An entry made only of lower-case letters is a *word*.
   - Any other entry is *markup*, and its first byte must not be a letter.
 - There are at most n1 + 256 · n2 + 65536 · n3 entries. Entry k is numbered from 0 in order, and
@@ -223,11 +229,16 @@ order; none of them begins a character in UTF-8.
 varint  n1                    the codes of one byte
 u8      one[n1]
 varint  n2                    how many of the leads begin codes of two bytes
-entries                       each followed by LF, to the end of the resource
+entries                       to the end of the resource, each:
+  u8    shared                the count of its first bytes that are those of the entry before
+  u8    rest[]                the rest of its bytes
+  u8    LF
 ```
 
 - The bytes of `one` must be distinct, below 0x80, and none of them LF. n2 is at most 32.
-- An entry is not empty and does not contain LF. It may be any other bytes.
+- An entry is its `shared` first bytes of the entry before it, then `rest`. `shared` is at most
+  the length of the entry before (0 for the first entry), and `rest` does not contain LF.
+- An entry is not empty. It may be any other bytes.
 - There are at most n1 + 256 · n2 + 65536 · (32 − n2) entries. Entry k is numbered from 0 in
   order. Its code is as follows, where L is the list of the leads:
 

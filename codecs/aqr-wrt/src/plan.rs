@@ -12,14 +12,15 @@ use crate::{hangul, words};
 /// The memory plan of `wrt-recons`: of its initial memory (`initial` bytes), parameters `params`,
 /// resources and inputs of these lengths, and an output of `len`.
 pub fn recons(initial: u64, params: &[u8], resources: &[u64], inputs: &[u64], len: u64) -> Option<u64> {
-    let (entries, lists, _) = words::header(params).ok()?;
+    let (shape, _) = words::header(params).ok()?;
     let mut m = Sim::new(initial);
     m.take(whole(params.len() as u64, resources, inputs));
-    // (the dictionary parsed: the layout's lists, then the entries; then the text)
-    for l in lists {
+    // (the dictionary parsed: the layout's lists, the entries, their bytes; then the text)
+    for l in shape.lists {
         m.take(l as u64);
     }
-    m.take(words::ENTRY * entries as u64);
+    m.take(words::ENTRY * shape.entries as u64);
+    m.take(shape.bytes as u64);
     m.take(len);
     Some(m.plan())
 }

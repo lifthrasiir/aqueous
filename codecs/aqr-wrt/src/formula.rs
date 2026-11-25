@@ -13,7 +13,7 @@ use crate::words::{self, Dictionary};
 
 pub use crate::module::{decode, decode_hangul};
 
-pub const MODULE: Module = Module::new("wrt-recons", 3).with_plan(plan_recons);
+pub const MODULE: Module = Module::new("wrt-recons", 4).with_plan(plan_recons);
 pub const HANGUL: Module = Module::new("wrt-recons-hangul", 2).with_plan(plan_hangul);
 
 /// The memory of [`MODULE`]: its plan ([`crate::plan::recons`]).
@@ -359,9 +359,13 @@ mod tests {
         assert_eq!(eval(&f, d.len()).unwrap(), d);
         assert!(eval(&f, d.len() - 1).is_err());
         // a little Hangul in other text is coded as words
+        // (words in no order, so that coding them pays by more than their dictionary takes)
+        let mut rng = aqr_common::rng::Rng::new(5);
+        let words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "한"];
         let mut other = Vec::new();
         while other.len() < 400_000 {
-            other.extend_from_slice("the quick brown fox jumps over the lazy dog 한 ".as_bytes());
+            other.extend_from_slice(words[rng.below(words.len() as u64) as usize].as_bytes());
+            other.push(b' ');
         }
         assert!(!korean(&other));
         let Node::Apply(a) = &encode(&other, 1).unwrap().root else { panic!() };

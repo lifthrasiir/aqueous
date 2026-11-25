@@ -593,8 +593,8 @@ pub static KNOWN: &[Known] = &[
     },
     Known {
         name: "wrt-recons",
-        version: 3,
-        sha512_256: hex("d7a2ad763a9c9ef48cfb8a35ba24b6654e03fa8fbe2879f50109750c8dacc8f8"),
+        version: 4,
+        sha512_256: hex("d0c9c7c168a5961eb03ab1de640dcc5b14e8031006eec5eb360025bf203df1fd"),
         block: include_bytes!("../wasm/wrt-recons.block"),
     },
     Known {
