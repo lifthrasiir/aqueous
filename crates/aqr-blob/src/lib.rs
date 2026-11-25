@@ -163,12 +163,14 @@ pub const CRT_NAMES: [&str; CRT_COUNT] = [
     "truncf",
     "copysign",
     "copysignf",
+    // (of WAH 2691 on: its memories)
+    "calloc",
 ];
 
-const CRT_COUNT: usize = 43;
+const CRT_COUNT: usize = 44;
 
 /// The magic of [`CRT_TABLE`], by which `aqr-ld merge` finds it in a stub's file.
-pub const CRT_MAGIC: &[u8; 16] = b"\x89AQRCRTTABLEv3\x00\x00";
+pub const CRT_MAGIC: &[u8; 16] = b"\x89AQRCRTTABLEv4\x00\x00";
 
 /// The program's own functions of [`CRT_NAMES`], after [`CRT_MAGIC`].
 #[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
@@ -228,6 +230,7 @@ mod crt {
         fn truncf();
         fn copysign();
         fn copysignf();
+        fn calloc();
     }
 
     #[link(name = "kernel32")]
@@ -315,6 +318,7 @@ mod crt {
             truncf,
             copysign,
             copysignf,
+            calloc,
         ],
     };
 
