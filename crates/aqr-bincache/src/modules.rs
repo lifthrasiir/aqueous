@@ -237,7 +237,7 @@ fn packed() -> bool {
     let mut head = [0; 8];
     fs::File::open(root().join("target/aqr-sfx/sfx.pack"))
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
-        .is_ok_and(|()| &head == b"AQRSFXP2")
+        .is_ok_and(|()| &head == b"AQRSFXP3")
 }
 
 /// Whether the pack's `modules.txt` (`NAME HASH` lines, the binaries' names) has the modules of

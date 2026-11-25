@@ -33,10 +33,10 @@ use wah_engine as linked;
 
 #[cfg(not(feature = "engine"))]
 mod interp;
+#[cfg(not(feature = "engine"))]
+pub use interp::{engine, load, load_bounded, load_released, set_interpreter, warm_up};
 #[cfg(all(not(feature = "engine"), feature = "sandbox"))]
 pub(crate) use interp::{interpreter_given, worker_main};
-#[cfg(not(feature = "engine"))]
-pub use interp::{load, load_bounded, load_released, set_interpreter, warm_up};
 
 pub(crate) type Decoded<T> = std::result::Result<T, Failure>;
 
@@ -104,7 +104,23 @@ pub fn set_application_bound(bytes: u64) {
 /// Where the interpreter blob comes from, for running modules without an engine linked
 /// ([`interp`]); nothing where it is.
 #[cfg(feature = "engine")]
-pub fn set_interpreter(_: fn() -> Result<Vec<u8>, String>) {}
+pub fn set_interpreter(_: fn(&str) -> Result<Vec<u8>, String>) {}
+
+/// The engine the modules run by: `wah` or `wasmtime` (`-Z wasm:engine` where there are two, the
+/// linked or the blobs the program carries).
+#[cfg(all(feature = "wah", not(feature = "wasmtime")))]
+pub fn engine() -> &'static str {
+    "wah"
+}
+
+/// The engine the modules run by: `wah` or `wasmtime` (`-Z wasm:engine` where there are two, the
+/// linked or the blobs the program carries).
+#[cfg(all(feature = "wasmtime", not(feature = "wah")))]
+pub fn engine() -> &'static str {
+    "wasmtime"
+}
+#[cfg(all(feature = "wasmtime", feature = "wah"))]
+pub use both::engine;
 
 /// The bound set ([`set_application_bound`]).
 #[cfg(any(feature = "sandbox", not(feature = "engine")))]

@@ -19,13 +19,16 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     compression dialog's questions before it begins (`src/session.rs`). `--format sfx` (`src/sfx.rs`,
     Windows x86-64) makes a self-extracting program: the archive with shorthand module blocks for
     the modules that have native blobs, after aqr-sfx-shim (packed by UPX) and the bundle of
-    those blobs (and of the interpreter blob, if any module is in full: aqr-sfx's `bundle`), and
+    those blobs (and of the interpreter blob of `-Z wasm:engine`, WAH by default, if any module is
+    in full: aqr-sfx's `bundle`), and
     what the program does once run where the input's root has `.aqr/sfx/sfx.toml`
     (`docs/sfx-config-design.md`: read back of the archive made, compiled by aqr-sfx's `config`
     into a record of CBOR before the archive, and the stub's icon, `VERSIONINFO`, manifest and
     subsystem written by its `pe`, as a section after UPX's). What it bundles is `target/aqr-sfx/` (or
     `AQR_SFX_PACK`), which `crates/aqr-sfx/pack.py` gathers and packs (`sfx.pack`, the blobs as
-    bundles of LZMA2, ~2.9 MB: only aqr reads it); it is no part of aqr's build but written into
+    bundles of LZMA2, ~2.9 MB: only aqr reads it; each interpreter blob a bundle of its own, WAH's
+    always and Wasmtime's with `pack.py --engines=wah,wasmtime`, +2.2 MB, which aqr picks by
+    `-Z wasm:engine`); it is no part of aqr's build but written into
     the linked executable as resources (`aqr-sfx-pack --embed DIR EXE`, aqr-sfx's `resource`, read
     in place as it runs): `cargo aqr` writes it into the binary it keeps (`pack.id` in its
     manifest), aqr's tests/sfx.rs into a copy of theirs. Each blob is used only for the hash it

@@ -577,8 +577,8 @@ const SANDBOX_WORKER: &str = "--sandbox-worker";
 static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
 
 fn main() -> ExitCode {
-    // (the modules run as WebAssembly by the interpreter blob this program carries, where no
-    // Wasmtime is linked: Windows x86-64; in a worker too)
+    // (the modules run as WebAssembly by the interpreter blob this program carries, of the engine
+    // `-Z wasm:engine` picks, where none is linked: Windows x86-64; in a worker too)
     aqr_decompress::set_interpreter(sfx::interpreter);
     // before anything else, as the worker's standard input and output are its messages
     if std::env::args_os().nth(1).is_some_and(|a| a == SANDBOX_WORKER) {

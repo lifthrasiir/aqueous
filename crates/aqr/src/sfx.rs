@@ -58,21 +58,31 @@ pub struct Pack {
     libs: HashMap<String, (Vec<u8>, Vec<String>)>,
 }
 
-/// The interpreter blob of the pack: what runs the modules as WebAssembly where this program
-/// links no Wasmtime (`aqr_decompress::set_interpreter`), unpacked alone (its bundle of its own,
-/// the first).
-pub fn interpreter() -> Result<Vec<u8>, String> {
-    let [interp, _, _] = parts()?;
-    let mut blobs = aqr_sfx::bundle::unpack(interp).map_err(|e| format!("the interpreter blob: {e}"))?;
+/// The interpreter blob of `engine` (`wah`, `wasmtime`) of the pack: what runs the modules as
+/// WebAssembly where this program links no engine (`aqr_decompress::set_interpreter`), unpacked
+/// alone (each a bundle of its own).
+pub fn interpreter(engine: &str) -> Result<Vec<u8>, String> {
+    let (interps, _) = parts()?;
+    let Some((_, bundle)) = interps.iter().find(|i| i.0 == engine.as_bytes()) else {
+        let have: Vec<_> = interps.iter().map(|i| String::from_utf8_lossy(i.0)).collect();
+        return Err(format!(
+            "the self-extracting pack has no interpreter blob of {engine} (but of {})",
+            have.join(", ")
+        ));
+    };
+    let mut blobs = aqr_sfx::bundle::unpack(bundle).map_err(|e| format!("the interpreter blob: {e}"))?;
     match (blobs.pop(), blobs.is_empty()) {
-        (Some((name, blob)), true) if name == "aqr-interp.blob" => Ok(blob),
-        _ => Err("the self-extracting pack has no interpreter blob".into()),
+        (Some((name, blob)), true) if name.starts_with("aqr-interp") && name.ends_with(".blob") => Ok(blob),
+        _ => Err(format!("the self-extracting pack's interpreter blob of {engine} is not valid")),
     }
 }
 
-/// The parts of the pack (aqr-sfx's `aqr-sfx-pack`): the bundle of the interpreter blob, the
-/// bundle of the other blobs, and the other files.
-fn parts() -> Result<[&'static [u8]; 3], String> {
+/// The interpreter blobs of the pack, by engine.
+type Interps = Vec<(&'static [u8], &'static [u8])>;
+
+/// The parts of the pack (aqr-sfx's `aqr-sfx-pack`): the bundle of each interpreter blob by its
+/// engine; the bundle of the other blobs and the other files.
+fn parts() -> Result<(Interps, [&'static [u8]; 2]), String> {
     let packed = embedded().0;
     if packed.is_empty() {
         return Err("this aqr carries no blobs (the interpreter's and the self-extracting stub's: \
@@ -81,15 +91,25 @@ fn parts() -> Result<[&'static [u8]; 3], String> {
             .into());
     }
     let cut = || "the self-extracting pack is cut short".to_string();
-    let mut d = packed.strip_prefix(b"AQRSFXP2").ok_or("the self-extracting pack is not valid")?;
-    let mut bundle = || -> Result<&'static [u8], String> {
-        let (n, r) = d.split_first_chunk::<8>().ok_or_else(cut)?;
-        let (b, r) = r.split_at_checked(u64::from_le_bytes(*n) as usize).ok_or_else(cut)?;
-        d = r;
-        Ok(b)
-    };
-    let (interp, blobs) = (bundle()?, bundle()?);
-    Ok([interp, blobs, d])
+    let mut d = packed.strip_prefix(b"AQRSFXP3").ok_or("the self-extracting pack is not valid")?;
+    // (a length of `W` bytes, little endian, and as many bytes after it)
+    fn take<const W: usize>(d: &mut &'static [u8]) -> Option<&'static [u8]> {
+        let (n, r) = d.split_first_chunk::<W>()?;
+        let mut le = [0; 8];
+        le[..W].copy_from_slice(n);
+        let (b, r) = r.split_at_checked(usize::try_from(u64::from_le_bytes(le)).ok()?)?;
+        *d = r;
+        Some(b)
+    }
+    let (k, r) = d.split_first_chunk::<4>().ok_or_else(cut)?;
+    d = r;
+    let mut interps = Vec::new();
+    for _ in 0..u32::from_le_bytes(*k) {
+        let engine = take::<4>(&mut d).ok_or_else(cut)?;
+        interps.push((engine, take::<8>(&mut d).ok_or_else(cut)?));
+    }
+    let blobs = take::<8>(&mut d).ok_or_else(cut)?;
+    Ok((interps, [blobs, d]))
 }
 
 /// The pack, unpacked once; an error where this program carries none.
@@ -99,7 +119,7 @@ pub fn pack() -> Result<&'static Pack, String> {
 }
 
 fn unpack() -> Result<Pack, String> {
-    let [_, blobs, raw] = parts()?;
+    let (_, [blobs, raw]) = parts()?;
     let mut files: HashMap<String, Vec<u8>> = aqr_sfx::bundle::unpack(blobs)?.into_iter().collect();
     let mut at = 0;
     let take = |at: &mut usize| -> Option<&[u8]> {
@@ -259,7 +279,7 @@ pub fn make(archive: &[u8], settings: Option<&Compiled>) -> Result<Made, String>
         blobs.push((format!("{}{l}", aqr_sfx::LIB), pack.libs[l].0.clone()));
     }
     if full {
-        blobs.push((aqr_sfx::INTERP.to_owned(), interpreter()?));
+        blobs.push((aqr_sfx::INTERP.to_owned(), interpreter(aqr_decompress::wasm_engine())?));
     }
     let bundle = if blobs.is_empty() { Vec::new() } else { aqr_sfx::bundle::pack(&blobs)? };
     let stub = match settings {

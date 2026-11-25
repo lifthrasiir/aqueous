@@ -7,8 +7,10 @@ for `cargo aqr`, the release workflow for its aqr.exe):
   of Windows 7 on), packed by UPX (`upx -9`, as the release packs aqr.exe; the one AQR_UPX names
   (not UPX: upx reads that as its options), else `upx` on the path; where there is none, left as
   it is with a warning);
-- aqr-interp.blob, the interpreter blob (aqr-interp built for the no-TLS target, digested by
-  `aqr-ld blob`), for the modules with no native blob;
+- aqr-interp.blob, the interpreter blob of WAH (aqr-interp built for the no-TLS target, digested
+  by `aqr-ld blob`), for the modules with no native blob; and with `--engines=wah,wasmtime`
+  aqr-interp-wasmtime.blob too, of Wasmtime (aqr-interp's feature `wasmtime`), a blob of its own
+  (aqr picks by `-Z wasm:engine`, WAH by default);
 - modules/NAME.blob, each module of aqr-modules built as a native library for the no-TLS target
   (crates/aqr-dll/build.py with NOTLS=1), and libs/LIB.blob, the shared libraries the modules
   link against (crates/aqr-dll/layout.py), all digested together by `aqr-ld blobs` (the
@@ -19,8 +21,8 @@ for `cargo aqr`, the release workflow for its aqr.exe):
   aqr-exe's x86 disfilter, then raw LZMA2 at preset 9, which aqr alone reads);
 - pack.id, a digest of the files.
 
-The modules named (`python crates/aqr-sfx/pack.py [--part=PART] [MODULE...]`) are packed (all by
-default). `--part=modules` makes the stub, the modules' blobs and the lists, `--part=interp` the
+The modules named (`python crates/aqr-sfx/pack.py [--part=PART] [--engines=ENGINES] [MODULE...]`)
+are packed (all by default). `--part=modules` makes the stub, the modules' blobs and the lists, `--part=interp` the
 interpreter blob, `--part=pack` sfx.pack and pack.id of what those made (the release workflow runs
 the first two in jobs of their own); by default all three. It needs the nightly toolchain of the
 file nightly-toolchain (AQR_NIGHTLY to use another) and build-std (as NOTLS does). `cargo aqr`
@@ -58,10 +60,13 @@ def main():
     part = args.pop(0).removeprefix("--part=") if args and args[0].startswith("--part=") else "all"
     if part not in PARTS:
         fail(f"--part={part}: one of {', '.join(PARTS)}")
+    engines = args.pop(0).removeprefix("--engines=").split(",") if args and args[0].startswith("--engines=") else ["wah"]
+    if "wah" not in engines or not set(engines) <= set(ENGINES):
+        fail(f"--engines={','.join(engines)}: wah and those of {', '.join(ENGINES)}")
     # (checked before anything is removed: `--help`, taken for a module, once emptied OUT)
     for m in args:
         if m.startswith("-") or not Path(f"crates/aqr-modules/src/bin/{m}.rs").exists():
-            fail(f"{m}: not an option nor a module (usage: pack.py [--part=PART] [MODULE...])")
+            fail(f"{m}: not an option nor a module (usage: pack.py [--part=PART] [--engines=ENGINES] [MODULE...])")
     if part == "all":
         shutil.rmtree(OUT, ignore_errors=True)
     OUT.mkdir(parents=True, exist_ok=True)
@@ -71,7 +76,7 @@ def main():
     if part in ("all", "modules"):
         modules_part(nightly, args)
     if part in ("all", "interp"):
-        interp_part(nightly)
+        interp_part(nightly, engines)
     if part in ("all", "pack"):
         pack_part()
 
@@ -79,6 +84,11 @@ def main():
 # The parts, which the release workflow runs in jobs of their own: the stub and the modules'
 # blobs, the interpreter blob, and the pack of them all.
 PARTS = ("all", "modules", "interp", "pack")
+# The engines of the interpreter blobs, each of its file and aqr-interp's features.
+ENGINES = {
+    "wah": ("aqr-interp.blob", []),
+    "wasmtime": ("aqr-interp-wasmtime.blob", ["--no-default-features", "--features", "wasmtime"]),
+}
 LD = ROOT / "target/release/aqr-ld.exe"
 
 
@@ -129,15 +139,19 @@ def modules_part(nightly, modules):
     write(OUT / "libs.txt", "".join(f"{n}\n" for n in lib_names))
 
 
-def interp_part(nightly):
-    """The interpreter blob."""
-    # (linked by aqr-ld as build.py links, so that the standard library built for the target is not
-    # built again for a linker of its own)
-    run("cargo", f"+{nightly}", "build", "-q", "--release", "-p", "aqr-interp", "--target",
-        "crates/aqr-dll/x86_64-aqr-windows-msvc.json", "-Z", "json-target-spec", "-Z", "build-std",
-        env=dict(os.environ, CARGO_TARGET_X86_64_AQR_WINDOWS_MSVC_LINKER=str(LD)))
-    run(LD, "blob", "--apply", "aqr_interp_vtable", "--info", "-", "--out", OUT / "aqr-interp.blob",
-        "target/x86_64-aqr-windows-msvc/release/aqr_interp.dll")
+def interp_part(nightly, engines):
+    """The interpreter blob of each engine (one after another: the same library built again)."""
+    for engine, (blob, features) in ENGINES.items():
+        (OUT / blob).unlink(missing_ok=True)
+        if engine not in engines:
+            continue
+        # (linked by aqr-ld as build.py links, so that the standard library built for the target
+        # is not built again for a linker of its own)
+        run("cargo", f"+{nightly}", "build", "-q", "--release", "-p", "aqr-interp", *features, "--target",
+            "crates/aqr-dll/x86_64-aqr-windows-msvc.json", "-Z", "json-target-spec", "-Z", "build-std",
+            env=dict(os.environ, CARGO_TARGET_X86_64_AQR_WINDOWS_MSVC_LINKER=str(LD)))
+        run(LD, "blob", "--apply", "aqr_interp_vtable", "--info", "-", "--out", OUT / blob,
+            "target/x86_64-aqr-windows-msvc/release/aqr_interp.dll")
 
 
 def signed(exe):

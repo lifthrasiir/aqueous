@@ -16,8 +16,13 @@ aqr_common::zopt! {
         Opt::value("wasm:engine", "wasmtime", "the engine running modules, of those linked").choices(&["wasmtime", "wah"]);
 }
 
+/// The engine picked.
+pub fn engine() -> &'static str {
+    ENGINE.get()
+}
+
 fn by_wah() -> bool {
-    ENGINE.get() == "wah"
+    engine() == "wah"
 }
 
 /// [`wasmtime::warm_up`] or [`wah::warm_up`], of the engine picked.

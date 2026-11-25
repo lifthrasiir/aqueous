@@ -50,13 +50,17 @@ pub mod sandbox {
         }
     }
 }
+/// The engine the modules run by as WebAssembly (`wah`, `wasmtime`): of the interpreter blob,
+/// where no engine is linked.
+#[cfg(feature = "wasm")]
+pub use wasm::engine as wasm_engine;
 #[cfg(feature = "wasm")]
 #[doc(hidden)]
 pub use wasm::load_released;
 #[cfg(feature = "wasm")]
 pub use wasm::set_application_bound;
-/// Where the interpreter blob comes from, where Wasmtime is not linked (Windows x86-64): before
-/// any module is run as WebAssembly, and before `sandbox::worker_main`.
+/// Where the interpreter blob of an engine comes from, where no engine is linked (Windows x86-64):
+/// before any module is run as WebAssembly, and before `sandbox::worker_main`.
 #[cfg(feature = "wasm")]
 pub use wasm::set_interpreter;
 #[cfg(feature = "wasm")]

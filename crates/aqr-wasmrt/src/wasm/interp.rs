@@ -11,8 +11,21 @@ use aqr_blob::interp::{Interpreter, Vtable};
 
 use super::Decoded;
 
-/// Gives the interpreter blob's bytes (its [`aqr_blob::Blob`]).
-type Provide = fn() -> Result<Vec<u8>, String>;
+/// Gives the interpreter blob's bytes (its [`aqr_blob::Blob`]) of an engine ([`engine`]).
+type Provide = fn(&str) -> Result<Vec<u8>, String>;
+
+aqr_common::zopt! {
+    /// The engine of the interpreter blob placed, of those the program carries.
+    static ENGINE: Opt<&'static str> =
+        Opt::value("wasm:engine", "wah", "the engine of the interpreter blob running modules, of those carried")
+            .choices(&["wah", "wasmtime"]);
+}
+
+/// The engine of the interpreter blob placed: WAH by default, of the two the faster as a blob
+/// (`aqr -d -Z wasm` of 12 samples in workers, 2738 ms, Wasmtime's 3331 ms).
+pub fn engine() -> &'static str {
+    ENGINE.get()
+}
 
 static PROVIDE: OnceLock<Provide> = OnceLock::new();
 static INTERP: OnceLock<Result<Interpreter, String>> = OnceLock::new();
@@ -28,7 +41,7 @@ pub fn set_interpreter(provide: Provide) {
 fn interpreter() -> Decoded<&'static Interpreter> {
     let i = INTERP.get_or_init(|| {
         let provide = PROVIDE.get().ok_or("this program has no interpreter blob")?;
-        place(&provide()?)
+        place(&provide(engine())?)
     });
     i.as_ref().map_err(|e| Failure::Resource(format!("modules not run as WebAssembly: {e}")))
 }
