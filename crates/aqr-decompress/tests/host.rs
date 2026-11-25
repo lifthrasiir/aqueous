@@ -721,9 +721,7 @@ fn native_threads_do_not_matter() {
 }
 
 /// Tables count toward the memory limit, 16 bytes an element past the 4,096 of an instance, as they
-/// are made and as they grow (spec, "Module execution"). (By Wasmtime alone until WAH 2691, whose
-/// limiter is told of tables.)
-#[cfg(feature = "wasmtime")]
+/// are made and as they grow (spec, "Module execution").
 #[test]
 fn table_limits() {
     let wat = |table: u64, grow: u64| {

@@ -3539,18 +3539,18 @@ dependencies = [
 
 [[package]]
 name = "wah"
-version = "2690.0.0"
+version = "2691.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c662b7bcd5148ed85e13e79776ce77066aaf787aa8aed047ecc0255148b313aa"
+checksum = "3bafddfc71c84e89c466a13649ba04186386a924e84c3935c9cea989ab4d428a"
 dependencies = [
  "wah-sys",
 ]
 
 [[package]]
 name = "wah-sys"
-version = "2690.0.0"
+version = "2691.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87b8de24fa082daa96919e22274d54a910d43c4db9e987ed812104c23ffda535"
+checksum = "54bbb4a6584deb8508b84dc96d636c5c9d1ea27cd0bfd30e2670a7d610a535b9"
 dependencies = [
  "cc",
 ]
