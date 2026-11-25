@@ -25,7 +25,7 @@ exclude = ["third_party", "codecs/aqr-flate/bench", "codecs/aqr-png/bench"]
 # `cfg(not(target_env = "msvc"))`: zlib-ng, zlib-chromium, libslz, cryptopp, go, gzip, infozip and
 # ect do not build, and zlib-cloudflare builds but takes zlib's symbols (or zlib its), the other
 # one then refusing every stream.
-flate-zoo = { version = "1.0.0", default-features = false, features = [
+flate-zoo = { version = "1.0.1", default-features = false, features = [
     "zlib", "libdeflate", "zopfli", "miniz", "stb", "lodepng", "sdefl", "uzlib",
     "7zip", "advancecomp-7z", "apple", "rust", "js", "isa-l",
 ] }
