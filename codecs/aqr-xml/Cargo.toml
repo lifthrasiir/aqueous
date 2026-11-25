@@ -1,0 +1,8 @@
+[package]
+name = "aqr-xml"
+version = "0.1.0"
+edition = "2024"
+description = "XML rebuilt bit for bit from its skeleton and its values in containers by path (after XMill)"
+publish = false
+
+[dependencies]

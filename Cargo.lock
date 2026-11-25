@@ -1977,6 +1977,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-xml"
+version = "0.1.0"
+
+[[package]]
 name = "aqr-xpress"
 version = "0.1.0"
 dependencies = [
