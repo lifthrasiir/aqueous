@@ -56,9 +56,27 @@ aqr_common::zopt! {
 /// failure of any module run in one).
 pub const SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "macos"));
 
+/// What a worker's arguments of the options of `wasm:` begin with, after those of the host's.
+const OPTION: &str = "-Z";
+
+/// The options of `wasm:` set (`-Z`), as their arguments, for the workers: those of the engines
+/// are read in the worker (`wasm:engine`, the interpreter blob it places, and `wasm:jit`), and it
+/// places its blob before it takes any message.
+fn wasm_options() -> Vec<String> {
+    let opts = aqr_common::zopt::all().into_iter().filter(|o| o.name().starts_with("wasm:"));
+    opts.filter_map(|o| Some(format!("{}={}", o.name(), o.set_text()?))).collect()
+}
+
 /// Serves the decoder that started this process as its worker, then exits: the whole of the
-/// worker program, or the part of the host's that its arguments for workers lead to.
+/// worker program, or the part of the host's that its arguments for workers lead to. The options
+/// of `wasm:` set in the decoder are its last arguments (`-ZNAME=VALUE`), set here first: each by
+/// itself, one the program does not register left as it is.
 pub fn worker_main() -> ! {
+    for a in std::env::args_os().skip(1) {
+        if let Some(o) = a.to_str().and_then(|a| a.strip_prefix(OPTION)) {
+            let _ = aqr_common::zopt::apply(&[o]);
+        }
+    }
     // std's keys of HashMap taken on this thread, which impersonates a token that opens the
     // system's libraries: on the win7 target they are advapi32's SystemFunction036, which aqr
     // looks up as it runs (crates/aqr/src/random.rs) and which loads cryptbase.dll; a thread of
@@ -239,7 +257,9 @@ struct Worker {
 
 impl Worker {
     fn start(s: &Sandbox) -> io::Result<Worker> {
-        let (child, to, from) = os::spawn(&s.program, s.title.as_deref(), &s.args)?;
+        let mut args = s.args.clone();
+        args.extend(wasm_options().into_iter().map(|o| format!("{OPTION}{o}").into()));
+        let (child, to, from) = os::spawn(&s.program, s.title.as_deref(), &args)?;
         let mut w = Worker {
             child,
             to: BufWriter::with_capacity(1 << 16, to),
@@ -249,11 +269,6 @@ impl Worker {
         };
         w.to.write_all(HELLO)?;
         put_u64(&mut w.to, s.threads.unwrap_or_else(aqr_common::pool::size).max(1) as u64)?;
-        let opts = wasm_options();
-        put_u64(&mut w.to, opts.len() as u64)?;
-        for o in &opts {
-            put_bytes(&mut w.to, o.as_bytes())?;
-        }
         w.to.flush()?;
         let mut ready = [0; 8];
         w.from.read_exact(&mut ready).map_err(|e| w.ended(e))?;

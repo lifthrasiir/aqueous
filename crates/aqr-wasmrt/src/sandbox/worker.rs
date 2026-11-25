@@ -22,14 +22,6 @@ pub fn serve() -> io::Result<()> {
         return Err(violation("not a decoder"));
     }
     let threads = get_u64(&mut r)? as usize;
-    let n = get_count(&mut r, 256)?;
-    let opts = (0..n).map(|_| get_bytes(&mut r, 4096)).collect::<io::Result<Vec<_>>>()?;
-    // (each by itself: an option the worker does not register, as the interpreter blob registers
-    // none, is left as it is)
-    for o in opts {
-        let o = String::from_utf8(o).map_err(|_| violation("an option not of UTF-8"))?;
-        let _ = aqr_common::zopt::apply(&[o]);
-    }
     // what the worker would make or load later, made before it is locked down
     aqr_common::pool::init(threads);
     wasm::warm_up();

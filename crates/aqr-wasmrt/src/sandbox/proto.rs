@@ -12,16 +12,9 @@ use std::io::{self, Read, Write};
 
 use aqr_archive::Failure;
 
-/// The first bytes each way: the decoder's (then the threads of the worker and the options of
-/// `wasm:` set, [`wasm_options`]), and the worker's once it is locked down.
-pub const HELLO: &[u8; 8] = b"AQRSBX\x00\x02";
-
-/// The options of `wasm:` set (`-Z`), as their arguments, for the workers: an option of a
-/// worker's engine is read in it (`wasm:engine`, `wasm:jit`), not in the decoder's process.
-pub fn wasm_options() -> Vec<String> {
-    let opts = aqr_common::zopt::all().into_iter().filter(|o| o.name().starts_with("wasm:"));
-    opts.filter_map(|o| Some(format!("{}={}", o.name(), o.set_text()?))).collect()
-}
+/// The first bytes each way: the decoder's (then the threads of the worker), and the worker's
+/// once it is locked down.
+pub const HELLO: &[u8; 8] = b"AQRSBX\x00\x01";
 pub const READY: &[u8; 8] = b"AQRSBX\x01\x01";
 
 /// The requests.

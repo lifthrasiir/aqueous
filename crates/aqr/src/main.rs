@@ -176,7 +176,8 @@
 //! - `-Z`: developer options ([`aqr_common::zopt`]), declared by the crates where they are read:
 //!   bounds, thresholds and switches of the stages, set without a rebuild (`-Z help` lists
 //!   them, `-Z NS:help` those of a namespace). This crate's are [`WASM`] (`-Z wasm`) and
-//!   [`SANDBOX`] (`-Z no-sandbox`). They are not passed to the sandbox's workers.
+//!   [`SANDBOX`] (`-Z no-sandbox`). Those of `wasm:` are passed to the sandbox's workers
+//!   (their last arguments), the others not.
 //! - `-l`: the level of compression ([`aqr_archive::Level`]), `0` (nothing compressed: uncompressed
 //!   blocks only), `1` (zstd alone: nothing recompressed) to `9`; `low`, `mid` (the default)
 //!   and `high` are 2, 5 and 8. `zstdN` compresses every stream at zstd level `N`, the
