@@ -3,7 +3,8 @@
 XML of records (dumps of wikis, Q&A sites, maps, bibliographies) rebuilt bit for bit from a
 skeleton and its values in containers by path, after XMill: the tags and the whitespace
 between them in the skeleton, each element's text and each attribute's value in the container
-of its path. Not written yet; a prototype's measurements are below.
+of its path. Not written yet: the format is drafted in [FORMAT.md](FORMAT.md), the design in
+`docs/xml-design.md`, and a prototype's measurements are below.
 
 ## Prototype
 
