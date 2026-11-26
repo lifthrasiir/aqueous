@@ -1,18 +1,25 @@
 //! The archives as `aqr-win --serve` serves them (`crates/aqr-win/src/serve.rs`): its class
-//! and archive objects (late-bound), one of each for the process, kept in the Global Interface
-//! Table as they are called from any apartment (Explorer's windows each have a thread, and
-//! DefView enumerates on threads of its own). Where the server is gone (it ended idle, or
-//! failed), what was kept is dropped and the call made again, of a server started anew.
+//! and archive objects (late-bound), one of each for the process. They are held in the
+//! process's multithreaded apartment and called there alone ([`on_mta`]), whatever apartment
+//! the shell calls from: Explorer's windows each have a thread of their own, which ends as the
+//! window is closed, and what an apartment gone held (its proxies, its entries of the Global
+//! Interface Table) is gone with it (`E_INVALIDARG` of a cookie no longer there). A thread of
+//! this library's keeps the apartment for as long as the process (the library pinned). Where
+//! the server is gone (it ended, or failed), what was held is dropped and the call made again, of
+//! a server started anew.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, Once};
 
 use serde_json::Value;
-use windows::Win32::Foundation::{E_FAIL, SysAllocStringLen, SysFreeString, SysStringLen};
+use windows::Win32::Foundation::{E_FAIL, HMODULE, SysAllocStringLen, SysFreeString, SysStringLen};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, CoCreateInstance, DISPATCH_METHOD, DISPPARAMS, EXCEPINFO, IDispatch,
-    IGlobalInterfaceTable, IStream,
+    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    DISPATCH_METHOD, DISPPARAMS, EXCEPINFO, IDispatch, IGlobalInterfaceTable, IStream,
+};
+use windows::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{BSTR, GUID, HRESULT, IUnknown, Interface, PCWSTR};
@@ -20,40 +27,67 @@ use windows::core::{BSTR, GUID, HRESULT, IUnknown, Interface, PCWSTR};
 /// The class of `aqr-win --serve`.
 pub const SERVER: GUID = GUID::from_u128(0xc6b7e992_0338_4d02_8f5f_1bbd5a9fbab9);
 
-/// The server's class, where the registry names another (for tests: `Server` under the key of
-/// the folder's class).
+/// The server's class, where another is to be taken (a test's).
 static SERVER_CLASS: Mutex<Option<GUID>> = Mutex::new(None);
 
 pub fn set_server(g: GUID) {
     *SERVER_CLASS.lock().unwrap() = Some(g);
 }
 
-/// An object kept in the Global Interface Table, by its cookie.
-struct Kept(u32);
+/// An object of the multithreaded apartment, used (and let go of) there alone.
+struct Mta(IDispatch);
 
-impl Kept {
-    fn of<T: Interface>(o: &T) -> windows::core::Result<Kept> {
-        // SAFETY: the system's table, and an interface of `T`
-        unsafe { Ok(Kept(git()?.RegisterInterfaceInGlobal(&o.cast::<IUnknown>()?, &T::IID)?)) }
-    }
+// SAFETY: used on threads of the multithreaded apartment alone ([`on_mta`]), where a proxy is
+// any thread's
+unsafe impl Send for Mta {}
+unsafe impl Sync for Mta {}
 
-    /// The object of `cookie`, for this apartment.
-    fn get_by<T: Interface>(cookie: u32) -> windows::core::Result<T> {
-        let mut p = std::ptr::null_mut();
-        // SAFETY: the system's table: an interface of `T`, of a reference of the caller's
-        unsafe {
-            git()?.GetInterfaceFromGlobal(cookie, &T::IID, &mut p)?;
-            Ok(T::from_raw(p))
-        }
-    }
+/// `f` run in the multithreaded apartment (on a thread of its own, waited for), which a thread
+/// of this library's keeps for as long as the process.
+fn on_mta<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    static KEEPER: Once = Once::new();
+    KEEPER.call_once(|| {
+        // (never unloaded while its thread is: pinned)
+        let mut m = HMODULE::default();
+        // SAFETY: an address of this library's, and a handle to fill
+        _ = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                PCWSTR(git as *const () as *const u16),
+                &mut m,
+            )
+        };
+        let (ready, started) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // SAFETY: this thread's COM, for as long as the process
+            _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            _ = ready.send(());
+            loop {
+                std::thread::park();
+            }
+        });
+        _ = started.recv();
+    });
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            // SAFETY: this thread's COM, of the apartment the keeper holds
+            let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+            let r = f();
+            if init {
+                // SAFETY: initialized above
+                unsafe { CoUninitialize() };
+            }
+            r
+        })
+        .join()
+        .unwrap_or_else(|p| std::panic::resume_unwind(p))
+    })
 }
 
-impl Drop for Kept {
-    fn drop(&mut self) {
-        if let Ok(g) = git() {
-            // SAFETY: a cookie of the table, revoked once
-            _ = unsafe { g.RevokeInterfaceFromGlobal(self.0) };
-        }
+/// What is held let go of, in the apartment it is of.
+fn release(held: Vec<Mta>) {
+    if !held.is_empty() {
+        on_mta(move || drop(held));
     }
 }
 
@@ -68,14 +102,13 @@ fn git() -> windows::core::Result<IGlobalInterfaceTable> {
 /// The server's class object, and the archives opened by path, each with the uses of it
 /// ([`Use`]): let go of with the last, for the server to close it (and to end, idle).
 struct Connection {
-    server: Option<Kept>,
-    archives: HashMap<PathBuf, (Option<Kept>, usize)>,
-    /// By archive kept, its file's size and time as it was opened ([`changed`]).
+    server: Option<Mta>,
+    archives: HashMap<PathBuf, (Option<Mta>, usize)>,
+    /// By archive held, its file's size and time as it was opened ([`changed`]).
     stamps: HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
 }
 
-// (never locked over a COM call: a call from a single-threaded apartment lets in others, which
-// may come back here on the same thread)
+// (never locked over a COM call, nor as what it holds is let go of)
 static CONNECTION: LazyLock<Mutex<Connection>> =
     LazyLock::new(|| Mutex::new(Connection { server: None, archives: HashMap::new(), stamps: HashMap::new() }));
 
@@ -117,39 +150,39 @@ impl Drop for Use {
                 e.1 -= 1;
                 e.1 == 0
             });
-            let archive = match last {
-                Some(true) => c.archives.remove(&self.0).and_then(|e| e.0),
-                _ => None,
-            };
+            let mut gone: Vec<Mta> = Vec::new();
             if last == Some(true) {
+                gone.extend(c.archives.remove(&self.0).and_then(|e| e.0));
                 c.stamps.remove(&self.0);
             }
             // (none left: the server too, for it to end once idle)
-            let server = if c.archives.is_empty() { c.server.take() } else { None };
-            (archive, server)
+            if c.archives.is_empty() {
+                gone.extend(c.server.take());
+            }
+            gone
         };
-        drop(gone);
+        release(gone);
     }
 }
 
-/// Archive `path` as the server has it open (opened now, where it is not).
+/// Archive `path` as the server has it open (opened now, where it is not); in the
+/// multithreaded apartment.
 fn archive(path: &Path) -> windows::core::Result<IDispatch> {
     let (archive, server) = {
         let c = CONNECTION.lock().unwrap();
-        let archive = c.archives.get(path).and_then(|e| e.0.as_ref()).map(|k| k.0);
-        (archive, c.server.as_ref().map(|k| k.0))
+        let archive = c.archives.get(path).and_then(|e| e.0.as_ref()).map(|m| m.0.clone());
+        (archive, c.server.as_ref().map(|m| m.0.clone()))
     };
-    if let Some(cookie) = archive {
-        return Kept::get_by(cookie);
+    if let Some(a) = archive {
+        return Ok(a);
     }
     let server: IDispatch = match server {
-        Some(cookie) => Kept::get_by(cookie)?,
+        Some(s) => s,
         None => {
             let class = SERVER_CLASS.lock().unwrap().unwrap_or(SERVER);
             // SAFETY: a class of a local server
             let s: IDispatch = unsafe { CoCreateInstance(&class, None, CLSCTX_LOCAL_SERVER)? };
-            let kept = Kept::of(&s)?;
-            let other = CONNECTION.lock().unwrap().server.replace(kept);
+            let other = CONNECTION.lock().unwrap().server.replace(Mta(s.clone()));
             drop(other);
             s
         }
@@ -164,14 +197,13 @@ fn archive(path: &Path) -> windows::core::Result<IDispatch> {
         Got::Object(o) => o.cast::<IDispatch>()?,
         Got::Text(_) => return Err(E_FAIL.into()),
     };
-    let kept = Kept::of(&a)?;
-    // (kept where it has a use, of which one opening it at once: the other let go of)
+    // (held where it has a use, of which one opening it at once: the other let go of)
     let other = {
         let mut c = CONNECTION.lock().unwrap();
         c.stamps.insert(path.to_owned(), stamp);
         match c.archives.get_mut(path) {
-            Some(e) if e.0.is_none() => e.0.replace(kept),
-            _ => Some(kept),
+            Some(e) if e.0.is_none() => e.0.replace(Mta(a.clone())),
+            _ => None,
         }
     };
     drop(other);
@@ -200,7 +232,7 @@ pub fn changed(path: &Path) -> bool {
             _ => return false,
         }
     };
-    drop(gone);
+    release(gone.into_iter().collect());
     true
 }
 
@@ -211,21 +243,25 @@ unsafe fn allow_foreground(server: &IDispatch) {
     _ = unsafe { CoAllowSetForegroundWindow(server.as_raw(), std::ptr::null_mut()) };
 }
 
-/// `f` of archive `path`; again of a server started anew, where it was gone.
-fn with<T>(path: &Path, f: impl Fn(&IDispatch) -> windows::core::Result<T>) -> windows::core::Result<T> {
-    let r = archive(path).and_then(|a| f(&a));
-    match r {
-        Err(e) if disconnected(&e) => {
-            let dropped = {
-                let mut c = CONNECTION.lock().unwrap();
-                let kept: Vec<Kept> = c.archives.values_mut().filter_map(|e| e.0.take()).collect();
-                (c.server.take(), kept)
-            };
-            drop(dropped);
-            f(&archive(path)?)
+/// `f` of archive `path`, in the multithreaded apartment; again of a server started anew, where
+/// it was gone.
+fn with<T: Send>(path: &Path, f: impl Fn(&IDispatch) -> windows::core::Result<T> + Sync) -> windows::core::Result<T> {
+    on_mta(|| {
+        let r = archive(path).and_then(|a| f(&a));
+        match r {
+            Err(e) if disconnected(&e) => {
+                let dropped = {
+                    let mut c = CONNECTION.lock().unwrap();
+                    let mut held: Vec<Mta> = c.archives.values_mut().filter_map(|e| e.0.take()).collect();
+                    held.extend(c.server.take());
+                    held
+                };
+                drop(dropped);
+                f(&archive(path)?)
+            }
+            r => r,
         }
-        r => r,
-    }
+    })
 }
 
 /// What a method gave.
@@ -319,12 +355,23 @@ pub fn stat(path: &Path, at: &str) -> windows::core::Result<Value> {
     with(path, |a| json(a, "Stat", &[at]))
 }
 
-/// A stream of file `at` of archive `path`.
+/// A stream of file `at` of archive `path`, for the calling apartment.
 pub fn stream(path: &Path, at: &str) -> windows::core::Result<IStream> {
-    with(path, |a| match call(a, "OpenStream", &[at])? {
-        Got::Object(o) => o.cast(),
+    // (handed over by the Global Interface Table, from the apartment it is got in)
+    let cookie = with(path, |a| match call(a, "OpenStream", &[at])? {
+        // SAFETY: the system's table, and a stream
+        Got::Object(o) => unsafe { git()?.RegisterInterfaceInGlobal(&o, &IStream::IID) },
         Got::Text(_) => Err(E_FAIL.into()),
-    })
+    })?;
+    let mut p = std::ptr::null_mut();
+    // SAFETY: the table's stream of `cookie`, taken once
+    unsafe {
+        let g = git()?;
+        let r = g.GetInterfaceFromGlobal(cookie, &IStream::IID, &mut p);
+        _ = g.RevokeInterfaceFromGlobal(cookie);
+        r?;
+        Ok(IStream::from_raw(p))
+    }
 }
 
 /// File `at` of archive `path` written out by the server, to be opened by a program: its path.

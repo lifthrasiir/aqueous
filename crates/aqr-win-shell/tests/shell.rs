@@ -176,11 +176,11 @@ fn browsed() {
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    // (the library of this build: `cargo test` writes it in `deps`, beside this test, and the one
-    // in the directory above only as `cargo build` does)
+    // (the library of this build: `cargo test` writes it in `deps`, beside this test; the one in
+    // the directory above only as `cargo build` does, and it may be of another build)
     let exe = std::env::current_exe().unwrap();
     let dll = exe.with_file_name("aqr_shell.dll");
-    let dll = if dll.is_file() { dll } else { bin.join("aqr_shell.dll") };
+    assert!(dll.is_file(), "{}: not built", dll.display());
     let _registered = Registered::new(&dll);
     let mut server = Command::new(bin.join("aqr-win.exe"))
         .args(["--serve", &braced(&TEST_SERVER)])
@@ -431,6 +431,33 @@ fn browsed() {
 "
                 )
             );
+        }
+        // an archive first listed by a window's thread, which then ends (the window closed),
+        // while a folder of it is kept by another: listed again by that one (what the thread
+        // gone held, gone with its apartment: E_INVALIDARG once)
+        std::fs::copy(&archive, d.join("u.aqrtest")).unwrap();
+        let u = d.join("u.aqrtest");
+        // SAFETY: COM calls of the shell's objects
+        unsafe {
+            let kept: IShellFolder2 = item(&u).BindToHandler(None, &BHID_SFObject).unwrap();
+            let u2 = u.clone();
+            std::thread::spawn(move || {
+                OleInitialize(None).unwrap();
+                {
+                    let f: IShellFolder2 = item(&u2).BindToHandler(None, &BHID_SFObject).unwrap();
+                    let mut e = None;
+                    assert!(f.EnumObjects(HWND::default(), 0x20 | 0x40, &mut e).is_ok());
+                }
+                OleUninitialize();
+            })
+            .join()
+            .unwrap();
+            let mut e = None;
+            let hr = kept.EnumObjects(HWND::default(), 0x20 | 0x40, &mut e);
+            assert!(hr.is_ok(), "{hr:?}");
+            let mut got = [std::ptr::null_mut()];
+            assert!(e.unwrap().Next(&mut got, None).is_ok() && !got[0].is_null());
+            windows::Win32::UI::Shell::ILFree(Some(got[0]));
         }
         // (not there: the shell's parse fails)
         // SAFETY: a path, parsed by the shell

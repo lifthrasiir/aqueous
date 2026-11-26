@@ -36,6 +36,10 @@ pub fn log(what: impl FnOnce() -> String) {
     }
 }
 
+/// Of the class of the tests: nothing shown (boxes) nor told to the shell (changes, which would
+/// have Explorer, the user's, load the library of a test), but logged.
+pub static TESTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The objects of this library alive, and the locks of its class factories: none, it may be
 /// unloaded.
 static OBJECTS: AtomicUsize = AtomicUsize::new(0);
@@ -124,7 +128,10 @@ pub unsafe extern "system" fn DllGetClassObject(
         LANGUAGE.call_once(|| _ = aqr_l10n::init(&aqr_l10n::system_languages()));
         match clsid {
             folder::FOLDER => {}
-            folder::TEST_FOLDER => client::set_server(folder::TEST_SERVER),
+            folder::TEST_FOLDER => {
+                client::set_server(folder::TEST_SERVER);
+                TESTING.store(true, Ordering::Relaxed);
+            }
             _ => return CLASS_E_CLASSNOTAVAILABLE,
         }
         let f: IClassFactory = Factory { clsid, _counted: Counted::new() }.into();

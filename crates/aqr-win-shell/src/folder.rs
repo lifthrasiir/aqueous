@@ -196,6 +196,10 @@ fn failed(hwnd: HWND, path: &Path, e: &windows::core::Error) -> HRESULT {
         }
         shown.push((m.clone(), std::time::Instant::now()));
     }
+    crate::log(|| format!("not read: {}: {m}", path.display()));
+    if crate::TESTING.load(std::sync::atomic::Ordering::Relaxed) {
+        return CANCELLED;
+    }
     let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let text = HSTRING::from(format!("{}\n\n{m}", aqr_l10n::folder::not_read(&name)));
     // SAFETY: strings of their own
@@ -422,7 +426,7 @@ impl IShellFolder_Impl for Folder_Impl {
             {
                 crate::log(|| format!("changed: {}", archive.path().display()));
                 let at = self.at.read().unwrap();
-                if let Some(a) = at.as_ref() {
+                if let Some(a) = at.as_ref().filter(|_| !crate::TESTING.load(std::sync::atomic::Ordering::Relaxed)) {
                     // SAFETY: an ID list of the folder's
                     unsafe { SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_IDLIST, Some(a.pidl.as_ptr() as *const _), None) };
                 }

@@ -172,6 +172,9 @@ fn open(archive: Arc<client::Use>, path: String, folder: bool, hwnd: HWND) {
         });
         if let Err(e) = r {
             crate::log(|| format!("open {path}: {e}"));
+            if crate::TESTING.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             let text = HSTRING::from(format!("{}\n\n{}", aqr_l10n::folder::not_opened(&name), e.message()));
             // SAFETY: strings of their own
             unsafe { MessageBoxW(Some(hwnd), &text, &HSTRING::from("Aqueous"), MB_OK | MB_ICONERROR) };
