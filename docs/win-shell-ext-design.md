@@ -325,7 +325,9 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
 
 - 받는 곳: 보기(`CreateViewObject(IDropTarget)`, 그 폴더), 보기 안의 폴더(`GetUIObjectOf(IDropTarget)`),
   일반 폴더에 있는 아카이브 파일(ProgID의 `shellex\DropHandler`, `IPersistFile`로 파일을 받는다).
-  붙여넣기는 배경 메뉴의 "붙여넣기"(동사 `paste`, Ctrl+V가 부르는 것)다(`src/drop.rs`, `src/versions.rs`).
+  붙여넣기는 보기 자신의 "붙여넣기"다. 받는 폴더(`SFGAO_DROPTARGET`)면 DefView가 배경 메뉴에 넣고,
+  보기의 drop target으로 넣는다(`src/drop.rs`). 우리 메뉴에도 넣었더니 두 개가 되어 뺐다. 이름으로
+  부르는 동사 `paste`만 남겼다(`src/versions.rs`).
 - 파일 시스템의 파일(`CF_HDROP`)만 받는다. 다른 아카이브나 메일의 가상 파일(descriptor와 contents)은
   받지 않는다. 언제나 복사이고 원본을 지우지 않는다. 아카이브 자신이나 그것을 담은 폴더는 뺀다.
 - aqr-win의 `add ARCHIVE DIR PATH...`가 `aqr --ipc -a -o ARCHIVE PATH --rename DIR/NAME ...`을 진행 창과
@@ -350,7 +352,7 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
   형식, 크기는 언제나 있다. 파일을 따로 압축하는 형식(tar 말고 모두)은 데이터(압축된 크기,
   `Opened::packed`. solid 블록은 크기 비율로 나눈 몫)와 비율도 있다. 오버헤드, 세그먼트, 주석, macOS
   플래그, `-t`의 플래그는 `.aqr`에만 있다.
-- 넣기, 판(배경 메뉴의 붙여넣기와 버전, 명령 모음의 버전), 속성의 버전 탭은 없다(`client::appendable`:
+- 넣기, 판(배경 메뉴와 명령 모음의 버전), 속성의 버전 탭은 없다(`client::appendable`:
   `fields`가 없는 아카이브만).
 
 ## 7. 암호와 손상

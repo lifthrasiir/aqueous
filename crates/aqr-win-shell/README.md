@@ -67,8 +67,8 @@ object is released, for the server to close it a minute later (and to end, idle)
   aqr-unpack, the columns those their format has (the server's `fields`: Data, a file's compressed bytes,
   and Ratio of all but tar's; never Segment nor Overhead), nothing added nor versions.
 - Adding files (`src/drop.rs`): files of the file system's dropped on a view, on a folder in it
-  or on the archive file (its type's `DropHandler`), or pasted (the background menu's "Paste",
-  the verb `paste` of Ctrl+V), always copied, are added by aqr-win (`add ARCHIVE DIR PATH...`:
+  or on the archive file (its type's `DropHandler`), or pasted (the view's own "Paste", through
+  the view's drop target), always copied, are added by aqr-win (`add ARCHIVE DIR PATH...`:
   `aqr -a`, each at its name in the folder), the user asked first where a name is there
   already; nothing of a journal point's view.
 - Encrypted archives: their passphrase asked for by the server's dialog over the window of the

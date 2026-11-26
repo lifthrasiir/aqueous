@@ -1,17 +1,15 @@
-//! The menu of the background of an archive's view: "Paste" (the files copied added to the
-//! folder, [`crate::drop::add`]; the verb `paste`, as Ctrl+V invokes it; not of a journal
-//! point's), and "Versions", its journal points (the named versions, `--tag` and `-j`), newest
+//! The menu of the background of an archive's view: "Versions", its journal points (the named versions, `--tag` and `-j`), newest
 //! first, after "Latest" (all of it), the one shown checked. A point chosen is browsed to in the
 //! same window: the archive file's ID list with the point's item after it
-//! ([`crate::pidl::Kind::Version`]). Of an archive of no point, no "Versions".
+//! ([`crate::pidl::Kind::Version`]). Of an archive of no point, no "Versions". Its verb `paste`
+//! (where it is invoked by name) adds the files copied to the folder ([`crate::drop::add`]): the
+//! menu's "Paste" is the view's own (of a folder taking files dropped, through its drop target).
 
 use std::sync::Mutex;
 
 use serde_json::Value;
 use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::IServiceProvider;
-use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
-use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::System::Ole::{IObjectWithSite, IObjectWithSite_Impl};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -20,14 +18,14 @@ use windows::Win32::UI::Shell::{
     SID_STopLevelBrowser, SIGDN_DESKTOPABSOLUTEPARSING, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, InsertMenuW, MF_BYPOSITION, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, SendMessageW, WM_USER,
+    AppendMenuW, CreatePopupMenu, InsertMenuW, MF_BYPOSITION, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    SW_SHOWNORMAL, SendMessageW, WM_USER,
 };
 use windows::core::{HRESULT, HSTRING, IUnknown, Interface, PCWSTR, PSTR, Ref, implement, w};
 
 use crate::client;
 
-// (the offsets of the commands: "Paste", "Latest", then the points)
+// (the offsets of the commands: `paste` (of no item), "Latest", then the points)
 const PASTE: usize = 0;
 const LATEST: usize = 1;
 const VERB: &str = "paste";
@@ -75,22 +73,8 @@ impl Versions {
         if (last - first) < 2 + points.len() as u32 {
             return Ok(0);
         }
-        let mut index = index;
-        if client::appendable(&self.key) {
-            // SAFETY: a menu of the shell's
-            unsafe {
-                let files = IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok();
-                let flags = MF_BYPOSITION | MF_STRING | if files { MF_ENABLED } else { MF_GRAYED };
-                InsertMenuW(
-                    hmenu,
-                    index,
-                    flags,
-                    (first + PASTE as u32) as usize,
-                    &HSTRING::from(aqr_l10n::folder::paste()),
-                )?;
-            }
-            index += 1;
-        }
+        // ("Paste" is the view's own, of a folder taking files dropped: none of ours added, the
+        // verb `paste` alone taken)
         if points.is_empty() {
             return Ok(2);
         }
@@ -276,7 +260,7 @@ impl IContextMenu_Impl for Versions_Impl {
     }
 
     fn GetCommandString(&self, id: usize, kind: u32, _: *const u32, out: PSTR, n: u32) -> windows::core::Result<()> {
-        // (GCS_VERBA, GCS_VERBW: of "Paste" alone)
+        // (GCS_VERBA, GCS_VERBW: of `paste` alone)
         if id != PASTE || (kind != 0 && kind != 4) || out.is_null() {
             return Err(E_NOTIMPL.into());
         }
