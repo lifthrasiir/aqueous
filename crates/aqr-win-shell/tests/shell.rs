@@ -39,6 +39,7 @@ use windows::Win32::UI::Shell::{CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FILED
 use windows::Win32::UI::Shell::{FILEOPERATION_FLAGS, FileOperation, IFileOperation};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GET_MENU_DEFAULT_ITEM_FLAGS, GetMenuDefaultItem, GetMenuItemCount, GetMenuItemID,
+    GetMenuState, GetMenuStringW, GetSubMenu, MF_BYPOSITION, MF_CHECKED,
 };
 use windows::core::{GUID, HSTRING, Interface};
 use windows::core::{PSTR, PWSTR};
@@ -225,6 +226,22 @@ fn browsed() {
     std::fs::write(d.join("img/q.bmp"), &big_bmp).unwrap();
     let o =
         Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", "img.aqrtest", "img"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // (an archive of two journal points, the second of a file added)
+    std::fs::create_dir_all(d.join("j")).unwrap();
+    std::fs::write(d.join("j/one.txt"), b"one").unwrap();
+    let o = Command::new(bin.join("aqr.exe"))
+        .current_dir(&d)
+        .args(["-q", "-j", "first", "-o", "j.aqrtest", "j"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    std::fs::write(d.join("two.txt"), b"two").unwrap();
+    let o = Command::new(bin.join("aqr.exe"))
+        .current_dir(&d)
+        .args(["-q", "-a", "-j", "second", "j.aqrtest", "two.txt"])
+        .output()
+        .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let o = Command::new(bin.join("aqr.exe"))
         .current_dir(&d)
@@ -693,6 +710,67 @@ fn browsed() {
             let asked: Vec<&str> = told.lines().filter(|l| l.contains("asked")).collect();
             assert!(got.iter().all(|g| g.1), "{got:?}\n{}", asked.join("\n"));
         }
+        // the menu of the view's background: "Versions", the journal points newest first after
+        // "Latest", the one shown checked; one chosen browsed to (told, in tests), the archive as
+        // of it of the files there then
+        let j = d.join("j.aqrtest");
+        // (the menu of the folder at `path`: its choices' texts and checks, and the place its
+        // choice of offset `k` browses to)
+        let versions = |path: &Path, k: Option<usize>| -> (Vec<(String, bool)>, Option<String>) {
+            // SAFETY: COM calls of the shell's objects
+            unsafe {
+                let f: IShellFolder2 = item(path).BindToHandler(None, &BHID_SFObject).unwrap();
+                let m: IContextMenu = f.CreateViewObject(HWND::default()).unwrap();
+                let menu = CreatePopupMenu().unwrap();
+                let hr = m.QueryContextMenu(menu, 0, 1, 0x7fff, 0);
+                assert_eq!(hr.0, 3, "{hr:?}");
+                let sub = GetSubMenu(menu, 0);
+                let shown = (0..GetMenuItemCount(Some(sub)))
+                    .map(|i| {
+                        let mut b = [0u16; 128];
+                        let n = GetMenuStringW(sub, i as u32, Some(&mut b), MF_BYPOSITION);
+                        let checked = GetMenuState(sub, i as u32, MF_BYPOSITION) & MF_CHECKED.0 != 0;
+                        (String::from_utf16_lossy(&b[..n as usize]), checked)
+                    })
+                    .collect();
+                DestroyMenu(menu).unwrap();
+                let browsed = k.map(|k| {
+                    _ = std::fs::remove_file(&opened);
+                    let info = CMINVOKECOMMANDINFO {
+                        cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+                        lpVerb: windows::core::PCSTR(k as *const u8),
+                        nShow: 1,
+                        ..Default::default()
+                    };
+                    m.InvokeCommand(&info).unwrap();
+                    std::fs::read_to_string(&opened).unwrap().trim().to_owned()
+                });
+                (shown, browsed)
+            }
+        };
+        let (shown, browsed) = versions(&j, Some(1));
+        let texts: Vec<&str> = shown.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(texts.len(), 4, "{shown:?}");
+        assert!(texts[2].starts_with("second (") && texts[3].starts_with("first ("), "{shown:?}");
+        assert_eq!(shown.iter().map(|s| s.1).collect::<Vec<_>>(), [true, false, false, false]);
+        let browsed = browsed.unwrap();
+        let at = browsed.strip_prefix("browse ").unwrap();
+        assert!(at.starts_with(&format!(r"{}\@", j.display())), "{browsed}");
+        assert_eq!(entries(&item(&j)).len(), 2);
+        assert_eq!(entries(&item(Path::new(at))), [("one.txt".to_owned(), false, Some(3))]);
+        // SAFETY: COM calls of the shell's items
+        unsafe {
+            let v = item(Path::new(at));
+            let n = v.GetDisplayName(SIGDN_NORMALDISPLAY).unwrap();
+            assert!(n.to_string().unwrap().starts_with("first ("));
+            windows::Win32::System::Com::CoTaskMemFree(Some(n.0 as *const _));
+            let s: IStream = item(&Path::new(at).join("one.txt")).BindToHandler(None, &BHID_Stream).unwrap();
+            assert_eq!(read(&s), b"one");
+        }
+        // (of the point: it checked; "Latest" browses back to all of the archive)
+        let (shown, browsed) = versions(Path::new(at), Some(0));
+        assert_eq!(shown.iter().map(|s| s.1).collect::<Vec<_>>(), [false, false, false, true]);
+        assert_eq!(browsed.unwrap(), format!("browse {}", j.display()));
         // (not there: the shell's parse fails)
         // SAFETY: a path, parsed by the shell
         assert!(

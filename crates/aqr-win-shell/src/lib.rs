@@ -18,6 +18,7 @@ mod handlers;
 mod menu;
 pub mod pidl;
 mod props;
+mod versions;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

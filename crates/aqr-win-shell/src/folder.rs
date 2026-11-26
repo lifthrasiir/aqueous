@@ -1,7 +1,9 @@
 //! A folder of an archive: the archive file itself (a junction: the shell initializes it with
 //! the file's ID list) or a directory in it (bound to from its parent), its entries listed by
 //! the server, their columns of what [`crate::pidl::Item`]s hold, the view the shell's own
-//! (DefView).
+//! (DefView). The archive as of a journal point (a named version) is a folder too: of an item
+//! of the point after the file's ([`Kind::Version`]), never listed, reached by the menu of the
+//! view's background ([`crate::versions`]).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -61,7 +63,7 @@ unsafe impl Send for Pidl {}
 unsafe impl Sync for Pidl {}
 
 impl Pidl {
-    fn as_ptr(&self) -> *const ITEMIDLIST {
+    pub fn as_ptr(&self) -> *const ITEMIDLIST {
         self.0
     }
 
@@ -201,11 +203,17 @@ impl Folder {
             windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
             s?
         };
-        let names: Vec<String> = ids[k..].iter().filter_map(|b| Item::decode(b)).map(|i| i.name).collect();
+        let mut items: Vec<Item> = ids[k..].iter().filter_map(|b| Item::decode(b)).collect();
+        // (as of a journal point)
+        let at = match items.first() {
+            Some(i) if i.kind == Kind::Version => Some(items.remove(0).size),
+            _ => None,
+        };
+        let names: Vec<String> = items.into_iter().map(|i| i.name).collect();
         // SAFETY: the shell's ID list, copied
         let pidl = Pidl(unsafe { ILClone(pidl) });
-        let archive = Arc::new(client::Use::of(Path::new(&path)));
-        crate::log(|| format!("initialized: {path} at {names:?}"));
+        let archive = Arc::new(client::Use::of(client::Key { path: path.clone().into(), at }));
+        crate::log(|| format!("initialized: {path} as of {at:?} at {names:?}"));
         // SAFETY: an ID list of its own
         let _view = unsafe { client::View::of(archive.path(), pidl.as_ptr()) };
         *self.at.write().unwrap() = Some(At { pidl, archive, dir: names.join("/"), _view });
@@ -224,7 +232,7 @@ impl Folder {
     /// The entries of the folder, as items (kept, as the server tells them).
     fn entries(&self) -> windows::core::Result<Vec<Item>> {
         let (archive, dir) = self.at()?;
-        let entries = client::list(archive.path(), &dir, false)?;
+        let entries = client::list(archive.key(), &dir, false)?;
         let items = entries.iter().map(Item::of).collect();
         let by_name = entries.into_iter().map(|e| (e["name"].as_str().unwrap_or("").to_owned(), e)).collect();
         *self.listed.lock().unwrap() = (by_name, false);
@@ -249,14 +257,14 @@ impl Folder {
         let verbose = need == Need::Verbose;
         match verbose {
             true => {
-                let entries = client::list(archive.path(), &dir, true).ok()?;
+                let entries = client::list(archive.key(), &dir, true).ok()?;
                 let by_name: std::collections::HashMap<_, _> =
                     entries.into_iter().map(|e| (e["name"].as_str().unwrap_or("").to_owned(), e)).collect();
                 let e = by_name.get(&item.name).cloned();
                 *self.listed.lock().unwrap() = (by_name, true);
                 e
             }
-            false => client::stat(archive.path(), &joined(&dir, &item.name), false).ok(),
+            false => client::stat(archive.key(), &joined(&dir, &item.name), false).ok(),
         }
     }
 
@@ -264,6 +272,36 @@ impl Folder {
     fn cell(&self, item: &Item, what: What) -> Cell {
         columns::cell(item, self.entry(item, what.needs()).as_ref(), what)
     }
+}
+
+/// The journal point of archive `archive` that name `n` (`@` and its offset, [`Item::parsed`])
+/// tells, where no entry at its root is of the name.
+fn version_named(archive: &client::Use, n: &str) -> Option<Item> {
+    let m: u64 = n.strip_prefix('@')?.parse().ok()?;
+    if client::stat(archive.key(), n, false).is_ok() {
+        return None;
+    }
+    let points = client::journal(archive.key()).ok()?;
+    let p = points.iter().find(|p| p["metadata"].as_u64() == Some(m))?;
+    Some(Item::version(p, version_shown(p)))
+}
+
+/// Journal point `p` (as `aqr --serve` tells it) as it is shown: its label and time.
+pub(crate) fn version_shown(p: &serde_json::Value) -> String {
+    let label = p["label"].as_str().unwrap_or("");
+    let time = p["shown"].as_str().unwrap_or("");
+    match label.is_empty() {
+        true => time.to_owned(),
+        false => aqr_l10n::folder::version(label, time),
+    }
+}
+
+/// The ID list of the archive file of absolute ID list `p` (its items before the first of ours).
+fn file_of(p: *const ITEMIDLIST) -> Pidl {
+    // SAFETY: an ID list of a folder's
+    let ids = unsafe { pidl::ids(p) };
+    let k = ids.iter().position(|b| Item::decode(b).is_some()).unwrap_or(ids.len());
+    Pidl(pidl::alloc(&ids[..k]))
 }
 
 /// The items of relative ID list `p` (none of another namespace).
@@ -276,6 +314,9 @@ fn items_of(p: *const ITEMIDLIST) -> windows::core::Result<Vec<Item>> {
 }
 
 fn attributes_of(item: &Item) -> u32 {
+    if item.kind == Kind::Version {
+        return FOLDER_ATTR | HASSUBFOLDER | READONLY;
+    }
     let hidden = if item.attrs & 0x2 != 0 { HIDDEN } else { 0 };
     hidden
         | HASPROPSHEET
@@ -301,13 +342,25 @@ impl IShellFolder_Impl for Folder_Impl {
             }
             // SAFETY: the caller's string, ended by 0
             let text = unsafe { name.to_string() }.map_err(|_| windows::core::Error::from(E_INVALIDARG))?;
-            let (archive, dir) = self.at()?;
+            let (mut archive, dir) = self.at()?;
             let mut path = dir;
             let mut items = Vec::new();
             for n in text.split(['\\', '/']).filter(|n| !n.is_empty()) {
+                // (`@` and an offset, first at the root of all of the archive, and no entry of the
+                // name: a journal point, what follows of the archive as of it)
+                if items.is_empty()
+                    && path.is_empty()
+                    && archive.key().at.is_none()
+                    && let Some(v) = version_named(&archive, n)
+                {
+                    let key = client::Key { path: archive.path().to_owned(), at: Some(v.size) };
+                    archive = Arc::new(client::Use::of(key));
+                    items.push(v);
+                    continue;
+                }
                 path = joined(&path, n);
                 // (not there: as the file system tells a path not found, for the shell to know it)
-                let e = client::stat(archive.path(), &path, false).map_err(|e| {
+                let e = client::stat(archive.key(), &path, false).map_err(|e| {
                     let missing = e.message().contains("not in the archive");
                     if missing { windows::core::Error::new(NOT_FOUND, e.message()) } else { e }
                 })?;
@@ -335,7 +388,7 @@ impl IShellFolder_Impl for Folder_Impl {
             owner(hwnd);
             // (the archive changed: opened anew, the other views of it told)
             if let Ok((archive, _)) = self.at()
-                && client::changed(archive.path())
+                && client::changed(archive.key())
             {
                 crate::log(|| format!("changed: {}", archive.path().display()));
                 let at = self.at.read().unwrap();
@@ -376,21 +429,29 @@ impl IShellFolder_Impl for Folder_Impl {
             }
             // SAFETY: the caller's pointer
             unsafe { *ppv = std::ptr::null_mut() };
-            let items = items_of(pidl)?;
-            let (archive, dir) = self.at()?;
+            let mut items = items_of(pidl)?;
+            let (mut archive, dir) = self.at()?;
+            // (a journal point: of the archive as of it, at its root)
+            if items[0].kind == Kind::Version {
+                if archive.key().at.is_some() || !dir.is_empty() {
+                    return Err(E_INVALIDARG.into());
+                }
+                let key = client::Key { path: archive.path().to_owned(), at: Some(items.remove(0).size) };
+                archive = Arc::new(client::Use::of(key));
+            }
             let path = items.iter().fold(dir, |p, i| joined(&p, &i.name));
             // SAFETY: the caller's GUID
             let iid = unsafe { *riid };
             crate::log(|| format!("asked BindToObject {iid:?} of {}", items.last().map_or("", |i| i.name.as_str())));
             if iid == IStream::IID {
-                if items.last().unwrap().is_dir() {
+                if items.last().is_none_or(Item::is_dir) {
                     return Err(E_INVALIDARG.into());
                 }
-                let s = client::stream(archive.path(), &path)?;
+                let s = client::stream(archive.key(), &path)?;
                 // SAFETY: the caller's pointer, given a reference
                 return unsafe { s.query(riid, ppv).ok() };
             }
-            if !items.iter().all(Item::is_dir) {
+            if !items.iter().all(Item::is_dir) || items.iter().any(|i| i.kind == Kind::Version) {
                 return Err(E_INVALIDARG.into());
             }
             let abs = {
@@ -450,6 +511,15 @@ impl IShellFolder_Impl for Folder_Impl {
             unsafe {
                 *ppv = std::ptr::null_mut();
                 crate::log(|| format!("asked CreateViewObject {:?}", *riid));
+                // (the menu of the view's background: the archive's journal points)
+                if *riid == IContextMenu::IID {
+                    let at = self.at.read().unwrap();
+                    let at = at.as_ref().ok_or(windows::core::Error::from(E_FAIL))?;
+                    let m: IContextMenu =
+                        crate::versions::Versions::new(at.archive.key().clone(), file_of(at.pidl.as_ptr()), hwnd)
+                            .into();
+                    return m.query(riid, ppv).ok();
+                }
                 if *riid != IShellView::IID {
                     return Err(E_NOINTERFACE.into());
                 }
@@ -510,6 +580,12 @@ impl IShellFolder_Impl for Folder_Impl {
                 *ppv = std::ptr::null_mut();
                 let iid = *riid;
                 crate::log(|| format!("asked GetUIObjectOf {iid:?} of {cidl}"));
+                // (of a journal point: its icon alone, as a folder's)
+                let versions =
+                    (0..cidl as usize).any(|k| pidl::first(*apidl.add(k)).is_some_and(|i| i.kind == Kind::Version));
+                if versions && iid != IExtractIconW::IID {
+                    return Err(E_NOINTERFACE.into());
+                }
                 if cidl == 1 && iid == IExtractIconW::IID {
                     let item = pidl::first(*apidl).ok_or(windows::core::Error::from(E_INVALIDARG))?;
                     let w: Vec<u16> = item.name.encode_utf16().chain([0]).collect();
@@ -531,7 +607,7 @@ impl IShellFolder_Impl for Folder_Impl {
                     let (archive, dir) = self.at()?;
                     let at = joined(&dir, &item.name);
                     if iid == IThumbnailProvider::IID {
-                        return crate::handlers::thumbnail(archive.path(), &at, &item)?.query(riid, ppv).ok();
+                        return crate::handlers::thumbnail(archive.key(), &at, &item)?.query(riid, ppv).ok();
                     }
                     // (as the image factory asks: made as it is extracted)
                     let x: IExtractImage2 = crate::handlers::Extract::new(archive, at, item).into();
@@ -610,15 +686,17 @@ impl IShellFolder_Impl for Folder_Impl {
             }
             let items = items_of(pidl)?;
             let text = if flags.0 & SHGDN_FORPARSING.0 != 0 {
-                let rel: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+                let rel: Vec<String> = items.iter().map(Item::parsed).collect();
                 match flags.0 & SHGDN_INFOLDER.0 != 0 {
                     true => rel.join("\\"),
                     false => {
                         let (archive, dir) = self.at()?;
                         let mut p = archive.path().to_string_lossy().into_owned();
-                        for n in dir.split('/').filter(|n| !n.is_empty()).chain(rel) {
+                        let version = archive.key().at.map(|m| format!("@{m}"));
+                        let dir = dir.split('/').filter(|n| !n.is_empty()).map(str::to_owned);
+                        for n in version.into_iter().chain(dir).chain(rel) {
                             p.push('\\');
-                            p.push_str(n);
+                            p.push_str(&n);
                         }
                         p
                     }
@@ -656,6 +734,9 @@ fn compare(x: &[Item], y: &[Item], canonical: bool, by: impl Fn(&Item, &Item) ->
             },
         };
         let n = match (a.is_dir(), b.is_dir()) {
+            _ if a.kind == Kind::Version || b.kind == Kind::Version => {
+                ((a.kind == Kind::Version) as u8, a.size).cmp(&((b.kind == Kind::Version) as u8, b.size)) as i32
+            }
             _ if canonical => by_name(),
             (true, false) => -1,
             (false, true) => 1,

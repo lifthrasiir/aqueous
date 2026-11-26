@@ -107,9 +107,17 @@ fn git() -> windows::core::Result<IGlobalInterfaceTable> {
 /// ([`Use`]): let go of with the last, for the server to close it (and to end, idle).
 struct Connection {
     server: Option<Mta>,
-    archives: HashMap<PathBuf, (Option<Mta>, usize)>,
+    archives: HashMap<Key, (Option<Mta>, usize)>,
     /// By archive held, its file's size and time as it was opened ([`changed`]).
-    stamps: HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
+    stamps: HashMap<Key, (u64, Option<std::time::SystemTime>)>,
+}
+
+/// An archive as it is opened: its file, and the journal point it is of (none: all of it).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Key {
+    pub path: PathBuf,
+    /// The offset of the point's segment's metadata block (`aqr --serve`'s `journal`).
+    pub at: Option<u64>,
 }
 
 // (never locked over a COM call, nor as what it holds is let go of)
@@ -132,16 +140,20 @@ fn disconnected(e: &windows::core::Error) -> bool {
     )
 }
 
-/// A use of archive `path` (a folder's): the archive is kept open while it has one.
-pub struct Use(PathBuf);
+/// A use of archive `key` (a folder's): the archive is kept open while it has one.
+pub struct Use(Key);
 
 impl Use {
-    pub fn of(path: &Path) -> Use {
-        CONNECTION.lock().unwrap().archives.entry(path.to_owned()).or_insert((None, 0)).1 += 1;
-        Use(path.to_owned())
+    pub fn of(key: Key) -> Use {
+        CONNECTION.lock().unwrap().archives.entry(key.clone()).or_insert((None, 0)).1 += 1;
+        Use(key)
     }
 
     pub fn path(&self) -> &Path {
+        &self.0.path
+    }
+
+    pub fn key(&self) -> &Key {
         &self.0
     }
 }
@@ -169,12 +181,13 @@ impl Drop for Use {
     }
 }
 
-/// Archive `path` as the server has it open (opened now, where it is not); in the
-/// multithreaded apartment.
-fn archive(path: &Path) -> windows::core::Result<IDispatch> {
+/// Archive `key` as the server has it open (opened now, where it is not); in the multithreaded
+/// apartment.
+fn archive(key: &Key) -> windows::core::Result<IDispatch> {
+    let path = key.path.as_path();
     let (archive, server) = {
         let c = CONNECTION.lock().unwrap();
-        let archive = c.archives.get(path).and_then(|e| e.0.as_ref()).map(|m| m.0.clone());
+        let archive = c.archives.get(key).and_then(|e| e.0.as_ref()).map(|m| m.0.clone());
         (archive, c.server.as_ref().map(|m| m.0.clone()))
     };
     if let Some(a) = archive {
@@ -197,15 +210,16 @@ fn archive(path: &Path) -> windows::core::Result<IDispatch> {
     // SAFETY: a proxy of the server's object
     unsafe { allow_foreground(&server) };
     let stamp = stamp(path);
-    let a = match call(&server, "Open", &[&path.to_string_lossy(), &owner.to_string()])? {
+    let at = key.at.map_or_else(String::new, |m| m.to_string());
+    let a = match call(&server, "Open", &[&path.to_string_lossy(), &owner.to_string(), &at])? {
         Got::Object(o) => o.cast::<IDispatch>()?,
         Got::Text(_) => return Err(E_FAIL.into()),
     };
     // (held where it has a use, of which one opening it at once: the other let go of)
     let other = {
         let mut c = CONNECTION.lock().unwrap();
-        c.stamps.insert(path.to_owned(), stamp);
-        match c.archives.get_mut(path) {
+        c.stamps.insert(key.clone(), stamp);
+        match c.archives.get_mut(key) {
             Some(e) if e.0.is_none() => e.0.replace(Mta(a.clone())),
             _ => None,
         }
@@ -222,16 +236,16 @@ fn stamp(path: &Path) -> (u64, Option<std::time::SystemTime>) {
     std::fs::metadata(path).map_or((0, None), |m| (m.len(), m.modified().ok()))
 }
 
-/// Whether archive `path` changed since it was opened (its file's size or time): then it is let
+/// Whether archive `key` changed since it was opened (its file's size or time): then it is let
 /// go of, to be opened anew.
-pub fn changed(path: &Path) -> bool {
-    let now = stamp(path);
+pub fn changed(key: &Key) -> bool {
+    let now = stamp(&key.path);
     let gone = {
         let mut c = CONNECTION.lock().unwrap();
-        match c.stamps.get(path) {
+        match c.stamps.get(key) {
             Some(&s) if s != now => {
-                c.stamps.remove(path);
-                c.archives.get_mut(path).and_then(|e| e.0.take())
+                c.stamps.remove(key);
+                c.archives.get_mut(key).and_then(|e| e.0.take())
             }
             _ => return false,
         }
@@ -276,20 +290,21 @@ impl Drop for View {
 /// The archives whose files changed since they were opened (their size or time), let go of (to
 /// be opened anew), and the views of their folders told to refresh. On the keeper's thread.
 fn watch() {
-    let stamps: Vec<(PathBuf, (u64, Option<std::time::SystemTime>))> =
-        CONNECTION.lock().unwrap().stamps.iter().map(|(p, s)| (p.clone(), *s)).collect();
-    for (path, was) in stamps {
+    let stamps: Vec<(Key, (u64, Option<std::time::SystemTime>))> =
+        CONNECTION.lock().unwrap().stamps.iter().map(|(k, s)| (k.clone(), *s)).collect();
+    for (key, was) in stamps {
+        let path = key.path.clone();
         if stamp(&path) == was {
             continue;
         }
         let gone = {
             let mut c = CONNECTION.lock().unwrap();
             // (where nothing else saw it first)
-            if c.stamps.get(&path) != Some(&was) {
+            if c.stamps.get(&key) != Some(&was) {
                 continue;
             }
-            c.stamps.remove(&path);
-            c.archives.get_mut(&path).and_then(|e| e.0.take())
+            c.stamps.remove(&key);
+            c.archives.get_mut(&key).and_then(|e| e.0.take())
         };
         drop(gone);
         crate::log(|| format!("watched: {} changed", path.display()));
@@ -320,9 +335,9 @@ unsafe fn allow_foreground(server: &IDispatch) {
 
 /// `f` of archive `path`, in the multithreaded apartment; again of a server started anew, where
 /// it was gone.
-fn with<T: Send>(path: &Path, f: impl Fn(&IDispatch) -> windows::core::Result<T> + Sync) -> windows::core::Result<T> {
+fn with<T: Send>(key: &Key, f: impl Fn(&IDispatch) -> windows::core::Result<T> + Sync) -> windows::core::Result<T> {
     on_mta(|| {
-        let r = archive(path).and_then(|a| f(&a));
+        let r = archive(key).and_then(|a| f(&a));
         match r {
             Err(e) if disconnected(&e) => {
                 let dropped = {
@@ -332,7 +347,7 @@ fn with<T: Send>(path: &Path, f: impl Fn(&IDispatch) -> windows::core::Result<T>
                     held
                 };
                 drop(dropped);
-                f(&archive(path)?)
+                f(&archive(key)?)
             }
             r => r,
         }
@@ -422,22 +437,22 @@ fn json(o: &IDispatch, name: &str, args: &[&str]) -> windows::core::Result<Value
 
 /// The entries of directory `dir` (names joined with `/`) of archive `path`.
 /// With what `-t -v` tells too where `verbose` (all of the archive's blocks read for it, once).
-pub fn list(path: &Path, dir: &str, verbose: bool) -> windows::core::Result<Vec<Value>> {
+pub fn list(key: &Key, dir: &str, verbose: bool) -> windows::core::Result<Vec<Value>> {
     let how = if verbose { "verbose" } else { "" };
-    with(path, |a| Ok(json(a, "List", &[dir, how])?.as_array().cloned().unwrap_or_default()))
+    with(key, |a| Ok(json(a, "List", &[dir, how])?.as_array().cloned().unwrap_or_default()))
 }
 
 /// The entry at `at` of archive `path`.
 /// With what `-t -v` tells too where `verbose`.
-pub fn stat(path: &Path, at: &str, verbose: bool) -> windows::core::Result<Value> {
+pub fn stat(key: &Key, at: &str, verbose: bool) -> windows::core::Result<Value> {
     let how = if verbose { "verbose" } else { "" };
-    with(path, |a| json(a, "Stat", &[at, how]))
+    with(key, |a| json(a, "Stat", &[at, how]))
 }
 
 /// A stream of file `at` of archive `path`, for the calling apartment.
-pub fn stream(path: &Path, at: &str) -> windows::core::Result<IStream> {
+pub fn stream(key: &Key, at: &str) -> windows::core::Result<IStream> {
     // (handed over by the Global Interface Table, from the apartment it is got in)
-    let cookie = with(path, |a| match call(a, "OpenStream", &[at])? {
+    let cookie = with(key, |a| match call(a, "OpenStream", &[at])? {
         // SAFETY: the system's table, and a stream
         Got::Object(o) => unsafe { git()?.RegisterInterfaceInGlobal(&o, &IStream::IID) },
         Got::Text(_) => Err(E_FAIL.into()),
@@ -454,8 +469,8 @@ pub fn stream(path: &Path, at: &str) -> windows::core::Result<IStream> {
 }
 
 /// File `at` of archive `path` written out by the server, to be opened by a program: its path.
-pub fn materialize(path: &Path, at: &str) -> windows::core::Result<PathBuf> {
-    with(path, |a| match call(a, "Materialize", &[at])? {
+pub fn materialize(key: &Key, at: &str) -> windows::core::Result<PathBuf> {
+    with(key, |a| match call(a, "Materialize", &[at])? {
         Got::Text(t) => Ok(PathBuf::from(t)),
         Got::Object(_) => Err(E_FAIL.into()),
     })
@@ -463,20 +478,20 @@ pub fn materialize(path: &Path, at: &str) -> windows::core::Result<PathBuf> {
 
 /// How far file `at` of archive `path` is being made: `(done, total)` of its bytes written
 /// where it is, else of the archive's data decompressed.
-pub fn progress(path: &Path, at: &str) -> windows::core::Result<(u64, u64)> {
-    let v = with(path, |a| json(a, "Progress", &[at]))?;
+pub fn progress(key: &Key, at: &str) -> windows::core::Result<(u64, u64)> {
+    let v = with(key, |a| json(a, "Progress", &[at]))?;
     let pair = |k: &str| Some((v[k][0].as_u64()?, v[k][1].as_u64()?));
     Ok(pair("written").or_else(|| pair("decompressed")).unwrap_or((0, 0)))
 }
 
 /// File `at` of archive `path`, being written out, stopped (removed, its Materialize failing).
-pub fn cancel(path: &Path, at: &str) -> windows::core::Result<()> {
-    with(path, |a| json(a, "Cancel", &[at]).map(drop))
+pub fn cancel(key: &Key, at: &str) -> windows::core::Result<()> {
+    with(key, |a| json(a, "Cancel", &[at]).map(drop))
 }
 
 /// The bytes of file `at` of archive `path` (at most `max`: none past them).
-pub fn read_all(path: &Path, at: &str, max: u64) -> windows::core::Result<Vec<u8>> {
-    with(path, |a| match call(a, "OpenStream", &[at])? {
+pub fn read_all(key: &Key, at: &str, max: u64) -> windows::core::Result<Vec<u8>> {
+    with(key, |a| match call(a, "OpenStream", &[at])? {
         Got::Object(o) => {
             let s: IStream = o.cast()?;
             let (mut all, mut buf) = (Vec::new(), vec![0u8; 1 << 20]);
@@ -492,4 +507,9 @@ pub fn read_all(path: &Path, at: &str, max: u64) -> windows::core::Result<Vec<u8
         }
         Got::Text(_) => Err(E_FAIL.into()),
     })
+}
+
+/// The journal points of archive `key` (its named versions): a JSON array of `aqr --serve`'s.
+pub fn journal(key: &Key) -> windows::core::Result<Vec<Value>> {
+    with(key, |a| Ok(json(a, "Journal", &[])?.as_array().cloned().unwrap_or_default()))
 }

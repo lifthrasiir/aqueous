@@ -21,9 +21,10 @@ use crate::pidl::Item;
 
 /// The lines of the page of `item` (of `dir` of archive `path`), as the server tells it with
 /// what `-t -v` tells too.
-fn lines(path: &std::path::Path, dir: &str, item: &Item) -> Vec<(String, String)> {
+fn lines(key: &client::Key, dir: &str, item: &Item) -> Vec<(String, String)> {
     let at = crate::folder::joined(dir, &item.name);
-    let entry = client::stat(path, &at, !item.is_dir()).ok();
+    let entry = client::stat(key, &at, !item.is_dir()).ok();
+    let path = &key.path;
     let mut out = Vec::new();
     let place = format!("{}\\{}", path.display(), at.replace('/', "\\"));
     out.push((aqr_l10n::folder::prop_location().to_owned(), place));
@@ -67,7 +68,7 @@ pub fn show(archive: Arc<client::Use>, dir: String, items: Vec<Item>) {
         }
         let pages: Vec<(String, Vec<u16>)> = items
             .iter()
-            .map(|i| (i.name.clone(), text(&lines(archive.path(), &dir, i)).encode_utf16().chain([0]).collect()))
+            .map(|i| (i.name.clone(), text(&lines(archive.key(), &dir, i)).encode_utf16().chain([0]).collect()))
             .collect();
         if crate::TESTING.load(std::sync::atomic::Ordering::Relaxed) {
             for (name, t) in &pages {

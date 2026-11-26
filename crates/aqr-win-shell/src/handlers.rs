@@ -90,13 +90,13 @@ const THUMBNAIL_MAX: u64 = 64 << 20;
 /// bytes as a stream in memory (read first: a provider may read it from threads of its own,
 /// which a stream of another apartment would hold up); none where the type has none taking a
 /// stream, or the file is over [`THUMBNAIL_MAX`].
-pub fn thumbnail(path: &Path, at: &str, item: &Item) -> windows::core::Result<IThumbnailProvider> {
+pub fn thumbnail(key: &client::Key, at: &str, item: &Item) -> windows::core::Result<IThumbnailProvider> {
     let none = || windows::core::Error::from(windows::Win32::Foundation::E_NOINTERFACE);
     if item.size > THUMBNAIL_MAX {
         return Err(none());
     }
     let class = handler_of(item, THUMBNAIL_PROVIDER).ok_or_else(none)?;
-    let bytes = client::read_all(path, at, THUMBNAIL_MAX)?;
+    let bytes = client::read_all(key, at, THUMBNAIL_MAX)?;
     // SAFETY: a copy of the bytes, the stream's
     let stream = unsafe { SHCreateMemStream(Some(&bytes)) }.ok_or_else(none)?;
     // SAFETY: the type's handler, in this process as the shell takes it
@@ -159,7 +159,7 @@ impl IExtractImage_Impl for Extract_Impl {
 
     fn Extract(&self) -> windows::core::Result<HBITMAP> {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let t = thumbnail(self.archive.path(), &self.at, &self.item)?;
+            let t = thumbnail(self.archive.key(), &self.at, &self.item)?;
             let (mut bmp, mut alpha) = (HBITMAP::default(), WTS_ALPHATYPE::default());
             // SAFETY: places of the picture and its kind
             unsafe { t.GetThumbnail(*self.size.lock().unwrap(), &mut bmp, &mut alpha)? };

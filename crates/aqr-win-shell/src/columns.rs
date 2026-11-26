@@ -386,7 +386,7 @@ pub fn type_text(item: &Item) -> String {
 }
 
 pub fn file_attributes(item: &Item) -> FILE_FLAGS_AND_ATTRIBUTES {
-    match item.is_dir() {
+    match item.is_dir() || item.kind == crate::pidl::Kind::Version {
         true => FILE_ATTRIBUTE_DIRECTORY,
         false => FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0 | (item.attrs & 0x7)),
     }

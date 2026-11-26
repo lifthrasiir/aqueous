@@ -81,7 +81,7 @@ Explorer 또는 파일 대화상자를 연 아무 프로세스
 고정하고 버전을 붙였다.
 
 ```text
-u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other)
+u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, journal point)
 | u64 size | i64 mtime (FILETIME) | u32 attributes (Windows')
 | u16 name length | name (UTF-16, a component of the path)
 ```
@@ -91,6 +91,10 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other)
 - 크기와 시간은 열을 빨리 채우기 위한 사본이다.
 - 이름은 `aqr -d`가 풀 때 쓰는 이름 그대로다(`crates/aqr/src/names.rs`, 서버가 만들어 준다). 그래서
   끌어 내보낸 이름과 풀어 쓴 이름이 같다.
+- journal의 지점(판, kind 4)은 아카이브 파일 바로 다음에만 오는 항목이다. 그 뒤의 항목은 그 지점의
+  아카이브의 것이다. size는 지점을 가리키는 오프셋(서버의 `metadata`), mtime은 지점의 시각, 이름은
+  보이는 이름("라벨 (시각)")이다. 목록에는 나오지 않고 메뉴로만 간다(§6.8). 파싱 이름은 `@`와
+  오프셋이다(`x.aqr\@1234\a.txt`). 루트에 같은 이름의 항목이 있으면 항목이 먼저다.
 
 ### 3.3 구현한 인터페이스
 
@@ -136,9 +140,10 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other)
 - 클래스는 `REGCLS_MULTIPLEUSE`로 노출한다. 단일 인스턴스와 기동 경합은 COM이 처리한다.
 - **타입 라이브러리 없는 `IDispatch`**다. 시스템의 프록시가 마샬링하므로 proxy/stub DLL이나 typelib
   등록이 필요 없다. 메서드(인자는 문자열, 결과는 JSON 문자열이나 객체):
-  - 클래스: `Open(path[, hwnd])` → 아카이브 객체
+  - 클래스: `Open(path[, hwnd[, at]])` → 아카이브 객체(`at`: journal 지점의 오프셋. 그 지점의
+    아카이브)
   - 아카이브: `Info()`, `List(dir[, "verbose"])`, `Stat(path[, "verbose"])`, `OpenStream(path)` →
-    `IStream`, `Materialize(path)`, `Progress(path)`, `Cancel(path)`
+    `IStream`, `Materialize(path)`, `Progress(path)`, `Cancel(path)`, `Journal()`
 - 아카이브 객체가 놓이면(클라이언트가 놓거나, 클라이언트가 죽어 COM이 정리하면) 그 handle은 1분 뒤에
   닫는다. 그 사이 다시 열면 그대로 쓴다. 탐색기가 폴더를 옮길 때마다 객체를 만들었다 놓기 때문이다.
 - 객체가 하나도 없이 10분이 지나면 클래스를 revoke하고 끝난다. 수치는 정해 둔 것이니 재 보고 고친다.
@@ -178,6 +183,9 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other)
 - `read`: 범위로 읽고, 한 번에 1 MiB까지다. 큰 읽기 하나가 다른 요청의 응답을 오래 막지 않게 한다.
 - `progress`: 아카이브가 마지막으로 알려 준 진행(`decompressed`, `evaluated`)과 평가 중인 leaf 수.
   요청별로 나뉘지 않는다(§10).
+- `journal`: journal의 지점들(판). 순서대로 `metadata`(지점을 가리키는 오프셋), `time`, `shown`(aqr가
+  보여 주는 지역 시각), `label`. `open`에 `at`(지점의 `metadata`)을 주면 그 지점의 아카이브를 연다
+  (`--at`과 같다). handle은 따로다. 그 지점의 아카이브는 그 뒤의 지점을 모른다.
 - `trim`: 둔 내용을 버린다. `close`: handle을 놓는다.
 
 ## 5. 캐시
@@ -285,6 +293,23 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other)
   `0xfffffffb`)과 Alt+Enter에 우리 시트를 띄운다. 고른 항목마다 한 페이지이고, 열에 값이 있는 것을
   한 줄씩, 위치, formula와 명령어 수까지 보여 준다. 별도 스레드, 별도 창이다.
 
+### 6.8 판(journal의 지점)
+
+판을 하위 폴더로 보이면 아카이브 안의 진짜 디렉터리와 헷갈린다. 그래서 목록에는 넣지 않고, 들어가는
+길과 들어간 뒤의 모습을 나눴다.
+
+- 들어간 뒤: 아카이브 파일의 PIDL 뒤에 지점 항목(§3.2)이 붙은 곳이다. 그 아래는 그 지점의 아카이브를
+  읽기 전용으로 보여 준다. 열기, 복사, 썸네일, 속성이 그대로 된다. 주소 표시줄에는
+  `x.aqr › 라벨 (시각)`으로 보인다.
+- 들어가는 길
+  1. 보기의 배경 메뉴 "버전 ▸"(`src/versions.rs`, `CreateViewObject(IContextMenu)`): "최신"과
+     지점들(최근 것부터). 지금 보는 것에 체크가 붙는다. 지점이 없는 아카이브에는 메뉴를 넣지 않는다.
+     고르면 같은 창에서 간다(사이트의 `SID_STopLevelBrowser`, 없으면 창의 `CWM_GETISHELLBROWSER`,
+     그것도 없으면 새 창).
+  2. 아카이브 파일 속성의 "버전" 탭(예정).
+  3. 탐색기 도구 모음(`IExplorerCommandProvider`, 예정. Windows 10과 11에서 어디에 보이는지 먼저
+     확인한다).
+
 ## 7. 암호와 손상
 
 - **암호화된 아카이브**
@@ -322,7 +347,7 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other)
 7. ~~썸네일과 미리 보기, 속성 시트~~.
 8. ~~설치 프로그램과 릴리스~~(§12).
 9. 그 뒤:
-   - 판(journal의 지점)을 하위 폴더로 보이기
+   - 판(journal의 지점, §6.8): 배경 메뉴(완료), 속성 탭, 도구 모음
    - 다른 형식(aqr-unpack이 읽는 것)과 넣기(`IDropTarget` → `aqr -a`)
    - 손상된 아카이브의 salvage
    - ProjFS로 "폴더로 마운트"

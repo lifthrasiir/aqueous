@@ -67,7 +67,7 @@ impl Files {
                 .collect();
             while let Some(d) = stack.pop() {
                 if d.item.is_dir() {
-                    let under = client::list(self.archive.path(), &d.path, false).map_err(|e| e.code())?;
+                    let under = client::list(self.archive.key(), &d.path, false).map_err(|e| e.code())?;
                     for e in under.iter().rev() {
                         let i = Item::of(e);
                         stack.push(Dropped {
@@ -129,7 +129,7 @@ impl Files {
         if d.item.is_dir() {
             return Err(DV_E_LINDEX.into());
         }
-        let s = client::stream(self.archive.path(), &d.path)?;
+        let s = client::stream(self.archive.key(), &d.path)?;
         Ok(STGMEDIUM {
             tymed: TYMED_ISTREAM.0 as u32,
             u: STGMEDIUM_0 { pstm: std::mem::ManuallyDrop::new(Some(s)) },

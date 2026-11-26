@@ -3,13 +3,18 @@
 //! favourites, recent items and jump lists, so their layout is fixed and versioned:
 //!
 //! ```text
-//! u16 cb | u32 magic 'AQRI' | u8 version | u8 kind (dir, file, link, other)
+//! u16 cb | u32 magic 'AQRI' | u8 version | u8 kind (dir, file, link, other, journal point)
 //! | u64 size | i64 mtime (FILETIME) | u32 attributes (Windows')
 //! | u16 name length | name (UTF-16, a name of the path)
 //! ```
 //!
 //! An entry is told by its name alone (a content's index changes as the archive is appended to);
 //! the size and time are copies, to fill the columns at once.
+//!
+//! A journal point (a named version, [`Kind::Version`]) is an item right after the archive
+//! file's, never listed: the archive as it was there, the entries after it of that. Its size is
+//! the offset that tells the point (`aqr --serve`'s `metadata`), its time the point's, its name
+//! what it is shown as.
 
 use serde_json::Value;
 use windows::Win32::System::Com::CoTaskMemAlloc;
@@ -28,6 +33,7 @@ pub enum Kind {
     File = 1,
     Link = 2,
     Other = 3,
+    Version = 4,
 }
 
 /// An entry, as an item ID holds it.
@@ -69,6 +75,26 @@ impl Item {
         self.kind == Kind::Dir
     }
 
+    /// Journal point `v` as `aqr --serve` tells it (`journal`), shown as `shown`.
+    pub fn version(v: &Value, shown: String) -> Item {
+        let ms = v["time"].as_u64().unwrap_or(0) as i128;
+        Item {
+            kind: Kind::Version,
+            size: v["metadata"].as_u64().unwrap_or(0),
+            mtime: (ms * 10_000 + 116_444_736_000_000_000).clamp(0, i64::MAX as i128) as i64,
+            attrs: 0,
+            name: shown,
+        }
+    }
+
+    /// The name it is parsed by: an entry's name, a journal point's `@` and its offset.
+    pub fn parsed(&self) -> String {
+        match self.kind {
+            Kind::Version => format!("@{}", self.size),
+            _ => self.name.clone(),
+        }
+    }
+
     /// Its `SHITEMID`'s bytes, `cb` first.
     pub fn encode(&self) -> Vec<u8> {
         let name: Vec<u16> = self.name.encode_utf16().collect();
@@ -100,6 +126,7 @@ impl Item {
             0 => Kind::Dir,
             1 => Kind::File,
             2 => Kind::Link,
+            4 => Kind::Version,
             _ => Kind::Other,
         };
         let n = u16::from_le_bytes([b[28], b[29]]) as usize;
@@ -214,6 +241,9 @@ mod tests {
         let mut other = b.clone();
         other[2] = b'X';
         assert_eq!(Item::decode(&other), None);
+        let v = Item::version(&serde_json::json!({"metadata": 1234, "time": 0, "label": "x"}), "x".into());
+        assert_eq!(Item::decode(&v.encode()), Some(v.clone()));
+        assert_eq!((v.kind, v.parsed(), v.mtime), (Kind::Version, "@1234".to_owned(), 116_444_736_000_000_000));
     }
 
     #[test]

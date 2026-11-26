@@ -52,6 +52,11 @@ object is released, for the server to close it a minute later (and to end, idle)
 - Properties (the menu's, Alt+Enter; `src/props.rs`): a sheet of a page for each entry chosen,
   of all that `aqr -t -v` tells of it, its formula and instructions too, under the columns'
   names; on a thread of its own, a window of its own.
+- Named versions (journal points, `-j`, `--tag`; `src/versions.rs`): the view's background menu
+  "Versions", "Latest" and the points newest first, the one shown checked; one chosen is browsed
+  to in the same window, the archive as of it (read only, as all of it is): the file's ID list
+  with an item of the point after it (`src/pidl.rs`'s `Kind::Version`, never listed; parsed as
+  `@` and the point's offset).
 - Encrypted archives: their passphrase asked for by the server's dialog over the window of the
   shell's (the server let come to the front).
 - An archive not read (damaged): told in a box over the window, once in a while, the failure

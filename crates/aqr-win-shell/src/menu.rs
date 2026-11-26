@@ -147,7 +147,7 @@ impl Menu {
 /// `folder`, the files of its folder too (not under it) and those under its folders named after
 /// it (`page.html`'s `page_files`, `page.files`: its name before the first `.`, then what is not
 /// a letter nor a digit).
-fn files_of(archive: &Path, path: &str, folder: bool) -> windows::core::Result<Vec<(String, u64)>> {
+fn files_of(archive: &client::Key, path: &str, folder: bool) -> windows::core::Result<Vec<(String, u64)>> {
     let size = client::stat(archive, path, false)?["size"].as_u64().unwrap_or(0);
     let mut out = vec![(path.to_owned(), size)];
     if !folder {
@@ -226,7 +226,7 @@ fn written(
     folder: bool,
     hwnd: HWND,
 ) -> windows::core::Result<Option<PathBuf>> {
-    let files = files_of(archive.path(), path, folder)?;
+    let files = files_of(archive.key(), path, folder)?;
     let all: u64 = files.iter().map(|f| f.1).sum();
     if folder && all > ASK_OVER {
         let text = aqr_l10n::folder::ask_many(name, files.len(), aqr_l10n::size(all as f64));
@@ -260,7 +260,7 @@ fn written(
                         }
                         s.1 = p.clone();
                     }
-                    let file = client::materialize(archive.path(), &p)?;
+                    let file = client::materialize(archive.key(), &p)?;
                     first.get_or_insert(file);
                     state.lock().unwrap().0 += size;
                 }
@@ -293,8 +293,8 @@ fn written(
         // (of all: the files whole, and of the one at work, what is written or decompressed)
         let (whole, at, _) = state.lock().unwrap().clone();
         let total = (*total.lock().unwrap()).max(1);
-        let (d, t) = client::progress(archive.path(), &at).unwrap_or((0, 0));
-        let size = client::stat(archive.path(), &at, false).ok().and_then(|e| e["size"].as_u64()).unwrap_or(0);
+        let (d, t) = client::progress(archive.key(), &at).unwrap_or((0, 0));
+        let size = client::stat(archive.key(), &at, false).ok().and_then(|e| e["size"].as_u64()).unwrap_or(0);
         let part = if t > 0 { (size as u128 * d as u128 / t as u128) as u64 } else { 0 };
         // SAFETY: the dialog's calls
         unsafe {
@@ -302,7 +302,7 @@ fn written(
             if dialog.HasUserCancelled().as_bool() {
                 // (the file being written stopped, and none after it: nothing opened)
                 state.lock().unwrap().2 = true;
-                _ = client::cancel(archive.path(), &at);
+                _ = client::cancel(archive.key(), &at);
                 break Ok(None);
             }
         }
