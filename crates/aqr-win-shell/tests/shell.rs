@@ -15,7 +15,11 @@ use std::time::{Duration, Instant};
 
 use aqr_shell::folder::{TEST_FOLDER, TEST_SERVER};
 use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY};
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, IDataObject, IStream};
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, CoCreateInstance, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
+};
+use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{OleGetClipboard, OleInitialize, OleUninitialize};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -24,6 +28,7 @@ use windows::Win32::UI::Shell::{
     BHID_EnumItems, BHID_SFObject, BHID_Stream, IEnumShellItems, IShellFolder2, IShellItem, IShellItem2, IShellView,
     SHCreateItemFromParsingName, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
+use windows::Win32::UI::Shell::{CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FILEDESCRIPTORW};
 use windows::Win32::UI::Shell::{CMINVOKECOMMANDINFO, IContextMenu};
 use windows::Win32::UI::Shell::{FILEOPERATION_FLAGS, FileOperation, IFileOperation};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -241,6 +246,46 @@ fn browsed() {
             let out = d_out();
             let ids: Vec<*const ITEMIDLIST> = items.iter().map(|&p| p as *const _).collect();
             let data: IDataObject = f.GetUIObjectOf(HWND::default(), &ids, None).unwrap();
+            // for other programs: the files' descriptors (of all under the folders chosen too)
+            // and their contents by index
+            let format = |name| FORMATETC {
+                cfFormat: RegisterClipboardFormatW(name) as u16,
+                ptd: std::ptr::null_mut(),
+                dwAspect: 1,
+                lindex: -1,
+                tymed: TYMED_HGLOBAL.0 as u32,
+            };
+            let m = data.GetData(&format(CFSTR_FILEDESCRIPTORW)).unwrap();
+            let names: Vec<(String, u32, u64)> = {
+                let p = GlobalLock(m.u.hGlobal) as *const u8;
+                let n = (p as *const u32).read_unaligned() as usize;
+                let size = std::mem::size_of::<FILEDESCRIPTORW>();
+                let all = (0..n)
+                    .map(|k| {
+                        let f = (p.add(4 + k * size) as *const FILEDESCRIPTORW).read_unaligned();
+                        let name = f.cFileName;
+                        let name = String::from_utf16_lossy(&name[..name.iter().position(|&c| c == 0).unwrap()]);
+                        (name, f.dwFileAttributes & 0x10, (f.nFileSizeHigh as u64) << 32 | f.nFileSizeLow as u64)
+                    })
+                    .collect();
+                _ = GlobalUnlock(m.u.hGlobal);
+                all
+            };
+            let mut sorted = names.clone();
+            sorted.sort();
+            let want = [
+                ("a.txt", 0, 1000),
+                ("sub", 0x10, 0),
+                (r"sub\big.bin", 0, 2_500_000),
+                (r"sub\deep", 0x10, 0),
+                (r"sub\deep\c.txt", 0, 4),
+            ];
+            assert_eq!(sorted, want.map(|(n, a, s)| (n.to_owned(), a, s)));
+            let k = names.iter().position(|n| n.0 == r"sub\big.bin").unwrap();
+            let mut fc = format(CFSTR_FILECONTENTS);
+            (fc.lindex, fc.tymed) = (k as i32, TYMED_ISTREAM.0 as u32);
+            let m = data.GetData(&fc).unwrap();
+            assert!(read(m.u.pstm.as_ref().unwrap()) == big);
             let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL).unwrap();
             // FOF_NO_UI
             op.SetOperationFlags(FILEOPERATION_FLAGS(0x4 | 0x10 | 0x200 | 0x400)).unwrap();

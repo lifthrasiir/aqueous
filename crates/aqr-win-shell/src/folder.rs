@@ -168,7 +168,7 @@ fn guard_hr(what: &str, f: impl FnOnce() -> HRESULT) -> HRESULT {
 }
 
 /// `path` with `name` after it.
-fn joined(path: &str, name: &str) -> String {
+pub(crate) fn joined(path: &str, name: &str) -> String {
     if path.is_empty() { name.to_owned() } else { format!("{path}/{name}") }
 }
 
@@ -586,9 +586,13 @@ impl IShellFolder_Impl for Folder_Impl {
                 if iid == IDataObject::IID && cidl > 0 {
                     // (the shell's, of the items' ID lists: what it copies, reading them as
                     // folders and streams)
-                    let items = std::slice::from_raw_parts(apidl, cidl as usize);
+                    let ids = std::slice::from_raw_parts(apidl, cidl as usize);
+                    let chosen: Vec<Item> = ids.iter().filter_map(|&p| pidl::first(p)).collect();
+                    let (archive, dir) = self.at()?;
+                    // (and for other programs' drops, the files' descriptors and contents)
+                    let inner: IDataObject = crate::data::Files::new(archive, dir, chosen).into();
                     let folder = self.at.read().unwrap().as_ref().map(|a| a.pidl.as_ptr());
-                    let d: IDataObject = SHCreateDataObject(folder, Some(items), None)?;
+                    let d: IDataObject = SHCreateDataObject(folder, Some(ids), &inner)?;
                     return d.query(riid, ppv).ok();
                 }
                 Err(E_NOINTERFACE.into())
