@@ -38,8 +38,10 @@ pub const DEPTH: usize = 256;
 pub const CUT_OPEN: usize = 4;
 /// The longest value cut out.
 const MAX_VALUE: usize = 1 << 30;
-/// The containers of fewer bytes than this share a stream.
-const SMALL: usize = 4096;
+/// The containers of fewer bytes than this share a stream (the least that aqr-compress
+/// recompresses for its own: 4 KiB made 0.05% more of the small files of the corpus, 16 KiB and
+/// 64 KiB the same).
+pub const SMALL: usize = 16 << 10;
 
 const _: () = assert!(CONTAINERS as u64 <= MAX_CONTAINERS && DEPTH as u64 <= MAX_DEPTH);
 
@@ -47,8 +49,17 @@ aqr_common::zopt_namespace!("xml", "XML (aqr-xml)");
 
 aqr_common::zopt! {
     /// The bytes of text of a segment at least (but the last), coded on its own (FORMAT.md,
-    /// "Encoding"): what the encoder and the module hold of a file at once.
-    pub static SEGMENT: Opt<usize> = Opt::size("xml:segment", 64 << 20, "bytes of XML of a segment, coded on its own");
+    /// "Encoding"): what the encoder and the module hold of a file at once. A module holds its
+    /// inputs (nearly as many bytes as the text: the values) and its output, and the host copies
+    /// of them, which the application bound (256 MiB) counts: a segment of 64 MiB needed 269 MB.
+    pub static SEGMENT: Opt<usize> = Opt::size("xml:segment", 32 << 20, "bytes of XML of a segment, coded on its own");
+}
+
+aqr_common::zopt! {
+    /// A text shorter than this is not taken ([`MIN_LEN`]).
+    static MIN: Opt<usize> = Opt::size("xml:min-len", MIN_LEN, "bytes of XML at least that aqr-xml takes");
+    /// The containers of fewer bytes than this share a stream ([`SMALL`]).
+    static SMALL_PART: Opt<usize> = Opt::size("xml:small", SMALL, "bytes of a container under which it shares a stream");
 }
 
 /// The bounds of an encoding: tests make them small.
@@ -65,21 +76,63 @@ impl Default for Limits {
     }
 }
 
-/// Whether `d` starts as XML does: after a UTF-8 byte order mark and spaces, `<?xml` or a tag.
+/// Whether `d` is an XML document this crate takes: of [`MIN_LEN`] bytes at least and
+/// [`looks_like_xml`] (the text's being text is for the caller to tell).
 pub fn starts(d: &[u8]) -> bool {
-    let d = d.strip_prefix(b"\xef\xbb\xbf").unwrap_or(d);
-    let at = d.iter().position(|&b| !space(b)).unwrap_or(d.len());
-    let d = &d[at..];
-    d.starts_with(b"<?xml")
-        || d.len() > 1 && d[0] == b'<' && (name_byte(d[1]) && d[1] != b'!' && d[1] != b'?')
-        || d.starts_with(b"<!--")
-        || d.starts_with(b"<!DOCTYPE")
+    d.len() >= MIN.get() && looks_like_xml(d)
+}
+
+/// Whether `d` starts as an XML document does: after a UTF-8 byte order mark and spaces, the
+/// processing instructions, comments and DOCTYPE of the prolog, then an element. Not HTML (a
+/// DOCTYPE or a root element named `html`, in any case): its void elements (`<br>`, `<img>`) are
+/// never closed, so that every end tag after one pops the wrong element and the contexts of the
+/// values drift; aqr-wrt takes HTML's markup better. XHTML is XML but has the same root.
+pub fn looks_like_xml(d: &[u8]) -> bool {
+    let mut d = &d[..d.len().min(64 << 10)];
+    d = d.strip_prefix(b"\xef\xbb\xbf").unwrap_or(d);
+    fn skip(d: &[u8]) -> &[u8] {
+        &d[d.iter().position(|&b| !space(b)).unwrap_or(d.len())..]
+    }
+    d = skip(d);
+    loop {
+        let rest = if d.starts_with(b"<?") {
+            memmem::find(d, b"?>").map(|p| p + 2)
+        } else if d.starts_with(b"<!--") {
+            memmem::find(&d[4..], b"-->").map(|p| p + 7)
+        } else if d.len() > 9 && d[..9].eq_ignore_ascii_case(b"<!DOCTYPE") {
+            let r = &d[9..];
+            let name = skip(r);
+            let end = name.iter().position(|&b| !name_byte(b)).unwrap_or(name.len());
+            if name[..end].eq_ignore_ascii_case(b"html") {
+                return false;
+            }
+            // (past an internal subset's `]`)
+            let from = match memchr::memchr2(b'>', b'[', d) {
+                Some(p) if d[p] == b'[' => memchr(b']', &d[p..]).map(|q| p + q),
+                _ => Some(0),
+            };
+            from.and_then(|f| memchr(b'>', &d[f..]).map(|p| f + p + 1))
+        } else {
+            break;
+        };
+        match rest.and_then(|r| d.get(r..)) {
+            Some(r) => d = skip(r),
+            None => return false,
+        }
+    }
+    let [b'<', first, ..] = *d else { return false };
+    if !name_byte(first) || first == b'!' {
+        return false;
+    }
+    let end = d[1..].iter().position(|&b| !name_byte(b)).map_or(d.len(), |p| p + 1);
+    let name = &d[1..end];
+    !name.eq_ignore_ascii_case(b"html") && d.get(end).is_some_and(|&b| space(b) || b == b'>' || b == b'/')
 }
 
 /// The formula of text `input`, or `None` where it is shorter than [`MIN_LEN`] or nothing of it
 /// is cut out. It is the same whatever `threads` is (one is used).
 pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
-    if input.len() < MIN_LEN {
+    if input.len() < MIN.get() {
         return None;
     }
     let (f, containers) = encode_with(input, &Limits::default());
@@ -570,7 +623,7 @@ impl<'d, 'l> Segment<'d, 'l> {
         let mut small = Vec::new();
         let mut parts = Vec::new();
         for c in conts {
-            match c.data.len() < SMALL {
+            match c.data.len() < SMALL_PART.get() {
                 true => {
                     parts.push(Err((small.len(), c.data.len())));
                     small.extend_from_slice(&c.data);

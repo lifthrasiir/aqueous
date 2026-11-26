@@ -77,6 +77,7 @@ aqr-tex = { workspace = true, default-features = true }
 aqr-wrt = { workspace = true, default-features = true }
 aqr-jsonl = { workspace = true, default-features = true }
 aqr-log = { workspace = true, default-features = true }
+aqr-xml = { workspace = true, default-features = true }
 aqr-xsv = { workspace = true, default-features = true }
 aqr-zip = { workspace = true, default-features = true }
 aqr-zstd = { workspace = true, default-features = true }

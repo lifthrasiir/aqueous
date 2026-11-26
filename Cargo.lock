@@ -373,6 +373,7 @@ dependencies = [
  "aqr-wim",
  "aqr-wrt",
  "aqr-wwise",
+ "aqr-xml",
  "aqr-xsv",
  "aqr-zip",
  "aqr-zstd",

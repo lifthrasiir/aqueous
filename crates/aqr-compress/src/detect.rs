@@ -286,6 +286,8 @@ static ROWS: &[Row] = {
         start(Isc, aqr_isc::formula::starts),
         // (before tables: JSON lines may cut into the same number of fields)
         start(Jsonl, aqr_jsonl::formula::starts),
+        // (XML not HTML; before the text path, as the tables)
+        start(Xml, |d| aqr_xml::formula::starts(d) && aqr_wrt::formula::mostly_text(d)),
         start(Xsv, aqr_xsv::formula::starts),
         start(Text, aqr_wrt::formula::starts),
         // (of no magic, its header checked against the length: after every other; Chromium's
@@ -818,5 +820,26 @@ mod tests {
         // (too short, none; binary, none)
         assert_eq!(detect(b"{\"a\":1}\n"), None);
         assert_eq!(detect(&aqr_common::rng::noise(5000)), None);
+    }
+
+    /// XML (not HTML) of at least the least length is [`Format::Xml`], else text.
+    #[test]
+    fn xml_not_html() {
+        let body: String = (0..12000).map(|i| format!("<item id=\"{i}\"><name>n{}</name></item>\n", i * 7)).collect();
+        let xml = format!("<?xml version=\"1.0\"?>\n<items>\n{body}</items>\n");
+        assert!(xml.len() > aqr_xml::formula::MIN_LEN);
+        assert_eq!(detect(xml.as_bytes()), Some(Format::Xml));
+        let bom = [&b"\xef\xbb\xbf"[..], xml.as_bytes()].concat();
+        assert_eq!(detect(&bom), Some(Format::Xml));
+        assert_ne!(detect(&xml.as_bytes()[..aqr_xml::formula::MIN_LEN - 1]), Some(Format::Xml));
+        // (HTML's void elements are never closed: the contexts would drift)
+        let html = format!("<!DOCTYPE html>\n<html><body>\n{body}</body></html>\n");
+        assert_eq!(detect(html.as_bytes()), Some(Format::Text));
+        let html = format!("<HTML>\n{body}</HTML>\n");
+        assert_eq!(detect(html.as_bytes()), Some(Format::Text));
+        // (binary data after the tag is not text)
+        let mut bin = xml.clone().into_bytes();
+        (0..bin.len() / 50).for_each(|i| bin[i * 50 + 3] = 0);
+        assert_ne!(detect(&bin), Some(Format::Xml));
     }
 }

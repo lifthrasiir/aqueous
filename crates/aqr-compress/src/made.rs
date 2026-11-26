@@ -189,18 +189,25 @@ fn quopri(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
 }
 
 /// `d`, text, as JSON lines if aqr-jsonl takes it, else as a table if aqr-xsv does or as lines
-/// of templates and fields if aqr-log does ([`log_or_table`]), where the formula is
+/// of templates and fields if aqr-log does ([`table_pick`]), where the formula is
 /// [`smaller`].
 fn table(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     let jsonl = aqr_jsonl::formula::starts(d).then(|| recompress_as(Format::Jsonl, d, opt, depth, cx)).flatten();
     jsonl.or_else(|| {
         let xsv = aqr_xsv::formula::starts(d);
-        let format = match aqr_log::formula::starts(d) {
-            true => log_or_table(d, xsv)?,
-            false if xsv => Format::Xsv,
-            false => return None,
+        let (format, share) = match aqr_log::formula::starts(d) {
+            true => table_pick(d, xsv),
+            false => (xsv.then_some(Format::Xsv), None),
         };
-        recompress_as(format, d, opt, depth, cx)
+        // (XML where its sample beats the text's and the table coder's, if one takes the text;
+        // else as any text, below)
+        if detect(d) == Some(Format::Xml)
+            && xml_wins(d, share)
+            && let Some(f) = recompress_as(Format::Xml, d, opt, depth, cx)
+        {
+            return Some(f);
+        }
+        recompress_as(format?, d, opt, depth, cx)
     })
 }
 
@@ -212,7 +219,7 @@ aqr_common::zopt! {
     /// The number of windows of that sample ([`table_sample`]).
     pub(crate) static TABLE_WINDOWS: Opt<usize> =
         Opt::value("table:windows", 8, "windows of the sample that log, xsv and text are compared on");
-    /// The level of zstd that the sample's streams are compared at ([`log_or_table`]).
+    /// The level of zstd that the sample's streams are compared at ([`table_pick`]).
     static TABLE_ZSTD_LEVEL: Opt<i32> =
         Opt::value("table:zstd-level", 3, "zstd level that log, xsv and text are compared at");
     /// aqr-log takes text over the text path (aqr-wrt) where its streams on the sample, compressed
@@ -254,22 +261,81 @@ pub(crate) fn table_sample(d: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(s)
 }
 
+aqr_common::zopt! {
+    /// aqr-xml takes XML over the text path (aqr-wrt) where its sample's streams, compressed by zstd
+    /// -3, are at most this many percent of the sample compressed so ([`xml_wins`]).
+    static XML_PERCENT: Opt<usize> =
+        Opt::value("xml:percent", 100, "percent of the text path's size under which aqr-xml takes XML");
+    /// aqr-xml takes XML over aqr-log where its sample's ratio (its streams over the sample, both
+    /// by zstd -3) is at most this many percent of aqr-log's on its own sample: rows of attributes
+    /// one to a line are aqr-log's, elements of text and records aqr-xml's.
+    static XML_LOG_PERCENT: Opt<usize> =
+        Opt::value("xml:log-percent", 135, "percent of aqr-log's ratio under which aqr-xml takes XML");
+}
+
+/// The sample of XML `d` that aqr-xml is compared on: as [`table_sample`], its windows cut at
+/// tags rather than at lines (an XML file may have no line to speak of). A window starts at the
+/// `<` of a tag and ends after a `>`.
+fn xml_sample(d: &[u8]) -> Cow<'_, [u8]> {
+    let (window, windows) = (TABLE_WINDOW.get(), TABLE_WINDOWS.get());
+    if d.len() <= window * windows {
+        return Cow::Borrowed(d);
+    }
+    let mut s = Vec::with_capacity(window * windows);
+    for i in 0..windows {
+        let at = (d.len() - window) * i / (windows - 1);
+        let to = (at + window).min(d.len());
+        let from = d[at..to].iter().position(|&b| b == b'<').map_or(to, |p| at + p);
+        if from < to
+            && let Some(j) = d[from..to].iter().rposition(|&b| b == b'>')
+        {
+            s.extend_from_slice(&d[from..from + j + 1]);
+        }
+    }
+    Cow::Owned(s)
+}
+
+/// Whether XML `d` is taken by aqr-xml: of its sample ([`xml_sample`]) the formula's streams,
+/// each compressed by zstd -3 on its own as the containers are recompressed, are at most
+/// [`XML_PERCENT`] of the sample so compressed, and at most [`XML_LOG_PERCENT`] of the share that
+/// a table coder's streams make of their sample (`table`, [`table_pick`]) where one takes the text.
+fn xml_wins(d: &[u8], table: Option<f64>) -> bool {
+    let s = &*xml_sample(d);
+    let level = TABLE_ZSTD_LEVEL.get();
+    let z = |b: &[u8]| zstd::bulk::compress(b, level).map_or(b.len(), |c| c.len());
+    let (f, containers) = aqr_xml::formula::encode_with(s, &aqr_xml::formula::Limits::default());
+    if containers == 0 {
+        return false;
+    }
+    let share = f.streams.iter().map(|s| z(&s.data)).sum::<usize>() as f64 / z(s).max(1) as f64;
+    share * 100.0 <= XML_PERCENT.get() as f64 && table.is_none_or(|t| share * 100.0 <= t * XML_LOG_PERCENT.get() as f64)
+}
+
 /// The format for text `d` that aqr-log takes (its `starts`), `xsv` whether aqr-xsv does too:
 /// of a sample of `d` ([`table_sample`]) each candidate's streams as zstd -3 compresses them, and
 /// the sample itself for the text path. aqr-xsv where it is no larger than aqr-log; aqr-log
 /// where it is at most [`LOG_PERCENT`] of the text path; else aqr-xsv if it takes the text, else
 /// none (the text path).
-fn log_or_table(d: &[u8], xsv: bool) -> Option<Format> {
+/// and how large the streams of the sample are of the sample compressed (as a
+/// fraction) in the format it picks, if any.
+fn table_pick(d: &[u8], xsv: bool) -> (Option<Format>, Option<f64>) {
     let s = &*table_sample(d);
     let level = TABLE_ZSTD_LEVEL.get();
     let z = |b: &[u8]| zstd::bulk::compress(b, level).map_or(b.len(), |c| c.len());
     let coded = |f: Formula| f.streams.iter().map(|s| z(&s.data)).sum::<usize>();
     let log = aqr_log::formula::encode(s, 1).map(coded);
     let x = xsv.then(|| aqr_xsv::formula::encode(s, 1).map(coded)).flatten();
-    pick_table(log, x, || z(s), xsv, LOG_PERCENT.get())
+    let text = z(s);
+    let format = pick_table(log, x, || text, xsv, LOG_PERCENT.get());
+    let size = match format {
+        Some(Format::Log) => log,
+        Some(Format::Xsv) => x,
+        _ => None,
+    };
+    (format, size.map(|n| n as f64 / text.max(1) as f64))
 }
 
-/// [`log_or_table`]'s choice, of the sizes of the sample's streams by aqr-log (`log`) and by
+/// [`table_pick`]'s choice, of the sizes of the sample's streams by aqr-log (`log`) and by
 /// aqr-xsv (`x`), and of the sample itself (`text`, worked out where it is asked for), at `percent`.
 pub(crate) fn pick_table(
     log: Option<usize>,
@@ -523,7 +589,9 @@ fn recompress_sealed(
     };
     drop(shared);
     let watches = told_as_second_half(&f, d);
-    let words = (format == Format::Jsonl || format.is_bundle()).then(|| segment_words(&f, opt, cx)).flatten();
+    let words = (matches!(format, Format::Jsonl | Format::Xml) || format.is_bundle())
+        .then(|| segment_words(&f, opt, cx, format == Format::Xml))
+        .flatten();
     // (where the data put off is, and what the formula is, as the contents may take its streams
     // out of it)
     let bases: Vec<usize> = f.streams.iter().map(|s| addr(&s.data)).collect();
@@ -688,15 +756,16 @@ aqr_common::zopt! {
 }
 
 /// Sets [`Cx::words`] for the contents of `f`, where none is set: a dictionary of the text of its
-/// contents (for JSON lines cut into segments, those of [`Kind::Text`]; for an archive that only
+/// contents (for JSON lines cut into segments, and XML cut into segments or not, as it has a
+/// container of text for each context, those of [`Kind::Text`]; for an archive that only
 /// bundles files, the members that are text as [`made`] tells), at least [`SEGMENT_WORDS_MIN`]
 /// bytes in all, so that it is coded with one dictionary, as it is where the file is one segment,
 /// and the same text of members is coded alike (the files of a tar archive, as they are on their
 /// own in an archive of files). Returns it, to be unset once they are made.
-fn segment_words(f: &Formula, opt: &Options, cx: &Cx) -> Option<Arc<aqr_wrt::formula::Shared>> {
+fn segment_words(f: &Formula, opt: &Options, cx: &Cx, single: bool) -> Option<Arc<aqr_wrt::formula::Shared>> {
     // (of one segment, the file's text has a dictionary of its own anyway)
     let apart = bundle::bundles(f);
-    if cx.words.borrow().is_some() || !(apart || matches!(f.root, Node::Concat(_))) {
+    if cx.words.borrow().is_some() || !(apart || single || matches!(f.root, Node::Concat(_))) {
         return None;
     }
     let texts: Vec<&[u8]> = match apart {

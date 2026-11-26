@@ -263,7 +263,7 @@ fn segments_cut_after_end_tags() {
 #[test]
 fn small_containers_share_a_stream() {
     let mut s = String::from("<r>");
-    for i in 0..4000 {
+    for i in 0..6000 {
         s += &format!("<a>{}</a><b c='{}'>{}</b>", "x".repeat(i % 5 + 1), i, i % 3);
     }
     s += "<z>1</z></r>";
@@ -283,11 +283,34 @@ fn not_xml() {
     assert!(encode(b"<a>x</a>", 1).is_none());
     assert!(encode(&b"<a>x</a>".repeat(10000), 1).is_some());
     assert!(encode(&b"<!-- c -->\n".repeat(10000), 1).is_none());
-    assert!(starts(b"<?xml version='1.0'?><a/>"));
-    assert!(starts(b"\xef\xbb\xbf  \n<a>"));
-    assert!(starts(b"<!DOCTYPE html>"));
-    assert!(!starts(b"hello <a>"));
-    assert!(!starts(b"{\"a\":1}"));
+    let pad = |s: &str| format!("{s}{}", " ".repeat(MIN_LEN));
+    for yes in [
+        "<?xml version='1.0'?><a/>",
+        "\u{feff}  \n<a>",
+        "<?xml version='1.0'?>\n<!-- c -->\n<!DOCTYPE a [<!ENTITY e 'x'>]>\n<a b='1'>",
+        "<!DOCTYPE note SYSTEM \"n.dtd\"><note>",
+        "<rss version=\"2.0\">",
+        "<svg xmlns='http://www.w3.org/2000/svg'>",
+    ] {
+        assert!(starts(pad(yes).as_bytes()), "{yes}");
+        assert!(!starts(yes.as_bytes()), "{yes}: short");
+    }
+    for no in [
+        "<!DOCTYPE html><html>",
+        "<!doctype HTML>\n<html lang='en'>",
+        "<html><head>",
+        "<HTML>",
+        "<?xml version='1.0'?><!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0//EN'><html>",
+        "<?xml version='1.0'?><html xmlns='http://www.w3.org/1999/xhtml'>",
+        "hello <a>",
+        "{\"a\":1}",
+        "<?xml version='1.0'",
+        "<",
+        "<!-- unterminated",
+        "<!x>",
+    ] {
+        assert!(!starts(pad(no).as_bytes()), "{no}");
+    }
     // (random bytes round-trip, whatever they are)
     let mut rng = aqr_common::rng::Rng::new(3);
     let alphabet = b"<>/=\"' \n\r\t!?-[]abc\x01\x02\x03\x04\x05";

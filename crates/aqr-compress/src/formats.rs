@@ -997,6 +997,16 @@ formats! {
         heap: 0.0,
         text: true,
     }
+    /// XML (aqr-xml): the tags in a skeleton, each element's text and attribute's value in the
+    /// container of its context, a whole file known by its text (HTML left out): not looked for
+    /// in other data. [`crate::made::table`] takes it where its sample is smaller than aqr-log's
+    /// (rows of attributes, one to a line) and the text path's.
+    Xml = "xml" {
+        recompressor: Pure(aqr_xml::formula::encode),
+        // segments of 64 MiB, each its skeleton and containers
+        heap: 0.0,
+        text: true,
+    }
     /// Lines of text as templates and fields in columns (aqr-log): logs and tables of numbers,
     /// a whole file known by its text, never detected: [`crate::made::table`] takes it where its
     /// sample is clearly smaller than the text's.

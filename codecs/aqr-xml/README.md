@@ -8,7 +8,7 @@ name). The module `xml-recons` only takes the text apart and puts it back; it co
 Each container is text (`Kind::Text`, a content), which aqr-compress is to recompress in turn
 (aqr-log or aqr-xsv for a column of numbers or times, aqr-wrt for words). Whatever is not XML
 round-trips too, kept in the skeleton. The format is specified in [FORMAT.md](FORMAT.md), the
-design is in `docs/xml-design.md`. aqr-compress does not choose it yet.
+design is in `docs/xml-design.md`. aqr-compress takes XML with it where it pays (below).
 
 ```rust
 use aqr_xml::formula::{self, MODULE};
@@ -37,64 +37,83 @@ aqr-modules builds into the Wasm module `xml-recons` (4.2 KB as a block, 10.5 KB
 
 ## Results
 
-The module on the corpus below, on an Apple M4 (`cache/bench-2026-11-26.txt`; speeds on one
-thread, of the file's bytes). Sizes in bytes at zstd -3: the file itself, against the skeleton,
-`table` and `lens` and each container compressed on its own (what aqr-compress hands to the
-coders; aqr-wrt, aqr-log and aqr-xsv do better than zstd on the containers). The speeds are the
-module's alone, at the order of what the file's text is made of (most bytes in values: faster).
+Through `aqr` at its default level (10 threads), on an Apple M4 (2026-11-26; raw numbers in
+`cache/final.tsv`, the choice's ground truth in `cache/gt2.tsv` and `cache/small.tsv`): archive
+bytes without aqr-xml (`-Z format:no-xml`) and with it, instructions retired (`/usr/bin/time -l`)
+as a ratio of with over without, and peak memory of compressing and decompressing (`-K`, which
+decodes and checks; without aqr-xml in brackets). The files marked `+0.0%` are not taken by
+aqr-xml: rows of attributes one to a line (OSM's changes, Stack Exchange's `Badges` and `Votes`),
+which aqr-log codes smaller, and files under 64 KiB.
 
-| file | MB | segments | containers | file | split | | encode MB/s | decode MB/s |
+| file | MB | without | with | | compress instr. | compress peak MB | decompress instr. | decompress peak MB |
 |---|---|---|---|---|---|---|---|---|
-| `enwik8` | 100.0 | 2 | 33 | 35,419,425 | 35,071,278 | -1.0% | 5100 | 7985 |
-| `silesia/xml` | 5.3 | 1 | 526 | 635,299 | 569,468 | -10.4% | 508 | 714 |
-| `dblp/dblp-head.xml` | 268.4 | 4 | 297 | 47,990,209 | 41,888,078 | -12.7% | 734 | 740 |
-| `pubmed/pubmed26n0001.xml` | 195.4 | 3 | 279 | 16,412,957 | 12,663,672 | -22.8% | 749 | 871 |
-| `jmdict/JMdict_e` | 63.3 | 1 | 23 | 11,139,643 | 8,516,809 | -23.5% | 539 | 640 |
-| `osm-hours/503.osc` | 71.7 | 2 | 39 | 5,773,624 | 4,265,481 | -26.1% | 504 | 731 |
-| `osm-hours/504.osc` | 163.8 | 3 | 48 | 8,693,516 | 5,948,930 | -31.6% | 509 | 735 |
-| `uw/lineitem.xml` | 32.3 | 1 | 17 | 2,891,098 | 1,565,369 | -45.9% | 722 | 802 |
-| `uw/nasa.xml` | 25.1 | 1 | 60 | 3,396,104 | 3,075,601 | -9.4% | 924 | 1159 |
-| `uw/SwissProt.xml` | 114.8 | 2 | 379 | 11,370,776 | 8,408,307 | -26.1% | 517 | 648 |
-| `uw/treebank_e.xml` | 86.1 | 2 | 1399 | 33,181,033 | 29,618,945 | -10.7% | 654 | 904 |
-| `se-coffee/Badges.xml` | 1.6 | 1 | 6 | 231,469 | 168,792 | -27.1% | 466 | 695 |
-| `se-coffee/Comments.xml` | 1.6 | 1 | 7 | 517,597 | 465,999 | -10.0% | 1181 | 1361 |
-| `se-coffee/PostHistory.xml` | 9.5 | 1 | 10 | 2,173,064 | 1,954,804 | -10.0% | 1867 | 1745 |
-| `se-coffee/PostLinks.xml` | 0.1 | 1 | 5 | 11,052 | 8,331 | -24.6% | 444 | 660 |
-| `se-coffee/Posts.xml` | 5.7 | 1 | 22 | 1,632,455 | 1,553,098 | -4.9% | 1980 | 1749 |
-| `se-coffee/Tags.xml` | 0.0 | 1 | 5 | 1,926 | 1,659 | -13.9% | 238 | 475 |
-| `se-coffee/Users.xml` | 4.5 | 1 | 12 | 1,108,417 | 972,966 | -12.2% | 801 | 961 |
-| `se-coffee/Votes.xml` | 2.0 | 1 | 6 | 173,598 | 113,832 | -34.4% | 508 | 706 |
-| `se-history/Badges.xml` | 10.9 | 1 | 6 | 1,552,686 | 1,170,721 | -24.6% | 479 | 687 |
-| `se-history/Comments.xml` | 47.8 | 1 | 7 | 15,534,232 | 14,048,627 | -9.6% | 1246 | 1319 |
-| `se-history/PostHistory.xml` | 301.7 | 5 | 50 | 48,720,964 | 45,562,240 | -6.5% | 3272 | 2295 |
-| `se-history/PostLinks.xml` | 0.3 | 1 | 5 | 51,823 | 40,724 | -21.4% | 504 | 687 |
-| `se-history/Posts.xml` | 104.2 | 2 | 44 | 31,744,210 | 30,720,903 | -3.2% | 3141 | 2107 |
-| `se-history/Tags.xml` | 0.1 | 1 | 5 | 14,050 | 10,498 | -25.3% | 352 | 543 |
-| `se-history/Users.xml` | 16.8 | 1 | 12 | 3,936,904 | 3,336,130 | -15.3% | 773 | 911 |
-| `se-history/Votes.xml` | 42.0 | 1 | 6 | 3,025,439 | 2,207,515 | -27.0% | 520 | 700 |
-| all 27 | 1,675.1 | | | 287,333,570 | 253,928,777 | -11.6% | 848 | 990 |
+| `enwik8` | 100.0 | 26,838,455 | 26,677,235 | -0.6% | 1.64 | 337 (210) | 1.03 | 224 (161) |
+| `silesia/xml` | 5.3 | 508,962 | 484,684 | -4.8% | 1.45 | 84 (52) | 1.03 | 11 (10) |
+| `dblp/dblp-head.xml` | 268.4 | 39,742,159 | 31,588,741 | -20.5% | 2.31 | 710 (859) | 1.47 | 568 (605) |
+| `jmdict/JMdict_e` | 63.3 | 7,739,721 | 6,239,991 | -19.4% | 1.50 | 244 (209) | 1.35 | 115 (120) |
+| `osm-hours/503.osc` | 71.7 | 2,537,139 | 2,537,139 | +0.0% | 1.00 | 152 (152) | 1.00 | 90 (90) |
+| `osm-hours/504.osc` | 163.9 | 3,874,399 | 3,874,399 | +0.0% | 1.00 | 289 (288) | 1.00 | 179 (179) |
+| `pubmed/pubmed26n0001.xml` | 195.5 | 11,828,651 | 9,135,487 | -22.8% | 1.79 | 664 (450) | 1.36 | 362 (362) |
+| `se-coffee/Badges.xml` | 1.6 | 127,042 | 127,042 | +0.0% | 1.03 | 29 (29) | 1.00 | 5 (5) |
+| `se-coffee/Comments.xml` | 1.6 | 422,144 | 393,538 | -6.8% | 1.71 | 55 (42) | 1.02 | 7 (5) |
+| `se-coffee/PostHistory.xml` | 9.5 | 1,603,616 | 1,449,630 | -9.6% | 1.95 | 89 (47) | 1.06 | 23 (18) |
+| `se-coffee/PostLinks.xml` | 0.1 | 9,451 | 9,451 | +0.0% | 1.00 | 6 (6) | 1.00 | 3 (3) |
+| `se-coffee/Posts.xml` | 5.7 | 1,219,104 | 1,165,724 | -4.4% | 1.75 | 52 (47) | 1.00 | 15 (12) |
+| `se-coffee/Tags.xml` | 0.0 | 1,953 | 1,953 | +0.0% | 1.00 | 3 (3) | 1.00 | 3 (3) |
+| `se-coffee/Users.xml` | 4.5 | 997,836 | 819,952 | -17.8% | 1.40 | 70 (78) | 0.93 | 14 (31) |
+| `se-coffee/Votes.xml` | 2.0 | 102,552 | 102,552 | +0.0% | 1.03 | 30 (31) | 1.00 | 6 (6) |
+| `se-history/Badges.xml` | 10.9 | 667,274 | 667,274 | +0.0% | 1.02 | 52 (53) | 1.00 | 16 (16) |
+| `se-history/Comments.xml` | 47.8 | 11,539,091 | 9,942,123 | -13.8% | 2.25 | 190 (108) | 1.41 | 94 (78) |
+| `se-history/PostHistory.xml` | 301.7 | 34,175,279 | 30,710,023 | -10.1% | 2.02 | 557 (460) | 1.30 | 712 (496) |
+| `se-history/PostLinks.xml` | 0.3 | 47,394 | 45,178 | -4.7% | 1.11 | 23 (17) | 1.01 | 4 (3) |
+| `se-history/Posts.xml` | 104.2 | 22,855,471 | 22,053,563 | -3.5% | 2.01 | 346 (203) | 1.24 | 257 (134) |
+| `se-history/Tags.xml` | 0.1 | 12,717 | 12,717 | +0.0% | 1.00 | 6 (6) | 1.00 | 3 (3) |
+| `se-history/Users.xml` | 16.8 | 3,190,329 | 2,600,723 | -18.5% | 1.74 | 114 (118) | 1.34 | 39 (32) |
+| `se-history/Votes.xml` | 42.0 | 1,154,924 | 1,154,924 | +0.0% | 1.00 | 128 (128) | 1.00 | 50 (50) |
+| `uw/lineitem.xml` | 32.3 | 1,854,258 | 1,173,496 | -36.7% | 1.67 | 126 (155) | 1.52 | 60 (43) |
+| `uw/nasa.xml` | 25.1 | 2,475,397 | 2,406,747 | -2.8% | 2.82 | 135 (53) | 1.10 | 52 (41) |
+| `uw/SwissProt.xml` | 114.8 | 7,588,475 | 6,794,895 | -10.5% | 2.65 | 444 (304) | 1.46 | 225 (178) |
+| `uw/treebank_e.xml` | 86.1 | 28,075,293 | 26,542,009 | -5.5% | 1.25 | 360 (269) | 1.22 | 163 (144) |
+| all 28 | 1,675.1 | 211,189,086 | 188,711,190 | -10.6% | | | | |
 
-- Elements of text and records of many fields (DBLP, PubMed, JMdict, SwissProt, lineitem) gain
-  the most; rows of attributes in one element (Posts, PostHistory, Comments: a long `Body`)
-  gain least, as their text is most of the bytes. Small files gain too at zstd, but the
-  prototype's measurements through `aqr` (above) say that aqr-log takes rows of attributes
-  whole already: choosing is aqr-compress's (phase B).
-- The skeleton is where the structure is: 31 KB of enwik8's 35.1 MB, but 3.5 MB of DBLP's 41.9,
-  1.4 of PubMed's 12.7, 1.5 of SwissProt's 8.4 and 5.6 of treebank's 29.6 (zstd -3). `table`
-  and `lens` are small except where values hold LF (enwik8's `text`: 22 KB of lengths).
-- Containers: 5 to 60 for most files, 297 for DBLP, 1399 for treebank (its elements' parents
-  vary most; the bound is 4096 for a segment). Few are big.
-- Memory: the module's plan is the text plus the containers' table and the stack of names (a
-  few KiB): decoding PostHistory (301.7 MB) takes five segments of 64 MiB or a little more.
+- Decompressing with `-Z wasm` (WAH's JIT, and its interpreter with `-Z wasm:no-jit`) gives
+  JMdict and SwissProt back byte for byte (`cache/wasm-check.txt`; 0.2 s and 1.8 s for JMdict).
+- Compressing takes up to 2.3 times the instructions (DBLP: 134 -> 310 G): the sample and the
+  encoder, and every container recompressed in turn with aqr-wrt's dictionary of all of them.
+- The module alone, on one thread (`aqr-xml-bench`, zstd -3 of the pieces as a proxy): encode 848
+  MB/s, decode 990 MB/s over the 27 files; 500-750 on files of many tags, 3000 on text.
+
+### The choice
+
+`aqr-compress` takes a file as XML (`Format::Xml`, `detect.rs`: a document, not HTML, text, 64 KiB
+or more) and `made::table` tries it where its sample, coded and compressed by zstd -3 container by
+container, is no larger than the sample compressed (`xml:percent` 100%) and, where aqr-log or
+aqr-xsv would take the file, at most 135% of theirs (`xml:log-percent`). On the 47 files of the ground truth (the 26 of the table that are not a tar, and the 21 files of
+silesia's `xml` tar, each coded both ways, `cache/gt2.tsv`, `cache/gt-silesia-members.tsv`) it picks
+the smaller of the two within 0.2% for 46. The miss is `silesia/play3.xml`, a play of 280 KB
+whose sample is as good as its neighbours' (0.93 of zstd) and whose archive is 5.3% larger with
+aqr-xml (69.7 -> 73.4 KB); a threshold that kept it out would lose `se-history/Posts.xml` (0.97 of
+zstd, -3.5%). Files that aqr-xml's formula does not make smaller than the text path's are given up
+by `recompress_as` and cost only the sample. See `docs/xml-design.md` §2. A container's text shares one aqr-wrt dictionary
+with the others of the file: JMdict -3.8%, Posts -5.5%, PubMed -6.8%, DBLP -4.1%, SwissProt -1.6%
+against a dictionary for each (`cache/words.tsv`).
+
+### The prototype
+
+A Python prototype (the pieces archived by `aqr` as files of a directory) said: elements of text
+(DBLP, PubMed, JMdict, SwissProt) gain the most, 16-24%; rows of numbers as attributes gain
+nothing, as aqr-log takes the lines whole; small files lose to the cost of each container. The
+numbers' own coding mattered little, so aqr-xml leaves them to aqr-log and aqr-xsv.
 
 ## Status
 
 Left, in the order they are likely to pay:
 
-- aqr-compress choosing it (phase B): by a sample, against aqr-log for files of rows of
-  attributes; a minimum length (`MIN_LEN`, 64 KiB now); which classes recompress each container
-  (see `formula.rs`: one class `xml/values`; `segment_words` of aqr-compress takes the contents
-  of a segmented text only where the root is a concatenation).
+- The choice's proxy (zstd -3 of the sample's pieces): the containers are recompressed by coders
+  that do better than zstd on numbers, so it is checked against the ground truth (Results);
+  a sample coded by the real coders would be exact and cost more.
+- Segments are 32 MiB: a module holds its inputs, nearly as large as its output, and the host's
+  copies of both count against the application bound (256 MiB; 64 MiB segments needed 269 MB).
 - The skeleton's structure (attribute lists called by number, as aqr-jsonl's key lists).
 - Contexts of other depth (three levels, the element alone), measured on the corpus.
 - CDATA sections and comments are kept in the skeleton as they are; text with entities is a
@@ -103,46 +122,6 @@ Left, in the order they are likely to pay:
   the wrong one: the text round-trips, but its contexts drift (nothing resyncs them).
 - Containers of numbers coded in the module (`docs/xml-design.md`, 1.1), if aqr-log's coding of
   the columns proves slow or large enough to show.
-
-## Prototype
-
-A prototype in Python (2026-11-26) split each sample into a skeleton (the tags, the whitespace
-between them, comments; a byte for each value taken out) and containers (each element's text by
-its parent and name, each attribute's value by its element and name; the values of a container
-one after another, separated by LF), and the pieces were archived by `aqr` as files of a
-directory: aqr-wrt takes the containers of text (with one dictionary), aqr-log those of numbers
-and times. Against `aqr` on the sample itself (sizes in MB):
-
-| sample | MB | `aqr` | split, then `aqr` | |
-|---|---|---|---|---|
-| `enwik8` | 100.0 | 26.899 | 26.664 | −0.9% |
-| silesia `xml` | 5.3 | 0.509 | 0.473 | −7.0% |
-| `dblp` | 268.4 | 39.742 | 31.671 | −20.3% |
-| `pubmed` | 195.5 | 11.829 | 9.032 | −23.6% |
-| `jmdict` | 63.3 | 7.740 | 6.342 | −18.1% |
-| `uw` SwissProt | 114.8 | 7.588 | 6.350 | −16.3% |
-| `uw` lineitem | 32.3 | 1.854 | 1.098 | −40.8% |
-| `uw` treebank | 86.1 | 28.075 | 27.055 | −3.6% |
-| `uw` nasa | 25.1 | 2.478 | 2.371 | −4.3% |
-| `se-history` Comments | 47.8 | 11.554 | 9.931 | −14.0% |
-| `se-history` PostHistory | 301.7 | 34.268 | 30.071 | −12.2% |
-| `se-history` Posts | 104.2 | 22.895 | 21.900 | −4.3% |
-| `se-history` Users | 16.8 | 3.195 | 2.529 | −20.8% |
-| `se-history` Votes | 42.0 | 1.155 | 1.181 | +2.3% |
-| `se-history` Badges | 10.9 | 0.667 | 0.663 | −0.7% |
-| `osm-hours` (two) | 235.6 | 6.411 | 6.345 | −1.0% |
-| all 27 files (with `se-coffee` and the rest) | 1,675 | 211.406 | 187.788 | −11.2% |
-
-- Elements of text (DBLP, PubMed, JMdict, SwissProt) gain the most: their values, apart from
-  the tags, are what aqr-wrt and zstd code well.
-- Rows of numbers as attributes, one to a line (`Votes`, `Badges`, OSM's changes), gain
-  nothing: aqr-log takes the lines whole already, a template for each and its fields in
-  columns. Small files lose (`se-coffee`'s `Badges` +22%, `Votes` +15%): every container costs.
-- The numbers' own coding mattered little: coded by the prototype as changes from the
-  previous value, they were larger than as aqr-log codes them.
-
-So aqr-xml would take the XML apart and leave the containers to the coders there are (aqr-wrt,
-aqr-log), and be chosen where it pays, as aqr-compress's `table` chooses aqr-log.
 
 ## Corpus
 

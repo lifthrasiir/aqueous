@@ -55,7 +55,7 @@ aqr-wrt가 텍스트로 받지 않는다(텍스트 아닌 바이트는 1/1000까
 
 ### 1.5 세그먼트
 
-aqr-jsonl처럼 64 MiB 이상의 세그먼트로 자르고, 세그먼트마다 적용이 하나다. 자르는 곳은 열린 원소가
+32 MiB 이상의 세그먼트로(64 MiB에서는 입력(값)과 출력이 각각 텍스트만큼이라 호스트의 복사본까지 269 MB가 들어 응용 한도 256 MiB를 넘었다. aqr-jsonl은 입력이 출력보다 훨씬 작다) 자르고, 세그먼트마다 적용이 하나다. 자르는 곳은 열린 원소가
 네 개 이하가 되는 끝 태그나 빈 원소 태그(`<row .../>`) 뒤(레코드의 끝)다. 한 개 이하로 했더니 행이
 빈 원소인 Stack Exchange의 덤프(PostHistory 301 MB)가 한 세그먼트가 되었다. 세그먼트 시작에서 열려 있는
 원소의 이름은 params에 둔다. 문맥의 묶음 번호는 세그먼트마다 새로 매긴다. 묶음은 세그먼트마다 스트림
@@ -71,15 +71,32 @@ aqr-jsonl처럼 64 MiB 이상의 세그먼트로 자르고, 세그먼트마다 �
 
 ## 2. 고르기
 
-aqr-compress의 `table`(`crates/aqr-compress/src/made.rs`)에서 aqr-jsonl과 같은 자리에 둔다. 파일이
-XML로 시작하면(BOM, `<?xml`, 또는 `<`와 이름) aqr-xml을 시도한다. 하지만 줄마다 레코드 하나가 속성으로
-든 파일(Stack Exchange의 `Votes`·`Badges`, OSM의 변경분)은 aqr-log가 이미 줄 전체를 템플릿과 열로
-나누므로, aqr-xml이 이득을 내지 못한다(README의 표: −1%에서 +2%). 그래서 aqr-log와 aqr-xsv 사이를 고르는
-`log_or_table`처럼 표본에서 둘을 코딩해 작은 쪽을 고른다.
+`Format::Xml`은 텍스트로 알아본다(`detect.rs`: BOM과 공백 뒤 프롤로그(처리 명령, 주석, DOCTYPE)를 지나 첫
+원소가 오는 문서이고 `mostly_text`이며 `aqr_xml::formula::MIN_LEN`(64 KiB) 이상). HTML은 뺀다
+(`<!DOCTYPE html`이나 루트 `html`, 대소문자 무관): 닫지 않는 빈 원소(`<br>`, `<img>`) 때문에 그 뒤의 끝
+태그마다 엉뚱한 원소가 닫혀 문맥이 어긋난다. 왕복은 되지만 값이 엉뚱한 묶음으로 간다. `.xml` 같은
+이름은 따로 두지 않는다: 이름이 텍스트로 알려진 파일(`Kind::Text`)도 같은 `table`로 간다.
 
-- 작은 파일은 묶음마다의 비용으로 손해를 본다(`se-coffee`의 `Badges` 1.6 MB가 +22%). 최소 크기는
-  코퍼스에서 정한다.
-- 표본 비교는 aqr-xml과 aqr-log를 다 코딩해 보는 비용이 든다. 비교는 XML로 시작하는 파일에서만 한다.
+`table`(`crates/aqr-compress/src/made.rs`)에서 aqr-jsonl 다음, aqr-log·aqr-xsv 앞에 aqr-xml을 시도한다.
+표본(`table_sample`과 같은 크기: 256 KiB 창 8개, 창은 줄이 아니라 태그에서 자른다. `xml_sample`)을 aqr-xml
+으로 코딩해 스트림마다(컨테이너는 각각) zstd -3으로 압축한 크기를 표본 자체의 zstd -3 크기에 견준 몫
+(`share`)으로 잰다.
+
+- 텍스트 경로(aqr-wrt)보다: `share`가 `xml:percent`(100%) 이하일 때만.
+- aqr-log나 aqr-xsv가 그 파일을 가져갈 때(`table_pick`)는 그 몫과도 견준다: `share`가 그 몫의
+  `xml:log-percent`(135%) 이하일 때만. 줄마다 속성으로 든 행(Stack Exchange의 `Votes`·`Badges`, OSM의
+  변경분)에서는 aqr-xml의 몫이 aqr-log의 1.44–1.85배이고 실제로 aqr-log가 작다. 원소로 된 레코드
+  (silesia의 stats1·tpc, treebank)에서는 1.01–1.04배인데도 aqr-xml이 4–19% 작다: aqr-xml의 컨테이너는
+  이어서 aqr-wrt·aqr-log·aqr-xsv가 다시 압축해 zstd 표본보다 더 줄고, aqr-log의 스트림은 그렇지 않다.
+  그래서 135%다(경계는 1.31배인 se-history의 `PostLinks`와 1.44배인 OSM 사이).
+- 고르고 나서의 `recompress_as`는 아카이브가 원본보다 작은지(`smaller`)를 한 번 더 본다.
+
+작은 파일은 `MIN_LEN` 아래로는 시도하지 않는다. 1 KiB로 내려도 코퍼스의 작은 파일 27개 중 달라지는
+것이 없었다(`recompress_as`가 거절). 표본 비교는 한 파일에 2 MiB 이하만 코딩하므로 큰 파일에도 비용이
+정해져 있다. 한 세그먼트(32 MiB 이상)로 안 잘리는 텍스트나 컨테이너가 한도를 넘는 것은 안 쓴다.
+
+한 파일의 컨테이너 텍스트는 aqr-wrt 사전 하나를 나눠 쓴다(`segment_words`: 세그먼트가 하나여도).
+JMdict −3.8%, Posts −5.5%, PubMed −6.8%, DBLP −4.1%, SwissProt −1.6%(컨테이너마다 사전을 따로 둘 때보다).
 
 ## 3. 남은 문제
 
@@ -95,6 +112,6 @@ XML로 시작하면(BOM, `<?xml`, 또는 `<`와 이름) aqr-xml을 시도한다.
 ## 4. 단계
 
 1. 모듈과 인코더(FORMAT 확정, 왕복과 손상 입력 테스트, `plans_hold`). 끝남.
-2. aqr-compress에 연결하고 고르기(§2).
-3. 코퍼스로 측정(크기, 속도, 최대 메모리)하고 README의 표를 실제 `aqr`의 수치로 바꾼다.
+2. aqr-compress에 연결하고 고르기(§2). 끝남.
+3. 코퍼스로 측정(크기, 속도, 최대 메모리)하고 README의 표를 실제 `aqr`의 수치로 바꾼다. 끝남.
 4. §3의 개선을 하나씩 잰다.
