@@ -10,7 +10,8 @@
 //! The programs are those of [`PROGRAMS`]: `aqr`, and `aqr-win` (Windows), which runs the `aqr`
 //! beside it: its kept binary has the kept `aqr` of the working copy beside it (a hard link, else
 //! a copy), the key of that `aqr` in its own, so `cargo aqr-win --register` points Explorer's
-//! verbs at a pair that stays as it is. A binary run with the arguments that tell the system of
+//! verbs at a pair that stays as it is; its shell extension (`aqr_shell.dll`, crates/aqr-win-shell)
+//! is built and kept with it, beside it. A binary run with the arguments that tell the system of
 //! it (`--register`) is pinned, never evicted, until it is run with those that take it back
 //! (`--unregister`; `cache/pinned/PROGRAM`).
 //!
@@ -53,14 +54,23 @@ struct Program {
     modules: bool,
     /// The programs whose kept binaries go beside it (it runs them as the ones beside itself).
     beside: &'static [&'static str],
+    /// The libraries built and kept with it, beside it: each a package and its library's name
+    /// (aqr-win's shell extension, which it registers as the one beside itself).
+    libraries: &'static [(&'static str, &'static str)],
     /// The first argument of a run that, where it succeeds, pins the binary run (what the system
     /// was told of it: aqr-win's verbs in the registry), and that of one unpinning it.
     pin: Option<(&'static str, &'static str)>,
 }
 
 const PROGRAMS: &[Program] = &[
-    Program { name: "aqr", modules: true, beside: &[], pin: None },
-    Program { name: "aqr-win", modules: false, beside: &["aqr"], pin: Some(("--register", "--unregister")) },
+    Program { name: "aqr", modules: true, beside: &[], libraries: &[], pin: None },
+    Program {
+        name: "aqr-win",
+        modules: false,
+        beside: &["aqr"],
+        libraries: &[("aqr-win-shell", "aqr_shell")],
+        pin: Some(("--register", "--unregister")),
+    },
 ];
 
 fn program(name: &str) -> Result<&'static Program> {
@@ -73,6 +83,11 @@ fn program(name: &str) -> Result<&'static Program> {
 /// The file name of a program's binary.
 fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The file name of a library's binary (of a `cdylib`).
+fn dll(name: &str) -> String {
+    format!("{}{name}{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX)
 }
 
 /// The binary of a program to run, and its key where it is kept.
@@ -175,6 +190,9 @@ fn program_env(p: &Program, beside: &[Beside]) -> String {
     for b in beside {
         text += &format!("beside {}={}\n", b.name, b.key);
     }
+    for (_, l) in p.libraries {
+        text += &format!("library {l}\n");
+    }
     text
 }
 
@@ -192,6 +210,17 @@ fn build(p: &Program, env: &str, beside: &[Beside]) -> Result<Built> {
     }
     let mut built = target().join(exe(p.name));
     let mut paths = dep_info(&target().join(format!("{}.d", p.name)))?;
+    for (package, name) in p.libraries {
+        let status = Command::new(std::env::var_os("CARGO").unwrap_or("cargo".into()))
+            .current_dir(root())
+            .args(["build", "-r", "-p", package, "--lib"])
+            .status()
+            .map_err(|e| format!("cargo: {e}"))?;
+        if !status.success() {
+            return Err(format!("cargo build of {package} failed"));
+        }
+        paths.extend(dep_info(&target().join(format!("{name}.d")))?);
+    }
     if p.modules {
         // (the pack written into a copy in the target directory, the one run where the binary is
         // not kept: a file just written in the cache, which a sync client such as Dropbox may be
@@ -229,6 +258,10 @@ fn build(p: &Program, env: &str, beside: &[Beside]) -> Result<Built> {
         fs::rename(tmp.join("manifest"), &dest).map_err(|e| e.to_string())?;
     }
     fs::copy(&built, tmp.join(exe(p.name))).map_err(|e| format!("{}: {e}", built.display()))?;
+    for (_, name) in p.libraries {
+        let from = target().join(dll(name));
+        fs::copy(&from, tmp.join(dll(name))).map_err(|e| format!("{}: {e}", from.display()))?;
+    }
     let mut info = format!("created={}\nmanifest={manifest}\nprogram={}\n", now(), p.name);
     for b in beside {
         link_or_copy(&b.exe, &tmp.join(exe(b.name)))?;
@@ -250,14 +283,16 @@ fn build(p: &Program, env: &str, beside: &[Beside]) -> Result<Built> {
 /// The binary `built` of `p` to run where it is not kept: itself, or where others go beside it,
 /// a copy beside copies of theirs (in `target/release/PROGRAM-unkept/`).
 fn unkept(p: &Program, built: &Path, beside: &[Beside]) -> Result<PathBuf> {
-    if beside.is_empty() {
+    if beside.is_empty() && p.libraries.is_empty() {
         return Ok(built.to_path_buf());
     }
     let dir = target().join(format!("{}-unkept", p.name));
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let all = std::iter::once((built, p.name)).chain(beside.iter().map(|b| (b.exe.as_path(), b.name)));
+    let all = std::iter::once((built.to_path_buf(), exe(p.name)))
+        .chain(beside.iter().map(|b| (b.exe.clone(), exe(b.name))))
+        .chain(p.libraries.iter().map(|(_, l)| (target().join(dll(l)), dll(l))));
     for (from, name) in all {
-        fs::copy(from, dir.join(exe(name))).map_err(|e| format!("{} to {}: {e}", from.display(), dir.display()))?;
+        fs::copy(&from, dir.join(name)).map_err(|e| format!("{} to {}: {e}", from.display(), dir.display()))?;
     }
     Ok(dir.join(exe(p.name)))
 }
