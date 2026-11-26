@@ -23,8 +23,9 @@
 //!   file, is the same handle (closed as many times); a file there now that is not the one open
 //!   is opened anew (`changed` true), the handle before staying of the file it was. `single`: an
 //!   archive of a single file (no metadata block), whose one entry at the root is the name the
-//!   archive is extracted as. An encrypted archive is not opened (yet): an `error` with
-//!   `encrypted` true.
+//!   archive is extracted as. An encrypted archive is opened of `passphrase` given with `open`
+//!   (decrypted as it is read); without it, an `error` with `encrypted` true, and `wrong` too
+//!   where the passphrase given does not open it.
 //! - `list` (a handle, and `dir`: names from the root joined with `/`, empty for the root): the
 //!   entries of the directory, in answers of at most [`LISTED`] entries, each but the last with
 //!   `more` true. An entry has its `name` (as `aqr -d` writes it: [`crate::names`]), its `kind`
@@ -38,6 +39,10 @@
 //!   file evaluates its leaf, all of whose files are kept ([`Cache`]) for the reads after.
 //! - `close` (a handle): the handle given back; once all of a file's are, the archive is let go
 //!   of (the file no longer mapped) and its files kept dropped.
+//! - `progress` (a handle): how far the evaluation of its leaves is (`decompressed` and
+//!   `evaluated`, `[done, total]` bytes of what is evaluated at once, as the archive last told
+//!   it: of the evaluations at work of several requests, any of them), and `evaluating`, how many
+//!   leaves are.
 //! - `trim`: the files kept dropped (`trimmed`: their bytes), as a frontend idle a while asks.
 //!
 //! A request that fails is answered by `error` (a message). The program ends once its standard
@@ -46,7 +51,6 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, Write};
-use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -136,18 +140,38 @@ struct Opened {
     handle: u64,
     path: PathBuf,
     identity: Identity,
-    archive: ManuallyDrop<Archive<'static, 'static>>,
-    /// The mapping the archive reads, leaked for it to borrow, and let go of after it.
-    map: &'static memmap2::Mmap,
+    // (dropped before what it borrows: fields are dropped in their order)
+    archive: Archive<'static, 'static>,
+    _leaked: Leaked,
     view: View,
+    /// How far the evaluation of its leaves is, as the archive last told it, and how many are
+    /// being evaluated.
+    progress: Arc<Progress>,
 }
 
-impl Drop for Opened {
+#[derive(Default)]
+struct Progress {
+    reached: Mutex<Option<aqr_archive::Reached>>,
+    evaluating: std::sync::atomic::AtomicUsize,
+}
+
+/// What an archive open borrows, leaked for it to (its lifetime `'static`), and let go of after
+/// it: the mapping of its file, and of an encrypted one, its payload decrypted as it is read.
+struct Leaked {
+    map: &'static memmap2::Mmap,
+    sealed: Option<&'static aqr_archive::envelope::Decrypting<'static>>,
+}
+
+impl Drop for Leaked {
     fn drop(&mut self) {
-        // SAFETY: the archive, which borrows the mapping, dropped first and not used after; the
-        // mapping leaked of a box by `open`, and borrowed by nothing else
+        // SAFETY: leaked of boxes by `Opened::open`, borrowed by nothing left (the archive dropped
+        // before), the payload (which borrows the mapping) before the mapping
         unsafe {
-            ManuallyDrop::drop(&mut self.archive);
+            if let Some(d) = self.sealed.take() {
+                drop(Box::from_raw(
+                    d as *const aqr_archive::envelope::Decrypting as *mut aqr_archive::envelope::Decrypting,
+                ));
+            }
             drop(Box::from_raw(self.map as *const memmap2::Mmap as *mut memmap2::Mmap));
         }
     }
@@ -177,25 +201,45 @@ enum At {
 
 impl Opened {
     /// Archive `path` opened, as handle `handle`.
-    fn open(handle: u64, path: &Path, a: &Args) -> Result<Opened, Value> {
+    fn open(handle: u64, path: &Path, passphrase: Option<&str>, a: &Args) -> Result<Opened, Value> {
         let err = |e: &dyn std::fmt::Display| json!({"error": format!("{}: {e}", path.display())});
         let file = File::open(path).map_err(|e| err(&e))?;
         let identity = Identity::of(&file).map_err(|e| err(&e))?;
         // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
         let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
         drop(file);
-        if aqr_archive::envelope::is_encrypted(&map) || aqr_archive::envelope::is_damaged_encrypted(&map) {
-            return Err(json!({"error": format!("{}: encrypted", path.display()), "encrypted": true}));
+        let encrypted = aqr_archive::envelope::is_encrypted(&map) || aqr_archive::envelope::is_damaged_encrypted(&map);
+        let mut leaked = Leaked { map: Box::leak(Box::new(map)), sealed: None };
+        let map = leaked.map;
+        // (an encrypted one of the passphrase given: its payload decrypted as it is read)
+        if encrypted {
+            let Some(p) = passphrase else {
+                return Err(json!({"error": format!("{}: encrypted", path.display()), "encrypted": true}));
+            };
+            let (e, _) = aqr_archive::envelope::open_damaged(map).map_err(|e| err(&e))?;
+            match e.unlock(p.as_bytes()) {
+                Ok(u) => leaked.sealed = Some(Box::leak(Box::new(u.decrypting()))),
+                Err(aqr_archive::Failure::Decryption(_)) => {
+                    let m = format!("{}: encrypted, and the passphrase does not open it", path.display());
+                    return Err(json!({"error": m, "encrypted": true, "wrong": true}));
+                }
+                Err(f) => return Err(err(&f)),
+            }
         }
-        let map: &'static memmap2::Mmap = Box::leak(Box::new(map));
-        // (from here, the mapping let go of with the archive, or here where it does not open)
-        let opened = (|| {
+        // (from here, what is leaked let go of with the archive, or here where it does not open)
+        let opened = (|| -> Result<_, Value> {
             let runner: &'static Decoder = DECODER.get().expect("made as serving begins");
-            let bytes: &'static [u8] = crate::located(map, path, true);
-            let payload = aqr_archive::Payload::Plain(bytes);
-            let mut archive = match payload.of_tree() {
-                true => aqr_archive::open_indexed(payload, runner, a.opt.threads),
-                false => aqr_archive::open(bytes, runner),
+            let (payload, bytes) = match leaked.sealed {
+                Some(d) => (aqr_archive::Payload::Sealed(d), &[][..]),
+                None => {
+                    let bytes: &'static [u8] = crate::located(map, path, true);
+                    (aqr_archive::Payload::Plain(bytes), bytes)
+                }
+            };
+            let mut archive = match (payload.of_tree(), leaked.sealed) {
+                (true, _) => aqr_archive::open_indexed(payload, runner, a.opt.threads),
+                (false, Some(d)) => aqr_archive::open_decrypting(d, runner),
+                (false, None) => aqr_archive::open(bytes, runner),
             }
             .map_err(|e| err(&e))?;
             archive.set_budget(aqr_common::budget::global());
@@ -219,18 +263,17 @@ impl Opened {
                     View::Single { name: single_name(path), size }
                 }
             };
-            Ok((archive, view))
+            let progress = Arc::new(Progress::default());
+            let told = progress.clone();
+            archive.on_progress(Some(Arc::new(move |s| match s {
+                aqr_archive::Step::Reached(r) => *told.reached.lock().unwrap() = Some(r),
+                aqr_archive::Step::Started(_) => _ = told.evaluating.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                aqr_archive::Step::Ended(_) => _ = told.evaluating.fetch_sub(1, std::sync::atomic::Ordering::Relaxed),
+            })));
+            Ok((archive, view, progress))
         })();
-        match opened {
-            Ok((archive, view)) => {
-                Ok(Opened { handle, path: path.to_owned(), identity, archive: ManuallyDrop::new(archive), map, view })
-            }
-            Err(e) => {
-                // SAFETY: leaked above, and the archive of it gone with the closure
-                drop(unsafe { Box::from_raw(map as *const memmap2::Mmap as *mut memmap2::Mmap) });
-                Err(e)
-            }
-        }
+        let (archive, view, progress) = opened?;
+        Ok(Opened { handle, path: path.to_owned(), identity, archive, _leaked: leaked, view, progress })
     }
 
     /// What `path` (names joined with `/`) names.
@@ -467,7 +510,7 @@ impl Server<'_> {
         handles.open.get(&h).map(|(o, _)| o.clone()).ok_or_else(|| format!("{h}: no archive open so"))
     }
 
-    fn open(&self, path: &str) -> Result<Value, Value> {
+    fn open(&self, path: &str, passphrase: Option<&str>) -> Result<Value, Value> {
         let path = Path::new(path);
         // (as given: an archive opened by another path is opened again, to be closed apart)
         let now = File::open(path).and_then(|f| Identity::of(&f));
@@ -491,7 +534,7 @@ impl Server<'_> {
             handles.next += 1;
             handles.next
         };
-        let o = Arc::new(Opened::open(handle, path, self.args)?);
+        let o = Arc::new(Opened::open(handle, path, passphrase, self.args)?);
         let v = self.opened_value(&o, changed);
         self.handles.lock().unwrap().open.insert(handle, (o, 1));
         Ok(v)
@@ -647,7 +690,7 @@ impl Server<'_> {
         let plain = |r: Result<Value, String>| vec![(r.unwrap_or_else(|e| json!({"error": e})), Vec::new())];
         if let Some(p) = v.get("open") {
             let r = match p.as_str() {
-                Some(p) => self.open(p),
+                Some(p) => self.open(p, v["passphrase"].as_str()),
                 None => Err(json!({"error": "open: not a path"})),
             };
             return vec![(r.unwrap_or_else(|e| e), Vec::new())];
@@ -666,6 +709,17 @@ impl Server<'_> {
         }
         if v.get("close").is_some() {
             return plain(self.close(v));
+        }
+        if v.get("progress").is_some() {
+            return plain(self.opened(v, "progress").map(|o| {
+                let r = *o.progress.reached.lock().unwrap();
+                let mut a = json!({"evaluating": o.progress.evaluating.load(std::sync::atomic::Ordering::Relaxed)});
+                if let Some(r) = r {
+                    a["decompressed"] = json!([r.decompressed.0, r.decompressed.1]);
+                    a["evaluated"] = json!([r.evaluated.0, r.evaluated.1]);
+                }
+                a
+            }));
         }
         if v.get("trim").is_some() {
             return plain(Ok(json!({"trimmed": self.cache.lock().unwrap().trim()})));

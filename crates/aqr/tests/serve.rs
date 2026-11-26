@@ -364,3 +364,50 @@ fn client() {
     drop(s);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// An encrypted archive: not opened without its passphrase, nor of a wrong one; of its own,
+/// listed and read as any other (a tree, and a single file). How far its evaluation went told.
+#[test]
+fn encrypted() {
+    let d = common::scratch("serve", "encrypted");
+    let files = tree(&d);
+    let text = common::text(9, 300_000);
+    fs::write(d.join("one.txt"), &text).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .current_dir(&d)
+        .env("AQR_PASS", "sesame")
+        .args(["-q", "--passphrase-from=env:AQR_PASS", "-o", "e.aqr", "t"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", common::stderr(&o));
+    let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+        .current_dir(&d)
+        .env("AQR_PASS", "sesame")
+        .args(["-q", "--passphrase-from=env:AQR_PASS", "-o", "one.aqr", "one.txt"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", common::stderr(&o));
+    let mut s = Served::start(&[]);
+    let v = s.open(&d.join("e.aqr"));
+    assert_eq!((&v["encrypted"], v.get("wrong")), (&json!(true), None), "{v}");
+    let v = s.ask(json!({"open": d.join("e.aqr"), "passphrase": "open"}));
+    assert_eq!((&v["encrypted"], &v["wrong"]), (&json!(true), &json!(true)), "{v}");
+    let v = s.ask(json!({"open": d.join("e.aqr"), "passphrase": "sesame"}));
+    let h = v["archive"].clone();
+    assert!(h.is_u64(), "{v}");
+    let mut served = Vec::new();
+    walked(&mut s, &h, "", &mut served);
+    served.sort();
+    assert_eq!(served, listed(&d, "t.aqr"));
+    for (path, bytes) in &files {
+        assert!(s.read(&h, path, 1 << 20) == *bytes, "{path}");
+    }
+    let p = s.ask(json!({"progress": h}));
+    assert_eq!(p["evaluating"], 0, "{p}");
+    assert!(p["evaluated"][1].is_u64() && p["decompressed"][1].is_u64(), "{p}");
+    let v = s.ask(json!({"open": d.join("one.aqr"), "passphrase": "sesame"}));
+    assert_eq!(v["single"], true, "{v}");
+    assert!(s.read(&v["archive"], "one", 1 << 20) == text);
+    s.end();
+    fs::remove_dir_all(&d).unwrap();
+}
