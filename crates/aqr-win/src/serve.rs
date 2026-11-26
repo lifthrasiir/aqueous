@@ -16,7 +16,9 @@
 //!   be opened by a program, read only, in `%LOCALAPPDATA%\Aqueous\Open\<archive>\<path>`: its
 //!   path; one there already of its size taken as it is), `Progress(path)` (JSON: `aqr --serve`'s
 //!   `progress` of the archive, and `written`, `[done, total]` bytes of the file at `path` being
-//!   materialized). Once let go of (its last reference released,
+//!   materialized), `Cancel(path)` (the file at `path` being materialized stopped at its next
+//!   piece, its part removed, the Materialize failing; what is evaluated of it kept). Once let
+//!   go of (its last reference released,
 //!   by the client or by COM as the client is gone), its handle is closed a [`LINGER`] later,
 //!   unless the archive is opened again: what was evaluated of it kept while the client moves
 //!   from one folder to another.
@@ -225,11 +227,24 @@ fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
     let r = (|| -> Result<(), String> {
         let f = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
         let mut at = 0u64;
+        // (how far, told; whether cancelled)
         let told = |at: u64| {
             let mut w = WRITING.lock().unwrap();
-            match w.iter_mut().find(|e| e.0 == a.path && e.1 == path) {
-                Some(e) => e.2 = at,
-                None => w.push((a.path.clone(), path.to_owned(), at, size)),
+            match w.iter_mut().find(|e| e.of(&a.path, path)) {
+                Some(e) => {
+                    e.done = at;
+                    e.cancelled
+                }
+                None => {
+                    w.push(Writing {
+                        archive: a.path.clone(),
+                        path: path.to_owned(),
+                        done: at,
+                        size,
+                        cancelled: false,
+                    });
+                    false
+                }
             }
         };
         told(0);
@@ -240,7 +255,9 @@ fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
             }
             write_at(&f, &d, at).map_err(|e| format!("{}: {e}", part.display()))?;
             at += d.len() as u64;
-            told(at);
+            if told(at) {
+                return Err(format!("{path}: cancelled"));
+            }
         }
         if let Some(t) = file_time(e) {
             _ = f.set_modified(t);
@@ -253,7 +270,7 @@ fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
         _ = clear_readonly(&to).and_then(|()| std::fs::remove_file(&to));
         std::fs::rename(&part, &to).map_err(|e| format!("{}: {e}", to.display()))
     })();
-    WRITING.lock().unwrap().retain(|e| !(e.0 == a.path && e.1 == path));
+    WRITING.lock().unwrap().retain(|e| !e.of(&a.path, path));
     if r.is_err() {
         _ = clear_readonly(&part).and_then(|()| std::fs::remove_file(&part));
     }
@@ -323,7 +340,24 @@ enum Opening {
 }
 
 /// By archive and path, the bytes of a file written out so far ([`materialize`]), and all of it.
-static WRITING: Mutex<Vec<(PathBuf, String, u64, u64)>> = Mutex::new(Vec::new());
+/// Where cancelled ([`Kind::Archive`]'s `Cancel`), it stops at the next piece.
+static WRITING: Mutex<Vec<Writing>> = Mutex::new(Vec::new());
+
+/// A file being written out: of which archive, its path, its bytes written and all of them, and
+/// whether it is to stop.
+struct Writing {
+    archive: PathBuf,
+    path: String,
+    done: u64,
+    size: u64,
+    cancelled: bool,
+}
+
+impl Writing {
+    fn of(&self, archive: &std::path::Path, path: &str) -> bool {
+        self.archive == archive && self.path == path
+    }
+}
 
 /// An archive open: its path, and the `aqr --serve` and handle it is open in, opened again
 /// where that is gone.
@@ -586,7 +620,7 @@ impl Kind {
     fn names(&self) -> &'static [&'static str] {
         match self {
             Kind::Server => &["Open"],
-            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream", "Materialize", "Progress"],
+            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream", "Materialize", "Progress", "Cancel"],
         }
     }
 }
@@ -646,10 +680,17 @@ impl Dispatch {
                 let path = args.first().map_or("", String::as_str);
                 let mut v = a.with(|s, h| s.ask(json!({"progress": h})))?;
                 let w = WRITING.lock().unwrap();
-                if let Some(e) = w.iter().find(|e| e.0 == a.path && e.1 == path) {
-                    v["written"] = json!([e.2, e.3]);
+                if let Some(e) = w.iter().find(|e| e.of(&a.path, path)) {
+                    v["written"] = json!([e.done, e.size]);
                 }
                 Ok(Out::Text(v.to_string()))
+            }
+            (Kind::Archive(a), 7) => {
+                // (the file at `path` being written out: stopped at its next piece, removed)
+                let path = args.first().map_or("", String::as_str);
+                let mut w = WRITING.lock().unwrap();
+                let found = w.iter_mut().filter(|e| e.of(&a.path, path)).map(|e| e.cancelled = true).count();
+                Ok(Out::Text(serde_json::json!({"cancelled": found > 0}).to_string()))
             }
             (Kind::Archive(a), 5) => {
                 let path = arg(0)?;

@@ -193,6 +193,20 @@ fn served() {
     let o = Command::new(&aqr).current_dir(&d).args(["-q", "-o", "t.aqr", "t"]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 
+    // (a file long to write out, of bytes that do not compress: to be cancelled as it is)
+    std::fs::create_dir_all(d.join("r")).unwrap();
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let random: Vec<u8> = (0..48 << 20)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    std::fs::write(d.join("r/r.bin"), &random).unwrap();
+    let o = Command::new(&aqr).current_dir(&d).args(["-q", "-o", "r.aqr", "r"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     for (name, pass) in [("e.aqr", "sesame"), ("w.aqr", "other")] {
         let o = Command::new(&aqr)
             .current_dir(&d)
@@ -262,6 +276,27 @@ fn served() {
         assert_eq!(json(e, "Stat", &["sub/big.bin"])["size"], 3_000_000);
         assert!(read_all(object(e, "OpenStream", &["sub/big.bin"]), 1 << 20) == big);
         release(e);
+        // cancelled as it is written out: stopped, nothing left of it
+        let r = object(s, "Open", &[d.join("r.aqr").to_str().unwrap()]) as usize;
+        let writing = std::thread::spawn(move || {
+            assert!(CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) >= 0);
+            call(r as *mut c_void, "Materialize", &["r.bin"]).err()
+        });
+        let start = Instant::now();
+        loop {
+            let c = json(r as *mut c_void, "Cancel", &["r.bin"]);
+            if c["cancelled"] == true {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(30) && !writing.is_finished(), "not cancelled in time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let e = writing.join().unwrap();
+        assert!(e.as_deref().is_some_and(|e| e.contains("cancelled")), "{e:?}");
+        let open = d.join(r"local\Aqueous\Open");
+        let left: Vec<_> = walk(&open);
+        assert!(left.iter().all(|p| !p.to_string_lossy().contains("r.bin")), "{left:?}");
+        release(r as *mut c_void);
         match call(s, "Open", &[d.join("w.aqr").to_str().unwrap()]) {
             Err(e) => assert!(e.contains("no passphrase given"), "{e}"),
             Ok(_) => panic!("opened of a wrong passphrase"),
@@ -322,4 +357,16 @@ fn superseded() {
     // SAFETY: a key of the user's
     unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, class.as_ptr()) };
     assert!(ended.is_some_and(|s| s.success()), "the server stayed");
+}
+
+/// The files under `d`.
+fn walk(d: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+        match e.file_type().unwrap().is_dir() {
+            true => out.extend(walk(&e.path())),
+            false => out.push(e.path()),
+        }
+    }
+    out
 }

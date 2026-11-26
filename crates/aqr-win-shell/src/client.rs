@@ -389,3 +389,8 @@ pub fn progress(path: &Path, at: &str) -> windows::core::Result<(u64, u64)> {
     let pair = |k: &str| Some((v[k][0].as_u64()?, v[k][1].as_u64()?));
     Ok(pair("written").or_else(|| pair("decompressed")).unwrap_or((0, 0)))
 }
+
+/// File `at` of archive `path`, being written out, stopped (removed, its Materialize failing).
+pub fn cancel(path: &Path, at: &str) -> windows::core::Result<()> {
+    with(path, |a| json(a, "Cancel", &[at]).map(drop))
+}

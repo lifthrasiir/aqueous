@@ -167,6 +167,10 @@ fn browsed() {
     std::fs::write(d.join("t/a.txt"), b"some text\n".repeat(100)).unwrap();
     std::fs::write(d.join("t/sub/big.bin"), &big).unwrap();
     std::fs::write(d.join("t/sub/deep/c.txt"), b"deep").unwrap();
+    // (beside big.bin: a file named after it, and a folder)
+    std::fs::create_dir_all(d.join("t/sub/big_files")).unwrap();
+    std::fs::write(d.join("t/sub/big.bin.srt"), b"srt").unwrap();
+    std::fs::write(d.join("t/sub/big_files/p.txt"), b"page").unwrap();
     let o = Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", "t.aqrtest", "t"]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let o = Command::new(bin.join("aqr.exe"))
@@ -212,7 +216,15 @@ fn browsed() {
         let root = item(&archive);
         assert_eq!(entries(&root), [("a.txt".to_owned(), false, Some(1000)), ("sub".to_owned(), true, None)]);
         let sub = item(&archive.join("sub"));
-        assert_eq!(entries(&sub), [("big.bin".to_owned(), false, Some(2_500_000)), ("deep".to_owned(), true, None)]);
+        assert_eq!(
+            entries(&sub),
+            [
+                ("big.bin".to_owned(), false, Some(2_500_000)),
+                ("big.bin.srt".to_owned(), false, Some(3)),
+                ("big_files".to_owned(), true, None),
+                ("deep".to_owned(), true, None)
+            ]
+        );
         let c = item(&archive.join(r"sub\deep\c.txt"));
         // SAFETY: COM calls of the shell's item
         unsafe {
@@ -299,6 +311,9 @@ fn browsed() {
                 ("a.txt", 0, 1000),
                 ("sub", 0x10, 0),
                 (r"sub\big.bin", 0, 2_500_000),
+                (r"sub\big.bin.srt", 0, 3),
+                (r"sub\big_files", 0x10, 0),
+                (r"sub\big_files\p.txt", 0, 4),
                 (r"sub\deep", 0x10, 0),
                 (r"sub\deep\c.txt", 0, 4),
             ];
@@ -360,10 +375,16 @@ fn browsed() {
         // SAFETY: COM calls of the shell's objects
         unsafe {
             let sub: IShellFolder2 = item(&archive.join("sub")).BindToHandler(None, &BHID_SFObject).unwrap();
-            let mut e = None;
-            assert!(sub.EnumObjects(HWND::default(), 0x40, &mut e).is_ok());
             let mut got = [std::ptr::null_mut()];
-            assert!(e.unwrap().Next(&mut got, None).is_ok());
+            sub.ParseDisplayName(
+                HWND::default(),
+                None,
+                windows::core::w!("big.bin"),
+                None,
+                &mut got[0],
+                std::ptr::null_mut(),
+            )
+            .unwrap();
             let m: IContextMenu = sub.GetUIObjectOf(HWND::default(), &[got[0] as *const _], None).unwrap();
             let menu = CreatePopupMenu().unwrap();
             assert!(m.QueryContextMenu(menu, 0, 1, 0x7fff, 0).is_ok());
@@ -387,8 +408,10 @@ fn browsed() {
             let file = PathBuf::from(told.trim());
             assert!(file.starts_with(d.join(r"local\Aqueous\Open")) && file.ends_with(r"sub\big.bin"), "{told}");
             assert!(std::fs::read(&file).unwrap() == big);
-            assert_eq!(std::fs::read(file.with_file_name(r"deep\c.txt")).unwrap(), b"deep");
-            // (the file beside the folder, not)
+            // (beside it, and in its folder named after it; not the other folder, nor above)
+            assert_eq!(std::fs::read(file.with_file_name("big.bin.srt")).unwrap(), b"srt");
+            assert_eq!(std::fs::read(file.with_file_name(r"big_files\p.txt")).unwrap(), b"page");
+            assert!(!file.with_file_name("deep").exists());
             assert!(!file.parent().unwrap().with_file_name("a.txt").exists());
         }
         // encrypted: of the passphrase the server's dialog is given (the test's)

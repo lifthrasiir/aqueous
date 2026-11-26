@@ -1,10 +1,11 @@
 //! The context menu of entries of an archive: the shell's own (`SHCreateDefaultContextMenu`:
 //! Copy, Properties, and of folders the verbs of folders), with two of ours first of a file
 //! chosen alone: "Open" (the default) and "Open with the files beside it" (a `.cue` and its
-//! `.bin`, a page and its images: the files of its folder, and under it, written out too). The
-//! files are written out by the server (`Materialize`) on a thread of their own, a window of how
-//! far it is shown where it takes over [`QUIET`] (cancelled, nothing is opened), and the file
-//! opened as the system opens a file of its type.
+//! `.bin`, a page and its images: the files of its folder and of its folders named after it,
+//! [`files_of`], written out too; over [`ASK_OVER`] bytes, once the user says so). The files are
+//! written out by the server (`Materialize`) on a thread of their own, a window of how far it is
+//! shown where it takes over [`QUIET`] (cancelled, the one being written stopped, nothing
+//! opened), and the file opened as the system opens a file of its type.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -21,7 +22,8 @@ use windows::Win32::UI::Shell::{
     PROGDLG_NOMINIMIZE, QCMINFO, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    InsertMenuW, MB_ICONERROR, MB_OK, MF_BYPOSITION, MF_STRING, MessageBoxW, SW_SHOWNORMAL, SetMenuDefaultItem,
+    IDYES, InsertMenuW, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_BYPOSITION, MF_STRING, MessageBoxW,
+    SW_SHOWNORMAL, SetMenuDefaultItem,
 };
 use windows::core::{GUID, HSTRING, PCWSTR, Ref, implement};
 
@@ -130,28 +132,47 @@ impl Menu {
     }
 }
 
-/// The files written out to open file `path` (of its folder, and under it, where `folder`),
-/// with their sizes; the file itself first.
+/// The files written out to open file `path`, with their sizes, the file itself first: where
+/// `folder`, the files of its folder too (not under it) and those under its folders named after
+/// it (`page.html`'s `page_files`, `page.files`: its name before the first `.`, then what is not
+/// a letter nor a digit).
 fn files_of(archive: &Path, path: &str, folder: bool) -> windows::core::Result<Vec<(String, u64)>> {
     let size = client::stat(archive, path)?["size"].as_u64().unwrap_or(0);
     let mut out = vec![(path.to_owned(), size)];
     if !folder {
         return Ok(out);
     }
-    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
-    let mut dirs = vec![dir.to_owned()];
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let stem = name.split('.').next().unwrap_or(name);
+    let named = |d: &str| {
+        d.strip_prefix(stem).is_some_and(|rest| rest.chars().next().is_some_and(|c| !c.is_alphanumeric()))
+            && !stem.is_empty()
+    };
+    let mut dirs = Vec::new();
+    for e in client::list(archive, dir)? {
+        let n = e["name"].as_str().unwrap_or("");
+        let p = crate::folder::joined(dir, n);
+        match e["kind"].as_str() {
+            Some("dir") if named(n) => dirs.push(p),
+            Some("file") if p != path => out.push((p, e["size"].as_u64().unwrap_or(0))),
+            _ => {}
+        }
+    }
     while let Some(d) = dirs.pop() {
         for e in client::list(archive, &d)? {
             let p = crate::folder::joined(&d, e["name"].as_str().unwrap_or(""));
             match e["kind"].as_str() {
                 Some("dir") => dirs.push(p),
-                Some("file") if p != path => out.push((p, e["size"].as_u64().unwrap_or(0))),
+                Some("file") => out.push((p, e["size"].as_u64().unwrap_or(0))),
                 _ => {}
             }
         }
     }
     Ok(out)
 }
+
+/// Over so many bytes in all, the files beside a file are written out only once the user says so.
+const ASK_OVER: u64 = 256 << 20;
 
 /// File `path` of `archive` (with those beside it, where `folder`) written out and opened, on a
 /// thread of its own; a failure told in a box over `hwnd`.
@@ -194,23 +215,40 @@ fn written(
     folder: bool,
     hwnd: HWND,
 ) -> windows::core::Result<Option<PathBuf>> {
-    // (the bytes of the files written whole, and the one being written)
-    let state: Arc<Mutex<(u64, String)>> = Arc::new(Mutex::new((0, path.to_owned())));
-    let total = Arc::new(Mutex::new(0u64));
+    let files = files_of(archive.path(), path, folder)?;
+    let all: u64 = files.iter().map(|f| f.1).sum();
+    if folder && all > ASK_OVER {
+        let text = aqr_l10n::folder::ask_many(name, files.len(), aqr_l10n::size(all as f64));
+        // SAFETY: strings of their own
+        let r = unsafe {
+            MessageBoxW(Some(hwnd), &HSTRING::from(text), &HSTRING::from("Aqueous"), MB_YESNO | MB_ICONQUESTION)
+        };
+        if r != IDYES {
+            return Ok(None);
+        }
+    }
+    // (the bytes of the files written whole, and the one being written; whether cancelled)
+    let state: Arc<Mutex<(u64, String, bool)>> = Arc::new(Mutex::new((0, path.to_owned(), false)));
+    let total = Arc::new(Mutex::new(all));
     let (to, done) = channel();
     {
-        let (archive, path, state, total) = (archive.clone(), path.to_owned(), state.clone(), total.clone());
+        let (archive, state) = (archive.clone(), state.clone());
         std::thread::spawn(move || {
             // SAFETY: this thread's COM
             if unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_err() {
                 return;
             }
             let r = (|| {
-                let files = files_of(archive.path(), &path, folder)?;
-                *total.lock().unwrap() = files.iter().map(|f| f.1).sum();
                 let mut first = None;
                 for (p, size) in files {
-                    state.lock().unwrap().1 = p.clone();
+                    {
+                        let mut s = state.lock().unwrap();
+                        if s.2 {
+                            // (cancelled: none written on)
+                            return Err(windows::Win32::Foundation::E_ABORT.into());
+                        }
+                        s.1 = p.clone();
+                    }
                     let file = client::materialize(archive.path(), &p)?;
                     first.get_or_insert(file);
                     state.lock().unwrap().0 += size;
@@ -242,7 +280,7 @@ fn written(
             Err(RecvTimeoutError::Timeout) => {}
         }
         // (of all: the files whole, and of the one at work, what is written or decompressed)
-        let (whole, at) = state.lock().unwrap().clone();
+        let (whole, at, _) = state.lock().unwrap().clone();
         let total = (*total.lock().unwrap()).max(1);
         let (d, t) = client::progress(archive.path(), &at).unwrap_or((0, 0));
         let size = client::stat(archive.path(), &at).ok().and_then(|e| e["size"].as_u64()).unwrap_or(0);
@@ -251,7 +289,9 @@ fn written(
         unsafe {
             _ = dialog.SetProgress64(whole + part.min(size), total);
             if dialog.HasUserCancelled().as_bool() {
-                // (the files written on, for the next time: not opened)
+                // (the file being written stopped, and none after it: nothing opened)
+                state.lock().unwrap().2 = true;
+                _ = client::cancel(archive.path(), &at);
                 break Ok(None);
             }
         }

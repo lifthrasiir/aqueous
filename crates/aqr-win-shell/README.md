@@ -27,10 +27,12 @@ object is released, for the server to close it a minute later (and to end, idle)
   folder) and `CFSTR_FILECONTENTS` (a stream of each by its index).
 - The context menu (`src/menu.rs`): the shell's (`SHCreateDefaultContextMenu`: Copy,
   Properties; of folders, the verbs of folders), with ours first of a file chosen alone: "Open"
-  (the default) and "Open with the files beside it" (those of its folder and under it too: a
-  `.cue` and its `.bin`, a page and its images), written out by the server (`Materialize`) on
-  a thread of their own, the shell's progress window shown where it takes over 0.4 s (cancelled,
-  nothing opened), then opened as the system opens a file of its type.
+  (the default) and "Open with the files beside it" (the files of its folder, not under it, and
+  those under its folders named after it: a `.cue` and its `.bin`, `page.html` and `page_files`;
+  over 256 MiB in all, once the user says so), written out by the server (`Materialize`) on a
+  thread of their own, the shell's progress window shown where it takes over 0.4 s (cancelled,
+  the file being written stopped and those after it not begun, nothing opened), then opened as
+  the system opens a file of its type.
 - Encrypted archives: their passphrase asked for by the server's dialog over the window of the
   shell's (the server let come to the front).
 - An archive not read (damaged): told in a box over the window, once in a while, the failure
