@@ -312,6 +312,20 @@ pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Co
     (cmd, 1)
 }
 
+/// The command extracting each archive of `paths` (not empty; sorted here) into the folder
+/// `into` as it is (`aqr --ipc -d --each --into`: the entries at the top of each in it, beside
+/// what is there), its standard streams piped; and the number of archives.
+pub fn command_into(aqr: &Path, mut paths: Vec<PathBuf>, into: &Path) -> (Command, usize) {
+    paths.sort();
+    let mut cmd = aqr_command(aqr);
+    cmd.arg("--ipc").arg("-d").arg("--each").arg("--into").arg(into).arg("--").args(&paths);
+    if let Some(dir) = paths[0].parent().filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    (cmd, paths.len())
+}
+
 /// The command running `aqr` adding `paths` to `archive` (`-a`: what is not in it, or changed),
 /// each at its name under `dir` in the archive (names between `/`; empty: its root), with
 /// `--ipc`.
@@ -782,6 +796,9 @@ aqr: not there
         assert_eq!(count, 1);
         let (cmd, count) = command(a, Verb::Extract, paths(&["x.aqr", "y.aqr"]), false, "aqr");
         assert_eq!(args_of(&cmd), ["--ipc", "-d", "--each", "--auto-dir", "--", "x.aqr", "y.aqr"]);
+        assert_eq!(count, 2);
+        let (cmd, count) = command_into(a, paths(&["y.aqr", "x.zip"]), Path::new("/p/out"));
+        assert_eq!(args_of(&cmd), ["--ipc", "-d", "--each", "--into", "/p/out", "--", "x.zip", "y.aqr"]);
         assert_eq!(count, 2);
         let (cmd, count) = command_add(a, Path::new("x.aqr"), "d/e", &paths(&["/p/b.txt", "/p/c"]));
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();

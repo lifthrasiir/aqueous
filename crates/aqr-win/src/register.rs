@@ -115,6 +115,7 @@ pub fn told() -> String {
         shell::compress(),
         menu.join(", "),
         shell::extract(),
+        shell::extract_to(),
         shell::test(),
         shell::name_version(),
         shell::extract_version(),
@@ -191,7 +192,7 @@ pub fn register() -> Result<(), String> {
         set(&format!(r"{class}\Application"), Some("ApplicationName"), APPLICATION)?;
         set(&format!(r"{class}\Application"), Some("ApplicationIcon"), &format!("\"{}\",-{icon}", exe.display()))?;
         set(&format!(r"{class}\shell"), None, "extract")?;
-        for (v, text) in [("extract", shell::EXTRACT), ("test", shell::TEST)] {
+        for (v, text) in [("extract", shell::EXTRACT), ("extract-to", shell::EXTRACT_TO), ("test", shell::TEST)] {
             verb(&format!(r"{class}\shell\{v}"), text, v)?;
         }
         Ok(())
@@ -612,6 +613,7 @@ mod tests {
             "{t}"
         );
         assert!(t.contains("(.zip .7z .rar") && t.contains(".zst)"), "{t}");
+        assert!(t.contains("\"Extract here\", \"Extract to…\" and \"Test\""), "{t}");
         // (the verbs of the versions of an archive, on .aqr files alone)
         assert!(t.contains("\"Name this version…\"") && t.contains("\"Extract a previous version…\""), "{t}");
     }

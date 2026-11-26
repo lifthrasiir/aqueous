@@ -37,3 +37,4 @@ name_version = 1206
 extract_version = 1207
 description = 1208
 compress_options = 1209
+extract_to = 1210

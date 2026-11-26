@@ -3,8 +3,9 @@
 Aqueous in Windows Explorer: "Compress with Aqueous" on files and folders, and beside it the
 menu "Aqueous" of the rest ("Compress with options…", the dialog of the options, `aqr --session`; "Compress with passphrase…", encrypted, `aqr -P`; a separator;
 "Compress into .zip" and ".7z", `aqr --format zip`, `7z`), "Extract here" (also the
-double-click) and "Test" on `.aqr` files and the other archives `aqr` extracts, and a window of
-how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
+double-click), "Extract to…" (a folder picked, the root of what each archive holds: `aqr -d
+--each --into`, the user asked once where files there would be replaced) and "Test" on `.aqr`
+files and the other archives `aqr` extracts, and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
 `crates/aqr/src/ipc.rs`); this program is the window and the verbs, about 1 MB (550 KB of it
 the icons: `droplet.ico`, the program's, and `icons/*.ico`, the files', from `scripts/icons.py`;
 in the installer they take some 230 KB, the drop being the same bytes in each).

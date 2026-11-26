@@ -34,8 +34,16 @@ use windows_sys::core::{GUID, HRESULT};
 
 /// The verbs taking many paths, each a class of its own: its CLSID is [`BASE`] with its index in
 /// the last byte. Never reorder (the CLSIDs registered would go to other verbs); add at the end.
-pub const VERBS: [&str; 7] =
-    ["compress", "compress-passphrase", "compress-zip", "compress-7z", "compress-options", "extract", "test"];
+pub const VERBS: [&str; 8] = [
+    "compress",
+    "compress-passphrase",
+    "compress-zip",
+    "compress-7z",
+    "compress-options",
+    "extract",
+    "test",
+    "extract-to",
+];
 
 /// The CLSID of the verbs' classes, the last byte the verb's index.
 const BASE: u128 = 0x88c8460e_ca88_454d_b38c_3b192ee4e700;

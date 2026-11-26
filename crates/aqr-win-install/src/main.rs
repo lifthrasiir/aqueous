@@ -60,6 +60,7 @@ fn main() -> std::process::ExitCode {
                 let done = l::done(
                     shell::compress(),
                     shell::extract(),
+                    shell::extract_to(),
                     shell::test(),
                     shell::name_version(),
                     shell::extract_version(),

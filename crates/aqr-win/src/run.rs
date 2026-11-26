@@ -17,6 +17,22 @@ pub fn run(verb: Verb, paths: Vec<PathBuf>, encrypt: bool, format: &str) -> Exit
     drive(verb, cmd, count)
 }
 
+/// "Extract to…": asks for a folder (opened at the archives' own), and runs `aqr` extracting
+/// each archive of `paths` into it as it is ([`aqr_ipc::command_into`]: the folder the root of
+/// what each holds), showing how far it is; nothing where none is picked.
+pub fn run_into(paths: Vec<PathBuf>) -> ExitCode {
+    let title = match &paths[..] {
+        [one] => aqr_l10n::win::extract_to_title(aqr_ipc::file_name(one)),
+        _ => aqr_l10n::win::extract_to_title_many(paths.len()),
+    };
+    let start = paths[0].parent();
+    let Some(into) = crate::folder::pick(start, &title, aqr_l10n::win::extract_to_button()) else {
+        return ExitCode::SUCCESS;
+    };
+    let (cmd, count) = aqr_ipc::command_into(&aqr_ipc::aqr(), paths, &into);
+    drive(Verb::Extract, cmd, count)
+}
+
 /// Runs `aqr` extracting `archive` as it was at `point`, into a folder beside it named after the
 /// version ([`aqr_ipc::version_folder`]), and shows how far it is.
 pub fn run_at(archive: &Path, point: &Point) -> ExitCode {

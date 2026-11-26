@@ -2,14 +2,14 @@
 //! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
 //!
 //! usage: aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... |
-//!        extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE |
-//!        rollback-version ARCHIVE #N
+//!        extract ARCHIVE... | extract-to ARCHIVE... | test ARCHIVE... | name-version ARCHIVE |
+//!        extract-version ARCHIVE | rollback-version ARCHIVE #N
 //!
 //! - `--register` adds the verbs for the user (`register`): "Compress with Aqueous" on files
 //!   and folders, and the menu "Aqueous" beside it with the rest ("Compress with passphrase…",
 //!   which encrypts: `aqr -P`; then "Compress into .zip" and ".7z", `aqr --format zip`, `7z`);
-//!   "Extract here" (also the double-click) and "Test" on `.aqr` files and the other archives
-//!   `aqr` extracts. `--unregister` takes them away.
+//!   "Extract here" (also the double-click), "Extract to…" and "Test" on `.aqr` files and the
+//!   other archives `aqr` extracts. `--unregister` takes them away.
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
 //!   (`install`): the former run by the installer, the latter by Settings' Apps.
 //! - `compress-options`: the dialog of the options first (`options`), `aqr --session` beside it
@@ -18,8 +18,9 @@
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
 //!   named after their folder (`compress-zip`: `.zip`, `compress-7z`: `.7z`,
 //!   `register::OTHER_FORMATS`). `extract`: each archive beside it, a single entry at its top
-//!   as it is, else into its name without `.aqr` (`aqr --each --auto-dir`). `test`: each archive
-//!   checked, and what it holds told.
+//!   as it is, else into its name without `.aqr` (`aqr --each --auto-dir`). `extract-to`: a
+//!   folder asked for (`folder`), each archive extracted into it as it is, the folder the root
+//!   of what it holds (`aqr --each --into`). `test`: each archive checked, and what it holds told.
 //! - `name-version` and `extract-version`, on one `.aqr` file chosen (`version`): "Name this
 //!   version…" names the state the archive is in (`aqr --tag`), and "Extract a previous
 //!   version…" extracts one of the versions named (the points of its journal: `aqr -j`, `--tag`)
@@ -50,6 +51,8 @@ mod dialog;
 mod dpi;
 #[cfg(windows)]
 mod drop;
+#[cfg(windows)]
+mod folder;
 #[cfg(windows)]
 mod gather;
 #[cfg(windows)]
@@ -103,7 +106,7 @@ fn main() -> std::process::ExitCode {
         }
         _ => (verb, args.iter().skip(1).map(PathBuf::from).collect(), false),
     };
-    let (mut encrypt, mut format, mut options) = (false, "aqr", false);
+    let (mut encrypt, mut format, mut options, mut into) = (false, "aqr", false, false);
     let name = verb;
     let verb = match verb {
         "--register" => {
@@ -176,6 +179,10 @@ fn main() -> std::process::ExitCode {
             Verb::Compress
         }
         "extract" => Verb::Extract,
+        "extract-to" => {
+            into = true;
+            Verb::Extract
+        }
         "test" => Verb::Test,
         // (one archive: a verb that takes a single selection)
         "name-version" | "extract-version" | "rollback-version" => {
@@ -203,7 +210,7 @@ fn main() -> std::process::ExitCode {
         }
         _ => {
             let usage = "aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... | \
-                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N] | rollback-version ARCHIVE #N | add ARCHIVE DIR PATH...";
+                         extract ARCHIVE... | extract-to ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N] | rollback-version ARCHIVE #N | add ARCHIVE DIR PATH...";
             return fail(win::not_verb(), usage);
         }
     };
@@ -217,8 +224,9 @@ fn main() -> std::process::ExitCode {
         Err(paths) if paths.is_empty() => return fail(win::nothing(), win::no_path()),
         Err(paths) => paths,
     };
-    match options {
-        true => run::run_options(paths),
-        false => run::run(verb, paths, encrypt, format),
+    match (options, into) {
+        (true, _) => run::run_options(paths),
+        (_, true) => run::run_into(paths),
+        _ => run::run(verb, paths, encrypt, format),
     }
 }
