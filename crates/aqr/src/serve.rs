@@ -31,7 +31,10 @@
 //!   `more` true. An entry has its `name` (as `aqr -d` writes it: [`crate::names`]), its `kind`
 //!   (`dir`, `file`, `link`, `other`) and what is known of it: a file's `size`, `mtime` (seconds
 //!   and nanoseconds since the epoch; `local` true where it is a local time of an unknown time
-//!   zone), `attrs` (Windows' attributes), a link's `target`.
+//!   zone; `crtime`, `atime`, `ctime` alike), `attrs` (Windows' attributes), as `-t -v` shows
+//!   them `owner`, `mode`, `win`, `mac` and `flags`, its `comment`, a link's `target`. With
+//!   `verbose` true, a file's `data`, `overhead`, `share`, `ratio` and `segment` too (as `-t -v`'s:
+//!   all of the archive's blocks read for them, once).
 //! - `stat` (a handle, and `path`): the entry at the path, as `entry` (the root's of no name).
 //! - `read` (a handle, `path`, `offset`, `len`): bytes of the file at `path` from `offset`, at
 //!   most `len` and [`CHUNK`]: `data` tells how many, and that many bytes follow the line as
@@ -147,6 +150,9 @@ struct Opened {
     /// How far the evaluation of its leaves is, as the archive last told it, and how many are
     /// being evaluated.
     progress: Arc<Progress>,
+    /// What `-t -v` tells of its contents ([`aqr_archive::Listed`]), by content: all of its
+    /// blocks read for it, once it is first asked for (`verbose`).
+    listed: OnceLock<Result<Vec<aqr_archive::Listed>, String>>,
 }
 
 #[derive(Default)]
@@ -273,7 +279,16 @@ impl Opened {
             Ok((archive, view, progress))
         })();
         let (archive, view, progress) = opened?;
-        Ok(Opened { handle, path: path.to_owned(), identity, archive, _leaked: leaked, view, progress })
+        Ok(Opened {
+            handle,
+            path: path.to_owned(),
+            identity,
+            archive,
+            _leaked: leaked,
+            view,
+            progress,
+            listed: OnceLock::new(),
+        })
     }
 
     /// What `path` (names joined with `/`) names.
@@ -301,11 +316,35 @@ impl Opened {
         }
     }
 
-    /// The entry at `at`, as it is served.
-    fn entry(&self, at: At) -> Value {
+    /// What `-t -v` tells of content `c` (of the file of an archive of a single file, 0).
+    fn listed(&self, c: usize) -> Option<&aqr_archive::Listed> {
+        let l = self.listed.get_or_init(|| self.archive.listing(&|_| None).map_err(|e| e.to_string()));
+        l.as_ref().ok()?.get(c)
+    }
+
+    /// Of `-t -v`'s, what `v` (of content `c`) has: its data blocks' bytes, the other blocks', its
+    /// share of them and its ratio to its size, its segment (from 1).
+    fn verbose(&self, v: &mut Value, c: usize) {
+        if let Some(l) = self.listed(c) {
+            v["data"] = l.data.into();
+            v["overhead"] = l.overhead.into();
+            v["share"] = l.share.into();
+            v["ratio"] = crate::list::ratio(l.share, l.size).into();
+            v["segment"] = (l.segment + 1).into();
+        }
+    }
+
+    /// The entry at `at`, as it is served (with what `-t -v` tells too, where `verbose`).
+    fn entry(&self, at: At, verbose: bool) -> Value {
         match (&self.view, at) {
             (_, At::Root) => json!({"name": "", "kind": "dir"}),
-            (View::Single { name, size }, _) => json!({"name": name, "kind": "file", "size": size}),
+            (View::Single { name, size }, _) => {
+                let mut v = json!({"name": name, "kind": "file", "size": size});
+                if verbose {
+                    self.verbose(&mut v, 0);
+                }
+                v
+            }
             (View::Tree { names, .. }, At::Entry(i)) => {
                 let e = &self.archive.tree().unwrap().entries[i];
                 let mut v = json!({"name": names[i]});
@@ -317,11 +356,16 @@ impl Opened {
                 }
                 .into();
                 match &e.node {
-                    &EntryNode::File(c) => v["size"] = self.archive.content_size(c).unwrap_or(0).into(),
+                    &EntryNode::File(c) => {
+                        v["size"] = self.archive.content_size(c).unwrap_or(0).into();
+                        if verbose {
+                            self.verbose(&mut v, c);
+                        }
+                    }
                     EntryNode::Link(to) => v["target"] = String::from_utf8_lossy(name_bytes(to).0).into_owned().into(),
                     _ => {}
                 }
-                extra(&mut v, &e.extra);
+                extra(&mut v, &e.extra, matches!(e.node, EntryNode::File(_)));
                 v
             }
             (View::Tree { .. }, At::Single) => unreachable!("of an archive of a single file"),
@@ -330,15 +374,35 @@ impl Opened {
 }
 
 /// Of `x`, what an entry served tells.
-fn extra(v: &mut Value, x: &Extra) {
+fn extra(v: &mut Value, x: &Extra, file: bool) {
     if let Some(t) = x.mtime {
         v["mtime"] = json!([t.secs, t.nanos]);
         if t.zone == Zone::Local {
             v["local"] = true.into();
         }
     }
+    for (name, t) in [("crtime", x.crtime), ("atime", x.atime), ("ctime", x.ctime)] {
+        if let Some(t) = t {
+            v[name] = json!([t.secs, t.nanos]);
+        }
+    }
     if let Some(a) = x.win_attrs {
         v["attrs"] = a.into();
+    }
+    // (as `-t -v` shows them)
+    for (name, shown) in [
+        ("owner", crate::list::owner(x)),
+        ("mode", crate::list::mode(x)),
+        ("win", crate::list::win(x)),
+        ("mac", crate::list::mac(x)),
+    ] {
+        if shown != "-" {
+            v[name] = shown.into();
+        }
+    }
+    v["flags"] = crate::list::flags(x, Some(file)).into();
+    if let Some(c) = &x.comment {
+        v["comment"] = String::from_utf8_lossy(c).into_owned().into();
     }
 }
 
@@ -556,15 +620,16 @@ impl Server<'_> {
     fn list(&self, v: &Value) -> Result<Vec<Value>, String> {
         let o = self.opened(v, "list")?;
         let dir = v["dir"].as_str().unwrap_or("");
+        let verbose = v["verbose"] == true;
         let entries: Vec<Value> = match (o.at(dir)?, &o.view) {
-            (At::Root, View::Single { .. }) => vec![o.entry(At::Single)],
+            (At::Root, View::Single { .. }) => vec![o.entry(At::Single, verbose)],
             (At::Root, View::Tree { children, .. }) => {
-                children.get(&None).into_iter().flatten().map(|&i| o.entry(At::Entry(i))).collect()
+                children.get(&None).into_iter().flatten().map(|&i| o.entry(At::Entry(i), verbose)).collect()
             }
             (At::Entry(d), View::Tree { children, .. })
                 if o.archive.tree().unwrap().entries[d].node == EntryNode::Dir =>
             {
-                children.get(&Some(d)).into_iter().flatten().map(|&i| o.entry(At::Entry(i))).collect()
+                children.get(&Some(d)).into_iter().flatten().map(|&i| o.entry(At::Entry(i), verbose)).collect()
             }
             _ => return Err(format!("{dir}: not a directory")),
         };
@@ -579,7 +644,7 @@ impl Server<'_> {
     fn stat(&self, v: &Value) -> Result<Value, String> {
         let o = self.opened(v, "stat")?;
         let at = o.at(v["path"].as_str().unwrap_or(""))?;
-        Ok(json!({"entry": o.entry(at)}))
+        Ok(json!({"entry": o.entry(at, v["verbose"] == true)}))
     }
 
     fn read(&self, v: &Value) -> Result<Answer, String> {

@@ -185,6 +185,17 @@ fn listed_and_read() {
     assert_eq!((a["entry"]["kind"].as_str(), a["entry"]["size"].as_u64()), (Some("file"), Some(5000)));
     assert!(a["entry"]["mtime"][0].as_i64().is_some_and(|t| t > 1_500_000_000), "{a}");
     assert_eq!(s.ask(json!({"stat": h, "path": ""}))["entry"]["kind"], "dir");
+    // what -t -v tells of a file, with `verbose`: as its JSON listing has it
+    let t: Value = serde_json::from_str(&aqr(&d, &["-t", "--json", "t.aqr"])).unwrap();
+    let j = t["entries"].as_array().unwrap().iter().find(|e| e["path"] == "sub/big.txt").unwrap().clone();
+    let v = s.ask(json!({"stat": h, "path": "sub/big.txt", "verbose": true}))["entry"].clone();
+    for k in ["data", "overhead", "share", "segment"] {
+        assert_eq!(v[k], j[k], "{k}: {v} {j}");
+    }
+    assert!(v["ratio"].as_str().is_some_and(|r| r.ends_with('%')), "{v}");
+    assert_eq!(v["flags"].as_str().map(str::len), Some(7), "{v}");
+    // (not asked for: not there)
+    assert!(a["entry"].get("data").is_none(), "{a}");
 
     // every file as it was archived, in reads of several sizes
     for (k, (path, bytes)) in files.iter().enumerate() {

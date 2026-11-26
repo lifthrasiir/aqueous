@@ -564,7 +564,7 @@ fn size_shown(a: &Args, n: u64) -> String {
     if a.verbose { n.to_string() } else { size(n as f64) }
 }
 
-fn ratio(a: u64, of: u64) -> String {
+pub(crate) fn ratio(a: u64, of: u64) -> String {
     if of == 0 { "-".into() } else { format!("{:.1}%", 100.0 * a as f64 / of as f64) }
 }
 
@@ -585,7 +585,7 @@ fn time(t: Option<Time>) -> String {
 /// `@` (extended attributes), `+` (forks), `=` (a hard link) and `~` (archived as another file
 /// read the same, `--lossy`: [`aqr_compress::lossy::Mark`]), `-` where not; with `x`
 /// (executable), `r` (read-only) and `h` (hidden) before them by default (of a file or not).
-fn flags(x: &Extra, file: Option<bool>) -> String {
+pub(crate) fn flags(x: &Extra, file: Option<bool>) -> String {
     let f = |on: bool, c: char| if on { c } else { '-' };
     let mut s = String::new();
     if let Some(file) = file {
@@ -605,7 +605,7 @@ fn flags(x: &Extra, file: Option<bool>) -> String {
 }
 
 /// `USER:GROUP`, by names where they are kept, else by ids; `-` where neither is.
-fn owner(x: &Extra) -> String {
+pub(crate) fn owner(x: &Extra) -> String {
     let one = |name: &Option<std::sync::Arc<[u8]>>, id: Option<u64>| match (name, id) {
         (Some(n), _) => Some(String::from_utf8_lossy(n).into_owned()),
         (None, Some(id)) => Some(id.to_string()),
