@@ -11,7 +11,8 @@ Aqueous의 WebAssembly 기반 전처리기(RarVM의 현대판)의 설계이다. 
 - **[제안]** 제안되었으나 아직 검토하지 않은 것
 - **[구현]** 명세와 코드에 들어간 것(근거와 노트만 남긴다)
 
-크레이트의 배치와 역할은 `CLAUDE.md`와 각 크레이트의 README가, 재압축기의 포맷은 각자의 `FORMAT.md`가 적는다.
+크레이트의 배치와 역할은 `CLAUDE.md`와 각 크레이트의 README가, 재압축기의 포맷은 각자의 `FORMAT.md`가 적는다. 끝낸 일의
+경과는 git 이력에 있다.
 
 ---
 
@@ -120,6 +121,8 @@ Aqueous에서 둘은 다음과 같이 표현된다.
 ```
 node := slice(offset, len) | concat(node, ...) | pack(node, ...) | apply(module#, resources, params, [input, ...]) | patch(node, node)
 ```
+
+(명세에는 literal, 출력 여럿을 내는 Split, Checksum도 있다. 표기에서는 생략한다.)
 
 ```
 PE:   concat(slice(0,0x400), apply(disfilter, {}, {origin,is64}, [slice(a0,l0), ..., slice(a27,l27)]), slice(...))
@@ -292,15 +295,16 @@ Wasm 3.0 core를 deterministic profile로 실행하고, 3.0에서 더해진 기�
 ### 5.3 데이터 전달과 ABI [구현]
 
 메모리 import(작업, 파라미터, 리소스, 입력, 출력), 전체형과 부분형, 창과 ring, `request`/`release`/`commit`/
-`heartbeat`/`log`는 명세 "Module execution"에 있다. 부분형인 모듈은 `known.rs`의 이름들 가운데 bcj 계열, mszip, lzma/lzma2, bz2, lz4, snappy, git, exe-recons, png-recons,
-pcm/flac, fasta, bundle, flate-set, flate-inflate, bcj-delta, zip-recons, mp3-recons 등이다(`docs/arena-design.md`의 현황). 창은 모듈이 `entry! { part fn … windows(…) }`로 선언하고 aqr-ld가 import의 maximum으로 바꾼다.
+`heartbeat`/`log`는 명세 "Module execution"에 있다. 어느 모듈이 부분형인지는 `CLAUDE.md`의 Modules와
+`crates/aqr-modules/src/bin`이 적는다. 창은 모듈이 `entry! { part fn … windows(…) }`로 선언하고 aqr-ld가 import의
+maximum으로 바꾼다.
 
 **구현 노트.**
 
 - `slice` 리프는 블록을 풀어 소비자의 창에 복사한다. 자식 `apply`의 출력은 간선마다 복사 한 번이다.
 - 전체형에서 전체형으로 가는 간선은 출력 메모리를 소비자의 import로 넘길 수 있다(꼬리는 0으로).
 - 부분형의 평가는 값의 그래프 위에서 스레드와 큐(배압 16 MiB)로 한다. 출력이 여럿인 생산자의 간선은 기다리게 하지
-  않고 넘치는 바이트를 파일에 내보낸다(`docs/streaming-encoder-design.md`).
+  않고 넘치는 바이트를 파일에 내보낸다(`crates/aqr-archive/src/eval.rs`, `docs/eval-design.md`).
 
 > **근거.**
 >
@@ -329,19 +333,16 @@ pcm/flac, fasta, bundle, flate-set, flate-inflate, bcj-delta, zip-recons, mp3-re
 
 명세는 `request`, `commit`, `join`, `send`, `recv`가 기다릴 수 있다는 것만 정한다. 구현은 엔진의 일시 정지, 파이버,
 노드마다 OS 스레드 중 무엇이든 되고, 노드망이 KPN이므로 출력은 같다. 일시 정지는 import 지점의 협조적 방식으로
-충분하다(선점은 시간 예산의 장치이다). 레퍼런스 디코더의 wasmtime 경로는 파이버(`call_async`)이다(§5.5).
+충분하다(선점은 시간 예산의 장치이다). 레퍼런스 디코더는 두 엔진(WAH, Wasmtime) 모두 인스턴스를 파이버
+(`call_async`)로 돌린다(aqr-wasmrt `wasm/wah_engine.rs`, `wasm/engine.rs`, §5.5).
 
 - **요구 구동(pull) 스케줄링.** 바이트열마다 소비자가 하나인 트리라면 한 스레드로 돌 수 있다. 소비자의 `request` 안에서
   호스트가 생산자를 중첩으로 재개하고, 생산자의 `commit`은 바이트를 호스트 버퍼에 옮긴 뒤 양보를 청한다. 생산자 하나에
   소비자가 여럿이 되면(다중 출력, 채널) 비울 소비자가 스택에 없으므로 진짜 블로킹이 필요하다. 레퍼런스 디코더는 부분형
   적용을 자기 스레드에서 큐로 잇는다(§5.3).
 
-> **근거: 엔진의 현황(2026-10).** wasmi는 `call_resumable`, wasmtime은 `call_async`(파이버)로 호스트 함수 안에서 멈춘다.
-> wasm3는 Wasm 호출이 네이티브 재귀라 스레드 방식만 된다. WAH는 실행 전체의 일시 정지와 재개(`wah_start`/
-> `wah_resume`)는 있지만 호스트 함수 *안에서* 멈추지 못한다. 확장안은 재시도 의미론이다: call 직전에는 늘 POLL이 있으므로
-> 호스트 함수가 "아직 실행하지 않음"을 돌려주면 IP를 call로 되돌려 SUSPENDED로 들어가고, 재개하면 같은 호출을 다시
-> 실행한다(bulk 연산의 `WAH_BULK_YIELD`가 이미 그렇다). ABI에서 우회(`request`가 "준비 안 됨"을 돌려주고 모듈이
-> 양보)하는 방법은 엔진의 사정이 ABI로 새어 나오므로 택하지 않는다.
+> **근거.** 블로킹을 ABI에서 우회(`request`가 "준비 안 됨"을 돌려주고 모듈이 양보)하는 방법은 엔진의 사정이 ABI로 새어
+> 나오므로 택하지 않았다. wasm3처럼 Wasm 호출이 네이티브 재귀인 엔진은 노드마다 스레드로만 된다.
 
 ### 5.5 모듈 내부 병렬성
 
@@ -360,19 +361,18 @@ Wasm threads도 쓰지 않는다. task 수와 분할은 데이터로 정하며 �
 - **aqr-common.** `pool::par_map_apart`가 Wasm에서 항목마다 task를 돌리고 결과를 `wire::Wire`로 바이트로 만든다. 그 밖의
   `par_map`, `scope`는 Wasm에서 직렬이다. 모듈 바이너리는 스레드 수를 상수로 주고(`whole!(slots N, …)`, flate-set은 8),
   출력은 그 수와 무관하다. `OnceLock` 표는 `spawn` 전에 부모가 만들어 두면 사본으로 물려받는다.
-- **wasmtime(aqr-decompress).** task 하나가 Store 하나이고, 모든 인스턴스를 `call_async`로 돌리며 `join`, `send`,
-  `recv`는 async 호스트 함수이다. 실행기(`exec`)는 적용하는 스레드와 aqr-common `pool`의 워커들이 깨어난 future를 poll하는
-  것이고, task 수와 OS 스레드 수가 분리된다. 큐가 비었고 poll 중인 스레드도 없는데 첫 future가 끝나지 않았으면 교착이다.
-  waker는 잠금을 푼 뒤에 깨우고(인스턴스의 drop이 채널을 잠그는 재진입), 끝난 적용에 남은 future는 실행기가 약한
-  참조로 기억했다가 drop한다(waker와 Store의 순환 참조).
-- **작업 메모리의 사본(`cow`).** macOS는 `vm_copy`로 스냅샷과 task 메모리를 CoW로 복사한다. Linux에는 익명 private
-  메모리를 fork 없이 CoW로 스냅샷하는 방법이 없어서 0이 아닌 페이지만 복사한다. Windows는 `docs/sandbox-design.md`.
-  `spawn`이 묶음인 것은 이 복사를 task마다가 아니라 spawn마다 한 번으로 하려는 것이다.
+- **엔진(aqr-wasmrt, WAH와 Wasmtime 같은 구조).** task 하나가 Store 하나이고, 모든 인스턴스를 `call_async`로 돌리며
+  `join`, `send`, `recv`는 async 호스트 함수이다. 실행기(`exec.rs`)는 적용하는 스레드와 aqr-common `pool`의 워커들이 깨어난
+  future를 poll하는 것이고, task 수와 OS 스레드 수가 분리된다. 큐가 비었고 poll 중인 스레드도 없는데 첫 future가 끝나지
+  않았으면 교착이다. waker는 잠금을 푼 뒤에 깨우고(인스턴스의 drop이 채널을 잠그는 재진입), 끝난 적용에 남은 future는
+  실행기가 약한 참조로 기억했다가 drop한다(waker와 Store의 순환 참조).
+- **작업 메모리의 사본(aqr-wasmrt `cow.rs`).** macOS는 `vm_copy`, Windows는 paging file의 section을 placeholder 위에 CoW로
+  매핑한다(`docs/sandbox-design.md`). Linux에는 익명 private 메모리를 fork 없이 CoW로 스냅샷하는 방법이 없어서 0이 아닌
+  페이지만 복사한다. `spawn`이 묶음인 것은 이 복사를 task마다가 아니라 spawn마다 한 번으로 하려는 것이다.
 
-> **근거: 측정(M4, 2026-10-27).** 48 MB 텍스트를 gzip -6한 8.0 MB를 모든 모듈을 wasmtime으로 돌려 풀었다. flate를
-> 직렬로 두면 0.74–0.77 s, 세그먼트 배치를 task로 돌리면 0.45 s, 스냅샷을 CoW로 하자 0.37–0.41 s(네이티브 10코어
-> 0.15 s). task 하나의 준비(instantiate, 143 MB 작업 메모리 생성과 스냅샷 복사)가 memcpy로는 10–13 ms로, task가 하는
-> 일(세그먼트 약 1 MiB)과 비슷했다. CoW로 0.05–0.9 ms가 되었다.
+> **근거: 측정(M4, 2026-10-27).** 48 MB 텍스트를 gzip -6한 8.0 MB를 wasmtime으로 풀면 flate 직렬 0.74–0.77 s, task와
+> CoW 사본으로 0.37–0.41 s(네이티브 10코어 0.15 s). task 하나의 준비가 memcpy로는 10–13 ms로 task의 일(세그먼트 약 1 MiB)과
+> 비슷했고, CoW로 0.05–0.9 ms가 되었다.
 >
 > **근거: FLAC과 PCM의 파이프라인.** aqr-raw `audio::par::apart`가 네이티브 파이프라인과 같은 단계를 task와 채널로 돈다
 > (앞단, 오차 디코드, LMS가 task 하나씩, 작업 task 다섯이 배치 `k mod 5`). wasmtime에서 FLAC 63 MB가 직렬 2.25 s →
@@ -414,17 +414,15 @@ instruction"에 있다. 옛 `aqr_spawn(arg, n)`과 opcode 11은 릴리스된 모
 > task가 슬롯을 쥔 채 기다려 교착할 수 있고, 기다리는 task를 세지 않으면 그 메모리가 상한에서 빠진다. 클래스가
 > 비순환이면 가장 큰 클래스는 기다리지 않고 끝까지 돌므로 교착이 없고, 상한이 중첩 깊이와 무관하다.
 >
-> **옛 형식을 지운 이유(2026-11-07).** 형식이 0.0대이므로 Apply는 opcode 16 하나이고(한도 목록이
-> 늘 있다) opcode 11은 예약 번호로만 남았다(Wasm의 legacy EH처럼). `aqr_spawn_v2`라는 import는 없다.
+> **옛 형식.** 형식이 0.0대이므로 Apply는 opcode 16 하나이고 opcode 11은 예약 번호로만 남았다(Wasm의 legacy EH처럼).
 > 인코더, aqr-api, aqr-ld는 새 형식만 만든다.
 
 #### 동시 실행 수를 디코더가 낮추기: gang [구현]
 
 **목표.** 디코더가 메모리를 아끼려고 클래스마다 동시 실행 수를 1 이상 아무 값으로 낮춰도 교착하지 않고, 그때의
-메모리가 **인스턴스 한도 + Σ_c (동시 실행 수_c × 단위 한도_c)**로 정해지게 한다. 지금 명세는 슬롯만큼 돌리는 것이
-강제이고(빈 슬롯이 있으면 다음 pending을 시작한다), 낮추는 것은 정의되어 있지 않다.
+메모리가 **인스턴스 한도 + Σ_c (동시 실행 수_c × 단위 한도_c)**로 정해지게 한다.
 
-**클래스 순서만으로는 모자라다.** spawn은 높은 클래스로만 가지만(5), 채널은 용량이 유한해서 두 끝이 서로를 기다린다
+**클래스 순서만으로는 모자라다.** spawn은 높은 클래스로만 가지만, 채널은 용량이 유한해서 두 끝이 서로를 기다린다
 (가득 차면 send, 비면 recv). 실행 중인 task가 낮은 클래스(부모)를 기다리고, 그 부모가 같은 클래스의 pending task를
 기다리면 교착이다. 예: 부모(클래스 0)가 작업 task 둘(클래스 1)에게 채널로 돌아가며 일을 보낸다. 클래스 1을 1로
 낮추면 작업 task 0만 돌고, 부모는 task 1의 채널이 차서 send에서, task 0은 부모의 다음 일을 recv에서 기다리며, task 1은
@@ -440,21 +438,15 @@ gang의 task(함께 시작했으므로 모두 떠 있다), 그 gang을 spawn한 
 Kahn 네트워크이므로, 슬롯이 넉넉할 때 끝나는 것은 낮췄을 때도 끝난다. 위의 예는 작업 task 둘이 한 gang이라 함께
 시작하므로 생기지 않는다.
 
-**구현 (2026-11-07).** `spawn_gang`이 gang 클래스의 spawn이고(`whole!(gang N, …)`는 슬롯 하나의 gang 클래스 하나, gang은 N개 task), 호스트와
-에뮬레이션이 채널의 소속을 같은 규칙으로 검사한다. gang의 한도는 task들의 메모리를 더한 것과 채널의 메시지이다. 동시 실행 수는
-`-M`을 줄 때만 한도에 맞춰 낮춘다(`choose_concurrency`; 기본 예산 2 GB는 속도 조절일 뿐이라 그것으로 실패시키면 지금 풀리는
-아카이브가 깨진다). 네이티브 경로는 슬롯을 쓰지 않는다. flac/pcm의 gang은 파이프라인 하나씩 돌리므로 슬롯이 1이다.
+**구현.** `spawn_gang`, `whole!(gang N, …)`(슬롯 하나의 gang 클래스, gang은 N개 task). 호스트와 에뮬레이션이 채널의
+소속을 같은 규칙으로 검사한다. 동시 실행 수는 `-M`을 줄 때만 한도에 맞춰 낮춘다(aqr-wasmrt `choose_concurrency`; 기본
+예산으로 실패시키면 지금 풀리는 아카이브가 깨진다). 네이티브 경로는 슬롯을 쓰지 않는다. Wasm에서 채널을 쓰는 것은 flac/pcm
+파이프라인(aqr-raw `audio::par::apart`, 슬롯 1)과 prores의 줄무늬뿐이고, 채널 없는 task(flate-set, fasta, jpeg 등)는 gang이
+아닌 클래스라 task 하나 단위로 낮출 수 있다.
 
-**지금의 모듈.** Wasm에서 채널을 쓰는 것은 flac/pcm 파이프라인(aqr-raw `audio::par::apart`)과 prores(프레임마다 줄무늬 태스크에 보내고 받는다)뿐이다(mp3, psd의
-파이프라인은 네이티브에만 있다). 채널을 모두 만든 뒤 한 번에 spawn한 형제(3 + 작업 task 수)와 부모 사이에서만 쓰므로
-gang 하나가 되고, 코드의 변경 없이 그 클래스를 gang으로 선언하면 된다.
-task를 채널 없이 쓰는 것(flate-set, fasta, jpeg 등)은 gang이 아닌 클래스이고, 디코더가 task 하나 단위로 낮출 수
-있다.
-
-> **근거: post-init 스냅샷을 버렸던 이유와 다시 꺼낸 이유.** 예전 안은 task가 post-init 스냅샷에서 시작하고 명시된 입력
-> 범위만 복사받는 것이었다. 그때는 병렬 경로가 모두 부모의 파생 상태(flate의 세그먼트 목록과 모델과 평문, sqlite의
-> 테이블별 행, mp3의 프레임 목록)를 참조로 빌려서 전체 사본이 더 단순했다. 지금은 전체 사본을 영역 하나로 표현해 그
-> 단순함을 남기고, 메모리를 아낄 모듈만 영역을 좁힌다.
+> **근거: 영역 하나의 전체 사본.** post-init 스냅샷에서 시작해 입력 범위만 받는 예전 안은 병렬 경로가 모두 부모의 파생
+> 상태(flate의 세그먼트 목록과 모델, sqlite의 테이블별 행, mp3의 프레임 목록)를 빌려서 버렸다. 그 단순함은 작업 메모리 전체의
+> 영역 하나(`task::spawn`)로 남기고, 메모리를 아낄 모듈만 영역을 좁힌다.
 
 ### 5.6 모듈과 리소스 [구현]
 
@@ -468,12 +460,16 @@ module 블록과 resource 블록은 명세에 있다. `apply`는 `(모듈, 리�
 ### 5.7 규범, 실행 엔진, 네이티브 치환 [잠정]
 
 - **Wasm 모듈이 규범이고, 레퍼런스 디코더는 표준 모듈마다 네이티브 구현을 갖는다.** 모듈 해시로 알아보고 치환한다
-  (aqr-decompress `known`). 순서: 해시를 아는 모듈은 네이티브, 모르는 모듈은 JIT, JIT가 없으면 인터프리터.
+  (aqr-decompress `known`, 실행 방식은 aqr-native `NATIVE`). 순서: 해시를 아는 모듈은 네이티브, 모르는 모듈은 JIT, JIT가
+  없으면 인터프리터. 엔진은 WAH가 기본이고 Wasmtime은 feature이다(aqr-wasmrt; Windows의 aqr.exe는 엔진을 링크하지 않고
+  인터프리터 blob을 쓴다).
 - 네이티브 구현은 같은 Rust 소스의 네이티브 빌드이다. 규범 wasm의 AOT 컴파일(wasm2c + C 컴파일러)도 방법이다(동치가
   거의 공짜이고 JIT가 금지된 플랫폼에서도 된다).
 - 모듈의 일부(핫스팟)만 호스트 함수로 치환하는 방식은 두지 않는다. 치환은 모듈 단위이다.
 - **적합성 수준 [제안].** 0: 모듈 없음(`slice`, `concat`만). 1: 사양 부록에 해시로 동결된 표준 모듈만(Wasm 엔진 없이
-  네이티브 구현만으로 디코더를 만들 수 있다). 2: 임의의 모듈. 수준은 정확성이 아니라 쓸 수 있는 속도의 보장이다.
+  네이티브 구현만으로 디코더를 만들 수 있다). 2: 임의의 모듈. 수준은 정확성이 아니라 쓸 수 있는 속도의 보장이다. 해시로
+  동결된 목록은 명세의 Modules Registry(registered module, shorthand block)로 생겼다. 자기 압축 해제 stub(aqr-sfx-shim)이
+  네이티브 blob과 인터프리터 blob으로 수준 1에 가까운 디코더이다.
 - **작성 지침.** 핫 루프에서 예측하기 어려운 분기는 산술식이나 `core::hint::select_unpredictable`로 쓴다. wasm32 백엔드가
   select를 분기로 바꾸기도 하고, 모든 엔진이 이를 되돌리지는 않는다.
 
@@ -490,6 +486,8 @@ module 블록과 resource 블록은 명세에 있다. `apply`는 `(모듈, 리�
 > | jpeg | 0.0163 | 0.0278 (1.71×) | 0.0245 (1.50×) | 0.0202 (1.24×) | 0.0226 (1.39×) |
 >
 > - 인터프리터는 WAH 20–34배, Pulley 24–31배. wasm2c + clang -O3는 1.05–1.32배로, wasm32라는 형식 자체의 비용에 가깝다.
+> - 실제 모듈(Windows x86-64, `aqr -d -Z wasm`, 표본 12개, 8f651ffc): Wasmtime 2140 ms, WAH 2225 ms(1.04배), WAH 인터프리터만
+>   32144 ms. 릴리스 방식(인터프리터 blob)으로는 WAH가 Wasmtime의 0.82–0.84배이고 blob이 12.34 → 2.49 MB라 WAH를 기본으로 했다.
 > - 남은 격차: flate는 wasm32 자체(32비트 주소 확장, 스필, 조건 비교)가 1.32배로 고르게 퍼져 있었다. jpeg는 엔진의 코드
 >   생성(부호 검사가 `csel` 대신 분기로 나오고 Cranelift가 되돌리지 못함)이 전부였고, 분기 없는 식으로 바꿔 Cranelift
 >   1.25배가 되었다. Cranelift의 인라이닝, Spectre 완화, opt level은 효과가 없었다.
@@ -537,25 +535,24 @@ module 블록과 resource 블록은 명세에 있다. `apply`는 `(모듈, 리�
    [committed, committed + W)까지 쓸 수 있는지. 부분형 모듈의 창을 task에 줄지(명세의 Issue; §5.5의 영역으로 풀 수 있는지 본다).
 2. **엔트리 식 모델의 검증.** 해결: 모든 재압축기가 컨테이너 없는 모듈(`formula`)로 쪼개졌고, 반례(aqr-png의 융합,
    다중 출력)는 §4.5와 §4.6이 다룬다.
-3. **블로킹의 구현.** WAH에 재시도 의미론을 넣을지(§5.4). 공유 간선, 다중 출력, 채널이 있으므로 WAH로 레퍼런스 경로를
-   만들려면 필요하다.
+3. **블로킹의 구현.** 해결: WAH도 인스턴스를 파이버(`call_async`)로 돌려 호스트 함수 안에서 기다린다(§5.4).
 4. **성능.**
-   - 명세 ABI(memory64 I/O 메모리) 그대로인 모듈의 WAH JIT 측정. memory64 접근은 가드 페이지를 켜도 경계 검사를 한다.
-   - SIMD가 이득인 모듈의 WAH JIT 측정(wasmtime에서는 LMS 3.6배).
+   - 모듈별 WAH JIT와 Wasmtime의 차이(표본 12개 전체로는 1.04배, §5.7). memory64 I/O 메모리 접근은 가드 페이지를 켜도
+     경계 검사를 한다. SIMD가 이득인 모듈(wasmtime에서 LMS 3.6배)을 따로 볼 것.
    - 부동소수점이 많은 모듈(psd, obj)에서 NaN 정규화의 비용.
    - 네이티브 구현의 동치를 무엇으로 시험할지(말뭉치의 차등 시험, 퍼징).
 5. **비용 선언의 형태.** "출력 바이트당 명령 수" 같은 힌트가 디코더의 실행 전 시간 예산 검증(§5.2)에 쓸 만한지.
    aqr-pdf의 선형 비용 모델은 표본 전체로 실측과 몇 % 이내, 파일별로 약 10% 흩어진다. aqr-git은 시계 없이 분해와 복원
    시간을 추정해(rms 9.3%, 14.2%) 입력 크기 × 10 ns/B 안에 들도록 다시 만들 zlib 스트림을 고르고, 예산에 넣는 *순서*
    (아끼는 바이트 / 시간)가 예산만큼 중요했다. 선언한다면 ns가 아니라 기계 독립 단위여야 한다.
-6. **표준 모듈과 리소스를 아카이브에서 생략할지.** 사양 부록에 바이트째로 동결한 경우에 한해. 장기 보존과 작은
-   아카이브의 오버헤드가 맞선다(작은 아카이브에서는 모듈 바이트가 지배적이다; 계획 중인 내장 사전은 `CLAUDE.md`).
-   적합성 수준 1(§5.7)의 목록과 그 버전을 어디에 적을지.
+6. **표준 모듈과 리소스를 아카이브에서 생략할지.** 모듈은 명세의 Modules Registry와 shorthand block으로 생략할 수
+   있게 되었다(명세 "Registered blocks"). 남은 것: 내장 사전의 데이터와 해시(명세의 Issue, `CLAUDE.md`의 계획), 리소스의
+   생략, 적합성 수준 1(§5.7)을 registry의 어느 판으로 정할지.
 7. **중첩 깊이와 노드망 크기의 상한.** 포맷마다 따로 정하고 있고(aqr-jpeg, aqr-psd 깊이 3, aqr-compress의 깊이),
    서로 다른 포맷의 중첩을 합산하는 장치와 import와 `patch` 사슬의 길이 상한이 없다. 모듈 *안*의 의존 사슬(aqr-git의
    delta 체인)도 있다.
-8. **명세의 남은 TODO.** 모듈의 식별 해시와 인터페이스 세부는 명세의 Issue로 남아 있다. 세그먼트 안의 앞 블록
-   역참조는 10번.
+8. **명세의 남은 TODO.** "Module execution" 절 전체가 잠정(Issue)이고, task에 작업 메모리 밖의 메모리와 부분형의 창을
+   보일지가 Issue로 남아 있다(1번). 세그먼트 안의 앞 블록 역참조는 10번.
 9. **다중 파일 변환.** 해결에 가깝다: aqr-git은 팩 하나(와 그 `.idx`/`.rev`)만 받고, 경로와 같은 내용은 아카이브의
    것이다. 다중 출력은 PNG 세트에 쓴다(§4.6). 아카이브 인코더가 어떤 파일 집합을 변환 하나에 넘길지는 포맷마다 정한다.
 10. **세그먼트 안의 역참조와 스트리밍 [제안].** 같은 세그먼트 안의 앞 파일을 base로 쓰는 경우(명세 "Formula data"의
@@ -566,5 +563,5 @@ module 블록과 resource 블록은 명세에 있다. `apply`는 `(모듈, 리�
 11. **작은 파일 여러 개를 프레임 하나에.** 지금은 non-leaf 블록 하나에 묶고 파일마다 `slice` 하나인 formula를 둔다
     (`aqr`의 solid 블록). 묶은 파일 목록을 직접 가리키는 leaf 형태를 따로 둘지는 열려 있다(§3의 실측).
 12. **랜덤 액세스 단위 상한의 기본값.** 파일을 하나씩 GB/s로 꺼내려면 16K 이하 + 사전, 대량 해제가 주라면 16M 이상이다
-    (§3). 하나의 기본값을 둘지, "랜덤 액세스 우선"과 "대량 해제 우선" 같은 프로파일을 둘지. `apply` 크기도 같은 상한에
-    묶이므로 모듈 출력에 대해서도 같은 측정이 필요하다.
+    (§3). 지금의 기본은 대량 해제 쪽이다: 공유 블록 16 MiB(aqr-compress `Options::block`), 사전은 기본으로 끔. "랜덤 액세스
+    우선" 프로파일을 둘지. `apply` 크기도 같은 상한에 묶이므로 모듈 출력에 대해서도 같은 측정이 필요하다.

@@ -30,7 +30,7 @@
 
 ## 그 밖
 
-- `--json`은 `-t`만 받는다. `-I`(디버깅용)와 압축·풀기의 요약(지금은 `--ipc`의 메시지와 `--stats=FILE.json`)은
+- `--json`은 `-t`(와 `--history`, `--diff`)만 받는다. `-I`(디버깅용)와 압축·풀기의 요약(지금은 `--ipc`의 메시지와 `--stats=FILE.json`)은
   필요해지면 더한다.
 
 - 셸 자동 완성(`--setup-autocomplete`): fish와 PowerShell의 스크립트는 그 셸에서 돌려 보지 않았다(이 Mac에 없다).

@@ -2,8 +2,8 @@
 
 An audit (2026-11-19) of the tests, by reading them and the code, listed the edge cases they
 missed, about 430 items (the list as it was: this file at 4016b556). They were taken in turn,
-each by its test first (failing, or pinning what is right), then the fix: what is below is
-what is left.
+each by its test first, then the fix; the history is in git. What is below is what is left
+(spot-checked against the code 2026-11-27: the tests and limits named below still exist).
 
 Decided: no fuel or epoch interruption in aqr-wasmrt (neither deterministic nor exact); a
 module that never ends hangs the decoder, by design for now.
@@ -113,6 +113,4 @@ To decide, in the spec:
   asks for well-formed only.
 
 ### Housekeeping
-- The SFX stub (aqr-sfx-shim) and the pack are to be rebuilt for a release (`cargo aqr` runs
-  pack.py).
 - The wwise pad-byte heuristic (wem.rs) is unchecked on real `.wem` files (none in the corpus).

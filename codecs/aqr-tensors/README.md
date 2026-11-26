@@ -256,7 +256,7 @@ Left:
   symbols of every segment in flight (17 of 16 MiB) and their words.
 - Files of tens of GB in an archive of several files: a file is one leaf there, its batch held
   whole (docs/streaming-encoder-design.md, step 7); written directly only alone, to a file
-  (not to standard output, encrypted, or mirrored).
+  (not to standard output or mirrored).
 - Within the archive, the streams coded are compressed at zstd's probe level all the same,
   whole, to see whether they would save (`How::Light`), which costs as many thread-seconds as
   the coding (most of it the long-distance matching: zstd -1 alone is 3.4 times faster). Not

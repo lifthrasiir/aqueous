@@ -108,7 +108,7 @@ Windows의 `Folding::Full`은 원래도 정규화를 접어서 비교하므로 �
   것(`Folding`이 `Exact`가 아닌 것: vfat, exFAT, HFS, 대소문자를 접는 ext4와 CIFS 등)은 뺀다.
   그런 파일시스템은 대개 UTF-8을 강제하기 때문이다.
 - `keep`이 왕복을 지키는 이유: 압축기는 WTF-8로 유효한 바이트를 `wtf-8` 이름으로
-  저장한다(`aqr-formula`의 `tree.rs`의 `name_from`). 그래서 Windows에서 압축하고 Linux에서
+  저장한다(`aqr-archive`의 `tree.rs`의 `name_from`). 그래서 Windows에서 압축하고 Linux에서
   풀었다가 다시 압축해 Windows에서 풀면 원래 이름이 된다.
 - `%XX`는 macOS가 HFS에서 하는 방식과 같다. 해석되지 않은 바이트와 함께 이름의 `%`와 0x5C도
   `%25`, `%5C`로 쓴다(`names::escaped`; Windows에서는 0x5C가
@@ -127,7 +127,6 @@ win.aqr: 3 names with lone surrogates written with U+FFFD (--bad-names)
 mac.aqr: 1204 names composed (NFC)
 ```
 
-
 ## 시나리오
 
 | 시나리오 | 기본값 | 명시 |
@@ -145,11 +144,12 @@ mac.aqr: 1204 names composed (NFC)
 
 ## 남은 것
 
+(제어 문자와 bidi override의 이스케이프는 끝났다: `crates/aqr/src/term.rs`.)
+
 - 명령줄로 고른 경로와 `--rename`은 아직 저장된 이름과 비교한다. ①③을 거친 이름과 비교하고,
   정규화를 무시하고 맞춰야 한다(macOS 터미널은 NFC로 입력하는데 아카이브의 이름은 NFD일 때).
 - 디코딩하면 길이가 는다(cp932의 2바이트가 UTF-8의 3바이트). Linux의 NAME_MAX(255바이트)를 넘는
   이름은 지금은 OS 오류로 실패한다.
-- 보고와 목록에서 제어 문자와 bidi override(U+202E)를 이스케이프하기.
 - 이름이 아닌 텍스트: ZIP 주석, tar의 uname/gname, 확장 속성의 이름.
 - 압축 쪽(aqr-pack): lone surrogate나 `raw` 이름을 ZIP과 tar에 쓰기, 옛 도구를 위한 cp932 ZIP
   (`--format zip -E shift_jis`).
