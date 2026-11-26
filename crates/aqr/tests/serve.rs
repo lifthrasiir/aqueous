@@ -422,3 +422,37 @@ fn encrypted() {
     s.end();
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// The journal points of an archive appended to (named versions), and the archive opened as it
+/// was at each: of the files there then.
+#[test]
+fn journal() {
+    let d = common::scratch("serve", "journal");
+    fs::create_dir_all(d.join("t")).unwrap();
+    fs::write(d.join("t/one.txt"), common::text(1, 3000)).unwrap();
+    aqr(&d, &["-q", "-j", "first", "-o", "t.aqr", "t"]);
+    fs::write(d.join("t/two.txt"), common::text(2, 2000)).unwrap();
+    aqr(&d, &["-q", "-a", "-j", "second", "t.aqr", "t/two.txt"]);
+    let mut s = Served::start(&[]);
+    let h = s.open(&d.join("t.aqr"))["archive"].clone();
+    let points = s.ask(json!({"journal": h}))["points"].as_array().unwrap().clone();
+    let labels: Vec<&str> = points.iter().map(|p| p["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["first", "second"]);
+    assert!(points[0]["shown"].as_str().is_some_and(|t| t.len() == 19), "{points:?}");
+    let names = |s: &mut Served, h: &Value| {
+        let mut n: Vec<String> = s.list(h, "").iter().map(|e| e["name"].as_str().unwrap().to_owned()).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(&mut s, &h), ["one.txt", "t"]);
+    let first = s.ask(json!({"open": d.join("t.aqr"), "at": points[0]["metadata"]}));
+    let f = first["archive"].clone();
+    assert_ne!(f, h, "{first}");
+    assert_eq!(names(&mut s, &f), ["one.txt"]);
+    assert!(s.read(&f, "one.txt", 1 << 20) == common::text(1, 3000));
+    // (the same point again: the same handle)
+    let again = s.ask(json!({"open": d.join("t.aqr"), "at": points[0]["metadata"]}));
+    assert_eq!(again["archive"], f);
+    s.end();
+    fs::remove_dir_all(&d).unwrap();
+}

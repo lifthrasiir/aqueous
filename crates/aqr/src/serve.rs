@@ -43,6 +43,10 @@
 //!   file evaluates its leaf, all of whose files are kept ([`Cache`]) for the reads after.
 //! - `close` (a handle): the handle given back; once all of a file's are, the archive is let go
 //!   of (the file no longer mapped) and its files kept dropped.
+//! - `journal` (a handle): its journal points (named versions, `--tag` and `-j`), in their order:
+//!   `metadata` (what `open` takes as `at`), `time` (milliseconds since the epoch), `shown` (in
+//!   local time, as `aqr` shows it) and `label`. `open` with `at` (a point's `metadata`) opens the
+//!   archive as it was at that point, as `--at` does: a handle of its own.
 //! - `progress` (a handle): how far the evaluation of its leaves is (`decompressed` and
 //!   `evaluated`, `[done, total]` bytes of what is evaluated at once, as the archive last told
 //!   it: of the evaluations at work of several requests, any of them), and `evaluating`, how many
@@ -144,6 +148,9 @@ struct Opened {
     handle: u64,
     path: PathBuf,
     identity: Identity,
+    /// The journal point it is opened as of (the offset of its segment's metadata block), where
+    /// it is not of all of its segments.
+    at: Option<usize>,
     // (dropped before what it borrows: fields are dropped in their order)
     archive: Archive<'static, 'static>,
     _leaked: Leaked,
@@ -208,7 +215,7 @@ enum At {
 
 impl Opened {
     /// Archive `path` opened, as handle `handle`.
-    fn open(handle: u64, path: &Path, passphrase: Option<&str>, a: &Args) -> Result<Opened, Value> {
+    fn open(handle: u64, path: &Path, passphrase: Option<&str>, at: Option<usize>, a: &Args) -> Result<Opened, Value> {
         let err = |e: &dyn std::fmt::Display| json!({"error": format!("{}: {e}", path.display())});
         let file = File::open(path).map_err(|e| err(&e))?;
         let identity = Identity::of(&file).map_err(|e| err(&e))?;
@@ -244,7 +251,10 @@ impl Opened {
                 }
             };
             let mut archive = match (payload.of_tree(), leaked.sealed) {
-                (true, _) => aqr_archive::open_indexed(payload, runner, a.opt.threads),
+                (true, _) => match at {
+                    Some(m) => aqr_archive::open_indexed_upto(payload, runner, a.opt.threads, m),
+                    None => aqr_archive::open_indexed(payload, runner, a.opt.threads),
+                },
                 (false, Some(d)) => aqr_archive::open_decrypting(d, runner),
                 (false, None) => aqr_archive::open(bytes, runner),
             }
@@ -284,6 +294,7 @@ impl Opened {
             handle,
             path: path.to_owned(),
             identity,
+            at,
             archive,
             _leaked: leaked,
             view,
@@ -579,7 +590,7 @@ impl Server<'_> {
         handles.open.get(&h).map(|(o, _)| o.clone()).ok_or_else(|| format!("{h}: no archive open so"))
     }
 
-    fn open(&self, path: &str, passphrase: Option<&str>) -> Result<Value, Value> {
+    fn open(&self, path: &str, passphrase: Option<&str>, at: Option<usize>) -> Result<Value, Value> {
         let path = Path::new(path);
         // (as given: an archive opened by another path is opened again, to be closed apart)
         let now = File::open(path).and_then(|f| Identity::of(&f));
@@ -587,7 +598,7 @@ impl Server<'_> {
         {
             let mut handles = self.handles.lock().unwrap();
             for (o, refs) in handles.open.values_mut() {
-                if o.path == path {
+                if o.path == path && o.at == at {
                     match &now {
                         Ok(i) if *i == o.identity => {
                             *refs += 1;
@@ -603,7 +614,7 @@ impl Server<'_> {
             handles.next += 1;
             handles.next
         };
-        let o = Arc::new(Opened::open(handle, path, passphrase, self.args)?);
+        let o = Arc::new(Opened::open(handle, path, passphrase, at, self.args)?);
         let v = self.opened_value(&o, changed);
         self.handles.lock().unwrap().open.insert(handle, (o, 1));
         Ok(v)
@@ -760,7 +771,7 @@ impl Server<'_> {
         let plain = |r: Result<Value, String>| vec![(r.unwrap_or_else(|e| json!({"error": e})), Vec::new())];
         if let Some(p) = v.get("open") {
             let r = match p.as_str() {
-                Some(p) => self.open(p, v["passphrase"].as_str()),
+                Some(p) => self.open(p, v["passphrase"].as_str(), v["at"].as_u64().map(|m| m as usize)),
                 None => Err(json!({"error": "open: not a path"})),
             };
             return vec![(r.unwrap_or_else(|e| e), Vec::new())];
@@ -779,6 +790,24 @@ impl Server<'_> {
         }
         if v.get("close").is_some() {
             return plain(self.close(v));
+        }
+        if v.get("journal").is_some() {
+            return plain(self.opened(v, "journal").map(|o| {
+                let points: Vec<Value> = o
+                    .archive
+                    .journal()
+                    .iter()
+                    .map(|p| {
+                        json!({
+                            "metadata": p.metadata,
+                            "time": p.time,
+                            "shown": crate::journal::show(p.time),
+                            "label": p.label,
+                        })
+                    })
+                    .collect();
+                json!({"points": points})
+            }));
         }
         if v.get("progress").is_some() {
             return plain(self.opened(v, "progress").map(|o| {
