@@ -26,6 +26,11 @@ object is released, for the server to close it a minute later (and to end, idle)
   the user's language), the others by properties of ours named by aqr-l10n (`folder.col_*`).
   A folder keeps what the server told of the entries it listed, for no call a cell.
 - Icons: of the name's extension (`SHCreateFileExtractIconW`).
+- Thumbnails and the preview pane, by the system's handlers of a file's type (`src/handlers.rs`):
+  a file's associations (`IQueryAssociations`: its extension, `SystemFileAssociations` of it and
+  of its perceived type, `*`), through which the preview pane finds its handler (reading the
+  file by `BHID_Stream`); a thumbnail by the type's provider, given the file's bytes (up to 64
+  MiB) as a stream in memory (a provider may read it from threads of its own).
 - Copying out (paste, drag): the shell's data object of the items' ID lists
   (`SHCreateDataObject`), which the copy engine reads as folders and streams; for other
   programs' drops (a browser's upload, a mail's attachment), its inner object (`src/data.rs`)

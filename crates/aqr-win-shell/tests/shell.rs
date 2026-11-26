@@ -25,17 +25,19 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, REG_SZ, Reg
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::Common::SHELLDETAILS;
 use windows::Win32::UI::Shell::{
+    ASSOCF_NONE, ASSOCSTR_SHELLEXTENSION, CMINVOKECOMMANDINFO, IContextMenu, IQueryAssociations, IThumbnailProvider,
+};
+use windows::Win32::UI::Shell::{
     BHID_EnumItems, BHID_SFObject, BHID_Stream, IEnumShellItems, IShellFolder2, IShellItem, IShellItem2, IShellView,
     SHCreateItemFromParsingName, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
 use windows::Win32::UI::Shell::{CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FILEDESCRIPTORW};
-use windows::Win32::UI::Shell::{CMINVOKECOMMANDINFO, IContextMenu};
 use windows::Win32::UI::Shell::{FILEOPERATION_FLAGS, FileOperation, IFileOperation};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GET_MENU_DEFAULT_ITEM_FLAGS, GetMenuDefaultItem, GetMenuItemCount, GetMenuItemID,
 };
-use windows::core::PSTR;
 use windows::core::{GUID, HSTRING, Interface};
+use windows::core::{PSTR, PWSTR};
 
 /// The directory of the binaries built (of this test's, `deps` in it).
 fn built() -> PathBuf {
@@ -49,6 +51,16 @@ fn built() -> PathBuf {
         );
     }
     dir
+}
+
+/// A process killed as it is dropped (a test failed: not left running).
+struct Killed(std::process::Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        _ = self.0.kill();
+        _ = self.0.wait();
+    }
 }
 
 fn braced(g: &GUID) -> String {
@@ -173,6 +185,25 @@ fn browsed() {
     std::fs::write(d.join("t/sub/big_files/p.txt"), b"page").unwrap();
     let o = Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", "t.aqrtest", "t"]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // (a picture of 2x2 pixels, a BMP)
+    std::fs::create_dir_all(d.join("img")).unwrap();
+    let mut bmp = Vec::new();
+    bmp.extend(b"BM");
+    bmp.extend(70u32.to_le_bytes());
+    bmp.extend([0; 4]);
+    bmp.extend(54u32.to_le_bytes());
+    bmp.extend(40u32.to_le_bytes());
+    bmp.extend(2i32.to_le_bytes());
+    bmp.extend(2i32.to_le_bytes());
+    bmp.extend(1u16.to_le_bytes());
+    bmp.extend(24u16.to_le_bytes());
+    bmp.extend([0; 24]);
+    bmp.extend([0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0]);
+    std::fs::write(d.join("img/p.bmp"), &bmp).unwrap();
+    std::fs::write(d.join("img/n.txt"), b"text").unwrap();
+    let o =
+        Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", "img.aqrtest", "img"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let o = Command::new(bin.join("aqr.exe"))
         .current_dir(&d)
         .env("AQR_PASS", "sesame")
@@ -186,14 +217,24 @@ fn browsed() {
     let dll = exe.with_file_name("aqr_shell.dll");
     assert!(dll.is_file(), "{}: not built", dll.display());
     let _registered = Registered::new(&dll);
-    let mut server = Command::new(bin.join("aqr-win.exe"))
-        .args(["--serve", &braced(&TEST_SERVER)])
-        .env("AQR", bin.join("aqr.exe"))
-        .env("AQR_SERVE_IDLE", "0.2,1")
-        .env("AQR_SERVE_TEST_PASSPHRASE", "sesame")
-        .env("LOCALAPPDATA", d.join("local"))
-        .spawn()
-        .unwrap();
+    // (a class of this run's alone, which the library is told: a server left of a run failed
+    // takes nothing of this one)
+    let class = GUID::from_u128(TEST_SERVER.to_u128() ^ (std::process::id() as u128) << 64);
+    // SAFETY: the test's own environment, before the library reads it
+    unsafe { std::env::set_var("AQR_SHELL_TEST_SERVER", braced(&class)) };
+    let mut server = Killed(
+        Command::new(bin.join("aqr-win.exe"))
+            .args(["--serve", &braced(&class)])
+            .env("AQR", bin.join("aqr.exe"))
+            .env("AQR_SERVE_IDLE", "0.2,1")
+            .env("AQR_SERVE_TEST_PASSPHRASE", "sesame")
+            // (not this test's output: a server left of a test failed holds it open no longer)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .env("LOCALAPPDATA", d.join("local"))
+            .spawn()
+            .unwrap(),
+    );
     // (once it has registered its class)
     std::thread::sleep(Duration::from_millis(500));
     let archive = d.join("t.aqrtest");
@@ -506,6 +547,47 @@ fn browsed() {
             assert!(e.unwrap().Next(&mut got, None).is_ok() && !got[0].is_null());
             windows::Win32::UI::Shell::ILFree(Some(got[0]));
         }
+        // a picture's thumbnail, by its type's provider; and the associations of its type (which
+        // the preview pane finds its handler by)
+        // SAFETY: COM calls of the shell's objects
+        unsafe {
+            let f: IShellFolder2 = item(&d.join("img.aqrtest")).BindToHandler(None, &BHID_SFObject).unwrap();
+            let mut p = [std::ptr::null_mut()];
+            f.ParseDisplayName(
+                HWND::default(),
+                None,
+                windows::core::w!("p.bmp"),
+                None,
+                &mut p[0],
+                std::ptr::null_mut(),
+            )
+            .unwrap();
+            let t: IThumbnailProvider = f.GetUIObjectOf(HWND::default(), &[p[0] as *const _], None).unwrap();
+            let (mut bmp, mut alpha) = (Default::default(), Default::default());
+            t.GetThumbnail(32, &mut bmp, &mut alpha).unwrap();
+            assert!(!bmp.is_invalid());
+            _ = windows::Win32::Graphics::Gdi::DeleteObject(bmp.into());
+            // (text's preview handler, which every Windows has; pictures are previewed by
+            // Explorer itself)
+            let mut n = [std::ptr::null_mut()];
+            f.ParseDisplayName(
+                HWND::default(),
+                None,
+                windows::core::w!("n.txt"),
+                None,
+                &mut n[0],
+                std::ptr::null_mut(),
+            )
+            .unwrap();
+            let a: IQueryAssociations = f.GetUIObjectOf(HWND::default(), &[n[0] as *const _], None).unwrap();
+            let mut buf = [0u16; 64];
+            let mut len = buf.len() as u32;
+            let preview = windows::core::w!("{8895b1c6-b41f-4c1c-a562-0d564250836f}");
+            a.GetString(ASSOCF_NONE, ASSOCSTR_SHELLEXTENSION, preview, Some(PWSTR(buf.as_mut_ptr())), &mut len)
+                .unwrap();
+            windows::Win32::UI::Shell::ILFree(Some(n[0]));
+            windows::Win32::UI::Shell::ILFree(Some(p[0]));
+        }
         // (not there: the shell's parse fails)
         // SAFETY: a path, parsed by the shell
         assert!(
@@ -523,9 +605,9 @@ fn browsed() {
     }
     // (its objects let go of: the server ends, idle)
     let start = Instant::now();
-    while server.try_wait().unwrap().is_none() {
+    while server.0.try_wait().unwrap().is_none() {
         if start.elapsed() > Duration::from_secs(10) {
-            _ = server.kill();
+            _ = server.0.kill();
             panic!("the server stayed: an object of it not let go of");
         }
         std::thread::sleep(Duration::from_millis(50));

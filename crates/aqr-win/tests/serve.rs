@@ -21,6 +21,16 @@ const CLSID: GUID = GUID::from_u128(0x5e1f0b6a_92c4_4d1e_a7f3_0c2b9d8e7a61);
 const IID_IDISPATCH: GUID = GUID::from_u128(0x00020400_0000_0000_c000_000000000046);
 const IID_ISTREAM: GUID = GUID::from_u128(0x0000000c_0000_0000_c000_000000000046);
 
+/// A process killed as it is dropped (a test failed: not left running, its class registered).
+struct Killed(std::process::Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        _ = self.0.kill();
+        _ = self.0.wait();
+    }
+}
+
 fn aqr() -> PathBuf {
     let aqr = Path::new(env!("CARGO_BIN_EXE_aqr-win")).with_file_name("aqr.exe");
     assert!(aqr.is_file(), "{}: not built (cargo rt -p aqr -p aqr-win)", aqr.display());
@@ -216,14 +226,19 @@ fn served() {
             .unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
-    let mut server = Command::new(env!("CARGO_BIN_EXE_aqr-win"))
-        .args(["--serve", "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A61}"])
-        .env("AQR", &aqr)
-        .env("AQR_SERVE_IDLE", "0.2,2")
-        .env("LOCALAPPDATA", d.join("local"))
-        .env("AQR_SERVE_TEST_PASSPHRASE", "sesame")
-        .spawn()
-        .unwrap();
+    let mut server = Killed(
+        Command::new(env!("CARGO_BIN_EXE_aqr-win"))
+            .args(["--serve", "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A61}"])
+            .env("AQR", &aqr)
+            .env("AQR_SERVE_IDLE", "0.2,2")
+            .env("LOCALAPPDATA", d.join("local"))
+            .env("AQR_SERVE_TEST_PASSPHRASE", "sesame")
+            // (not this test's output: a server left of a test failed holds it open no longer)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     // SAFETY: this thread's COM, and the objects of the server through it
     unsafe {
         assert!(CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) >= 0);
@@ -305,11 +320,11 @@ fn served() {
     }
     // (idle: the server ends)
     let start = Instant::now();
-    while server.try_wait().unwrap().is_none() {
+    while server.0.try_wait().unwrap().is_none() {
         assert!(start.elapsed() < Duration::from_secs(10), "the server stayed");
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(server.wait().unwrap().success());
+    assert!(server.0.wait().unwrap().success());
     // (what was opened, let go of as the server ended)
     assert!(std::fs::read_dir(d.join(r"local\Aqueous\Open")).unwrap().next().is_none());
     std::fs::remove_dir_all(&d).unwrap();
@@ -322,13 +337,15 @@ fn superseded() {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
     let clsid = "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A62}";
     let key: Vec<u16> = format!(r"Software\Classes\CLSID\{clsid}\LocalServer32").encode_utf16().chain([0]).collect();
-    let mut server = Command::new(env!("CARGO_BIN_EXE_aqr-win"))
-        .args(["--serve", clsid])
-        .env("AQR_SERVE_IDLE", "0.2,600")
-        .spawn()
-        .unwrap();
+    let mut server = Killed(
+        Command::new(env!("CARGO_BIN_EXE_aqr-win"))
+            .args(["--serve", clsid])
+            .env("AQR_SERVE_IDLE", "0.2,600")
+            .spawn()
+            .unwrap(),
+    );
     std::thread::sleep(Duration::from_secs(3));
-    assert!(server.try_wait().unwrap().is_none(), "ended though idle for less than its time");
+    assert!(server.0.try_wait().unwrap().is_none(), "ended though idle for less than its time");
     let other: Vec<u16> = r#""C:\elsewhere\aqr-win.exe" --serve"#.encode_utf16().chain([0]).collect();
     // SAFETY: a key of the user's, and a string ended by 0
     let r = unsafe {
@@ -344,11 +361,11 @@ fn superseded() {
     assert_eq!(r, 0);
     let start = Instant::now();
     let ended = loop {
-        if let Some(s) = server.try_wait().unwrap() {
+        if let Some(s) = server.0.try_wait().unwrap() {
             break Some(s);
         }
         if start.elapsed() > Duration::from_secs(10) {
-            _ = server.kill();
+            _ = server.0.kill();
             break None;
         }
         std::thread::sleep(Duration::from_millis(50));

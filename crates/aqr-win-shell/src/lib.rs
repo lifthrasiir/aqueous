@@ -13,6 +13,7 @@ mod client;
 mod columns;
 mod data;
 pub mod folder;
+mod handlers;
 mod menu;
 pub mod pidl;
 
@@ -130,7 +131,12 @@ pub unsafe extern "system" fn DllGetClassObject(
         match clsid {
             folder::FOLDER => {}
             folder::TEST_FOLDER => {
-                client::set_server(folder::TEST_SERVER);
+                // (of the test's run, where it tells one)
+                let class = std::env::var("AQR_SHELL_TEST_SERVER")
+                    .ok()
+                    .and_then(|c| GUID::try_from(c.trim_matches(['{', '}'])).ok())
+                    .unwrap_or(folder::TEST_SERVER);
+                client::set_server(class);
                 TESTING.store(true, Ordering::Relaxed);
             }
             _ => return CLASS_E_CLASSNOTAVAILABLE,

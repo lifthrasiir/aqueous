@@ -471,3 +471,23 @@ pub fn progress(path: &Path, at: &str) -> windows::core::Result<(u64, u64)> {
 pub fn cancel(path: &Path, at: &str) -> windows::core::Result<()> {
     with(path, |a| json(a, "Cancel", &[at]).map(drop))
 }
+
+/// The bytes of file `at` of archive `path` (at most `max`: none past them).
+pub fn read_all(path: &Path, at: &str, max: u64) -> windows::core::Result<Vec<u8>> {
+    with(path, |a| match call(a, "OpenStream", &[at])? {
+        Got::Object(o) => {
+            let s: IStream = o.cast()?;
+            let (mut all, mut buf) = (Vec::new(), vec![0u8; 1 << 20]);
+            loop {
+                let mut n = 0;
+                // SAFETY: a buffer of its length
+                unsafe { s.Read(buf.as_mut_ptr() as *mut _, buf.len() as u32, Some(&mut n)).ok()? };
+                if n == 0 || all.len() as u64 >= max {
+                    return Ok(all);
+                }
+                all.extend_from_slice(&buf[..n as usize]);
+            }
+        }
+        Got::Text(_) => Err(E_FAIL.into()),
+    })
+}

@@ -16,10 +16,10 @@ use windows::Win32::UI::Shell::{
     ASSOCCLASS_FOLDER, ASSOCIATIONELEMENT, AssocCreateForClasses, DEFCONTEXTMENU, IContextMenu, IContextMenuCB,
     IEnumExtraSearch, IEnumIDList, IEnumIDList_Impl, IExtractIconW, ILClone, ILCombine, ILFree, IPersistFolder_Impl,
     IPersistFolder2_Impl, IPersistFolder3, IPersistFolder3_Impl, IPersistIDList, IPersistIDList_Impl,
-    IQueryAssociations, IShellFolder_Impl, IShellFolder2, IShellFolder2_Impl, IShellView, PERSIST_FOLDER_TARGET_INFO,
-    SFV_CREATE, SHCNE_UPDATEDIR, SHCNF_IDLIST, SHChangeNotify, SHCreateDataObject, SHCreateDefaultContextMenu,
-    SHCreateFileExtractIconW, SHCreateShellFolderView, SHGDN_FORPARSING, SHGDN_INFOLDER, SHGDNF, SHGetNameFromIDList,
-    SHStrDupW, SIGDN_FILESYSPATH,
+    IQueryAssociations, IShellFolder_Impl, IShellFolder2, IShellFolder2_Impl, IShellView, IThumbnailProvider,
+    PERSIST_FOLDER_TARGET_INFO, SFV_CREATE, SHCNE_UPDATEDIR, SHCNF_IDLIST, SHChangeNotify, SHCreateDataObject,
+    SHCreateDefaultContextMenu, SHCreateFileExtractIconW, SHCreateShellFolderView, SHGDN_FORPARSING, SHGDN_INFOLDER,
+    SHGDNF, SHGetNameFromIDList, SHStrDupW, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows::core::{GUID, HRESULT, HSTRING, IUnknownImpl, Interface, PCWSTR, Ref, implement};
@@ -511,6 +511,18 @@ impl IShellFolder_Impl for Folder_Impl {
                     let x: IExtractIconW =
                         SHCreateFileExtractIconW(PCWSTR(w.as_ptr()), columns::file_attributes(&item).0)?;
                     return x.query(riid, ppv).ok();
+                }
+                // (a file's: the associations of its type, its thumbnail by the type's provider)
+                if cidl == 1
+                    && (iid == IQueryAssociations::IID || iid == IThumbnailProvider::IID)
+                    && let Some(item) = pidl::first(*apidl).filter(|i| !i.is_dir())
+                {
+                    if iid == IQueryAssociations::IID {
+                        return crate::handlers::associations(&item)?.query(riid, ppv).ok();
+                    }
+                    let (archive, dir) = self.at()?;
+                    let t = crate::handlers::thumbnail(archive.path(), &joined(&dir, &item.name), &item)?;
+                    return t.query(riid, ppv).ok();
                 }
                 if iid == IContextMenu::IID && cidl > 0 {
                     let ids = std::slice::from_raw_parts(apidl, cidl as usize);
