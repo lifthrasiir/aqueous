@@ -1,9 +1,11 @@
-//! Packs `aqr.exe` and `aqr-win.exe` of the same target's `dist` (`target/dist`, or
+//! Packs `aqr.exe`, `aqr-win.exe` and `aqr-shell.dll` (aqr-win-shell's library, which cargo
+//! names `aqr_shell.dll`) of the same target's `dist` (`target/dist`, or
 //! `target/x86_64-win7-windows-msvc/dist` of `cargo win7`; or of the directory
 //! `AQR_WIN_INSTALL_FROM` names) into the payload (`src/payload.rs`), checked by unpacking it; and
-//! embeds the manifest and the icon. Where the two are not there, the payload is empty and the
+//! embeds the manifest and the icon. Where they are not there, the payload is empty and the
 //! installer says so: building them is up to whoever builds the installer (`cargo +NIGHTLY win7
-//! -p aqr -p aqr-win`, as the release does, or `cargo build --profile dist -p aqr -p aqr-win`).
+//! -p aqr -p aqr-win -p aqr-win-shell`, as the release does, or `cargo build --profile dist` of
+//! the same).
 //! The version (aqr-version) goes in the resources and is `env!("AQR_VERSION")`.
 
 #[path = "src/payload.rs"]
@@ -17,7 +19,13 @@ use aqr_exe::arch::x86;
 use aqr_exe::format::pe;
 use aqr_exe::reloc;
 
-const FILES: [&str; 2] = ["aqr.exe", "aqr-win.exe"];
+/// The files installed, each with the names it is found by in the directory packed from.
+const FILES: [(&str, &[&str]); 3] = [
+    ("aqr.exe", &["aqr.exe"]),
+    ("aqr-win.exe", &["aqr-win.exe"]),
+    // (cargo's name of the library, but where it is renamed already)
+    ("aqr-shell.dll", &["aqr-shell.dll", "aqr_shell.dll"]),
+];
 
 /// zstd's level for every frame.
 const LEVEL: i32 = 19;
@@ -41,15 +49,18 @@ fn main() {
 
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("payload.bin");
     let from = source();
-    for name in FILES {
-        println!("cargo:rerun-if-changed={}", from.join(name).display());
+    let names: Vec<&str> = FILES.iter().map(|f| f.0).collect();
+    for (_, found) in FILES {
+        found.iter().for_each(|n| println!("cargo:rerun-if-changed={}", from.join(n).display()));
     }
-    let files: Option<Vec<(&str, Vec<u8>)>> =
-        FILES.iter().map(|&name| Some((name, std::fs::read(from.join(name)).ok()?))).collect();
+    let files: Option<Vec<(&str, Vec<u8>)>> = FILES
+        .iter()
+        .map(|&(name, found)| Some((name, found.iter().find_map(|n| std::fs::read(from.join(n)).ok())?)))
+        .collect();
     let Some(files) = files else {
         println!(
-            "cargo:warning=no {} in {}: the installer is built without them (cargo +NIGHTLY win7 -p aqr -p aqr-win)",
-            FILES.join(" and "),
+            "cargo:warning=no {} in {}: the installer is built without them (cargo +NIGHTLY win7 -p aqr -p aqr-win -p aqr-win-shell)",
+            names.join(", "),
             from.display()
         );
         std::fs::write(&out, b"").unwrap();
@@ -62,7 +73,7 @@ fn main() {
     let raw: usize = files.iter().map(|f| f.1.len()).sum();
     println!(
         "cargo:warning=packed {} from {}: {raw} -> {} bytes in {:.1} s",
-        FILES.join(" and "),
+        names.join(", "),
         from.display(),
         packed.len(),
         start.elapsed().as_secs_f64()

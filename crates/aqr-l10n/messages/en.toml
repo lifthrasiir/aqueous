@@ -161,6 +161,8 @@ not_replaced = "{path} is not replaced: {error}"
 not_run = "aqr-win.exe does not run: {error}"
 
 # aqr-mac.
+restart_explorer = "Explorer still runs the earlier version of the folders of archives: it takes this one once you sign out and in again, or Explorer is restarted."
+
 [mac]
 extract_into = "Extract into the folder all the same? Its files of the same names are replaced."
 extract = "Extract"

@@ -1,13 +1,15 @@
-//! The installer of Aqueous on Windows, for the user alone (no administrator needed): `aqr.exe`
-//! and `aqr-win.exe` into `%LOCALAPPDATA%\Programs\Aqueous`, then `aqr-win --install`, which
-//! registers the verbs in Explorer, the folder on the user's `PATH` and the uninstaller
+//! The installer of Aqueous on Windows, for the user alone (no administrator needed): `aqr.exe`,
+//! `aqr-win.exe` and `aqr-shell.dll` (the archives browsed in Explorer as folders) into
+//! `%LOCALAPPDATA%\Programs\Aqueous`, then `aqr-win --install`, which registers the verbs in
+//! Explorer, the folder of archives, the folder on the user's `PATH` and the uninstaller
 //! (`aqr-win --uninstall`, in Settings' Apps).
 //!
 //! usage: aqr-win-install [--quiet]
 //!
-//! The two are carried in the binary (`payload`, packed by `build.rs` from `target/dist`).
-//! Files there already are replaced; one running is renamed aside first (`*.old`, deleted by
-//! the next install or the uninstall).
+//! They are carried in the binary (`payload`, packed by `build.rs` from `target/dist`). Files
+//! there already are replaced; one running is renamed aside first (`*.old`, deleted by the next
+//! install or the uninstall): of `aqr-shell.dll`, held by Explorer, the one Explorer runs until it
+//! is started again (as the dialog says, of an update).
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -53,7 +55,7 @@ fn main() -> std::process::ExitCode {
         return ExitCode::SUCCESS;
     }
     match install(&dir) {
-        Ok(()) => {
+        Ok(held) => {
             if !quiet {
                 let done = l::done(
                     shell::compress(),
@@ -71,6 +73,11 @@ fn main() -> std::process::ExitCode {
                     ),
                     false => done,
                 };
+                // (an update: Explorer runs the folder of archives it had until it is started again)
+                let done = match held {
+                    true => format!("{done}\n\n{}", l::restart_explorer()),
+                    false => done,
+                };
                 ui::message(ui::Icon::Information, l::installed(), &done);
             }
             ExitCode::SUCCESS
@@ -82,15 +89,23 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Installs into `dir`: whether a file there was held (renamed aside, as Explorer holds the
+/// shell extension it loaded).
 #[cfg(windows)]
-fn install(dir: &std::path::Path) -> Result<(), String> {
+fn install(dir: &std::path::Path) -> Result<bool, String> {
     use aqr_l10n::install as l;
 
     if PAYLOAD.is_empty() {
         return Err(l::empty().into());
     }
     let files = payload::unpack(PAYLOAD).map_err(l::damaged)?;
+    // (the servers of the archives browsed in Explorer, of the installation there, ended first:
+    // else they serve on as they were, their files renamed aside)
+    if quit_servers() {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
     std::fs::create_dir_all(dir).map_err(|e| l::not_made(dir.display(), e))?;
+    let mut held = false;
     for f in &files {
         let to = dir.join(&f.name);
         let old = dir.join(format!("{}.old", f.name));
@@ -104,13 +119,33 @@ fn install(dir: &std::path::Path) -> Result<(), String> {
                 let _ = std::fs::remove_file(&new);
                 return Err(l::not_replaced(to.display(), e));
             }
+            held |= f.name.ends_with(".dll");
         }
     }
     let out = std::process::Command::new(dir.join("aqr-win.exe")).arg("--install").output().map_err(l::not_run)?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    Ok(())
+    Ok(held)
+}
+
+/// Has every server of the archives browsed (`aqr-win --serve`) of the session end at once, by
+/// the event they watch (crates/aqr-win/src/serve.rs, `QUIT`): whether there was one.
+#[cfg(windows)]
+fn quit_servers() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
+    let name: Vec<u16> = r"Local\Aqueous.Serve.Quit".encode_utf16().chain([0]).collect();
+    // SAFETY: a name ended by 0; the event set and its handle closed
+    unsafe {
+        let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if h.is_null() {
+            return false;
+        }
+        SetEvent(h);
+        CloseHandle(h);
+    }
+    true
 }
 
 /// Task dialogs (common controls 6, which the manifest asks for) with this program's icon.

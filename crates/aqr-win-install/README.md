@@ -1,17 +1,19 @@
 # aqr-win-install
 
-The installer of Aqueous on Windows: `aqr.exe` and `aqr-win.exe` carried in one program, installed
-for the user alone (no administrator needed) into `%LOCALAPPDATA%\Programs\Aqueous`.
+The installer of Aqueous on Windows: `aqr.exe`, `aqr-win.exe` and `aqr-shell.dll` (the archives
+browsed in Explorer as folders, crates/aqr-win-shell) carried in one program, installed for the
+user alone (no administrator needed) into `%LOCALAPPDATA%\Programs\Aqueous`.
 
 ```sh
-cargo build --profile dist -p aqr -p aqr-win    # first: the installer carries these two
+cargo build --profile dist -p aqr -p aqr-win -p aqr-win-shell   # first: the installer carries these
 cargo build --profile dist -p aqr-win-install   # target/dist/aqr-win-install.exe
 aqr-win-install [--quiet]                       # asks first, unless --quiet
 ```
 
 `build.bat` runs the two builds as the release workflow does.
 
-- `build.rs` packs `target/dist/{aqr,aqr-win}.exe` (`AQR_WIN_INSTALL_FROM` names another
+- `build.rs` packs `target/dist/{aqr,aqr-win}.exe` and `aqr_shell.dll` (as `aqr-shell.dll`;
+  `AQR_WIN_INSTALL_FROM` names another
   directory, relative to the workspace's root), checks the payload by unpacking it, and is run
   again when they change. Without them the installer is built anyway, saying so, and tells
   whoever runs it that it carries nothing.
@@ -28,7 +30,9 @@ aqr-win-install [--quiet]                       # asks first, unless --quiet
   The uninstaller takes all that away, then the files; `aqr-win.exe` itself and the folder are
   deleted by `cmd.exe` once it has exited.
 - Installing over an installation replaces its files; one running is renamed aside first
-  (`*.old`, deleted by the next install or the uninstall).
+  (`*.old`, deleted by the next install or the uninstall). `aqr-shell.dll`, which Explorer holds
+  once it loaded it, is replaced so too, and Explorer runs the one it had until it is started
+  again, as the installer then says.
 - The manifest asks for no elevation (`asInvoker`): Windows would otherwise ask for an
   administrator for a program named so.
 

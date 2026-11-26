@@ -31,7 +31,7 @@ name: release
 # (v0.0.20261031 -> 20261031) as the first releases' assets were named; scripts/release-env.sh
 # tells, and fails on a tag not of a version:
 #   aqr-STEM.exe                  Windows 7 on, x86_64 (cargo +NIGHTLY win7; packed by UPX)
-#   aqr-STEM-win-install.exe      the installer, aqr.exe and aqr-win.exe (crates/aqr-win-install)
+#   aqr-STEM-win-install.exe      the installer: aqr.exe, aqr-win.exe, aqr-shell.dll (crates/aqr-win-install)
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
 #   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on)
 #   aqr-STEM-linux-aarch64.tar.xz
@@ -160,7 +160,7 @@ jobs:
         if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr -p aqr-win
+      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr -p aqr-win -p aqr-win-shell
       - run: git diff --exit-code -- Cargo.lock
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -168,8 +168,10 @@ jobs:
           path: |
             target/x86_64-win7-windows-msvc/dist/aqr.exe
             target/x86_64-win7-windows-msvc/dist/aqr-win.exe
+            target/x86_64-win7-windows-msvc/dist/aqr_shell.dll
             target/x86_64-win7-windows-msvc/dist/aqr.pdb
             target/x86_64-win7-windows-msvc/dist/aqr_win.pdb
+            target/x86_64-win7-windows-msvc/dist/aqr_shell.pdb
           if-no-files-found: error
 
   windows-release:
@@ -227,7 +229,8 @@ jobs:
           $aqr -c -q --format sfx -o smoke.exe smoke
           ./smoke.exe smoke-out
           diff -r smoke smoke-out
-      # build.rs packs target/x86_64-win7-windows-msvc/dist/{aqr,aqr-win}.exe, as above.
+      # build.rs packs target/x86_64-win7-windows-msvc/dist/{aqr,aqr-win}.exe and aqr_shell.dll
+      # (installed as aqr-shell.dll), as above.
       - run: cargo "+$AQR_NIGHTLY" win7 -p aqr-win-install
       - run: git diff --exit-code -- Cargo.lock
       - run: |
@@ -253,6 +256,7 @@ jobs:
           path: |
             target/x86_64-win7-windows-msvc/dist/aqr.pdb
             target/x86_64-win7-windows-msvc/dist/aqr_win.pdb
+            target/x86_64-win7-windows-msvc/dist/aqr_shell.pdb
             target/x86_64-win7-windows-msvc/dist/aqr_win_install.pdb
           if-no-files-found: error
 

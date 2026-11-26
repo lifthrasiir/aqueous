@@ -142,6 +142,7 @@ not_made = "{path} 폴더를 만들지 못했습니다: {error}"
 not_written = "{path} 파일을 쓰지 못했습니다: {error}"
 not_replaced = "{path} 파일을 바꾸지 못했습니다: {error}"
 not_run = "aqr-win.exe를 실행하지 못했습니다: {error}"
+restart_explorer = "탐색기는 아직 이전 버전의 아카이브 폴더 기능을 쓰고 있습니다. 로그아웃했다가 다시 로그인하거나 탐색기를 다시 시작하면 이 버전을 씁니다."
 
 [mac]
 extract_into = "그래도 이 폴더에 압축을 풀까요? 이름이 같은 파일은 덮어씁니다."

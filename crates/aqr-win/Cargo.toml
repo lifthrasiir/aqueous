@@ -14,7 +14,7 @@ serde_json.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_Registry"] }
+windows-sys = { workspace = true, features = ["Win32_System_Registry", "Win32_System_Threading"] }
 
 [build-dependencies]
 aqr-l10n.workspace = true

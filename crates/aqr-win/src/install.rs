@@ -8,8 +8,12 @@
 //!   error, which the installer shows.
 //! - `--uninstall`: all that taken away, and the files: those of the folder that the installer
 //!   wrote, then this program and the folder (left empty) by `cmd.exe` once this program has
-//!   exited, since a running program cannot be deleted. Only the program at the place the
-//!   uninstaller names (`InstallLocation`) uninstalls.
+//!   exited, since a running program cannot be deleted. The servers of the archives browsed in
+//!   Explorer (`aqr-win --serve`, its `aqr --serve`) are told to end first
+//!   ([`crate::serve::quit_all`]); the shell extension, `aqr-shell.dll`, held by Explorer once it
+//!   loaded it, is moved into the temporary directory and deleted as the user next signs in
+//!   (`RunOnce`). Only the program at the place the uninstaller names (`InstallLocation`)
+//!   uninstalls.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -28,7 +32,14 @@ const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aq
 const ENVIRONMENT: &str = "Environment";
 
 /// The files the installer writes, but this program.
-const FILES: [&str; 1] = ["aqr.exe"];
+const FILES: [&str; 2] = ["aqr.exe", SHELL_DLL];
+
+/// The shell extension (crates/aqr-win-shell), which Explorer holds once it loaded it: not
+/// deleted then but moved aside ([`set_aside`]).
+const SHELL_DLL: &str = "aqr-shell.dll";
+
+/// Where Windows runs a command once, as the user next signs in.
+const RUN_ONCE: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
 
 /// This program and its folder.
 fn here() -> Result<(PathBuf, PathBuf), String> {
@@ -76,9 +87,20 @@ pub fn uninstall(quiet: bool) -> Result<bool, String> {
             return Ok(false);
         }
     }
+    // (the servers of the archives browsed ended first: theirs, aqr.exe's `aqr --serve` among
+    // them, are no files running then)
+    if crate::serve::quit_all() {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
     // (the files first: one of them running stops the uninstall before anything else is gone)
     for name in FILES.iter().flat_map(|&f| [f.to_string(), format!("{f}.old"), format!("{f}.new")]) {
-        match std::fs::remove_file(dir.join(&name)) {
+        let file = dir.join(&name);
+        match std::fs::remove_file(&file) {
+            // (the shell extension, held by Explorer: moved aside, deleted as the user next
+            // signs in)
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound && name.starts_with(SHELL_DLL) => {
+                set_aside(&file).map_err(|_| win::not_deleted_running(&name, e))?;
+            }
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(win::not_deleted_running(name, e));
             }
@@ -97,6 +119,21 @@ pub fn uninstall(quiet: bool) -> Result<bool, String> {
     }
     delete_after_exit(&exe, &dir)?;
     Ok(true)
+}
+
+/// File `file`, held (a library loaded by Explorer: renamed it may be, deleted it may not),
+/// moved into the temporary directory, deleted by Windows as the user next signs in (`RunOnce`,
+/// by `cmd.exe`), when nothing holds it.
+fn set_aside(file: &Path) -> std::io::Result<()> {
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let to = std::env::temp_dir().join(format!("{name}.{}.delete", std::process::id()));
+    std::fs::rename(file, &to)?;
+    let cmd = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+    let delete = format!("\"{cmd}\" /d /q /c del /f /q \"{}\"", to.display());
+    // (a value of each file set aside: one of an uninstall before kept)
+    let value = format!("Aqueous {}", to.file_name().unwrap_or_default().to_string_lossy());
+    _ = register::set(RUN_ONCE, Some(&value), Value::Sz(&delete));
+    Ok(())
 }
 
 /// Whether `a` and `b` are the same path (of no case, with a trailing separator or not).

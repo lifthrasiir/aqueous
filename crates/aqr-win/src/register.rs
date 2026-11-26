@@ -257,7 +257,7 @@ fn clsid_key(verb: &str) -> String {
 }
 
 /// The shell extension browsing archives as folders (crates/aqr-win-shell), beside this program.
-const SHELL_DLL: &str = "aqr_shell.dll";
+const SHELL_DLL: &str = "aqr-shell.dll";
 
 /// The class of the folders of archives (aqr-win-shell's `folder::FOLDER`).
 const FOLDER: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0xf76e4146_e32e_4811_a0de_465ae547da1d);

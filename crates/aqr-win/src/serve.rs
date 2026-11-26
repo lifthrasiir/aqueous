@@ -24,7 +24,10 @@
 //!   unless the archive is opened again: what was evaluated of it kept while the client moves
 //!   from one folder to another.
 //!
-//! The files written out are removed as the program ends (but those open still), and those of
+//! An event of the session's (`Local\Aqueous.Serve.Quit`, [`quit_all`]) has every server end at
+//! once, as the uninstall does; one whose class is registered as another program's (or not at
+//! all) ends as soon as what it serves is let go of. The files written out are removed as the
+//! program ends (but those open still), and those of
 //! a day before as it starts. The program ends once it has served no object for [`IDLE`] (the class revoked first, so that
 //! a client coming then starts another).
 
@@ -36,15 +39,18 @@ use std::time::{Duration, Instant};
 
 use aqr_ipc::serve::{CHUNK, Error, Served};
 use serde_json::{Value, json};
-use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Foundation::{
     CLASS_E_NOAGGREGATION, DISP_E_EXCEPTION, DISP_E_MEMBERNOTFOUND, DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, E_FAIL,
     E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, FILETIME, S_FALSE, S_OK, STG_E_ACCESSDENIED,
     STG_E_INVALIDFUNCTION, STG_E_READFAULT, SysAllocStringLen, SysStringLen,
 };
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, CLSIDFromString, COINIT_MULTITHREADED, CoInitializeEx, CoRegisterClassObject,
     CoRevokeClassObject, CoTaskMemAlloc, REGCLS_MULTIPLEUSE,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, EVENT_MODIFY_STATE, OpenEventW, SetEvent, WaitForSingleObject,
 };
 use windows_sys::core::{GUID, HRESULT};
 
@@ -152,9 +158,19 @@ pub fn serve(args: &[std::ffi::OsString]) -> std::process::ExitCode {
     }
     let mut checked = Instant::now();
     let mut replaced = false;
+    let quit = quit_event();
     loop {
         std::thread::sleep(Duration::from_millis(250).min(linger / 4).max(Duration::from_millis(10)));
         close_lingering(Some(linger));
+        // (told to end, as the uninstall does: at once, what it serves gone with it)
+        // SAFETY: an event of its own, not waited for
+        if quit.is_some_and(|e| unsafe { WaitForSingleObject(e, 0) } == WAIT_OBJECT_0) {
+            // SAFETY: registered above
+            unsafe { CoRevokeClassObject(cookie) };
+            drop(SERVED.lock().unwrap().take());
+            sweep(None);
+            return std::process::ExitCode::SUCCESS;
+        }
         // (registered anew, of another program: a newer one. The class revoked, for clients to
         // start that one; this one ends as soon as what it serves is let go of)
         if !replaced && checked.elapsed() >= Duration::from_secs(2) {
@@ -190,11 +206,46 @@ pub fn serve(args: &[std::ffi::OsString]) -> std::process::ExitCode {
 /// a class not registered (a test's).
 fn superseded(clsid: &GUID) -> bool {
     let key = format!(r"Software\Classes\CLSID\{}\LocalServer32", crate::drop::braced(clsid));
-    let Some((command, _)) = crate::register::get(&key, None) else { return false };
+    // (the class of Aqueous's not registered any more: unregistered, uninstalled)
+    let Some((command, _)) = crate::register::get(&key, None) else { return same(clsid, &CLSID) };
     let Ok(exe) = std::env::current_exe() else { return false };
     // (`"PATH" --serve`)
     let registered = command.trim_start_matches('"').split('"').next().unwrap_or("");
     !std::path::Path::new(registered).as_os_str().eq_ignore_ascii_case(exe.as_os_str())
+}
+
+/// The name of the event that has every server of the session end at once ([`quit_all`]; the
+/// installer, aqr-win-install, sets it too, by the same name).
+const QUIT: &str = "Local\\Aqueous.Serve.Quit";
+
+/// [`QUIT`], or for tests another (`AQR_SERVE_QUIT_EVENT`: the servers of the user's not ended).
+fn quit_name() -> String {
+    std::env::var("AQR_SERVE_QUIT_EVENT").unwrap_or_else(|_| QUIT.into())
+}
+
+/// The event of [`QUIT`], made where it is not (set by [`quit_all`], reset by none: each server
+/// made after it ends at once too, but it is let go of with the last server and the uninstall).
+fn quit_event() -> Option<HANDLE> {
+    let name: Vec<u16> = quit_name().encode_utf16().chain([0]).collect();
+    // SAFETY: a name ended by 0; a manual-reset event, not set
+    let h = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
+    (!h.is_null()).then_some(h)
+}
+
+/// Has every server of the session end at once, what it serves gone with it (for the uninstall:
+/// its files to be deleted, aqr.exe's of `aqr --serve` among them); whether there was one.
+pub fn quit_all() -> bool {
+    let name: Vec<u16> = quit_name().encode_utf16().chain([0]).collect();
+    // SAFETY: a name ended by 0; the event set and its handle closed
+    unsafe {
+        let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if h.is_null() {
+            return false;
+        }
+        SetEvent(h);
+        CloseHandle(h);
+    }
+    true
 }
 
 /// Where the files opened of archives are written (`%LOCALAPPDATA%\Aqueous\Open`): a directory

@@ -387,3 +387,30 @@ fn walk(d: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// The servers of the session told to end (as the uninstall tells them, by an event of the
+/// session's: here of a name of the test's, the user's servers not told) end at once, though
+/// not idle for their time.
+#[test]
+fn quit() {
+    use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
+    let event = format!("Local\\Aqueous.Serve.Quit.test-{}", std::process::id());
+    let mut server = Killed(
+        Command::new(env!("CARGO_BIN_EXE_aqr-win"))
+            .args(["--serve", "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A63}"])
+            .env("AQR_SERVE_IDLE", "0.2,600")
+            .env("AQR_SERVE_QUIT_EVENT", &event)
+            .spawn()
+            .unwrap(),
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(server.0.try_wait().unwrap().is_none(), "ended untold");
+    let name: Vec<u16> = event.encode_utf16().chain([0]).collect();
+    // SAFETY: a name ended by 0; the server's event, set
+    unsafe { SetEvent(CreateEventW(std::ptr::null(), 1, 0, name.as_ptr())) };
+    let start = Instant::now();
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(5), "the server stayed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

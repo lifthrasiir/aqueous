@@ -53,13 +53,16 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   the string table in `aqr-win.rc`, so they follow a change of Windows' language without
   registering again.
 
-- Where `aqr_shell.dll` (crates/aqr-win-shell) is beside this program, `--register` registers
+- Where `aqr-shell.dll` (crates/aqr-win-shell) is beside this program, `--register` registers
   it too: a `.aqr` file double-clicked opens as a folder in Explorer (its class's `CLSID`, the
   verb `open` the shell's `ExecuteFolder`), "Extract here" staying a verb.
 - `aqr-win --serve` is the COM local server of the archives a shell extension browses
   (`docs/win-shell-ext-design.md`, `src/serve.rs`): late-bound objects (`IDispatch`, marshaled
   by the system's proxies, no type library) over one `aqr --serve`, an archive's handle closed a
-  minute after its object is let go of, the program ending after ten minutes of none.
+  minute after its object is let go of, the program ending after ten minutes of none, at once
+  where its class is registered as another program's or not at all, or as the session's event
+  `Local\Aqueous.Serve.Quit` is set (the uninstall: then `aqr-shell.dll`, held by Explorer, is
+  moved into the temporary directory and deleted as the user next signs in).
   `tests/serve.rs` drives it from another process (ignored: it needs `aqr.exe` built beside,
   `cargo rt -p aqr -p aqr-win --test serve -- --ignored`).
 

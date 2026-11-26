@@ -10,8 +10,8 @@
 //! The programs are those of [`PROGRAMS`]: `aqr`, and `aqr-win` (Windows), which runs the `aqr`
 //! beside it: its kept binary has the kept `aqr` of the working copy beside it (a hard link, else
 //! a copy), the key of that `aqr` in its own, so `cargo aqr-win --register` points Explorer's
-//! verbs at a pair that stays as it is; its shell extension (`aqr_shell.dll`, crates/aqr-win-shell)
-//! is built and kept with it, beside it. A binary run with the arguments that tell the system of
+//! verbs at a pair that stays as it is; its shell extension (crates/aqr-win-shell, kept as
+//! `aqr-shell.dll`: cargo's name of it is `aqr_shell.dll`) is built and kept with it, beside it. A binary run with the arguments that tell the system of
 //! it (`--register`) is pinned, never evicted, until it is run with those that take it back
 //! (`--unregister`; `cache/pinned/PROGRAM`).
 //!
@@ -54,9 +54,11 @@ struct Program {
     modules: bool,
     /// The programs whose kept binaries go beside it (it runs them as the ones beside itself).
     beside: &'static [&'static str],
-    /// The libraries built and kept with it, beside it: each a package and its library's name
+    /// The libraries built and kept with it, beside it: each a package, its library's name (as
+    /// cargo names its file) and the name of the file kept (as the program takes it beside
+    /// itself)
     /// (aqr-win's shell extension, which it registers as the one beside itself).
-    libraries: &'static [(&'static str, &'static str)],
+    libraries: &'static [(&'static str, &'static str, &'static str)],
     /// The first argument of a run that, where it succeeds, pins the binary run (what the system
     /// was told of it: aqr-win's verbs in the registry), and that of one unpinning it.
     pin: Option<(&'static str, &'static str)>,
@@ -68,7 +70,7 @@ const PROGRAMS: &[Program] = &[
         name: "aqr-win",
         modules: false,
         beside: &["aqr"],
-        libraries: &[("aqr-win-shell", "aqr_shell")],
+        libraries: &[("aqr-win-shell", "aqr_shell", "aqr-shell.dll")],
         pin: Some(("--register", "--unregister")),
     },
 ];
@@ -190,8 +192,8 @@ fn program_env(p: &Program, beside: &[Beside]) -> String {
     for b in beside {
         text += &format!("beside {}={}\n", b.name, b.key);
     }
-    for (_, l) in p.libraries {
-        text += &format!("library {l}\n");
+    for (_, l, kept) in p.libraries {
+        text += &format!("library {l} as {kept}\n");
     }
     text
 }
@@ -210,7 +212,7 @@ fn build(p: &Program, env: &str, beside: &[Beside]) -> Result<Built> {
     }
     let mut built = target().join(exe(p.name));
     let mut paths = dep_info(&target().join(format!("{}.d", p.name)))?;
-    for (package, name) in p.libraries {
+    for (package, name, _) in p.libraries {
         let status = Command::new(std::env::var_os("CARGO").unwrap_or("cargo".into()))
             .current_dir(root())
             .args(["build", "-r", "-p", package, "--lib"])
@@ -258,9 +260,9 @@ fn build(p: &Program, env: &str, beside: &[Beside]) -> Result<Built> {
         fs::rename(tmp.join("manifest"), &dest).map_err(|e| e.to_string())?;
     }
     fs::copy(&built, tmp.join(exe(p.name))).map_err(|e| format!("{}: {e}", built.display()))?;
-    for (_, name) in p.libraries {
+    for (_, name, kept) in p.libraries {
         let from = target().join(dll(name));
-        fs::copy(&from, tmp.join(dll(name))).map_err(|e| format!("{}: {e}", from.display()))?;
+        fs::copy(&from, tmp.join(kept)).map_err(|e| format!("{}: {e}", from.display()))?;
     }
     let mut info = format!("created={}\nmanifest={manifest}\nprogram={}\n", now(), p.name);
     for b in beside {
@@ -290,7 +292,7 @@ fn unkept(p: &Program, built: &Path, beside: &[Beside]) -> Result<PathBuf> {
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let all = std::iter::once((built.to_path_buf(), exe(p.name)))
         .chain(beside.iter().map(|b| (b.exe.clone(), exe(b.name))))
-        .chain(p.libraries.iter().map(|(_, l)| (target().join(dll(l)), dll(l))));
+        .chain(p.libraries.iter().map(|(_, l, kept)| (target().join(dll(l)), kept.to_string())));
     for (from, name) in all {
         fs::copy(&from, dir.join(name)).map_err(|e| format!("{} to {}: {e}", from.display(), dir.display()))?;
     }
