@@ -14,7 +14,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aqr_shell::folder::{TEST_FOLDER, TEST_SERVER};
-use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY};
+use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, SIZE};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, CoCreateInstance, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
 };
@@ -25,7 +25,8 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, REG_SZ, Reg
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::Common::SHELLDETAILS;
 use windows::Win32::UI::Shell::{
-    ASSOCF_NONE, ASSOCSTR_SHELLEXTENSION, CMINVOKECOMMANDINFO, IContextMenu, IQueryAssociations, IThumbnailProvider,
+    ASSOCF_NONE, ASSOCSTR_SHELLEXTENSION, CMINVOKECOMMANDINFO, IContextMenu, IQueryAssociations,
+    IShellItemImageFactory, IThumbnailProvider, SIIGBF_THUMBNAILONLY,
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, BHID_SFObject, BHID_Stream, IEnumShellItems, IShellFolder2, IShellItem, IShellItem2, IShellView,
@@ -201,6 +202,24 @@ fn browsed() {
     bmp.extend([0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0]);
     std::fs::write(d.join("img/p.bmp"), &bmp).unwrap();
     std::fs::write(d.join("img/n.txt"), b"text").unwrap();
+    let mut big_bmp = Vec::new();
+    let row = 64 * 3;
+    big_bmp.extend(b"BM");
+    big_bmp.extend((54 + row * 64u32).to_le_bytes());
+    big_bmp.extend([0; 4]);
+    big_bmp.extend(54u32.to_le_bytes());
+    big_bmp.extend(40u32.to_le_bytes());
+    big_bmp.extend(64i32.to_le_bytes());
+    big_bmp.extend(64i32.to_le_bytes());
+    big_bmp.extend(1u16.to_le_bytes());
+    big_bmp.extend(24u16.to_le_bytes());
+    big_bmp.extend([0; 24]);
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            big_bmp.extend([(x * 4) as u8, (y * 4) as u8, 128]);
+        }
+    }
+    std::fs::write(d.join("img/q.bmp"), &big_bmp).unwrap();
     let o =
         Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", "img.aqrtest", "img"]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
@@ -616,6 +635,26 @@ fn browsed() {
                 .unwrap();
             windows::Win32::UI::Shell::ILFree(Some(n[0]));
             windows::Win32::UI::Shell::ILFree(Some(p[0]));
+        }
+        // as Explorer asks for a picture of an item, at each size of its views: the item's image
+        // factory (the thumbnail cache, the handler bound as it binds it)
+        // SAFETY: COM calls of the shell's item
+        unsafe {
+            let q = item(&d.join(r"img.aqrtest\q.bmp"));
+            let f: IShellItemImageFactory = q.cast().unwrap();
+            let got: Vec<(i32, bool)> = [16, 32, 48, 96, 256]
+                .into_iter()
+                .map(|n| {
+                    let r = f.GetImage(SIZE { cx: n, cy: n }, SIIGBF_THUMBNAILONLY);
+                    if let Ok(b) = &r {
+                        _ = windows::Win32::Graphics::Gdi::DeleteObject((*b).into());
+                    }
+                    (n, r.is_ok())
+                })
+                .collect();
+            let told = std::fs::read_to_string(&log).unwrap_or_default();
+            let asked: Vec<&str> = told.lines().filter(|l| l.contains("asked")).collect();
+            assert!(got.iter().all(|g| g.1), "{got:?}\n{}", asked.join("\n"));
         }
         // (not there: the shell's parse fails)
         // SAFETY: a path, parsed by the shell

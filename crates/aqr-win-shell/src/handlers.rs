@@ -5,6 +5,14 @@
 //! finds its handler by the associations, and reads the file by `BHID_Stream` itself.
 
 use std::path::Path;
+use std::sync::Mutex;
+
+use windows::Win32::Foundation::{FILETIME, SIZE};
+use windows::Win32::Graphics::Gdi::HBITMAP;
+use windows::Win32::UI::Shell::{
+    IEIFLAG_ASYNC, IExtractImage_Impl, IExtractImage2, IExtractImage2_Impl, WTS_ALPHATYPE,
+};
+use windows::core::implement;
 
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CLSIDFromString, CoCreateInstance, STGM_READ};
 use windows::Win32::UI::Shell::PropertiesSystem::IInitializeWithStream;
@@ -96,4 +104,78 @@ pub fn thumbnail(path: &Path, at: &str, item: &Item) -> windows::core::Result<IT
     // SAFETY: a stream of the file's, read only
     unsafe { init.Initialize(&stream, STGM_READ.0)? };
     windows::core::Interface::cast(&init)
+}
+
+/// A file's picture as the shell's image factory asks for it (`IExtractImage`: what Explorer's
+/// views take, at each size of theirs): the size asked for taken by `GetLocation`, the picture
+/// made by `Extract` of the type's thumbnail provider ([`thumbnail`]); dated by the file's time,
+/// for the shell's cache.
+#[implement(IExtractImage2)]
+pub struct Extract {
+    archive: std::sync::Arc<client::Use>,
+    at: String,
+    item: Item,
+    size: Mutex<u32>,
+    _counted: crate::Counted,
+}
+
+impl Extract {
+    pub fn new(archive: std::sync::Arc<client::Use>, at: String, item: Item) -> Extract {
+        Extract { archive, at, item, size: Mutex::new(96), _counted: crate::Counted::new() }
+    }
+}
+
+impl IExtractImage_Impl for Extract_Impl {
+    fn GetLocation(
+        &self,
+        buf: PWSTR,
+        n: u32,
+        _: *mut u32,
+        size: *const SIZE,
+        _: u32,
+        flags: *mut u32,
+    ) -> windows::core::Result<()> {
+        // SAFETY: the caller's size, buffer of `n` characters, and flags
+        unsafe {
+            if let Some(s) = size.as_ref() {
+                *self.size.lock().unwrap() = s.cx.max(s.cy).max(1) as u32;
+            }
+            // (where it is: what the shell keys the picture by)
+            if !buf.is_null() && n > 0 {
+                let place: Vec<u16> = format!("{}\\{}", self.archive.path().display(), self.at)
+                    .encode_utf16()
+                    .take(n as usize - 1)
+                    .collect();
+                std::ptr::copy_nonoverlapping(place.as_ptr(), buf.0, place.len());
+                *buf.0.add(place.len()) = 0;
+            }
+            if !flags.is_null() {
+                // (made at once as asked: not of a thread of the caller's)
+                *flags &= !IEIFLAG_ASYNC;
+            }
+        }
+        Ok(())
+    }
+
+    fn Extract(&self) -> windows::core::Result<HBITMAP> {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let t = thumbnail(self.archive.path(), &self.at, &self.item)?;
+            let (mut bmp, mut alpha) = (HBITMAP::default(), WTS_ALPHATYPE::default());
+            // SAFETY: places of the picture and its kind
+            unsafe { t.GetThumbnail(*self.size.lock().unwrap(), &mut bmp, &mut alpha)? };
+            Ok(bmp)
+        }));
+        let r = r.unwrap_or_else(|_| Err(windows::Win32::Foundation::E_UNEXPECTED.into()));
+        if let Err(e) = &r {
+            crate::log(|| format!("Extract {}: {e}", self.at));
+        }
+        r
+    }
+}
+
+impl IExtractImage2_Impl for Extract_Impl {
+    fn GetDateStamp(&self) -> windows::core::Result<FILETIME> {
+        let t = self.item.mtime;
+        Ok(FILETIME { dwLowDateTime: t as u32, dwHighDateTime: (t as u64 >> 32) as u32 })
+    }
 }

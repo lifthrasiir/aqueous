@@ -14,12 +14,12 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::Common::{ITEMIDLIST, SHCOLSTATE, SHELLDETAILS, STRRET};
 use windows::Win32::UI::Shell::{
     ASSOCCLASS_FOLDER, ASSOCIATIONELEMENT, AssocCreateForClasses, DEFCONTEXTMENU, IContextMenu, IContextMenuCB,
-    IEnumExtraSearch, IEnumIDList, IEnumIDList_Impl, IExtractIconW, ILClone, ILCombine, ILFree, IPersistFolder_Impl,
-    IPersistFolder2_Impl, IPersistFolder3, IPersistFolder3_Impl, IPersistIDList, IPersistIDList_Impl,
-    IQueryAssociations, IShellFolder_Impl, IShellFolder2, IShellFolder2_Impl, IShellView, IThumbnailProvider,
-    PERSIST_FOLDER_TARGET_INFO, SFV_CREATE, SHCNE_UPDATEDIR, SHCNF_IDLIST, SHChangeNotify, SHCreateDataObject,
-    SHCreateDefaultContextMenu, SHCreateFileExtractIconW, SHCreateShellFolderView, SHGDN_FORPARSING, SHGDN_INFOLDER,
-    SHGDNF, SHGetNameFromIDList, SHStrDupW, SIGDN_FILESYSPATH,
+    IEnumExtraSearch, IEnumIDList, IEnumIDList_Impl, IExtractIconW, IExtractImage, IExtractImage2, ILClone, ILCombine,
+    ILFree, IPersistFolder_Impl, IPersistFolder2_Impl, IPersistFolder3, IPersistFolder3_Impl, IPersistIDList,
+    IPersistIDList_Impl, IQueryAssociations, IShellFolder_Impl, IShellFolder2, IShellFolder2_Impl, IShellView,
+    IThumbnailProvider, PERSIST_FOLDER_TARGET_INFO, SFV_CREATE, SHCNE_UPDATEDIR, SHCNF_IDLIST, SHChangeNotify,
+    SHCreateDataObject, SHCreateDefaultContextMenu, SHCreateFileExtractIconW, SHCreateShellFolderView,
+    SHGDN_FORPARSING, SHGDN_INFOLDER, SHGDNF, SHGetNameFromIDList, SHStrDupW, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows::core::{GUID, HRESULT, HSTRING, IUnknownImpl, Interface, PCWSTR, Ref, implement};
@@ -381,6 +381,7 @@ impl IShellFolder_Impl for Folder_Impl {
             let path = items.iter().fold(dir, |p, i| joined(&p, &i.name));
             // SAFETY: the caller's GUID
             let iid = unsafe { *riid };
+            crate::log(|| format!("asked BindToObject {iid:?} of {}", items.last().map_or("", |i| i.name.as_str())));
             if iid == IStream::IID {
                 if items.last().unwrap().is_dir() {
                     return Err(E_INVALIDARG.into());
@@ -507,6 +508,7 @@ impl IShellFolder_Impl for Folder_Impl {
             unsafe {
                 *ppv = std::ptr::null_mut();
                 let iid = *riid;
+                crate::log(|| format!("asked GetUIObjectOf {iid:?} of {cidl}"));
                 if cidl == 1 && iid == IExtractIconW::IID {
                     let item = pidl::first(*apidl).ok_or(windows::core::Error::from(E_INVALIDARG))?;
                     let w: Vec<u16> = item.name.encode_utf16().chain([0]).collect();
@@ -516,15 +518,23 @@ impl IShellFolder_Impl for Folder_Impl {
                 }
                 // (a file's: the associations of its type, its thumbnail by the type's provider)
                 if cidl == 1
-                    && (iid == IQueryAssociations::IID || iid == IThumbnailProvider::IID)
+                    && (iid == IQueryAssociations::IID
+                        || iid == IThumbnailProvider::IID
+                        || iid == IExtractImage::IID
+                        || iid == IExtractImage2::IID)
                     && let Some(item) = pidl::first(*apidl).filter(|i| !i.is_dir())
                 {
                     if iid == IQueryAssociations::IID {
                         return crate::handlers::associations(&item)?.query(riid, ppv).ok();
                     }
                     let (archive, dir) = self.at()?;
-                    let t = crate::handlers::thumbnail(archive.path(), &joined(&dir, &item.name), &item)?;
-                    return t.query(riid, ppv).ok();
+                    let at = joined(&dir, &item.name);
+                    if iid == IThumbnailProvider::IID {
+                        return crate::handlers::thumbnail(archive.path(), &at, &item)?.query(riid, ppv).ok();
+                    }
+                    // (as the image factory asks: made as it is extracted)
+                    let x: IExtractImage2 = crate::handlers::Extract::new(archive, at, item).into();
+                    return x.query(riid, ppv).ok();
                 }
                 if iid == IContextMenu::IID && cidl > 0 {
                     let ids = std::slice::from_raw_parts(apidl, cidl as usize);

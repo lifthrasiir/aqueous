@@ -30,7 +30,9 @@ object is released, for the server to close it a minute later (and to end, idle)
   a file's associations (`IQueryAssociations`: its extension, `SystemFileAssociations` of it and
   of its perceived type, `*`), through which the preview pane finds its handler (reading the
   file by `BHID_Stream`); a thumbnail by the type's provider, given the file's bytes (up to 64
-  MiB) as a stream in memory (a provider may read it from threads of its own).
+  MiB) as a stream in memory (a provider may read it from threads of its own), as
+  `IThumbnailProvider` and as `IExtractImage2` (what the shell's image factory asks for, at
+  every size of Explorer's views).
 - Copying out (paste, drag): the shell's data object of the items' ID lists
   (`SHCreateDataObject`), which the copy engine reads as folders and streams; for other
   programs' drops (a browser's upload, a mail's attachment), its inner object (`src/data.rs`)
