@@ -6,7 +6,8 @@
 //! The class's objects are late-bound (`IDispatch`, no type library: the system's proxies
 //! marshal them), their methods named:
 //!
-//! - the class: `Open(path[, hwnd])`, an archive object, or an error (`EXCEPINFO`'s
+//! - the class: `Open(path[, hwnd[, at]])`, an archive object (as of journal point `at`, the
+//!   offset `Journal` tells, where it is given), or an error (`EXCEPINFO`'s
 //!   description). An encrypted archive has its passphrase asked for over window `hwnd` (a
 //!   number, of the client's: its process lets this one come to the front), again where wrong;
 //!   it is kept by the archive object, to open the archive again where `aqr --serve` is gone.
@@ -17,7 +18,8 @@
 //!   be opened by a program, read only, in `%LOCALAPPDATA%\Aqueous\Open\<archive>\<path>`: its
 //!   path; one there already of its size taken as it is), `Progress(path)` (JSON: `aqr --serve`'s
 //!   `progress` of the archive, and `written`, `[done, total]` bytes of the file at `path` being
-//!   materialized), `Cancel(path)` (the file at `path` being materialized stopped at its next
+//!   materialized), `Journal()` (its journal points, the named versions: a JSON array of
+//!   `aqr --serve`'s), `Cancel(path)` (the file at `path` being materialized stopped at its next
 //!   piece, its part removed, the Materialize failing; what is evaluated of it kept). Once let
 //!   go of (its last reference released,
 //!   by the client or by COM as the client is gone), its handle is closed a [`LINGER`] later,
@@ -417,17 +419,19 @@ struct Archive {
     path: PathBuf,
     /// The passphrase it was opened of, to open it again of (in this process alone).
     passphrase: Option<String>,
+    /// The journal point it is opened as of, where it is (`aqr --serve`'s `at`).
+    at: Option<u64>,
     open: Mutex<(Arc<Served>, u64, Value)>,
 }
 
 impl Archive {
     /// Archive `path` opened: an encrypted one of a passphrase asked for over `owner` (again
     /// where it was wrong), the user's cancel an error.
-    fn open(path: PathBuf, owner: HWND) -> Result<Archive, String> {
+    fn open(path: PathBuf, owner: HWND, at: Option<u64>) -> Result<Archive, String> {
         let mut passphrase = None;
         loop {
-            match Archive::opened(&path, passphrase.as_deref()) {
-                Ok((s, h, info)) => return Ok(Archive { path, passphrase, open: Mutex::new((s, h, info)) }),
+            match Archive::opened(&path, passphrase.as_deref(), at) {
+                Ok((s, h, info)) => return Ok(Archive { path, passphrase, at, open: Mutex::new((s, h, info)) }),
                 Err(Opening::Encrypted { wrong }) => {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                     // (for tests: the answer of the dialog, once, and of none again)
@@ -445,9 +449,16 @@ impl Archive {
         }
     }
 
-    fn opened(path: &std::path::Path, passphrase: Option<&str>) -> Result<(Arc<Served>, u64, Value), Opening> {
+    fn opened(
+        path: &std::path::Path,
+        passphrase: Option<&str>,
+        at: Option<u64>,
+    ) -> Result<(Arc<Served>, u64, Value), Opening> {
         let s = served().map_err(Opening::Failed)?;
         let mut q = json!({"open": path});
+        if let Some(m) = at {
+            q["at"] = m.into();
+        }
         if let Some(p) = passphrase {
             q["passphrase"] = p.into();
         }
@@ -479,7 +490,7 @@ impl Archive {
             let mut o = self.open.lock().unwrap();
             // (where another call has not opened it again already)
             if Arc::ptr_eq(&o.0, &s) {
-                *o = Archive::opened(&self.path, self.passphrase.as_deref()).map_err(|e| match e {
+                *o = Archive::opened(&self.path, self.passphrase.as_deref(), self.at).map_err(|e| match e {
                     Opening::Failed(e) => e,
                     Opening::Encrypted { .. } => format!("{}: encrypted", self.path.display()),
                 })?;
@@ -672,7 +683,7 @@ impl Kind {
     fn names(&self) -> &'static [&'static str] {
         match self {
             Kind::Server => &["Open"],
-            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream", "Materialize", "Progress", "Cancel"],
+            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream", "Materialize", "Progress", "Cancel", "Journal"],
         }
     }
 }
@@ -706,7 +717,9 @@ impl Dispatch {
             (Kind::Server, 1) => {
                 // (the window to ask a passphrase over, where there is one)
                 let owner = args.get(1).and_then(|h| h.parse::<isize>().ok()).unwrap_or(0);
-                let a = Archive::open(PathBuf::from(arg(0)?), owner as HWND)?;
+                // (and the journal point, as of which it is opened)
+                let at = args.get(2).and_then(|m| m.parse::<u64>().ok());
+                let a = Archive::open(PathBuf::from(arg(0)?), owner as HWND, at)?;
                 Ok(Out::Object(Dispatch::new(Kind::Archive(Arc::new(a))) as *mut c_void, true))
             }
             (Kind::Archive(a), 1) => Ok(Out::Text(a.info().to_string())),
@@ -746,6 +759,10 @@ impl Dispatch {
                 let mut w = WRITING.lock().unwrap();
                 let found = w.iter_mut().filter(|e| e.of(&a.path, path)).map(|e| e.cancelled = true).count();
                 Ok(Out::Text(serde_json::json!({"cancelled": found > 0}).to_string()))
+            }
+            (Kind::Archive(a), 8) => {
+                let v = a.with(|s, h| s.ask(json!({"journal": h})))?;
+                Ok(Out::Text(v["points"].to_string()))
             }
             (Kind::Archive(a), 5) => {
                 let path = arg(0)?;

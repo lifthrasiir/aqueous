@@ -17,7 +17,19 @@ use windows_sys::Win32::Foundation::{SysAllocStringLen, SysFreeString, SysString
 use windows_sys::Win32::System::Com::{CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 use windows_sys::core::{GUID, HRESULT};
 
-const CLSID: GUID = GUID::from_u128(0x5e1f0b6a_92c4_4d1e_a7f3_0c2b9d8e7a61);
+/// The class of the test's server, of this run alone (a server left of a run that crashed, its
+/// class registered, takes nothing of this one): of the process's id in its middle bits.
+fn clsid(last: u8) -> GUID {
+    GUID::from_u128(0x5e1f0b6a_92c4_4d1e_a7f3_0c2b9d8e7a00 | last as u128 | (std::process::id() as u128) << 64)
+}
+
+fn braced(g: &GUID) -> String {
+    let d4 = g.data4;
+    format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        g.data1, g.data2, g.data3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7]
+    )
+}
 const IID_IDISPATCH: GUID = GUID::from_u128(0x00020400_0000_0000_c000_000000000046);
 const IID_ISTREAM: GUID = GUID::from_u128(0x0000000c_0000_0000_c000_000000000046);
 
@@ -217,6 +229,14 @@ fn served() {
     std::fs::write(d.join("r/r.bin"), &random).unwrap();
     let o = Command::new(&aqr).current_dir(&d).args(["-q", "-o", "r.aqr", "r"]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // (an archive of two journal points: the second of a file added)
+    std::fs::create_dir_all(d.join("j")).unwrap();
+    std::fs::write(d.join("j/one.txt"), b"one").unwrap();
+    let o = Command::new(&aqr).current_dir(&d).args(["-q", "-j", "first", "-o", "j.aqr", "j"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    std::fs::write(d.join("two.txt"), b"two").unwrap();
+    let o = Command::new(&aqr).current_dir(&d).args(["-q", "-a", "-j", "second", "j.aqr", "two.txt"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     for (name, pass) in [("e.aqr", "sesame"), ("w.aqr", "other")] {
         let o = Command::new(&aqr)
             .current_dir(&d)
@@ -228,7 +248,7 @@ fn served() {
     }
     let mut server = Killed(
         Command::new(env!("CARGO_BIN_EXE_aqr-win"))
-            .args(["--serve", "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A61}"])
+            .args(["--serve", &braced(&clsid(0x61))])
             .env("AQR", &aqr)
             .env("AQR_SERVE_IDLE", "0.2,2")
             .env("LOCALAPPDATA", d.join("local"))
@@ -245,7 +265,7 @@ fn served() {
         // (once it has registered its class)
         let start = Instant::now();
         let mut s = std::ptr::null_mut();
-        while CoCreateInstance(&CLSID, std::ptr::null_mut(), CLSCTX_LOCAL_SERVER, &IID_IDISPATCH, &mut s) < 0 {
+        while CoCreateInstance(&clsid(0x61), std::ptr::null_mut(), CLSCTX_LOCAL_SERVER, &IID_IDISPATCH, &mut s) < 0 {
             assert!(start.elapsed() < Duration::from_secs(10), "the class never came");
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -261,7 +281,6 @@ fn served() {
         assert!(read_all(st, 700_000) == big);
         let st = object(a, "OpenStream", &["a.txt"]);
         assert_eq!(read_all(st, 4096), b"some text\n".repeat(100));
-        release(st);
         // written out to be opened: read only, the same file once there
         let m = match call(a, "Materialize", &["sub/big.bin"]) {
             Ok(Got::Text(t)) => PathBuf::from(t),
@@ -291,6 +310,16 @@ fn served() {
         assert_eq!(json(e, "Stat", &["sub/big.bin"])["size"], 3_000_000);
         assert!(read_all(object(e, "OpenStream", &["sub/big.bin"]), 1 << 20) == big);
         release(e);
+        // the journal points (one: the archive was made with -j), and the archive as of one
+        let a = object(s, "Open", &[d.join("j.aqr").to_str().unwrap()]);
+        let points = json(a, "Journal", &[]);
+        assert_eq!(points.as_array().map(|p| p.len()), Some(2), "{points}");
+        let first = points[0]["metadata"].to_string();
+        let at = object(s, "Open", &[d.join("j.aqr").to_str().unwrap(), "0", &first]);
+        assert_eq!(json(at, "List", &[""]).as_array().map(|e| e.len()), Some(1));
+        assert_eq!(json(a, "List", &[""]).as_array().map(|e| e.len()), Some(2));
+        release(at);
+        release(a);
         // cancelled as it is written out: stopped, nothing left of it
         let r = object(s, "Open", &[d.join("r.aqr").to_str().unwrap()]) as usize;
         let writing = std::thread::spawn(move || {
@@ -335,12 +364,14 @@ fn served() {
 #[test]
 fn superseded() {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
-    let clsid = "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A62}";
+    let clsid = braced(&clsid(0x62));
     let key: Vec<u16> = format!(r"Software\Classes\CLSID\{clsid}\LocalServer32").encode_utf16().chain([0]).collect();
     let mut server = Killed(
         Command::new(env!("CARGO_BIN_EXE_aqr-win"))
-            .args(["--serve", clsid])
+            .args(["--serve", &clsid])
             .env("AQR_SERVE_IDLE", "0.2,600")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap(),
     );
@@ -397,9 +428,11 @@ fn quit() {
     let event = format!("Local\\Aqueous.Serve.Quit.test-{}", std::process::id());
     let mut server = Killed(
         Command::new(env!("CARGO_BIN_EXE_aqr-win"))
-            .args(["--serve", "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A63}"])
+            .args(["--serve", &braced(&clsid(0x63))])
             .env("AQR_SERVE_IDLE", "0.2,600")
             .env("AQR_SERVE_QUIT_EVENT", &event)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap(),
     );
