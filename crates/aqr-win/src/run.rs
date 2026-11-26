@@ -25,6 +25,14 @@ pub fn run_at(archive: &Path, point: &Point) -> ExitCode {
     drive(Verb::Extract, cmd, count)
 }
 
+/// Runs `aqr` writing `archive` as it was at `point` into a new archive beside it named after
+/// the version ([`aqr_ipc::version_archive`]: the later versions left out), and shows how far it is.
+pub fn run_keep_until(archive: &Path, point: &Point) -> ExitCode {
+    let into = aqr_ipc::version_archive(archive, point);
+    let (cmd, count) = aqr_ipc::command_keep_until(&aqr_ipc::aqr(), archive, point, &into);
+    drive(Verb::Convert, cmd, count)
+}
+
 /// Runs `aqr` adding `paths` to `archive` under `dir` in it ([`aqr_ipc::command_add`]: the
 /// Explorer folders' drops), and shows how far it is.
 pub fn run_add(archive: &Path, dir: &str, paths: &[PathBuf]) -> ExitCode {

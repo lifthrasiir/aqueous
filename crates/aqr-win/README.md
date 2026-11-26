@@ -57,7 +57,9 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   it too: a `.aqr` file (and one of the other formats Aqueous opens) double-clicked opens as a folder in Explorer (its class's `CLSID`, the
   verb `open` the shell's `ExecuteFolder`), "Extract here" staying a verb; and the "Versions"
   tab of a `.aqr` file's Properties (a property sheet handler of the library's), which runs
-  `extract-version ARCHIVE #N` (point N extracted, asked for nothing) and `name-version`; and
+  `extract-version ARCHIVE #N` (point N extracted, asked for nothing), `name-version` and
+  `rollback-version ARCHIVE #N` (asked first: the versions after point N deleted, `aqr
+  --rollback`, or point N saved as a new archive beside it, `aqr --convert --keep-until`); and
   its drop handler: files dropped on a `.aqr` file, or in its folder, are added to it by
   `aqr-win add ARCHIVE DIR PATH...` (`aqr -a`, each `--rename DIR/NAME`).
 - `aqr-win --serve` is the COM local server of the archives a shell extension browses

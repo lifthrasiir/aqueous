@@ -2,9 +2,11 @@
 //! its journal points (the named versions, `-j`, `--tag`), newest first, read once the tab is
 //! shown (an encrypted archive asks for its passphrase then, not as Properties opens). "Open"
 //! (or a double-click) opens the archive as of the point chosen in a window of its own, as the
-//! view's menu goes to it ([`crate::versions`]); "Extract…" and "Name this version…" are
-//! aqr-win's (`extract-version ARCHIVE #N`, `name-version ARCHIVE`), beside this library, the
-//! list read again once a version is named.
+//! view's menu goes to it ([`crate::versions`]); "Extract…", "Name this version…" and "Delete
+//! later versions…" are aqr-win's (`extract-version ARCHIVE #N`, `name-version ARCHIVE`,
+//! `rollback-version ARCHIVE #N`: it asks first, and may save the version as a new archive
+//! instead), beside this library, the list read again once a version is named or the later
+//! ones deleted.
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -159,7 +161,8 @@ const LIST: i32 = 100;
 const OPEN: i32 = 101;
 const EXTRACT: i32 = 102;
 const NAME: i32 = 103;
-/// Posted once a version is named: the list read again.
+const ROLLBACK: i32 = 104;
+/// Posted once a version is named (or the later ones deleted): the list read again.
 const NAMED: u32 = WM_APP + 1;
 /// `LBN_DBLCLK`.
 const DOUBLE_CLICK: u32 = 2;
@@ -218,6 +221,13 @@ unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                             None => Ok(()),
                         },
                         NAME => run(&["name-version", &s.file.to_string_lossy()], Some(hwnd)),
+                        ROLLBACK => match chosen() {
+                            Some((k, _)) => run(
+                                &["rollback-version", &s.file.to_string_lossy(), &format!("#{}", k + 1)],
+                                Some(hwnd),
+                            ),
+                            None => Ok(()),
+                        },
                         _ => Ok(()),
                     };
                     if let Err(e) = r {
@@ -262,7 +272,7 @@ fn fill(hwnd: HWND, s: &mut State) {
         }
         windows::core::link!("user32.dll" "system" fn EnableWindow(hwnd: HWND, enable: BOOL) -> BOOL);
         let some = BOOL(!points.is_empty() as i32);
-        for id in [LIST, OPEN, EXTRACT] {
+        for id in [LIST, OPEN, EXTRACT, ROLLBACK] {
             if let Ok(c) = GetDlgItem(Some(hwnd), id) {
                 _ = EnableWindow(c, some);
             }
@@ -319,7 +329,7 @@ pub(crate) fn run<S: AsRef<std::ffi::OsStr>>(args: &[S], then: Option<HWND>) -> 
     Ok(())
 }
 
-/// The template of a page: the list over it, the buttons below.
+/// The template of a page: the list over it, the buttons below (in two rows).
 fn template() -> Vec<u32> {
     const W: i16 = 227;
     const H: i16 = 215;
@@ -334,24 +344,29 @@ fn template() -> Vec<u32> {
     // WS_CHILD | WS_DISABLED | WS_CAPTION | DS_SETFONT
     dword(&mut t, 0x4000_0000 | 0x0800_0000 | 0x00C0_0000 | 0x40);
     dword(&mut t, 0);
-    t.push(4);
+    t.push(5);
     t.extend([0, 0, W as u16, H as u16]);
     t.extend([0, 0]);
     string(&mut t, "");
     t.push(9);
     string(&mut t, "Segoe UI");
-    let (open, extract, name) =
-        (aqr_l10n::folder::open(), aqr_l10n::folder::versions_extract(), aqr_l10n::folder::versions_name());
-    let by = H - 7 - 14;
+    let (open, extract, name, rollback) = (
+        aqr_l10n::folder::open(),
+        aqr_l10n::folder::versions_extract(),
+        aqr_l10n::folder::versions_name(),
+        aqr_l10n::folder::versions_rollback(),
+    );
+    let (by, low) = (H - 7 - 14 - 4 - 14, H - 7 - 14);
     // (style, extended style, place, id, class, text)
     type Control<'a> = (u32, u32, [i16; 4], i32, u16, &'a str);
-    let items: [Control; 4] = [
+    let items: [Control; 5] = [
         // WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, WS_EX_CLIENTEDGE
         (0x0020_0000 | 0x0001_0000 | 0x1 | 0x100, 0x200, [7, 7, W - 14, by - 7 - 7], LIST, 0x0083, ""),
         // WS_TABSTOP | BS_DEFPUSHBUTTON, BS_PUSHBUTTON
         (0x0001_0000 | 0x1, 0, [7, by, 50, 14], OPEN, 0x0080, open),
         (0x0001_0000, 0, [61, by, 60, 14], EXTRACT, 0x0080, extract),
         (0x0001_0000, 0, [W - 7 - 95, by, 95, 14], NAME, 0x0080, name),
+        (0x0001_0000, 0, [7, low, 114, 14], ROLLBACK, 0x0080, rollback),
     ];
     for (style, ex, [x, y, w, h], id, class, text) in items {
         align(&mut t);

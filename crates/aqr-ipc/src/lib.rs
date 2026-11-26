@@ -47,6 +47,8 @@ pub enum Verb {
     Compress,
     Extract,
     Test,
+    /// An Aqueous archive written again (`--convert`: a version of it as a new archive).
+    Convert,
 }
 
 impl Verb {
@@ -57,9 +59,11 @@ impl Verb {
             (Verb::Compress, "") => c::compressing().into(),
             (Verb::Extract, "") => c::extracting().into(),
             (Verb::Test, "") => c::testing().into(),
+            (Verb::Convert, "") => c::converting().into(),
             (Verb::Compress, n) => c::compressing_name(n),
             (Verb::Extract, n) => c::extracting_name(n),
             (Verb::Test, n) => c::testing_name(n),
+            (Verb::Convert, n) => c::converting_name(n),
         }
     }
 
@@ -70,9 +74,11 @@ impl Verb {
             (Verb::Compress, "") => c::could_not_compress().into(),
             (Verb::Extract, "") => c::could_not_extract().into(),
             (Verb::Test, "") => c::could_not_test().into(),
+            (Verb::Convert, "") => c::could_not_convert().into(),
             (Verb::Compress, n) => c::could_not_compress_name(n),
             (Verb::Extract, n) => c::could_not_extract_name(n),
             (Verb::Test, n) => c::could_not_test_name(n),
+            (Verb::Convert, n) => c::could_not_convert_name(n),
         }
     }
 
@@ -82,6 +88,7 @@ impl Verb {
             Verb::Compress => "-c",
             Verb::Extract => "-d",
             Verb::Test => "-K",
+            Verb::Convert => "--convert",
         }
     }
 }
@@ -228,6 +235,23 @@ pub fn tag(aqr: &Path, archive: &Path, label: &str) -> Result<String, String> {
     }
 }
 
+/// Cuts `archive` back in place to version `number` (`aqr --rollback #N`: the later versions taken
+/// out of it): what `aqr` told, or why it could not.
+pub fn rollback(aqr: &Path, archive: &Path, number: u64) -> Result<String, String> {
+    let out = aqr_command(aqr)
+        .arg("--rollback")
+        .arg(format!("#{number}"))
+        .arg("--")
+        .arg(archive)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| aqr_l10n::common::not_run(aqr.to_string_lossy(), e))?;
+    match out.status.success() {
+        true => Ok(last_line(&out.stderr)),
+        false => Err(last_line(&out.stderr)),
+    }
+}
+
 /// The last line of `aqr`'s standard error, without its `aqr: `.
 fn last_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
@@ -252,6 +276,28 @@ pub fn version_folder(archive: &Path, point: &Point) -> PathBuf {
         false => label.to_owned(),
     };
     archive.with_file_name(format!("{stem} ({label})"))
+}
+
+/// A name for the archive that version `point` of `archive` is written into, beside it: as
+/// [`version_folder`]'s, with `.aqr` after.
+pub fn version_archive(archive: &Path, point: &Point) -> PathBuf {
+    let mut name = version_folder(archive, point).into_os_string();
+    name.push(".aqr");
+    name.into()
+}
+
+/// The command writing `archive` as it was at `point` into the archive `into` (`aqr --ipc
+/// --convert --keep-until`: the versions after it left out), its standard streams piped: one
+/// archive, as [`command`] has it.
+pub fn command_keep_until(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Command, usize) {
+    let mut cmd = aqr_command(aqr);
+    cmd.arg("--ipc").arg("--convert").arg("--keep-until").arg(format!("#{}", point.number));
+    cmd.arg("-o").arg(into).arg("--").arg(archive);
+    if let Some(dir) = archive.parent().filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    (cmd, 1)
 }
 
 /// The command extracting `archive` as it was at `point` into `into` (`aqr --ipc -d --at`), its
@@ -486,6 +532,7 @@ impl Job {
                 0.05 * probe + 0.65 * done(p, "analysis") + 0.3 * done(p, "compression")
             }
             Verb::Extract | Verb::Test => 0.3 * done(p, "decompressed") + 0.7 * done(p, "evaluated"),
+            Verb::Convert => done(p, "written"),
         }
     }
 }
@@ -658,6 +705,16 @@ mod tests {
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["--ipc", "-d", "--at", "#1", "-o", "d/out", "--", "d/backup.aqr"]);
         assert_eq!(count, 1);
+        let v = Point { number: 2, shown: String::new(), label: "v1.2".into() };
+        assert_eq!(version_archive(a, &v), Path::new("d/backup (v1.2).aqr"));
+        let into = version_archive(a, &v);
+        let (cmd, count) = command_keep_until(Path::new("aqr"), a, &v, &into);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            args,
+            ["--ipc", "--convert", "--keep-until", "#2", "-o", &into.to_string_lossy(), "--", "d/backup.aqr"]
+        );
+        assert_eq!(count, 1);
         assert_eq!(
             last_line(
                 b"x
@@ -687,7 +744,7 @@ aqr: not there
 
     #[test]
     fn verbs_name_the_archive() {
-        for verb in [Verb::Compress, Verb::Extract, Verb::Test] {
+        for verb in [Verb::Compress, Verb::Extract, Verb::Test, Verb::Convert] {
             let (plain, named) = (verb.doing(""), verb.doing("a.aqr"));
             assert!(!plain.is_empty() && !plain.contains("a.aqr"), "{plain}");
             assert!(named.contains("a.aqr"), "{named}");

@@ -26,11 +26,12 @@ use windows_sys::Win32::UI::Controls::{
     PP_BAR, PP_FILL,
 };
 use windows_sys::Win32::UI::Controls::{
-    LIM_LARGE, LIM_SMALL, LoadIconMetric, PBST_PAUSED, TASKDIALOGCONFIG, TD_ERROR_ICON, TD_INFORMATION_ICON,
-    TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDCBF_CLOSE_BUTTON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON, TDE_CONTENT,
-    TDE_MAIN_INSTRUCTION, TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDF_SHOW_PROGRESS_BAR, TDM_CLICK_BUTTON,
-    TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE,
-    TDN_BUTTON_CLICKED, TDN_CREATED, TDN_TIMER, TaskDialogIndirect,
+    LIM_LARGE, LIM_SMALL, LoadIconMetric, PBST_PAUSED, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TD_ERROR_ICON,
+    TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDCBF_CLOSE_BUTTON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON,
+    TDE_CONTENT, TDE_MAIN_INSTRUCTION, TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDF_SHOW_PROGRESS_BAR,
+    TDF_USE_COMMAND_LINKS, TDM_CLICK_BUTTON, TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS,
+    TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE, TDN_BUTTON_CLICKED, TDN_CREATED, TDN_TIMER,
+    TaskDialogIndirect,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -150,6 +151,32 @@ pub fn confirm(main: &str, content: &str) -> bool {
     d.c.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON;
     d.c.pfCallback = Some(plain);
     d.show().0 == IDYES
+}
+
+/// Asks which of `choices` (command links: a text, and the line below it) to take, or none
+/// (Cancel): its index.
+pub fn choose(icon: Icon, main: &str, content: &str, choices: &[(&str, &str)]) -> Option<usize> {
+    const FIRST: i32 = 100;
+    let mut d = Config::new(std::ptr::null_mut(), Some(icon), main, content);
+    d.c.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_COMMAND_LINKS;
+    d.c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    d.c.pfCallback = Some(plain);
+    let texts: Vec<PCWSTR> = choices
+        .iter()
+        .map(|(t, more)| {
+            d.keep(&format!(
+                "{t}
+{more}"
+            ))
+        })
+        .collect();
+    let buttons: Vec<TASKDIALOG_BUTTON> =
+        (texts.iter().zip(FIRST..)).map(|(&t, id)| TASKDIALOG_BUTTON { nButtonID: id, pszButtonText: t }).collect();
+    d.c.cButtons = buttons.len() as u32;
+    d.c.pButtons = buttons.as_ptr();
+    d.c.nDefaultButton = IDCANCEL;
+    let (button, _) = d.show();
+    (button >= FIRST).then(|| (button - FIRST) as usize).filter(|&k| k < choices.len())
 }
 
 /// Lines of the content, always as many (for the dialog not to change its size).
@@ -332,6 +359,7 @@ impl Window<'_> {
                 [0.0, of("probe"), of("analysis"), of("compression")]
             }
             Verb::Extract | Verb::Test => [0.0, 0.0, of("decompressed"), of("evaluated")],
+            Verb::Convert => [0.0, 0.0, 0.0, of("written")],
         }
     }
 
@@ -369,6 +397,7 @@ impl Window<'_> {
                 }
                 Verb::Test => win::checked(bytes(pair("evaluated"))),
                 Verb::Extract => win::written(bytes(pair("evaluated"))),
+                Verb::Convert => win::written(bytes(pair("written"))),
             });
             let dir = p["dir"].is_object();
             let file = if dir { &p["dir"] } else { &p["file"] };

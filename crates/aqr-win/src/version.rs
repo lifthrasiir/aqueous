@@ -7,6 +7,10 @@
 //!   last chosen, and the one chosen is extracted as it was (`aqr -d --at`) into a folder beside
 //!   the archive named after it ([`aqr_ipc::version_folder`]), with the window of how far it is
 //!   ([`crate::run::run_at`]). With `#N`, point N is extracted, asked for nothing.
+//! - `rollback-version ARCHIVE #N` (the Versions tab's "Delete later versions…"): a dialog asks
+//!   whether to delete the versions after point N (`aqr --rollback #N`: cut back in place) or
+//!   to save point N as a new archive beside it instead (`aqr --convert --keep-until #N`, into
+//!   [`aqr_ipc::version_archive`], with the window of how far it is).
 //!
 //! The dialogs are modal ones of a template made in memory ([`crate::passphrase::Template`]): task
 //! dialogs have no edit field, and a list of many versions wants a list box.
@@ -97,6 +101,47 @@ pub fn extract(archive: PathBuf, number: Option<u64>) -> ExitCode {
     }
     match choose(std::ptr::null_mut(), &shown, &points) {
         Some(k) => crate::run::run_at(&archive, &points[k]),
+        None => ExitCode::SUCCESS,
+    }
+}
+
+/// `rollback-version`: asks whether to cut `archive` back to point `number` in place or to save
+/// that version as a new archive, and does it.
+pub fn rollback(archive: PathBuf, number: u64) -> ExitCode {
+    let shown = file_name(&archive);
+    let points = match aqr_ipc::points(&aqr_ipc::aqr(), &archive) {
+        Ok(p) => p,
+        Err(e) => {
+            dialog::message(Icon::Error, win::could_not_list(), &e, None);
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(point) = points.iter().find(|p| p.number == number) else {
+        dialog::message(Icon::Error, win::could_not_list(), &format!("{shown}: #{number}"), None);
+        return ExitCode::FAILURE;
+    };
+    let version = match point.label.is_empty() {
+        true => format!("#{} ({})", point.number, point.shown),
+        false => format!("\"{}\" ({})", point.label, point.shown),
+    };
+    let into = file_name(&aqr_ipc::version_archive(&archive, point));
+    let choices = [
+        (win::rollback_delete(), win::rollback_delete_info(&shown)),
+        (win::rollback_save(), win::rollback_save_info(&into)),
+    ];
+    let choices: Vec<(&str, &str)> = choices.iter().map(|(a, b)| (*a, b.as_str())).collect();
+    match dialog::choose(Icon::Warning, &win::rollback_ask(&shown, &version), win::rollback_info(), &choices) {
+        Some(0) => match aqr_ipc::rollback(&aqr_ipc::aqr(), &archive, number) {
+            Ok(told) => {
+                dialog::message(Icon::Information, win::rolled_back(), &told, None);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                dialog::message(Icon::Error, win::could_not_roll_back(), &e, None);
+                ExitCode::FAILURE
+            }
+        },
+        Some(_) => crate::run::run_keep_until(&archive, point),
         None => ExitCode::SUCCESS,
     }
 }

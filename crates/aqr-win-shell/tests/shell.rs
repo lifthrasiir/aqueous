@@ -986,12 +986,14 @@ fn browsed() {
             SendMessageW(page, WM_COMMAND, Some(WPARAM(100 | 2 << 16)), None); // LBN_DBLCLK
             SendMessageW(page, WM_COMMAND, Some(WPARAM(102)), None);
             SendMessageW(page, WM_COMMAND, Some(WPARAM(103)), None);
+            SendMessageW(page, WM_COMMAND, Some(WPARAM(104)), None);
             let told: Vec<String> = std::fs::read_to_string(&opened).unwrap().lines().map(str::to_owned).collect();
-            assert_eq!(told.len(), 4, "{told:?}");
+            assert_eq!(told.len(), 5, "{told:?}");
             assert!(told[0].starts_with(&format!("open {}\\@", j.display())) && told[0] != told[1], "{told:?}");
             assert_eq!(told[1], format!("open {at}"), "{told:?}");
             assert_eq!(told[2], format!("run extract-version {} #1", j.display()));
             assert_eq!(told[3], format!("run name-version {}", j.display()));
+            assert_eq!(told[4], format!("run rollback-version {} #1", j.display()));
             // (named: the list read again, as the page is told)
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {

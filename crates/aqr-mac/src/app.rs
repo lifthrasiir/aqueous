@@ -295,7 +295,7 @@ fn show(r: &mut Running) {
             let p = NSProgress::initWithParent_userInfo(NSProgress::alloc(), None, None);
             p.setKind(Some(NSProgressKindFile));
             p.setFileOperationKind(Some(match job.ipc.verb {
-                Verb::Compress => NSProgressFileOperationKindCopying,
+                Verb::Compress | Verb::Convert => NSProgressFileOperationKindCopying,
                 Verb::Extract | Verb::Test => NSProgressFileOperationKindDecompressingAfterDownloading,
             }));
             p.setFileURL(Some(&url));

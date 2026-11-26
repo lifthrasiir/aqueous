@@ -2,7 +2,8 @@
 //! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
 //!
 //! usage: aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... |
-//!        extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE
+//!        extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE |
+//!        rollback-version ARCHIVE #N
 //!
 //! - `--register` adds the verbs for the user (`register`): "Compress with Aqueous" on files
 //!   and folders, and the menu "Aqueous" beside it with the rest ("Compress with passphrase…",
@@ -24,6 +25,9 @@
 //!   version…" extracts one of the versions named (the points of its journal: `aqr -j`, `--tag`)
 //!   as it was, into a folder beside the archive named after it (`extract-version ARCHIVE #N`:
 //!   point N, asked for nothing: the Versions tab of the shell extension's).
+//! - `rollback-version ARCHIVE #N` (the Versions tab's "Delete later versions…"): the versions
+//!   after point N deleted (`aqr --rollback`), or point N saved as a new archive instead (`aqr
+//!   --convert --keep-until`), as a dialog asks (`version`).
 //! - `add ARCHIVE DIR PATH...`: the paths added to the archive under `DIR` in it (`aqr -a`,
 //!   each `--rename DIR/NAME`), as files are dropped or pasted into its folder in Explorer
 //!   (the shell extension's).
@@ -174,10 +178,11 @@ fn main() -> std::process::ExitCode {
         "extract" => Verb::Extract,
         "test" => Verb::Test,
         // (one archive: a verb that takes a single selection)
-        "name-version" | "extract-version" => {
-            // (and of extract-version, the number of the point, `#N`, where it is chosen)
+        "name-version" | "extract-version" | "rollback-version" => {
+            // (and of extract-version, the number of the point, `#N`, where it is chosen; of
+            // rollback-version, always)
             let (archive, number) = match <[PathBuf; 2]>::try_from(paths) {
-                Ok([a, n]) if name == "extract-version" => {
+                Ok([a, n]) if name != "name-version" => {
                     match n.to_str().and_then(|n| n.strip_prefix('#')).and_then(|n| n.parse::<u64>().ok()) {
                         Some(n) => (a, Some(n)),
                         None => return fail(win::not_verb(), &n.to_string_lossy()),
@@ -189,14 +194,16 @@ fn main() -> std::process::ExitCode {
                     Err(_) => return fail(win::nothing(), win::no_path()),
                 },
             };
-            return match name {
-                "name-version" => version::name(archive),
+            return match (name, number) {
+                ("name-version", _) => version::name(archive),
+                ("rollback-version", Some(n)) => version::rollback(archive, n),
+                ("rollback-version", None) => fail(win::nothing(), win::no_path()),
                 _ => version::extract(archive, number),
             };
         }
         _ => {
             let usage = "aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... | \
-                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N] | add ARCHIVE DIR PATH...";
+                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N] | rollback-version ARCHIVE #N | add ARCHIVE DIR PATH...";
             return fail(win::not_verb(), usage);
         }
     };

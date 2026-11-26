@@ -58,9 +58,10 @@ object is released, for the server to close it a minute later (and to end, idle)
   with an item of the point after it (`src/pidl.rs`'s `Kind::Version`, never listed; parsed as
   `@` and the point's offset). And the "Versions" tab of the file's Properties
   (`src/history.rs`, a property sheet handler): the points, read once the tab is shown; "Open"
-  (or a double-click) opens one in a window of its own, "Extract…" and "Name this version…"
-  run aqr-win (`extract-version ARCHIVE #N`, `name-version ARCHIVE`), the list read again once
-  a version is named. And a command "Versions" of the view, its subcommands the menu's
+  (or a double-click) opens one in a window of its own, "Extract…", "Name this version…" and
+  "Delete later versions…" run aqr-win (`extract-version ARCHIVE #N`, `name-version ARCHIVE`,
+  `rollback-version ARCHIVE #N`), the list read again once a version is named or the later
+  ones deleted. And a command "Versions" of the view, its subcommands the menu's
   (`src/commands.rs`, `IExplorerCommandProvider`), which Explorer may show in its command bar.
 - Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and its compressors, a single file
   compressed), browsed alike where Aqueous opens their type: read by `aqr --serve` through
