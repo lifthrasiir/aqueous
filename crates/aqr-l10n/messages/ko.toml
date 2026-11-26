@@ -317,3 +317,6 @@ replace = "{path} 파일을 덮어쓸까요?"
 [folder]
 open = "열기"
 not_opened = "{name}을(를) 열지 못했습니다"
+not_read = "{name}을(를) 읽지 못했습니다"
+open_with_folder = "옆의 파일과 함께 열기"
+opening = "{name} 여는 중…"

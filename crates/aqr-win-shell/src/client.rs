@@ -70,12 +70,14 @@ fn git() -> windows::core::Result<IGlobalInterfaceTable> {
 struct Connection {
     server: Option<Kept>,
     archives: HashMap<PathBuf, (Option<Kept>, usize)>,
+    /// By archive kept, its file's size and time as it was opened ([`changed`]).
+    stamps: HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
 }
 
 // (never locked over a COM call: a call from a single-threaded apartment lets in others, which
 // may come back here on the same thread)
 static CONNECTION: LazyLock<Mutex<Connection>> =
-    LazyLock::new(|| Mutex::new(Connection { server: None, archives: HashMap::new() }));
+    LazyLock::new(|| Mutex::new(Connection { server: None, archives: HashMap::new(), stamps: HashMap::new() }));
 
 /// Of the server gone: the error of a call to an object of a process no longer there.
 fn disconnected(e: &windows::core::Error) -> bool {
@@ -116,6 +118,9 @@ impl Drop for Use {
                 Some(true) => c.archives.remove(&self.0).and_then(|e| e.0),
                 _ => None,
             };
+            if last == Some(true) {
+                c.stamps.remove(&self.0);
+            }
             // (none left: the server too, for it to end once idle)
             let server = if c.archives.is_empty() { c.server.take() } else { None };
             (archive, server)
@@ -146,7 +151,13 @@ fn archive(path: &Path) -> windows::core::Result<IDispatch> {
             s
         }
     };
-    let a = match call(&server, "Open", &[&path.to_string_lossy()])? {
+    // (an encrypted one asks for its passphrase over the window of the shell's: the server's
+    // dialog let come to the front)
+    let owner = OWNER.load(std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: a proxy of the server's object
+    unsafe { allow_foreground(&server) };
+    let stamp = stamp(path);
+    let a = match call(&server, "Open", &[&path.to_string_lossy(), &owner.to_string()])? {
         Got::Object(o) => o.cast::<IDispatch>()?,
         Got::Text(_) => return Err(E_FAIL.into()),
     };
@@ -154,6 +165,7 @@ fn archive(path: &Path) -> windows::core::Result<IDispatch> {
     // (kept where it has a use, of which one opening it at once: the other let go of)
     let other = {
         let mut c = CONNECTION.lock().unwrap();
+        c.stamps.insert(path.to_owned(), stamp);
         match c.archives.get_mut(path) {
             Some(e) if e.0.is_none() => e.0.replace(kept),
             _ => Some(kept),
@@ -161,6 +173,39 @@ fn archive(path: &Path) -> windows::core::Result<IDispatch> {
     };
     drop(other);
     Ok(a)
+}
+
+/// The window of the shell's that a question is asked over (the last one a folder was given).
+pub static OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// The size and modification time of file `path`.
+fn stamp(path: &Path) -> (u64, Option<std::time::SystemTime>) {
+    std::fs::metadata(path).map_or((0, None), |m| (m.len(), m.modified().ok()))
+}
+
+/// Whether archive `path` changed since it was opened (its file's size or time): then it is let
+/// go of, to be opened anew.
+pub fn changed(path: &Path) -> bool {
+    let now = stamp(path);
+    let gone = {
+        let mut c = CONNECTION.lock().unwrap();
+        match c.stamps.get(path) {
+            Some(&s) if s != now => {
+                c.stamps.remove(path);
+                c.archives.get_mut(path).and_then(|e| e.0.take())
+            }
+            _ => return false,
+        }
+    };
+    drop(gone);
+    true
+}
+
+/// Lets the process of `server` come to the front (its dialogs, asked for by a call).
+unsafe fn allow_foreground(server: &IDispatch) {
+    windows::core::link!("ole32.dll" "system" fn CoAllowSetForegroundWindow(punk: *mut core::ffi::c_void, reserved: *mut core::ffi::c_void) -> HRESULT);
+    // SAFETY: an object of the caller's
+    _ = unsafe { CoAllowSetForegroundWindow(server.as_raw(), std::ptr::null_mut()) };
 }
 
 /// `f` of archive `path`; again of a server started anew, where it was gone.
@@ -285,4 +330,12 @@ pub fn materialize(path: &Path, at: &str) -> windows::core::Result<PathBuf> {
         Got::Text(t) => Ok(PathBuf::from(t)),
         Got::Object(_) => Err(E_FAIL.into()),
     })
+}
+
+/// How far file `at` of archive `path` is being made: `(done, total)` of its bytes written
+/// where it is, else of the archive's data decompressed.
+pub fn progress(path: &Path, at: &str) -> windows::core::Result<(u64, u64)> {
+    let v = with(path, |a| json(a, "Progress", &[at]))?;
+    let pair = |k: &str| Some((v[k][0].as_u64()?, v[k][1].as_u64()?));
+    Ok(pair("written").or_else(|| pair("decompressed")).unwrap_or((0, 0)))
 }

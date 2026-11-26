@@ -26,7 +26,9 @@ use windows::Win32::UI::Shell::{
     SHFILEINFOW, SHFormatDateTimeW, SHGDN_FORPARSING, SHGDN_INFOLDER, SHGDNF, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
     SHGetFileInfoW, SHGetNameFromIDList, SHStrDupW, SIGDN_FILESYSPATH, StrCmpLogicalW, StrFormatKBSizeW,
 };
-use windows::core::{GUID, HRESULT, IUnknownImpl, Interface, PCWSTR, Ref, implement};
+use windows::Win32::UI::Shell::{SHCNE_UPDATEDIR, SHCNF_IDLIST, SHChangeNotify};
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+use windows::core::{GUID, HRESULT, HSTRING, IUnknownImpl, Interface, PCWSTR, Ref, implement};
 
 use crate::client;
 use crate::pidl::{self, Item, Kind};
@@ -165,6 +167,40 @@ fn guard_hr(what: &str, f: impl FnOnce() -> HRESULT) -> HRESULT {
         crate::log(|| format!("{what}: {r:?}"));
     }
     r
+}
+
+/// Window `hwnd` (where there is one) taken as the one to ask questions over.
+fn owner(hwnd: HWND) {
+    if !hwnd.0.is_null() {
+        client::OWNER.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`: a failure the shell tells nothing of.
+const CANCELLED: HRESULT = HRESULT(0x8007_04C7_u32 as i32);
+
+/// Archive `path` not read (`e`): told in a box over `hwnd` (once in a while for the same, as
+/// the shell enumerates a folder more than once), the failure then one the shell tells nothing
+/// of. A passphrase not given is told nothing of.
+fn failed(hwnd: HWND, path: &Path, e: &windows::core::Error) -> HRESULT {
+    let m = e.message();
+    if m.contains("no passphrase given") {
+        return CANCELLED;
+    }
+    static SHOWN: Mutex<Vec<(String, std::time::Instant)>> = Mutex::new(Vec::new());
+    {
+        let mut shown = SHOWN.lock().unwrap();
+        shown.retain(|(_, t)| t.elapsed() < std::time::Duration::from_secs(10));
+        if shown.iter().any(|(s, _)| *s == m) {
+            return CANCELLED;
+        }
+        shown.push((m.clone(), std::time::Instant::now()));
+    }
+    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let text = HSTRING::from(format!("{}\n\n{m}", aqr_l10n::folder::not_read(&name)));
+    // SAFETY: strings of their own
+    unsafe { MessageBoxW(Some(hwnd), &text, &HSTRING::from("Aqueous"), MB_OK | MB_ICONERROR) };
+    CANCELLED
 }
 
 /// `path` with `name` after it.
@@ -377,11 +413,23 @@ impl IShellFolder_Impl for Folder_Impl {
         })
     }
 
-    fn EnumObjects(&self, _: HWND, flags: u32, out: windows::core::OutRef<IEnumIDList>) -> HRESULT {
+    fn EnumObjects(&self, hwnd: HWND, flags: u32, out: windows::core::OutRef<IEnumIDList>) -> HRESULT {
         guard_hr("EnumObjects", || {
+            owner(hwnd);
+            // (the archive changed: opened anew, the other views of it told)
+            if let Ok((archive, _)) = self.at()
+                && client::changed(archive.path())
+            {
+                crate::log(|| format!("changed: {}", archive.path().display()));
+                let at = self.at.read().unwrap();
+                if let Some(a) = at.as_ref() {
+                    // SAFETY: an ID list of the folder's
+                    unsafe { SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_IDLIST, Some(a.pidl.as_ptr() as *const _), None) };
+                }
+            }
             let items = match self.entries() {
                 Ok(i) => i,
-                Err(e) => return e.code(),
+                Err(e) => return failed(hwnd, &self.at().map(|a| a.0.path().to_owned()).unwrap_or_default(), &e),
             };
             let items: Vec<Vec<u8>> = items
                 .iter()
@@ -467,11 +515,12 @@ impl IShellFolder_Impl for Folder_Impl {
 
     fn CreateViewObject(
         &self,
-        _: HWND,
+        hwnd: HWND,
         riid: *const GUID,
         ppv: *mut *mut core::ffi::c_void,
     ) -> windows::core::Result<()> {
         guard("CreateViewObject", || {
+            owner(hwnd);
             if ppv.is_null() || riid.is_null() {
                 return Err(E_POINTER.into());
             }
@@ -532,6 +581,7 @@ impl IShellFolder_Impl for Folder_Impl {
             if ppv.is_null() || riid.is_null() {
                 return Err(E_POINTER.into());
             }
+            owner(hwnd);
             // SAFETY: the caller's pointers; an array of `cidl` ID lists
             unsafe {
                 *ppv = std::ptr::null_mut();

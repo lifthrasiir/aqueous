@@ -41,7 +41,7 @@ use windows::core::{GUID, HSTRING, Interface};
 fn built() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let dir = exe.parent().unwrap().parent().unwrap().to_owned();
-    for f in ["aqr.exe", "aqr-win.exe", "aqr_shell.dll"] {
+    for f in ["aqr.exe", "aqr-win.exe"] {
         assert!(
             dir.join(f).is_file(),
             "{}: not built (cargo rt -p aqr -p aqr-win -p aqr-win-shell)",
@@ -169,16 +169,38 @@ fn browsed() {
     std::fs::write(d.join("t/sub/deep/c.txt"), b"deep").unwrap();
     let o = Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", "t.aqrtest", "t"]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    let _registered = Registered::new(&bin.join("aqr_shell.dll"));
+    let o = Command::new(bin.join("aqr.exe"))
+        .current_dir(&d)
+        .env("AQR_PASS", "sesame")
+        .args(["-q", "--passphrase-from=env:AQR_PASS", "-o", "e.aqrtest", "t"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // (the library of this build: `cargo test` writes it in `deps`, beside this test, and the one
+    // in the directory above only as `cargo build` does)
+    let exe = std::env::current_exe().unwrap();
+    let dll = exe.with_file_name("aqr_shell.dll");
+    let dll = if dll.is_file() { dll } else { bin.join("aqr_shell.dll") };
+    let _registered = Registered::new(&dll);
     let mut server = Command::new(bin.join("aqr-win.exe"))
         .args(["--serve", &braced(&TEST_SERVER)])
         .env("AQR", bin.join("aqr.exe"))
         .env("AQR_SERVE_IDLE", "0.2,1")
+        .env("AQR_SERVE_TEST_PASSPHRASE", "sesame")
+        .env("LOCALAPPDATA", d.join("local"))
         .spawn()
         .unwrap();
     // (once it has registered its class)
     std::thread::sleep(Duration::from_millis(500));
     let archive = d.join("t.aqrtest");
+    // (what the library tells: the archive changed, below)
+    let log = d.join("shell.log");
+    // SAFETY: the test's own environment, before the library reads it
+    unsafe { std::env::set_var("AQR_SHELL_LOG", &log) };
+    // (what "Open" opens, told rather than run)
+    let opened = d.join("opened.txt");
+    // SAFETY: as above
+    unsafe { std::env::set_var("AQR_SHELL_TEST_OPENED", &opened) };
     let d_out = || {
         let o = d.join("out");
         std::fs::create_dir_all(&o).unwrap();
@@ -313,6 +335,7 @@ fn browsed() {
             let default = GetMenuDefaultItem(menu, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0));
             assert!(verbs.iter().any(|(id, v)| v == "open" && *id == default), "{verbs:?} {default}");
             assert!(verbs.iter().any(|(_, v)| v == "copy"), "{verbs:?}");
+            assert!(verbs.iter().any(|(_, v)| v == "openwithfolder"), "{verbs:?}");
             DestroyMenu(menu).unwrap();
             let copy = windows::core::s!("copy");
             let info = CMINVOKECOMMANDINFO {
@@ -331,6 +354,83 @@ fn browsed() {
             op.PerformOperations().unwrap();
             assert_eq!(std::fs::read(pasted.join("a.txt")).unwrap(), b"some text\n".repeat(100));
             items.into_iter().for_each(|p| windows::Win32::UI::Shell::ILFree(Some(p)));
+        }
+        // "Open with the files beside it": the file and those of its folder (and under it)
+        // written out, the file opened
+        // SAFETY: COM calls of the shell's objects
+        unsafe {
+            let sub: IShellFolder2 = item(&archive.join("sub")).BindToHandler(None, &BHID_SFObject).unwrap();
+            let mut e = None;
+            assert!(sub.EnumObjects(HWND::default(), 0x40, &mut e).is_ok());
+            let mut got = [std::ptr::null_mut()];
+            assert!(e.unwrap().Next(&mut got, None).is_ok());
+            let m: IContextMenu = sub.GetUIObjectOf(HWND::default(), &[got[0] as *const _], None).unwrap();
+            let menu = CreatePopupMenu().unwrap();
+            assert!(m.QueryContextMenu(menu, 0, 1, 0x7fff, 0).is_ok());
+            let info = CMINVOKECOMMANDINFO {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+                lpVerb: windows::core::s!("openwithfolder"),
+                nShow: 1,
+                ..Default::default()
+            };
+            m.InvokeCommand(&info).unwrap();
+            DestroyMenu(menu).unwrap();
+            windows::Win32::UI::Shell::ILFree(Some(got[0]));
+            let start = Instant::now();
+            let told = loop {
+                if let Ok(t) = std::fs::read_to_string(&opened) {
+                    break t;
+                }
+                assert!(start.elapsed() < Duration::from_secs(10), "nothing opened");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let file = PathBuf::from(told.trim());
+            assert!(file.starts_with(d.join(r"local\Aqueous\Open")) && file.ends_with(r"sub\big.bin"), "{told}");
+            assert!(std::fs::read(&file).unwrap() == big);
+            assert_eq!(std::fs::read(file.with_file_name(r"deep\c.txt")).unwrap(), b"deep");
+            // (the file beside the folder, not)
+            assert!(!file.parent().unwrap().with_file_name("a.txt").exists());
+        }
+        // encrypted: of the passphrase the server's dialog is given (the test's)
+        let e = item(&d.join("e.aqrtest"));
+        assert_eq!(entries(&e), [("a.txt".to_owned(), false, Some(1000)), ("sub".to_owned(), true, None)]);
+        // SAFETY: COM calls of the shell's item
+        let s: IStream = unsafe { item(&d.join(r"e.aqrtest\sub\big.bin")).BindToHandler(None, &BHID_Stream).unwrap() };
+        assert!(read(&s) == big);
+        drop((e, s));
+        // the archive changed (its time, here: a file mapped is not replaced): opened anew, as
+        // the folder is enumerated again
+        // SAFETY: COM calls of the shell's objects
+        unsafe {
+            // (a folder kept, as a window's view keeps it)
+            let kept: IShellFolder2 = root.BindToHandler(None, &BHID_SFObject).unwrap();
+            let count = |f: &IShellFolder2| {
+                let mut e = None;
+                assert!(f.EnumObjects(HWND::default(), 0x20 | 0x40, &mut e).is_ok());
+                let (e, mut n) = (e.unwrap(), 0);
+                loop {
+                    let mut got = [std::ptr::null_mut()];
+                    if e.Next(&mut got, None).is_err() || got[0].is_null() {
+                        return n;
+                    }
+                    windows::Win32::UI::Shell::ILFree(Some(got[0]));
+                    n += 1;
+                }
+            };
+            assert_eq!(count(&kept), 2);
+            let f = std::fs::File::options().write(true).open(&archive).unwrap();
+            f.set_modified(std::time::SystemTime::now() + Duration::from_secs(5)).unwrap();
+            drop(f);
+            assert_eq!(count(&kept), 2);
+            let told = std::fs::read_to_string(&log).unwrap_or_default();
+            assert!(
+                told.contains("changed: "),
+                "{}",
+                told.lines().filter(|l| !l.contains("GetDetailsEx")).collect::<Vec<_>>().join(
+                    "
+"
+                )
+            );
         }
         // (not there: the shell's parse fails)
         // SAFETY: a path, parsed by the shell

@@ -351,3 +351,6 @@ replace = "Replace the file {path}?"
 [folder]
 open = "Open"
 not_opened = "{name} could not be opened"
+not_read = "{name} could not be read"
+open_with_folder = "Open with the files beside it"
+opening = "Opening {name}…"

@@ -26,9 +26,17 @@ object is released, for the server to close it a minute later (and to end, idle)
   has `CFSTR_FILEDESCRIPTORW` (every file and folder under those chosen, by its path from the
   folder) and `CFSTR_FILECONTENTS` (a stream of each by its index).
 - The context menu (`src/menu.rs`): the shell's (`SHCreateDefaultContextMenu`: Copy,
-  Properties; of folders, the verbs of folders), with "Open" first of a file chosen alone, the
-  default: written out by the server (`Materialize`) on a thread of its own and opened as the
-  system opens a file of its type.
+  Properties; of folders, the verbs of folders), with ours first of a file chosen alone: "Open"
+  (the default) and "Open with the files beside it" (those of its folder and under it too: a
+  `.cue` and its `.bin`, a page and its images), written out by the server (`Materialize`) on
+  a thread of their own, the shell's progress window shown where it takes over 0.4 s (cancelled,
+  nothing opened), then opened as the system opens a file of its type.
+- Encrypted archives: their passphrase asked for by the server's dialog over the window of the
+  shell's (the server let come to the front).
+- An archive not read (damaged): told in a box over the window, once in a while, the failure
+  then one the shell tells nothing of.
+- An archive whose file changed (its size or time) as a folder of it is enumerated again: opened
+  anew, the views of the folder told (`SHCNE_UPDATEDIR`).
 
 `cargo aqr-win --register` registers the library kept beside aqr-win (`aqr-win --register`
 registers the folder where `aqr_shell.dll` is beside it; the double-click then opens the
@@ -42,7 +50,7 @@ beside the library (`cargo rt -p aqr -p aqr-win -p aqr-win-shell --test shell --
 
 ## Status
 
-Left (the design's phases): a window of how far a big file opened is
-decoded, the siblings of a file opened with it, encrypted and damaged archives told,
-`SHChangeNotify` where an archive changed, the installer and the release carrying the library,
-ARM64. "Open" itself (`ShellExecuteEx`) is not tested but by hand.
+Left: the installer and the release carrying the library (and its uninstall, the library being
+held by Explorer), the archive's file watched (it is checked as a folder is enumerated, F5),
+salvaging damaged archives, ARM64. The progress window is tested by hand only, and
+`AQR_SHELL_TEST_OPENED=FILE` has "Open" tell the file in FILE rather than run it (for tests).
