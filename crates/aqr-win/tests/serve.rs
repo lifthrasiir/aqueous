@@ -197,6 +197,7 @@ fn served() {
         .args(["--serve", "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A61}"])
         .env("AQR", &aqr)
         .env("AQR_SERVE_IDLE", "0.2,2")
+        .env("LOCALAPPDATA", d.join("local"))
         .spawn()
         .unwrap();
     // SAFETY: this thread's COM, and the objects of the server through it
@@ -222,6 +223,18 @@ fn served() {
         let st = object(a, "OpenStream", &["a.txt"]);
         assert_eq!(read_all(st, 4096), b"some text\n".repeat(100));
         release(st);
+        // written out to be opened: read only, the same file once there
+        let m = match call(a, "Materialize", &["sub/big.bin"]) {
+            Ok(Got::Text(t)) => PathBuf::from(t),
+            _ => panic!("not materialized"),
+        };
+        assert!(m.starts_with(d.join(r"local\Aqueous\Open")) && m.ends_with(r"sub\big.bin"), "{}", m.display());
+        assert!(std::fs::read(&m).unwrap() == big);
+        assert!(std::fs::metadata(&m).unwrap().permissions().readonly());
+        match call(a, "Materialize", &["sub/big.bin"]) {
+            Ok(Got::Text(t)) => assert_eq!(PathBuf::from(t), m),
+            _ => panic!("not materialized again"),
+        }
         match call(a, "OpenStream", &["nope"]) {
             Err(e) => assert!(e.contains("not in the archive"), "{e}"),
             Ok(_) => panic!("a stream of nothing"),
@@ -240,5 +253,7 @@ fn served() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(server.wait().unwrap().success());
+    // (what was opened, let go of as the server ended)
+    assert!(std::fs::read_dir(d.join(r"local\Aqueous\Open")).unwrap().next().is_none());
     std::fs::remove_dir_all(&d).unwrap();
 }

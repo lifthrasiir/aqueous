@@ -9,12 +9,15 @@
 //! - the class: `Open(path)`, an archive object, or an error (`EXCEPINFO`'s description).
 //! - an archive: `Info()` (what `open` answered, as JSON), `List(dir)` (the entries, a JSON
 //!   array), `Stat(path)` (an entry, JSON), `OpenStream(path)` (an `IStream` of the file, read
-//!   only, read a chunk of `read` after another). Once let go of (its last reference released,
+//!   only, read a chunk of `read` after another), `Materialize(path)` (the file written out to
+//!   be opened by a program, read only, in `%LOCALAPPDATA%\Aqueous\Open\<archive>\<path>`: its
+//!   path; one there already of its size taken as it is). Once let go of (its last reference released,
 //!   by the client or by COM as the client is gone), its handle is closed a [`LINGER`] later,
 //!   unless the archive is opened again: what was evaluated of it kept while the client moves
 //!   from one folder to another.
 //!
-//! The program ends once it has served no object for [`IDLE`] (the class revoked first, so that
+//! The files written out are removed as the program ends (but those open still), and those of
+//! a day before as it starts. The program ends once it has served no object for [`IDLE`] (the class revoked first, so that
 //! a client coming then starts another).
 
 use std::ffi::c_void;
@@ -121,6 +124,8 @@ pub fn serve(args: &[std::ffi::OsString]) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     *IDLE_SINCE.lock().unwrap() = Some(Instant::now());
+    // (what was opened before, of a day ago: let go of)
+    sweep(Some(Duration::from_secs(24 * 3600)));
     let factory = Box::into_raw(Box::new(Factory { vtbl: &FACTORY_VTBL, refs: AtomicU32::new(1) }));
     let mut cookie = 0;
     // SAFETY: a class object of a static vtable, alive until the process ends
@@ -149,8 +154,119 @@ pub fn serve(args: &[std::ffi::OsString]) -> std::process::ExitCode {
             }
             close_lingering(None);
             drop(SERVED.lock().unwrap().take());
+            // (the files opened, but those open still)
+            sweep(None);
             return std::process::ExitCode::SUCCESS;
         }
+    }
+}
+
+/// Where the files opened of archives are written (`%LOCALAPPDATA%\Aqueous\Open`): a directory
+/// for each archive (by a hash of its path and identity), the files at their paths in it.
+fn opened_dir() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join(r"Aqueous\Open"))
+}
+
+/// File `path` of archive `a` written out to be opened by a program (read only, so that a change
+/// made to it is saved elsewhere, not lost), where it is not already: its path.
+fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
+    let e = a.with(|s, h| s.ask(json!({"stat": h, "path": path})))?;
+    let e = &e["entry"];
+    if e["kind"] != "file" {
+        return Err(format!("{path}: not a file"));
+    }
+    let size = e["size"].as_u64().unwrap_or(0);
+    let identity = a.info()["identity"].as_str().unwrap_or("").to_owned();
+    // (FNV-1a of the archive's path and identity)
+    let key = format!("{}\n{identity}", a.path.display())
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    let dir = opened_dir().ok_or("no LOCALAPPDATA")?.join(format!("{key:016x}"));
+    let to = path.split('/').filter(|n| !n.is_empty()).fold(dir, |p, n| p.join(n));
+    if std::fs::metadata(&to).is_ok_and(|m| m.len() == size) {
+        return Ok(to);
+    }
+    let parent = to.parent().ok_or("no folder")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let part = to.with_extension(format!("{}.part", std::process::id()));
+    let r = (|| -> Result<(), String> {
+        let f = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+        let mut at = 0u64;
+        while at < size {
+            let d = a.with(|s, h| s.read(h, path, at, CHUNK))?;
+            if d.is_empty() {
+                return Err(format!("{path}: cut short"));
+            }
+            write_at(&f, &d, at).map_err(|e| format!("{}: {e}", part.display()))?;
+            at += d.len() as u64;
+        }
+        if let Some(t) = file_time(e) {
+            _ = f.set_modified(t);
+        }
+        drop(f);
+        let mut p = std::fs::metadata(&part).map_err(|e| e.to_string())?.permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(&part, p).map_err(|e| e.to_string())?;
+        // (over one not of the size: cut short, or of another file before)
+        _ = clear_readonly(&to).and_then(|()| std::fs::remove_file(&to));
+        std::fs::rename(&part, &to).map_err(|e| format!("{}: {e}", to.display()))
+    })();
+    if r.is_err() {
+        _ = clear_readonly(&part).and_then(|()| std::fs::remove_file(&part));
+    }
+    r.map(|()| to)
+}
+
+fn write_at(f: &std::fs::File, d: &[u8], at: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let (mut at, mut d) = (at, d);
+    while !d.is_empty() {
+        match f.seek_write(d, at)? {
+            0 => return Err(std::io::ErrorKind::WriteZero.into()),
+            n => (at, d) = (at + n as u64, &d[n..]),
+        }
+    }
+    Ok(())
+}
+
+/// The modification time of `entry`, as `stat` tells it.
+fn file_time(entry: &Value) -> Option<std::time::SystemTime> {
+    let (s, n) = (entry["mtime"][0].as_i64()?, entry["mtime"][1].as_u64()?);
+    let d = Duration::new(s.unsigned_abs(), n as u32);
+    if s >= 0 { std::time::UNIX_EPOCH.checked_add(d) } else { std::time::UNIX_EPOCH.checked_sub(d) }
+}
+
+fn clear_readonly(p: &std::path::Path) -> std::io::Result<()> {
+    let mut perm = std::fs::metadata(p)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    std::fs::set_permissions(p, perm)
+}
+
+/// The files opened let go of: of the archives' directories not changed for `older` (all, where
+/// none), each file but those open still (a program has it).
+fn sweep(older: Option<Duration>) {
+    let Some(root) = opened_dir() else { return };
+    let Ok(dirs) = std::fs::read_dir(&root) else { return };
+    for d in dirs.flatten() {
+        let age = d.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        if older.is_some_and(|o| age.is_some_and(|a| a < o)) {
+            continue;
+        }
+        remove_tree(&d.path());
+    }
+}
+
+/// What of `p` can be removed, removed (a file open stays, and the folders it is in).
+fn remove_tree(p: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(p) {
+        for e in entries.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => remove_tree(&e.path()),
+                _ => _ = clear_readonly(&e.path()).and_then(|()| std::fs::remove_file(e.path())),
+            }
+        }
+        _ = std::fs::remove_dir(p);
     }
 }
 
@@ -380,7 +496,7 @@ impl Kind {
     fn names(&self) -> &'static [&'static str] {
         match self {
             Kind::Server => &["Open"],
-            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream"],
+            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream", "Materialize"],
         }
     }
 }
@@ -432,6 +548,10 @@ impl Dispatch {
                     return Err(format!("{path}: not a file"));
                 }
                 Ok(Out::Object(Stream::new(a.clone(), path, e) as *mut c_void, false))
+            }
+            (Kind::Archive(a), 5) => {
+                let path = arg(0)?;
+                Ok(Out::Text(materialize(a, path)?.display().to_string()))
             }
             _ => Err("no such method".into()),
         }
