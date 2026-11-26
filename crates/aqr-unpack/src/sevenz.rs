@@ -625,6 +625,19 @@ impl<'d> Listing<'d> {
         r
     }
 
+    /// The sizes of the contents of the tree: (content, bytes).
+    pub fn sizes(&self) -> Vec<(usize, u64)> {
+        let mut out: Vec<(usize, u64)> = self.empty.iter().map(|&c| (c, 0)).collect();
+        for (f, u) in self.units.iter().enumerate() {
+            for (k, (c, _)) in u.files.iter().enumerate() {
+                if let (Some(c), Some(&n)) = (c, self.main.subs[f].get(k)) {
+                    out.push((*c, n));
+                }
+            }
+        }
+        out
+    }
+
     pub fn tree(&self) -> &Tree {
         &self.b.tree
     }

@@ -77,7 +77,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     codec crates' decoding code alone (no `encode`); aqr-decompress pairs its `Module`s with it,
     aqr-dll builds each module's library with its entry.
   - `aqr-unpack` — archives of other formats (ZIP, 7z, tar and its compressors) read into a
-    tree for `aqr -d`, which extracts them as Aqueous archives (`crates/aqr/src/extract.rs`).
+    tree for `aqr -d`, which extracts them as Aqueous archives (`crates/aqr/src/extract.rs`),
+    and for `aqr --serve` (Explorer's folders of them: `sizes`, a file read by `unpack_selected`).
   - `aqr-pack` — the tree `aqr -c` gathers written as an archive of another format (ZIP, 7z,
     ALZ, EGG, tar and its compressors, single-file streams: `--format FORMAT`, or `-o NAME.EXT`),
     each format's work spread over the pool; liblzma (XZ Utils, built from source) for xz/7z.

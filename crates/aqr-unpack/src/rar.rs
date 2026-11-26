@@ -272,6 +272,12 @@ impl<'d> Listing<'d> {
         }
     }
 
+    /// The sizes of the contents of the tree: (content, bytes).
+    pub fn sizes(&self) -> Vec<(usize, u64)> {
+        let files = self.units.iter().flat_map(|u| &u.files).filter_map(|f| Some((f.c?, f.size as u64)));
+        files.chain(self.empty.iter().map(|&c| (c, 0))).collect()
+    }
+
     pub fn tree(&self) -> &Tree {
         &self.b.tree
     }

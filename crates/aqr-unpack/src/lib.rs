@@ -199,6 +199,29 @@ impl<'d> Opened<'d> {
         }
     }
 
+    /// The sizes of the contents of the tree its listing has ([`Opened::tree`]), by content
+    /// (`None`: not told).
+    pub fn sizes(&self) -> Option<Vec<Option<u64>>> {
+        let sizes = match &self.inner {
+            Inner::Zip(l) => l.sizes(),
+            Inner::SevenZip(l) => l.sizes(),
+            Inner::Rar(l) => l.sizes(),
+            Inner::Alz(l) | Inner::Egg(l) => l.sizes(),
+            Inner::SevenZipSealed | Inner::Tar(_) | Inner::Single(_) => return None,
+        };
+        let mut out = vec![None; sizes.iter().map(|&(c, _)| c + 1).max().unwrap_or(0)];
+        for (c, n) in sizes {
+            out[c] = Some(n);
+        }
+        Some(out)
+    }
+
+    /// As [`Opened::unpack`], of the entries of `s` alone (and what is under them), whatever
+    /// [`Opened::select`] chose: of an archive opened once, read by several at once.
+    pub fn unpack_selected(&self, threads: usize, sink: &dyn Sink, s: &Select) -> Result<Done, String> {
+        self.unpack_of(threads, sink, Some(s))
+    }
+
     /// What is told of how its names of no declared encoding were taken, where it was guessed
     /// (`build::Undeclared::told`).
     pub fn names_told(&self) -> Option<String> {
@@ -264,7 +287,10 @@ impl<'d> Opened<'d> {
 
     /// Extracts the tree to `sink`, on up to `threads` threads.
     pub fn unpack(&self, threads: usize, sink: &dyn Sink) -> Result<Done, String> {
-        let s = self.select.as_ref();
+        self.unpack_of(threads, sink, self.select.as_ref())
+    }
+
+    fn unpack_of(&self, threads: usize, sink: &dyn Sink, s: Option<&Select>) -> Result<Done, String> {
         match &self.inner {
             Inner::Zip(l) => l.unpack(threads, sink, s),
             Inner::SevenZip(l) => l.unpack(threads, sink, s),

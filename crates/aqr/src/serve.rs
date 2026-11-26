@@ -53,6 +53,17 @@
 //!   leaves are.
 //! - `trim`: the files kept dropped (`trimmed`: their bytes), as a frontend idle a while asks.
 //!
+//! An archive of another format that is of a tree (ZIP, 7z, RAR, ALZ, EGG, tar under its
+//! compressors: [`aqr_unpack::by_name`]) is served as well, of no journal point nor what
+//! `-t -v` tells of blocks: its entries as aqr-unpack reads them (by its listing; a tar
+//! archive's by reading it all once, as it is opened), a file read decoding it alone (where its
+//! format has it apart: of a tar archive, all of its files at once, kept as one leaf). An
+//! encrypted one (ZIP's, 7z's) is opened of `passphrase` as an Aqueous archive is. `open` tells
+//! of such an archive its `fields`, what its format may have of an entry ([`fields`]): the
+//! others are never told (of an Aqueous archive, all may be: no `fields`).
+//! A single file compressed (`.gz`, `.xz`, ...) is served as an archive of a single file, its
+//! name without the compressor's extension.
+//!
 //! A request that fails is answered by `error` (a message). The program ends once its standard
 //! input is closed; what it spilled to files is gone with it.
 
@@ -152,7 +163,7 @@ struct Opened {
     /// it is not of all of its segments.
     at: Option<usize>,
     // (dropped before what it borrows: fields are dropped in their order)
-    archive: Archive<'static, 'static>,
+    source: Source,
     _leaked: Leaked,
     view: View,
     /// How far the evaluation of its leaves is, as the archive last told it, and how many are
@@ -188,6 +199,110 @@ impl Drop for Leaked {
             }
             drop(Box::from_raw(self.map as *const memmap2::Mmap as *mut memmap2::Mmap));
         }
+    }
+}
+
+/// What an archive open is: an Aqueous archive, or one of another format (aqr-unpack's).
+#[allow(clippy::large_enum_variant, reason = "one for each archive open")]
+enum Source {
+    Aqr(Archive<'static, 'static>),
+    Foreign(Foreign),
+}
+
+/// An archive of another format, of a tree.
+struct Foreign {
+    format: aqr_unpack::Format,
+    opened: aqr_unpack::Opened<'static>,
+    tree: aqr_archive::Tree,
+    /// By content, its bytes.
+    sizes: Vec<Option<u64>>,
+    /// Whether it is decoded whole (a tar archive: no listing to find a file by), its files
+    /// one leaf (0) of all of them, by content; else each file a leaf of its own (its content).
+    whole: bool,
+}
+
+impl Progress {
+    fn tell(&self, s: aqr_archive::Step) {
+        match s {
+            aqr_archive::Step::Reached(r) => *self.reached.lock().unwrap() = Some(r),
+            aqr_archive::Step::Started(_) => _ = self.evaluating.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            aqr_archive::Step::Ended(_) => _ = self.evaluating.fetch_sub(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+/// What an entry of an archive of format `f` may have, of the fields an Aqueous archive's has
+/// beyond its name, kind and size (as the frontend's columns are named): its times, Windows'
+/// attributes, the permissions and owner of Unix, a link's target. The comment, macOS' flags,
+/// `-t`'s flags and what `-t -v` tells of blocks (`data`, `overhead`, `ratio`, `segment`) are
+/// Aqueous's alone.
+fn fields(f: aqr_unpack::Format) -> &'static [&'static str] {
+    use aqr_unpack::Format::*;
+    match f {
+        Zip => &["modified", "created", "accessed", "attributes", "mode", "owner", "target"],
+        SevenZip | Rar => &["modified", "created", "accessed", "attributes", "mode", "target"],
+        Alz => &["modified", "attributes"],
+        Egg => &["modified", "attributes", "mode", "owner"],
+        Tar(_) => &["modified", "accessed", "changed", "mode", "owner", "target"],
+        Single(_) => &[],
+    }
+}
+
+/// The view of tree `t`: its names as `aqr -d` writes them, and its directories' entries.
+fn view_of(t: &aqr_archive::Tree, a: &Args) -> View {
+    let names = Names::new(&a.names, false);
+    names.decide(t);
+    let names: Vec<String> = t.entries.iter().map(|e| names.name(&e.name).os.to_string_lossy().into_owned()).collect();
+    let mut children: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+    let mut by_name = HashMap::new();
+    for (i, e) in t.entries.iter().enumerate() {
+        children.entry(e.parent).or_default().push(i);
+        // (of two names written the same, the first)
+        by_name.entry((e.parent, names[i].clone())).or_insert(i);
+    }
+    View::Tree { names, children, by_name }
+}
+
+/// What a sink of aqr-unpack keeps of the contents it is given: those of `wanted` (none: all),
+/// held as a leaf's are (spilled once what is in memory would pass `cap`).
+struct Keeping<'p> {
+    wanted: Option<usize>,
+    cap: u64,
+    held: Mutex<(HashMap<usize, Held>, u64, Option<String>)>,
+    progress: &'p Progress,
+}
+
+impl aqr_unpack::Sink for Keeping<'_> {
+    fn entries(&self, _: &aqr_archive::Tree, _: &[usize]) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
+        if self.wanted.is_some_and(|w| w != c) {
+            return Ok(());
+        }
+        let mut h = self.held.lock().unwrap();
+        let n = d.len() as u64;
+        let held = match h.1 + n <= self.cap {
+            true => {
+                h.1 += n;
+                Held::Memory(d)
+            }
+            false => Held::of(d, 0).map_err(|e| format!("spilling: {e}"))?,
+        };
+        h.0.insert(c, held);
+        Ok(())
+    }
+
+    fn note(&self, what: &str) {
+        let mut h = self.held.lock().unwrap();
+        if h.2.is_none() {
+            h.2 = Some(what.to_owned());
+        }
+    }
+
+    fn step(&self, s: aqr_archive::Step) {
+        self.progress.tell(s);
     }
 }
 
@@ -240,6 +355,22 @@ impl Opened {
                 Err(f) => return Err(err(&f)),
             }
         }
+        // (of another format: as aqr-unpack reads it)
+        let name = path.file_name().map(crate::meta::os_bytes).unwrap_or_default();
+        if let Some((f, _)) = aqr_unpack::by_name(&name) {
+            let (source, view, progress) = Opened::foreign(f, map, path, passphrase, a)?;
+            return Ok(Opened {
+                handle,
+                path: path.to_owned(),
+                identity,
+                at: None,
+                source,
+                _leaked: leaked,
+                view,
+                progress,
+                listed: OnceLock::new(),
+            });
+        }
         // (from here, what is leaked let go of with the archive, or here where it does not open)
         let opened = (|| -> Result<_, Value> {
             let runner: &'static Decoder = DECODER.get().expect("made as serving begins");
@@ -261,20 +392,7 @@ impl Opened {
             .map_err(|e| err(&e))?;
             archive.set_budget(aqr_common::budget::global());
             let view = match archive.tree() {
-                Some(t) => {
-                    let names = Names::new(&a.names, false);
-                    names.decide(t);
-                    let names: Vec<String> =
-                        t.entries.iter().map(|e| names.name(&e.name).os.to_string_lossy().into_owned()).collect();
-                    let mut children: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-                    let mut by_name = HashMap::new();
-                    for (i, e) in t.entries.iter().enumerate() {
-                        children.entry(e.parent).or_default().push(i);
-                        // (of two names written the same, the first)
-                        by_name.entry((e.parent, names[i].clone())).or_insert(i);
-                    }
-                    View::Tree { names, children, by_name }
-                }
+                Some(t) => view_of(t, a),
                 None => {
                     let size = archive.listing(&|_| None).map_err(|e| err(&e))?.first().map_or(0, |l| l.size);
                     View::Single { name: single_name(path), size }
@@ -282,11 +400,7 @@ impl Opened {
             };
             let progress = Arc::new(Progress::default());
             let told = progress.clone();
-            archive.on_progress(Some(Arc::new(move |s| match s {
-                aqr_archive::Step::Reached(r) => *told.reached.lock().unwrap() = Some(r),
-                aqr_archive::Step::Started(_) => _ = told.evaluating.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                aqr_archive::Step::Ended(_) => _ = told.evaluating.fetch_sub(1, std::sync::atomic::Ordering::Relaxed),
-            })));
+            archive.on_progress(Some(Arc::new(move |s| told.tell(s))));
             Ok((archive, view, progress))
         })();
         let (archive, view, progress) = opened?;
@@ -295,12 +409,93 @@ impl Opened {
             path: path.to_owned(),
             identity,
             at,
-            archive,
+            source: Source::Aqr(archive),
             _leaked: leaked,
             view,
             progress,
             listed: OnceLock::new(),
         })
+    }
+
+    /// Archive `map` (at `path`) of format `f`, of another format: its tree as its listing has
+    /// it, or as it is read whole (a tar archive's).
+    fn foreign(
+        f: aqr_unpack::Format,
+        map: &'static [u8],
+        path: &Path,
+        passphrase: Option<&str>,
+        a: &Args,
+    ) -> Result<(Source, View, Arc<Progress>), Value> {
+        let err = |e: &dyn std::fmt::Display| json!({"error": format!("{}: {e}", path.display())});
+        let mut opened = aqr_unpack::Opened::open_with(f, map, &a.names.encoding).map_err(|e| err(&e))?;
+        if opened.encrypted() {
+            let Some(p) = passphrase else {
+                return Err(json!({"error": format!("{}: encrypted", path.display()), "encrypted": true}));
+            };
+            if !opened.unlock(p.as_bytes()).map_err(|e| err(&e))? {
+                let m = format!("{}: encrypted, and the passphrase does not open it", path.display());
+                return Err(json!({"error": m, "encrypted": true, "wrong": true}));
+            }
+        }
+        let progress = Arc::new(Progress::default());
+        // (a single file compressed: its name without the compressor's extension, its size of
+        // reading it once)
+        if !opened.is_tree() {
+            let threads = a.opt.threads;
+            let mut n = 0u64;
+            aqr_common::pool::run(|| {
+                opened.decompress(
+                    threads,
+                    &mut |d| {
+                        n += d.len() as u64;
+                        Ok(())
+                    },
+                    &|_| {},
+                )
+            })
+            .map_err(|e| err(&e))?;
+            let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let cut = aqr_unpack::by_name(name.as_bytes()).map_or(0, |(_, k)| k);
+            let name = name[..name.len() - cut.min(name.len())].to_owned();
+            let f =
+                Foreign { format: f, opened, tree: aqr_archive::Tree::default(), sizes: vec![Some(n)], whole: true };
+            return Ok((Source::Foreign(f), View::Single { name, size: n }, progress));
+        }
+        let (tree, sizes, whole) = match (opened.tree().cloned(), opened.sizes()) {
+            (Some(t), Some(s)) => (t, s, false),
+            _ => {
+                // (read all once: the tree, and the sizes of its files)
+                let sizes = Mutex::new(Vec::new());
+                struct Sizes<'s>(&'s Mutex<Vec<Option<u64>>>);
+                impl aqr_unpack::Sink for Sizes<'_> {
+                    fn entries(&self, _: &aqr_archive::Tree, _: &[usize]) -> Result<(), String> {
+                        Ok(())
+                    }
+                    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
+                        let mut s = self.0.lock().unwrap();
+                        if s.len() <= c {
+                            s.resize(c + 1, None);
+                        }
+                        s[c] = Some(d.len() as u64);
+                        Ok(())
+                    }
+                    fn note(&self, _: &str) {}
+                }
+                let threads = a.opt.threads;
+                let done = aqr_common::pool::run(|| opened.unpack(threads, &Sizes(&sizes))).map_err(|e| err(&e))?;
+                (done.tree, sizes.into_inner().unwrap(), true)
+            }
+        };
+        let view = view_of(&tree, a);
+        Ok((Source::Foreign(Foreign { format: f, opened, tree, sizes, whole }), view, progress))
+    }
+
+    /// Its tree (none: of a single file).
+    fn tree(&self) -> Option<&aqr_archive::Tree> {
+        match &self.source {
+            Source::Aqr(a) => a.tree(),
+            Source::Foreign(f) => f.opened.is_tree().then_some(&f.tree),
+        }
     }
 
     /// What `path` (names joined with `/`) names.
@@ -317,7 +512,7 @@ impl Opened {
                 for name in path.split('/').filter(|n| !n.is_empty()) {
                     // (a name under what is not a directory is not there)
                     if let Some(i) = at
-                        && self.archive.tree().unwrap().entries[i].node != EntryNode::Dir
+                        && self.tree().unwrap().entries[i].node != EntryNode::Dir
                     {
                         return Err(none());
                     }
@@ -332,7 +527,8 @@ impl Opened {
     fn listed(&self, c: usize) -> Option<&aqr_archive::Listed> {
         // (the modules named as -t -v names them)
         let name = |wasm: &[u8]| aqr_decompress::identify(wasm).map(|n| n.split('@').next().unwrap_or(&n).to_owned());
-        let l = self.listed.get_or_init(|| self.archive.listing(&name).map_err(|e| e.to_string()));
+        let Source::Aqr(archive) = &self.source else { return None };
+        let l = self.listed.get_or_init(|| archive.listing(&name).map_err(|e| e.to_string()));
         l.as_ref().ok()?.get(c)
     }
 
@@ -362,7 +558,7 @@ impl Opened {
                 v
             }
             (View::Tree { names, .. }, At::Entry(i)) => {
-                let e = &self.archive.tree().unwrap().entries[i];
+                let e = &self.tree().unwrap().entries[i];
                 let mut v = json!({"name": names[i]});
                 v["kind"] = match &e.node {
                     EntryNode::Dir => "dir",
@@ -373,7 +569,11 @@ impl Opened {
                 .into();
                 match &e.node {
                     &EntryNode::File(c) => {
-                        v["size"] = self.archive.content_size(c).unwrap_or(0).into();
+                        let size = match &self.source {
+                            Source::Aqr(a) => a.content_size(c),
+                            Source::Foreign(f) => f.sizes.get(c).copied().flatten(),
+                        };
+                        v["size"] = size.unwrap_or(0).into();
                         if verbose {
                             self.verbose(&mut v, c);
                         }
@@ -436,6 +636,8 @@ fn single_name(path: &Path) -> String {
 enum Held {
     Memory(Vec<u8>),
     Spilled(File, u64),
+    /// Not decoded (of an archive of another format, left out: why).
+    Missing(String),
 }
 
 impl Held {
@@ -443,6 +645,7 @@ impl Held {
         match self {
             Held::Memory(d) => d.len() as u64,
             Held::Spilled(_, n) => *n,
+            Held::Missing(_) => 0,
         }
     }
 
@@ -455,6 +658,7 @@ impl Held {
                 aqr_common::fsio::read_exact_at(f, &mut d, at)?;
                 Ok(d)
             }
+            Held::Missing(why) => Err(std::io::Error::other(why.clone())),
         }
     }
 
@@ -466,6 +670,49 @@ impl Held {
         let f = aqr_common::fsio::temp_file("aqr-serve")?;
         aqr_common::fsio::write_all_at(&f, &d, 0)?;
         Ok(Held::Spilled(f, d.len() as u64))
+    }
+}
+
+/// An output written a piece at a time: in memory up to `cap` bytes, then spilled.
+struct Growing {
+    held: Held,
+    cap: u64,
+}
+
+impl Growing {
+    fn new(cap: u64) -> Growing {
+        Growing { held: Held::Memory(Vec::new()), cap }
+    }
+
+    fn push(&mut self, d: &[u8]) -> std::io::Result<()> {
+        let spilled = match &mut self.held {
+            Held::Memory(m) if (m.len() + d.len()) as u64 <= self.cap => {
+                m.extend_from_slice(d);
+                None
+            }
+            Held::Memory(m) => {
+                let f = aqr_common::fsio::temp_file("aqr-serve")?;
+                aqr_common::fsio::write_all_at(&f, m, 0)?;
+                aqr_common::fsio::write_all_at(&f, d, m.len() as u64)?;
+                Some(Held::Spilled(f, (m.len() + d.len()) as u64))
+            }
+            Held::Spilled(f, n) => {
+                aqr_common::fsio::write_all_at(f, d, *n)?;
+                *n += d.len() as u64;
+                None
+            }
+            Held::Missing(_) => unreachable!("written into"),
+        };
+        if let Some(h) = spilled {
+            self.held = h;
+        }
+        Ok(())
+    }
+
+    /// The leaf of it alone.
+    fn leaf(self) -> Leaf {
+        let bytes = if let Held::Memory(m) = &self.held { m.len() as u64 } else { 0 };
+        Leaf { outputs: vec![self.held], bytes }
     }
 }
 
@@ -629,6 +876,9 @@ impl Server<'_> {
         if changed {
             v["changed"] = true.into();
         }
+        if let Source::Foreign(f) = &o.source {
+            v["fields"] = fields(f.format).into();
+        }
         v
     }
 
@@ -642,9 +892,7 @@ impl Server<'_> {
             (At::Root, View::Tree { children, .. }) => {
                 children.get(&None).into_iter().flatten().map(|&i| o.entry(At::Entry(i), verbose)).collect()
             }
-            (At::Entry(d), View::Tree { children, .. })
-                if o.archive.tree().unwrap().entries[d].node == EntryNode::Dir =>
-            {
+            (At::Entry(d), View::Tree { children, .. }) if o.tree().unwrap().entries[d].node == EntryNode::Dir => {
                 children.get(&Some(d)).into_iter().flatten().map(|&i| o.entry(At::Entry(i), verbose)).collect()
             }
             _ => return Err(format!("{dir}: not a directory")),
@@ -670,11 +918,21 @@ impl Server<'_> {
         let len = v["len"].as_u64().unwrap_or(CHUNK as u64).min(CHUNK as u64);
         let (key, output, size) = match (o.at(path)?, &o.view) {
             (At::Single, View::Single { size, .. }) => ((o.handle, 0), 0, *size),
-            (At::Entry(i), _) => match o.archive.tree().unwrap().entries[i].node {
-                EntryNode::File(c) => {
-                    let (leaf, output, size) = o.archive.content_at(c).expect("a content of the tree");
-                    ((o.handle, leaf), output, size)
-                }
+            (At::Entry(i), _) => match o.tree().unwrap().entries[i].node {
+                EntryNode::File(c) => match &o.source {
+                    Source::Aqr(a) => {
+                        let (leaf, output, size) = a.content_at(c).expect("a content of the tree");
+                        ((o.handle, leaf), output, size)
+                    }
+                    // (of a tar archive, all its files one leaf; else a leaf each)
+                    Source::Foreign(f) => {
+                        let size = f.sizes.get(c).copied().flatten().unwrap_or(0);
+                        match f.whole {
+                            true => ((o.handle, 0), c, size),
+                            false => ((o.handle, c), 0, size),
+                        }
+                    }
+                },
                 _ => return Err(format!("{path}: not a file")),
             },
             _ => return Err(format!("{path}: not a file")),
@@ -682,6 +940,10 @@ impl Server<'_> {
         let err = |e: &dyn std::fmt::Display| format!("{}: {path}: {e}", o.path.display());
         let leaf = Cache::get(&self.cache, key, || self.evaluate(&o, key.1)).map_err(|e| err(&e))?;
         let held = leaf.outputs.get(output).ok_or_else(|| err(&"a file of an output its leaf does not have"))?;
+        // (of another format, a file not decoded: told why)
+        if let Held::Missing(why) = held {
+            return Err(err(why));
+        }
         if held.len() != size {
             return Err(err(&"a file of another size than its entry's"));
         }
@@ -697,34 +959,17 @@ impl Server<'_> {
     fn evaluate(&self, o: &Opened, leaf: usize) -> Result<Leaf, String> {
         let threads = self.args.opt.threads;
         let cap = self.cache.lock().unwrap().cap;
+        if let Source::Foreign(f) = &o.source {
+            return aqr_common::pool::run(|| self.evaluate_foreign(o, f, leaf, cap));
+        }
+        let Source::Aqr(archive) = &o.source else { unreachable!() };
         aqr_common::pool::run(|| match o.view {
             View::Single { .. } => {
                 // (written as it is evaluated: spilled once it is over the bound, not held whole)
-                let mut held = Held::Memory(Vec::new());
+                let mut g = Growing::new(cap);
                 let mut failed = None;
-                let r = o.archive.write_file(threads, &mut |d: &[u8]| {
-                    let r = match &mut held {
-                        Held::Memory(m) if (m.len() + d.len()) as u64 <= cap => {
-                            m.extend_from_slice(d);
-                            Ok(None)
-                        }
-                        Held::Memory(m) => aqr_common::fsio::temp_file("aqr-serve").and_then(|f| {
-                            aqr_common::fsio::write_all_at(&f, m, 0)?;
-                            aqr_common::fsio::write_all_at(&f, d, m.len() as u64)?;
-                            let n = (m.len() + d.len()) as u64;
-                            Ok(Some(Held::Spilled(f, n)))
-                        }),
-                        Held::Spilled(f, n) => aqr_common::fsio::write_all_at(f, d, *n).map(|()| {
-                            *n += d.len() as u64;
-                            None
-                        }),
-                    };
-                    let r = r.map(|spilled| {
-                        if let Some(s) = spilled {
-                            held = s;
-                        }
-                    });
-                    r.map_err(|e| {
+                let r = archive.write_file(threads, &mut |d: &[u8]| {
+                    g.push(d).map_err(|e| {
                         let m = format!("spilling: {e}");
                         failed = Some(m.clone());
                         aqr_archive::Failure::Resource(m)
@@ -734,14 +979,13 @@ impl Server<'_> {
                     return Err(m);
                 }
                 r.map_err(|e| e.to_string())?;
-                let bytes = if let Held::Memory(m) = &held { m.len() as u64 } else { 0 };
-                Ok(Leaf { outputs: vec![held], bytes })
+                Ok(g.leaf())
             }
             View::Tree { .. } => {
-                let mut only = vec![false; o.archive.leaves_len()];
+                let mut only = vec![false; archive.leaves_len()];
                 only[leaf] = true;
                 let outputs = Mutex::new(None);
-                o.archive
+                archive
                     .each_leaf_only(threads, &only, |_, r| {
                         *outputs.lock().unwrap() = Some(r?);
                         Ok(())
@@ -751,6 +995,36 @@ impl Server<'_> {
                 Leaf::of(outputs, cap)
             }
         })
+    }
+
+    /// Leaf `leaf` of `f` (of `o`), an archive of another format, decoded: the file of content
+    /// `leaf`, or (decoded whole) all of its files, by content.
+    fn evaluate_foreign(&self, o: &Opened, f: &Foreign, leaf: usize, cap: u64) -> Result<Leaf, String> {
+        let threads = self.args.opt.threads;
+        if !f.opened.is_tree() {
+            let mut g = Growing::new(cap);
+            let progress = &o.progress;
+            f.opened
+                .decompress(threads, &mut |d| g.push(d).map_err(|e| format!("spilling: {e}")), &|s| progress.tell(s))?;
+            return Ok(g.leaf());
+        }
+        let keeping = Keeping { wanted: None, cap, held: Mutex::default(), progress: &o.progress };
+        match f.whole {
+            true => _ = f.opened.unpack(threads, &keeping)?,
+            false => {
+                let k = Keeping { wanted: Some(leaf), ..keeping };
+                let s = select_of(&f.tree, leaf).ok_or("a content of no file")?;
+                f.opened.unpack_selected(threads, &k, &s)?;
+                let (mut held, bytes, note) = k.held.into_inner().unwrap();
+                let h = held.remove(&leaf).unwrap_or_else(|| Held::Missing(note.unwrap_or("not decoded".into())));
+                return Ok(Leaf { outputs: vec![h], bytes });
+            }
+        }
+        let (mut held, bytes, note) = keeping.held.into_inner().unwrap();
+        let n = f.sizes.len();
+        let why = note.unwrap_or("not decoded".into());
+        let outputs = (0..n).map(|c| held.remove(&c).unwrap_or_else(|| Held::Missing(why.clone()))).collect();
+        Ok(Leaf { outputs, bytes })
     }
 
     fn close(&self, v: &Value) -> Result<Value, String> {
@@ -793,9 +1067,11 @@ impl Server<'_> {
         }
         if v.get("journal").is_some() {
             return plain(self.opened(v, "journal").map(|o| {
-                let points: Vec<Value> = o
-                    .archive
-                    .journal()
+                let journal = match &o.source {
+                    Source::Aqr(a) => a.journal(),
+                    Source::Foreign(_) => &[],
+                };
+                let points: Vec<Value> = journal
                     .iter()
                     .map(|p| {
                         json!({
@@ -825,6 +1101,18 @@ impl Server<'_> {
         }
         plain(Err("a request not known".into()))
     }
+}
+
+/// The selection of the file of content `c` of `t` (aqr-unpack's).
+fn select_of(t: &aqr_archive::Tree, c: usize) -> Option<aqr_unpack::Select> {
+    let mut i = t.entries.iter().position(|e| e.node == EntryNode::File(c))?;
+    let mut names = vec![t.entries[i].name.clone()];
+    while let Some(p) = t.entries[i].parent {
+        names.push(t.entries[p].name.clone());
+        i = p;
+    }
+    names.reverse();
+    Some(aqr_unpack::Select::new(vec![names]))
 }
 
 /// Answers `a` to request `id`, each line with the bytes after it, at once.

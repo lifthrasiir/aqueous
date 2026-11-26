@@ -430,6 +430,12 @@ impl<'d> Listing<'d> {
         ok
     }
 
+    /// The sizes of the contents of the tree: (content, bytes).
+    pub fn sizes(&self) -> Vec<(usize, u64)> {
+        let units = self.units.iter().map(|u| (u.c, u.size));
+        units.chain(self.empty.iter().map(|&c| (c, 0))).collect()
+    }
+
     pub fn tree(&self) -> &Tree {
         &self.b.tree
     }
@@ -723,6 +729,29 @@ mod tests {
         // kept as they are, split between Shift_JIS's characters still
         let l = Listing::read(&zip, &Choice::Raw).unwrap();
         assert_eq!(paths(l.tree()), ["<955c8ea6>/", "<955c8ea6>/<835c837483672e747874>", "<975c92e8955c>"]);
+    }
+
+    /// The sizes of the contents, an empty file's too; and one file read alone of an archive
+    /// opened once (`unpack_selected`).
+    #[test]
+    fn sizes_and_one_read() {
+        let zip = zip_of(&[(b"a.txt", b"hello"), (b"d/b.txt", b"xy"), (b"e.txt", b"")], 0, 0);
+        let o = crate::Opened::open(crate::Format::Zip, &zip).unwrap();
+        let t = o.tree().unwrap();
+        let size_of = |name: &[u8]| {
+            let e = t.entries.iter().find(|e| e.name == name).unwrap();
+            let EntryNode::File(c) = e.node else { panic!("not a file") };
+            (c, o.sizes().unwrap()[c])
+        };
+        assert_eq!(size_of(b"a.txt").1, Some(5));
+        assert_eq!(size_of(b"b.txt").1, Some(2));
+        assert_eq!(size_of(b"e.txt").1, Some(0));
+        let kept = crate::testing::Kept::default();
+        let (c, _) = size_of(b"b.txt");
+        o.unpack_selected(1, &kept, &crate::testing::file_of(t, c)).unwrap();
+        let got = kept.0.lock().unwrap();
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), [c]);
+        assert_eq!(got[&c], b"xy");
     }
 
     /// Of Windows NTFS's host (10), `\` separates names as MS-DOS's; of MVS's (11), not.

@@ -28,6 +28,8 @@ let mut opened = aqr_unpack::Opened::open(format, &archive)?;  // the listing re
 opened.unlock(pass)?;                                       // ZIP's and 7z's encrypted entries: the passphrase
 let done = opened.unpack(threads, &sink)?;                  // sink: entries told, then contents
 // done.tree: the whole tree; done.skipped: entries left out (told to sink.note)
+opened.sizes();                                             // by content, its bytes, as the listing tells
+opened.unpack_selected(threads, &sink, &select)?;           // some entries alone, of an archive read by several
 ```
 
 ## What is kept

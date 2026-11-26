@@ -283,7 +283,9 @@ fn handles() {
         assert!(s.read(&h, "a.txt", 1 << 20) == files[0].1);
     } else {
         // (Windows: a file mapped is not replaced)
-        assert!(cfg!(windows), "{replaced:?}");
+        if !cfg!(windows) {
+            panic!("not replaced: {replaced:?}");
+        }
     }
     s.end();
     fs::remove_dir_all(&d).unwrap();
@@ -453,6 +455,49 @@ fn journal() {
     // (the same point again: the same handle)
     let again = s.ask(json!({"open": d.join("t.aqr"), "at": points[0]["metadata"]}));
     assert_eq!(again["archive"], f);
+    s.end();
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// Archives of other formats (ZIP, 7z, tar.gz: as aqr writes them), served as Aqueous ones
+/// are: their entries, a file read alone (of the tar archive, all at once), no journal point.
+#[test]
+fn foreign() {
+    let d = common::scratch("serve", "foreign");
+    fs::create_dir_all(d.join("t/sub")).unwrap();
+    fs::write(d.join("t/a.txt"), common::text(1, 5000)).unwrap();
+    fs::write(d.join("t/sub/b.txt"), common::text(2, 300_000)).unwrap();
+    fs::write(d.join("t/sub/e.txt"), b"").unwrap();
+    let mut s = Served::start(&[]);
+    for name in ["t.zip", "t.7z", "t.tar.gz"] {
+        aqr(&d, &["-q", "-o", name, "t"]);
+        let opened = s.open(&d.join(name));
+        let h = opened["archive"].clone();
+        assert!(h.is_u64(), "{name}: {h}");
+        // (what its format has: never what -t -v tells of blocks)
+        let fields = opened["fields"].as_array().unwrap();
+        assert!(fields.contains(&json!("modified")) && !fields.contains(&json!("segment")), "{name}: {opened}");
+        // (the folder itself at the top, as other archivers have it)
+        let top: Vec<String> = s.list(&h, "").iter().map(|e| e["name"].as_str().unwrap().to_owned()).collect();
+        let p = match &top[..] {
+            [t] if t == "t" => "t/",
+            _ => "",
+        };
+        let mut root: Vec<(String, String)> = s
+            .list(&h, p.trim_end_matches('/'))
+            .iter()
+            .map(|e| (e["name"].as_str().unwrap().to_owned(), e["kind"].as_str().unwrap().to_owned()))
+            .collect();
+        root.sort();
+        assert_eq!(root, [("a.txt".into(), "file".into()), ("sub".into(), "dir".into())], "{name}");
+        let sub = s.list(&h, &format!("{p}sub"));
+        let b = sub.iter().find(|e| e["name"] == "b.txt").unwrap();
+        assert_eq!(b["size"], 300_000, "{name}: {b}");
+        assert!(s.read(&h, &format!("{p}sub/b.txt"), 1 << 20) == common::text(2, 300_000), "{name}");
+        assert!(s.read(&h, &format!("{p}a.txt"), 1 << 20) == common::text(1, 5000), "{name}");
+        assert!(s.read(&h, &format!("{p}sub/e.txt"), 1 << 20).is_empty(), "{name}");
+        assert_eq!(s.ask(json!({"journal": h}))["points"], json!([]));
+    }
     s.end();
     fs::remove_dir_all(&d).unwrap();
 }
