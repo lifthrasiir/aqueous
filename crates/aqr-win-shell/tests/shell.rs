@@ -898,7 +898,7 @@ fn browsed() {
         // archives of other formats: the folder of a ZIP's and a tar.gz's file (as Explorer makes
         // it where Aqueous opens the type: not registered here, not to take `.zip` of the user's),
         // their entries and a file read, only the columns their formats have, nothing added
-        for (name, columns) in [("o.zip", 10), ("o.tar.gz", 9)] {
+        for (name, columns) in [("o.zip", 12), ("o.tar.gz", 9)] {
             let o = Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", name, "t"]).output().unwrap();
             assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
             // SAFETY: COM calls of the shell's objects

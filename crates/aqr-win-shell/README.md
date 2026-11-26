@@ -64,8 +64,8 @@ object is released, for the server to close it a minute later (and to end, idle)
   (`src/commands.rs`, `IExplorerCommandProvider`), which Explorer may show in its command bar.
 - Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and its compressors, a single file
   compressed), browsed alike where Aqueous opens their type: read by `aqr --serve` through
-  aqr-unpack, the columns those their format has (the server's `fields`: never Segment, Data,
-  Overhead, Ratio), nothing added nor versions.
+  aqr-unpack, the columns those their format has (the server's `fields`: Data, a file's compressed bytes,
+  and Ratio of all but tar's; never Segment nor Overhead), nothing added nor versions.
 - Adding files (`src/drop.rs`): files of the file system's dropped on a view, on a folder in it
   or on the archive file (its type's `DropHandler`), or pasted (the background menu's "Paste",
   the verb `paste` of Ctrl+V), always copied, are added by aqr-win (`add ARCHIVE DIR PATH...`:

@@ -216,6 +216,24 @@ impl<'d> Opened<'d> {
         Some(out)
     }
 
+    /// The bytes of the archive's data of the contents of the tree its listing has, by content
+    /// (`None`: not told): of a solid block, its files' shares by their sizes. None of a tar
+    /// archive (compressed whole, if at all).
+    pub fn packed(&self) -> Option<Vec<Option<u64>>> {
+        let packed = match &self.inner {
+            Inner::Zip(l) => l.packed(),
+            Inner::SevenZip(l) => l.packed(),
+            Inner::Rar(l) => l.packed(),
+            Inner::Alz(l) | Inner::Egg(l) => l.packed(),
+            Inner::SevenZipSealed | Inner::Tar(_) | Inner::Single(_) => return None,
+        };
+        let mut out = vec![None; packed.iter().map(|&(c, _)| c + 1).max().unwrap_or(0)];
+        for (c, n) in packed {
+            out[c] = Some(n);
+        }
+        Some(out)
+    }
+
     /// As [`Opened::unpack`], of the entries of `s` alone (and what is under them), whatever
     /// [`Opened::select`] chose: of an archive opened once, read by several at once.
     pub fn unpack_selected(&self, threads: usize, sink: &dyn Sink, s: &Select) -> Result<Done, String> {

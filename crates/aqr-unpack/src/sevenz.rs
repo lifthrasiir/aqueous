@@ -638,6 +638,24 @@ impl<'d> Listing<'d> {
         out
     }
 
+    /// The bytes of the archive's data of the contents of the tree: (content, bytes), a
+    /// folder's shared by its files by their sizes.
+    pub fn packed(&self) -> Vec<(usize, u64)> {
+        let mut out: Vec<(usize, u64)> = self.empty.iter().map(|&c| (c, 0)).collect();
+        for (f, u) in self.units.iter().enumerate() {
+            let Some(packs) = self.packs.get(f) else { continue };
+            let total: u64 = packs.clone().filter_map(|k| self.spans.get(k)).map(|r| r.end - r.start).sum();
+            let files: Vec<(Option<usize>, u64)> = u
+                .files
+                .iter()
+                .enumerate()
+                .map(|(k, (c, _))| (*c, self.main.subs[f].get(k).copied().unwrap_or(0)))
+                .collect();
+            out.extend(build::shared(total, &files));
+        }
+        out
+    }
+
     pub fn tree(&self) -> &Tree {
         &self.b.tree
     }

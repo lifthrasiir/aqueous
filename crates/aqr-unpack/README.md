@@ -29,6 +29,7 @@ opened.unlock(pass)?;                                       // ZIP's and 7z's en
 let done = opened.unpack(threads, &sink)?;                  // sink: entries told, then contents
 // done.tree: the whole tree; done.skipped: entries left out (told to sink.note)
 opened.sizes();                                             // by content, its bytes, as the listing tells
+opened.packed();                                            // and its compressed bytes (a solid block's shared by size)
 opened.unpack_selected(threads, &sink, &select)?;           // some entries alone, of an archive read by several
 ```
 

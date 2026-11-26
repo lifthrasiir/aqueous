@@ -278,6 +278,13 @@ impl<'d> Listing<'d> {
         files.chain(self.empty.iter().map(|&c| (c, 0))).collect()
     }
 
+    /// The bytes of the archive's data of the contents of the tree: (content, bytes).
+    pub fn packed(&self) -> Vec<(usize, u64)> {
+        let files = self.units.iter().flat_map(|u| &u.files);
+        let files = files.filter_map(|f| Some((f.c?, (f.data.end - f.data.start) as u64)));
+        files.chain(self.empty.iter().map(|&c| (c, 0))).collect()
+    }
+
     pub fn tree(&self) -> &Tree {
         &self.b.tree
     }

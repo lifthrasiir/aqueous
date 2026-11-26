@@ -471,6 +471,18 @@ impl<'d> Listing<'d> {
         files.chain(self.empty.iter().map(|&c| (c, 0))).collect()
     }
 
+    /// The bytes of the archive's data of the contents of the tree: (content, bytes), a unit's
+    /// (an EGG solid block) shared by its files by their sizes.
+    pub fn packed(&self) -> Vec<(usize, u64)> {
+        let mut out: Vec<(usize, u64)> = self.empty.iter().map(|&c| (c, 0)).collect();
+        for u in &self.units {
+            let total: u64 = u.pieces.iter().map(|p| (p.body.end - p.body.start) as u64).sum();
+            let files: Vec<(Option<usize>, u64)> = u.files.iter().map(|f| (f.c, f.size as u64)).collect();
+            out.extend(build::shared(total, &files));
+        }
+        out
+    }
+
     pub fn tree(&self) -> &Tree {
         &self.b.tree
     }

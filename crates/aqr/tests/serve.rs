@@ -493,6 +493,14 @@ fn foreign() {
         let sub = s.list(&h, &format!("{p}sub"));
         let b = sub.iter().find(|e| e["name"] == "b.txt").unwrap();
         assert_eq!(b["size"], 300_000, "{name}: {b}");
+        // (its compressed bytes and ratio, but of the tar archive, compressed whole)
+        match name {
+            "t.tar.gz" => assert!(b.get("data").is_none(), "{b}"),
+            _ => assert!(
+                b["data"].as_u64().is_some_and(|n| n > 0 && n < 300_000) && b["ratio"].is_string(),
+                "{name}: {b}"
+            ),
+        }
         assert!(s.read(&h, &format!("{p}sub/b.txt"), 1 << 20) == common::text(2, 300_000), "{name}");
         assert!(s.read(&h, &format!("{p}a.txt"), 1 << 20) == common::text(1, 5000), "{name}");
         assert!(s.read(&h, &format!("{p}sub/e.txt"), 1 << 20).is_empty(), "{name}");

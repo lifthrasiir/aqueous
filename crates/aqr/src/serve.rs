@@ -214,8 +214,9 @@ struct Foreign {
     format: aqr_unpack::Format,
     opened: aqr_unpack::Opened<'static>,
     tree: aqr_archive::Tree,
-    /// By content, its bytes.
+    /// By content, its bytes, and of the archive's data (where its listing tells).
     sizes: Vec<Option<u64>>,
+    packed: Vec<Option<u64>>,
     /// Whether it is decoded whole (a tar archive: no listing to find a file by), its files
     /// one leaf (0) of all of them, by content; else each file a leaf of its own (its content).
     whole: bool,
@@ -233,16 +234,17 @@ impl Progress {
 
 /// What an entry of an archive of format `f` may have, of the fields an Aqueous archive's has
 /// beyond its name, kind and size (as the frontend's columns are named): its times, Windows'
-/// attributes, the permissions and owner of Unix, a link's target. The comment, macOS' flags,
-/// `-t`'s flags and what `-t -v` tells of blocks (`data`, `overhead`, `ratio`, `segment`) are
-/// Aqueous's alone.
+/// attributes, the permissions and owner of Unix, a link's target, and of a format compressing
+/// its files apart (all but tar's) a file's `data` (its compressed bytes; of a solid block, its
+/// share by its size) and `ratio`. The comment, macOS' flags, `-t`'s flags and what else
+/// `-t -v` tells of blocks (`overhead`, `segment`) are Aqueous's alone.
 fn fields(f: aqr_unpack::Format) -> &'static [&'static str] {
     use aqr_unpack::Format::*;
     match f {
-        Zip => &["modified", "created", "accessed", "attributes", "mode", "owner", "target"],
-        SevenZip | Rar => &["modified", "created", "accessed", "attributes", "mode", "target"],
-        Alz => &["modified", "attributes"],
-        Egg => &["modified", "attributes", "mode", "owner"],
+        Zip => &["modified", "created", "accessed", "attributes", "mode", "owner", "target", "data", "ratio"],
+        SevenZip | Rar => &["modified", "created", "accessed", "attributes", "mode", "target", "data", "ratio"],
+        Alz => &["modified", "attributes", "data", "ratio"],
+        Egg => &["modified", "attributes", "mode", "owner", "data", "ratio"],
         Tar(_) => &["modified", "accessed", "changed", "mode", "owner", "target"],
         Single(_) => &[],
     }
@@ -457,8 +459,14 @@ impl Opened {
             let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let cut = aqr_unpack::by_name(name.as_bytes()).map_or(0, |(_, k)| k);
             let name = name[..name.len() - cut.min(name.len())].to_owned();
-            let f =
-                Foreign { format: f, opened, tree: aqr_archive::Tree::default(), sizes: vec![Some(n)], whole: true };
+            let f = Foreign {
+                format: f,
+                opened,
+                tree: aqr_archive::Tree::default(),
+                sizes: vec![Some(n)],
+                packed: Vec::new(),
+                whole: true,
+            };
             return Ok((Source::Foreign(f), View::Single { name, size: n }, progress));
         }
         let (tree, sizes, whole) = match (opened.tree().cloned(), opened.sizes()) {
@@ -487,7 +495,8 @@ impl Opened {
             }
         };
         let view = view_of(&tree, a);
-        Ok((Source::Foreign(Foreign { format: f, opened, tree, sizes, whole }), view, progress))
+        let packed = opened.packed().unwrap_or_default();
+        Ok((Source::Foreign(Foreign { format: f, opened, tree, sizes, packed, whole }), view, progress))
     }
 
     /// Its tree (none: of a single file).
@@ -574,6 +583,14 @@ impl Opened {
                             Source::Foreign(f) => f.sizes.get(c).copied().flatten(),
                         };
                         v["size"] = size.unwrap_or(0).into();
+                        // (of another format: its compressed bytes, where told)
+                        if let Source::Foreign(f) = &self.source
+                            && let Some(p) = f.packed.get(c).copied().flatten()
+                        {
+                            v["data"] = p.into();
+                            v["share"] = p.into();
+                            v["ratio"] = crate::list::ratio(p, size.unwrap_or(0)).into();
+                        }
                         if verbose {
                             self.verbose(&mut v, c);
                         }

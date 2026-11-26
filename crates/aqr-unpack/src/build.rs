@@ -153,6 +153,27 @@ pub fn lax(path: &[u8], backslash: bool) -> Vec<Vec<u8>> {
     }
 }
 
+/// Bytes `total` shared by `files` (their contents, where they are of the tree, and sizes) by
+/// their sizes, all of it given out: (content, bytes).
+pub fn shared(total: u64, files: &[(Option<usize>, u64)]) -> Vec<(usize, u64)> {
+    let sum: u128 = files.iter().map(|f| f.1 as u128).sum();
+    let (mut given, mut seen) = (0u64, 0u128);
+    let mut out = Vec::new();
+    for &(c, n) in files {
+        seen += n as u128;
+        // (of the sizes up to it: what the last is given ends at the total)
+        let upto = match sum {
+            0 => 0,
+            s => (total as u128 * seen / s) as u64,
+        };
+        if let Some(c) = c {
+            out.push((c, upto - given));
+        }
+        given = upto;
+    }
+    out
+}
+
 /// Paths of an archive's entries to extract alone, each with what is under it (as names, by
 /// `split`); none: everything.
 #[derive(Debug, Clone, Default)]
@@ -372,6 +393,15 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
+    /// All of it given out, by size, to the files of the tree alone.
+    #[test]
+    fn shared_by_size() {
+        use super::shared;
+        assert_eq!(shared(100, &[(Some(0), 1), (None, 1), (Some(2), 2)]), [(0, 25), (2, 50)]);
+        assert_eq!(shared(10, &[(Some(0), 1), (Some(1), 1), (Some(2), 1)]), [(0, 3), (1, 3), (2, 4)]);
+        assert_eq!(shared(7, &[(Some(0), 0)]), [(0, 0)]);
+    }
+
     use super::*;
 
     #[test]

@@ -436,6 +436,12 @@ impl<'d> Listing<'d> {
         units.chain(self.empty.iter().map(|&c| (c, 0))).collect()
     }
 
+    /// The bytes of the archive's data of the contents of the tree: (content, bytes).
+    pub fn packed(&self) -> Vec<(usize, u64)> {
+        let units = self.units.iter().map(|u| (u.c, u.body.len() as u64));
+        units.chain(self.empty.iter().map(|&c| (c, 0))).collect()
+    }
+
     pub fn tree(&self) -> &Tree {
         &self.b.tree
     }
@@ -746,6 +752,8 @@ mod tests {
         assert_eq!(size_of(b"a.txt").1, Some(5));
         assert_eq!(size_of(b"b.txt").1, Some(2));
         assert_eq!(size_of(b"e.txt").1, Some(0));
+        // (stored: its data its size)
+        assert_eq!(o.packed().unwrap()[size_of(b"a.txt").0], Some(5));
         let kept = crate::testing::Kept::default();
         let (c, _) = size_of(b"b.txt");
         o.unpack_selected(1, &kept, &crate::testing::file_of(t, c)).unwrap();
