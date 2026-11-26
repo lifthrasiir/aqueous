@@ -27,11 +27,7 @@ pub fn interpret(a: &Args) -> Result<(), String> {
         Some(d) => d,
         None => crate::located(&c, input, a.quiet),
     };
-    let decoder = crate::Decoder {
-        native: aqr_decompress::Native { threads: a.opt.threads },
-        wasm: crate::WASM.get(),
-        sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
-    };
+    let decoder = crate::Decoder::new(a.opt.threads);
     let value = aqr_archive::interpret::archive_value(payload, sealed, &decoder, a.opt.threads)
         .map_err(|e| err(&exit::seen(e)))?;
     let mut out = std::io::stdout().lock();

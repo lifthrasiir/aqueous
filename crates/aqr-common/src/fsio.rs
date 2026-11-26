@@ -37,6 +37,42 @@ pub fn read_exact_at(f: &File, d: &mut [u8], at: u64) -> io::Result<()> {
     }
 }
 
+/// A file of its own in the system's temporary directory, named `{prefix}-{pid}-{n}`, gone once
+/// closed: deleted on close (Windows, hidden and not indexed until then), or unlinked as it is
+/// made (Unix, of the owner alone until then: the directory is shared, and what is put there
+/// may be an encrypted archive's payload decrypted).
+pub fn temp_file(prefix: &str) -> io::Result<File> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true).write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_DELETE_ON_CLOSE; shared to read, write and delete; hidden and not indexed
+        o.custom_flags(0x0400_0000).share_mode(7).attributes(0x2 | 0x2000);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    loop {
+        static MADE: AtomicU64 = AtomicU64::new(0);
+        let n = MADE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+        match o.open(&path) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            r => {
+                let f = r?;
+                if cfg!(unix) {
+                    std::fs::remove_file(&path)?;
+                }
+                return Ok(f);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

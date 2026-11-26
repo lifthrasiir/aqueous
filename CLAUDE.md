@@ -16,7 +16,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   code and the spec not obvious at a glance).
 - `crates/` — the core crates
   - `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`); `--ipc` drives it from a frontend (`src/ipc.rs`); `--session` serves a
-    compression dialog's questions before it begins (`src/session.rs`). `--format sfx` (`src/sfx.rs`,
+    compression dialog's questions before it begins (`src/session.rs`); `--serve` serves a shell
+    extension the entries and files of archives, leaves evaluated kept (`src/serve.rs`,
+    `docs/win-shell-ext-design.md`). `--format sfx` (`src/sfx.rs`,
     Windows x86-64) makes a self-extracting program: the archive with shorthand module blocks for
     the modules that have native blobs, after aqr-sfx-shim (packed by UPX) and the bundle of
     those blobs (and of the interpreter blob of `-Z wasm:engine`, WAH by default, if any module is

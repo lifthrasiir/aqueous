@@ -259,11 +259,7 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
     drop(archive);
     // (a repair that would lose a file is not taken: every file decoded, as -K does)
     if repaired || !erased.is_empty() {
-        let decoder = crate::Decoder {
-            native: aqr_decompress::Native { threads },
-            wasm: crate::WASM.get(),
-            sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
-        };
+        let decoder = crate::Decoder::new(threads);
         let opened = match sealed {
             true => aqr_archive::open_payload(read, &decoder),
             false => aqr_archive::open(read, &decoder),
@@ -432,11 +428,7 @@ fn checked(
         }
         None => None,
     };
-    let decoder = crate::Decoder {
-        native: aqr_decompress::Native { threads: a.opt.threads },
-        wasm: crate::WASM.get(),
-        sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
-    };
+    let decoder = crate::Decoder::new(a.opt.threads);
     let archive = match &decrypting {
         Some(d) => aqr_archive::open_decrypting(d, &decoder),
         None => aqr_archive::open(&map, &decoder),

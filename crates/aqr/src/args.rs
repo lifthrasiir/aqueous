@@ -88,6 +88,8 @@ pub(crate) struct Args {
     pub(crate) ipc: bool,
     /// Started for a frontend that tells what to do later ([`session`]).
     pub(crate) session: bool,
+    /// Serving a frontend the entries and files of archives ([`serve`]).
+    pub(crate) serve: bool,
     /// Listing as JSON (`--json`).
     pub(crate) json: bool,
     /// Compressing, into archives of this format (`--format`, or `-o`'s name).
@@ -262,6 +264,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         stats: None,
         ipc: false,
         session: false,
+        serve: false,
         json: false,
         format: Pack::Aqr,
         level: None,
@@ -429,6 +432,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             }
             "--ipc" => a.ipc = true,
             "--session" => (a.session, a.ipc) = (true, true),
+            "--serve" => a.serve = true,
             "--json" => a.json = true,
             "--setup-autocomplete" => return Err("--setup-autocomplete is a command alone (no other argument)".into()),
             "-P" | "--passphrase" => a.passphrase = true,
@@ -516,11 +520,11 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         });
     }
     // (none given, of standard input where it is not a terminal: as zstd and gzip have it)
-    if a.inputs.is_empty() && !listed && !a.list && !a.info && !a.ipc && !std::io::stdin().is_terminal() {
+    if a.inputs.is_empty() && !listed && !a.list && !a.info && !a.ipc && !a.serve && !std::io::stdin().is_terminal() {
         a.inputs.push("-".into());
         dirs.push(dir.clone());
     }
-    if a.inputs.is_empty() && !a.session {
+    if a.inputs.is_empty() && !a.session && !a.serve {
         return Err("no input".into());
     }
     if stats || !stats_to.is_empty() {
@@ -560,6 +564,12 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             return Err(format!("--lossy: {why}"));
         }
         a.opt.lossy = Some(aqr_compress::lossy::Lossy::parse(spec)?);
+    }
+    if a.serve {
+        if !a.inputs.is_empty() || a.ipc {
+            return Err("--serve takes no inputs (they come with its requests), nor --ipc".into());
+        }
+        return Ok(a);
     }
     if a.session {
         if !a.inputs.is_empty() {

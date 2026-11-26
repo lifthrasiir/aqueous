@@ -591,6 +591,14 @@ impl<'c, 'n> Archive<'c, 'n> {
         self.tree.as_ref()?.1.get(c).map(|r| r.0)
     }
 
+    /// Where content `c` of the tree is: its leaf (as [`Archive::leaf_of`]), the output of that
+    /// leaf it is, and its bytes (as [`Archive::content_size`]). Of the outputs that
+    /// [`Archive::each_leaf_only`] gives, a content is the one so numbered, of the size so told
+    /// where the leaf is as its metadata block has it.
+    pub fn content_at(&self, c: usize) -> Option<(usize, usize, u64)> {
+        self.tree.as_ref()?.1.get(c).copied()
+    }
+
     /// Evaluates every leaf, at once on up to `threads` threads, giving `f` each one's outputs
     /// (by its index among the leaf blocks) as it is evaluated. The first failure, in the order
     /// of the leaves, is returned (as is one of `f`); the others may have been given theirs.

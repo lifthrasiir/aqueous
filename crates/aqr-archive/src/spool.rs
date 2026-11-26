@@ -3,8 +3,9 @@
 //! holds takes no more memory than its bound however much is put in it ahead of being taken.
 
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Pieces of the memory held at most this long, the bytes put in joined into them, and read
@@ -83,41 +84,12 @@ impl Spool {
 #[cfg(test)]
 pub(super) static FILES: AtomicU64 = AtomicU64::new(0);
 
-/// A file of its own in the system's temporary directory, gone once closed: deleted on close
-/// (Windows, hidden and not indexed until then), or unlinked as it is made (Unix, of the owner
-/// alone until then: the directory is shared, and what is spooled may be an encrypted archive's
-/// payload decrypted).
+/// A file of its own in the system's temporary directory, gone once closed
+/// ([`aqr_common::fsio::temp_file`]).
 fn spool_file() -> io::Result<File> {
     #[cfg(test)]
     FILES.fetch_add(1, Ordering::Relaxed);
-    let mut o = OpenOptions::new();
-    o.read(true).write(true).create_new(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // FILE_FLAG_DELETE_ON_CLOSE; shared to read, write and delete; hidden and not indexed
-        o.custom_flags(0x0400_0000).share_mode(7).attributes(0x2 | 0x2000);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
-    loop {
-        static MADE: AtomicU64 = AtomicU64::new(0);
-        let n = MADE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("aqr-spool-{}-{n}", std::process::id()));
-        match o.open(&path) {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            r => {
-                let f = r?;
-                if cfg!(unix) {
-                    std::fs::remove_file(&path)?;
-                }
-                return Ok(f);
-            }
-        }
-    }
+    aqr_common::fsio::temp_file("aqr-spool")
 }
 
 #[cfg(test)]

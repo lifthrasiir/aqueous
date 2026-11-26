@@ -329,11 +329,7 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<bool, String> {
         }
         false => None,
     };
-    let decoder = Decoder {
-        native: Native { threads: a.opt.threads },
-        wasm: WASM.get(),
-        sandbox: SANDBOX.get().then(OnceLock::new),
-    };
+    let decoder = Decoder::new(a.opt.threads);
     let runner: &dyn aqr_archive::Runner = &decoder;
     let plain: &[u8] = match decrypting {
         Some(_) => &[],
@@ -1054,6 +1050,13 @@ pub(crate) struct Decoder {
     pub(crate) native: Native,
     pub(crate) wasm: bool,
     pub(crate) sandbox: Option<OnceLock<Result<sandbox::Sandbox, String>>>,
+}
+
+impl Decoder {
+    /// The modules run as `-Z wasm` and `-Z sandbox` ask, natively on up to `threads` threads.
+    pub(crate) fn new(threads: usize) -> Decoder {
+        Decoder { native: Native { threads }, wasm: WASM.get(), sandbox: SANDBOX.get().then(OnceLock::new) }
+    }
 }
 
 impl aqr_archive::Runner for Decoder {

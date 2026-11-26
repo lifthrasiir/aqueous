@@ -279,7 +279,8 @@
 //! and output ([`ipc`]): what it shows as it goes told there, and the frontend asked what the
 //! options leave open. `--session` is that started before the work is known, as a compression
 //! dialog does: asked how many files the inputs are while the options are chosen, then begun
-//! ([`session`]).
+//! ([`session`]). `--serve` has it serve another the entries of archives and the bytes of their
+//! files, as a shell extension browsing them asks ([`serve`]).
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -324,6 +325,7 @@ mod names;
 mod pass;
 #[cfg(all(windows, target_vendor = "win7"))]
 mod random;
+mod serve;
 mod session;
 mod sfx;
 mod sparse;
@@ -458,6 +460,8 @@ Output:
                         writes all that was sampled (may be given more than once)
       --ipc             be driven by a frontend through standard input and output
       --session         as --ipc, told what to do later (a compression dialog's)
+      --serve           serve a frontend the entries and files of archives through
+                        standard input and output (a shell extension's)
 
 Compression:
   -P, --passphrase      encrypt the archives with a passphrase asked for (decompressing:
@@ -626,6 +630,16 @@ fn main() -> ExitCode {
         aqr_common::trace::enable();
     }
     aqr_common::pool::init(args.opt.threads);
+    // (served until the frontend is gone: not on a worker, which the requests' work takes)
+    if args.serve {
+        return match serve::serve(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("aqr: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let r = aqr_common::pool::run(|| match () {
         _ if args.convert => convert::convert_all(&args),
         _ if args.edit.is_some() || args.compact => edit::edit(&args),

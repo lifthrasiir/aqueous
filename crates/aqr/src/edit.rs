@@ -198,11 +198,7 @@ fn checked(a: &Args, part: &PathBuf, lead: usize, t: &Tree, sizes: &[u64], made:
     let file = fs::File::open(part).map_err(|e| e.to_string())?;
     // SAFETY: a file of this process, not written to any more
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
-    let decoder = crate::Decoder {
-        native: aqr_decompress::Native { threads: a.opt.threads },
-        wasm: crate::WASM.get(),
-        sandbox: crate::SANDBOX.get().then(std::sync::OnceLock::new),
-    };
+    let decoder = crate::Decoder::new(a.opt.threads);
     let archive = aqr_archive::open(&c[lead..], &decoder).map_err(|e| e.to_string())?;
     holds(a, &archive, t, sizes, made)
 }
