@@ -25,6 +25,13 @@ pub fn run_at(archive: &Path, point: &Point) -> ExitCode {
     drive(Verb::Extract, cmd, count)
 }
 
+/// Runs `aqr` adding `paths` to `archive` under `dir` in it ([`aqr_ipc::command_add`]: the
+/// Explorer folders' drops), and shows how far it is.
+pub fn run_add(archive: &Path, dir: &str, paths: &[PathBuf]) -> ExitCode {
+    let (cmd, count) = aqr_ipc::command_add(&aqr_ipc::aqr(), archive, dir, paths);
+    drive(Verb::Compress, cmd, count)
+}
+
 /// Runs `aqr --session` beside the compression dialog on `paths` ([`options::open`]): it finds
 /// out what they are as the options are chosen, and once the user presses Compress it makes the
 /// archive, the window of how far it is shown and what came of it.

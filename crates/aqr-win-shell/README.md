@@ -62,6 +62,11 @@ object is released, for the server to close it a minute later (and to end, idle)
   run aqr-win (`extract-version ARCHIVE #N`, `name-version ARCHIVE`), the list read again once
   a version is named. And a command "Versions" of the view, its subcommands the menu's
   (`src/commands.rs`, `IExplorerCommandProvider`), which Explorer may show in its command bar.
+- Adding files (`src/drop.rs`): files of the file system's dropped on a view, on a folder in it
+  or on the archive file (its type's `DropHandler`), or pasted (the background menu's "Paste",
+  the verb `paste` of Ctrl+V), always copied, are added by aqr-win (`add ARCHIVE DIR PATH...`:
+  `aqr -a`, each at its name in the folder), the user asked first where a name is there
+  already; nothing of a journal point's view.
 - Encrypted archives: their passphrase asked for by the server's dialog over the window of the
   shell's (the server let come to the front).
 - An archive not read (damaged): told in a box over the window, once in a while, the failure

@@ -46,6 +46,7 @@ const HASPROPSHEET: u32 = 0x40;
 const STREAM: u32 = 0x40_0000;
 const FOLDER_ATTR: u32 = 0x2000_0000;
 const HASSUBFOLDER: u32 = 0x8000_0000;
+const DROPTARGET: u32 = 0x100;
 
 /// `HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)`.
 const NOT_FOUND: HRESULT = HRESULT(0x8007_0002_u32 as i32);
@@ -511,13 +512,27 @@ impl IShellFolder_Impl for Folder_Impl {
             unsafe {
                 *ppv = std::ptr::null_mut();
                 crate::log(|| format!("asked CreateViewObject {:?}", *riid));
+                // (files dropped or pasted on the view: added, where it is not of a journal point)
+                if *riid == windows::Win32::System::Ole::IDropTarget::IID {
+                    let at = self.at.read().unwrap();
+                    let at = at.as_ref().ok_or(windows::core::Error::from(E_FAIL))?;
+                    if at.archive.key().at.is_some() {
+                        return Err(E_NOINTERFACE.into());
+                    }
+                    let t = crate::drop::target(at.archive.path().to_owned(), at.dir.clone(), hwnd);
+                    return t.query(riid, ppv).ok();
+                }
                 // (the menu of the view's background: the archive's journal points)
                 if *riid == IContextMenu::IID {
                     let at = self.at.read().unwrap();
                     let at = at.as_ref().ok_or(windows::core::Error::from(E_FAIL))?;
-                    let m: IContextMenu =
-                        crate::versions::Versions::new(at.archive.key().clone(), file_of(at.pidl.as_ptr()), hwnd)
-                            .into();
+                    let m: IContextMenu = crate::versions::Versions::new(
+                        at.archive.key().clone(),
+                        at.dir.clone(),
+                        file_of(at.pidl.as_ptr()),
+                        hwnd,
+                    )
+                    .into();
                     return m.query(riid, ppv).ok();
                 }
                 // (the commands of the view, in Explorer's command bar)
@@ -555,13 +570,16 @@ impl IShellFolder_Impl for Folder_Impl {
             if inout.is_null() {
                 return Err(E_POINTER.into());
             }
-            let mut all = FOLDER_ATTR | HASSUBFOLDER | READONLY;
+            // (folders take files dropped, but of a journal point's)
+            let drops = self.at().is_ok_and(|(a, _)| a.key().at.is_none());
+            let mut all = FOLDER_ATTR | HASSUBFOLDER | READONLY | if drops { DROPTARGET } else { 0 };
             if cidl > 0 {
                 all = u32::MAX;
                 for k in 0..cidl as usize {
                     // SAFETY: the caller's array of `cidl` ID lists
                     let item = unsafe { pidl::first(*apidl.add(k)) }.ok_or(windows::core::Error::from(E_INVALIDARG))?;
-                    all &= attributes_of(&item);
+                    let drop = if drops && item.is_dir() { DROPTARGET } else { 0 };
+                    all &= attributes_of(&item) | drop;
                 }
             }
             // SAFETY: the caller's pointer
@@ -594,6 +612,18 @@ impl IShellFolder_Impl for Folder_Impl {
                     (0..cidl as usize).any(|k| pidl::first(*apidl.add(k)).is_some_and(|i| i.kind == Kind::Version));
                 if versions && iid != IExtractIconW::IID {
                     return Err(E_NOINTERFACE.into());
+                }
+                // (a folder's: files dropped on it added to it)
+                if cidl == 1
+                    && iid == windows::Win32::System::Ole::IDropTarget::IID
+                    && let Some(item) = pidl::first(*apidl).filter(Item::is_dir)
+                {
+                    let (archive, dir) = self.at()?;
+                    if archive.key().at.is_some() {
+                        return Err(E_NOINTERFACE.into());
+                    }
+                    let t = crate::drop::target(archive.path().to_owned(), joined(&dir, &item.name), hwnd);
+                    return t.query(riid, ppv).ok();
                 }
                 if cidl == 1 && iid == IExtractIconW::IID {
                     let item = pidl::first(*apidl).ok_or(windows::core::Error::from(E_INVALIDARG))?;

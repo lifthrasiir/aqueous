@@ -266,6 +266,24 @@ pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Co
     (cmd, 1)
 }
 
+/// The command running `aqr` adding `paths` to `archive` (`-a`: what is not in it, or changed),
+/// each at its name under `dir` in the archive (names between `/`; empty: its root), with
+/// `--ipc`.
+pub fn command_add(aqr: &Path, archive: &Path, dir: &str, paths: &[PathBuf]) -> (Command, usize) {
+    let mut cmd = aqr_command(aqr);
+    cmd.arg("--ipc").arg("-a").arg("-o").arg(archive);
+    for p in paths {
+        let name = p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let to = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+        cmd.arg(p).arg("--rename").arg(to);
+    }
+    if let Some(d) = archive.parent().filter(|d| d.is_dir()) {
+        cmd.current_dir(d);
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    (cmd, 1)
+}
+
 /// The lines of `aqr`'s standard error kept, the last.
 const LOG: usize = 200;
 
@@ -708,6 +726,15 @@ aqr: not there
         let (cmd, count) = command(a, Verb::Extract, paths(&["x.aqr", "y.aqr"]), false, "aqr");
         assert_eq!(args_of(&cmd), ["--ipc", "-d", "--each", "--auto-dir", "--", "x.aqr", "y.aqr"]);
         assert_eq!(count, 2);
+        let (cmd, count) = command_add(a, Path::new("x.aqr"), "d/e", &paths(&["/p/b.txt", "/p/c"]));
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            args,
+            ["--ipc", "-a", "-o", "x.aqr", "/p/b.txt", "--rename", "d/e/b.txt", "/p/c", "--rename", "d/e/c"]
+        );
+        assert_eq!(count, 1);
+        let (cmd, _) = command_add(a, Path::new("x.aqr"), "", &paths(&["/p/b.txt"]));
+        assert_eq!(cmd.get_args().last().unwrap(), "b.txt");
         let (cmd, count) = command(a, Verb::Test, paths(&["x.aqr"]), false, "aqr");
         assert_eq!(args_of(&cmd), ["--ipc", "-K", "--each", "--", "x.aqr"]);
         assert_eq!(count, 1);

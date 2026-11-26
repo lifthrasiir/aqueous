@@ -13,15 +13,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use aqr_shell::drop::TEST_DROP_HANDLER;
 use aqr_shell::folder::{TEST_FOLDER, TEST_SERVER};
 use aqr_shell::history::TEST_VERSIONS_PAGE;
 use windows::Win32::Foundation::WPARAM;
 use windows::Win32::Foundation::{HWND, LPARAM, POINTL, PROPERTYKEY, SIZE};
+use windows::Win32::System::Com::IPersistFile;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, CoCreateInstance, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::DROPEFFECT;
 use windows::Win32::System::Ole::{DROPEFFECT_COPY, IDropTarget};
 use windows::Win32::System::Ole::{OleGetClipboard, OleInitialize, OleUninitialize};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
@@ -110,7 +113,7 @@ impl Registered {
         set(&format!(r"{class}\InProcServer32"), Some("ThreadingModel"), "Apartment");
         // (CATID_BrowsableShellExt)
         set(&format!(r"{class}\Implemented Categories\{{00021490-0000-0000-C000-000000000046}}"), None, "");
-        let attributes: u32 = 0x2000_0000 | 0x40_0000;
+        let attributes: u32 = 0x2000_0000 | 0x40_0000 | 0x100;
         // SAFETY: a key of the user's, and a DWORD
         let r = unsafe {
             RegSetKeyValueW(
@@ -127,7 +130,11 @@ impl Registered {
         let page = format!(r"CLSID\{}", braced(&TEST_VERSIONS_PAGE));
         set(&format!(r"{page}\InProcServer32"), None, &dll.display().to_string());
         set(&format!(r"{page}\InProcServer32"), Some("ThreadingModel"), "Apartment");
-        Registered(vec![".aqrtest".into(), "Aqueous.aqrtest".into(), class, page])
+        // (the drop handler's)
+        let handler = format!(r"CLSID\{}", braced(&TEST_DROP_HANDLER));
+        set(&format!(r"{handler}\InProcServer32"), None, &dll.display().to_string());
+        set(&format!(r"{handler}\InProcServer32"), Some("ThreadingModel"), "Apartment");
+        Registered(vec![".aqrtest".into(), "Aqueous.aqrtest".into(), class, page, handler])
     }
 }
 
@@ -735,8 +742,9 @@ fn browsed() {
                 let m: IContextMenu = f.CreateViewObject(HWND::default()).unwrap();
                 let menu = CreatePopupMenu().unwrap();
                 let hr = m.QueryContextMenu(menu, 0, 1, 0x7fff, 0);
-                assert_eq!(hr.0, 3, "{hr:?}");
-                let sub = GetSubMenu(menu, 0);
+                // ("Paste", of all of the archive; "Latest" and the two points)
+                assert_eq!(hr.0, 4, "{hr:?}");
+                let sub = GetSubMenu(menu, GetMenuItemCount(Some(menu)) - 1);
                 let shown = (0..GetMenuItemCount(Some(sub)))
                     .map(|i| {
                         let mut b = [0u16; 128];
@@ -760,7 +768,7 @@ fn browsed() {
                 (shown, browsed)
             }
         };
-        let (shown, browsed) = versions(&j, Some(1));
+        let (shown, browsed) = versions(&j, Some(2));
         let texts: Vec<&str> = shown.iter().map(|s| s.0.as_str()).collect();
         assert_eq!(texts.len(), 4, "{shown:?}");
         assert!(texts[2].starts_with("second (") && texts[3].starts_with("first ("), "{shown:?}");
@@ -781,7 +789,7 @@ fn browsed() {
             assert_eq!(read(&s), b"one");
         }
         // (of the point: it checked; "Latest" browses back to all of the archive)
-        let (shown, browsed) = versions(Path::new(at), Some(0));
+        let (shown, browsed) = versions(Path::new(at), Some(1));
         let latest = shown[0].0.clone();
         assert_eq!(shown.iter().map(|s| s.1).collect::<Vec<_>>(), [false, false, false, true]);
         assert_eq!(browsed.unwrap(), format!("browse {}", j.display()));
@@ -820,6 +828,71 @@ fn browsed() {
             _ = std::fs::remove_file(&opened);
             all[2].Invoke(None, None).unwrap();
             assert_eq!(std::fs::read_to_string(&opened).unwrap().trim(), format!("browse {at}"));
+        }
+        // files dropped: on the view (its folder), on a folder in it, on the archive file (its
+        // type's drop handler), and pasted; added by aqr-win (told), always copied, asked first
+        // where a name is there already; nothing of the archive as of a journal point
+        std::fs::write(d.join("new.txt"), b"new").unwrap();
+        std::fs::write(d.join("a.txt"), b"other").unwrap();
+        // SAFETY: COM calls of the shell's objects
+        unsafe {
+            let data =
+                |name: &str| -> IDataObject { item(&d.join(name)).BindToHandler(None, &BHID_DataObject).unwrap() };
+            let dropped = |t: &IDropTarget, name: &str| -> (u32, String) {
+                _ = std::fs::remove_file(&opened);
+                let data = data(name);
+                let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | 2); // DROPEFFECT_MOVE
+                t.DragEnter(&data, MODIFIERKEYS_FLAGS(0), POINTL::default(), &mut effect).unwrap();
+                assert_eq!(effect, DROPEFFECT_COPY);
+                let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | 2);
+                t.Drop(&data, MODIFIERKEYS_FLAGS(0), POINTL::default(), &mut effect).unwrap();
+                (effect.0, std::fs::read_to_string(&opened).unwrap_or_default().trim().to_owned())
+            };
+            let new = d.join("new.txt");
+            let f: IShellFolder2 = item(&archive).BindToHandler(None, &BHID_SFObject).unwrap();
+            let view: IDropTarget = f.CreateViewObject(HWND::default()).unwrap();
+            assert_eq!(dropped(&view, "new.txt"), (1, format!("run add {}  {}", archive.display(), new.display())));
+            let mut sub = [std::ptr::null_mut()];
+            f.ParseDisplayName(
+                HWND::default(),
+                None,
+                windows::core::w!("sub"),
+                None,
+                &mut sub[0],
+                std::ptr::null_mut(),
+            )
+            .unwrap();
+            let on_sub: IDropTarget = f.GetUIObjectOf(HWND::default(), &[sub[0] as *const _], None).unwrap();
+            windows::Win32::UI::Shell::ILFree(Some(sub[0]));
+            assert_eq!(dropped(&on_sub, "new.txt").1, format!("run add {} sub {}", archive.display(), new.display()));
+            // (a.txt is there: asked, logged in tests)
+            let (_, told) = dropped(&view, "a.txt");
+            assert_eq!(told, format!("run add {}  {}", archive.display(), d.join("a.txt").display()));
+            assert!(std::fs::read_to_string(&log).unwrap().contains("drop: asked:"));
+            let h: IPersistFile = CoCreateInstance(&TEST_DROP_HANDLER, None, CLSCTX_ALL).unwrap();
+            h.Load(&HSTRING::from(archive.as_os_str()), Default::default()).unwrap();
+            let on_file: IDropTarget = h.cast().unwrap();
+            assert_eq!(dropped(&on_file, "new.txt").1, format!("run add {}  {}", archive.display(), new.display()));
+            // (of a journal point's: none)
+            let v: IShellFolder2 = item(Path::new(at)).BindToHandler(None, &BHID_SFObject).unwrap();
+            assert!(v.CreateViewObject::<IDropTarget>(HWND::default()).is_err());
+            // pasted: the background's "paste", as Ctrl+V invokes it
+            _ = std::fs::remove_file(&opened);
+            windows::Win32::System::Ole::OleSetClipboard(&data("new.txt")).unwrap();
+            let m: IContextMenu = f.CreateViewObject(HWND::default()).unwrap();
+            let menu = CreatePopupMenu().unwrap();
+            assert!(m.QueryContextMenu(menu, 0, 1, 0x7fff, 0).is_ok());
+            DestroyMenu(menu).unwrap();
+            let info = CMINVOKECOMMANDINFO {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+                lpVerb: windows::core::s!("paste"),
+                nShow: 1,
+                ..Default::default()
+            };
+            m.InvokeCommand(&info).unwrap();
+            _ = windows::Win32::System::Ole::OleSetClipboard(None);
+            let told = std::fs::read_to_string(&opened).unwrap();
+            assert_eq!(told.trim(), format!("run add {}  {}", archive.display(), new.display()));
         }
         // the Versions tab of the archive file's Properties: its points newest first, read as it
         // is shown; Open (told: the archive as of the point), Extract (aqr-win's, told) and Name

@@ -24,6 +24,9 @@
 //!   version…" extracts one of the versions named (the points of its journal: `aqr -j`, `--tag`)
 //!   as it was, into a folder beside the archive named after it (`extract-version ARCHIVE #N`:
 //!   point N, asked for nothing: the Versions tab of the shell extension's).
+//! - `add ARCHIVE DIR PATH...`: the paths added to the archive under `DIR` in it (`aqr -a`,
+//!   each `--rename DIR/NAME`), as files are dropped or pasted into its folder in Explorer
+//!   (the shell extension's).
 //! - Explorer drops the paths chosen on the verb's class (`drop`: `--drop VERB`, this program as
 //!   a COM local server), all at once. A verb's command, one process for each path as other
 //!   programs may run it, is gathered into the first process of the verb in a folder (`gather`).
@@ -142,6 +145,17 @@ fn main() -> std::process::ExitCode {
             };
         }
         "options-preview" => return options::preview(),
+        // (the shell extension's drops: ARCHIVE, the directory in it, the paths)
+        "add" => {
+            let (Some(archive), Some(dir)) = (args.get(1), args.get(2).and_then(|d| d.to_str())) else {
+                return fail(win::nothing(), win::no_path());
+            };
+            let paths: Vec<PathBuf> = args.iter().skip(3).map(PathBuf::from).collect();
+            if paths.is_empty() {
+                return fail(win::nothing(), win::no_path());
+            }
+            return run::run_add(std::path::Path::new(archive), dir, &paths);
+        }
         "compress-options" => {
             options = true;
             Verb::Compress
@@ -182,7 +196,7 @@ fn main() -> std::process::ExitCode {
         }
         _ => {
             let usage = "aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... | \
-                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N]";
+                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N] | add ARCHIVE DIR PATH...";
             return fail(win::not_verb(), usage);
         }
     };

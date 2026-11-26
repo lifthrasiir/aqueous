@@ -72,7 +72,8 @@ Explorer 또는 파일 대화상자를 연 아무 프로세스
   `DelegateExecute = {11dbb47c-...}`(CLSID_ExecuteFolder)를 둔다. "여기에 풀기"와 "검사"는 동사로
   남는다.
 - 속성의 "버전" 탭 클래스 `CLSID\{54394c15-...}`(`InProcServer32`, 같은 DLL)와 ProgID의
-  `shellex\PropertySheetHandlers\Aqueous`(§6.8).
+  `shellex\PropertySheetHandlers\Aqueous`(§6.8). 넣기의 drop handler 클래스 `CLSID\{6a3e2f84-...}`와
+  `shellex\DropHandler`(§6.9). 폴더 클래스의 `Attributes`에는 `SFGAO_DROPTARGET`도 둔다.
 - 서버 클래스 `CLSID\{c6b7e992-...}`의 `LocalServer32 = "aqr-win.exe" --serve`.
 - 다른 형식(`.zip`, `.7z`, ...)은 다루지 않는다(§9). `.zip`은 Windows의 ZIP 폴더와 부딪친다.
 
@@ -317,6 +318,22 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
      간다. Windows 7의 명령 모음에는 나오는 것으로 알려져 있다. Windows 10의 리본과 11의 새 명령
      모음에 나오는지는 아직 확인하지 않았다.
 
+### 6.9 넣기(끌어 놓기, 붙여넣기)
+
+- 받는 곳: 보기(`CreateViewObject(IDropTarget)`, 그 폴더), 보기 안의 폴더(`GetUIObjectOf(IDropTarget)`),
+  일반 폴더에 있는 아카이브 파일(ProgID의 `shellex\DropHandler`, `IPersistFile`로 파일을 받는다).
+  붙여넣기는 배경 메뉴의 "붙여넣기"(동사 `paste`, Ctrl+V가 부르는 것)다(`src/drop.rs`, `src/versions.rs`).
+- 파일 시스템의 파일(`CF_HDROP`)만 받는다. 다른 아카이브나 메일의 가상 파일(descriptor와 contents)은
+  받지 않는다. 언제나 복사이고 원본을 지우지 않는다. 아카이브 자신이나 그것을 담은 폴더는 뺀다.
+- aqr-win의 `add ARCHIVE DIR PATH...`가 `aqr --ipc -a -o ARCHIVE PATH --rename DIR/NAME ...`을 진행 창과
+  함께 돌린다(`aqr_ipc::command_add`). `--rename`을 늘 붙이므로 폴더 하나를 놓아도 그 내용이 아니라 폴더가
+  들어간다.
+- 놓은 이름이 그 폴더에 이미 있으면 먼저 묻는다(`-a`는 바뀐 것을 바꿔 넣는다. 예전 것은 앞의
+  segment에 남고, journal 지점이 있으면 그 판에서 보인다).
+- 판(journal 지점)의 보기는 받지 않는다. 암호화된 아카이브는 `aqr`가 거절하고 그 오류를 aqr-win이
+  보여 준다(`-a`가 nonce를 다시 쓰지 않도록, docs/append-design.md).
+- 넣은 뒤에는 아카이브 파일이 바뀌므로 감시(§6.5)가 보기를 새로 고친다.
+
 ## 7. 암호와 손상
 
 - **암호화된 아카이브**
@@ -355,7 +372,9 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
 8. ~~설치 프로그램과 릴리스~~(§12).
 9. 그 뒤:
    - 판(journal의 지점, §6.8): 배경 메뉴, 속성 탭, 도구 모음(Windows 10, 11에서 보이는지 확인)
-   - 다른 형식(aqr-unpack이 읽는 것)과 넣기(`IDropTarget` → `aqr -a`)
+   - 다른 형식(aqr-unpack이 읽는 것)
+   - ~~넣기~~(§6.9). 남은 것: 가상 파일(다른 아카이브, 메일 첨부)의 넣기, 지우기(`aqr --delete`)와
+     이름 바꾸기(`--move`)
    - 손상된 아카이브의 salvage
    - ProjFS로 "폴더로 마운트"
    - Windows 11의 새 컨텍스트 메뉴(aqr-win README의 Status)

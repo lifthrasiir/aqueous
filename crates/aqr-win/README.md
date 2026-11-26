@@ -57,7 +57,9 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   it too: a `.aqr` file double-clicked opens as a folder in Explorer (its class's `CLSID`, the
   verb `open` the shell's `ExecuteFolder`), "Extract here" staying a verb; and the "Versions"
   tab of a `.aqr` file's Properties (a property sheet handler of the library's), which runs
-  `extract-version ARCHIVE #N` (point N extracted, asked for nothing) and `name-version`.
+  `extract-version ARCHIVE #N` (point N extracted, asked for nothing) and `name-version`; and
+  its drop handler: files dropped on a `.aqr` file, or in its folder, are added to it by
+  `aqr-win add ARCHIVE DIR PATH...` (`aqr -a`, each `--rename DIR/NAME`).
 - `aqr-win --serve` is the COM local server of the archives a shell extension browses
   (`docs/win-shell-ext-design.md`, `src/serve.rs`): late-bound objects (`IDispatch`, marshaled
   by the system's proxies, no type library) over one `aqr --serve`, an archive's handle closed a

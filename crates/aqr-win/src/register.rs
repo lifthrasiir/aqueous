@@ -221,10 +221,18 @@ pub fn register() -> Result<(), String> {
             set(&format!(r"{page}\InProcServer32"), None, &dll.display().to_string())?;
             set(&format!(r"{page}\InProcServer32"), Some("ThreadingModel"), "Apartment")?;
             set(&format!(r"{CLASS}\shellex\PropertySheetHandlers\Aqueous"), None, &crate::drop::braced(&PAGE))?;
+            // (files dropped on an archive file: added to it)
+            let handler = drop_handler_key();
+            set(&handler, None, "Aqueous: add")?;
+            set(&format!(r"{handler}\InProcServer32"), None, &dll.display().to_string())?;
+            set(&format!(r"{handler}\InProcServer32"), Some("ThreadingModel"), "Apartment")?;
+            set(&format!(r"{CLASS}\shellex\DropHandler"), None, &crate::drop::braced(&DROP_HANDLER))?;
         }
         false => {
             delete(&classes(&page_key()))?;
             delete(&classes(&format!(r"{CLASS}\shellex\PropertySheetHandlers\Aqueous")))?;
+            delete(&classes(&drop_handler_key()))?;
+            delete(&classes(&format!(r"{CLASS}\shellex\DropHandler")))?;
             delete(&classes(&folder))?;
             delete(&classes(&format!(r"{CLASS}\CLSID")))?;
             delete(&classes(&format!(r"{CLASS}\shell\open")))?;
@@ -274,13 +282,21 @@ const FOLDER: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0xf76
 /// `history::VERSIONS_PAGE`).
 const PAGE: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0x54394c15_6f9d_4015_9d6c_5805da234236);
 
+/// The class of the archive files' drop handler (aqr-win-shell's `drop::DROP_HANDLER`).
+const DROP_HANDLER: windows_sys::core::GUID =
+    windows_sys::core::GUID::from_u128(0x6a3e2f84_1c5d_4b7a_9e08_d2f4c6b1a937);
+
+fn drop_handler_key() -> String {
+    format!(r"CLSID\{}", crate::drop::braced(&DROP_HANDLER))
+}
+
 fn page_key() -> String {
     format!(r"CLSID\{}", crate::drop::braced(&PAGE))
 }
 
-/// What an archive file is as a folder (`SFGAO_FOLDER | SFGAO_STREAM`): a folder that is a file
-/// too.
-const FOLDER_ATTRIBUTES: u32 = 0x2000_0000 | 0x40_0000;
+/// What an archive file is as a folder (`SFGAO_FOLDER | SFGAO_STREAM | SFGAO_DROPTARGET`): a
+/// folder that is a file too, taking files dropped.
+const FOLDER_ATTRIBUTES: u32 = 0x2000_0000 | 0x40_0000 | 0x100;
 
 /// `CATID_BrowsableShellExt`.
 const BROWSABLE: &str = "{00021490-0000-0000-C000-000000000046}";
@@ -305,6 +321,7 @@ pub fn unregister() -> Result<(), String> {
     delete(&classes(&serve_key()))?;
     delete(&classes(&folder_key()))?;
     delete(&classes(&page_key()))?;
+    delete(&classes(&drop_handler_key()))?;
     for key in COMPRESS.iter().chain(&MENU).chain(&OLD).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }

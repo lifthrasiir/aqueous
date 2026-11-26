@@ -54,27 +54,42 @@ impl Default for Page {
 impl IShellExtInit_Impl for Page_Impl {
     fn Initialize(&self, _: *const ITEMIDLIST, data: Ref<IDataObject>, _: HKEY) -> windows::core::Result<()> {
         let data = data.ok()?;
-        let format = FORMATETC {
-            cfFormat: CF_HDROP.0,
-            ptd: std::ptr::null_mut(),
-            dwAspect: DVASPECT_CONTENT.0,
-            lindex: -1,
-            tymed: TYMED_HGLOBAL.0 as u32,
+        let files = dropped(data)?;
+        *self.file.lock().unwrap() = match &files[..] {
+            [f] => Some(f.clone()),
+            _ => None,
         };
-        // SAFETY: the shell's data object, its medium let go of after
-        unsafe {
-            let mut m = data.GetData(&format)?;
-            let drop = HDROP(m.u.hGlobal.0);
-            let n = DragQueryFileW(drop, u32::MAX, None);
-            let file = (n == 1).then(|| {
-                let mut b = vec![0u16; DragQueryFileW(drop, 0, None) as usize + 1];
-                let k = DragQueryFileW(drop, 0, Some(&mut b)) as usize;
-                PathBuf::from(String::from_utf16_lossy(&b[..k]))
-            });
-            ReleaseStgMedium(&mut m);
-            *self.file.lock().unwrap() = file;
-        }
         Ok(())
+    }
+}
+
+/// The format of files dropped (`CF_HDROP`).
+pub(crate) fn hdrop() -> FORMATETC {
+    FORMATETC {
+        cfFormat: CF_HDROP.0,
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    }
+}
+
+/// The files of data object `data` (`CF_HDROP`: of the file system's, dropped or copied).
+pub(crate) fn dropped(data: &IDataObject) -> windows::core::Result<Vec<PathBuf>> {
+    // SAFETY: the caller's data object, its medium let go of after
+    unsafe {
+        let mut m = data.GetData(&hdrop())?;
+        let drop = HDROP(m.u.hGlobal.0);
+        let n = DragQueryFileW(drop, u32::MAX, None);
+        let files = (0..n)
+            .map(|k| {
+                let mut b = vec![0u16; DragQueryFileW(drop, k, None) as usize + 1];
+                let got = DragQueryFileW(drop, k, Some(&mut b)) as usize;
+                PathBuf::from(String::from_utf16_lossy(&b[..got]))
+            })
+            .collect();
+        ReleaseStgMedium(&mut m);
+        Ok(files)
     }
 }
 
@@ -277,8 +292,9 @@ fn open(file: &Path, p: &Value, hwnd: HWND) -> windows::core::Result<()> {
 }
 
 /// aqr-win (beside this library) run with `args`; where `then` is a page's, told once it ends.
-fn run(args: &[&str], then: Option<HWND>) -> windows::core::Result<()> {
-    if crate::versions::told(|| Ok(format!("run {}", args.join(" "))))? {
+pub(crate) fn run<S: AsRef<std::ffi::OsStr>>(args: &[S], then: Option<HWND>) -> windows::core::Result<()> {
+    let shown = || args.iter().map(|a| a.as_ref().to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+    if crate::versions::told(|| Ok(format!("run {}", shown())))? {
         if let Some(h) = then {
             // SAFETY: a message of the page's
             unsafe { PostMessageW(Some(h), NAMED, WPARAM(0), LPARAM(0)) }?;
