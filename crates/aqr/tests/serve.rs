@@ -189,7 +189,7 @@ fn listed_and_read() {
     let t: Value = serde_json::from_str(&aqr(&d, &["-t", "--json", "t.aqr"])).unwrap();
     let j = t["entries"].as_array().unwrap().iter().find(|e| e["path"] == "sub/big.txt").unwrap().clone();
     let v = s.ask(json!({"stat": h, "path": "sub/big.txt", "verbose": true}))["entry"].clone();
-    for k in ["data", "overhead", "share", "segment"] {
+    for k in ["data", "overhead", "share", "segment", "formula", "nodes"] {
         assert_eq!(v[k], j[k], "{k}: {v} {j}");
     }
     assert!(v["ratio"].as_str().is_some_and(|r| r.ends_with('%')), "{v}");

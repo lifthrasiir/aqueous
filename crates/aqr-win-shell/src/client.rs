@@ -428,8 +428,10 @@ pub fn list(path: &Path, dir: &str, verbose: bool) -> windows::core::Result<Vec<
 }
 
 /// The entry at `at` of archive `path`.
-pub fn stat(path: &Path, at: &str) -> windows::core::Result<Value> {
-    with(path, |a| json(a, "Stat", &[at]))
+/// With what `-t -v` tells too where `verbose`.
+pub fn stat(path: &Path, at: &str, verbose: bool) -> windows::core::Result<Value> {
+    let how = if verbose { "verbose" } else { "" };
+    with(path, |a| json(a, "Stat", &[at, how]))
 }
 
 /// A stream of file `at` of archive `path`, for the calling apartment.

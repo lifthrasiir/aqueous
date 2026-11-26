@@ -17,9 +17,9 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IDataObject,
 };
 use windows::Win32::UI::Shell::{
-    DFM_GETDEFSTATICID, DFM_GETVERBA, DFM_GETVERBW, DFM_INVOKECOMMAND, DFM_INVOKECOMMANDEX, DFM_MAPCOMMANDNAME,
-    DFM_MERGECONTEXTMENU, IContextMenuCB, IContextMenuCB_Impl, IProgressDialog, IShellFolder, PROGDLG_AUTOTIME,
-    PROGDLG_NOMINIMIZE, QCMINFO, SHELLEXECUTEINFOW, ShellExecuteExW,
+    DFM_CMD_PROPERTIES, DFM_GETDEFSTATICID, DFM_GETVERBA, DFM_GETVERBW, DFM_INVOKECOMMAND, DFM_INVOKECOMMANDEX,
+    DFM_MAPCOMMANDNAME, DFM_MERGECONTEXTMENU, IContextMenuCB, IContextMenuCB_Impl, IProgressDialog, IShellFolder,
+    PROGDLG_AUTOTIME, PROGDLG_NOMINIMIZE, QCMINFO, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     IDYES, InsertMenuW, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_BYPOSITION, MF_STRING, MessageBoxW,
@@ -39,6 +39,8 @@ const PROGRESS_DIALOG: GUID = GUID::from_u128(0xf8383852_fcd3_11d1_a6b9_006097df
 #[implement(IContextMenuCB)]
 pub struct Menu {
     pub open: Option<(Arc<client::Use>, String)>,
+    /// The entries chosen, of their folder of their archive: of the menu's Properties.
+    pub props: (Arc<client::Use>, String, Vec<crate::pidl::Item>),
     pub _counted: crate::Counted,
 }
 
@@ -124,7 +126,16 @@ impl Menu {
                 }
                 Ok(())
             }
-            // (the shell's commands, its own: copy, properties, ...)
+            // (Properties: the sheet of ours)
+            m if (m == DFM_INVOKECOMMAND.0 || m == DFM_INVOKECOMMANDEX.0)
+                // (the command's offset as 32 bits: -5 as 0xfffffffb)
+                && wparam.0 as u32 as i32 == DFM_CMD_PROPERTIES.0 =>
+            {
+                let (archive, dir, items) = self.props.clone();
+                crate::props::show(archive, dir, items);
+                Ok(())
+            }
+            // (the shell's commands, its own: copy, ...)
             m if m == DFM_INVOKECOMMAND.0 || m == DFM_INVOKECOMMANDEX.0 => Err(S_FALSE.into()),
             m if m == DFM_GETDEFSTATICID.0 => Err(E_NOTIMPL.into()),
             _ => Err(E_NOTIMPL.into()),
@@ -137,7 +148,7 @@ impl Menu {
 /// it (`page.html`'s `page_files`, `page.files`: its name before the first `.`, then what is not
 /// a letter nor a digit).
 fn files_of(archive: &Path, path: &str, folder: bool) -> windows::core::Result<Vec<(String, u64)>> {
-    let size = client::stat(archive, path)?["size"].as_u64().unwrap_or(0);
+    let size = client::stat(archive, path, false)?["size"].as_u64().unwrap_or(0);
     let mut out = vec![(path.to_owned(), size)];
     if !folder {
         return Ok(out);
@@ -283,7 +294,7 @@ fn written(
         let (whole, at, _) = state.lock().unwrap().clone();
         let total = (*total.lock().unwrap()).max(1);
         let (d, t) = client::progress(archive.path(), &at).unwrap_or((0, 0));
-        let size = client::stat(archive.path(), &at).ok().and_then(|e| e["size"].as_u64()).unwrap_or(0);
+        let size = client::stat(archive.path(), &at, false).ok().and_then(|e| e["size"].as_u64()).unwrap_or(0);
         let part = if t > 0 { (size as u128 * d as u128 / t as u128) as u64 } else { 0 };
         // SAFETY: the dialog's calls
         unsafe {

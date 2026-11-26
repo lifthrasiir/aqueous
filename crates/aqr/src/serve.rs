@@ -33,7 +33,8 @@
 //!   and nanoseconds since the epoch; `local` true where it is a local time of an unknown time
 //!   zone; `crtime`, `atime`, `ctime` alike), `attrs` (Windows' attributes), as `-t -v` shows
 //!   them `owner`, `mode`, `win`, `mac` and `flags`, its `comment`, a link's `target`. With
-//!   `verbose` true, a file's `data`, `overhead`, `share`, `ratio` and `segment` too (as `-t -v`'s:
+//!   `verbose` true, a file's `data`, `overhead`, `share`, `ratio`, `segment`, `formula` and
+//!   `nodes` (its instructions) too (as `-t -v`'s:
 //!   all of the archive's blocks read for them, once).
 //! - `stat` (a handle, and `path`): the entry at the path, as `entry` (the root's of no name).
 //! - `read` (a handle, `path`, `offset`, `len`): bytes of the file at `path` from `offset`, at
@@ -318,7 +319,9 @@ impl Opened {
 
     /// What `-t -v` tells of content `c` (of the file of an archive of a single file, 0).
     fn listed(&self, c: usize) -> Option<&aqr_archive::Listed> {
-        let l = self.listed.get_or_init(|| self.archive.listing(&|_| None).map_err(|e| e.to_string()));
+        // (the modules named as -t -v names them)
+        let name = |wasm: &[u8]| aqr_decompress::identify(wasm).map(|n| n.split('@').next().unwrap_or(&n).to_owned());
+        let l = self.listed.get_or_init(|| self.archive.listing(&name).map_err(|e| e.to_string()));
         l.as_ref().ok()?.get(c)
     }
 
@@ -331,6 +334,8 @@ impl Opened {
             v["share"] = l.share.into();
             v["ratio"] = crate::list::ratio(l.share, l.size).into();
             v["segment"] = (l.segment + 1).into();
+            v["formula"] = l.formula.clone().into();
+            v["nodes"] = l.nodes.into();
         }
     }
 

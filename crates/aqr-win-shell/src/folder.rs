@@ -40,6 +40,7 @@ pub const TEST_SERVER: GUID = GUID::from_u128(0x5e1f0b6a_92c4_4d1e_a7f3_0c2b9d8e
 const CANCOPY: u32 = 0x1;
 const READONLY: u32 = 0x4_0000;
 const HIDDEN: u32 = 0x8_0000;
+const HASPROPSHEET: u32 = 0x40;
 const STREAM: u32 = 0x40_0000;
 const FOLDER_ATTR: u32 = 0x2000_0000;
 const HASSUBFOLDER: u32 = 0x8000_0000;
@@ -255,7 +256,7 @@ impl Folder {
                 *self.listed.lock().unwrap() = (by_name, true);
                 e
             }
-            false => client::stat(archive.path(), &joined(&dir, &item.name)).ok(),
+            false => client::stat(archive.path(), &joined(&dir, &item.name), false).ok(),
         }
     }
 
@@ -277,6 +278,7 @@ fn items_of(p: *const ITEMIDLIST) -> windows::core::Result<Vec<Item>> {
 fn attributes_of(item: &Item) -> u32 {
     let hidden = if item.attrs & 0x2 != 0 { HIDDEN } else { 0 };
     hidden
+        | HASPROPSHEET
         | match item.kind {
             Kind::Dir => FOLDER_ATTR | HASSUBFOLDER | CANCOPY | READONLY,
             _ => STREAM | CANCOPY | READONLY,
@@ -305,7 +307,7 @@ impl IShellFolder_Impl for Folder_Impl {
             for n in text.split(['\\', '/']).filter(|n| !n.is_empty()) {
                 path = joined(&path, n);
                 // (not there: as the file system tells a path not found, for the shell to know it)
-                let e = client::stat(archive.path(), &path).map_err(|e| {
+                let e = client::stat(archive.path(), &path, false).map_err(|e| {
                     let missing = e.message().contains("not in the archive");
                     if missing { windows::core::Error::new(NOT_FOUND, e.message()) } else { e }
                 })?;
@@ -546,7 +548,9 @@ impl IShellFolder_Impl for Folder_Impl {
                         .map(|a| a.into()),
                         false => None,
                     };
-                    let cb: IContextMenuCB = crate::menu::Menu { open, _counted: crate::Counted::new() }.into();
+                    let (archive, dir) = self.at()?;
+                    let props = (archive, dir, items);
+                    let cb: IContextMenuCB = crate::menu::Menu { open, props, _counted: crate::Counted::new() }.into();
                     let folder = self.at.read().unwrap().as_ref().map_or(std::ptr::null_mut(), |a| a.pidl.0);
                     let dcm = DEFCONTEXTMENU {
                         hwnd,

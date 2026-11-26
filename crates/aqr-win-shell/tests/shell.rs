@@ -450,6 +450,35 @@ fn browsed() {
                 ..Default::default()
             };
             m.InvokeCommand(&info).unwrap();
+            // (and its properties: all that -t -v tells, its formula too; logged by the library
+            // of the tests rather than shown)
+            let info = CMINVOKECOMMANDINFO {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+                lpVerb: windows::core::s!("properties"),
+                nShow: 1,
+                ..Default::default()
+            };
+            m.InvokeCommand(&info).unwrap();
+            let listed = Command::new(bin.join("aqr.exe")).args(["-t", "--json"]).arg(&archive).output().unwrap();
+            let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+            let formula = listed["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["path"] == "sub/big.bin")
+                .and_then(|e| e["formula"].as_str())
+                .unwrap()
+                .to_owned();
+            let start = Instant::now();
+            let props = loop {
+                let t = std::fs::read_to_string(&log).unwrap_or_default();
+                if let Some(k) = t.find("properties of big.bin:") {
+                    break t[k..].to_owned();
+                }
+                assert!(start.elapsed() < Duration::from_secs(10), "no properties");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            assert!(props.contains(&formula) && props.contains("2500000"), "{props}");
             DestroyMenu(menu).unwrap();
             windows::Win32::UI::Shell::ILFree(Some(got[0]));
             let start = Instant::now();

@@ -44,6 +44,9 @@ object is released, for the server to close it a minute later (and to end, idle)
   thread of their own, the shell's progress window shown where it takes over 0.4 s (cancelled,
   the file being written stopped and those after it not begun, nothing opened), then opened as
   the system opens a file of its type.
+- Properties (the menu's, Alt+Enter; `src/props.rs`): a sheet of a page for each entry chosen,
+  of all that `aqr -t -v` tells of it, its formula and instructions too, under the columns'
+  names; on a thread of its own, a window of its own.
 - Encrypted archives: their passphrase asked for by the server's dialog over the window of the
   shell's (the server let come to the front).
 - An archive not read (damaged): told in a box over the window, once in a while, the failure
