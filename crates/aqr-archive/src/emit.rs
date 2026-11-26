@@ -20,7 +20,7 @@ pub(crate) fn how_of(level: Level, class: &str, kind: Kind) -> How {
     let from = matches!(level, Level::Of(n) if n.clamp(1, Level::MAX) >= DENSE_FROM.get());
     let dense = at.is_some()
         && DENSE_CLASSES.get().iter().any(|&c| match c {
-            "text" => kind == Kind::Text,
+            "text" => kind.is_text(),
             _ => match c.strip_suffix('/') {
                 Some(_) => class.starts_with(c),
                 None => class == c,

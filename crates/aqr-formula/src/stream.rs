@@ -144,6 +144,14 @@ pub enum Kind {
     Pixels,
     /// Text, or a syntax in text such as PDF objects.
     Text,
+    /// Text of prose (values of words, long, with spaces: an XML element's text): only a
+    /// coder of words takes it, so that nothing looks for a table or base64 in it first. Text
+    /// for everything else ([`Kind::is_text`]).
+    Words,
+    /// Text of short values (a column: names, numbers, dates, codes): as [`Kind::Text`], taken
+    /// by what fits it best (a table coder or words) on a smaller sample. Text for everything
+    /// else ([`Kind::is_text`]).
+    Column,
     /// A font program (TrueType, OpenType, CFF, Type 1).
     Font,
     /// Binary records of fixed layout, such as a cross-reference table.
@@ -193,12 +201,21 @@ impl fmt::Debug for Kinds {
     }
 }
 
+impl Kind {
+    /// Whether it is text: [`Kind::Text`], [`Kind::Words`] or [`Kind::Column`].
+    pub fn is_text(self) -> bool {
+        matches!(self, Kind::Text | Kind::Words | Kind::Column)
+    }
+}
+
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Kind::Unknown => f.write_str("unknown"),
             Kind::Pixels => f.write_str("pixels"),
             Kind::Text => f.write_str("text"),
+            Kind::Words => f.write_str("words"),
+            Kind::Column => f.write_str("column"),
             Kind::Font => f.write_str("font"),
             Kind::Table => f.write_str("table"),
             Kind::Compressed => f.write_str("compressed"),

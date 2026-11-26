@@ -51,8 +51,10 @@ aqr_common::zopt! {
     /// The bytes of text of a segment at least (but the last), coded on its own (FORMAT.md,
     /// "Encoding"): what the encoder and the module hold of a file at once. A module holds its
     /// inputs (nearly as many bytes as the text: the values) and its output, and the host copies
-    /// of them, which the application bound (256 MiB) counts: a segment of 64 MiB needed 269 MB.
-    pub static SEGMENT: Opt<usize> = Opt::size("xml:segment", 32 << 20, "bytes of XML of a segment, coded on its own");
+    /// of them, which the application bound (256 MiB) counts: a segment of 64 MiB needed 269 MB, one
+    /// of 48 MiB some 205 (and a third fewer pieces to look at than at 32 MiB: enwik9 -3% of its
+    /// instructions).
+    pub static SEGMENT: Opt<usize> = Opt::size("xml:segment", 48 << 20, "bytes of XML of a segment, coded on its own");
 }
 
 aqr_common::zopt! {
@@ -186,7 +188,31 @@ struct Container {
     next: usize,
 }
 
+/// The mean bytes of a value of a container of prose at least.
+const PROSE_MEAN: usize = 40;
+/// A container of prose has a space for as many bytes as this at most (English: 6).
+const PROSE_SPACE: usize = 16;
+
 impl Container {
+    /// Whether the values are prose: long, and spaced as words are (not numbers, names, or base64).
+    fn is_prose(&self) -> bool {
+        let n = self.lens.as_ref().map_or_else(|| memchr_iter(b'\n', &self.data).count(), Vec::len);
+        let bytes = self.data.len() - self.lens.as_ref().map_or(n, |_| 0);
+        if n == 0 || bytes / n < PROSE_MEAN.max(1) {
+            return false;
+        }
+        // (a window of its start, middle and end)
+        let w = 16 << 10;
+        let at = [0, self.data.len() / 2, self.data.len().saturating_sub(w)];
+        let (mut spaces, mut total) = (0, 0);
+        for a in at {
+            let s = &self.data[a.min(self.data.len())..(a + w).min(self.data.len())];
+            spaces += memchr_iter(b' ', s).count();
+            total += s.len();
+        }
+        spaces * PROSE_SPACE >= total
+    }
+
     fn put(&mut self, v: &[u8]) {
         if let Some(l) = &mut self.lens {
             l.push(v.len() as u32);
@@ -628,7 +654,10 @@ impl<'d, 'l> Segment<'d, 'l> {
                     parts.push(Err((small.len(), c.data.len())));
                     small.extend_from_slice(&c.data);
                 }
-                false => parts.push(Ok(f.push_content("xml/values", Kind::Text, c.data))),
+                false => {
+                    let kind = if c.is_prose() { Kind::Words } else { Kind::Column };
+                    parts.push(Ok(f.push_content("xml/values", kind, c.data)))
+                }
             }
         }
         let shared = f.streams.len();
@@ -642,6 +671,16 @@ impl<'d, 'l> Segment<'d, 'l> {
         let values = Node::concat(values.collect::<Vec<_>>());
         f.streams[first..].iter_mut().for_each(|s| aqr_formula::store::spill(&mut s.data));
         Node::apply(MODULE, params, vec![skeleton, table, lens, values], len)
+    }
+}
+
+/// Whether formula `f` is one of [`encode`]'s: its root the module's application, or segments of
+/// them one after another (not a formula that holds one among other things).
+pub fn is(f: &Formula) -> bool {
+    let of = |n: &Node| matches!(n, Node::Apply(a) if a.module.name == MODULE.name);
+    match &f.root {
+        Node::Concat(ns) => !ns.is_empty() && ns.iter().all(of),
+        n => of(n),
     }
 }
 

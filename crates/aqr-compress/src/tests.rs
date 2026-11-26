@@ -7,11 +7,11 @@ use aqr_decompress::FLATE;
 fn table_sample_spreads() {
     let line = |i: usize| format!("{i:08};{};x\n", i * 7);
     let small: String = (0..1000).map(line).collect();
-    assert!(matches!(table_sample(small.as_bytes()), Cow::Borrowed(s) if s == small.as_bytes()));
+    assert!(matches!(table_sample(small.as_bytes(), TABLE_WINDOW.get()), Cow::Borrowed(s) if s == small.as_bytes()));
     let big: String = (0..300_000).map(line).collect();
     let (window, windows) = (TABLE_WINDOW.get(), TABLE_WINDOWS.get());
     assert!(big.len() > window * windows * 2);
-    let s = table_sample(big.as_bytes());
+    let s = table_sample(big.as_bytes(), TABLE_WINDOW.get());
     assert!(s.len() <= window * windows && s.len() > window * (windows - 1));
     assert!(s.starts_with(&big.as_bytes()[..30]));
     assert!(s.ends_with(&big.as_bytes()[big.len() - 30..]));
@@ -2612,4 +2612,55 @@ fn headerless_tensors_direct() {
     assert!(one.len() < d.len() * 8 / 10 && held.len() < d.len() * 7 / 10, "{} {}", one.len(), held.len());
     assert!(hints.report().is_empty(), "{:?}", hints.report());
     _ = std::fs::remove_file(&path);
+}
+
+/// XML text of records of elements of prose and of short values, `n` of them.
+fn xml_records(n: usize) -> Vec<u8> {
+    let mut rng = aqr_common::rng::Rng::new(9);
+    let words = ["river", "stone", "market", "quiet", "bridge", "winter", "letter", "iron", "paper", "light"];
+    let mut s = String::from("<?xml version=\"1.0\"?>\n<library>\n");
+    for i in 0..n {
+        let text: Vec<&str> = (0..30).map(|_| words[rng.below(10) as usize]).collect();
+        s += &format!(
+            "<book id=\"{i}\"><year>{}</year><abstract>{}</abstract></book>\n",
+            1900 + rng.below(120),
+            text.join(" ")
+        );
+    }
+    s += "</library>\n";
+    s.into_bytes()
+}
+
+/// A big XML file's formula is not compared with its data (the sample chose it), a small one is;
+/// and its containers of prose are made as text at once, a column of short values as a table or
+/// text on a smaller sample.
+#[test]
+fn xml_formula_compared_by_size() {
+    let d = xml_records(3000);
+    assert!(d.len() > 300_000);
+    let opt = Options { threads: 1, ..Options::default() };
+    COMPARED.with(|c| c.borrow_mut().clear());
+    let f = recompress(&d, &opt);
+    assert!(aqr_xml::formula::is(&f));
+    assert!(f.eval(&Native::default()).unwrap() == d);
+    assert!(COMPARED.with(|c| c.borrow().contains(&d.len())));
+    COMPARED.with(|c| c.borrow_mut().clear());
+    let _here = crate::verdict::XML_UNCOMPARED.set_here(64 << 10);
+    let g = recompress(&d, &opt);
+    assert!(aqr_xml::formula::is(&g));
+    assert!(g.eval(&Native::default()).unwrap() == d);
+    assert!(!COMPARED.with(|c| c.borrow().contains(&d.len())));
+    // (prose is made as text and nothing else: no look for base64, a table or a log)
+    let mut rng = aqr_common::rng::Rng::new(4);
+    let words = ["river", "stone", "market", "quiet", "bridge", "winter", "letter", "iron", "paper", "light"];
+    let prose: String = (0..4000)
+        .map(|_| (0..12).map(|_| words[rng.below(10) as usize]).collect::<Vec<_>>().join(" ") + "\n")
+        .collect();
+    let cx = Cx::new(prose.as_bytes(), &opt);
+    TRIED.with(|t| t.borrow_mut().clear());
+    let words_made = recompress_at(prose.as_bytes(), &opt, 1, Kind::Words, &cx);
+    assert_eq!(TRIED.with(|t| t.borrow().clone()), [Format::Text]);
+    drop(words_made);
+    assert_eq!(Nest::Scan.of(Kind::Words), Some(Nest::Words));
+    assert_eq!(Nest::Scan.of(Kind::Column), Some(Nest::Column));
 }

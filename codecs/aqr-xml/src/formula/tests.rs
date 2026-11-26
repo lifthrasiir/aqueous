@@ -274,7 +274,7 @@ fn small_containers_share_a_stream() {
     let small = containers(&f).iter().filter(|c| c.len() < SMALL).count();
     assert!(big >= 2 && small >= 1);
     assert_eq!(f.streams.len(), 3 + big + 1);
-    assert!(f.streams[3..].iter().all(|s| s.content && s.kind == Kind::Text));
+    assert!(f.streams[3..].iter().all(|s| s.content && [Kind::Text, Kind::Words, Kind::Column].contains(&s.kind)));
 }
 
 #[test]
@@ -403,4 +403,29 @@ fn inconsistent_streams() {
         i[0] = s;
         assert!(run(&[0, 0, 0], &i, 1).is_err());
     }
+}
+
+#[test]
+fn prose_and_columns_are_told() {
+    let mut s = String::from("<r>");
+    for i in 0..4000 {
+        s += &format!(
+            "<e id=\"{i}\"><p>the quick brown fox number {i} jumps over the lazy dog and runs far away</p><n>{}</n><h>{}</h><s>x{i}</s></e>",
+            i * 7919 % 10007,
+            "0123456789abcdef".repeat(4)
+        );
+    }
+    s += "</r>";
+    let (f, n) = roundtrip(s.as_bytes());
+    assert_eq!(n, 5);
+    let a = segments(&f)[0];
+    let table = bytes(&f, &a.inputs[1]);
+    // (the streams after skeleton, table, lens: in the order the containers are made, each of
+    // 16 KiB or more apart: id, p, n, h, s)
+    let kinds: Vec<Kind> = f.streams[3..].iter().map(|s| s.kind).collect();
+    let sizes = containers(&f).iter().map(|c| c.len()).collect::<Vec<_>>();
+    assert!(table.len() >= 10 && sizes.iter().all(|&n| n >= SMALL), "{sizes:?}");
+    // prose: long values with spaces; the rest, though long in all, columns of short values (a
+    // hexadecimal string has no spaces)
+    assert_eq!(kinds, [Kind::Column, Kind::Words, Kind::Column, Kind::Column, Kind::Column]);
 }

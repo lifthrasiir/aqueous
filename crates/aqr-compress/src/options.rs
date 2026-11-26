@@ -167,6 +167,12 @@ pub enum Nest {
     /// As the hint of [`Kind::Hint`] of this index tells ([`crate::hints::made`]): as data of the
     /// format told where its recompressor takes it, else as it would be without the hint.
     Hint(u32),
+    /// As text that only aqr-wrt takes ([`Kind::Words`]): no look for base64, a table
+    /// or a log first.
+    Words,
+    /// As text of short values, a column of XML ([`Kind::Column`]): as [`Nest::As`]
+    /// of text, but a table coder or text is picked on a smaller sample.
+    Column,
 }
 
 impl Nest {
@@ -180,6 +186,8 @@ impl Nest {
             Kind::Unknown => Some(self),
             Kind::Text => Some(Nest::As(Format::Text)),
             Kind::Pixels | Kind::Font | Kind::Table | Kind::Compressed => None,
+            Kind::Words => Some(Nest::Words),
+            Kind::Column => Some(Nest::Column),
             Kind::Format(name) => Some(Format::from_name(name).map_or(self, Nest::As)),
             Kind::Hint(i) => crate::hints::nest(i, self),
         }

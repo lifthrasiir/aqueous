@@ -1,5 +1,5 @@
 //! XML taken by aqr-xml where it pays (a test binary of its own: it sets the process's `-Z`, a
-//! segment of 64 KiB so that a text of a few segments is not 32 MiB).
+//! segment of 64 KiB so that a text of a few segments is not 48 MiB).
 
 use aqr_archive::Evaluate;
 use aqr_common::rng::Rng;

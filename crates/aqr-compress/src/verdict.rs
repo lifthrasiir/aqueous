@@ -29,7 +29,7 @@ pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
         _ => {}
     }
     let look = |kind| match Nest::Scan.of(kind) {
-        None | Some(Nest::As(Format::Text)) => Look::No,
+        None | Some(Nest::As(Format::Text) | Nest::Words | Nest::Column) => Look::No,
         Some(Nest::As(f)) if !f.is_bundle() => Look::Whole,
         Some(Nest::Hint(i)) => match crate::hints::get(i).format {
             crate::hints::Told::As(f) if !f.is_bundle() => Look::Whole,
@@ -95,12 +95,24 @@ aqr_common::zopt! {
         16 << 20,
         "bytes of a ProRes file from which on its formula is not compared with zstd",
     );
+    /// The size of an XML file from which on [`smaller`] takes its formula without comparing it:
+    /// it was chosen on a sample whose streams, by zstd -3, came to no more than the sample's
+    /// (`xml:percent`), and its containers are recompressed in turn (aqr-wrt codes text at least
+    /// 1/32 smaller than zstd or leaves it), so that it archives smaller than the file raw by a
+    /// margin no module block or record can make up where the file is big; comparing compressed
+    /// all of it twice (3 of 20 thread-seconds for enwik9). Small files are compared: the module's
+    /// block alone costs 4 KB.
+    pub(crate) static XML_UNCOMPARED: Opt<usize> = Opt::size(
+        "xml:uncompared",
+        4 << 20,
+        "bytes of an XML file from which on its formula is not compared with zstd",
+    );
     /// Whether [`smaller_as`] compares the formulas it takes without comparing by default (aqr-ppmd's,
-    /// aqr-tensors', aqr-wwise's and large ProRes files').
+    /// aqr-tensors', aqr-wwise's, large ProRes files' and large XML files').
     static SMALLER_ALWAYS: Opt<bool> = Opt::flag(
         "smaller-always",
         false,
-        "compare the formulas of ppmd, tensors, wwise and large ProRes files with zstd too",
+        "compare the formulas of ppmd, tensors, wwise, large ProRes and large XML files with zstd too",
     );
 }
 
@@ -197,10 +209,12 @@ pub(crate) fn verdict_as(
             && (aqr_ppmd::formula::is(f)
                 || (d.len() >= PRORES_UNCOMPARED.get() && aqr_prores::formula::is(f))
                 || aqr_tensors::formula::is(f)
-                || aqr_wwise::formula::is(f)))
+                || aqr_wwise::formula::is(f)
+                || (d.len() >= XML_UNCOMPARED.get() && aqr_xml::formula::is(f))))
         || {
             #[cfg(test)]
             tests::COMPARED.with(|c| c.borrow_mut().push(d.len()));
+            let _s = aqr_common::trace::span("verdict");
             let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
             let stand_in = pieces.as_deref().map(|p| (0, p));
             // (the streams the files archived together hold cost nothing)

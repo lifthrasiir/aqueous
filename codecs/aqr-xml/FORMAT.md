@@ -152,13 +152,15 @@ error, and so is a skeleton that ends within a step.
   are in `lens`.
 - **Streams.** The skeleton (`xml/skeleton`, `Kind::Text`), `table` and `lens` are the module's
   own. The part of each container is a stream of its own, of `Kind::Text`, a content
-  (`xml/values`): aqr-compress recompresses each in turn as text (aqr-xsv or aqr-log where it
+  (`xml/values`; of the kind `Kind::Words` where the values are prose, 40 bytes on average
+  and a space in 16, `Kind::Column` for the other parts of 16 KiB or more, which aqr-compress takes
+  as text with fewer looks, else `Kind::Text`): aqr-compress recompresses each in turn as text (aqr-xsv or aqr-log where it
   takes it, as with columns of numbers or times; else aqr-wrt), and `values` is their slices one
   after the other. The parts of fewer than 16384 bytes share one stream, a slice of it for each.
   Streams of one class and kind are put in one when the formula is archived
   (`Formula::merged`), contents that were recompressed or not alike.
 - **Segments.** A text is cut after the end tags and the empty-element tags (`<a/>`) that leave
-  at most four elements open, all of them known to the module, once the segment is 32 MiB
+  at most four elements open, all of them known to the module, once the segment is 48 MiB
   (`xml:segment`) long at least. Each is an application of the module of its own, the names open
   at its start in its params, its contexts and containers its own. The formula is their
   concatenation.
