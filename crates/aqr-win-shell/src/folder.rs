@@ -449,6 +449,7 @@ impl IShellFolder_Impl for Folder_Impl {
             // SAFETY: the caller's pointers
             unsafe {
                 *ppv = std::ptr::null_mut();
+                crate::log(|| format!("asked CreateViewObject {:?}", *riid));
                 if *riid != IShellView::IID {
                     return Err(E_NOINTERFACE.into());
                 }
@@ -587,6 +588,12 @@ impl IShellFolder_Impl for Folder_Impl {
                     let (archive, dir) = self.at()?;
                     // (and for other programs' drops, the files' descriptors and contents)
                     let inner: IDataObject = crate::data::Files::new(archive, dir, chosen).into();
+                    // (Windows 7: the descriptors and contents alone. Its copy engine and drop
+                    // targets take items of ID lists only of a folder of ITransferSource, and a
+                    // drop of descriptors as Outlook's attachments are)
+                    if !crate::windows_8_on() {
+                        return inner.query(riid, ppv).ok();
+                    }
                     let folder = self.at.read().unwrap().as_ref().map(|a| a.pidl.as_ptr());
                     let d: IDataObject = SHCreateDataObject(folder, Some(ids), &inner)?;
                     return d.query(riid, ppv).ok();

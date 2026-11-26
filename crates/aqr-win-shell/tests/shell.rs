@@ -14,14 +14,17 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aqr_shell::folder::{TEST_FOLDER, TEST_SERVER};
-use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, SIZE};
+use windows::Win32::Foundation::{HWND, LPARAM, POINTL, PROPERTYKEY, SIZE};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, CoCreateInstance, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::{DROPEFFECT_COPY, IDropTarget};
 use windows::Win32::System::Ole::{OleGetClipboard, OleInitialize, OleUninitialize};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
+use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+use windows::Win32::UI::Shell::BHID_SFUIObject;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::Common::SHELLDETAILS;
 use windows::Win32::UI::Shell::{
@@ -397,15 +400,35 @@ fn browsed() {
             (fc.lindex, fc.tymed) = (k as i32, TYMED_ISTREAM.0 as u32);
             let m = data.GetData(&fc).unwrap();
             assert!(read(m.u.pstm.as_ref().unwrap()) == big);
-            let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL).unwrap();
-            // FOF_NO_UI
-            op.SetOperationFlags(FILEOPERATION_FLAGS(0x4 | 0x10 | 0x200 | 0x400)).unwrap();
-            op.CopyItems(&data, &item(&out)).unwrap();
-            op.PerformOperations().unwrap();
-            assert!(!op.GetAnyOperationsAborted().unwrap().as_bool());
-            assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"some text\n".repeat(100));
-            assert!(std::fs::read(out.join(r"sub\big.bin")).unwrap() == big);
-            assert_eq!(std::fs::read(out.join(r"sub\deep\c.txt")).unwrap(), b"deep");
+            // dropped on a folder (as dragging there does, and pasting: the drop target of the
+            // folder's), copied by what it takes of the data object; perhaps on a thread of its own
+            let dropped = d_out().with_file_name("dropped");
+            std::fs::create_dir_all(&dropped).unwrap();
+            let target: IDropTarget = item(&dropped).BindToHandler(None, &BHID_SFUIObject).unwrap();
+            let mut effect = DROPEFFECT_COPY;
+            target.DragEnter(&data, MODIFIERKEYS_FLAGS(1), POINTL::default(), &mut effect).unwrap();
+            let mut effect = DROPEFFECT_COPY;
+            target.Drop(&data, MODIFIERKEYS_FLAGS(1), POINTL::default(), &mut effect).unwrap();
+            let start = Instant::now();
+            while std::fs::read(dropped.join(r"sub\deep\c.txt")).ok().as_deref() != Some(b"deep") {
+                assert!(start.elapsed() < Duration::from_secs(20), "not dropped");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(std::fs::read(dropped.join(r"sub\big.bin")).unwrap() == big);
+            assert_eq!(std::fs::read(dropped.join("a.txt")).unwrap(), b"some text\n".repeat(100));
+            // by the copy engine itself, of the data object (Windows 8 on: Windows 7's takes items
+            // of ID lists only of a folder of ITransferSource, and is given the descriptors alone)
+            if aqr_shell::windows_8_on() {
+                let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL).unwrap();
+                // FOF_NO_UI
+                op.SetOperationFlags(FILEOPERATION_FLAGS(0x4 | 0x10 | 0x200 | 0x400)).unwrap();
+                op.CopyItems(&data, &item(&out)).unwrap();
+                op.PerformOperations().unwrap();
+                assert!(!op.GetAnyOperationsAborted().unwrap().as_bool());
+                assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"some text\n".repeat(100));
+                assert!(std::fs::read(out.join(r"sub\big.bin")).unwrap() == big);
+                assert_eq!(std::fs::read(out.join(r"sub\deep\c.txt")).unwrap(), b"deep");
+            }
             // the menu of a file: "open" ours, the default; "copy" the shell's, which puts it on
             // the clipboard, to be pasted
             let file = [items[a] as *const ITEMIDLIST];
@@ -436,12 +459,26 @@ fn browsed() {
             m.InvokeCommand(&info).unwrap();
             let pasted = d_out().with_file_name("pasted");
             std::fs::create_dir_all(&pasted).unwrap();
-            let clip = OleGetClipboard().unwrap();
-            let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL).unwrap();
-            op.SetOperationFlags(FILEOPERATION_FLAGS(0x4 | 0x10 | 0x200 | 0x400)).unwrap();
-            op.CopyItems(&clip, &item(&pasted)).unwrap();
-            op.PerformOperations().unwrap();
-            assert_eq!(std::fs::read(pasted.join("a.txt")).unwrap(), b"some text\n".repeat(100));
+            // (the clipboard may be held by another program a moment)
+            let clip = (0..50)
+                .find_map(|_| {
+                    OleGetClipboard().ok().or_else(|| {
+                        std::thread::sleep(Duration::from_millis(100));
+                        None
+                    })
+                })
+                .expect("the clipboard");
+            // (as a paste does: dropped on the folder)
+            let target: IDropTarget = item(&pasted).BindToHandler(None, &BHID_SFUIObject).unwrap();
+            let mut effect = DROPEFFECT_COPY;
+            target.DragEnter(&clip, MODIFIERKEYS_FLAGS(1), POINTL::default(), &mut effect).unwrap();
+            let mut effect = DROPEFFECT_COPY;
+            target.Drop(&clip, MODIFIERKEYS_FLAGS(1), POINTL::default(), &mut effect).unwrap();
+            let start = Instant::now();
+            while std::fs::read(pasted.join("a.txt")).ok() != Some(b"some text\n".repeat(100)) {
+                assert!(start.elapsed() < Duration::from_secs(20), "not pasted");
+                std::thread::sleep(Duration::from_millis(100));
+            }
             items.into_iter().for_each(|p| windows::Win32::UI::Shell::ILFree(Some(p)));
         }
         // "Open with the files beside it": the file and those of its folder (and under it)
@@ -680,5 +717,12 @@ fn browsed() {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    std::fs::remove_dir_all(&d).unwrap();
+    // (a file may be held a moment longer, by the system's thumbnails or indexing: tried a while,
+    // then left to the temporary directory)
+    for _ in 0..50 {
+        if std::fs::remove_dir_all(&d).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

@@ -1,7 +1,8 @@
 # aqr-win-shell
 
 `.aqr` files browsed in Windows Explorer as folders, as Windows' ZIP folders are: a shell
-namespace extension, `aqr_shell.dll` (`docs/win-shell-ext-design.md`). The file is a junction
+namespace extension, `aqr-shell.dll` (`docs/win-shell-ext-design.md`; cargo names it
+`aqr_shell.dll`, renamed where it is copied: `cargo aqr-win`, the installer). The file is a junction
 (its ProgID's `CLSID`, a class with `ShellFolder` and `CATID_BrowsableShellExt`); the shell hands
 the folder the file's ID list, and the folder lists the archive's entries as items of its own
 (`src/pidl.rs`: one `SHITEMID` for each name of a path, its kind, size, time and attributes
@@ -34,7 +35,9 @@ object is released, for the server to close it a minute later (and to end, idle)
   `IThumbnailProvider` and as `IExtractImage2` (what the shell's image factory asks for, at
   every size of Explorer's views).
 - Copying out (paste, drag): the shell's data object of the items' ID lists
-  (`SHCreateDataObject`), which the copy engine reads as folders and streams; for other
+  (`SHCreateDataObject`), which the copy engine reads as folders and streams (Windows 8 on;
+  Windows 7's takes such items only of a folder of `ITransferSource`, and is given the
+  descriptors and contents alone, which its drop targets copy themselves); for other
   programs' drops (a browser's upload, a mail's attachment), its inner object (`src/data.rs`)
   has `CFSTR_FILEDESCRIPTORW` (every file and folder under those chosen, by its path from the
   folder) and `CFSTR_FILECONTENTS` (a stream of each by its index).
@@ -58,7 +61,7 @@ object is released, for the server to close it a minute later (and to end, idle)
   and the views of its folders told to refresh (`SHCNE_UPDATEDIR`), with no F5.
 
 `cargo aqr-win --register` registers the library kept beside aqr-win (`aqr-win --register`
-registers the folder where `aqr_shell.dll` is beside it; the double-click then opens the
+registers the folder where `aqr-shell.dll` is beside it; the double-click then opens the
 archive as a folder, "Extract here" staying a verb). `AQR_SHELL_LOG=FILE` has the library tell
 what fails, a line at a time.
 
@@ -66,6 +69,11 @@ what fails, a line at a time.
 test's (registered for the user while it runs), parsed by path, enumerated as shell items, a
 file read through `BHID_Stream`, the view made; ignored, as it needs aqr and aqr-win built
 beside the library (`cargo rt -p aqr -p aqr-win -p aqr-win-shell --test shell -- --ignored`).
+
+- Windows 7: the `windows` crate links `combase.dll` and `api-ms-win-core-winrt-error-l1-1-0.dll`
+  (Windows 8 on), delay-loaded (`build.rs`), the hook (`src/delay.rs`) giving `ole32.dll` for the
+  one and a function of no effect for its `RoOriginateErrorW`. The tests are built for the win7
+  target and run in the VM too.
 
 ## Status
 

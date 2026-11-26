@@ -12,6 +12,7 @@
 mod client;
 mod columns;
 mod data;
+pub mod delay;
 pub mod folder;
 mod handlers;
 mod menu;
@@ -42,6 +43,35 @@ pub fn log(what: impl FnOnce() -> String) {
 /// Of the class of the tests: nothing shown (boxes) nor told to the shell (changes, which would
 /// have Explorer, the user's, load the library of a test), but logged.
 pub static TESTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Windows is of 8 on (6.2 on): as it is, whatever the program's manifest says
+/// (`RtlGetVersion`).
+pub fn windows_8_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        #[repr(C)]
+        struct Version {
+            size: u32,
+            major: u32,
+            minor: u32,
+            build: u32,
+            platform: u32,
+            service_pack: [u16; 128],
+        }
+        windows::core::link!("ntdll.dll" "system" fn RtlGetVersion(info: *mut Version) -> i32);
+        let mut v = Version {
+            size: std::mem::size_of::<Version>() as u32,
+            major: 0,
+            minor: 0,
+            build: 0,
+            platform: 0,
+            service_pack: [0; 128],
+        };
+        // SAFETY: a structure of its size
+        unsafe { RtlGetVersion(&mut v) };
+        (v.major, v.minor) >= (6, 2)
+    })
+}
 
 /// The objects of this library alive, and the locks of its class factories: none, it may be
 /// unloaded.
