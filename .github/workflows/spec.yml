@@ -7,6 +7,8 @@ on:
       - 'spec/**'
       - 'site/**'
       - 'droplet.svg'
+      - 'man/**'
+      - 'scripts/man2html.py'
       - '.github/workflows/spec.yml'
   workflow_dispatch:
 
@@ -35,6 +37,9 @@ jobs:
       - run: mkdir -p _site/spec && bikeshed spec spec/index.bs _site/spec/index.html
       # The site's root page (site/), with the icon it uses.
       - run: cp -R site/. _site/ && cp droplet.svg _site/
+      # The manual pages (man/) as pages of the site, between its header and footer.
+      - run: sudo apt-get install -y --no-install-recommends mandoc
+      - run: python scripts/man2html.py _site
       - uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: _site
