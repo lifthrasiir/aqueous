@@ -21,6 +21,7 @@ Contents:
 6. [Encoding](#6-encoding-encoder)
 7. [Validation](#7-validation)
 8. [The module `dh-lods`](#8-the-module-dh-lods)
+9. [Design notes](#9-design-notes)
 
 ## 1. Conventions
 
@@ -336,3 +337,46 @@ are taken.
 - What the pool holds at once is bounded (96 MiB, and the pool 160 MiB): where more would be,
   the span (a child's from its first blob until its parent is made, a parent's until its last
   blob) ending last is let go, a child's quadrant then stored, a parent then stored.
+
+## 9. Design notes
+
+- **Version 1 and 2.** Version 1 stored the NBT whole: the Overworld's and the Nether's NBT
+  compressed little better than their zlib by the archive's coding (their files about 4.29 GB,
+  stale bytes included, against 4.56 GB of zlib streams in them); version 2's model is for that.
+  On The End, `aqr`: 180.98 -> 102.97 MB, compressing 32.5 -> 28.9 s, testing 4.0 -> 7.9 s; on the
+  three dimensions 4.54 -> 2.42 GB, 417 -> 311 s, 53 -> 94 s (version 1's time was before aqr's
+  allocator kept freed blocks on Windows, so not comparable). On 149 Overworld regions (414 MB):
+  271.84 -> 156.62 MB, compressing 11.4 -> 15.1 s, testing 3.0 -> 5.0 s. On 8 of them (23.3 MB)
+  the chunks' data came to 13.89 MB under zstd -3, the skeletons 2.92 and the holes 3.93 MB. The
+  model's time is half the decoding's (zlib's emulation the other half: 1.15 s against the
+  model's 0.75 s, one thread).
+- **Model alternatives, measured and not kept**: bits counting their uses (4% smaller, 0.2 s
+  slower), two coders taking halves of the rows (slower, 3.4% larger), ranks of the neighbours
+  under zstd (7.0 MB against 3.67), static ranks in 33 contexts (4.5 MB).
+- **Stale bytes are kept.** Minecraft allocates a chunk's sectors before it frees the old ones and
+  never clears them, so free sectors hold whole streams of earlier writes, and the padding after a
+  stream the tail of a longer one written there before. In four regions of the Nether, the
+  Overworld and The End (28 MB), 7.9 MB were padding of such tails and 1.8 MB free sectors (1.1 MB
+  of them 125 whole streams), against 17.2 MB of current streams: the tails are of old versions,
+  and only 7% of their bytes are found in the current streams (32-byte windows), so they are kept.
+  `mca/kept` is of no kind, so the archive's scan finds the whole streams in it.
+- **Encoding speed on Windows.** Encoding stopped scaling past four threads (49.8 MB/s a thread on
+  one, 10.0 on sixteen), as zlib's emulator makes its buffers (window, heads, links, tokens) anew
+  for each stream and Windows' heap gives large blocks back as they are freed; aqr's allocator now
+  keeps a few such blocks for each thread (aqr-common's `mem::cache`).
+- **Memory.** `mca-recons` is laid out as a stack (`aqr_api::stack`): the header, the chunks'
+  locations, the readers' pieces, the model (its tables of 2^18, 2^16 and 2^20 bits, 2.6 MiB) and
+  its walks' buffers, then for each chunk rebuilt its data, its sectors and zlib's emulator (or
+  its holes coded), freed before the next. Its plan (`module::plan`) follows the largest chunk
+  rebuilt, not the file (`mca_plans_hold` in aqr-decompress's `tests/wasm.rs`). Natively it is
+  applied whole (`Run::Threaded`), the chunks' streams made on threads. The encoder holds the
+  chunks' data twice as it gathers it (some 40 times the file in The End), at most 64 MiB and 64
+  times the file.
+- **`dh-lods` results.** The End's database makes 14,984 of its 24,192 exact parents, of 45,718
+  quadrants of children (14,218 stored); the Nether's 8,540 of 20,500 (17,118). The pool holds 32-34
+  MB at most. The decoder makes the children's quadrants on threads, the parents (their culling and
+  blobs) on one. Exact parents: 24,192 of The End's 25,149 and 20,501 of the Nether's 20,770 (about
+  190 columns differ in each stale one of The End's). The parent's merge (`src/dh.rs`: the 2 by 2
+  merge of each child's columns, the culling of points hidden by opaque states, which are learned
+  of the database and stored) and the formula are `src/lods.rs`, `src/lods_formula.rs`.
+

@@ -55,3 +55,18 @@ Each body's contents (the stored body, or the data of a DEFLATE or bzip2 body) a
 a stream by the kind its entry's name tells, one for each method: those of at least 1 KiB a slice
 of their own. Everything else (the headers, the names, bodies kept, the records after the
 entries) is one stream of class `alz`, as it is.
+
+## Design notes
+
+- No module of its own: the bodies follow the local headers, each of the size its header tells,
+  so the formula is the bytes kept and the bodies rebuilt in turn. A module carrying the headers'
+  CRC-32 and sizes as predictions (aqr-zip's way) would save a few bytes an entry and cost a
+  module in every archive.
+- ALZip's bzip2 is libbzip2's compressor with the stream header, the blocks' CRCs, the
+  randomised bit and the combined CRC left out and the magic numbers made 4 bytes (`DLZ\x01`,
+  `DLZ\x02`), always at level 9; the blocks are unaligned as bzip2's are.
+- ALZip's DEFLATE is zlib's: aqr-flate's adaptive profile (zlib emulation, aqr-compress's
+  levels 7 to 9) leaves a record of about 0.01% of the streams, the default profile 1-10% (it has
+  no zlib emulation).
+- The entries' CRC-32 and sizes (`alz::entry_sums`, the local headers read one after another)
+  tell aqr-compress's probe what the files archived along hold, as for ZIP and 7z.

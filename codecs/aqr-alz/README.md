@@ -18,29 +18,14 @@ let f = formula::encode(&alz, threads).unwrap();
 // `f` rebuilds `alz` with aqr-flate's module and aqr-bz2's `bz2-alz-recons` (`formula::apply` runs them)
 ```
 
-`FORMAT.md` describes the archive as read and the formula, after OctopusET's
+`FORMAT.md` describes the archive as read, the formula and how it works, after OctopusET's
 [ALZ Archive Format Spec](https://gist.github.com/OctopusET/6a88b6bb3f4eed682c031e704012cfc0)
 (CC0). No ALZ decoder's code was read.
 
-## How
-
-The bodies follow the local headers, each of the size its header tells, so the formula is the
-bytes kept and the bodies rebuilt in turn, with no module of its own: a module carrying the
-headers' CRC-32 and sizes as predictions (aqr-zip's way) would save a few bytes an entry and
-cost a module in every archive. ALZip's bzip2 is libbzip2's compressor with the stream header,
-the blocks' CRCs, the randomised bit and the combined CRC left out and the magic numbers made 4
-bytes (`DLZ\x01`, `DLZ\x02`), always at level 9; the blocks are unaligned as bzip2's are. Its
-DEFLATE is zlib's: aqr-flate's adaptive profile (zlib emulation, aqr-compress's levels 7 to 9) leaves
-a record of about 0.01% of the streams, the default profile 1-10% (it has no zlib emulation).
-
-## Status
+## What is taken
 
 Not taken, kept as they are: encrypted entries (ZIP 2.0's traditional encryption); bodies
-running past the data (the next volumes of a split archive are not joined). The entries' CRC-32 and sizes
-(`alz::entry_sums`, the local headers read one after another) tell aqr-compress's probe what the
-files archived along hold, as for ZIP and 7z. Left: the volumes of a split archive as one; bzip2
-of several blocks checked against ALZip itself (only one-block streams were at hand, reproduced
-exactly).
+running past the data (the next volumes of a split archive are not joined).
 
 ## Results
 
@@ -67,3 +52,9 @@ DEFLATE body (6.46 MB) at 92 MB/s of data with a record of 56,276 B at profile 6
 - aqr-compress `src/lib.rs` (`alz_taken_apart`): the DEFLATE and bzip2 fixtures through
   aqr-compress, at the start of a file and found in data; aqr-decompress `tests/wasm.rs`:
   `bz2-alz-recons` natively and as Wasm.
+
+## Left
+
+- **Split archives.** The volumes of a split archive are not joined into one.
+- **bzip2 of several blocks.** Checked against ALZip itself: only one-block streams were at hand
+  (reproduced exactly).

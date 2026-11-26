@@ -2,7 +2,8 @@
 //! takes zeroed in place. Minecraft reads a chunk by its location (its sectors) and its length:
 //! what is in the sectors no location points to (those freed as chunks grew or moved), in a
 //! chunk's sectors after its length, and after the last chunk's, it never reads. Those bytes are
-//! the stale data of earlier writes; about a third of a world's files (aqr-minecraft's README).
+//! the stale data of earlier writes; about a third of a world's files (aqr-minecraft's FORMAT.md,
+//! section 9, "Stale bytes are kept").
 //! The header (locations and timestamps) is kept as it is, as is the length of the file.
 
 use aqr_minecraft::region;

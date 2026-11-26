@@ -1,6 +1,6 @@
 # aqr-wrt
 
-Text rebuilt bit for bit from a coded text (`FORMAT.md`). The words and markup (XML tags,
+Text rebuilt bit for bit from a coded text. The words and markup (XML tags,
 character references) that the texts use most are in a dictionary, and the text has them
 replaced by codes of one to three bytes. A word's code takes the space before it, and flags
 before it tell its case. This is a word replacing transform after XWRT. zstd then finds more
@@ -11,101 +11,65 @@ syllables are coded in two bytes rather than UTF-8's three, and its words of Han
 of syllables with the space before it) by codes of a dictionary. ASCII letters are no words
 there, and Korean words are no letters to `wrt-recons`, which left such text as it was.
 
-- **Dictionary**: the texts of a batch of the archive share one (aqr-compress). Text that
-  holds other text then codes to what holds the other's code, so a file and the same file in
-  an archive, or a file and its start, are still stored once.
-- **What is taken**: text of 256 KiB or more, where coding pays by the text alone (zstd -3 on
-  samples). The same text is then taken alike wherever it is.
+`FORMAT.md` specifies the modules, and how it works (the dictionary, the flags, the pieces and
+segments on threads, and the design notes). The texts of a batch of the archive share one
+dictionary (aqr-compress): text that holds other text codes to what holds the other's code, so
+a file and the same file in an archive, or a file and its start, are still stored once.
 
-## How it does
+## What is taken
 
-Measured 2026-10-26 on an Apple M4 (10 cores), through `aqr` at level `mid`.
+Text of 256 KiB or more, where coding pays by the text alone (zstd -3 on samples); the same text
+is then taken alike wherever it is. Not taken: shorter text.
 
-| | before | after | compress | decompress |
-|---|---|---|---|---|
-| `enwik9` alone (1 GB) | 283.9 MB | 253.5 MB (−10.7%) | 3.8 → 6.8 s | 1.15 → 3.44 s |
-| the 10gb corpus | 2.775 GB | 2.739 GB (−35.8 MB) | 111 → 133 s | not measured |
+## Results
 
-- 2026-11-26: a word with no entry coded as its longest start with one (FORMAT.md §5,
-  "Coding"; `-Z wrt:prefix`), and the codes of three bytes in order of their entries' bytes:
-  `enwik9` 234.73 → 233.35 MB through `aqr` (−0.59%, the starts alone; instructions retired
-  361.1 → 361.9 G). At fixed levels (`aqr-wrt-bench`), `enwik8` 27.167 → 26.923 MB at zstd -9
-  (−0.90%: the dictionary 311 → 268 KB, the text 26.86 → 26.65 MB) and 29.90 → 29.51 MB at
-  -3; `bible.txt`, `dickens` and `webster` −0.5%, −0.6% and −1.0% at -9. Coding the rest of
-  such a word by entries too (after NOSP) gained nothing more, nor starts of 3 or 4 letters
-  at least, nor sorting the codes of two bytes (the text grew more than the dictionary shrank).
-- 2026-11-26, version 4: each entry of the dictionary written as the count of its first bytes
-  shared with the entry before and the rest (FORMAT.md §3): `enwik9` 233.35 → 233.04 MB
-  through `aqr` (−0.13%); at zstd -9, the dictionary of `enwik8` 268 → 207 KB (26.923 →
-  26.862 MB in all), of `webster` 144 → 117 KB, of `dickens` 53 → 48 KB. The module's block
-  grows 4,045 → 4,295 bytes. Sorting the codes of two bytes too, with that, came to ±12 KB.
-- In the 10gb corpus, the files taken come to −36.7 MB. Of that, −30.4 MB is `enwik9` with
-  `enwik9.zip`, which hold the same text and are stored once still. The files not taken come
-  to −0.6 MB. Their shares of the solid blocks move both ways, by about 350 B a file, as the
-  text taken leaves the blocks of the text kept as it is.
-- Peak memory is 9.7 GB, against 8.2 GB before.
-- The module codes 110 MB/s and decodes about 400 MB/s on a thread (`aqr-wrt-bench`, enwik8).
-  - Coding a text of more than 16 MiB is spread over threads, in pieces that end with a
-    byte no token holds (LF, `"`, `,`, …), so minified JSON too; the coded text is the same.
-  - Decoding goes by the same pieces, on threads of their own: the module's params tell where
-    they are (version 2). `enwik9` decodes at 409 MB/s on a thread and 2,875 MB/s on 10
-    (`aqr-wrt-bench`, 2.5 -> 0.35 s against version 1's single pass). In Wasm the module
-    still decodes on one thread.
-- A text of more than 32 MiB is cut into segments of about 32 MiB, each an application of the
-  module with the one dictionary of the whole text (FORMAT.md, §5 "Segments"), so that no
-  application needs more than about 105 MiB however long the text is (one of the whole needed
-  three times the text: 2.9 GiB for `enwik9`). The coded text is the same bytes, so the
-  archive is 50 bytes larger on `enwik8` (3 segments) and the modules are the same.
-
-Text of Hangul, measured 2026-10-29 on the same machine through `aqr -5`: 512 MiB from the
-middle of the namuwiki dump of 2021-03-01 (JSON of one line, 72% of its bytes above 0x7F).
+Through `aqr` at level `mid`, on an Apple M4 (10 cores), 2026-10-26 (`enwik9`'s size of 2026-11-26):
 
 | | before | after | compress | decompress |
 |---|---|---|---|---|
-| 512 MiB of namuwiki | 164.68 MB | 145.77 MB (−11.5%) | 5.80 → 3.07 s | 0.56 → 0.42 s |
+| `enwik9` alone (1 GB) | 283.9 MB | 233.04 MB (-17.9%; version 4, 2026-11-26) | 3.8 -> 6.8 s | 1.15 -> 3.44 s |
+| the 10gb corpus | 2.775 GB | 2.739 GB (-35.8 MB) | 111 -> 133 s | not measured |
 
-- The whole dump (8.83 GB), on a Ryzen 7 9700X: 2,565,721,176 → 2,237,433,596 bytes (−12.8%),
-  compressed in 57.54 s against 64 s before.
+Peak memory on the 10gb corpus is 9.7 GB, against 8.2 GB before. The module codes 110 MB/s and
+decodes about 400 MB/s on a thread (`aqr-wrt-bench`, enwik8); `enwik9` decodes at 2,875 MB/s on
+10 threads (409 MB/s on one; in Wasm one thread).
 
-- zstd picks level 9 for both. The coded text is 248 MB, so zstd has less to do: 143 → 105 G
-  instructions in all, with the module's coding. At `-l zstd12` it is 140.21 MB in 4.4 s.
-- The dictionary takes 3.2 MB at zstd -9 (694,348 entries).
-- The module counts about 390 MB/s and codes about 230 MB/s on a thread, and decodes about
-  560 MB/s; it does all three in pieces of 16 MiB on threads of their own. The pieces end
-  before an ASCII byte other than a space (JSON need not have LF), and the module's params
-  tell where.
-- Peak memory 2.20 → 2.23 GB.
-
-zstd at fixed levels (`aqr-wrt-bench`, each text with its own dictionary, the dictionary
-compressed counted):
+At fixed levels (`aqr-wrt-bench`, each text with its own dictionary, the dictionary counted):
 
 | | zstd -9 | zstd -19, window 2^27, long matching |
 |---|---|---|
-| enwik8 | −12.6% | −9.1% |
-| bible.txt, dickens | −16.5%, −16.1% | |
-| silesia `webster`, `xml`, `samba` | −12.3%, −8.8%, −0.6% | |
+| enwik8 | -13.4% (26.862 MB) | -9.1% |
+| bible.txt, dickens | -16.5%, -16.1% | |
+| silesia `webster`, `xml`, `samba` | -12.3%, -8.8%, -0.6% | |
 
-The design rests on an earlier prototype (Python, `zstd -19 --long`):
+Text of Hangul (`wrt-recons-hangul`), 512 MiB from the middle of the namuwiki dump of
+2021-03-01 (JSON of one line, 72% of its bytes above 0x7F), through `aqr -5`, same machine,
+2026-10-29:
 
-- On enwik8, the words alone take −6.5%, the flags of case −0.5% more, and the space taken by
-  a word −1.6% more. The least count of an entry hardly matters from 3 to 32.
-- Tags and character references as entries take another −0.5% on enwik8, and −1% on the
-  corpus's XML and HTML files (75 MB, −5.7% in all).
-- The rest of the text of the 10gb corpus (780 MB, a dictionary for all) gains −9% at
-  zstd -9 but −1.5% at zstd -19. At high levels, the level itself is what pays.
+| | before | after | compress | decompress |
+|---|---|---|---|---|
+| 512 MiB of namuwiki | 164.68 MB | 145.77 MB (-11.5%) | 5.80 -> 3.07 s | 0.56 -> 0.42 s |
 
-Not done:
-
-- Closing tags as one byte for the open one (XWRT's stack). They are few in enwik, and the
-  common ones already have one-byte codes.
-- Numbers in binary, and enwik's metadata (`<id>`, `<timestamp>`) as streams of their own.
-- Text shorter than 256 KiB: `Held` does not tell whether other files hold text that short,
-  and coding such text apart from the copies it shares broke the sharing of tar members with
-  their files.
+The whole dump (8.83 GB), on a Ryzen 7 9700X: 2,565,721,176 -> 2,237,433,596 bytes (-12.8%),
+compressed in 57.54 s against 64 s before; peak memory 2.23 GB. The module codes about 230 MB/s
+and decodes about 560 MB/s on a thread, in pieces on threads of their own.
 
 ## Tests
 
-`cargo test --release -p aqr-wrt` covers round trips, dictionaries shared and of pieces, and
-inputs it rejects. aqr-compress `text_words` and `held_once` cover the archive.
+`cargo test --release -p aqr-wrt`:
+
+- round trips, dictionaries shared and of pieces, and inputs it rejects.
+- aqr-compress `text_words` and `held_once` cover the archive.
+
 `aqr-wrt-bench FILE...` takes `LEVEL`, `LONG`, `THREADS` and `Z` (`-Z` options, separated by
 spaces).
+
+## Left
+
+- **Closing tags.** As one byte for the open one (XWRT's stack); few in enwik, and the common
+  ones already have one-byte codes.
+- **Numbers and metadata.** Numbers in binary, and enwik's metadata (`<id>`, `<timestamp>`) as
+  streams of their own.
+- **Short text.** Text under 256 KiB is not taken: `Held` does not tell whether other files hold
+  text that short, and coding such text apart from the copies it shares broke the sharing of
+  tar members with their files.

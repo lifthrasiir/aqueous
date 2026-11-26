@@ -23,6 +23,7 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
 11. [Validation](#11-validation)
 12. [Encoder](#12-encoder)
 - [Appendix A: tables](#appendix-a-tables)
+- [Design notes](#design-notes)
 
 ## 1. Conventions
 
@@ -1071,3 +1072,107 @@ Table B (`count1table` = 1): the 4 bits of `15 − q`.
 65536, 68438, 71468, 74632, 77936, 81386, 84990, 88752,
 92682, 96785, 101070, 105545, 110218, 115098, 120194, 125515
 ```
+
+## Design notes
+
+Not normative: why the format is as it is, and what was tried.
+
+### Decomposition
+
+Only main data that decodes is modelled: a granule that cannot be decoded (missing table, big
+values past the end, ...) is stored verbatim, as is every bit outside placed frames. Huffman
+decoding of a prefix code is unique, so re-encoding the decoded values reproduces the bits
+exactly. What can be derived (`part2_3_length`, CRCs, a predicted `main_data_begin`, headers as
+differences) is not stored.
+
+### Coefficient model
+
+- Contexts use only earlier granules of the channel and the other channel, never anything
+  decoded in the same granule, so there is no serial dependency between pairs when decoding.
+  The earlier granules enter as a moving average of the magnitudes (the history weighing 1/4,
+  as in packMP3's `ctx_h_abs`), kept at the step sizes of the last granule: on held-out FMA
+  files 0.27 pp better than the previous granule alone (0.8864 against 0.8890), for 1.6% of
+  compression and 3% of decompression speed. The previous pair as context gains 0.53 pp but
+  makes decompression about 40% slower; the pair two back gains 0.37 pp for -14% decompression,
+  -9% compression.
+- Static tables trained on FMA (4511 files), built into the binary (33 KB). The 6537 contexts
+  share 500 tables: contexts of one alphabet size are merged greedily, the pair costing the
+  fewest bits on the training set first. On held-out files this costs 0.018 pp (ideal code
+  lengths) for a resource of 131 KB instead of 1.5 MB raw (38 KB instead of 340 KB archived).
+  Merging is free down to about 1500 tables; log-quantizing the frequencies (steps of 2^(1/8))
+  would save 10 KB more for 0.004 pp. A table per context is 0.0002 pp better than shared
+  tables, at 20 MB/s compressing (against 45) and 28-52 MB more memory.
+- Adaptive per-file models lost to static tables: learning costs more than it gains at these
+  context counts. The side information is the exception: encoders differ in how they set
+  those fields, so adaptive binary range coding pays there (1.7% of the input).
+
+### Entropy coding
+
+- rANS with 8 interleaved states. Decoding by alias tables: one 64-bit entry per bucket
+  (cutoff, both symbols' frequencies, the alias and its rank offset), one load and a few
+  selects per symbol without branches.
+- The encoder keeps per table an inverse map (rank -> slot, 4096 entries, 8 KB), built on
+  first use and kept for the process; division by reciprocal multiplication.
+- The stream restarts every 1024 frames (16 words each, 0.006% of the archive), so the
+  encoder holds the symbols (4 bytes each, about 1.2 per byte of input) of one run rather
+  than of the file.
+- Tables are built lazily: the decoder's alias tables on first decompression (about 5 ms),
+  the encoder's tables on first compression and its inverse maps per context used.
+
+### Speed
+
+- Fused passes: compression decodes MP3 Huffman codes and emits model symbols in one pass
+  (the sign bits are copied into the raw stream); decompression turns decoded symbols
+  directly into Huffman bits. No coefficient arrays in between; the failure path rolls the
+  coder back.
+- Assembly: each frame is written out once its side information is complete and its payload
+  final in the reservoir, which is kept from the next frame's payload on only, in a window
+  of 512 KiB that does not grow.
+- Huffman decoding: register bit buffer with branchless refill; an 11-bit LUT resolves code
+  and signs (tables without linbits) or the code (with linbits).
+- Contexts of a granule are computed in one pass before coding it, per band. Bit writers
+  are branchless 8-byte stores (reconstruction) and a 32-bit word writer (the encoder's
+  short raw writes). Coder state is copied into locals for each granule.
+
+### Threads
+
+The formula is the same whatever the number of threads; one thread, or an input below
+64 KiB, runs the code unchanged. The coefficient model carries state from granule to granule
+and the rANS chain is serial, so the model pass (encoding) and the rANS decoding with the
+Huffman re-encoding (decoding) stay on the calling thread (`src/par.rs`).
+
+- Encoding (one helper thread, whatever N >= 2): the helper builds the tables while the file
+  is split into frames, then the encoder's inverse maps of the contexts the side information
+  says may be used, while the model pass runs.
+- Decoding: the side information (independent of the rANS stream) is decoded on its own
+  thread, ahead of the main pass, in batches of frames; with 3 or more threads another builds
+  the tables and the rANS decoder (with 2, the side information thread does it first); the
+  output is assembled in up to N pieces, one per 1024 frames, from the reservoir held whole.
+- Not done: splitting the Huffman re-encoding from the rANS decoding (a table lookup and a
+  write per symbol, about the cost of handing the values over), and a chunked model pass for
+  encoding (it would need warm-up, state validation and splicing of the streams).
+
+### Memory
+
+About 61 MB + 6.4x the file through `aqr-show` (the sample's files take 32-59 MB): the tables
+(frequencies, alias tables, the encoder's inverse maps of the tables used, 4 MB at most), then
+what follows the file, mostly the archive's. aqr-mp3 itself peaks at about 3x the file
+encoding and 2.4x decoding, on top of the tables. On WebAssembly (stack allocator, part
+module `src/part.rs`) the memory is exactly its plan (`src/plan.rs`), which follows no length:
+the tables (their contexts sharing the canonical one of their table), the models, the slides
+of the bit strings, the rANS decoder's window, the readers of the byte streams, the frames
+waiting for their payloads (1024 at most) and the reservoir's window, each at its final size
+in that order. The file is below 512 MiB (the reservoir's positions are in bits, in 32).
+
+### Tried and dropped
+
+| Attempt | Outcome |
+|---|---|
+| zstd on serialized fields | About 1% gain; the coefficient data needs a model |
+| Adaptive multi-symbol contexts | Worse than static tables at useful context counts |
+| Current-granule neighbours in the pair context | -0.53 pp ratio but about -40% decompression (serial chain) |
+| 4 buckets per octave, 8 position classes, position classes at all | No gain once the other channel became its own dimension |
+| Sorted-symbol coarse LUT for rANS decoding | Mispredicts (21% mixed buckets), 2x slower than alias tables |
+| 14-bit probabilities | ~0.1 pp, but the encoder's inverse maps would grow to 160 MB |
+| Prior smoothing of the trained tables | No gain with 4500 training files |
+| Range-coded (adaptive) scalefactors | About the same ratio as static rANS, slower |

@@ -15,44 +15,17 @@ let sp = recons::split(&stream, usize::MAX, threads)?;  // data (x86 filter undo
 assert!(recons::join(&sp.data, &sp.record, threads)? == stream);
 ```
 
-`FORMAT.md` specifies the streams as far as the module needs them, the record and the module,
-after OctopusET's
+`FORMAT.md` specifies the streams as far as the module needs them, the record and the module, and how
+they work, after OctopusET's
 [EGG Archive Format Specification](https://gist.github.com/OctopusET/0ad7da5da238b9153960d0bc4dfe2a50)
 (CC0), Appendix A. No AZO decoder's code was read; ALZip's output (the test archives of
 EggDotNet and alzgg) was the black box.
 
-## How
+## What is taken
 
-AZO is LZ77 under a binary range coder with adaptive models (the spec's Appendix A): literals by
-the byte before, matches as one of two recent distances, a distance and a length, or a
-remembered match again (a history of 128). `azo` decodes a block into its data and tokens and
-encodes tokens again; the spec's decoder was right in every model, and two things it leaves out
-were found from ALZip's streams: the models start afresh at each block (of 512 KiB), and how the
-coder ends (one more bit put off, then the zero bytes at the end dropped).
-
-The record (`recons`, as aqr-lzo's) codes the tokens given the data. ALZip's matches are the
-nearest ones of their lengths, with the whole common prefix, so a match is told by which of the
-longest matches along hash chains of 2 to 16 bytes it is, mostly the longest; whether a match
-starts is coded against the matches at the position and the next (ALZip matches lazily, or by
-cost).
-
-`azo-recons` is a whole module with an exact memory plan (`plan.rs`, `aqr_api::stack`): the models,
-the match finder and the contexts of the coded block, written onto the output as the tokens come.
-It spawns no tasks.
-
-## Status
-
-The x86 filter (bit 0 of a stream's flags) is E8/E9 with a converted address, the five bytes
-skipped whether converted or not (FORMAT.md §2.6; found from the CRC-32 of the four `.sys`
-streams of alzgg's archives, `docs/azo-x86-filter-search.md`). The data of a stream is
-the file itself: `split` undoes the filter and `join` applies it again (a block that the filter
-does not give back is not taken); ALZip picks AZO by itself for `.sys` and `.com` files only (alzgg's notes), so it is
-rare.
-
-Left: ALZip's choice between a match and a literal,
-most of the record; speed (5–6 MB/s of data a thread to split and to join, the chains walked
-twice where a match may start; a stream's blocks go on up to `threads` threads natively, one
-after another in Wasm).
+Streams of ALZip's EGG archives as aqr-egg finds them. The x86 filter (bit 0 of a stream's
+flags) is undone: the data of a stream is the file itself (a block that the filter does not give
+back is not taken).
 
 ## Results
 
@@ -70,3 +43,9 @@ again; records 32,215 B, 1.03% of the streams (2.1% of the coded blocks; 5.2% fo
   sizes, the limit).
 - aqr-decompress `tests/wasm.rs` (`azo_same_as_wasm`): natively and as Wasm alike, damaged
   records alike; aqr-egg `tests/formula.rs`: AZO blocks rebuilt in EGG archives.
+
+## Left
+
+- **ALZip's choice between a match and a literal.** Most of the record (1.03% of the streams).
+- **Speed.** 5-6 MB/s of data a thread to split and to join; the chains are walked twice where a
+  match may start.

@@ -14,6 +14,7 @@ Contents:
 2. [The setup header](#2-the-setup-header-encoder) *(encoder)*
 3. [A medium's formula](#3-a-mediums-formula-encoder) *(encoder)*
 4. [How the table was made](#4-how-the-table-was-made-informative) *(informative)*
+5. [Design notes](#design-notes)
 
 ## 1. Media
 
@@ -79,3 +80,38 @@ stripped setups, and tries each skeleton of the database with as many codebooks 
 keeping those under which every packet parses to its end; a wrong one parses few (0 to 27 of
 400). Every setup but one of the media of seven games had exactly one such skeleton (README),
 and the ids agreed across setups. Two ids (423, 438) are the same codebook.
+
+## Design notes
+
+Not normative.
+
+- Code: `wem` reads a medium's chunks, its `vorb` fields (in `fmt ` of 0x42 bytes; size 0x2A
+  only) and its packets (each after a u16 size; a medium cut short ends inside one);
+  `stripped` reads the stripped setup into its ids and the Vorbis setup's bits after the
+  codebooks, assembles the setup from codebooks given for the ids, and strips one back; `ids`
+  is the table of the ids known (286), each with its codebook part in aqr-vorbis's setup
+  database; `formula` splits a medium into head, packets and tail. A setup with an id the table
+  has not is sought among the database's skeletons by the medium's first packets. Parsed setups
+  are cached (a few setups serve many media).
+- `aqr-wwise ids` takes `.wem` files, banks and any other file holding media (Unreal's paks,
+  No Man's Sky's audio paks: RIFF WAVEs of format `FFFF` found anywhere). It tries every
+  skeleton of the setup database (`--db` another one) that has as many codebooks on each
+  setup, and takes those under which every packet parses to its end (no packet cut short, at
+  most 7 zero bits left). Where none does, it seeks the codebooks one place at a time.
+- Survey: seven games' media (Unpacking, Chants of Sennaar, Satisfactory, ASTRONEER and No Man's
+  Sky of Steam; Alba and The Alto Collection of Epic): 82,570 Vorbis media, 26 distinct setups
+  of 1 to 6 channels (more than two coded with the mono setups, as FMOD does), 44.1 and 48 kHz.
+  Under the database's skeletons (stock libvorbis 1.3.7's among them; the blocks of 512 and 4096
+  of two of Alba's setups are not FMOD's), 25 setups have exactly one skeleton under which their
+  packets parse, and the 286 ids seen agree across setups, each one codebook. One setup
+  (Satisfactory, 9 media: stereo at 6 to 8 kHz, blocks of 512) is not found: no skeleton fits
+  and the descent over the known codebooks stops at 29 of 200 packets, so its books are not
+  libvorbis 1.3.7's (aoTuV's, perhaps).
+- Packets that do not end exactly end early with zero bits only, so they do not tell against
+  the setups found: a stream's last packet often ends 21 to 28 bits early, and in some of No Man's
+  Sky's media runs of packets end far early (silence, padded); the record keeps their tails.
+  The ids 423 and 438 are the same codebook, as libvorbis's tables have it twice, which suggests
+  that the library is libvorbis's books in the order of its tables.
+- Encoding gives a formula only where it is smaller (no comparison with the medium), and a
+  setup is parsed once per distinct setup: for a bank of 15,000 media of 8 KB on average, what
+  each costs apart from its packets was otherwise most of the time.

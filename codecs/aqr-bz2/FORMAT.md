@@ -234,3 +234,30 @@ end and its padding alone).
 its blocks cut as §3.1 cuts its data at level 9, and compressing them gives the body back. The
 streams of ALZip at hand (of one block each) are all reproduced; streams of several blocks have
 been checked against this compressor only. Validation is §7's, without the level.
+
+## Design notes
+
+- The BWT is the suffix array (SA-IS) of the block written twice; rotations then sort as libbzip2
+  sorts them, but for equal rotations of a periodic block (one repeated pattern, such as zeros
+  through RLE1), where only the rank `origPtr` can differ: the params note it for those blocks
+  (3-4 bytes each).
+- Natively blocks are compressed in parallel (11.9 MB/s of data on one thread, 43.6 MB/s on 8, 51 MB
+  of data; libbzip2 itself is in the same class). The Wasm module (33 KB, a part module since version
+  2: pieces of the data and the stream, one block of RLE1 output) runs on one thread, one block at a
+  time. SA-IS works in buffers sized by the block alone (the reduced problem solved inside the
+  suffix array, a byte of type per symbol, the buckets of a level made again after the level below),
+  so its memory is a plan of the largest block's symbols: 16 bytes for each, besides the pieces
+  (about 30 bytes per symbol natively: 27 MB for a block of 900 kB, on each thread).
+- aqr-compress decodes the first 4 MiB of data or so; where it is not the start of a file of a
+  format and a probe tells that it would not pay, it keeps the stream; else it decodes the rest
+  (the blocks' inverse BWT in parallel) and probes all of it before compressing it again to check it.
+- Not done, measured (2026-10-31): storing a stream as the symbols after its BWT, coded by a model of
+  their own, where its data would not pay, and undoing the BWT only where it does (the stream rebuilt
+  by MTF and libbzip2's tables alone, without sorting). Ideal code lengths of two adaptive models
+  against bzip2's own coding: 20 MB of Korean JSON, MTF ranks −0.4%, the symbols directly (orders
+  0-2, mixed, SSE) −2.2%; this repository's sources as a tar +0.3% and −0.5%; `spec/index.bs`
+  +1.6% and +8.3%; a Rust stage0 snapshot −0.6% and −2.3%. With blocks of at most 900 kB bzip2's
+  Huffman coding is within a few percent of these models (what stronger BWT compressors gain
+  comes from larger blocks, which a stream to rebuild cannot have), and the duplicates are taken
+  already, so a hybrid would save about 2% of the streams kept for a second module (a
+  context-mixing coder, a few MB/s) and a choice in aqr-compress.

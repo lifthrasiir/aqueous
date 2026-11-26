@@ -216,8 +216,7 @@ What the READMEs may not say up front: how each was made and what is left in bri
 
 - aqr-lzma: the goal is deduplicating contents, not the best recompression; a record of about 14%
   at a reasonable speed is fine. What is left is in `docs/10gb-todo.md` item 6.
-- aqr-lzo: a record of the parse rather than emulation, as LZO has many encoders. Left (its
-  README's Status): raw LZO1X in other containers, LZO-RLE, LZO1X-1's hash table start.
+- aqr-lzo: a record of the parse rather than emulation, as LZO has many encoders.
 - aqr-bvx (Apple's LZFSE and LZVN, `bvx2`/`bvxn` blocks; asset catalogs): a record of the parse, as
   aqr-lzo, with the LZFSE compressor's table of candidates (14-bit hash, 4 ways) emulated as a
   context. Apple's lzfse code (BSD) is not read; libcompression is the black box.

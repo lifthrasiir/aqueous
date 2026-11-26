@@ -17,6 +17,8 @@ Contents:
 3. [`recs-fields`](#3-recs-fields)
 4. [`recs-entries`](#4-recs-entries)
 5. [`recs-floats`](#5-recs-floats)
+6. [The inference](#6-the-inference-encoder) *(encoder)*
+7. [Design notes](#7-design-notes)
 
 ## 1. Conventions
 
@@ -164,3 +166,65 @@ A float's bits `v` (an integer of `8w` bits) are, for a record's `q` and `r`:
 - `v = ord((ord(b) + r) mod 2^(8w))`.
 
 The float is written at `o` in its endianness.
+
+## 6. The inference *(encoder)*
+
+- **Tables of fixed-size records** (`fixed`): a record size k per window, by the code length of k
+  adaptive order-0 column models against one; the window grown into a region by a maximum-sum run
+  of the columns' log-ratio, and again with the records coded by fields (a sorted table ends where
+  its deltas stop fitting).
+- **Entries with a length field** (`chain`): chains of length fields followed from every field
+  position in spans of the file, for each width, endianness and mask, to the next fields where the
+  bytes around them are most like these (and by the rules that put them there: b and alignment);
+  scored by how consecutive entries agree column by column against a control; the best followed
+  through the file, extended backwards, rotated (a chain fixes entries only up to where they
+  start) and trimmed. Each entry's head (a width chosen by zstd) is a record; its tail follows.
+- **Floats** (`floats`): f64s and f32s of the records whose values are whole multiples of a
+  scale, at any offset and phase of the record (see §2). The scale is found from the values' gaps
+  and refined by least squares; each float is lifted to its whole number q and the difference, a
+  few units in the last place, from q x k (or q / k), which the fields then code (a delta for q,
+  say). The region is moved to the phase that keeps the floats whole, and tables of the same
+  records found apart are tried as one.
+- **Fields** (`fields`): DP over the record, each field raw, a delta or xor against the record
+  before, or a difference or xor against an earlier field, costed by adaptive order-0 models on a
+  sample of the records. A region is written as its fields' planes (or its bytes transposed), then
+  the tails.
+- **Choice** (`choose`): each candidate measured alone under zstd -3 (on itself and 64 KiB around
+  it, on its first MiB), the set apart with the largest sum of gains by weighted interval
+  scheduling, then each checked in context.
+- **Threads**: each step runs on the threads it is given (the windows scanned and grown a batch at
+  a time, the regions' fields and the candidates' sizes at once), with the same choices.
+
+### The estimate
+
+`probe::estimate` estimates in 2-50 ms what the inference may save: 48 windows of 8 KiB over the
+file, each at the record size its bytes repeat at, compressed as they are, transposed and split
+into fields (not against each other). A saving of 10% of a file needs records over much of it,
+which the windows find; `infer_if` infers only where the estimate is at least a given saving. The
+estimate is low where the saving is small (it misses small tables and chains of entries), so a
+threshold gives up some of those. On the oracle corpus and six more files (17, one thread):
+
+| estimate at least | files inferred | zstd -3 of the files | CPU s |
+|---|---|---|---|
+| (always infer) | 17/17 | 0.964 | 2.99 |
+| 1/32 | 8/17 | 0.975 | 1.70 |
+| 0.05 | 6/17 | 0.982 | 1.35 |
+| 0.10 | 5/17 | 0.985 | 1.02 |
+
+The five files saving 10% or more (13-58%) are estimated at 6.2-50%, all above 0.05; no other is
+above 7.5%. aqr-compress infers at 0.05.
+
+## 7. Design notes
+
+- Chains of entries are not looked for by default: on the data of the 10 GB corpus that the
+  estimate lets through they saved 0.04% more for a third of the time.
+- Cut down for speed on the 332 inputs that aqr-compress inferred in a quarter of the 10 GB corpus
+  (135.6 MB): 63.8 -> 16.7 s for 0.799 -> 0.794. As ported (85a8610) the bench took 106.9 CPU s
+  for the same 0.967.
+- Fewer candidates do not pay: at most 32 regions of fixed-size records (two from each seed); 16 or
+  8 save 10% or 19% of the time and give 0.974 or 0.976 (python3.12 0.943 -> 0.956, 0.969), one
+  region a seed 6% and 0.974.
+- Floats: the SAO catalogue's floats' differences from q x k are 2.5 bits (the converter used its
+  own constants), q's deltas most of the rest; its estimate (0.976) turned it down before floats
+  were lifted.
+

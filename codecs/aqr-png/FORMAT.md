@@ -503,3 +503,158 @@ slots as streams of the classes of `png-recons`, and a root of the files one aft
 the caller to put each where its file is. It codes every record against the parent's image where that makes
 it smaller (as `formula::encode_against`), and gives no formula if a file does not have one of
 its own.
+
+## Design notes *(informative)*
+
+### Model and representation
+
+Literals are the residual of the raw (unfiltered) byte against aqr-raw's pixel model
+([`aqr_raw::image::pixel`](../aqr-raw/src/image/pixel.rs)); the row's PNG filter is reapplied to
+give the byte the stream holds, so the filter choice does not matter. Matches start as an
+escape symbol in the literal alphabet, so a literal costs a single symbol. Entropy coding is
+static per-image tables (two passes when compressing), four interleaved 32-bit rANS states
+(`src/rans.rs`, on `aqr_common::rans32`); the encoder divides by multiplying with packed
+reciprocals, the decoder looks symbols up in a full table per context and renormalises without
+a branch. Huffman headers go through aqr-flate's header coder, against the frequencies of the
+block's tokens (zlib's own trees cost a bit). An image's payload may hold several zlib streams;
+Apple's iDOT files use one stream with a full flush, which needs nothing special.
+
+### Why the LZ77 parse is kept
+
+The obvious design inflates the image data, codes the pixels with a strong image model, and
+re-creates the DEFLATE stream on the way back by reproducing the encoder's choices
+(aqr-flate's job). Measured on these sets, it cannot be fast:
+
+- Most PNG files here are exact zlib output (libpng's level 6, or level 9). aqr-flate's
+  zlib emulation reproduces them for about 10 bytes, but at zlib's own speed: 1-20 MB/s of
+  PNG file. Its fast, rule-based representation is 5-25 MB/s of PNG here, and its
+  corrections cost 3-30% of the PNG (photo streams have long literal codes and short,
+  unpredictable matches, and oxipng/zopfli-style streams follow no simple rule).
+- PNG data expands 2-30× when inflated, so even 100 MB/s of decompressed data is only
+  3-50 MB/s of PNG.
+
+So aqr-png keeps the stream's own tokens (literals and matches) and codes *them* against
+the image: decompression decodes tokens and Huffman-codes them again, with no match search.
+The price is ratio on photos, where an LZ77 parse spends many bits on short matches that an
+image codec would not need (`src/bin/probe.rs`: 1.1 literals and 0.1 matches per PNG byte
+on the photo sets).
+
+### Against a reference
+
+A PNG file can be coded against a similar one (`formula::encode_against`, the module's
+fourth input): sets of variants of a picture, with layers shown or hidden ("差分"), are
+mostly the same pixels, and the same writer mostly makes the same parse of them. Each token
+where the reference's image has one starting at the same place of the data is first a
+decision whether it is that token (by the last decision and whether the reference's is a
+match); the tokens that are are coded by nothing else. The reference's tokens come from
+parsing its payload again, so the decoder needs its file, not its record.
+
+On seven ZIP archives of such sets (Clip Studio Paint, 684 MB of PNG files in groups of 13
+to 88 of the same size), each file coded against a parent along a maximum spanning tree of
+how alike their data are (`aqr-png-refprobe --code`): 85% of the tokens are the parent's,
+and the records come to 109.5 MB against 491.5 MB alone (4.5×). Both encoders code against
+a reference (by rows, and token by token for streams expanding more than 4×, as these do),
+the same symbols; each file is coded alone too to keep the smaller record: coding takes 36 s
+and decoding 18 s of one thread over the 684 MB.
+
+A set of such files is one application of `png-set` (`formula::encode_set`), of an output
+per file, each against an earlier one, its parent. The encoder takes the files' formulas
+alone where it is given them (those without a parent as they are), and parses each parent's
+images once for all its children. The decoder rebuilds the files of each depth of the trees
+at once, their parents being given to them as their reference files.
+
+Tried and dropped: predicting the literals that are not the reference's by the reference's
+pixel where their three neighbours are the reference's (tables of their own): 2.6% of the
+tokens, records 108.5 MB only, decoding twice as long.
+
+### Speed
+
+Measured with `aqr-png bench`, `samply`, and retired instruction counts
+(`/usr/bin/time -l`). The decoder runs at about 6 instructions per cycle, so what helped
+was doing less:
+
+- **Decoding**: the rANS states live in a local copy of the decoder (in registers, not
+  behind a pointer); literals are decoded in runs within a row, in a loop specialised by
+  the row's filter type, without bounds checks on the offsets the buffer layout keeps in
+  range (the data has a row of padding in front, the raw image a zero row and zero left
+  margin per pass). Symbol frequencies for the Huffman headers are counted while decoding.
+- **Encoding**: the data is parsed with aqr-flate; as its rows are complete, a window of
+  them at a time, they are unfiltered and every pixel byte's context and residual computed
+  (NEON, 16 bytes at a time), then the window's tokens walked. Streams that expand more
+  than 4× (mostly long matches) are modelled as the parser hands over the tokens instead,
+  skipping the bytes inside matches.
+- **aqr-flate** got two-level Huffman decoding tables (photo streams' 15-bit literal
+  codes made its single-level tables 128 KB), pattern copies for short match distances, a
+  branch-free token writer and a header reader that takes counted frequencies. Its match
+  copy (16-byte chunks, no library call) is aqr-png's too: a `copy_within` per match cost
+  the parse 15%.
+- Tried and dropped: two rANS states (latency-bound), padding the rANS stream to drop a
+  bounds check (the clamp lengthened the dependency chain), passing literals to the model
+  in batches (it serialised the parser's and the model's dependency chains, which ran
+  side by side before), tracking the row position incrementally, smaller (11-bit) tables
+  (not cache-bound; 0.2-0.6% larger output).
+
+Where the time goes (kadid10k): decompression is ~75% token decoding (about 210
+instructions per token), ~15% Huffman writing, ~6% Huffman headers, ~3% tables;
+compression is ~39% parsing, ~16% unfiltering and the row model, ~19% the token walk,
+~20% rANS tables and encoding, ~6% block layout and Huffman headers. Photos average
+1.1 literals per PNG byte, so 100 MB/s means about 9 ns per literal end to end. gb82-sc
+expands 30× when inflated; copying and unfiltering 93 MB of image data for 3 MB of PNG is
+already over budget.
+
+### Memory
+
+Neither side holds the inflated data, the raw image or the stream's tokens whole:
+
+- The data and the raw rows are windows: what the parser and the model may still read (the
+  farthest match, 32 KiB, and the row above) is kept, and moved down every MiB or so. The
+  image encoder computes the symbols of a window of rows (256 KiB per thread) as soon as its
+  rows are parsed and walks its tokens; of the parse it keeps only the matches and stored
+  blocks not walked yet. The decoder, and the encoder of streams expanding more than 4×,
+  move their buffers on the same way (with whole buffers up to 4 MiB of data).
+- The decoder hands each block's tokens to the DEFLATE writer as the block ends: one
+  block's tokens at a time.
+- What still follows the image: the encoder's symbols, 2 bytes each (about one per byte of
+  data on photos), since the static tables are counted over all of them before the rANS
+  stream is coded backwards. They are freed before the record is copied out.
+
+`png-recons` is a part module (version 5) laying its memory out as a stack (`aqr_api::stack`), so its
+limit is its plan (`plan::part`, `src/part.rs`): the skeleton and the index read whole, the file's
+chunks taken in pieces of 16 KiB, and the most an image takes (its record's head, layout and model
+tables reserved exactly, the decoder's windows, a block's tokens, room for a block written); each
+image's payload is written block by block and cut into its chunks as it goes. A file of several
+images, each of a payload of 8 MiB or less, is decoded in batches of up to 8 images as tasks
+(8 slots); any other, an image at a time. Natively it still decodes whole, on threads
+(`plan::recons` is the whole module's plan). `png-against` and
+`png-set` are planned the same way (`plan::against`, `plan::set`): a reference file's images are
+parsed with code tables of room for the largest code (`aqr_flate::inflate::tokens_of`), their
+tokens counted first and their references reserved exactly; `png-set` reserves its output first
+and copies each file to its place, and in WebAssembly makes a parent's references of its file
+there, where each child is rebuilt, rather than keeping them (which would leave holes on the
+stack: about 7% more time on sets than keeping them, which native decoding still does).
+
+Peak heap of `formula::encode` and of the evaluation (`tests/memory.rs` checks it, on a
+9.4 MB image), fitted over the 364 files of the sets above that are coded: 4.2 MB + 3.7×
+the file for the first, 2.9 MB + 1.1× for the second (the constants are mostly the
+windows).
+
+### Threads
+
+The `threads` of `formula::encode` and `formula::decode`: the output is the same whatever the
+number of threads, and one thread runs the code above unchanged. One image is coded by one
+rANS stream whose contexts come from the decoded pixels, so decoding an image stays serial;
+threads overlap what is independent around it:
+
+- An APNG (or any file with several image runs) has its images coded, and rebuilt, in
+  parallel: each image makes a record of its own, concatenated in order.
+  At most `N` images are in flight.
+- A large image (1 MB of data or more) has the symbols of each window computed by stripes
+  of rows on several threads, after the window's serial unfilter pass, and the symbol
+  histograms counted by chunks and summed.
+- Decompressing writes the DEFLATE streams on a thread of their own, block by block as the
+  model decodes them (a few blocks in flight): `aqr-png bench -t 4` decompresses the sets
+  above at 104 MB/s, against 88 MB/s on one thread.
+
+Files under 64 KB are handled on the calling thread. A panic in a worker is a panic of the
+call, so `formula::encode` gives no formula. Not done: parsing the zlib streams of a
+multi-stream image in parallel (a stream's end is known once it is parsed).

@@ -89,8 +89,10 @@ tables.
 2. Its plural rule in `plural` (`src/lib.rs`; a test checks that every catalog has one), and its
    Windows language in `RC_LANGUAGES` (`build.rs`: primary and sub language, of `winnt.h`).
 
-## Status
+## Left
 
-Left: VERSIONINFO's description (English only); numbers and sizes in the language's own forms
-(the functions of "Numbers" write `1.5 MB` everywhere); `aqr`'s messages; Settings' Apps' name and
-installer's title stay "Aqueous".
+- **VERSIONINFO's description.** English only.
+- **Numbers and sizes in the language's own forms.** The functions of "Numbers" write `1.5 MB`
+  everywhere.
+- **`aqr`'s own messages.** Its errors stay English.
+- **Names in Settings' Apps and the installer's title.** They stay "Aqueous".

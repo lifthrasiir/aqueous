@@ -176,3 +176,12 @@ they are):
 - An adaptive order-1 to order-4 context model of the opcodes alone (bitwise, mixed) codes them
   in 604 KB at best against zstd's 280 KB: the code repeats at long distances (inlined and
   monomorphized copies), which LZ77 takes, and a coder of its own would need a match model.
+
+## Design notes
+
+- Splitting takes 169 MB/s, joining 185 MB/s on one thread (M4). Per stream (zstd -22, each
+  stream of each module alone): `op` 2.41 MB -> 471 KB, `local` 667 -> 233 KB, `data` 176 -> 67 KB,
+  `label` 106 -> 31 KB, the other ten 337 -> 48 KB.
+- A zstd dictionary of 64 KiB trained on half of the modules (and the other way around) takes the
+  modules as they are from 1,016,872 B to 838,752 B, their streams from 855,599 B to 717,779 B
+  (-16.1%; 55 modules).

@@ -139,3 +139,13 @@ MB) or offsets (1.63 MB); the entries 0.12 MB of 3.2 MB (their offsets 0.23 MB, 
 1.85 MB, under zstd as they are): the keys of nine entries in ten are those of the
 configuration before. The string indices cost 0.94 MB: the pool is sorted by configuration
 and value, not in the order the entries refer to its strings.
+
+## Design notes
+
+- Under zstd -9 (the 7 APKs' `resources.arsc`): the strings 5.53 MB as text, against 8.29 MB as they are
+  (data and offsets); the entries (presence, flags, keys, value types) 0.11 MB against 2.08 MB with
+  their offsets; string indices 0.94 MB; other values and complex entries 0.16 MB.
+- Binary XML was tried with the same chunks and its nodes by field (lines in deltas, ends from the
+  starts open, attributes by name, raw value, type and data): 0.91 MB against 1.21 MB for all files as
+  one stream, but a formula for each file cost more than that, so it was not taken.
+- The module's Wasm block was 7.7 KB before `arsc-recons` was laid out as a stack (`1105fffe`), now 5.0 KB.

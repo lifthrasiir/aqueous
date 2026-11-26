@@ -80,6 +80,12 @@ The entry of 4 bytes `v` is `(h & M) >> 1`, where `M = 2 × (T - 1)` and `h` is:
 - multiplication: `(v × 0x1E35A7BD wrapping in u32) >> 16`;
 - CRC-32C: `crcw(v, M)`.
 
+Snappy's output depends on its version and, since 1.1.10, on its build. The families measured with
+the reference libraries are 1.1.5-1.1.8, 1.1.9, and 1.1.10 and later; the last splits in two: builds
+hashing with the CRC-32C instruction (SSE4.2, ARMv8 with CRC, as Homebrew's on Apple silicon) and
+builds hashing by multiplication. 1.2.0 through the main branch of 2026-09 are one within each.
+This format does both hashes of the last family.
+
 ### 3.3 Compressing a fragment
 
 For a fragment `F` of `n` bytes, positions are counted from its start. Each table entry holds a

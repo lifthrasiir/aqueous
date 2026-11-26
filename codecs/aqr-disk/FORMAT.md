@@ -45,7 +45,7 @@ into its pieces where it is in several.
 ## Pieces *(encoder)*
 
 `aqr_disk::files` reads the volumes of the disk (the image, or the virtual disk of its container:
-README) (all of it, then each partition of its table but one at its start) with the file systems
+see "Containers") (all of it, then each partition of its table but one at its start) with the file systems
 given, the first that starts a volume taking it,
 into files and their extents in bytes of the image (of a container, where it holds the blocks of
 the disk's extents; blocks it does not hold are no part of any file). `aqr_disk::pieces` lays them out: extents
@@ -53,3 +53,49 @@ within the image, sorted by where they start (the longest first, then of the low
 taken where it starts at or after the end of the one taken before, and the bytes between them
 the rest. A file's pieces are those of its extents taken, in the order of its extents. An image
 whose file systems give no extent has no formula.
+
+## Containers
+
+The virtual disk is what readers read (an `Image`: each read puts its bytes together from the
+block table, the blocks not allocated zeros); the files' extents are taken where the container
+holds them, and the block tables and headers are the rest. Written from the published
+descriptions: Microsoft's VHD specification and [MS-VHDX] (dynamic disks), VMware's Virtual Disk
+Format 1.1 (a hosted sparse extent), QEMU's `qcow2.txt` (versions 2 and 3), libyal's notes on VDI
+and on EWF. A fixed VHD and a flat VMDK extent are a plain disk.
+
+- **UDIF** (`.dmg`, `dmg`): the `koly` trailer, the property list's `mish` block tables. An image
+  of raw chunks and zeros only (UDRO, UDRW) is a container; one of compressed chunks is parsed
+  for aqr-compress, whose formula rebuilds its zlib, bzip2 and LZFSE chunks from the disk.
+- **Compressed chunks of other containers**: a qcow2 image's compressed clusters (raw DEFLATE,
+  `container::qcow2_chunks`), a streamOptimized VMDK extent's grains (`container::vmdk_stream_chunks`:
+  its markers, zlib streams) and an EnCase image's segment file (EWF-E01, `ewf`: its sections, the
+  tables' chunks, zlib streams or raw) are chunks for aqr-compress (`chunked`), each file by
+  itself; a qcow2's compressed clusters read as zeros as a container.
+
+## Partition tables and volumes
+
+GPT (of 512- or 4096-byte sectors; the primary header, its checksums not checked), else MBR (its
+four entries, and the logical partitions of the extended ones' chains of EBRs; a table any of
+whose entries is not one, as a volume's boot sector, is none), else APM (of the block size of the
+driver descriptor, or 512 bytes; the map itself and free space are no partitions). The types are
+not looked at: a volume is known by its file system's own bytes.
+
+The volumes are all of the image, then each partition (but one starting at the image's start, as
+a hybrid ISO image's own are), cut at the image's end; the first file system that starts one
+reads it. A partition's files are found along with all of the image's: of extents of several
+file systems, the first starting where it does is taken ("Pieces").
+
+## Files stored compressed: limits
+
+The applications hold their data whole, so a WOF file is cut into applications of 32 MiB of data
+at most, its XPRESS streams of 8 MiB at most (the split of XPRESS takes about 6 bytes a byte). A file stored compressed and not taken apart is
+its compressed bytes, of kind compressed whatever its name.
+
+## Design notes
+
+- Streams of 32 MiB of XPRESS took the heap to 2.31 GB, over the budget's 2.00: applications of one
+  stream of 8 MiB each (399.7 MB archived on the 854.6 MB sample) are what fits, as more
+  applications leave fewer of the files' own formulas within the description's bound.
+- A file in pieces that overlaps a piece before it is left in the rest, and the file's contents
+  are those taken.
+

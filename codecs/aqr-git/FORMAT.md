@@ -179,3 +179,23 @@ starts (each on its own, in parallel). The ids are read off it by those offsets;
 only where it is the index above of them (and the reverse index, where there is one, the
 reverse index above), else the files are archived as they are. aqr-compress finds a pack's
 indexes among the files archived along with it by the pack's trailer, which theirs repeat.
+
+## 7. Design notes (informative)
+
+- **Profile.** aqr-compress gives the records aqr-flate's default profile (static, fast) below
+  level 7 and its adaptive profile with zlib emulation from 7 on. With the adaptive one, the
+  zlib settings git writes every object with are found once on a few of the largest streams and
+  tried first on the others, which are then emulated exactly for next to no record. Below level
+  7 those few streams are made at the adaptive profile first, and where its emulation predicts
+  every token of at least half of them, all of the pack is made at it with those settings hinted
+  (no search, which is what makes the profile slow), as compressed DMGs' chunks are; else at the
+  default profile, and so too where the adaptive formula would need more memory than the
+  application bound. The pack of this repository (53.1 MB) went so from 43.02 to 42.19 MB at the
+  default level, in 6.27 s against 6.47.
+- **Memory.** The pack's plan is four pieces of readers (136 KiB) whatever its length; the index
+  module's is 36 bytes an entry (`aqr_api::stream::Reader`; blocks of 6.5 and 10.2 KB). The
+  encoder parses and deconstructs each entry's stream at once, a window of 64 MiB of streams at
+  a time put in place in order, and checks the layout against the pack as it goes.
+- **Loose objects.** A loose object's data is its header and the blob: aqr-compress keeps the
+  header with the container's bytes, so that the blob is a slice of its own, found where it is a
+  file checked out (in the same batch, `together`) and taken as a file of its format.

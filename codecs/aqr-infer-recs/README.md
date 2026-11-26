@@ -1,106 +1,55 @@
 # aqr-infer-recs
 
 Records inferred in files whose format nothing knows (a header, entries, a footer), and their
-fields transposed for a general-purpose coder. It is the port of `scripts/rec_probe.py`, the
-prototype; `scripts/rec_oracle.py` measures the prototype against the layouts of known formats.
+fields transposed for a general-purpose coder: a table of fixed-size records (ELF and Mach-O
+tables, caches, indexes, packet captures, fonts, catalogues of stars) compresses better as its
+fields' planes. It is the port of `scripts/rec_probe.py`, the prototype (`scripts/rec_oracle.py`
+measures the prototype against the layouts of known formats). `FORMAT.md` specifies the modules
+`recs-fields` (records from the byte planes of their fields: a transpose any recompressor may
+apply to records of a fixed size), `recs-entries` (entries from their heads and tails) and
+`recs-floats` (records' floats from their whole numbers and differences), and how the inference
+works. [`module`](src/module.rs) is their code, and [`formula`](src/formula.rs) makes the formula of a
+file.
 
-- **Tables of fixed-size records** ([`fixed`](src/fixed.rs)): a record size k per window, by
-  the code length of k adaptive order-0 column models against one; the window grown into a
-  region by a maximum-sum run of the columns' log-ratio, and again with the records coded by
-  fields (a sorted table ends where its deltas stop fitting).
-- **Entries with a length field** ([`chain`](src/chain.rs)): chains of length fields followed
-  from every field position in spans of the file, for each width, endianness and mask, to the
-  next fields where the bytes around them are most like these (and by the rules that put
-  them there: b and alignment); scored by how consecutive entries agree column by column
-  against a control; the best followed through the file, extended backwards, rotated (a chain
-  fixes entries only up to where they start) and trimmed. Each entry's head (a width chosen
-  by zstd) is a record; its tail follows. `infer` does not look for them: on the data of the
-  10 GB corpus that the estimate lets through, they saved 0.04% more for a third of the time.
-- **Floats** ([`floats`](src/floats.rs)): f64s and f32s of the records whose values are whole
-  multiples of a scale (numbers written in decimal and stored in other units: 0.01″ and 1 ms
-  of time as radians, say), at any offset and phase of the record. The scale is found from the
-  values' gaps and refined by least squares; each float is lifted to its whole number q and
-  the difference, a few units in the last place, from q × k (or q / k), which the fields then
-  code (a delta for q, say). The region is moved to the phase that keeps the floats whole, and
-  tables of the same records found apart are tried as one.
-- **Fields** ([`fields`](src/fields.rs)): DP over the record, each field raw, a delta or xor
-  against the record before, or a difference or xor against an earlier field, costed by
-  adaptive order-0 models on a sample of the records. A region is written as its fields'
-  planes (or its bytes transposed), then the tails.
-- **Choice** ([`choose`](src/lib.rs)): each candidate measured alone under zstd -3 (on itself
-  and 64 KiB around it, on its first MiB), the set apart with the largest sum of gains by weighted interval
-  scheduling, then each checked in context.
-
-## Status
-
-The modules `recs-fields` (records from the byte planes of their fields: a transpose any
-recompressor may apply to records of a fixed size), `recs-entries` (entries from their heads
-and tails) and `recs-floats` (records' floats from their whole numbers and differences) are
-specified in [FORMAT.md](FORMAT.md); [`module`](src/module.rs) is their
-code, and [`formula`](src/formula.rs) makes the formula of a file. aqr-compress tries it on
-data in which a scan finds no file, where the quick estimate tells 5% at least (below).
-
-The inference takes 0.01 to 0.5 s a file (on one thread), mostly a constant: the window scan
-and the growth of the regions found (`fixed`), the fields, and the choice's zstd. Each step runs
-on the threads it is given (the windows scanned and grown a batch at a time, the regions' fields
-and the candidates' sizes at once), with the same choices: on the 42.6 MB of an APK's library
-data, 0.71 s on one thread, 0.29 s on ten.
-
-## Giving up early
-
-[`probe::estimate`](src/probe.rs) estimates in 2–50 ms what the inference may save: 48
-windows of 8 KiB over the file, each at the record size its bytes repeat at, compressed as
-they are, transposed and split into fields (not against each other). A saving of 10% of a file needs records over much
-of it, which the windows find; [`infer_if`](src/lib.rs) infers only where the estimate is at
-least a given saving. The estimate is low where the saving is small (it misses small tables
-and chains of entries), so a threshold gives up some of those:
-
-| estimate at least | files inferred | zstd -3 of the files | CPU s |
-|---|---|---|---|
-| (always infer) | 17/17 | 0.964 | 2.99 |
-| 1/32 | 8/17 | 0.975 | 1.70 |
-| 0.05 | 6/17 | 0.982 | 1.35 |
-| 0.10 | 5/17 | 0.985 | 1.02 |
-
-(One thread; the oracle corpus and six more files: the prototype's struct.bin and pcap.bin,
-macOS's DataDetectors cache, two ResponseKit files and SFNS.ttf. The five files saving 10%
-or more, 13–58%, are estimated at 6.2–50%, all above 0.05; no other is above 7.5%.)
-
-aqr-compress infers at 0.05. On the 10 GB corpus that is 17,716 estimates (3.1 GB of data:
-contents are estimated where they are found) and 2,350 inferences (717 MB), a quarter of them
-of data met before, whose regions are kept by its hash.
-
-## Results
-
-On an M4, `aqr-infer-recs-bench` on 11 files (114.6 MB: ELF and Mach-O binaries, a font, a
-pcap of tcpdump, git's index and pack index, ld.so.cache), 10 threads, CPU seconds of each
-file's thread:
-
-| | CPU s | zstd -3 of the files transformed |
-|---|---|---|
-| `scripts/rec_bench.py` (numpy, 10 processes) | 605 | 0.967 |
-| this crate, as ported (85a8610) | 106.9 | 0.967 |
-| this crate, before the 10 GB corpus (9f7d085) | 7.1 | 0.968 |
-
-On one thread, 5.3 s then (21.5 MB/s), 1.77 s now (64.7 MB/s) for 0.974, or 3.57 s for 0.972
-looking for chains of entries too (`-c`). What the inference was cut down to was measured on
-the 332 inputs that aqr-compress inferred in a quarter of the 10 GB corpus (mingw470-x32,
-silesia, ghostscript, VideoLAN; 135.6 MB): 63.8 -> 16.7 s for 0.799 -> 0.794. Peak RSS 527 MB
-(the prototype's: 4.8 GB).
-
-Fewer candidates do not pay: at most 32 regions of fixed-size records (two from each seed);
-16 or 8 save 10% or 19% of the time and give 0.974 or 0.976 (python3.12 0.943 -> 0.956,
-0.969), one region a seed 6% and 0.974.
-
-Floats: the SAO star catalogue's binary (`sao`, 7.25 MB: 258,997 stars of 28 bytes, right
-ascension and declination as f64 radians, proper motions as f32 radians a year) is 0.432 of
-zstd -3 inferred (0.856 without floats, and its estimate, 0.976, turned it down); aqr -c
-5,272,411 -> 2,356,779 B (xz -9e: 4,425,672). The floats' differences from q × k are 2.5
-bits (the catalogue's converter used its own constants), q's deltas most of the rest.
-
-## Usage
+aqr-compress tries it on data of 16 KiB or more in which a scan finds no file, where a quick
+estimate (2-50 ms) tells 5% at least, and takes each region that makes the file smaller under
+zstd -3.
 
 ```sh
 cargo build -r -p aqr-infer-recs --examples
 target/release/examples/aqr-infer-recs-bench [-j THREADS] [-p INNER] [-v] [-t] FILE...  # -t: time of each step, -p: each file on INNER threads (timed by the clock)
 ```
+
+## What is taken
+
+- Tables of records of a fixed size, any offset, with fields coded as they are, as deltas or xors
+  against the record before or an earlier field, and floats that are whole multiples of a scale
+  (numbers written in decimal and stored in other units) as whole numbers and small differences.
+- Entries each holding its length (chains), which a formula may hold; aqr-compress does not look
+  for them.
+
+## Results
+
+On an M4, `aqr-infer-recs-bench` on 11 files (114.6 MB: ELF and Mach-O binaries, a font, a pcap of
+tcpdump, git's index and pack index, ld.so.cache), 10 threads: zstd -3 of the files transformed is
+0.968 of the files' zstd -3, in 7.1 CPU s (the prototype in numpy: 0.967, 605 s). On one thread
+1.77 s (64.7 MB/s) for 0.974, or 3.57 s for 0.972 looking for chains of entries too (`-c`); peak
+RSS 527 MB (the prototype's: 4.8 GB). The inference takes 0.01 to 0.5 s a file on one thread
+(0.71 s on one thread for 42.6 MB of an APK's library data, 0.29 s on ten).
+
+The SAO star catalogue's binary (7.25 MB: 258,997 stars of 28 bytes, right ascension and
+declination as f64 radians, proper motions as f32 radians a year) is 0.432 of zstd -3 inferred
+(0.856 without floats); `aqr -c` 5,272,411 -> 2,356,779 B (xz -9e: 4,425,672).
+
+On the 10 GB corpus aqr-compress makes 17,716 estimates (3.1 GB of data) and 2,350 inferences
+(717 MB), a quarter of them of data met before, whose regions are kept by its hash.
+
+## Tests
+
+- `tests/infer.rs`: files of known layouts (as `scripts/rec_synth.py` makes): the layout is found,
+  and every region taken restores.
+- `tests/edge.rs`: special floats, either byte order, tiny and random inputs, the decoders damaged.
+
+## Left
+
+- Nothing known.

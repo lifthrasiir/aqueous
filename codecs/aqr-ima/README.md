@@ -1,18 +1,32 @@
 # aqr-ima
 
 IMA ADPCM blocks as a record of their headers and nibbles, and back bit for bit: Xbox ADPCM (of
-FSB5 banks, through aqr-fsb) and Microsoft's IMA ADPCM (of WAV files, through aqr-raw) alike, by their channels and
-bytes per channel. The module `ima-recons` rebuilds whole blocks; `FORMAT.md` specifies it.
+FSB5 banks, through aqr-fsb) and Microsoft's IMA ADPCM (of WAV files, through aqr-raw) alike, by
+their channels and bytes per channel. The module `ima-recons` rebuilds whole blocks;
+[FORMAT.md](FORMAT.md) specifies it and how it works: a binary arithmetic code of adaptive bits
+in contexts of the IMA decoder's state.
 
-The record is a binary arithmetic code of adaptive bits (shifts growing with what each has seen)
-in contexts of the IMA decoder's state:
-- a channel equal to the one before in a block (FMOD's stereo is often two equal channels) is
-  one decision;
-- a header against the state its channel ended the block before at: the index as that one's
-  plus one (FMOD's), the predictor as a difference of a few steps, the reserved byte as 0;
-- each nibble by a tree of 4 bits, in a context of the step index, the nibble before, and the
-  other channel's nibble at the same place.
+## What is taken
 
-Any bytes of whole blocks come back. On The Crew's FSB5 banks the record is 57.8% of the blocks
-(xz -9e: about 67%); one thread encodes about 33 MB/s and decodes about 25 MB/s. IMA ADPCM WAV files of ffmpeg and
-sox come to 0.58–0.61 in stereo, 0.78 in mono (aqr-raw's README).
+Any bytes of whole blocks (a tail that is not a whole block is the caller's).
+
+## Results
+
+| Input | Record / blocks | Compressing | Decompressing |
+|---|---|---|---|
+| The Crew's FSB5 banks (817 samples, 100.2 MB of blocks) | 57.8% (`xz -9e`: about 67%) | 33 MB/s | 25 MB/s |
+| IMA ADPCM WAV of ffmpeg and sox, stereo / mono | 0.58-0.61 / 0.78 (aqr-raw's README) | | |
+
+One thread, Windows (date not recorded).
+
+## Tests
+
+- `tests/codec.rs`: blocks of IMA ADPCM encoded here (mono, stereo of equal channels, six
+  channels) and of noise (headers of any index and reserved byte), in the Xbox and Microsoft
+  layouts, through the record and back; records that are not one.
+- `tests/edge.rs`: the extremes (255 channels, saturated predictors and step indices, every
+  nibble), records that lie about the length, damaged records.
+
+## Left
+
+- Nothing known.

@@ -267,3 +267,7 @@ samples, the encoder's choices.
 | `src/dec.rs` | Decimals, floats, renders, coding a token in a mode |
 | `src/style.rs` | Mode of a group of numbers, fallbacks (encoder) |
 | `src/time.rs` | Times by a pattern: calendar, `put` and `parse` |
+
+## Left
+
+- Nothing known.

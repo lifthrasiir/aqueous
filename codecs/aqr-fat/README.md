@@ -10,56 +10,57 @@ one content all the same, its pieces split from it.
 
 ```sh
 codecs/aqr-fat/scripts/gen-fixtures.sh   # tests/data: volumes by hdiutil, files written mounted (macOS)
+cargo run --release -p aqr-fat --example aqr-fat-check -- [-v] IMAGE...   # files found, timed, rebuilt
 ```
 
-## What it reads
+## What is taken
 
 Written from Microsoft's specifications (fatgen103, the exFAT file system specification); no
 other implementation's code was read.
 
-- **FAT12, FAT16, FAT32**: the BPB (a jump, the signature, the sizes the specification allows;
-  the width by the count of clusters, FAT32's by its own fields), the first FAT, the directories
-  from the root (FAT12's and FAT16's fixed region, FAT32's cluster), their long names (VFAT,
-  checked against the short entry's sum) or else the short ones (of the lower case Windows NT's
-  flags tell; the OEM code page taken as Latin-1). A file's contents are its chain up to its
-  size.
-- **exFAT**: the main boot sector, the directory entry sets from the root (a File entry, its
-  Stream Extension and its File Name entries), a file's contents its first ValidDataLength bytes
-  (contiguous where the set says NoFatChain, else its chain in the first FAT).
+- **FAT12, FAT16, FAT32**: the BPB, the first FAT, the directories from the root, long names (VFAT,
+  checked against the short entry's sum) or else short ones (the OEM code page taken as Latin-1).
+  A file's contents are its chain up to its size.
+- **exFAT**: the main boot sector, the directory entry sets from the root; a file's contents its
+  first ValidDataLength bytes (contiguous where NoFatChain, else its chain in the first FAT).
 
-Whatever the bytes: a chain ends where it leaves the clusters, at its end or a bad cluster, or as
-the clusters followed in all reach twice their count (chains that meet or loop); the bytes of
+Whatever the bytes: a chain ends where it leaves the clusters, at a bad cluster, or when the
+clusters followed in all reach twice their count (chains that meet or loop); the bytes of
 directories read in all are at most the volume's; each directory is read once, at most 256 deep;
 what is past the end of an image cut short is not read.
 
-Left in the rest: the boot regions, the FATs, the directories, exFAT's bitmap and up-case table,
-the bytes of a file past its size (to the end of its cluster) or past exFAT's ValidDataLength,
-free clusters and deleted files. Not read: the second FAT (the first is taken), FAT32's FSInfo
-and backup boot sector (rest), TexFAT, checksums (exFAT's sets and boot region: not checked, so
-a damaged one does not stop the reading).
+Stays in the rest: the boot regions, the FATs, the directories, exFAT's bitmap and up-case table,
+a file's bytes past its size or exFAT's ValidDataLength, free clusters and deleted files. Not
+read: the second FAT, FAT32's FSInfo and backup boot sector, TexFAT, checksums (exFAT's sets and
+boot region are not checked, so a damaged one does not stop the reading).
 
-## How it does
+## Results
 
-Measured 2026-11-09 on an M4 (all threads, the default level) through `cargo aqr`, against the
-build before (the volume compressed as it is), `--stats`:
+On an M4 through `cargo aqr` (all threads, the default level, 2026-11-09), a FAT32 volume of
+`/usr/share` (734,003,200 bytes, 20,992 files, 4 KiB clusters; a fresh copy, so no file in
+pieces) against the volume compressed as it is:
 
 | | before | after |
 |---|---|---|
-| FAT32 volume of `/usr/share` (`cp -RLX` until full; 734,003,200 bytes, 20,992 files, 4 KiB clusters) | 26,205,279 B, 6.0 s, 74 G instructions, 2.56 GB resident | 23,342,349 B, 7.0 s, 300 G instructions, 1.32 GB resident |
+| archived, time, resident | 26,205,279 B, 6.0 s, 2.56 GB | 23,342,349 B, 7.0 s, 1.32 GB |
 
-(with aqr-compress's contents looked for in linear time, the commit before). Reading the volume
-and making the formula take 53 ms of it (`examples/check.rs`); the rest is the files' own
-recompression (aqr-infer-recs' records the most) and sealing them, as of the same files in a tar
-archive. The copy is fresh, so no file is in pieces.
-
-```sh
-cargo run --release -p aqr-fat --example aqr-fat-check -- [-v] IMAGE...   # files found, timed, rebuilt
-```
+Reading the volume and making the formula take 53 ms; the rest is the files' own recompression
+(aqr-infer-recs' records the most), as of the same files in a tar archive.
 
 ## Tests
 
-`cargo rt -p aqr-fat`: the fixtures of hdiutil (FAT12, FAT16, FAT32, exFAT: long and Korean names,
-subdirectories, an empty file, and two files written into the gaps of deleted ones, in pieces on
-FAT; exFAT's allocator did not fragment them), the images rebuilt through aqr-disk, volumes cut
-short and changed bytes, chains that meet, data that is no volume. aqr-compress's tests archive
-the FAT32 fixture, its JPEG file in pieces recompressed by aqr-jpeg as one.
+`cargo rt -p aqr-fat`:
+
+- The fixtures of hdiutil (FAT12, FAT16, FAT32, exFAT: long and Korean names, subdirectories, an
+  empty file, two files in the gaps of deleted ones, in pieces on FAT), rebuilt through aqr-disk.
+- Volumes cut short and changed bytes, chains that meet, data that is no volume.
+
+aqr-compress's tests archive the FAT32 fixture, its JPEG file in pieces recompressed by aqr-jpeg
+as one.
+
+## Left
+
+- **Metadata.** The boot regions, FATs and directories are stored as they are (zstd), not derived
+  from the files.
+- **Fragmented exFAT.** exFAT's allocator did not fragment the fixtures' files, so files in pieces
+  are tested on FAT only.

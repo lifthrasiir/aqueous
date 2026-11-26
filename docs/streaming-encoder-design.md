@@ -134,7 +134,7 @@ execution"). 끝낸 일의 경과(단계별 커밋과 중간 수치)는 git 이�
 - **7단계: 트리 아카이브의 배치.** 레벨 2 이상에서 배치는 아카이브로 스토어(스필)에 쓰인 뒤 출력에 복사된다
   (`3f1b1f44`; 검증이 배치를 따로 디코딩하므로). 배치마다 formula 자리를 예약해 leaf를 출력에 바로 쓰면 배치 크기만큼의
   스필이 없어진다. 배치의 `share_slices`를 해시 기반으로(봉인의 공유처럼) 하는 것도 여기다. 수십 GB 파일이 여러 파일의
-  아카이브에 들 때 지금은 배치를 통째로 쥔다(`codecs/aqr-tensors/README.md` Status).
+  아카이브에 들 때 지금은 배치를 통째로 쥔다(`codecs/aqr-tensors/README.md` Left).
 - **6단계: 우회 정리.** `spill.rs`의 쓰기 가능한 매핑 경로, `Bytes::lazy`(aqr-wim의 데이터), `store::Buffer`, 다 만든
   공식의 봉인. 해시 검증이 늘 끝까지 가므로 리프를 통째로 푸는 길(`verify::Cached`, `each_leaf_only`)은 오류 때만 쓰인다.
   (`each_leaf_only`는 aqr의 serve, edit, convert도 쓴다.)

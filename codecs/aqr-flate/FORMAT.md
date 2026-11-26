@@ -1184,3 +1184,138 @@ memory is laid out as a stack, a plan that does not depend on them).
   candidate lengths and (when the last search found exact ones, or every 16 blocks) the first
   five candidates is coded, the recipe's run-length coding or (now and then) the first that
   matches, and the first code-length code that matches.
+
+## Design notes (informative)
+
+How the reference implementation is built, and why. None of it is needed to decode.
+
+### Prediction
+
+- **Rules** are derived empirically from flate-zoo's encoders (the oracle): `aqr-flate-train
+  rules` fits the best rule of each preset class by coordinate descent, then a greedy set cover
+  picks a catalog of 32 (`model/rules-lλ.txt`). A stream's fingerprint (the common shortest
+  match, farthest distance, far short matches, full-block token count, block types, how the
+  first Huffman header was built) maps to one or two of them; two candidates, or an unknown
+  fingerprint, are settled by a trial on a 4 KB prefix.
+- **Chain rules** walk exact chains (`matchfind`), so nothing depends on an encoder's hash. Their
+  depth never exceeds the 99.5th percentile of how deep the stream's matches lie in their chains
+  (deeper ones are coded by rank anyway, and joining stays fast). Up to four configurations are
+  compared by cost on the first 256 KiB of long streams.
+- **Corrections.** A distance is coded by its entry in the bucket, else by its rank among earlier
+  positions matching as long (walking a chain at the misses only), else verbatim. Static codes
+  use a trained default model (`model/models.txt`) or the stream's own, whichever is smaller;
+  adaptive coding's contexts include a lookahead (how the match at the next position compares),
+  with priors (`model/priors-10.txt`) from the first 16 uses of each context in every training
+  segment, worth 2 observations each.
+- **Speed vs. size of the static profiles.** λ is bits per KB of plain text for each ns/B a rule
+  takes (`Rule::ns_per_byte`, measured by `aqr-flate-train speed`). Below λ = 10 speed costs
+  little size: λ = 0 gains only 0.1 points over λ = 5. A higher λ first drops the 8-way tables,
+  then ranked distances and the second table; λ = 200 is hardly faster than 100. At λ = 5, gaps
+  and kinds (where the misses are and what they are) make 70% of the corrections, lengths and
+  distances the rest. Split time at λ = 5 on the held-out split: parsing 0.14 s, rule choice
+  0.03 s, token coding 0.70 s (with the second parse, by segment), headers 0.07 s.
+- **Profile 10 splitting** codes each stream two or three times (the catalog's rule, a chain
+  rule, zlib emulation for streams that look like zlib's), except where zlib emulation, tried
+  first, misses at most 1% of the tokens: then it is taken alone (the chain rule only tried for
+  coding its misses). Emulation runs once: the detection's, if it followed the whole stream, else
+  a coding's; the other codings replay its predictions, the segments at once.
+
+### zlib emulation
+
+- Written from the description in this document, not from zlib's code; driven by the actual
+  tokens (`predict`, then `commit`), so after a misprediction it carries on from where the stream
+  really is.
+- Each segment resumes it from a checkpoint (`zlib::Checkpoint`, a few counters: the lazy levels
+  insert every position, so the rest of the state follows from the data). With threads, a blind
+  emulation (`Emulator::blind`, neither chaining nor searching) follows the tokens, its window
+  moving as the emulation's does; right after a match its state is the emulation's, so from the
+  checkpoint after the last match before a segment an emulation rebuilt there follows the
+  tokens up to it, and the segments are coded at once (enwik8 by Info-ZIP 3.0 -9, 10 threads of
+  a Ryzen 7 9700X: split 4.85 -> 1.86 s, the same record). deflate_fast (levels 1-3) cannot be
+  resumed, since its hash chains depend on the tokens: such a stream is one segment.
+- **`zlib::compress(data, params)`** writes what zlib 1.3.1 writes in one `deflate(Z_FINISH)`
+  call (raw DEFLATE), byte for byte, for containers whose streams are known to be zlib's with
+  fixed parameters (Clip Studio Paint's tiles: level 1, windowBits 15, memLevel 9). The emulator
+  runs on its own there (`Emulator::run`: deflate_fast without `predict` and `commit`), and
+  each block's frequencies serve both its header and `_tr_flush_block`'s choice. At level 1,
+  memLevel 9, 256 KiB chunks, one thread on an M4: photos and screenshots (123.4 MB) 334 MB/s
+  against zlib's 305 MB/s, flat synthetic tiles (104.9 MB) 2,011 MB/s against 1,626.
+- **Detection** (`detect`, on the idea of preflate's estimator) checks that every dynamic header
+  is exactly zlib's, that full blocks hold `2^(mem+6) - 1` tokens (which gives memLevel; other
+  blocks but the last may hold a multiple of 4096, as gzip's and Info-ZIP's deflate end blocks
+  early there), the maximum distance (which bounds windowBits), that no match refers to
+  position 0 or uses 284+31, and that there are no far length-3 matches for lazy levels. The
+  candidates left are ranked by emulating them over growing prefixes (1K, 4K, 16K... tokens),
+  keeping those tied for the fewest misses. The lazy levels (4-9, default or filtered) sharing
+  windowBits and memLevel are emulated together, SPMD style (`zlib::MultiSlow`): driven by the
+  actual tokens they keep identical windows and hash chains, and one walk of each chain gives
+  every level's `longest_match`. `Hints` narrow the candidates by what a container says (a zlib
+  header's FLEVEL and CINFO, a gzip header's XFL) and may name the parameters themselves
+  (`Hints::params`, e.g. the previous stream's `Report::zlib` in a container of many streams):
+  if they pass the structural checks and predict every token, they are taken without detection,
+  the rule's trial or the chain rule (streams below 1 KiB still compare the rule alone). On
+  small git objects (zlib -6, profile 10) that splits 1.5-5x faster than the header's hints
+  alone. Reading a record needs no hints.
+- **Estimate** (`Parsed::estimate`) codes runs of tokens spread over the stream under its rule
+  and scales them to the whole (blocks and headers exactly). The parser keeps the tokens of the
+  first 16 KiB, then runs of 16 KiB placed 64 KiB apart or an eighth of the data before apart
+  (about 8 per doubling, the length not known as it is parsed), the first 8 KiB of each only
+  filling the rule's tables; all are counted into one coder, as the segments share their
+  codes. On 10 streams it comes to 0.96x to 1.80x of the record (1.14x in all); the first 128
+  KiB alone came to 0.27x to 5.2x. What it computes is not computed again by `deconstruct`.
+
+### Headers and speed
+
+- Dynamic headers are coded against the builders and run-length coders of zlib, libdeflate and
+  zopfli/ECT, so an exact block costs one bit.
+- Tokens are cut into ~1 MiB segments coded independently. The parser gathers the statistics
+  everything else needs (symbol frequencies, fingerprint, segment cuts) as it decodes. Candidate
+  matches are measured on 8 bytes without branching. Exact zlib trees use a heap with packed
+  keys; package-merge is computed as Huffman's two-queue algorithm whenever the limit does not
+  bite (tests check it matches the full package-merge).
+- `deflate` is a parser and bit-exact writer: `Stream` keeps everything an encoder can choose
+  (block types and boundaries, stored-block padding and lengths, exact Huffman headers, the
+  tokens, symbol 284+31 for length 258, tail padding, trailing bytes).
+
+### Parser and writer (`inflate`, `write`)
+
+- `inflate::parse_into` hands the data and tokens to a `Sink` (`lit`, `mat`, `stored`) for
+  callers that process tokens as they are decoded (aqr-png models them in the same pass);
+  `parse` is it with a collecting sink. `header::read_freqs` reads a header against
+  frequencies the caller counted itself, sparing `header::read`'s pass over the tokens.
+- Decoding tables are two-level, 11 bits (literal/length) and 8 bits (distance) with subtables,
+  to stay in L1 (single-level tables took up to 128 KB with the 15-bit literal codes common in
+  image data). Up to three literals per refill, the last two straight from the primary table.
+  Matches closer than 8 bytes copy their first period byte by byte and the rest in 8-byte
+  chunks from a multiple of the distance. The collecting sink keeps its vectors as raw parts so
+  that their lengths stay in registers.
+- The writer flushes its 64-bit buffer once per token without a branch: the 8 bytes go to the
+  end of the output (capacity reserved per 4096 tokens) and the output grows by the whole bytes
+  among them.
+
+### Memory of `flate-set`
+
+`flate-inflate` is a part module whose plan is the same whatever the lengths (`plan::inflate`).
+`flate-set` lays its memory out as a stack (`aqr_api::stack`), so its limit is its plan
+(`plan::plan`): the instance's memory taken block by block in the order the module takes it, and
+each batch's tasks. An exact record (zlib emulation's tokens, every one) takes the emulator
+alone (no rule's table, no adaptive model). What decoding holds is reserved once at the size it
+takes:
+
+- headers are read and kept without the heap (`deflate::Short`: lengths and run-length ops in
+  place, the candidates' builders on arrays);
+- a round's blocks are reserved for the most a round writes (4096), and freed with it;
+- a pulled stream's data and writer are reserved for the most they hold (`pull_room`,
+  `writer_room`); a batch's tasks give their tokens back 5 bytes each, decoded into the pending
+  tokens as they are taken;
+- what is held of tokens does not grow with the blocks (flate-set 4): a block of `BIG` = 256K
+  tokens or more has its frequencies in the record, so its header is read before its tokens and
+  they are written 64K at a time as the batches decode them; the pending tokens are the most a
+  smaller block holds and a batch's, compacted after every round. A 100 MB stream of 6 blocks,
+  the largest of 7.3M tokens (text8.zip), fell from 351 MiB to 103 MiB whatever the block size;
+- small streams are rebuilt in groups, a task each, onto a result of room for their lengths,
+  which the index tells (flate-set 2);
+- a stream of params `04` is not held for the CRC-32 of its data: the index of a stream of 2 MiB
+  or more carries it, and the module writes the header from it and checks it at the end
+  (flate-set 3). enwik9.zip's 322 MB entry needed 353 MiB with the stream held, about 108 MiB
+  without.

@@ -7,45 +7,50 @@ and the rest (the header, the FAT and DIFAT, the directory, the mini stream and 
 contents recompressed in turn by what they are. The formula is aqr-disk's, so this crate has no
 module of its own and no FORMAT.md.
 
-A stream of the regular sectors (4096 bytes and over) is a file named by its path from the root; its
-extents are the runs of its sectors. A package's cabinet is such a stream, and the FAT's own sectors
-lie between its sectors, so that only the extents put it together as the CAB file aqr-mszip and
-aqr-lzx take. Streams in the mini stream are left in the rest.
-
 ```sh
 cargo run --profile release-test -p aqr-ole --example aqr-ole-ls -- FILE            # the streams and their runs
 cargo run --profile release-test -p aqr-ole --example aqr-ole-ls -- FILE STREAM OUT # one stream written
 ```
 
+## What is taken
+
+Version 3 and 4 files with a DIFAT, in directories of any depth. A stream of the regular sectors
+(4096 bytes and over) is a file named by its path from the root; its extents are the runs of its
+sectors. A package's cabinet is such a stream, and the FAT's own sectors lie between its sectors,
+so that only the extents put it together as the CAB file aqr-mszip and aqr-lzx take. Cut or looping
+files give what reads.
+
+Not taken: streams in the mini stream, which stay in the rest, as do storages' CLSIDs and
+timestamps.
+
 ## Results
 
-Windows Installer packages of `C:\Windows\Installer` (measured on 2026-11-11, 16 threads, `aqr -9`;
-LZX from level 9, see aqr-compress's `lzx_on`):
+Windows Installer packages of `C:\Windows\Installer` (2026-11-11, 16 threads, `aqr -9`; LZX from
+level 9, see aqr-compress's `lzx_on`):
 
-| package | cabinet | before (`-1`) | `-9` |
+| package | cabinet | `-1` | `-9` |
 |---|---|---|---|
-| 10ce6a.msi | LZX | 19.60 MB -> 17.29 MB | 16.57 MB (84.6%, 25 s) |
-| 617785f.msi | LZX | 20.62 MB -> 19.41 MB | 19.15 MB (92.9%, 21 s) |
-| two of 22 MB | LZX | 98.0% | 99.7% (20 s) |
+| 10ce6a.msi | LZX | 19.60 -> 17.29 MB | 16.57 MB (84.6%, 25 s) |
+| 617785f.msi | LZX | 20.62 -> 19.41 MB | 19.15 MB (92.9%, 21 s) |
+| two of 22 MB | LZX | | 99.7% (20 s) |
 
-Before this crate no cabinet inside a package was found at all: the FAT's sectors break its bytes
-apart. As with `.cab` files alone, the gain is small for one package (aqr-compress's `lzx_on`:
--1.1% over 441 CAB files) and pays with the files archived along (other versions of a product).
+A 568 MB cabinet in a 569 MB package comes to 552.33 MB (97.0%, decoded in 2 min 4 s); compressing
+holds a folder's data and parse whole (11.7 GB heap peak). As with `.cab` files alone, the gain is
+small for one package (aqr-compress's `lzx_on`: -1.1% over 441 CAB files) and pays with the files
+archived along (other versions of a product).
 
-An LZX cabinet whose data was over some tens of MB was not used while `lzx-recons` was a whole
-module (469 MiB planned for a 66 MB cabinet, over the compressing bound of 256 MiB). Since
-`lzx-recons` 3, a part module, a 568 MB cabinet in a 569 MB package comes to 552.33 MB (97.0%,
-decoded in 2 min 4 s; aqr-lzx's commit 090c6c36); compressing still holds a folder's data and
-parse whole (11.7 GB heap peak).
+## Tests
 
-## Status
+`cargo rt -p aqr-ole`:
 
-Done: version 3 and 4 files with a DIFAT, the streams of the regular sectors, in files of any
-directory depth; cut or looping files give what reads.
+- `tests/edge.rs`: files built by the test (version 4's sectors of 4096 bytes, a DIFAT of its own,
+  directories that loop, many siblings, deep storages, damaged files).
 
-Left:
+## Left
 
-- Storages' CLSIDs, timestamps and the mini stream are kept as they are (in the rest).
-- HWP 5's streams are raw DEFLATE (no zlib header): not found as such; `\x05HwpSummaryInformation` and
-  the rest are small. Office documents' streams are not recompressed, only separated.
-- LZX's encoder streamed, for the memory of large cabinets (above).
+- **HWP 5.** Its streams are raw DEFLATE (no zlib header) and are not found as such;
+  `\x05HwpSummaryInformation` and the rest are small.
+- **Office documents.** Their streams are only separated, not recompressed.
+- **Mini stream.** Small streams, CLSIDs and timestamps stay in the rest.
+- **LZX memory.** LZX's encoder is not streamed, so compressing a large cabinet holds its folder
+  whole (11.7 GB heap for 568 MB).

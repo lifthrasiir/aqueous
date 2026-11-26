@@ -70,3 +70,10 @@ Each stream's data (and each resource of no compression) is a slice of `raw`, wh
 aqr-compress recompresses as a content of its own; the files within it are not told apart (the
 images' metadata is not read). The data compresses better so than the chunks, compressed 32 KiB
 at a time, so aqr-compress takes a WIM file whatever the formula's size.
+
+## Memory
+
+Decompression stays bounded whatever the file: a resource is streams of at most 1024 chunks (32
+MiB of data), and an application takes streams of at most 32 MiB of data, so its memory is about
+that, its record and its output.
+

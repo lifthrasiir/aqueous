@@ -950,3 +950,109 @@ by its rank as the colour values', `ctx = (wr·4 + a)·2 + plane` (wr the range'
 - `.astc` files (astcenc's) of 2D footprints, KTX files of OpenGL's internal formats 0x93B0–0x93BD
   and 0x93D0–0x93DD, KTX 2 of Vulkan's 157–184 and 1000066000–1000066013, PVR 3 of pixel formats
   27–40, as §11.6; Unity's textures of formats 48–59 and 66–71 by aqr-bundle.
+
+## Design notes *(informative)*
+
+### Choices of the generic walk
+
+Measured on the first 400 files of the sample (123 MB) by code length, before the coder was
+written (bits of BC1 unless said):
+
+- **Order.** A layer's mipmaps are coded from the smallest, each pixel predicted from the next
+  smaller mipmap upsampled (bilinear, 9-3-3-1): BC1's indices 0.400 -> 0.364 bytes per byte;
+  it sees the pixels to the right and below. Both predictions go into the context, each as a
+  bucket of its projection on the line between the endpoints (a quarter of a level): the causal
+  one adds 0.25% on BC1 but 10% on BC3 and some on BC5.
+- **Indices as levels**, under the contexts of where the predictions fall, the contrast of the
+  endpoints and the mode. Contexts of the left and upper indices of the block, of whether the
+  extremes were seen in the block, and of the indices of the block whose endpoints were copied
+  gained nothing.
+- **Endpoints.** 35% of BC1 blocks have those of the block to the left or above, and most of
+  the rest those of a block used not long before. Copies of the left or upper block: 0.143 ->
+  0.130; a cache by MTF rank on top: 64 entries 0.095, 1024 0.086, 4096 0.085 (zstd -19 of the
+  endpoints alone 0.100). The rank is kept over a window of times, renumbered when full: a bit
+  a time and counts of groups of 1,024 times, so that a use flips two bits and two counts
+  (rather than a Fenwick tree, whose loops of varying length were mispredicted: 10% of the
+  time). Whole blocks recurring further than the neighbours are about 2% of blocks.
+- **Stripes.** A surface of 32,768 blocks or more is coded in stripes of rows, one per 16,384
+  blocks and 16 at most (natively on the pool's workers, as tasks in Wasm). Only a surface's
+  stripes are apart: its mipmap waits for the one before. The first stripe goes on with the
+  texture's models and stream; the others start from a copy of the models as before the
+  surface, with streams of their own, and what the copies learn is dropped. Bytes per byte
+  against 0.3464 unsplit: a fixed number of stripes costs 0.6% (2), 1.4% (4), 2.7% (8), 4.6%
+  (16); a stripe per 4,096 blocks 3.0%, per 16,384 0.85%, and from a copy of the models rather
+  than anew 1.0% and 0.29%. The stripes' streams are an input behind the first stream: in
+  front of it, their packed header kept the archive from finding textures alike (the `gui`
+  directory 61.10 -> 61.81 MB).
+- **Coder.** aqr-common's binary arithmetic coder, adaptive bits learning at 1/(n + 1.5) first:
+  against multi-symbol frequencies of a fixed rate 0.551 -> 0.546 (small textures have few
+  blocks to learn from). One code walks the blocks for both directions (`coder::Side`).
+- Where the bits go (all files of The Crew, bytes per byte): indices 0.255, the cache ranks
+  0.043, the choices 0.011, new endpoints 0.015.
+
+### BC7
+
+- **Copies.** Of the largest mipmaps of 56 textures, 67% of the blocks are the block to their
+  left or above, and 18% more have the endpoints of a block before. A block is first the left or
+  upper one, then its endpoints are those of the left or upper or of a block of the cache (by a
+  hash, the last block of each kept): 0.1583 -> 0.1358 (zstd -19 0.1770), twice as fast.
+- **Endpoints** are predicted from pixels, not the neighbours' endpoints: the ends of the line
+  through the subset's pixels of the smaller mipmap, else through the pixels decoded around that
+  touch the subset. Against the mean of the pixels around: 0.2466 -> 0.2423; neighbours'
+  endpoints of the same mode and partition predicted worse (0.2423 -> 0.2340 without them). The
+  smaller mipmap is the better of the two where there is one.
+- **Indices** as BC1's, of 7 kinds; of no smaller mipmap, the pixels above and to the left as
+  the two contexts (0.1358 -> 0.1336). The resolution of the buckets mattered little (within
+  0.1%); an edge context gained 0.4% for 10% of the speed and is not used.
+- Bits: endpoints 0.066, indices 0.135, choices and cache 0.021, modes and the like 0.012.
+
+### BC6H, ETC1/ETC2/EAC, PVRTC1, ASTC
+
+- **BC6H** is as BC7 (copies, endpoints predicted from the pixels, indices by buckets), of
+  planes of the endpoints unquantized (16 bits), the endpoints coded as stored (of transformed
+  modes the differences from the first) against the prediction quantized. On a smooth texture of
+  mode 10 (`tests/formats.rs`) 0.645 of zstd -19, BC7's alike 0.51.
+- **ETC/EAC**: each part of a block (RGB; EAC of alpha, R11) as BC7's blocks are; an RGB block's
+  mode, its fields predicted from the pixels (a subblock's base by the mean of its predicted
+  pixels, its codeword by their spread, the flip by which split spreads less, planar's colours by
+  the pixels at its corners), the bits of no field kept as they are so that any 64 bits are a
+  block; indices as levels on a *ladder* of their values (T's and H's by the paint colour
+  nearest). Smooth textures: ETC1 0.46 of zstd -19, EAC R11 0.83.
+- **PVRTC1**: a word's colours are samples of two images of low resolution, each pixel blended
+  from the 4 words around it (wrapping), so a surface is coded in two passes of no stripes: every
+  word's colours (copies, or MED of the words around), then the modulation of the words not
+  copied whole. The walk takes words row by row, the data has them in Morton order. Smooth
+  texture of 4 bits a pixel: 0.42 of zstd -19. 2 bits a pixel match once stored values are of
+  weights 0, 3, 5, 8 and never punch-through (as PowerVR's decoders).
+- **ASTC**: a block is read into its fields and written back; one that does not come back as it
+  was is an error block, kept as it is. The packed trits and quints of a group are a choice
+  among the codes of its values (13 tuples of trits and 3 of quints have two codes), which an
+  encoder makes the same way each time, so the choices are cheap. Blocks are copies as BC7's, or
+  new: block mode, partitions, endpoint modes, colour values (from a neighbour of the same
+  configuration, or from the pixels) and weights (by where the pixel predicted at each grid
+  point falls between the endpoints, and by the weights around it), in ranks of what they
+  unquantize to. HDR endpoint modes predict only roughly. Smooth texture of 4x4 blocks: 0.67 of
+  zstd -19.
+
+### Speed work
+
+Walk (2026-11-01, M4, 139.6 -> 111.7 G cycles for both ways): the coder's bits by selects rather
+than branches (indices are hard to predict), the decoder reading a tree's children before the
+bit that picks one, the products of the buckets taken beforehand, the pixel of each level looked
+up at once, the cache's ranks without a Fenwick tree, upsampling by columns taken once; the
+sample 26.6 / 20.9 -> 31.9 / 27.1 MB/s. Tried and slower: the coder's renormalization without a
+branch, the decoder's read-ahead on the encoder too.
+
+PVRTC and ASTC (2026-11-14, `-j 8`, encoding / decoding MB/s, the streams the same): PVRTC 4bpp
+4.6 / 4.8 -> 8.9 / 8.8, 2bpp 2.0 / 2.1 -> 4.3 / 4.3, ASTC 4x4 6.4 / 7.2 -> 10.4 / 12.1, 6x6
+4.9 / 5.5 -> 7.1 / 8.1, 8x8 3.6 / 4.0 -> 5.0 / 5.8, 4x4 HDR 4.2 / 4.6 -> 6.4 / 7.7.
+
+- PVRTC: a word's images at its pixels are taken of the colours of the 3x3 words around it,
+  decoded once, not of 4 words decoded for each pixel; of 2 bits a pixel, only the pixels of no
+  value stored are made again in the end.
+- ASTC: the partitions' hash once a block, not once a texel; the nearest rank of a value by a
+  table made with the work buffers (5,132 bytes); the weights read and written by the block's
+  bits reversed; a weight's line between the endpoints once for each partition and plane; the
+  grid unquantized once for its infill; the pixels of a copy copied; a new block written not
+  read again where it is legal.
+

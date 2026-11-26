@@ -25,6 +25,7 @@ Contents:
 4. [The layout record](#4-the-layout-record)
 5. [The walk](#5-the-walk)
 6. [Encoding](#6-encoding-informative) *(informative)*
+7. [Design notes](#design-notes)
 
 ## 1. Conventions
 
@@ -173,3 +174,20 @@ page's header type and sequence number are as predicted, and so is every granule
 the last page's of 10 of the 12 streams (cut short at the end of the samples). Pieces of 1 MiB made the records 0.15% of the files larger than the
 streams whole, of 2 MiB 0.05%, of 4 MiB 0.02%; aqr-vorbis's encoder holds about 35 bytes a byte
 of a piece.
+
+## Design notes
+
+Not normative.
+
+- Code: `page` reads a page with its CRC checked and writes it; `layout` frames the packets (in
+  chunks of 65535 bytes at most, as aqr-vorbis frames its packets), holds the layout record
+  and the walk over the pages that the encoder and the decoder both make; `formula` makes the
+  file as its layout and its streams' packets, a Vorbis stream's audio packets by aqr-vorbis's
+  `vorbis-recons` in pieces of 2 MiB (on threads), its setup header one stream that the
+  pieces and the packets share.
+- Only Vorbis files are taken: of other streams (Opus, FLAC, Theora), the layout and the
+  packets framed are no smaller than the pages once compressed.
+- Memory on WebAssembly (stack allocator, `aqr_api::stack`): the plan is exactly what the
+  decoder reserves, in this order: the output, the CRC's tables, the layout's lists, the
+  streams' packets (the bytes, ends, lacing values and durations of all streams in one vector
+  each, counted first) and the walk's list.

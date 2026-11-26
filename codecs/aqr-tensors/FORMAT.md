@@ -418,3 +418,84 @@ Of the indices of more than 16 values, the classes of the high nibbles are made 
 the coded symbols, pieces of 64 KiB of `raw`, `side` and the output, a chunk's symbols, raw
 and side bytes (16 KiB each, the side bytes 129 more), and of a grid, of each column of tiles its scale, zero point and
 row of tiles (16384 × 16 bytes), and its values (1 KiB).
+
+
+## Design notes
+
+Not normative.
+
+**Order-0 is enough.** Weights are close to noise: what is left to take is the order-0 entropy
+of the exponents (BF16's 8 bits come to about 2.6) and of the quants (a Q4_K nibble 3.86 bits,
+Q8_0's high nibble 3.6-3.7, Q6_K's 6 bits 5.86 as nibble and crumb). Contexts were measured and
+give little: the exponent before (2.594 -> 2.592 bits), the low nibble of Q8_0 given its high
+one (3.92 of 4), the top 4 bits of BF16's mantissa given the exponent (3.93 of 4; F32's alike).
+So the model is order-0 by table, and the work is in the speed. Weights of a lower precision
+converted are not noise but a grid's values: of NVFP4's to BF16 the mantissa has 13 or 14 values
+(3.7 bits of 7) and a block of 16 has 7 distinct magnitudes; as a grid, 4.2 bits a weight.
+(Until 2026-11-12 the crate was aqr-gguf and the module `gguf-recons`.)
+
+**The coder** (§3). A static rANS of 32 interleaved 32-bit states, 16-bit words, probabilities
+of 15 bits, over 16 symbols, in groups of 32 symbols of one table. As all the states of a group
+have the same table, a symbol is found by comparing the slot with the 15 cumulative
+frequencies, and its frequency and start are looked up by a permutation (AVX2) or a byte
+shuffle (NEON, SIMD128): no gather. The renormalisation reads the words of the states that need
+one by a table of the mask of those states. Natively the AVX2 kernels are taken where the
+processor has them, the NEON ones on AArch64 (else one state at a time); the Wasm module runs
+SIMD128. NEON compares the slots as 16 bits, 8 at a time, and divides by the 64-bit magic
+numbers of the scalar encoder (`umull`, `umlal`), not by doubles. Speed, one thread, 64M symbols
+of a table of 3.67 bits (`timing::speed`), Msym/s:
+
+| | Ryzen 7 9700X | Apple M4 |
+|---|---|---|
+| encode, scalar (u32 division) | 374 | |
+| encode, scalar, branchless renormalisation, Lemire's division | 726 | 1044 |
+| encode, AVX2 (division by doubles, exact below 2^32) / NEON | 1555 | 1386 |
+| decode, scalar | | 216 |
+| decode, AVX2 / NEON | 1900 | 1210 |
+
+**Grids' decoding.** The values are made by AVX2 where a tile's span is 32 or more, or of F16
+(GPTQ's to F16 1.2 GB/s, 0.6 one at a time); by NEON for F16, BF16 of spans of 16 or more, and
+F32 of spans of 64 or more of a grid of 16 values at most (M4, `gridval::timing::speed`: spans
+of 16 of BF16 1.63 -> 2.15 G elements/s, of F16 0.67 -> 2.33, spans of 128 of F32 2.98 -> 4.57).
+A tile is fitted by a few passes over its elements (gathered, its indices at a first scale, the
+range of scales, the check); each scale is the F32 of the fewest bits that gives all its tile's
+elements exactly (`src/grid.rs`).
+
+**Zeros and rows.** The F16 weights of PP-OCR's networks are of a normalisation folded into each
+output channel: rows of their own scale, the detector's largest tensors 97-99% zeros (most rows
+all of them, of either sign) and the rest many subnormals. Coded as other floats, a zero was its
+exponent symbol and its 11 bits of sign and mantissa, and every row's exponents of one table;
+xz -6 came to 5% and 2.5% less. The codes of §4.2 (`fine`) and the classes of rows (`rows`)
+fix that. Float codes are put together one at a time, so decoding is 400-600 MB/s on 16
+threads (580 and 1320 before). Row classes on Llama-3.2-1B's BF16 at a threshold of 0.5% would
+have saved 0.18% for 16% of the decoding speed, hence the 2% threshold of a run.
+
+**Tied tensors.** `lm_head.weight` the same bytes as `model.embed_tokens.weight` (Qwen3-0.6B:
+311 MB of 1.50 GB; Qwen3-1.7B: 622 MB of 4.06 GB, in its second shard): a tensor of a segment's
+bytes or more makes segments of its own, the same wherever it is, so that the archive stores
+their streams once.
+
+**`.pth` and safetensors.** A `.pth` is a ZIP archive of stored entries: its pickle `data.pkl`
+first, then each storage an entry `data/KEY`. The storages are found by the central directory
+and the persistent ids of the pickle (`('storage', torch.FloatStorage, KEY, ..., NUMEL)`), read
+by a machine of the opcodes that keeps only strings, integers, globals and tuples: no Python
+object is made, nothing else of the pickle is run. A safetensors file's JSON header is read for
+each tensor's `dtype` and `data_offsets` alone.
+
+**Writing directly.** A file of 1 GiB or more archived alone to a file has each segment's
+formula sealed into the archive's sink as it is made, its blocks written as they fill, and the
+formula block put into a room left before them (its bound, `formula::formula_bound`, or
+`formula_bound_layout` for data of no header), the rest a spacer. A shard of 49.9 GB that grew
+to 80 GB of memory (the spill's regions mapped, and the input) and was stopped now has a
+resident peak of 1.22 GB and a spill peak of 18.7 KB: 72 s to write the archive, then 116 s
+verifying it on 1.8 threads. A 5.3 GB Q4_K_M: 18.65 -> 13.1-13.5 s, resident peak 15.89 ->
+1.26 GB, spill peak 5.66 GB -> 15.8 MB, the archive +0.006% (the room's spacer, and the blocks
+in the order they filled).
+
+**Archive-side costs.** The file is read once for its checksum and its content hash together
+(the hash on all the threads) and verifying compares with those; the archive's blocks stored as
+they are are hashed in place on all the threads; each segment's `tensors/side` is a block of its
+own, encoded on the segment's worker (as one stream of the archive its 128 MiB blocks were
+compressed one at a time on the thread that seals: 0.3 s each for a Q4_K_M, 1.25 s for Gemma's
+Q4_0 scales). On the 11 files of tenz's README `aqr -c` 109.6 -> 71.7 s, `aqr -K` 22.4 -> 18.4
+s, the archives -0.06% to +0.02%.

@@ -54,13 +54,11 @@ Aqueous is distributed as `Aqueous.zip`, holding `Aqueous.app` (`aqr-mac` and `a
   System Settings, else the system's). Those Finder shows (the services, the types' names) are
   the bundle's `LANG.lproj/*.strings`, written by `bundle.sh`.
 
-## Status
+## Left
 
-Left:
-
-- A window of the progress (the phases overlaid, as aqr-win's).
-- Notarization (a Developer ID).
-- A `.dmg` to drag the app to Applications from.
-- Compressing what is dropped on the app's icon (a document type of `public.item`, which would
-  put Aqueous in every file's "Open With").
-- Quick Look of what an archive holds.
+- **Progress window.** The phases overlaid, as aqr-win's.
+- **Notarization.** Needs a Developer ID.
+- **A `.dmg`.** To drag the app to Applications from.
+- **Dropping files on the app's icon.** Needs a document type of `public.item`, which would
+  put Aqueous in every file's "Open With".
+- **Quick Look.** Of what an archive holds.

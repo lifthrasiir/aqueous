@@ -162,3 +162,36 @@ layout, the case, the other runs and the bases.
   a block of its own in a batch, and compress worse). `threads` segments are coded at once and
   the coded bases are written to the store as they come.
 - Restarting the model costs: each segment after the first about 0.1 MB for chr1 of hg19.
+
+## Design notes
+
+- **Decoding speed is memory-bound.** A model of 4^10 contexts (8 MiB) codes 1% smaller than
+  4^9 (2 MiB), but ten decoders at once miss the caches: 19 Mbase/s a thread against 71 (chr1,
+  ten at once, M4). The decoder loads the contexts two bases ahead as it decodes one (58 -> 71
+  there): 128 bytes, aligned, asked for as two halves of 64 bytes. One hint for all 128 bytes
+  was slower on both machines measured: chr1 on the M4 132 -> 162 MB/s alone and 91 -> 95 ten at
+  once; a synthetic 61 MB file on a 4-core Xeon 61 -> 75 alone, 61 -> 80 four at once (glibc's
+  large blocks start 16 bytes into a page, so the hint caught at most 6 contexts).
+- **Model choice** (chr1, bits per base): order-9 1.806, order-10 1.787, order-11 1.786;
+  probabilities moving by 1/64 against 1/16 (1.827) and 1/128 (1.795) at order 10; counts
+  halved at 250 (1.790, and a division per base): not taken. A match model of 24-base hashes
+  (last occurrence, its prediction weighed by an adaptive table of its length) brought 1.787 to
+  1.773 on 60 MB at four times the time: not taken. Models started anew every 64 Mbase cost
+  1.6%, every 16 Mbase 4.0%: a file is one stream, cut (§7) only past 256 MiB.
+- **Part module (version 3).** Its five inputs are read and its output written in order
+  through windows of 64 KiB pieces, the bases decoded as the file is built; the application's
+  memory plan is 3.4 MiB with the module's initial memory (the model's 2 MiB, six pieces), 9.5
+  MiB at most, whatever the length. Version 2 held its output, a copy, its inputs twice and the
+  model (2.5 times the file, 588 MiB for chr1) and so cut at 96 MiB (+0.45% on chr1) to fit the
+  application bound of 256 MiB. Version 3: chr1 decodes natively in 18.3 G instructions
+  against 21.3, resident 115 MB against 368 (Wasm 363 MB against 532, 2.2 s of user time
+  against 2.7); the module block grew 687 B; 10gb decompression's peak footprint 8.66 -> 7.49 GB
+  (ten chromosomes at once).
+- **Encoder memory.** The bases are held packed four to a byte and coded 8 Mbase at a time,
+  from the last chunk, the model kept at the start of each (2 MiB a chunk): chr1 about 0.25 GB
+  where it took 1.3 GB (lines listed, a byte a base, 4-byte start and frequency of each base).
+  The model runs twice over all but the last chunk, the second time for the chunk before on a
+  free worker while this one is coded: chr1 parses in 0.32 s (0.41 before) and codes in 0.98 s
+  on two threads (1.38 on one). The module encodes at 194 MB/s (chr1 and chr10). The archive's
+  batches (512 MB) hold few chromosomes each, which keeps compression to two or three cores.
+

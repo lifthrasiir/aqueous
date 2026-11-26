@@ -73,8 +73,8 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   `tests/serve.rs` drives it from another process (ignored: it needs `aqr.exe` built beside,
   `cargo rt -p aqr -p aqr-win --test serve -- --ignored`).
 
-## Status
+## Left
 
-Left: the menu of Windows 11 (an `IExplorerCommand` DLL and a sparse package), a list
-of what an archive holds, drag and drop, and the questions `aqr` does not ask yet (`--consume`,
-damaged blocks).
+- **Windows 11's own menu.** An `IExplorerCommand` DLL and a sparse package (the verbs are under
+  "Show more options" until then).
+- **Questions `aqr` does not ask yet.** `--consume`, damaged blocks.

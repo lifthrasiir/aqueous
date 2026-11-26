@@ -51,3 +51,7 @@ Measured on 2026-10-31 on a Ryzen 7 9700X: `aqr.exe` and `aqr-win.exe` of `targe
 Packing takes 13 s (`build.rs`'s dependencies are not optimised); the installer's own code
 (fat LTO as `dist` builds it: zstd's decoder, the x86 decoder, the dialogs), the icon and the
 resources are some 0.4 MB.
+
+## Left
+
+- Nothing known.

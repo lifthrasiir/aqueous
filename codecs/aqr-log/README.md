@@ -1,20 +1,10 @@
 # aqr-log
 
-Lines of text (logs, tables of numbers between spaces) rebuilt bit for bit from a *template* for
-each line and its fields stored column by column. A timestamp (`Dec 10 06:55:46`,
-`[01/Jul/1995:00:00:01 -0400]`, `2004-02-28 00:59:16.02785`, `16/12/2006`) is a slot of the
-template coded as one integer by a pattern ([`aqr-num`](../../crates/aqr-num)'s "Times"). The rest of a
-line is cut into tokens at its spaces (and, where the first MiB of streams comes out smaller,
-at `;`, TABs and commas, but not commas where the numbers have a decimal comma); a token that is a
-whole number (`-0.05`, `4,216`, `1.187,25`, `12.50`, `1.5E-07`, `42283.58000000`, as aqr-num prints them) is a
-slot coded as an integer and how it was printed; a token whose form (its digit runs masked) is
-rare in the file is a word kept as it is in its column; any other token stays in the template,
-its digit runs slots of integers (zero padding in a width byte). A column is the
-values of one slot of one template, each number as it is, as the change from the column's
-previous one, or as the change from the same slot of the line before (taken at the scale of the
-number, which varies in padded fixed and `%g`), whichever zstd packs smaller. A time with a fraction
-is two columns, the seconds and the fraction. An IPv4 address is a slot too (a 32-bit integer, also as an index into the 64 addresses seen last), a column's integers are divided by their common divisor where that pays (quarters of a megawatt-hour), and a CR before the LF belongs to the template. Lines that cannot be so (a byte 0x01 to 0x05 in them, or past the limits) are kept as
-they are, so any file round-trips.
+Lines of text (logs, tables of numbers between spaces) rebuilt bit for bit from a template for
+each line and its fields stored column by column: timestamps, numbers and IPv4 addresses are
+coded as integers ([`aqr-num`](../../crates/aqr-num)), words are kept as they are for aqr-wrt.
+`FORMAT.md` specifies the module `log-recons`, and how it works (`docs/log-design.md` has the
+reasons and the prototype).
 
 ```rust
 use aqr_log::formula::{self, MODULE};
@@ -32,15 +22,20 @@ aqr-wrt as before. The streams of words, of templates and of the lines kept are 
 aqr-wrt takes in turn. Without the default feature `encode`, the crate is the module's code
 alone (`module`), which aqr-modules builds into the Wasm module `log-recons`.
 
-A file over 64 MiB (`formula::SEGMENT`) is cut at line starts into segments, one application
-each, whose templates and columns start afresh (FORMAT.md, "Segments"). The format is specified
-in [FORMAT.md](FORMAT.md); `docs/log-design.md` has the reasons and the prototype.
+## What is taken
+
+Text whose first lines are such (logs, tables of numbers, CSV with decimal commas), of which the
+streams of a sample (the file up to 2 MiB, else 8 windows of 256 KiB spread from start to end),
+compressed by zstd -3, are no larger than the sample itself (prose and source code come to 120%
+and more) and, against aqr-xsv by the same measure, smaller. Lines that cannot be so (a byte 0x01
+to 0x05, or past the limits) are kept as they are, so any file round-trips. Not taken: prose and
+code (aqr-wrt's).
 
 ## Results
 
-Measured on 2026-11-14 on an Apple M4, through `aqr` (archived bytes at the default level,
-before = the commit before this crate's tokens were cut at `;`, TAB and `,`, and numbers and
-times were coded as of aqr-num; the file sizes in the commits that made them):
+Measured on 2026-11-14 on an Apple M4, through `aqr` (archived bytes at the default level;
+before = the same without this crate's tokens at `;`, TAB and `,` and without aqr-num's numbers
+and times):
 
 | file | bytes | before | after | module |
 |---|---|---|---|---|
@@ -53,19 +48,19 @@ times were coded as of aqr-num; the file sizes in the commits that made them):
 | binance_btc_trades.csv | 122,428,696 | 10,880,669 (8.89%) | 9,770,213 (7.98%) | xsv -> log |
 | household_power.txt | 132,960,755 | 7,166,559 (5.39%) | 6,683,029 (5.03%) | xsv -> log |
 
-`aqr-log-bench` (the streams as zstd -3 compresses them) gives the sizes of the streams.
+`aqr-log-bench` gives the sizes of the streams (as zstd -3 compresses them), speeds and the round trip.
 
-## Testing
+## Tests
 
 ```sh
 cargo rt -p aqr-log
 ```
 
-Unit tests: round trips of edge cases (no last LF, CR LF, empty lines and tokens, numbers of
-many writers, marks and zero bytes in lines, runs of more than 18 digits), the templates made,
-the limits (more templates than a segment holds), predictors, segments at several lengths,
-files not taken, and damaged streams and params (errors, never panics). The module's memory
-plan is checked to the page by `log_plans_hold` in aqr-decompress's `tests/wasm.rs`.
+- Unit tests: round trips of edge cases (no last LF, CR LF, empty lines and tokens, numbers of
+  many writers, marks and zero bytes in lines, runs of more than 18 digits), the templates made,
+  the limits (more templates than a segment holds), predictors, segments at several lengths,
+  files not taken, and damaged streams and params (errors, never panics).
+- `log_plans_hold` in aqr-decompress's `tests/wasm.rs` checks the module's memory plan to the page.
 
 ## Layout
 
@@ -75,9 +70,9 @@ plan is checked to the page by `log_plans_hold` in aqr-decompress's `tests/wasm.
 | `src/module.rs` | Params, limits, and the file rebuilt from its streams (the module's code), its plan |
 | `examples/bench.rs` | Sizes of the streams, speeds, round trip |
 
-## Next steps
+## Left
 
-- Epoch seconds and milliseconds (`1704067200000`) as times.
-- IPv6 addresses, and an address with the port after it as one integer; the same units and
+- **Epoch times.** Epoch seconds and milliseconds (`1704067200000`) stay numbers, not times.
+- **IPv6.** IPv6 addresses, and an address with its port as one integer; the same units and
   addresses in aqr-xsv.
-- Fields at positions of words (Drain's clusters) beyond the rare-form rule.
+- **Clusters.** Fields at the positions of words (Drain's clusters) beyond the rare-form rule.

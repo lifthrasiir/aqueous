@@ -145,3 +145,32 @@ for contents of up to `content` bytes (its tables and buffers, made once). Its p
 - A frame is taken where it decompresses, and the emulation makes it again byte for byte, and its
   pieces are apart from the others'. Where the frames open at once would be more than 96 MiB (or
   their pool more than 160 MiB), those closing last are left out, as bytes kept.
+
+## Design notes
+
+- No frame is rebuilt from its content for `.zst` files: Zstandard has many levels and strategies, a
+  record of its parse (as aqr-lzo and aqr-lzma keep) would cost a good part of the frame, and its
+  entropy coding is already about as good as the archive's, so a frame costs about what its content
+  would and keeping it is the cheapest record. Sharing needs only the content, which a Patch
+  instruction gives. (On libarchive's tree the `zstd -3` frame is 6% larger than the archive would
+  make the tree.)
+- The compressor emulated, `compress::compress(content, 3)`, makes the frame libzstd (1.5.x) writes at
+  level 3 (`ZSTD_compress`, or a stream ended at once with its size pledged: no dictionary, no
+  checksum) byte for byte: the parameters of the level for the size, the double-fast match finder, the
+  literals' Huffman coding and the sequences' FSE coding with libzstd's choices of tables and block
+  types. It is written from libzstd's behaviour and checked against it as a black box (Python's
+  `compression.zstd`, the `zstd` crate's); its code is not read. It needs no `encode`, so modules can
+  make frames. Contents of 256 KiB or more, whose blocks libzstd may split, give `None`.
+- `zstd-frames` natively makes the frames on threads, 2048 at a time ahead of where they are put; in
+  WebAssembly one at a time.
+- On The End's database, the 805,720 frames (491 MB) hold 5.05 GB; the layout is 3.0 MB and the bytes
+  kept 103 MB (the pages, other columns, the tables of chunks' hashes). Overflow chains go back and
+  forth over the file: 38% of The End's frame bytes and 68% of the Nether's are of frames whose
+  pieces are out of the file's order, and at most 1,882 frames (19 MB of pool) are open at once in
+  The End, 2,541 (93 MB) in the Nether.
+- Compressing those databases the heap peaks at 1.34, 3.95 and 6.78 GB, most of it the archive's zstd
+  of the contents (9.4 GB of them in the Nether, 18 GB in the Overworld), past the budget: what the
+  archive holds of a long stream as it codes it, not the module's.
+- A formula block of many files taking pieces of one Split once cost Swaps growing as their square (a
+  program of hundreds of MB, 364 MB resident testing); each file made is put in its place below the
+  pieces not taken yet (`Emit::sink` in aqr-formula), a Swap each.

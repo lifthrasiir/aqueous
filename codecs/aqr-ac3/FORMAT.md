@@ -236,3 +236,8 @@ do not add up.
 that brings it to 16 MiB or more, codes the chunks on `threads` threads, and returns the coded
 stream only if it comes to at most 97% of the stream. Chunking costs 0.2% on the audio of
 `mari.avi` (87.56% against 87.37%).
+
+No SIMD is used: the range coder is serial, and the bit allocation and the checksums were not
+hot. The syntax is walked by one function over aqr-walk's `Io`, serving coding, decoding and
+the dry parse; each chunk has a model of its own, so natively they are coded and decoded at
+once.

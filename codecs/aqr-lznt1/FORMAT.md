@@ -317,3 +317,16 @@ samples of the tests; the record is cheap because of it.
   with one after the first 2 KiB of a chunk, far fewer before 512 bytes): its hash table
   probably loses candidates there, and the model cannot see which. These decisions are most of
   the record, 0.3% of the stream.
+
+## Design notes
+
+- The record's contexts are the first two candidates whose first 3 bytes agree, which is all that
+  Windows seems to look at: the longer, the nearer on ties, is nearly always the match taken. The
+  first version, which took the nearest candidates by rank, took 1.10% of the compressed bytes; the
+  two-candidate contexts 0.48% on text.
+- On text, the record is (percent of the compressed bytes): the decisions between a literal and a
+  match 0.35 (a literal where Windows has a candidate: its own table seems to lose some), the
+  matches' offsets 0.17 (the shorter of the two candidates now and then), lengths none (a match is
+  the whole match at its offset), the unit's rest (end header, allocation, padding, unused flag bits)
+  below 0.01.
+- Splitting tries both candidate modes on the first 256 KiB.

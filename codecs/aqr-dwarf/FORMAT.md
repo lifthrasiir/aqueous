@@ -242,3 +242,13 @@ are (the DIEs of those are not indexed). Strings are coded by their index where 
 a string's, references by the index of the DIE they point to where it is one of a unit taken,
 a sibling derived where it is the end of the subtree. The encoder decodes what it made and
 takes the section only where it comes back.
+
+## Design notes
+
+- Of rustc's `.debug_info` streams (7.26 MB under zstd -3) the strings take 1.65 MB, the references
+  1.64 MB, the lines of inlined calls 0.96 MB, the codes 0.84 MB.
+- `__apple_names` of rustc's dSYM: 3.75 M DIE offsets for 0.40 M names (each inlined instance is a
+  DIE of the name) are 3.19 MB of the 3.79 MB of streams. Table 23.48 MB, streams 8.84 MB, zstd -3
+  of the table 17.96 MB; `__apple_types` 0.72 MB, 0.45 MB, 0.44 MB, streams under zstd 0.19 MB;
+  `__apple_namespac` 0.91 MB, 0.54 MB, 0.79 MB, 0.46 MB.
+- The modules' blocks were 12.0 and 7.1 KB before they were laid out as stacks.

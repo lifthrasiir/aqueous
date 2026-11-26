@@ -4,12 +4,9 @@ LZO1X streams (lzop files) split into their data and a small record of the parse
 bit for bit. The archive then stores the data, which zstd compresses better than the stream,
 which aqr-compress recompresses in turn, and which other files may share.
 
-No compressor is reproduced. LZO has many (LZO1X-1 and its 11-, 12- and 15-bit variants,
-LZO1X-999 at nine levels, the Linux kernel's own), and LZO is GPL, so this crate holds none of
-its code. The record codes any compressor's parse given the data, under contexts of what a
-match finder sees there. It was written from the kernel's description of the stream format
-(`Documentation/staging/lzo.rst`) and from what liblzo2 and lzop output, used as black boxes.
-The record's format is in [FORMAT.md](FORMAT.md).
+It was written from the kernel's description of the stream format (`Documentation/staging/lzo.rst`)
+and from what liblzo2 and lzop output, used as black boxes; LZO is GPL and no code of it is
+held. The record's format and how it works are in [FORMAT.md](FORMAT.md).
 
 ```sh
 cargo build --release
@@ -26,6 +23,12 @@ use aqr_lzo::recons;
 let sp = recons::split(&stream, limit)?;
 assert_eq!(recons::join(&sp.data, &sp.record).unwrap(), stream[..sp.used]);
 ```
+
+## What is taken
+
+lzop files, at the start of a file or found in other data; raw LZO1X streams of Unreal 3's
+compressed chunks (packages and `.tfc` texture caches, aqr-bundle's `unreal-upk`: Goat
+Simulator's 40 files 1419.50 -> 1273.27 MB).
 
 ## Results
 
@@ -47,17 +50,10 @@ stream; and the first MiB of each file through each of liblzo2's LZO1X compresso
 
 Speeds are of the data. Every stream was rebuilt.
 
-- LZO1X-1's matches are, 99.9% of the time, the nearest ones of their length among the
-  positions outside earlier matches (its hash table never sees those). The match finder's
-  *skip* mode leaves them out too, which brought its records from 17% of the streams to 3.5%.
-  What is left is mostly where matches start and which of the candidates is taken, which
-  depend on its hash table's collisions and its skipping over literals.
-- LZO1X-999's matches are the nearest ones of their lengths; what is left is its parse.
-
 Through `aqr` (10 threads, level mid, with its check), the Silesia files as `lzop -3` files
 (101.0 MB) archive to 62.84 MB in 6.5 s, and as `lzop -9` files (76.3 MB) to 62.62 MB in 7.8 s;
 `zstd -3` of the same files gives 84.85 and 70.44 MB, and the original files archive to 57.83 MB.
-Testing the archives (`aqr -K`, then `-t`) takes 1.1 s, and 1.9 s for the second with the modules as Wasm.
+Testing the archives takes 1.1 s, and 1.9 s with the modules as Wasm.
 
 ## Tests
 
@@ -68,15 +64,11 @@ python3 -I scripts/gen-fixtures.py        # rewrites tests/data (needs liblzo2 a
 
 `cargo test` (debug) catches an overflow from a damaged record as a panic.
 
-## Status
+## Left
 
-The module `lzo-recons` (natively and as a Wasm module of aqr-modules) and lzop files in
-aqr-compress (at the start of a file or found in other data) are done.
-
-Raw LZO1X streams in other containers: Unreal 3's compressed chunks (packages and `.tfc` texture
-caches, aqr-bundle's `unreal-upk`, aqr-compress's `bundle::unreal_upk`): Goat Simulator's 40 files
-1419.50 -> 1273.27 MB.
-
-Not yet: LZO1X streams in other containers (the Linux kernel's images and initramfs are lzop
-files; squashfs, UBIFS, btrfs and zram hold raw streams), LZO-RLE, and the other LZO formats
-(LZO1, LZO1A-1C, LZO1F, LZO1Y, LZO1Z, LZO2A).
+- **Raw LZO1X in other containers.** The Linux kernel's images and initramfs are lzop files;
+  squashfs, UBIFS, btrfs and zram hold raw streams.
+- **LZO-RLE.** Not taken.
+- **The other LZO formats.** LZO1, LZO1A-1C, LZO1F, LZO1Y, LZO1Z, LZO2A.
+- **LZO1X-1's hash table start.** Records of 3.5-4.6% of the streams are mostly where matches
+  start, which depends on its hash table's collisions.

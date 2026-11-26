@@ -325,3 +325,14 @@ because of it.
   shorter and nearer one (the cost of the offset's bits against the length). `all` is 1.
 - An incompressible buffer is written as a stream larger than its data (the standard engine's
   noise: 1,088 bytes more for 256 KiB), not stored; WOF stores a chunk that does not shrink.
+
+## Design notes
+
+- On text, the record is (percent of the compressed bytes): the decisions between a literal and a
+  match 2.5 to 4.2 (4 KiB chunks to 64 KiB blocks), the matches' offsets (ranks) 0.5 to 2.7, lengths
+  none (a match is the whole match at its offset), code lengths and the rest below 0.01. The maximum
+  engine's record is nearly all offsets (3.1 of 3.55).
+- The first version looked at every position and coded a length and an offset's rank: 24.6% on text
+  (standard, buffer). Knowing that Windows' standard engine only looks at the positions where tokens
+  started, and coding record setters, took it to 6.9%.
+- Splitting tries both candidate modes on the first 256 KiB.

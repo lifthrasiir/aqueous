@@ -380,3 +380,30 @@ and skeletons after those (`vorbis_setup_db.py --base`), and no rows: Wwise's me
 The database has 524 codebooks (71,648 bytes), 13 floors, 41 residues, 4 mappings and 2 modes,
 44 skeletons and 260 rows, 79,861 bytes in all. Of the rows, 197 are setups unmodified
 libvorbis makes and 63 only the changed one; all 161 of vgmstream's table are among them.
+
+## Design notes
+
+Not normative.
+
+- Parsing: `setup` parses a setup header for a stream's channels and block sizes (codebooks
+  with the codewords of Vorbis I §3.2.1, their decoding trees, a table for their first 10 bits
+  and their lookup tables; floors of type 1; residues of types 0 to 2; mappings and modes).
+  `packet::walk` runs the decode of an audio packet against a source of values: reading a
+  packet gives its values and tail, values given write it, and the record's coder takes or
+  gives them.
+- Model: each value is a symbol of a key, chosen by its role, its book and a context: for a
+  residue VQ entry, the magnitude of the entry before it; for floor values and classwords, the
+  same field's value in the previous packet of its block size. Entries are coded by their rank
+  in the code (escapes past 255, as tables hold 256 symbols). Each key's table is the book's
+  code (free) or one of its own the record gives, where it pays.
+- Natively, setups are parsed once (`Setup::parse_cached`: by the encoder, the plan and the
+  module's decode alike), as many small streams share a few (a Wwise bank's media, FSB5's
+  samples). The record is of `Kind::Compressed`: its rANS words are stored as they are.
+- Memory on WebAssembly (stack allocator, `aqr_api::stack`): the plan is exactly what the
+  decoder reserves, in its order, from the setup header and the record's header; nothing grows
+  or is made per packet: the output first, then the setup (four vectors a codebook, its tree
+  last; floors, residues and mappings in fixed room), the keys (the entries by rank in one
+  vector), the header's lists and the tables (the default ones from the books' codes, the own
+  ones from the levels, all in one vector of frequencies, with no hashing), the decoder, the
+  contexts (slots only for the floors' values and the residues' partitions the setup has) and
+  the walk's room; freed top first.

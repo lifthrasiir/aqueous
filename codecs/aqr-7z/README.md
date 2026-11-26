@@ -5,7 +5,7 @@ files it holds, its coders of LZMA or LZMA2 by aqr-lzma's modules (`lzma-recons`
 `lzma2-recons`) and the filters over them (the branch converters, Delta, BCJ2, Swap2 and Swap4)
 by aqr-bcj's, and an encoded header of LZMA likewise; the rest of the archive (the signature header, folders of
 other coders, the header) is kept as it is. There is no module of its own: `FORMAT.md` tells
-what the formula is.
+what the formula is, and how it works.
 
 What it is for is the files: a folder's data is cut into the files' contents, each a slice of
 its own (from 1 KiB) in a stream of its kind by its name, so that they are recompressed in turn
@@ -27,10 +27,16 @@ let f = formula::encode(&archive, threads).unwrap();
 let sums = formula::entry_sums(&mut |span| read(span)); // the files' CRC-32s and sizes, from the header
 ```
 
+## What is taken
+
+Folders of LZMA, LZMA2 or Copy, under filters (any of aqr-bcj's, BCJ2 over three of them), with
+the header encoded or plain; 7z archives are found anywhere in data (a self-extractor's), from
+level 4 only. Kept as they are: folders of other coders, encrypted archives.
+
 ## Results
 
 Measured on 2026-10-30 on an Apple M4 (10 cores), through `aqr-7z-check -t 4` and `aqr`
-(all threads, level mid; the commit before as the baseline).
+(all threads, level mid).
 
 | | archives | rebuilt from | records | kept |
 |---|---|---|---|---|
@@ -38,15 +44,12 @@ Measured on 2026-10-30 on an Apple M4 (10 cores), through `aqr-7z-check -t 4` an
 
 - The large one (`mingw480/*.7z`, 37.10 MB) has an LZMA folder of 64 MiB dictionary (23.43 MB,
   249.4 MB of data, its record 4.32 MB) and a folder of BCJ2 (13.58 MB: its main stream of
-  LZMA2, its call and jump streams of LZMA). Splitting runs at 30 MB/s of data, rebuilding at
-  24 MB/s, through `aqr-7z-check -t 4` (a stream of LZMA was split and rebuilt on one thread then; now in parts, see aqr-lzma).
+  LZMA2, its call and jump streams of LZMA).
 - `mingw480` (411.0 MB: the tree of 8,344 files and that archive, whose files are those of the
   tree) archives into 84.45 -> 68.79 MB (the LZMA folder alone) -> 55.36 MB (with BCJ2); the
   tree alone into 47.36 MB. Compressing takes 5.6 -> 27.8 -> 42.3 s and 1.44 -> 3.34 -> 4.96 GB
   at peak; testing 0.3 -> 10.9 -> 16.9 s and 0.39 -> 2.17 -> 2.27 GB.
-- Of the 8.0 MB the archive costs beside its tree, 6.51 MB are the records. Before BCJ2, about
-  3.5 MB of it was what sharing the files' contents leaves (a plain tar of the same 8,238 files
-  costs 17.0 MB beside the tree); that is not measured again.
+- Of the 8.0 MB the archive costs beside its tree, 6.51 MB are the records.
 
 ## Tests
 
@@ -55,15 +58,9 @@ cargo rt -p aqr-7z   # 7-Zip's archives: LZMA2, LZMA, solid or not, header encod
                      # LZMA2 blocks, BCJ, BCJ2, ARM64, ARMT, SPARC, RISC-V, Delta; and of `write`
 ```
 
-## Status
+## Left
 
-Done: the container (headers encoded or plain), folders of LZMA, LZMA2 or Copy, under filters
-(any of aqr-bcj's, BCJ2 over three of them), and in aqr-compress: 7z archives detected anywhere
-(a self-extractor's), their files' CRC-32s for batching them with the same files (`together`); from level 4 only
-(`format_on`), kept as they are below.
-Left:
-
-- PPMd, BZip2, Deflate folders; encrypted archives are kept as they are.
-- A folder of LZMA over 64 MiB of data is coded in parts rebuilt side by side, and the match
-  finder's reach is cut to fit the encoder's bound on an application (256 MiB by default: 8 MiB
-  for the 64 MiB dictionary, so the records grow); see aqr-lzma's README for the figures.
+- **PPMd, BZip2 and Deflate folders.** Kept as they are.
+- **Folders of LZMA over 64 MiB.** Coded in parts, with the match finder's reach cut to fit the
+  encoder's bound on an application (8 MiB for the 64 MiB dictionary), so the records grow; see
+  aqr-lzma's FORMAT.md for the figures.

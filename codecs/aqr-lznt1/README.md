@@ -7,13 +7,10 @@ NTFS's compression of files (`compact /c`, the "compress contents" attribute: un
 clusters, 64 KiB of data with clusters of 4 KiB), in `RtlCompressBuffer` buffers and in a few
 file formats; a container (NTFS in aqr-disk) takes the units apart and makes the applications.
 
-No encoder is reproduced. Windows' is closed. The record codes the parse given the data, under
-contexts of what a match finder sees there (the first two candidates whose first 3 bytes agree,
-which is all that Windows seems to look at: the longer, the nearer on ties, is nearly always the
-match taken), and the unit's other bytes (the end header, the padding to the cluster, a stored
-chunk, unused flag bits) against what Windows writes. It was written from the public
-description of the algorithm ([MS-XCA], §2.5), without any implementation's code. The streams,
-the record and the module `lznt1-recons` are in [FORMAT.md](FORMAT.md).
+No encoder is reproduced (Windows' is closed): any stream has a record, 0.35% of the compressed
+bytes for Windows'. It was written from the public description of the algorithm ([MS-XCA], 2.5), without
+any implementation's code. `FORMAT.md` specifies the streams, the record, the module `lznt1-recons`,
+and how Windows' encoder behaves.
 
 ```sh
 cargo run --release -p aqr-lznt1 --example aqr-lznt1-check -- [-n K] FILE...   # split, rebuilt; record share and speeds
@@ -28,13 +25,21 @@ assert_eq!(recons::join(&sp.data, &sp.record)?, units.concat());
 
 A buffer of `RtlCompressBuffer` is one unit of the buffer's whole data length.
 
+## What is taken
+
+- NTFS compressed units (`compact /c`: 16 clusters, 64 KiB of data at 4 KiB clusters; any cluster size
+  and unit length is modelled), taken apart by aqr-disk from NTFS volumes in disk images (stored,
+  holes, compressed; aqr-disk's README has the figures), and `RtlCompressBuffer` buffers
+  (`COMPRESSION_FORMAT_LZNT1`, the standard engine: one unit of the buffer's whole length).
+- Not taken: the maximum engine's output, other systems' NTFS drivers, ESE databases and hibernation
+  files (no sample here).
+
 ## Results
 
-Windows 11 (NTFS on a 64 MiB volume, `compact /c` files; `RtlCompressBuffer` with
-`COMPRESSION_FORMAT_LZNT1`, the standard engine, whole buffers), on text (712,895 bytes of Rust
-source), a repeating byte pattern (`gen`, 1 MiB), the same text, pattern and text again (`mixed`,
-2 MiB) and noise (256 KiB). `aqr-lznt1-check -n 3`, an M-series Mac with other work running,
-measured on 2026-11-09. Every stream was rebuilt. Record share of the compressed bytes:
+Windows 11 samples, 2026-11-09 (`aqr-lznt1-check -n 3`, an M-series Mac): NTFS on a 64 MiB volume
+(`compact /c` files) and `RtlCompressBuffer`, on text (712,895 bytes of Rust source), a repeating
+byte pattern (`gen`, 1 MiB), text, pattern and text again (`mixed`, 2 MiB) and noise (256 KiB). Every
+stream was rebuilt. Record share of the compressed bytes:
 
 | sample | NTFS units | `RtlCompressBuffer` |
 |---|---|---|
@@ -44,16 +49,9 @@ measured on 2026-11-09. Every stream was rebuilt. Record share of the compressed
 | noise | | 0.00% (7 bytes: all chunks stored) |
 | all | | 0.35% (9,700 of 2,758,564 bytes, the 7 files) |
 
-What the record is made of, on text (percent of the compressed bytes): the decisions between a
-literal and a match 0.35 (a literal where Windows has a candidate: its own table seems to lose
-some), the matches' offsets 0.17 (the shorter of the two candidates now and then), lengths none (a
-match is the whole match at its offset), the unit's rest (end header, allocation, padding, unused
-flag bits) below 0.01. The first version, which took the nearest candidates by rank, took 1.10%.
-
 Speed, one thread, MB/s of data: splitting 26 to 43 (text), up to 210 (repeats); rebuilding 130
-(text), up to 680 (repeats). Splitting tries both candidate modes on the first 256 KiB.
-
-The module `lznt1-recons` is 29,399 bytes of Wasm (9,108 bytes as its module block).
+(text), up to 680 (repeats). The module `lznt1-recons` is 29,399 bytes of Wasm (9,108 bytes as its
+module block).
 
 ## Tests
 
@@ -71,14 +69,12 @@ bytes, unit lengths that are not a multiple of 4096): the same. Damaged records,
 do not panic. aqr-decompress runs the module as WebAssembly on `ntfs.units` and `buf-gen.units`
 (with a hole and a stored unit added) and checks its memory plan.
 
-## Status
+## Left
 
-The module `lznt1-recons` (natively and as a Wasm module of aqr-modules) is done, and aqr-disk
-takes NTFS's compressed streams apart by it (the units of NTFS volumes in disk images: stored,
-holes, compressed; aqr-disk's README has the figures).
-
-Not yet: the encoder's own candidate set (the literal decisions are most of the record: Windows'
-hash table is not known); NTFS compression with other cluster sizes (clusters of 512 bytes to
-64 KiB make units of 16 clusters, not tried: the model takes any unit length and cluster); other LZNT1 writers (the maximum
-engine's output, other systems' NTFS drivers, ESE databases, hibernation files) have no sample here;
-several threads for a large buffer.
+- **Windows' candidate set.** The decisions of a literal where Windows has a candidate are most of the
+  record (0.35% of the compressed bytes on text); its hash table is not known.
+- **Other cluster sizes.** Clusters of 512 bytes to 64 KiB make units of 16 clusters; the model takes
+  any, but only 4 KiB has a Windows sample.
+- **Other writers.** The maximum engine, other systems' NTFS drivers, ESE databases and hibernation
+  files have no sample here.
+- **Threads.** A large buffer is split on one thread.

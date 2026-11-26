@@ -73,3 +73,18 @@ each stream included), and for each LZMA stream three more: `inno` (its data, a 
 turn), `lzma/record` and `lzma/index` (empty). The node of the stream is the application of
 `lzma-recons` to the three, of the stream's length. A zlib stream is a content of the format zlib
 (class `inno`), recompressed in turn as zlib streams are (aqr-flate).
+
+## Design notes
+
+- aqr-compress takes the streams of a PE image from level 4 (as `.lzma` files and 7z archives:
+  rebuilding LZMA is slow), each where its data may archive smaller than it (by aqr-formula's
+  probe; where the data hardly compresses itself, as packed executables, the files in it are not
+  counted as nothing).
+- aqr-compress counts the installer's data (up to the total the table gives, a certificate after
+  it left to the PE extent; before 5.1.5 only where it starts with a chunk of LZMA or zlib) in
+  the image's extent, what is not taken of it kept in a stream of its own.
+- Inno Setup 4.0's zlib streams (chunks and the setup program) are recompressed by aqr-flate as
+  zlib's level 9, what Inno Setup 4.0 wrote.
+- The files cut apart by the header's list are not used: the data is scanned as a whole (the call
+  instruction filter `CallInstructionOptimization` of executables and per-file kinds are not
+  undone).

@@ -50,10 +50,10 @@ Other formats this one uses are specified elsewhere:
 
 ## 2. Module
 
-The module is `clip-recons`, version 2, implemented by `module::decode`. Its output is the
-`.clip` file (the original) of `total` bytes, the length the application gives. (Version 2 reads
-the same inputs as version 1 and gives the same output; it differs only in how it uses memory,
-which the encoder declares as the module's limit.)
+The module is `clip-recons`, version 3, implemented by `module::decode`. Its output is the
+`.clip` file (the original) of `total` bytes, the length the application gives. (Versions 2 and 3
+read the same inputs as version 1 and give the same output: 2 changed how it uses memory, which
+the encoder declares as the module's limit; 3 is a rebuild with aqr-flate's changes, `7d84e656`.)
 
 **Parameters**: a varint `batch`, the tiles a batch holds, `1 ≤ batch ≤ 65536`; nothing may
 follow it.
@@ -308,3 +308,74 @@ The reference encoder (`formula::encode`):
 - The database: aqr-sqlite's formula embedded where it takes it, else its bytes as content of
   the format `sqlite`. The skeleton is content (aqr-compress looks into it for files).
 - A file that is not a `.clip` file, or whose walk fails, has no formula.
+
+## Design notes *(informative)*
+
+**Container as read.** `Head`, `Exta` chunks (external data: a layer's tiles as block data, or
+data of other kinds), one `SQLi` chunk and `Foot`. A block is a 256x256 tile, zlib-compressed,
+or none where empty. Tiles inflate to 327,680 bytes (the alpha plane, then B, G, R and a fourth
+byte, mostly 0 or 255, interleaved), 65,536 (one plane) or 131,072 (two planes). `BlockStatus`
+and `BlockCheckSum` follow the blocks, a u32 each per block; the checksum is 0 for empty blocks
+and none of CRC-32 or Adler-32 of the stream, the data or the record. The database's
+`Offscreen.Attribute` gives each layer's canvas and block grid (`Parameter`) and the sizes of its
+block records (`BlockSize`); `Offscreen.BlockData` names the `Exta` chunk. Every one of the
+111,515 zlib streams in the 13 files is what zlib 1.3 makes at level 1, window 15, memLevel 9.
+
+**Memory.** `clip-recons` lays its memory out as a stack (`aqr_api::stack`), so what it takes is
+its plan, which the encoder declares as the module's limit (`plan::decode`;
+docs/arena-design.md): the vectors of `module::parse`, each reserved at the size it ends at,
+then the file, which the batches of tiles (tasks, each giving back its zlib streams as one block
+of bytes) fill in place. The file is the only block whose size is the output's; a task holds its
+model, the pixels of a tile, its streams and zlib's emulator. The plan equals what the module
+takes, to the page (`clip_plans_hold` in aqr-decompress's `wasm.rs`, and the 15 files of the
+corpus). The format is the same in every version (§2).
+
+**The dynamic model** (`src/dynamic.rs`). A pixel is coded whole: whether it copies its left,
+upper, upper right or upper left neighbour; else its place in a list of recent pixels; else its
+samples. `Escape::Left` codes samples as differences to the left pixel's; `Escape::Med` as
+aqr-psd's model (the residual against MED, B and R corrected by G's residual). It beats the
+per-sample models on everything but the few two-plane tiles: the art is mostly flat fills, line
+art and the colours under transparent pixels, which copies and the list catch whole. Runs and
+tile kinds (all-zero and one-pixel tiles by a flag; runs of pixels equal to the left where the
+row above equals it for 4 pixels on) are 1.4% larger than without but several times as fast on
+flat tiles.
+
+**The static model** (`src/static.rs`): the same model in symbols of static tables per chunk of
+2^20 symbols (rANS, as aqr-psd), the list a ring with a hash index. It is 7.8% larger: not its
+tables (5.2 MB of 298 MB) but the adaptivity it gives up; smaller chunks code the symbols
+smaller (2^15: -7%) and the tables larger (+6 MB on one file).
+
+**Models by class** (13 files, 775 MB of zlib; ratio to the zlib bytes; `aqr-clip bench`):
+
+| tiles | count | zlib MB | zlib through archive | aqr-psd | dyn-m | dyn |
+|---|---|---|---|---|---|---|
+| colour, all zero | 20,011 | 29.1 | 0.000 | 0.132 | 0.004 | **0.000** |
+| colour, one pixel | 24,242 | 39.0 | 0.001 | 0.121 | 0.004 | **0.000** |
+| colour, <=16 | 20,884 | 86.7 | 0.613 | 0.300 | **0.102** | 0.115 |
+| colour, <=256 | 22,008 | 289.0 | 0.913 | 0.610 | **0.450** | 0.457 |
+| colour, more | 8,386 | 301.3 | 0.987 | 0.501 | **0.405** | 0.408 |
+| one plane, <=16 | 2,712 | 2.7 | 0.739 | 1.073 | **0.272** | 0.280 |
+| one plane, <=256 | 3,971 | 19.0 | 0.965 | 0.629 | **0.379** | 0.404 |
+| two planes, <=256 | 219 | 5.2 | 1.000 | **0.489** | 0.603 | 0.604 |
+| all tiles | | 774.9 | 0.826 | 0.490 | **0.352** | 0.357 |
+
+(`dyn-m`: `Escape::Med`; `dyn`: with runs and tile kinds.) On the held-out file the tiles of few
+colours repeat across the file: their inflated bytes through the archive come to 0.041 (<=16
+colours) and 0.291 (<=256) of their zlib bytes, the per-tile model 0.414 and 0.607.
+
+**Speed** (`aqr-clip speed`, a model alone as a module runs it: batches of 64 tiles each a
+stream of its own, 13 files, 926 MB, Ryzen 7 9700X; the decoder deflates at level 1 with
+zlib-rs, memLevel 8, for speed only):
+
+| model | tiles / zlib | encode, 16 threads | decode, 16 threads | model alone, 1 thread (encode / decode) |
+|---|---|---|---|---|
+| `dynamic` | **0.357** | 9.9 s (93 MB/s) | 12.8 s | 14.8 / 17.8 MB/s |
+| `static` | 0.384 | **7.6 s (122 MB/s)** | **8.3 s** | 21.4 / 30.3 MB/s |
+
+On one thread inflating takes 11.8 s and deflating 22 s on top. The streams are made by
+`aqr_clip::zlib` (aqr-flate's `zlib::compress`, zlib's deflate_fast run on its own, with
+aqr-common's Adler-32): all 111,515 byte for byte; on an M4 (`speed -t 10 -b 64 -u`) deflating
+takes 18.6 thread seconds (30.0 when driven token by token). With 16 threads a thread runs at
+about half its speed alone (SMT). Model speed by inflated bytes a second a thread (encoder, 16
+at once): colour tiles of 0-1 pixels ~135 (dyn-m) / 1300-1500 (dyn); <=16 139 / 551; <=256 56 /
+83; more 39 / 47; one plane 25-30 / 56-450.

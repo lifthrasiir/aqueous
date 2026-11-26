@@ -2,39 +2,36 @@
 
 Ogg files rebuilt bit for bit from their logical streams' packets and the layout of their
 pages. The module `ogg-recons` derives each page's lacing values from its stream's packets and
-its CRC from the page, and the layout holds only each page's stream and lacing values' count,
-and its header type, sequence number and granule position as they differ from a prediction:
-the flags and numbers as a muxer writes them, the granule positions from the samples of the
-packets ending on the page (of Vorbis' block sizes, of Opus' TOC bytes). `FORMAT.md` specifies
-it.
-
-- `page`: a page, read with its CRC checked, and written.
-- `layout`: the packets framed (in chunks of 65535 bytes at most, as aqr-vorbis frames its
-  packets), the layout record, and the walk over the pages that the encoder and the decoder
-  both make.
-- `plan`: the module's memory on WebAssembly (it is on the stack allocator, `aqr_api::stack`):
-  exactly what the decoder reserves, in this order: the output, the CRC's tables, the layout's
-  lists, the streams' packets (the bytes, ends, lacing values and durations of all streams in
-  one vector each, counted first) and the walk's list.
-- `formula`: the file as its layout and its streams' packets, a Vorbis stream's audio packets
-  by aqr-vorbis's `vorbis-recons` in pieces of 2 MiB (on threads), its setup header one stream
-  that the pieces and the packets share.
+its CRC from the page; the layout holds only each page's stream, lacing values' count and the
+flags and numbers that differ from a muxer's prediction. A Vorbis stream's audio packets go
+to aqr-vorbis's `vorbis-recons`. [FORMAT.md](FORMAT.md) specifies the module and
+[its design notes](FORMAT.md#design-notes) say how it works.
 
 ```sh
 cargo run -r -p aqr-ogg --example aqr-ogg-check -- FILE...   # encoded, decoded; streams by class
 ```
 
-Ogg files of Vorbis only are taken: of other streams (Opus, FLAC, Theora), the layout and the
-packets framed are no smaller than the pages once compressed. Pages are taken from the start of
-a file up to the first that is not whole or of a wrong CRC; what follows is kept as it is.
+## What is taken
 
-On 12 Ogg Vorbis files (libvorbisenc with libogg, and ffmpeg's muxer; 49.14 MB): 0.932 through
-`aqr` (zstd -3 0.999); the layout is about 5 bytes a page before compression.
+Ogg files of Vorbis only. Of other streams (Opus, FLAC, Theora) the layout and the packets
+framed are no smaller than the pages once compressed, so they are kept as they are. Pages are
+taken from the start of a file up to the first that is not whole or of a wrong CRC; what
+follows is kept as it is.
 
-## Status
+## Results
 
-Left:
+12 Ogg Vorbis files (libvorbisenc with libogg, and ffmpeg's muxer; 49.14 MB): 0.932 through
+`aqr` (`zstd -3`: 0.999). The layout is about 5 bytes a page before compression.
 
-- FLAC in Ogg: its packets are FLAC's metadata blocks and frames, which aqr-flac would take
+## Tests
+
+- `tests/ogg.rs` (`tests/data`): files rebuilt from their formulas: libvorbisenc and libogg,
+  ffmpeg's muxer (Vorbis and Opus), FLAC's, chained and grouped streams, data after the pages.
+- `tests/edge.rs`: Vorbis streams over the size of a piece and with packets of a chunk and
+  more, Opus packets of every TOC code, a decoder given lengths and counts the data cannot hold.
+
+## Left
+
+- **FLAC in Ogg.** Its packets are FLAC's metadata blocks and frames, which aqr-flac would take
   once joined into a FLAC stream.
-- Opus: no recompressor; the pages are kept as they are.
+- **Opus.** No recompressor; the pages are kept as they are.

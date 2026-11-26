@@ -28,6 +28,7 @@ Contents:
 6. [Planes](#6-planes)
 7. [The model](#7-the-model)
 8. [The encoder](#8-the-encoder-informative) *(informative)*
+9. [Design notes](#9-design-notes)
 
 ## 1. Conventions
 
@@ -394,3 +395,60 @@ stream (a slice of `prores/side`), its stripes' pieces (a slice of `prores/coded
 compressed) and the bytes between its frames (the slice of `prores/rest` they are in, in
 order). It is made where the chunks come to less than the frames' bytes; aqr-compress weighs it
 against the file.
+
+
+
+## 9. Design notes
+
+Why the module and the model are as they are; none of it is needed to decode.
+
+- **Pieces.** Each piece restarts the arithmetic coder (the model's state carries on), about four
+  bytes a piece: on 120 frames of 1080p in 16 stripes 106,220,346 bytes against 106,219,711 of the
+  streams before, and 122,123,352 against 122,129,519 on 24 frames of UHD 4:4:4.
+- **Part module (version 3, against 2).** A gang of tasks, one for each stripe, lives for the whole
+  chunk, holding its stripe's model and the planes of the frame before; the instance sends each its
+  message and puts the frame together from what they send back. Three frames are in flight
+  (`module::DEPTH`; depths 2 to 6 decode alike on ten cores). Natively the same code runs through
+  the emulation of aqr-api, the tasks on threads. The plan follows the frames, not the chunk: a
+  chunk of 64 MiB took up to 389 MiB of the application's memory as version 2, over the compressing
+  bound, so 14 of the 30 corpus files over 64 MiB were kept as they were; version 3 keeps none
+  (hd 404 -> 70 MB, uhd 410 -> 220 MB, a 4 KB-frame repetition 582 -> 6.9 MB). The module is 45,159
+  bytes (15,222 of its block).
+- **Stripes by size.** A stripe for each 4 MiB of a chunk's frames (at most 16), and none for
+  less than 16 KiB of a frame: for frames of 4 KB the messages cost more than the work (on 300 MB of
+  those, 16 stripes decoded at 3.8 MB/s, one at 18). Splitting rows costs little spatial context
+  (SD at 32 stripes, a slice row each, lost 0.1%); what costs is each stripe's model learning anew,
+  which shows where little is coded: 150 frames in one chunk by 1, 8, 16, 32 stripes, Apple's
+  animated film 0.7347, 0.7414, 0.7457, 0.7516, while camera footage gained a little (ARRI 2K
+  0.5517, 0.5498, 0.5493, 0.5491); decoding on 16 threads 13, 71, 100, 108 MB/s. On noisy ffmpeg
+  1080p HQ by 1, 2, 4, 8, 16 stripes the streams came to 106.23, 106.17, 106.15, 106.11, 106.14 MB
+  and decoded at 12, 24, 45, 72, 82 MB/s on 10 cores.
+- **Contexts.** Chosen with `examples/model.rs` (static entropy of sampled frames by context).
+  Against the coded bytes: neighbours alone 0.850; median DC, frequency neighbours, mantissa bits
+  0.830; the previous frame for AC sizes 0.793, for DC 0.775, for signs and mantissa 0.738. Coding
+  the difference from the previous frame instead helps static footage and hurts noisy footage,
+  about even in all. The other block placement and a raster scan cost more.
+- **What the decoding time is.** The latency chain of each decision (the adaptive bit's load, the
+  multiplication of the range, the comparison, whose result is a branch) and its mispredictions,
+  not cache (a model cut to 16k contexts ran as fast) or instructions (unchecked indexing took 8% of
+  them for 2% of the cycles). What helped: fewer branches on hard-to-predict bits (mantissa and sign
+  bits by selects), the slices written from the nonzero positions (a quarter of decoding, now 13%),
+  a cheaper bit update: decoding 22.0 -> 29.8 MB/s, encoding unchanged (15.6), the ratio 0.7902 ->
+  0.7900.
+- **Tried and dropped** (decisions or ratio, one thread):
+  - zero flags in spans with nothing around them as one decision per span: decisions -3% to -8%,
+    ratio +0.65% and +0.2%; the spans are short;
+  - a raw second mantissa bit where the previous frame gives no hint: decisions -5%, ratio +0.15%
+    (+1.5% on static footage), 1-3% of the time (those bits are branchless already);
+  - all zero flags of a block first, then sizes, signs and mantissas, with no branch on a result:
+    decoding 6-13% slower (a chain of 25 cycles a flag against 22);
+  - one window for a coefficient's run, level and sign in the parse, by selects: 2-3% of encoding
+    for more code.
+- **Weighing.** aqr-compress does not weigh the formula against zstd of the file when it is 16 MiB
+  or more (`PRORES_UNCOMPARED`); a smaller one still is (FATE's 8 files, 1.2 MB of nearly blank
+  frames, archived to 377.6 KB without, 319.5 KB with it). On the 30 files the archives were
+  identical byte for byte.
+- **Chunk size.** 120 frames of 1080p repeated nine times (1.04 GB, 10 cores): 64 MiB chunks
+  955,914,677 bytes, 24.8 s; 256 MiB 954,581,967 (-0.14%), 32.8 s; 1 GiB 954,124,586 (-0.19%),
+  78.7 s. Bigger chunks gain little on noise and lose the chunks' parallelism in encoding and the
+  encoder's memory; the default stays 64 MiB.

@@ -362,3 +362,36 @@ The encoder (`recons::split`) decodes each image's stream (as far as it decodes,
 of 2 to 8; the others stay in the skeleton. `formula::encode` takes a file from its header; the
 skeleton goes in a stream of class `gif/skeleton`, the record in `gif/record`. aqr-compress finds
 GIF files at the start of a file and in other data, up to their trailer.
+
+## Design notes *(informative)*
+
+The first version of the model (12 contexts, tables of up to 2^22 slots, every index bit by
+bit) gave records 1.1% smaller at about twice the instructions and a 1.2 GB peak for `aqr -c`
+of the 10 GB corpus's GIF files. What was given up, as `aqr-gif-check` measures (records of all
+of `corpus/`, 5.74 MB at first; instructions of the three photographs and of the other 485
+files of `corpus/10gb`):
+
+| change | records | photographs | other files |
+|---|---|---|---|
+| contexts of W, N and of W, N, NE, NNE dropped; mixers of 16 lanes of `i32`, vectorized | +0.24% | -43% | -43% |
+| first, whether the index is W's | +0.42% | -15% | -42% |
+| tables of 2^21 slots at most, 4 a pixel; the APM's contexts one for 8 pixels | +0.43% (the animation of `corpus/misc` +2.9%) | ±0 | ±0 |
+
+- The APM (a probability map over the mix by W, N and the node) was dropped: records +0.65%,
+  89 -> 76 s on one thread (106 coded GIF files of aqr-asar's corpus, Windows x86-64). A bit's
+  time is a chain of dependent steps: tables of 2^16 slots gave -7%, AVX2 mixers nothing.
+- Flat pixels (W, N, NW, NE the same; 88% of those files', 99.5% of them W's) got a small model
+  of their own (§5.4): records -0.67%, 76 -> 54 s.
+- The mixers are 12 lanes (10 inputs and two zeros) in SIMD of their own (SIMD128 in the
+  module, NEON, SSE4.1), the records the same: on an M4 `aqr -K` of 15 GIF files as Wasm 94.9
+  -> 69.3 G instructions, natively 51.8 -> 46.9 G; the module 35.1 -> 33.9 KB. On a Ryzen 7
+  9700X natively 4.86 -> 4.49 s (scalar loops 4.98 s).
+- Module versions: 1 took no parameters (46 KB of Wasm, a 14 KB block); 2 decodes onto its
+  output, laid out as a stack with an exact plan, the most pixels an image holds in its params.
+- Left out: a single mixer (+0.6%, -14%); the W bit gated by how often pixels were W's (larger
+  at every threshold: the tree's tables learn from both cases).
+- The give-up rule of the encoder (a quarter of an image's LZW data of 1 Mbit at least coded
+  and over 5/4 of its bits): files of lossy encoders (Photoshop's "Lossy") are made to fit
+  LZW's dictionary, which the model codes up to 2.3 times larger. Of the 117 GIF files of
+  aqr-asar's 27 archives, 11 of 12 such files are given up, none of the others (at most 1.16;
+  the 12th is 1.22).

@@ -346,3 +346,15 @@ of the row above, wrapping in `w` bytes (the row above the first is zeros). It m
 for `J`, `E`, `C` and `P`, 8 for `K`, `D`, `M` and `Q`, and 1 otherwise. `delta` is taken
 where the planes' bytes have the smaller order-0 entropy that way, each byte position of each
 element counted apart.
+
+## Design notes
+
+- **No Rice encoder reproduced.** The Rice coder's choices are not emulated: the tiles' streams
+  are rebuilt from the pixels and the codes of their blocks, which are kept (coded in the context
+  of the shortest code). No encoder's code was read, only the Standard's description.
+- **Pyramid** (§5): hcompress's own quantisation is not reproduced, which would make the DSS's
+  coefficients exact multiples; the coefficients' values are learnt by band and level instead.
+  Images through hcompress code to a third of what prediction gives.
+- **Modes by sample.** Both modes are tried on a sample of the image, the smaller coding taken;
+  the pyramid holds its levels as 64-bit numbers (299 MB peak on a 3600x3600 image).
+

@@ -3,25 +3,11 @@
 Audiokinetic Wwise's Vorbis media (`.wem`, and the media of banks, aqr-bundle's `wwise-bnk`).
 A medium is a RIFF WAVE of format `FFFF` whose Vorbis stream has no identification or comment
 header and a stripped setup header: each codebook is a 10-bit id into a library that Wwise's
-runtime carries, and the fields that never vary are left out (a floor's and a mapping's type, a
-mode's window and transform, the time-domain list, the framing flag; a residue's type in 2
-bits). The audio packets leave out the packet type and the window flags. The floors, residues,
-mappings and modes are all there, so only the ids' codebooks are missing to rebuild the setup.
-
-- `wem` reads a medium's chunks, its `vorb` fields (in `fmt ` of 0x42 bytes; size 0x2A only)
-  and its packets (each after a u16 size; a medium cut short ends inside one).
-- `stripped` reads the stripped setup into its ids and the Vorbis setup's bits after the
-  codebooks, assembles the setup from codebooks given for the ids, and strips one back.
-- `ids` is the table of the ids known (286), each with its codebook part in aqr-vorbis's setup
-  database.
-- `formula` splits a medium into its head (up to the first audio packet, the stripped setup
-  among it), its packets, rebuilt by aqr-vorbis's module `vorbis-recons` (stripped packets)
-  from the record of their values with the setup the stripped one stands for, and its tail.
-  A setup with an id the table has not is sought among the database's skeletons by the
-  medium's first packets. Parsed setups are cached (a few setups serve many media).
-
-`FORMAT.md` tells the media, the setup rebuilt and the split. aqr-compress takes media by their
-header or the extension `.wem` (format `wem`), the banks' media among them.
+runtime carries. The medium is split into its head, its packets (rebuilt by aqr-vorbis's
+`vorbis-recons` from the record of their values, with the setup the stripped one stands for) and
+its tail. [FORMAT.md](FORMAT.md) tells the media, the setup rebuilt and the split, and
+[its design notes](FORMAT.md#design-notes) how the ids were found. aqr-compress takes media by
+their header or the extension `.wem` (format `wem`), the banks' media among them.
 
 ```sh
 cargo build --release --example aqr-wwise   # target/release/examples/aqr-wwise
@@ -29,45 +15,37 @@ aqr-wwise ids [--db FILE] FILE...|@LIST   # setups grouped, the ids' codebooks f
 aqr-wwise recode FILE...|@LIST            # each medium through its formula and back; size, speed
 ```
 
-`ids` takes `.wem` files, banks, and any other file holding media (Unreal's paks, No Man's
-Sky's audio paks: RIFF WAVEs of format `FFFF` found anywhere). It tries every skeleton of
-aqr-vorbis's setup database (libvorbis's setups; `--db` another one) that has as many codebooks
-on each setup, and takes those under which every packet parses to its end (no packet cut short,
-at most 7 zero bits left). A wrong skeleton parses few (0 to 27 of 400). Where none does, it
-seeks the codebooks one place at a time.
+## What is taken
 
-## Status
+Vorbis media with `vorb` fields in `fmt ` of size 0x2A whose setup has the 286 known ids, or is
+found among aqr-vorbis's database skeletons. Not taken: other `vorb` sizes, and media whose
+setup is none of those.
 
-On seven games' media (Unpacking, Chants of Sennaar, Satisfactory, ASTRONEER and No Man's Sky
-of Steam; Alba and The Alto Collection of Epic): 82,570 Vorbis media, 26 distinct setups of 1
-to 6 channels (more than two coded with the mono setups, as FMOD does), 44.1 and 48 kHz. Under
-the database's skeletons (those of stock libvorbis 1.3.7 among them: the blocks of 512 and 4096
-of two of Alba's setups are not FMOD's), 25 setups have exactly one skeleton under which their
-packets parse, and the 286 ids seen agree across setups, each one codebook. One setup
-(Satisfactory, 9 media: stereo at 6 to 8 kHz, blocks of 512) is not found: no skeleton fits and
-the descent over the codebooks known stops at 29 of 200 packets, so its books are not libvorbis
-1.3.7's (aoTuV's, perhaps).
+## Results
 
-`recode` on all of them (16 threads, Windows, Ryzen 7 9700X): 82,550 media taken, all given
-back, 7011.6 -> 6349.8 MB of streams but the setups (0.906: the records 6286.4 MB); 16.3 MB/s
-encoding and 15.5 MB/s decoding a thread. Through `aqr -c -T 16` (against `1c50674d`):
+Seven games' media (82,570 Vorbis media, 26 setups), `recode`, 16 threads, Windows, Ryzen 7
+9700X: 82,550 taken, all given back, 7011.6 -> 6349.8 MB of streams but the setups (0.906);
+16.3 MB/s encoding and 15.5 MB/s decoding a thread. Through `aqr -c -T 16` (against
+`1c50674d`):
 
-| | before | after |
+| Input | Before | After |
 |---|---|---|
-| Unpacking (66 `.wem`, 3 banks, 15,492 media, 278.95 MB) | 270.28 MB, 1.9 s | 252.35 MB (−6.6%), 4.5 s |
-| Chants of Sennaar (2 banks, 308.38 MB) | 307.01 MB, 1.9 s | 284.41 MB (−7.4%), 3.2 s |
+| Unpacking (66 `.wem`, 3 banks, 15,492 media, 278.95 MB) | 270.28 MB, 1.9 s | 252.35 MB (-6.6%), 4.5 s |
+| Chants of Sennaar (2 banks, 308.38 MB) | 307.01 MB, 1.9 s | 284.41 MB (-7.4%), 3.2 s |
 
-`aqr -K -T 16` of Unpacking's archive: 3.9 s. Its main bank holds 15,425 media of 8 KB on
-average; what each costs apart from its packets (a setup parsed, the formula compared with the
-medium) was most of the time, until setups were parsed once (aqr-vorbis's `parse_cached`) and
-media's formulas were taken without comparing (`encode` gives one only where it is smaller).
+`aqr -K -T 16` of Unpacking's archive: 3.9 s.
 
-The packets that do not end exactly end early with zero bits only, so they do not tell against
-the setups found: a stream's last packet often ends 21 to 28 bits early, and in some of No Man's
-Sky's media runs of packets end far early (silence, padded); the record keeps their tails. Two
-ids (423, 438) are the same codebook, as libvorbis's tables have it twice, which suggests that
-the library is libvorbis's books in the order of its tables.
+## Tests
 
-Left: the ids of other Wwise versions, where the library differs (`vorb` chunks of other sizes,
-packets with granules); aoTuV's setups (Satisfactory's low rates); a stream's fixed cost in
-aqr-vorbis's encoder (about 0.24 ms: its keys, default tables and rANS tables).
+- `tests/formula.rs`: media made here from setups of aqr-vorbis's database: their stripped
+  setups read and made again, their formulas (the setup found by the table of ids or by a
+  skeleton) giving them back through aqr-vorbis's module.
+- `tests/riff.rs`: the walk of a medium's RIFF chunks (the pad byte after a chunk of odd size).
+
+## Left
+
+- **Other Wwise versions.** The ids of versions where the library differs (`vorb` chunks of
+  other sizes, packets with granules).
+- **aoTuV's setups.** Satisfactory's low-rate media (9 of 82,570) are kept as they are.
+- **Fixed cost of a stream** in aqr-vorbis's encoder (about 0.24 ms: its keys, default tables and
+  rANS tables).

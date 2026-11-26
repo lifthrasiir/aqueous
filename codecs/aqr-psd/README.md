@@ -1,7 +1,10 @@
 # aqr-psd
 
 Lossless PSD/PSB recompression: a Photoshop file is coded as a formula (the module
-`psd-recons` of aqr-formula) of a smaller representation, and restored bit for bit.
+`psd-recons` of aqr-formula) of a smaller representation, and restored bit for bit. `FORMAT.md`
+specifies the module and how it works: the pixel model, PackBits rebuilt by the encoder
+identified per channel, the composite predicted by rendering the layers, and the threads and
+memory plan.
 
 ```sh
 cargo build --release --bins --example aqr-psd   # aqr-psd in target/release/examples
@@ -15,70 +18,28 @@ cargo test                              # formula round trips of synthetic PSDs 
 input. `examples/` holds profiling aids (`modelbench`, `renderbench`, `pbbench`, `recbench`) and
 debugging ones (`chan`, `diff`, `rlediff`), run with `cargo run --release --example aqr-psd-NAME -- FILE`.
 
-## How
+## What is taken
 
-- Layer channels and the composite image (8-bit, PackBits or raw) are decoded and coded with
-  a pixel model (MED prediction with alpha-aware neighbors, contexts, runs) and static-table
-  rANS. Color planes are coded pixel by pixel so that their dependency chains overlap.
-- PackBits is rebuilt bit for bit: Photoshop's encoder is identified per channel (it cuts rows
-  at its image cache tiles, then into 128-byte chunks); rows no known encoder reproduces are
-  stored verbatim.
-- The composite is predicted by rendering the layers (blend modes, masks, clipping, groups),
-  when a sample of rows shows that it pays: where pixels match, runs of them cost next to
-  nothing.
-- Channels repeating an earlier one are copies; files embedded in smart objects are coded as
-  formulas of their own, recursively (PSD/PSB), or by aqr-png and aqr-jpeg.
-- The rest of the file, the skeleton, is kept as it is: whatever holds the formula compresses
-  it.
-- The format is specified in [FORMAT.md](FORMAT.md).
-- Both directions stream: pixel data is coded row by row from the input and decoded row by
-  row into the output (allocated at its final size), so the memory besides input, output and
-  the streams stays small whatever the file size (embedded PNG and JPEG files take what their
-  recompressors need).
-
-## Threads
-
-`-t N` (the `threads` of `formula::encode` and `formula::decode`): the output is the same
-bytes whatever the number of threads, and one thread runs the serial code unchanged. The model
-state is per group but all groups share one rANS stream, so the model coding and decoding stay
-on one thread, in order; around it:
-
-- Encoding: spans are planned (RLE checks, tile inference, encoder ranking) in parallel and
-  then added in order; embedded files are recompressed, and the composite is planned and its
-  hint sampled, at the same time; for groups of at least 256K samples a thread reads the rows,
-  checks them against the encoders and renders the hint ahead (in batches of about 1 MB)
-  while the first one codes them; encoders are settled per span in parallel.
-- Decoding: in groups of at least 256K samples one thread reads the known planes and renders
-  the hint ahead, and another re-encodes the PackBits rows behind the model decoder.
-- aqr-jpeg uses rayon: for more than one thread aqr-psd asks it for that many, for one it
-  keeps the global pool. aqr-png gets the threads too. A nested PSD gets one thread when
-  several embedded files run at once.
-- `psd:stats` times are summed over threads.
-
-Memory of the native pipeline (WebAssembly runs one thread): batches in flight add at most about 10 MB per helper pair (5 batches of about 1 MB,
-twice), and fewer rows than the group has.
-
-## Memory (the module)
-
-`psd-recons` lays its memory out as a stack (`aqr_api::stack`), so what it takes is its plan,
-which the encoder declares as the module's limit (`plan::decode`; docs/arena-design.md): the
-file, the head's vectors (spans, their planes' lengths and exceptions, groups; each reserved at
-the size it ends at), the model's player (its tables made once, with room for as many as the
-stream's head can have bits), and for each group, in the order `decode_group` makes them, the
-rows, the PackBits sinks' previous rows (one block), and for a hinted group the parsed layers
-and the renderer's vectors. Vectors of vectors are dropped last first (`psd::Lifo`), or there
-would be a hole for each. The plan equals what the module takes, to the page
-(`psd_plans_hold` in aqr-decompress's `wasm.rs`, and a sample of the corpus). The format did not
-change, but for one thing: ZIP channels are no longer decoded for the hint (FORMAT.md, section
-9), so a file with them in its layers is coded without the hint.
+- 8-bit documents' layer channels and composite (RLE/PackBits or raw), in RGB(A) groups; other
+  modes code each plane on its own. Channels repeating an earlier one are copies.
+- Smart objects' embedded PSD/PSB (recursively), PNG (aqr-png) and JPEG (aqr-jpeg) files.
+- The rest, the skeleton, is kept as it is: whatever holds the formula compresses it.
+- A file whose structure cannot be parsed, or with an RLE row that does not decode, gets no
+  formula (`formula::encode` gives `None`).
+- Not taken, left in the skeleton: 16- and 32-bit data, ZIP channels, 1-bit images, embedded PDF
+  and other files.
+- Memory is about 28 MB + 5.4x the file for `aqr` (372 MB for a 22.7 MB file with embedded
+  JPEGs); aqr-psd's own is the streams and a few MB, the output at its final size, plus the
+  embedded files' recompressors (up to 96 MB, for progressive JPEGs).
+- `-t N` (`threads`): the output is the same bytes whatever the number of threads.
 
 ## Results
 
-Measured on 2026-10-24 on an Apple M4, one thread, through `aqr-show` (see the
-[file formats overview](../../docs/file-formats.md#how-it-was-measured)): each file archived at level `mid` with
-its round-trip check, then extracted. Ratios are tentative, since the decoder modules were not
-in the archives then. Memory is the peak RSS of that process (input, archive and output
-included) over the input size.
+Apple M4, 2026-10-24, one thread, through `aqr-show` (see the
+[file formats overview](../../docs/file-formats.md#how-it-was-measured)): each file archived at
+level `mid` with its round-trip check, then extracted. Ratios are tentative, since the decoder
+modules were not in the archives then. Measured again with the modules in the archives on
+2026-11-01 (`docs/file-formats.md`, 37 files, 424 MB): 0.230-0.236 of the input (zstd -3 0.419).
 
 | set | files | MB | ratio | zstd -3 | compress | decompress |
 |---|---|---|---|---|---|---|
@@ -88,66 +49,13 @@ included) over the input size.
 | tori29umai | 1 | 10.3 | 0.215 | 0.383 | 40.2 MB/s | 87.5 MB/s |
 | all | 56 | 439 | **0.330** | 0.555 | **45 MB/s** | **127 MB/s** |
 
-8 files are kept as they are. Memory is about 28 MB + 5.4× the file (a least-squares fit; the
-largest above it, 372 MB for a 22.7 MB file with embedded JPEGs, recompressed by aqr-jpeg),
-against 32 MB + 5.2× and up to 98 MB for a 0.58 MB file before files kept raw were scanned by
-their parts. Little of it is aqr-psd's: on its own (`formula::encode` and evaluating the
-formula) it takes the streams and at most a few MB besides, plus what aqr-png and aqr-jpeg take
-for embedded files (up to 96 MB, for progressive JPEGs), and decoding holds the embedded files'
-bytes twice (the module's input and its output). The rest is the archive's: its verification,
-and for files kept raw, the files found in them. These are looked for by the parts
-`formula::regions` tells (pixel data, structure, text and embedded files), not from every byte,
-where MP3 frames were found in pixel data.
+8 files are kept as they are. The composite hint saves 19% (GenPoster) and 29% (OpenGameArt)
+of the size.
 
-## Limitations
+## Tests
 
-- Pixel data is coded only in 8-bit documents (RLE or raw channels); 16- and 32-bit data,
-  ZIP channels and 1-bit images stay in the skeleton. Color groups are RGB(A) only:
-  other modes code each plane on its own.
-- Embedded PDF and other non-PSD/PNG/JPEG smart object files stay in the skeleton.
-- Rendering supports normal and the common blend modes, opacity, fill, user masks, clipping and
-  groups; layer effects, adjustment layers and dissolve are not rendered (the hint is then
-  weaker, or dropped when a sample of rows predicts less than half the pixels).
-- A file whose structure cannot be parsed, or with an RLE row that does not decode, gets no
-  formula (`formula::encode` gives `None`).
-- Embedded PNG and JPEG files are recompressed in memory by their own recompressors.
-
-## Speed work (2026-10-08)
-
-From the first streaming version to the last results measured with the former file format
-(subsets, single thread): compression
-22-35 -> 83-123 MB/s, decompression 30-53 -> 103-142 MB/s. What helped, roughly by gain:
-
-- Planning on samples: PackBits rows are checked and the tile cut inferred on every 8th row,
-  candidate encoders ranked on 32 rows; checking a row against an encoder compares token
-  headers only (nothing is written).
-- Runs: shorter (4 equal samples above) with the stretch above as context; runs of pixels
-  equal to the composite hint; the run check reads the (known) row above first.
-- Color planes coded pixel by pixel; second and third planes jointly when small.
-- The composite hint only when a sample of rows shows that it pays (it does on GenPoster and
-  OpenGameArt, -19% and -29% in size, not on tori29umai, where it cost a third of the
-  decompression time for -4%).
-- Renderer: 8-bit integer canvases row by row, blend functions chosen per layer, rows without
-  coverage skipped, clipping bases only where clipped layers follow.
-- 8-byte compares in
-  PackBits encoders; 11-bit rANS probabilities with per-chunk compacted decoding tables.
-
-Tried and dropped (no gain, or a loss): contexts from the row above only; dropping
-alpha-aware prediction or the cross-plane context (ratio loss, same speed); zero-residual and
-copy-from-above runs; one rANS stream per color plane; ring-indexed rANS states; coding two
-rows in turns (2-15% slower at every interleave step); forced inlining of the pixel code;
-unchecked indexing in the pair coder and PGO (both cut instructions by 6-10% but not
-cycles); `target-cpu=native` (no change).
-
-How it was measured: `samply record --save-only`, then `dsymutil ../../target/release/examples/aqr-psd` and
-`llvm-symbolizer --inlining` on the sampled addresses (plus 0x100000000) for inlined source
-lines and annotated disassembly; A/B comparisons by the cycles and instructions of
-`/usr/bin/time -l`, since wall-clock times moved by ±5% with other load on the machine.
-
-Open: cutting instructions has not cut cycles, so the bound is likely elsewhere (front end or
-memory); Instruments' CPU counters (full Xcode) would tell. Compression of tori29umai and
-GenPoster is short of 100 MB/s; a row-wise SIMD model would need a predictor without the left
-neighbor, at a ratio cost.
+- `cargo test`: formula round trips of synthetic PSDs (no corpus needed).
+- `aqr-psd bench` checks the `.aqr` round trip of the files given.
 
 ## Corpus
 
@@ -161,3 +69,15 @@ neighbor, at a ratio cost.
 | fixtures | test files of psd-tools, ag-psd, psd.js, webtoon/psd, Krita, Pillow, chinedufn/psd, psd.rb | 651 | 205 MB |
 
 The speed subsets are ~110-120 MB of each of the first three (10, 7 and 45 files).
+
+## Left
+
+- **Deeper pixel data.** 16- and 32-bit documents, ZIP channels and 1-bit images stay in the
+  skeleton; non-RGB modes code each plane on its own.
+- **Embedded PDF and other smart objects.** They stay in the skeleton.
+- **Layer effects, adjustment layers and dissolve** are not rendered, so the composite hint is
+  weaker, or dropped when a sample of rows predicts less than half the pixels.
+- **Speed.** Compression of tori29umai and GenPoster is short of 100 MB/s; cutting instructions
+  has not cut cycles, so the bound is likely the front end or memory (Instruments' CPU counters
+  would tell). A row-wise SIMD model would need a predictor without the left neighbour, at a
+  ratio cost.

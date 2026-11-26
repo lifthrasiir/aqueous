@@ -95,8 +95,15 @@ beside the library (`cargo rt -p aqr -p aqr-win -p aqr-win-shell --test shell --
   one and a function of no effect for its `RoOriginateErrorW`. The tests are built for the win7
   target and run in the VM too.
 
-## Status
+## Tests
 
-Left: the installer and the release carrying the library (and its uninstall, the library being
-held by Explorer), salvaging damaged archives, ARM64. The progress window is tested by hand only, and
-`AQR_SHELL_TEST_OPENED=FILE` has "Open" tell the file in FILE rather than run it (for tests).
+- `tests/shell.rs`: the shell in its own process (see above): files of a test class parsed by
+  path, enumerated as shell items, read through `BHID_Stream`, the view made.
+
+The progress window is tested by hand only. `AQR_SHELL_TEST_OPENED=FILE` has "Open" tell the file
+in FILE rather than run it (for tests).
+
+## Left
+
+- **Damaged archives.** Not salvaged: told in a box, nothing listed.
+- **ARM64.**

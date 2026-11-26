@@ -200,3 +200,22 @@ more or fewer key lists than the params tell.
 - The streams are left to the archive to compress; `raw`, `keys`, `names` and `text` are of
   `Kind::Text` and contents (aqr-compress recompresses them in turn, as text: with one aqr-wrt
   dictionary of all the segments' text, where there are several).
+
+## Design notes
+
+- **Strings by path or in the order of the file.** GitHub's events repeat their ids and URLs
+  across fields, which strings by path take apart (GH Archive 1.051 of zstd -3, against 0.876
+  with all strings in order); reviews and metadata are the other way (0.833 against 0.888). The
+  choice by path (`shared_paths`) gets 0.888 and 0.833 (as one segment).
+- **Strings end at LF, not a zero byte**, for aqr-wrt to take them in turn (C4 34.44 -> 28.65 MB
+  through `aqr`; zero bytes kept aqr-wrt off).
+- **Segments** are coded with one aqr-wrt dictionary of all of the text (aqr-compress's
+  `segment_words`): with a dictionary of each segment's own, GH Archive was 70.31 MB rather than
+  65.66. Counting that dictionary is most of the instructions compressing takes more. Segments
+  lose the reach of a path's values across the file (0.9% larger than one segment). Memory: the
+  module's limit is its plan (`aqr_api::stack`; `tree::plan`: the paths counted from `paths`,
+  their arrays' children, the key lists, their members, the table of the members' paths and the
+  file); the encoder holds a segment's streams and what the first pass keeps, spilling the
+  streams it makes, and aqr-compress evaluates a concatenation part by part to check it
+  (`Formula::eval_parts`; `docs/streaming-encoder-design.md`). One segment per file took 1.97 GB
+  for one hour of GH Archive, against 311 MB.

@@ -21,41 +21,18 @@ let sp = recons::split(&stream, size, method)?;
 assert!(recons::join(&sp.data, &sp.record)? == stream);
 ```
 
-`FORMAT.md` specifies the streams, the record and the module, and describes the archive as
-read. No LHA code was read: the streams' format is ar002's as LHA's decoders read it, and the
+`FORMAT.md` specifies the streams, the record and the module, describes the archive as read, and
+says how they work. No LHA code was read: the streams' format is ar002's as LHA's decoders read it, and the
 compressors (the test archives of [lhasa](https://github.com/fragglet/lhasa), Aminet's
 archives) were the black boxes.
 
-## How
-
-A stream of `-lh5-` and its kin is LZ77 (matches of 3 to 256 bytes within a window of 4 to 64
-KiB) under static Huffman codes sent block by block. `lzh` decodes a stream into its data, its
-blocks' headers as written and its tokens, and writes them again; a stream is taken where that
-gives it back.
-
-The record (`recons`) codes the tokens given the data, as aqr-lzo's and aqr-azo's do: whether
-a match starts (against the longest match at the position and the next: the compressors match
-lazily), then which match, as the match a binary search tree finds (Okumura's LZSS finder, of
-LHA's lineage) or one of the longest matches along hash chains, nearest first, mostly the
-longest and whole. A match that is neither is its length and its rank among the matches of
-that length, nearest first. Blocks cost next to nothing: every compressor seen writes the header
-that LHA's Huffman coder of ar002's lineage makes from the block's tokens (a heap, lengths
-limited to 16 by moving leaves down, tables written the shortest way), and cuts its blocks
-where a buffer of its tokens fills up, whose threshold the record learns from the first cut.
-
-## Status
+## What is taken
 
 Taken at the start of a file only (by its first header, or by its name's extension): a header
 has no signature to look for in other data, so self-extracting archives and archives within
 other files are not taken. Not taken, kept as they are: `-lh1-` (LHarc's adaptive Huffman),
 `-lh2-`, `-lh3-`, UNLHA32's `-lhx-`, LArc's `-lzs-` and `-lz5-`, PMarc's `-pm1-` and `-pm2-`,
 LHARK's `-lh7-` (another format under the same id), and data past the archive's end byte.
-
-Left: the methods above (`-lh1-` first, as old archives have it); archives in other data
-(self-extracting programs: a scan for `-lh?-` two bytes into a header); LHA 2.x's choice among
-the matches of the longest length (3% of its matches, most of its record); speed (5 MB/s of data a
-thread to split and to join; an archive's streams go side by side); the module's size (20 KB as a
-block in every archive, which small archives do not pay back).
 
 ## Results
 
@@ -93,3 +70,11 @@ Much of Aminet's archives is already compressed (pictures, sounds, stored files)
   archive.
 - aqr-compress `src/lib.rs` (`lha_taken_apart`); aqr-decompress `tests/wasm.rs`
   (`lha_same_as_wasm`): natively and as Wasm alike, damaged records alike.
+
+## Left
+
+- **Other methods.** `-lh1-` first, as old archives have it; then the others listed above.
+- **Archives in other data.** Self-extracting programs: a scan for `-lh?-` two bytes into a header.
+- **LHA 2.x's choice among the longest matches.** 3% of its matches, most of its record.
+- **Speed.** 5 MB/s of data a thread to split and to join; an archive's streams go side by side.
+- **The module's size.** 20 KB as a block in every archive, which small archives do not pay back.

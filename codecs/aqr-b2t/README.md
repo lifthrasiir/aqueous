@@ -15,12 +15,16 @@ and the text without them as text. Two modules write the file again bit for bit:
   layout (none for Python's `quopri` and `email`, Perl's MIME::QuotedPrint, and Ruby's
   `pack("M")` on text of lines to cut and escapes).
 
-`FORMAT.md` specifies the modules and tells how the encoders find the blocks. aqr-compress
-(`Format::B2t`, `Format::Quopri`) tries them on every text (a quick look first: a line of 40
-alphabet characters, a `quoted-printable` header), the text left by one looked at by the other
-a level deeper; the formula is kept where it is smaller than the text compressed as it is.
-Developer options: `-Z b2t:min`, `b2t:hex`, `b2t:share`, `b2t:apart`, `b2t:quopri-min`,
-`b2t:quopri-share`, `b2t:quopri-apart`, `b2t:quopri-exceptions`.
+`FORMAT.md` specifies the modules, how the encoders find the blocks, and how it works. aqr-compress
+(`Format::B2t`, `Format::Quopri`) tries them on every text; the formula is kept where it is
+smaller than the text compressed as it is. Developer options: `-Z b2t:min`, `b2t:hex`,
+`b2t:share`, `b2t:apart`, `b2t:quopri-min`, `b2t:quopri-share`, `b2t:quopri-apart`,
+`b2t:quopri-exceptions`.
+
+## What is taken
+
+Base64 and hexadecimal blocks of 40 alphabet characters a line or more, and quoted-printable
+bodies announced by a header. Not taken: uuencode, yEnc (see Left).
 
 ## Results
 
@@ -39,10 +43,8 @@ and not (`-Z b2t:min=1024G`); instructions retired of compression, and of `aqr -
 The time is that of recompressing what the blocks hold (JPEG, PNG, PDF).
 
 On the 10 GB corpus it takes 36 files (PEM files, mail in Python's tests, RFCs, OpenOffice's
-templates, Firefox's `omni.ja`): with the zstd levels picked alike (`-Z zstd:higher=9`), the
-archive is 314 KB smaller (2,443,380,365 -> 2,443,066,049 B). At the default levels it is
-550 KB larger, as a block of the mingw 7z, 44 KB shorter, gets level 6 rather than 9 (the
-sample's sizes tie in the picker's cost of size and time): not of the blocks.
+templates, Firefox's `omni.ja`): 314 KB smaller (2,443,380,365 -> 2,443,066,049 B) with the zstd
+levels picked alike (`-Z zstd:higher=9`).
 
 Hexadecimal and quoted-printable (synthetic files from the same corpora, `aqr -c` on an M4, the
 same binary with `-Z b2t:min=1024G -Z b2t:quopri-min=1024G` and without; compression and
@@ -57,19 +59,18 @@ same binary with `-Z b2t:min=1024G -Z b2t:quopri-min=1024G` and without; compres
 | mbox, 20 messages: Python `email` quoted-printable HTML, JPEG and PNG attachments | 5,009,462 | 3,514,225 | 2,920,553 (-16.9%; quoted-printable alone -8 KB) | 3.98 -> 5.14 G | 0.09 -> 0.67 G |
 | mbox of 40 quoted-printable HTML messages | 794,903 | 86,938 | 76,666 (-11.8%) | 1.32 -> 1.24 G | 0.06 -> 0.12 G |
 
-On the 10 GB corpus (`-Z zstd:higher=9 -Z zstd:higher-speeds=100e6`): 2,443,380,365 off, 2,443,069,771
-with base64 and quoted-printable only, 2,443,297,333 with hexadecimal too (hexadecimal +227 KB
-there, though the subtrees that take it, run alone, are smaller with it: cygwin -290 KB,
-progs -13 KB, cygwin with each other top directory -29 to -156 KB, Ghostscript's fonts -49 KB).
-The sum is the layout's: by the stats' files, the directories whose formulas did not change at
-all moved by as much (hg19 -161 KB, cygwin's perl5 +174 KB, progs +128 KB). Type 1 fonts (`.pfa`), Tcl's encodings (`.enc`: 16-bit tables in hex),
-PostScript's images are what it takes.
+On the 10 GB corpus (`-Z zstd:higher=9 -Z zstd:higher-speeds=100e6`): 2,443,380,365 off,
+2,443,069,771 with base64 and quoted-printable only, 2,443,297,333 with hexadecimal too (the
+subtrees that take hexadecimal, run alone, are smaller with it, the sum is not: the layout's).
+Type 1 fonts (`.pfa`), Tcl's encodings (`.enc`) and PostScript's images are what it takes.
 
-## Status
+## Left
 
-Left: uuencode and yEnc; base64 with `\/` (PHP's JSON); a block whose first line is shorter than 40
-characters (LDIF's attributes of long names); hexadecimal in groups (`<0123 4567>`), Intel HEX;
-quoted-printable of a header's encoded words (RFC 2047), encoders that escape every space
-(Python's `quotetabs`) or write trailing whitespace otherwise than the canonical (Perl's `=20=20`,
-Ruby's soft break after a space: an exception each), Gmail's, Outlook's and Thunderbird's own
-(none seen in the corpora).
+- **uuencode and yEnc.** Not taken.
+- **Other base64 forms.** Base64 with `\/` (PHP's JSON); a block whose first line is shorter
+  than 40 characters (LDIF's attributes of long names).
+- **Other hexadecimal forms.** Hexadecimal in groups (`<0123 4567>`), Intel HEX.
+- **Quoted-printable encoders.** A header's encoded words (RFC 2047); encoders that escape every
+  space (Python's `quotetabs`) or write trailing whitespace otherwise than the canonical (Perl's
+  `=20=20`, Ruby's soft break after a space: an exception each); Gmail's, Outlook's and
+  Thunderbird's own (none seen in the corpora).

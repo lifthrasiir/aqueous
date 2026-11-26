@@ -70,3 +70,9 @@ contents.
 - Folders are split side by side on the threads given (a folder of LZMA2 alone: its segments).
 - The kept bytes are one stream, in order: the signature header, the packed streams not
   rebuilt, the header and anything after it.
+- A folder of LZMA over 64 MiB of data is coded in parts rebuilt side by side, and the match
+  finder's reach is cut to fit the encoder's bound on an application (256 MiB by default: 8 MiB
+  for the 64 MiB dictionary, so the records grow; aqr-lzma's FORMAT.md has the figures).
+- aqr-compress takes 7z archives detected anywhere (a self-executable's) from level 4 only
+  (`format_on`), kept as they are below, and batches them with the same files by the files'
+  CRC-32s (`together`).

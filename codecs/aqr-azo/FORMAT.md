@@ -301,3 +301,15 @@ application's declared output size.
   left of the record is mostly whether a match starts (a lazy or cost-based choice) and which
   kind: 1.0% of the streams in all, 5% of a PE file, 7% of digits.
 - aqr-egg takes the AZO blocks of EGG archives (method 3), each a stream.
+
+## 8. Design notes *(informative)*
+
+- The spec's decoder was right in every model; two things it leaves out were found from ALZip's
+  streams: the models start afresh at each block (of 512 KiB), and how the coder ends (one more
+  bit put off, then the zero bytes at the end dropped).
+- `azo-recons` is a whole module with an exact memory plan (`plan.rs`, `aqr_api::stack`): the
+  models, the match finder and the contexts of the coded block, written onto the output as the
+  tokens come. It spawns no tasks; natively a stream's blocks go on up to `threads` threads, one
+  after another in Wasm.
+- ALZip picks AZO by itself for `.sys` and `.com` files only (alzgg's notes), so the x86 filter
+  (§2.6; `docs/azo-x86-filter-search.md`) is rare.

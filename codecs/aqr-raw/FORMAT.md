@@ -831,3 +831,70 @@ xJyuWkFNogONxET6ROsapyLL4N3/hw2ZqmhVkZeyOM+jqQ7ZRYKh2edTkgLKG321KGLSKkeUlYgc
 
 Changing the tables (retraining with `aqr-flac-train`) changes the encoder's
 resource and needs new versions of both modules.
+
+## Design notes
+
+Not normative: why the encoder and the models are as they are, and what lives where.
+
+**Source files.** `src/audio/frame.rs` frames as FLAC models them (subframes, sample
+synthesis); `src/audio/model.rs` the residual model (sign-sign LMS stage in NEON, scale
+contexts, token / raw bit coding); `src/audio/residual.rs` the pipeline over frames and the
+subframe parameters; `src/audio/par.rs` pipelines for more than one thread; `src/audio/pcm.rs`
+interleaved PCM and the block LPC encoder; `src/image/pixel.rs` the pixel model (scalar and
+NEON); `src/image/raster.rs`, `raster16.rs` the raster coders; `src/container.rs` the
+containers; `src/formula/` the modules and the formulas; `model/audio.bin` the residual
+model's built-in tables (trained by `aqr-flac-train`).
+
+**Audio.** FLAC's model of a frame is the common ground: FLAC files parse into it exactly
+(aqr-flac), and PCM is cut into it here.
+
+- Residual model: FLAC's predictor stays, its residuals are the input. A sign-sign LMS stage
+  over the last 32 residuals of the channel follows, its weight update applied two samples late
+  (delayed LMS: 0.02 pp, but out of the dependency chain). The LMS error is a token under
+  static rANS tables, by a scale context from a running mean of its zigzag value, and raw bits.
+  On real CD material about 1.2 pp come from the entropy coding (against FLAC's partitioned Rice
+  parameters) and about 2.3 pp from the LMS stage.
+- PCM: blocks of 4096 samples become FLAC-like frames: stereo decorrelation (left / side, side
+  / right, mid / side) chosen by the sum of second differences, wasted bits, constant blocks,
+  and per channel a quantised LPC predictor (Tukey-windowed autocorrelation, Levinson-Durbin,
+  14-bit coefficients). The order (up to 16) is chosen per block from the Levinson prediction
+  errors against four times the cost of the extra coefficients and warm-up samples; the LMS
+  stage takes over much of what a higher order would gain.
+- Speed: separate passes per frame; LMS on two channels in one loop with four independent NEON
+  accumulators and the newest term in scalar code (about 11 cycles per residual each way); rANS
+  with flat alias tables, bounds checks per frame, raw bits in two streams by channel parity
+  (about 12 cycles per residual to decode, 7 + 4 to encode).
+- Threads (the formula is the same whatever their number): a pool makes the frames of the
+  blocks ahead, one thread runs the LMS stage in order, the calling thread codes. Decoding is a
+  pipeline of subframe parameters -> error decoding -> LMS stage, then a pool reconstructs the
+  samples straight into their place in the output.
+- Memory of `pcm-recons` (version 2): windows of 16 pages, the memory a stack
+  (`aqr_api::stack`) whose limit is its plan (`module::pcm::plan`), the same whatever the
+  lengths: it holds neither its inputs nor its output. The streams pass through sliding buffers
+  (`audio::slide`) that hold ahead of a frame the most a frame can read (the rANS decoder's words
+  and the raw bits of a block of all channels at their worst, and the frame's varints). The gang
+  of eight tasks is the LMS stage and seven workers (`audio::par::apart`), the frames passing as
+  messages of their own, each task taking one into a buffer reserved for the largest; the
+  instance keeps at most `2 * workers - 1` of them in the pipeline, so that no channel it waits
+  on is full, and the plan adds the messages the channels may hold. The rANS tables are built
+  of exactly what they keep (`Tables::from_flat`), once the tasks are spawned. A varint coded in
+  more bytes than its value takes is refused, as the window would not hold a frame of them.
+
+**Images.**
+
+- Bands: a raster of more than 48 MiB is cut into bands of rows, each an application of its own
+  (`formula::raster::apply_in`), each needing at most about four times its band (192 MiB; a
+  whole raster needed 4x its length and fell back over a 256 MiB bound). A 126 MB 24-bit BMP of
+  a synthetic picture, M4, `-9`: 126,000,089 B at 256M before (stored), 52,391,685 B without a
+  bound, 52,394,755 B in three bands (+0.006%); compress 33.15 -> 33.31 G instructions,
+  decompress native 13.60 -> 13.73 G, Wasm resident 555 -> 415 MB.
+- Pixel model: a sample is predicted by LOCO-I's MED from its left, upper and upper left
+  neighbours; the second and third channels of three or more add the previous channel's
+  residual. The context is the channel and the activity bucket (the neighbours' gradients plus,
+  in a raster, the magnitudes of the left and upper residuals; in aqr-png, those of the
+  filtered bytes).
+- Raster coder: the residual symbols with static rANS tables per chunk of 2^22 samples
+  (aqr-png's table coding), so the encoder holds a chunk's symbols, and both sides only the
+  current and previous rows besides.
+- 8-bit samples written as 16 bits (every sample a multiple of 257) are not taken: they came
+  to 0.676 of their files, against 0.565 by the transpose.

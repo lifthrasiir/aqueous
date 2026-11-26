@@ -1,12 +1,8 @@
 # aqr-xsv
 
-Delimited text tables rebuilt bit for bit from their fields, stored column by column: CSV,
-TSV, the `;`, `|` and space variants (a space where a column holds numbers), and USV (U+241F and U+241E, or their ASCII forms). Text fields
-are kept as they are, for the archive to compress; numbers are coded as integers in the way
-they were printed ([`aqr-num`](../../crates/aqr-num)), as they are or as differences from the column's
-previous one; so are dates and times (`2023-10-12 00:00`, `17:24:00`, `01/07/1995`: version 2 of the module),
-as the ticks of aqr-num's time patterns. Decimal commas (`4,216`, in `;`-separated tables, or quoted in CSV) are numbers of aqr-num's comma modes, and so are digit groups (`1.187,25`, `1,234.56`: its mode bit 7). Records that are not of the table (a quote not closed, a zero byte) are kept as
-they are, so any file round-trips.
+Delimited text tables rebuilt bit for bit from their fields, stored column by column, so that
+numbers, dates and times (and not only text) compress as columns do. `FORMAT.md` specifies the
+module `xsv-recons`, and how it works.
 
 ```rust
 use aqr_xsv::formula::{self, MODULE};
@@ -21,9 +17,14 @@ is smaller than the file kept raw; a file named as text (`.csv`, `.tsv`, `.log`,
 as a table too. Without the default feature `encode`, the crate is the module's code alone
 (`module`), which aqr-modules builds into the Wasm module `xsv-recons`.
 
-A table over 64 MiB (`formula::SEGMENT`) is cut at record starts into segments, one application
-each, so that no application needs more than a segment's memory (FORMAT.md, "Segments").
-The format is specified in [FORMAT.md](FORMAT.md).
+## What is taken
+
+CSV, TSV, the `;`, `|` and space variants (a space where a column holds numbers), and USV (U+241F
+and U+241E, or their ASCII forms), of at least 16 KiB. Numbers (decimal commas and digit groups
+too), dates and times are coded as integers, as printed
+([`aqr-num`](../../crates/aqr-num)); text fields are left for the archive to compress. Records
+that are not of the table (a quote not closed, a zero byte) are kept as they are, so any file
+round-trips. Not taken: files where fewer than 9 in 10 records have the same number of fields.
 
 ## Results
 
@@ -52,15 +53,15 @@ peak footprint 4.60 -> 4.70 GB); 9 of those files grow, by 185 KB in all, most o
 `iq/digits.txt` (random digits, +151 KB), which the comparison with the file kept raw lets
 through.
 
-## Testing
+## Tests
 
 ```sh
 cargo rt -p aqr-xsv
 ```
 
-Unit tests: dialects, records (quotes, CR LF, fields over lines, records kept as they are),
-round trips of edge cases and of every dialect, numbers of several writers, and damaged
-streams (errors, never panics).
+- Unit tests: dialects, records (quotes, CR LF, fields over lines, records kept as they are),
+  round trips of edge cases and of every dialect, numbers of several writers, and damaged streams
+  (errors, never panics).
 
 ## Layout
 
@@ -72,9 +73,10 @@ streams (errors, never panics).
 | `src/module.rs` | The module's entry |
 | `examples/bench.rs` | Sizes of the streams, speeds, round trip |
 
-## Next steps
+## Left
 
-- Numbers within text fields (`"40.07, -74.93"`, dates, times): a field's template and its
+- **Numbers within text fields.** `"40.07, -74.93"` stays text; a field's template and its
   numbers, as aqr-obj does with lines.
-- Hexadecimal fields (`UnicodeData.txt`'s code points).
-- The numbers coded better than varints for zstd (rANS per column, as aqr-obj does).
+- **Hexadecimal fields.** `UnicodeData.txt`'s code points stay text (0.906 of zstd -3).
+- **Entropy coding of the numbers.** Varints for zstd; rANS per column, as aqr-obj does, would
+  code them better.

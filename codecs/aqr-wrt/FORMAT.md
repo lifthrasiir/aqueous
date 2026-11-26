@@ -298,3 +298,30 @@ A step must not be cut by the end of the piece.
     the module with the one dictionary of the whole text.
 - **Shared dictionary.** The texts of Hangul of a batch share a dictionary of their own, as §5
   tells of the others.
+
+## Design notes
+
+Measured on prototypes and versions; what the numbers back, one line each.
+
+- **Prototype** (Python, `zstd -19 --long`, enwik8): the words alone take -6.5%, the flags of
+  case -0.5% more, the space taken by a word -1.6% more; the least count of an entry hardly
+  matters from 3 to 32. Tags and character references as entries take -0.5% more on enwik8 and
+  -1% on the 10gb corpus's XML and HTML (75 MB, -5.7% in all). The rest of that corpus's text
+  (780 MB, one dictionary) gains -9% at zstd -9 but -1.5% at -19: at high levels the level itself
+  pays.
+- **Prefix coding** (2026-11-26; `-Z wrt:prefix`): a word with no entry is coded as its longest
+  start with one, and the codes of three bytes go in order of their entries' bytes: `enwik9`
+  234.73 -> 233.35 MB through `aqr` (-0.59%); enwik8 27.167 -> 26.923 MB at zstd -9 (-0.90%:
+  dictionary 311 -> 268 KB). Coding the rest of such a word by entries too gained nothing, nor
+  did starts of at least 3 or 4 letters, nor sorting the codes of two bytes (the text grew more
+  than the dictionary shrank).
+- **Version 4** (2026-11-26): each entry written as the count of its first bytes shared with the
+  entry before and the rest (§3): `enwik9` 233.35 -> 233.04 MB; at zstd -9 the dictionary of
+  enwik8 268 -> 207 KB, of `webster` 144 -> 117 KB. The module's block grows 4,045 -> 4,295
+  bytes. Sorting the codes of two bytes too came to +-12 KB.
+- **Segments**: one application of the whole text needed three times the text (2.9 GiB for
+  `enwik9`); segments of 32 MiB cost 50 bytes on enwik8 (3 segments), the modules unchanged.
+- **Hangul at zstd** picks level 9 for both: the coded text is 248 MB, so zstd has less to do
+  (143 -> 105 G instructions in all); the dictionary takes 3.2 MB at -9 (694,348 entries).
+- **Held back**: text under 256 KiB is not coded apart from the copies it shares, which broke
+  the sharing of tar members with their files.

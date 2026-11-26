@@ -8,7 +8,7 @@ file (the header and the strings) is kept as it is for the archive to compress. 
 of the format (Python's `msgfmt.py`, Babel) write no hash table, which is taken too. Solaris'
 own `.mo` format is another one, not taken.
 
-`FORMAT.md` specifies the module.
+`FORMAT.md` specifies the module, and how it works.
 
 ## Results
 
@@ -22,3 +22,12 @@ transposed their tables:
 | this crate | 10,983,629 B (−19.8%) | 1.17 s | 76.5 G |
 
 Extraction takes 1.37 G instructions (1.25 G before).
+
+## Tests
+
+- `tests/mo.rs`: .mo files through the formula and the module, as msgfmt lays them out, in
+  either byte order, with and without a hash table, with plural forms; other layouts not taken.
+
+## Left
+
+- Nothing known.

@@ -98,3 +98,20 @@ applications' data is the section's data and the zeros after it, cut into the co
 section's files (by their directory entries, in order of their offsets, gaps unknown; where they
 overlap or run past the data, one piece), each sliced into a stream of the kind its name tells.
 
+## Design notes (informative)
+
+- An MSZIP block is `CK` and a DEFLATE stream of its own whose matches may reach 32 KiB back into
+  the blocks before. aqr-flate takes no preset dictionary, but needs none: a folder's blocks are
+  one DEFLATE stream but for each block's final flag and the padding after it. So the blocks are
+  *joined* (`mszip::join`) into the stream aqr-flate splits into the folder's data and a record
+  as any other, and `mszip-recons` cuts the blocks back out given how many DEFLATE blocks each
+  holds. Neither decodes the data: Huffman blocks' bodies are walked symbol by symbol and copied
+  bit for bit, and only stored blocks, whose padding depends on where they start, are written
+  again. The data blocks' headers (checksum, sizes, reserved field) are kept between the blocks.
+- An LZX folder's blocks are one LZX stream over frames of 32 KiB (aligned to a word after each,
+  where the data blocks end), which aqr-lzx splits into its data (e8 undone) and a record of its
+  parse, as it does WIM's chunks: windows of up to 2 MiB, blocks of any size over the frames, the
+  e8 header and translation frame by frame. A CHM file's LZX section resets every few frames:
+  each interval is a stream of its own (rebuilt in parallel), the last one of whole frames.
+- LZX is slow (22 MB/s split on one thread, 37 MB/s rebuilt), as a stream of 2 MiB windows is
+  split on one thread: hence aqr-compress takes it from level 9 only.

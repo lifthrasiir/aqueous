@@ -469,3 +469,19 @@ instructions after a match), checks that the plan writes the stream back, and co
 blocks' headers tell (a stream found by aqr-compress in other data: asset catalogs hold one per
 image); the data goes in a stream of class `raw`, which the formula may recompress in turn, the
 record in `bvx/record`, and what follows the stream in one of class `bvx`.
+
+## Design notes
+
+- The record codes the stream's parse given the data, under contexts of what a match finder sees
+  there; in LZFSE blocks that includes the compressor's own table of candidates (a 14-bit hash of 4
+  bytes, buckets of 4), from which it nearly always takes its matches. Everything else
+  (frequencies, coder states, padding, how runs and matches are cut into triples and instructions)
+  is what the compressor does, which the record only notes where a stream differs. LZVN comes along
+  with LZFSE: libcompression's LZFSE streams of small data are LZVN blocks.
+- In LZFSE records, 85% is whether a match starts at a position. The compressor's choice between its
+  table's best match there and one at the next position is modelled only through the lengths of both.
+- Taking asset catalogs' streams at every level was dropped: at level mid it gave 191.11 MB against
+  220.47 MB without (−13.3%), but compressing took 55.5 s against 1.7 s (the data is 14 times the
+  catalogs) with a peak of 7.8 GB, so they are taken at level 9 only. The streams a scan finds were made
+  one after another; made at once (aqr-compress's `ahead`) `-l 9` takes 74 s, not 146 s. The LZVN
+  streams alone gain nothing at level mid.

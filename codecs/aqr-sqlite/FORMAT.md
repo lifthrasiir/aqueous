@@ -714,3 +714,27 @@ A decoder must reject the following rather than produce output:
 This implementation also bounds its work on corrupt input. It checks `kind` and the tail
 before allocating the output. It also rejects a table whose key column contents, for one
 index, add up to `2^32 - 1` bytes or more.
+
+## Design notes
+
+- **Memory.** The module lays its memory out as a stack (`aqr_api::stack`), its limit its plan
+  (`transform::plan`): the groups' decoders (each column's repeated values counted from its tags
+  and lengths), every index's keys (their rows counted from the records' codes, their bytes in
+  the params), the scans and orders as tasks, each a copy of the instance with its own on top,
+  and the pages' buffers and the file. `aqr-sqlite bench -m` reports the Rust heap beyond input
+  and output; `--features memprof` the heap use per phase.
+- **Threads** (`-t N`, `formula::Options::threads`; default 1; `std::thread::scope` and a small
+  work queue, `src/par.rs`): the streams are the same whatever the number. Encoding codes the
+  b-tree groups in parallel (each makes its directory entry and pieces, put together in group
+  order; an index group reads its table's group, freed after its last index); the page pass and
+  the index key discovery (first match wins, in schema order) stay serial, and verification is a
+  separate pass. Decoding runs the first pass over the tables and the index orders in parallel;
+  the page loop and the record decoding stay on one thread. A panic on a worker means no formula.
+- **Index sort.** A radix sort over the prefix bytes that vary (packed with the row number when
+  they are few), with full comparisons only for ties; the decoder keeps only the indexed columns
+  of such a table (it decodes the table once for them, and again for its pages).
+- **Measured, not kept.**
+  - Integers byte-transposed or fixed-width: 1% smaller int stream, not worth it.
+  - Reals byte-transposed or XOR-delta'd: larger under zstd than raw doubles.
+  - An adaptive binary model for the integer streams: 9% larger than zstd and 5x slower (zstd's
+    gain there is exact repeats).

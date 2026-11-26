@@ -564,3 +564,60 @@ with these differences:
   an object that is written twice): `ENC` items are never `DUP`s.
 
 The cipher is the parameters of the application, and nothing else of the encryption is kept.
+
+## Design notes
+
+- **The budget.** Everything that pays costs about the budget or more: inflating a DEFLATE stream
+  alone runs at about 200 MB/s of DEFLATE data (5 ns/B, half the 10 ns/B the target allows), and
+  the coders take 10-115 ns per byte of stream. So the compressor plans (§7.1): a cost model
+  fitted to per-item measurements of the corpus (ns per item, per stream byte and per inflated
+  byte, each way; for JPEG per 8x8 block from the frame header, which halves the error); inflated
+  sizes from the dictionary (images' geometry, fonts' `/Length1`), else from the first DEFLATE
+  block's code lengths (expected bytes per bit with probabilities 2^-length: a third of the class
+  prior's error on content streams), else a per-class prior; planning inflates nothing. The
+  estimates are within a few percent of measured times over each set and scatter by about 10%
+  per file (content the features do not see), hence the 1.1 margin on the budget
+  (`file size / (1.1 x target speed)`). The estimates, not timing, decide, so the output does not
+  depend on the machine's load.
+- **Streams.** What is not recognised stays in the skeleton, so a miss costs ratio, never
+  correctness. Streams are classed (content, font, image, object stream, cross-reference stream,
+  other data) by their dictionaries; indirect objects (colour spaces, decode parameters) are
+  looked up through an index of every `N G obj` (`objects.rs`). Uncompressed and ASCII-encoded
+  streams stay in the skeleton, as does anything after a DEFLATE stream's data. A file with an
+  `/Encrypt` entry that is not understood keeps its streams raw (they look random).
+- **Encryption.** The formula keeps only the file key (a byte for the method and 5 to 32 bytes of
+  key); the module derives each object's key with MD5 (algorithm 1 of ISO 32000-1) and encrypts
+  with RC4 or AES (encryption only: `crypt.rs`, about 200 lines, no decryption tables, no SHA-2,
+  no password logic). Keeping the per-object keys instead would drop MD5 (1.5 KB of the module)
+  and cost 16 bytes of incompressible key for each stream (against about 3 bytes for the object
+  number and generation now); the file key is smaller as soon as a file has a handful of streams.
+  The module grew from 80,782 to 86,598 bytes (block 25,234 to 27,721). Cross-reference streams,
+  the metadata of a file with `/EncryptMetadata false`, streams with their own `/Crypt` filter and
+  streams shorter than 64 bytes stay as they are, as do strings.
+- **Token mode** keeps the stream's own LZ77 parse, so rebuilding needs no match search, only
+  Huffman coding (the aqr-png approach, for any stream). Dynamic headers go through aqr-flate's
+  header coder; static per-file tables and four interleaved rANS states (all token streams of a
+  file share one rANS stream, decoded in file order). Memory does not follow the inflated data: a
+  stream is parsed straight into its part (symbols, the extra bits of its matches), the literals'
+  contexts read from a sliding window (32 KiB, or a row and a pixel more for pixels, every
+  256 KiB); the encoder holds the file's symbols (4 bytes each) for the static tables, and the
+  full mode takes only the data's length and Adler-32 from its parse. `tests/memory.rs`: 56 MB of
+  data in a 1.55 MB file takes 18 MB to code and 7 MB to rebuild (109 and 80 MB before).
+- **Threads** (`-t N`, `Options::threads`): the formula is the same whatever the number. A pool of
+  N threads codes the items ahead, in order, at most 4N + 4 of them and about 256 MB of estimated
+  working memory in flight (always one): JPEG, PNG and aqr-flate items whole, and FlateDecode
+  streams for the token mode made into their parts; the calling thread adds them to the sections
+  in order and to the token coder, whose tables and bit streams carry over. aqr-jpeg's own
+  parallelism runs on the same pool (N threads in all; aqr-flate one thread per item). The token
+  coder's final pass runs beside the zstd that measures the table, skeleton and pools. The
+  decoder takes no threads: the nested modules rebuild their items, and the tokens are one rANS
+  stream.
+- **Measured, not kept.**
+  - Everything through aqr-flate's fast representation, no budget: 0.810 on CC at 29 / 55 MB/s (it
+    rebuilds at 60-270 MB/s of inflated data, and PDF streams inflate 2-12x).
+  - Measuring every FlateDecode stream at planning with a counting parse: 5 ns/B, half the budget;
+    the dictionary and class priors do nearly as well for free.
+  - 11- and 10-bit probabilities for the token tables: 0.2-1% larger, decoding only a little
+    faster (it is latency-bound, not cache-bound).
+  - Stronger zstd levels for the skeleton and pools with what the budget leaves (level 19 makes
+    skeletons 10% smaller than 9 at 27x the time): a few KB per set.

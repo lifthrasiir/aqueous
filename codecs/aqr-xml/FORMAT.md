@@ -167,3 +167,26 @@ error, and so is a skeleton that ends within a step.
 - **Taken.** A text shorter than 64 KiB (`MIN_LEN`) is not taken, nor one that has no value cut
   out; `starts` tells a text that begins as XML does. Which texts to take where it pays is for
   aqr-compress (`docs/xml-design.md`, "Choosing").
+
+## Design notes
+
+- **Prototype** (Python, the pieces archived by `aqr` as files of a directory): elements of text
+  (DBLP, PubMed, JMdict, SwissProt) gain the most, 16-24%; rows of numbers as attributes gain
+  nothing, as aqr-log takes the lines whole; small files lose to the cost of each container. The
+  numbers' own coding mattered little, so the module codes none.
+- **Cost of compressing.** The first version took 1.79 times the corpus's instructions (enwik9
+  363 -> 665 G): the looks that every content makes on each of 31 segments' text container, aqr-log
+  on pieces, the comparison of the formula with the file, and the shared dictionary. Now 1.29
+  (enwik9 419 G); the encoder itself is 4.8 GB/s. What was done:
+  - The encoder tells aqr-compress what a container is by its stream's kind: `Kind::Words` for
+    prose (values of 40 bytes on average, a space for 16) is made as aqr-wrt's text and nothing
+    else; `Kind::Column` for the other containers of 16 KiB or more is made as any text with a
+    sample of a sixteenth of the size (`table:column-window`, 16 KiB windows). 665 -> 435 G; the
+    archives vary within 1.6% either way (PubMed -1.0%, lineitem +1.2%).
+  - A file of 4 MiB or more is taken without the comparison of its formula with the file
+    (`xml:uncompared`): the sample chose it; a small file's formula is compared still, as the
+    module's block alone is 4 KB.
+  - Segments of 48 MiB, not 32: a third fewer files to look at (435 -> 425 G); 64 MiB passes the
+    application bound (256 MiB), which 48 leaves 13 MiB to spare for.
+  - A file under 1 MiB is taken only at 92% (`xml:small-percent`): the fixed costs of the format
+    are most of what it would gain (`play3.xml`, 0.93 of zstd, was 5.3% larger).

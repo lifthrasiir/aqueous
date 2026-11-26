@@ -19,7 +19,7 @@ let f = formula::encode(&file, 1).unwrap();
 // `f` rebuilds `file` when evaluated with `formula::decode` as the module `MODULE`
 ```
 
-`FORMAT.md` specifies the module `lz4-recons`, with the compressor in full.
+`FORMAT.md` specifies the module `lz4-recons`, with the compressor in full, and how it works.
 
 ## What is taken
 
@@ -35,9 +35,9 @@ The following are not reproduced: frames with linked blocks (`lz4 -BD`), HC leve
 
 ## Results
 
-Measured on 2026-10-23 with the reference liblz4 1.10.0 (through ctypes, before this crate
-existed), on one Firefox profile on Windows. The session store, `addonStartup.json.lz4` and 178
-telemetry pings over two months were all `LZ4_compress_default`, all reproduced.
+One Firefox profile on Windows, 2026-10-23 (zstd -3 of the streams against of the data they hold).
+The session store, `addonStartup.json.lz4` and 178 telemetry pings over two months were all
+`LZ4_compress_default`, all reproduced.
 
 | | files | lz4 → zstd -3 | data → zstd -3 |
 |---|---|---|---|
@@ -46,14 +46,8 @@ telemetry pings over two months were all `LZ4_compress_default`, all reproduced.
 | telemetry pings, each alone | 178 | 2.10 MB | 1.73 MB (−17.5%) |
 | telemetry pings, solid | 178 | 1.075 MB | 0.465 MB (−56.7%) |
 
-This crate reproduces the fixtures of `tests/data` (blocks at accelerations 1-65537, and
-frames with checksums, kept tables, stored blocks and `--fast=3`), which
-`scripts/gen-fixtures.py` makes with the reference liblz4. It also reproduced 4 of the files
-above (the session store, `addonStartup.json.lz4` and a telemetry ping, 2.36 MB) with `aqr-lz4-check`.
-
-The module (a part module since version 2: nothing of the lengths is held) runs at 650-1150 MB/s of data on an M4, single-threaded, on the
-fixtures (`aqr-lz4-check`). That is liblz4's speed class. Frames could be made in parallel, since a
-block of 4 KiB or more clears the state. That is not done.
+The module runs at 650-1150 MB/s of data on an M4, single-threaded (`aqr-lz4-check`), liblz4's
+speed class.
 
 ## Tests
 
@@ -63,11 +57,12 @@ block of 4 KiB or more clears the state. That is not done.
 - aqr-compress `tests/compress.rs` (`lz4_nested`): a mozlz4 around gzip around FLAC, and a
   mozlz4 found in data.
 
-## Status
+## Left
 
-- The module is a part module (version 2). A block of 65547 bytes or more is compressed from a
-  sliding view, which holds a sequence's literals until its match is measured: a sequence of more
-  than `LIT_MAX` (4 MiB) literals fails, and the encoder does not take such a stream (a very high
-  acceleration that skips far is one; incompressible stretches longer than that are, too, though
-  liblz4 gives them the same way as one run of literals). The trade is accepted for a plan that
-  does not depend on the lengths (about 8.2 MiB for a block, two blocks for a frame).
+- **Linked blocks and HC.** Frames with linked blocks (`lz4 -BD`), HC levels (`lz4 -3` and above),
+  frames with a dictionary and the legacy frame stay as they are.
+- **Long literal runs.** A sequence of more than 4 MiB of literals (a very high acceleration, or
+  incompressible stretches that long) fails, so such a stream is kept as it is; the price of a plan
+  of about 8.2 MiB for a block that does not depend on the lengths.
+- **Frames in parallel.** A block of 4 KiB or more clears the state, so a frame's blocks could be made
+  at once; not done.

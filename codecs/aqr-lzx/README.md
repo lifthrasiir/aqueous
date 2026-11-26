@@ -8,12 +8,9 @@ LZX files on NTFS (32 KiB each), and the streams of CAB folders and CHM sections
 32 KiB to 2 MiB, frames of 32 KiB). aqr-wim, aqr-disk and aqr-mszip take those containers apart
 and make the applications.
 
-No encoder is reproduced. Microsoft's encoders are closed and their parse optimal-style, so the
-record codes the parse given the data, under contexts of what a match finder sees there (the
-longest match, the repeat offsets' matches), a new offset by its rank among those of its length,
-and the trees against Huffman codes of each block's frequencies. It was written from the public
-description of LZX (MS-PATCH), without any implementation's code. The streams, the record and
-the module `lzx-recons` are in [FORMAT.md](FORMAT.md).
+It was written from the public description of LZX (MS-PATCH), without any implementation's code.
+The streams, the record, the module `lzx-recons` and how they work are in
+[FORMAT.md](FORMAT.md).
 
 ```sh
 cargo run --release -p aqr-lzx --example aqr-lzx-check -- [-r] [-s K] FILE [OFFSET LEN]   # a WIM's chunks read, written back; -r: split and rebuilt
@@ -30,6 +27,12 @@ let v = lzx::Variant::cab(21).unwrap();
 let sp = recons::split_stream(&stream, n, v)?;
 ```
 
+## What is taken
+
+WIM files (aqr-wim), WOF's LZX files in disk images (aqr-disk), CAB and CHM files (aqr-mszip).
+Not taken: LZX DELTA (MS-PATCH's reference data), LZMS and XPRESS (ESD files, WIMs of other
+compression).
+
 ## Results
 
 install.wim of a Windows Server 2008 R2 DVD (2,538.1 MB of chunks in 38,986 resources),
@@ -39,7 +42,7 @@ aqr-lzx-check -r, measured on 2026-10-30:
 |---|---|
 | data | 6,603.3 MB |
 | records | 171.0 MB, 6.74% of the chunks: kinds 91.1, lengths 72.7, trees 6.3, offsets 0.8, the rest 0.1 MB |
-| speed, one thread | split 9.5 MB/s, rebuilt 20.8 MB/s of data (before the decoding tables were made small) |
+| speed, one thread | split 9.5 MB/s, rebuilt 20.8 MB/s of data |
 
 Every resource was rebuilt. With the data at `zstd -3 --long` (1,765.5 MB), about 1,936 MB in
 all against 2,538 MB of LZX, before the data is recompressed further. Through `aqr` the whole
@@ -62,18 +65,8 @@ damaged records; streams of many windows, whose data slides along the window as 
 fixtures (`write_fixture` and the others, ignored), which aqr-decompress runs as WebAssembly,
 and whose plans of memory it checks to the page (`slide.cab-lzx` of many windows).
 
-## Status
+## Left
 
-The module `lzx-recons` (natively and as a Wasm module of aqr-modules), WIM files (aqr-wim),
-WOF's LZX files in disk images (aqr-disk) and CAB and CHM files (aqr-mszip) are done. The module
-is a part module (version 3): a CAB stream's data is read frame by frame and only the window and
-the block being coded are held, so its memory does not grow with the stream (a 568 MB CAB of an
-MSI, 3 GB of data, took 8.9 GiB as a whole module). Splitting is streamed alike
-(`recons::split_stream_to`): the stream is read twice, a block at a time (the record starts with
-the capacities, the most of any block), the data put onto a sink as it is decoded, so that neither
-the data nor the parse of a stream is held but the window and the blocks being coded (the
-tokens of a 3 GB stream took 8 bytes each).
-
-Not yet: speed (a large CAB folder is one stream on one thread, which keeps LZX CABs to level
-9); LZX DELTA (MS-PATCH's reference data); LZMS and XPRESS (ESD files, WIMs of other
-compression).
+- **Speed.** A large CAB folder is one stream on one thread, which keeps LZX CABs to level 9.
+- **LZX DELTA.** MS-PATCH's reference data.
+- **LZMS and XPRESS.** ESD files and WIMs of other compression.

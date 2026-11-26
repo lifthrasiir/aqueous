@@ -286,3 +286,22 @@ The module fails if:
 - the deflated bodies taken again are more than `again` bytes;
 - `data` or `kept` is not used up exactly;
 - the output is not `len` bytes long.
+
+## 7. Design notes (informative)
+
+- Every fixed field of the layout is stored as its XOR with a prediction (§4): CRCs, sizes,
+  offsets and what the central directory repeats of the local headers cost nothing when they
+  are what they should be, and are kept exactly when they are not.
+- With `Options::probe`, a DEFLATE body of 256 KiB or more is rebuilt only where its record and
+  its data may archive in at least 1/32 less than it (`aqr_formula::probe`): the record
+  estimated by aqr-flate on runs of the stream, the data at the fewest bytes the archive's level
+  may take it in, the files in it recompressed in turn counted as nothing, and so is what the
+  other entries of its kind hold of it (by anchors of a rolling hash: fuzzing corpora and near
+  copies compress together, which no sample of one entry tells). Smaller bodies are always
+  rebuilt: the contents of small entries compress far better together than alone. The bodies
+  are parsed first (in parallel), probed, then the ones taken deconstructed (in parallel).
+- Bodies the same as an earlier one are taken again without looking into them: in 42.zip each of
+  the 16 archives of a level is the same, so each level inflates one. Where the sizes the
+  headers say fit the limit, the bodies inflate at once, each stopped as soon as it holds more
+  than it says; otherwise, or where one was stopped, the parse that keeps no data measures them
+  (§5).

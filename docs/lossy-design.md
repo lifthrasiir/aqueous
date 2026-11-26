@@ -59,7 +59,7 @@ b-tree 구조(빈 공간 제외). 파일 시스템은 파일 트리, 메타데�
 
 **방법 B(미구현): 내용에서 바로 식을 만든다.** 재압축기가 내용만 넣고 풀 때 정규 인코더 모듈이 스트림을 만드는 식을 낸다.
 방법 A가 듣지 않는 곳에 필요하다. 특히 aqr-png는 무손실 경로가 zlib 에뮬레이션이 아니라 원본의 LZ77 토큰을 남기므로
-(에뮬레이션은 1–20 MB/s로 느리다, aqr-png README "Why the LZ77 parse is kept") R을 다시 넣어도 토큰 기록이 남는다. 픽셀에서
+(에뮬레이션은 1–20 MB/s로 느리다, aqr-png FORMAT.md "Design notes"의 "Why the LZ77 parse is kept") R을 다시 넣어도 토큰 기록이 남는다. 픽셀에서
 바로 식을 만들어야 이득이 난다.
 
 **정규 인코더의 선택.** `coding`의 R은 원본보다 클 수 있다(7-Zip ultra의 LZMA, zopfli, zlib 9를 빠른 인코더로 다시 만들

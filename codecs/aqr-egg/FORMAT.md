@@ -78,3 +78,19 @@ sliced into a stream by the kind its file's name tells, one for each method: tho
 holds, by their sizes, where those add up to its uncompressed size (else it is all of the kind of
 the file it follows). Everything else (the headers, the names, blocks kept, the records after the
 files) is one stream of class `egg`, as it is.
+
+## Design notes
+
+- No module of its own (as aqr-alz): the blocks follow their headers, each of the size its
+  header tells, so the formula is the bytes kept and the blocks rebuilt in turn.
+- ALZip's DEFLATE is zlib's: aqr-flate's adaptive profile (zlib emulation, aqr-compress's levels
+  7 to 9) leaves a record of 0.08% of the blocks, the default profile 0.79%. Its bzip2 is
+  libbzip2's, a stream a block. Its LZMA is the LZMA SDK's (lc 3, lp 0, pb 2, a dictionary of
+  16 MiB, no end marker), whose parse aqr-lzma records in 1.2% of the streams. Its AZO is a
+  stream a block, whose parse aqr-azo records in 1.0% of the streams; the data of an AZO block
+  with the x86 filter is the file's (aqr-azo's FORMAT.md).
+- A solid archive is one block after its last file holding all the files' data, cut into their
+  contents by their sizes.
+- The files' CRC-32 and sizes (`egg::entry_sums`, the records read one after another, the
+  blocks' data skipped; of files of one block, none of a solid archive's) tell aqr-compress's
+  probe what the files archived along hold, as for ZIP and 7z.

@@ -46,7 +46,7 @@ aqr-flate README의 홀드아웃 벤치(807개 스트림, 40.6 MB, M4 한 스레
 | preflate | 2.378% | 15 | 3.8 s | 3.0 s |
 | preflate-rs | 0.780% | 117 | 1.7 s | 0.8 s |
 
-- **preflate-rs**(https://github.com/microsoft/preflate-rs, Apache-2.0, 활발): 그 사이 영역(예: 2–3 s에 0.6–0.7%)이 비어 있다. preflate-rs는 자기가 정확히 모델링하는 인코더(gzip, miniz-oxide, sdefl, zlib-cloudflare, zlib-ng)에서 aqr-flate보다 작다. 그 해시 후보와 add policy 목록이 aqr-flate "Next steps"의 에뮬레이션에 바로 참고가 된다(귀속을 지키면 코드도).
+- **preflate-rs**(https://github.com/microsoft/preflate-rs, Apache-2.0, 활발): 그 사이 영역(예: 2–3 s에 0.6–0.7%)이 비어 있다. preflate-rs는 자기가 정확히 모델링하는 인코더(gzip, miniz-oxide, sdefl, zlib-cloudflare, zlib-ng)에서 aqr-flate보다 작다. 그 해시 후보와 add policy 목록이 aqr-flate README의 Left("More emulated encoders")의 에뮬레이션에 바로 참고가 된다(귀속을 지키면 코드도).
   - 해시(`hash_algorithm.rs`): zlib(memLevel별 셋), MiniZFast, Libdeflate4(4바이트와 3바이트 보조), Libdeflate4Fast, ZlibNG, Crc32c, RandomVector.
   - add policy(`add_policy_estimator.rs`): AddAll, AddFirst(n), AddFirstAndLast(n), miniz fast의 4K 경계, zlib-ng fast의 32K 경계.
 - **헤더 없는 raw deflate 탐지**: aqr-compress는 컨테이너(gzip, zlib, ZIP, PNG, PDF 등)를 거쳐서만 찾는다. Precomp `-brute`(`check_inf_result`)의 거르개가 그대로 비용 모델이 된다. BTYPE=3과 stored를 버리고, 64바이트 ×4 구간의 바이트 히스토그램으로 중복이 심한 위치를 거르고, `inflate`를 2048 B만 돌려 끝났다면 1024 B 이상 풀린 것만 받으며, 실패한 위치는 기록해 다시 보지 않는다. 게임 아카이브나 독자 컨테이너에 쓸모가 있다.
@@ -75,7 +75,7 @@ aqr-flate README의 홀드아웃 벤치(807개 스트림, 40.6 MB, M4 한 스레
 
 ## 4. JPEG
 
-aqr-jpeg는 packJPG, Lepton(lepton_jpeg_rust), brunsli보다 빠르고 작으며, paq8px는 비트 단위 CM이라 비교할 속도가 아니다. 이들에서 온 후보는 aqr-jpeg README의 "Tried and dropped"에서 모두 기각했다. GDCC 2023 과제 1의 상위 결과(0.33)는 데이터셋이 원본 75장의 다품질 사본이라 생긴 것이라 aqr-jpeg와 견줄 수 없다.
+aqr-jpeg는 packJPG, Lepton(lepton_jpeg_rust), brunsli보다 빠르고 작으며, paq8px는 비트 단위 CM이라 비교할 속도가 아니다. 이들에서 온 후보는 aqr-jpeg FORMAT.md의 "Design notes"의 "Tried and dropped (`jpeg-recons`)"에서 모두 기각했다. GDCC 2023 과제 1의 상위 결과(0.33)는 데이터셋이 원본 75장의 다품질 사본이라 생긴 것이라 aqr-jpeg와 견줄 수 없다.
 
 ## 5. 오디오
 
@@ -85,7 +85,7 @@ packMP3(https://github.com/packjpg/packMP3, LGPL-3.0)는 적응 산술 부호화
 
 남은 후보(코드 읽기의 가설이며 정량 검증은 하지 않았다. 시간 방향 이동평균은 이미 넣었다):
 
-1. **같은 granule의 이미 코딩한 이웃.** aqr-mp3는 직렬 의존을 피하려고 일부러 쓰지 않는다. README의 측정으로 직전 쌍이 0.53 pp(디코딩 약 −40%), 두 쌍 전이 0.37 pp(−14%)이다. 격차의 가장 큰 몫으로 보인다.
+1. **같은 granule의 이미 코딩한 이웃.** aqr-mp3는 직렬 의존을 피하려고 일부러 쓰지 않는다. aqr-mp3 FORMAT.md의 "Design notes"(Coefficient model, Tried and dropped)의 측정으로 직전 쌍이 0.53 pp(디코딩 약 −40%), 두 쌍 전이 0.37 pp(−14%)이다. 격차의 가장 큰 몫으로 보인다.
 2. **부호 모델링.** 이득은 1 pp 미만일 것이다. 비트당 이진 코딩이라 속도 비용이 크다.
 3. **적응 대 정적.** 인코더와 비트레이트가 섞인 코퍼스에서는 적응이 유리할 수 있다. 정적 prior 위에 SSE/APM이나 2입력 믹싱을 얹는 혼합을 시도할 만하다.
 
@@ -100,13 +100,13 @@ packMP3(https://github.com/packjpg/packMP3, LGPL-3.0)는 적응 산술 부호화
 
 ### 무손실 오디오
 
-aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭, 샘플 도메인 재예측)은 그 README의 "Tried and dropped"이다.
+aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭, 샘플 도메인 재예측)은 그 FORMAT.md의 "Design notes"의 "Tried and dropped"이다.
 
 - **PCM 경로(aqr-raw)에서 샘플 도메인 캐스케이드.** (LMS 한 단은 채택, 잔차 위의 32탭이다.) FLAC 경로에서는 FLAC의 LPC 위라 듣지 않았지만, PCM은 aqr-raw가 직접 예측하므로 Monkey's Audio식 int16 sign-sign LMS를 직렬로 쌓을 수 있다. Monkey's의 레벨별 (탭, 시프트)는 high (64, 11), extra high (256, 13)+(32, 10), insane (1024+256, 15)+(256, 13)+(16, 11)이다. Monkey's는 FLAC `--best`보다 3.8% 작다(ERK 2023, 16비트 스테레오 61개).
 - **Sac식 편향 보정**(https://github.com/slmdev/sac, MIT, `pred/bias.h`): 앞 입력과 델타의 부호·크기 비트로 만든 문맥 셋마다 평균 편향을 세어 예측에 더한다. 샘플당 10사이클 안팎이다. Sac은 FLAC -8pe 대비 89%로 가장 작은 쪽이지만 fp64 내부라 출력이 플랫폼에 묶이고 매우 비대칭이다.
 - **두 전문가 혼합**(Sac의 `BlendLS`): 스텝이 다른 sign-sign LMS 둘을 최근 |오차|로 섞는다. 정수 가중치 두 개로 된다.
 - PCM이 L/R로 들어올 때 둘째 채널에 첫 채널의 같은 시점 샘플을 탭으로 넣는다(Sac).
-- **가변 블록 크기 FLAC**: [채택] aqr-flac이 처리한다(README).
+- **가변 블록 크기 FLAC**: [채택] aqr-flac이 처리한다(FORMAT.md).
 - **포맷 우선순위**:
   1. ALAC(https://github.com/macosforge/alac, Apache-2.0): 4096프레임 패킷, 정수 매트릭스 믹스, 차수 최대 31의 LPC, 적응 Golomb(`ag_enc.c`)이다. Rice 파라미터가 잔차 열의 순수 함수라 잔차만 알면 비트스트림이 정확히 재현되고, aqr-flac과 같은 설계가 된다. MP4 컨테이너(`stsz`, `stco`) 분해가 필요하다.
   2. Shorten(etree의 옛 라이브 녹음)
@@ -115,10 +115,10 @@ aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭
 
 ## 6. 이미지
 
-- **GIF.** [완료] aqr-gif. Precomp(giflib 인코더를 다시 돌려 다른 곳만 적는다)와 paq8px(clear 위치 하나와 최장 일치가 아닌 위치 목록, 다르면 포기)와 달리, 화소가 주어졌을 때 코드열을 최장 일치에 견주어 부호화하므로 어떤 코드열이든 받는다. 본 인코더는 모두 최장 일치에 사전이 가득 차면 clear였다. 남은 것은 그 README의 Status이다.
+- **GIF.** [완료] aqr-gif. Precomp(giflib 인코더를 다시 돌려 다른 곳만 적는다)와 paq8px(clear 위치 하나와 최장 일치가 아닌 위치 목록, 다르면 포기)와 달리, 화소가 주어졌을 때 코드열을 최장 일치에 견주어 부호화하므로 어떤 코드열이든 받는다. 본 인코더는 모두 최장 일치에 사전이 가득 차면 clear였다. 남은 것은 그 README의 Left이다.
   - flexiGIF 2018.11a의 최적화 옵션(clear 시점, 탐욕 대 lookahead, 첫 clear 생략, 사전 4093 제한)이 만드는 코드열도 레코드가 받지만, 최적화된 파일로 비용을 재 보지는 않았다.
 - **camera RAW.** [채택] aqr-jpeg의 SOF3(`jpeg-lossless-recons`). 남은 것은 aqr-jpeg README. 다른 컨테이너(NEF, ARW2, RW2, ORF…)는 아직이다(rawspeed의 디코더 목록이 지도).
-- **BC7, BC6H, KTX**: [채택] BC7은 aqr-tex의 `bc7-recons`(README의 BC7). BC6H와 KTX는 aqr-tex README를 본다.
+- **BC7, BC6H, KTX**: [채택] BC7은 aqr-tex의 `bc7-recons`(FORMAT.md "Design notes"의 "BC7"). BC6H와 KTX는 같은 곳의 "BC6H, ETC1/ETC2/EAC, PVRTC1, ASTC"를 본다.
 - **래스터 모델(aqr-raw).** fNBLI(GPL-3.0, 실행 파일만)는 CLIC2021 585장에서 PNG 대비 −29.8%를 압축 94.8 MB/s, 해제 149 MB/s(한 스레드)로 낸다. 약 100 MB/s 목표가 비현실적이지 않다는 근거이다. QLIC(https://github.com/OzzyMitchell/QLIC, Apache-2.0)과 같은 계열인 aqr-raw에서 값싸게 더 얻을 후보:
   - 이미지마다 색 변환을 고른다(G 델타, B 델타, 가중 블렌드 등). 인코더 시간만 들고 디코더는 한 번만 분기한다.
   - 클램프 그래디언트와 MED 중 하나를 인코더가 고른다.
@@ -143,7 +143,7 @@ aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭
   - 코드 밖: `.rela.dyn`은 오프셋 델타, type, symbol, addend 열로 나눈다(`R_*_RELATIVE`는 오프셋 델타가 대개 8). `.dynsym`과 `.symtab`은 aqr-exe의 .NET 표 처리나 `recs-fields`를 쓴다. `.gnu.hash`와 `.hash`는 이름에서, `.eh_frame_hdr`의 정렬 표는 FDE에서 다시 계산할 수 있다. RELR과 Android APS2(lld)는 이미 압축된 형태라 더 줄일 것이 적다. CREL(LLVM 19 이후)은 재배치 가능 목적 파일의 것이라 링크된 실행 파일에는 해당하지 않는다.
 - **PIC 점프 표.** gcc/clang PIC의 `lea table(%rip); movslq (table,idx,4); add; jmp *` 표는 `.rodata`에 표 기준 32비트 상대 오프셋으로 있다. aqr-exe의 x86-64 점프 표는 절대 `le64` 엔트리만 알아보므로(FORMAT.md §6), ELF와 Mach-O에서는 이 꼴을 알아보아 절대 주소로 바꾸는 것이 이득일 수 있다(실측 필요).
 - **점프 타깃 부호화.** kkrunchy의 disfilter(aqr-exe disfilter의 선조)는 `E9`/Jcc rel32의 절대 타깃을 앞 점프 타깃과의 차이(zigzag)로 저장하고, aqr-exe는 절대 타깃을 그대로 저장한다. 함수 안의 지역성으로는 델타가 작을 수 있고, 절대는 반복 일치에 유리하다. 같은 코퍼스에서 비교해 볼 만하다.
-- **ARM64의 `ADRP` 짝.** [채택] `ADRP` 뒤 같은 레지스터의 `ADD`/`LDR`/`STR`의 lo12를 묶어 예측한다(aqr-exe README의 ARM64). Linux aarch64 PLT 스텁도 이 꼴이다.
+- **ARM64의 `ADRP` 짝.** [채택] `ADRP` 뒤 같은 레지스터의 `ADD`/`LDR`/`STR`의 lo12를 묶어 예측한다(aqr-exe FORMAT.md의 `exe-recons/arm64`). Linux aarch64 PLT 스텁도 이 꼴이다.
 - **리터럴 풀 오인**(aqr-exe의 ARM64 한계): xz의 `ADRP` ±512 MiB 범위 검사나 "바꿔서 커지면 되돌리기"를 응용할 수 있다.
 - **RISC-V.** xz `riscv.c`(5.6 이후, 주석이 설계 문서 역할을 한다)가 출발점이다.
   - `JAL`은 rd가 x1/x5일 때만 바꾼다. `JAL x0`, `C.J`, `C.JAL`, 조건 분기는 절대 주소가 거의 한 번만 나와 손해라 두지 않는다.

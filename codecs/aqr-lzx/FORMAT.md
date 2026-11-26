@@ -493,3 +493,13 @@ that the plan does not depend on the trees). A block is written as soon as its r
   91.1 MB kinds, 72.7 MB lengths, 6.3 MB trees, 0.8 MB offsets, 0.1 MB the rest.
 - aqr-wim (WIM files) and aqr-mszip (CAB and CHM files) make the applications: see their
   `FORMAT.md`s.
+- Splitting is streamed like the module (`recons::split_stream_to`): the stream is read twice, a
+  block at a time (the record starts with the capacities, the most of any block), the data put
+  onto a sink as it is decoded, so that neither the data nor the parse of a stream is held but
+  the window and the blocks being coded. Holding the tokens of a 3 GB stream took 8 bytes each,
+  and a 568 MB CAB of an MSI (3 GB of data) took 8.9 GiB as a whole module; hence the part
+  module.
+- No encoder is reproduced: Microsoft's encoders are closed and their parse optimal-style, so
+  the record codes the parse given the data, under contexts of what a match finder sees there
+  (the longest match, the repeat offsets' matches), a new offset by its rank among those of its
+  length, and the trees against Huffman codes of each block's frequencies.

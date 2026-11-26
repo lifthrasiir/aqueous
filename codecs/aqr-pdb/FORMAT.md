@@ -390,3 +390,18 @@ encoder decodes what it made and compares it with the streams. A record is kept 
 fields do not end at its length, its padding is not the usual, a leaf has a code not in the table,
 or its kind has no layout. A numeric leaf is escaped where it is not in the shortest form, not
 whole or past ±2⁶². Formulas take the streams where the records are 64 KiB or more.
+
+## Design notes
+
+- The modules' streams, through `aqr-pdb-check` (zstd -3), as they are -> zstd -3 -> the streams:
+  `uniform.pdb` 44.17 -> 13.95 -> 5.78 MB (-58.6%), `std` 3.36 -> 0.70 -> 0.41 MB, `combase.pdb`
+  17.85 -> 4.62 -> 3.31 MB. Of `uniform.pdb`'s (75.8% of its 36.7 MB of symbols are inline sites)
+  the annotations are left at 2.99 MB (3.84 MB as they were), most of them code offsets (1.36 MB),
+  the C13 lines at 1.07 MB (1.58 MB).
+- Inlinee lines code each inlinee's file and line from its last entry: the same in 99.9% of
+  `uniform.pdb`'s 384 K entries.
+- The modules' streams being whole outputs, they are a few runs for the content scan, each
+  inferred once; as the modules' symbols alone were outputs, `uniform.pdb`'s were 57 pieces,
+  1.28 s of inference against 0.29 s at once.
+- A name's text (a type's name and decorated name twice, again for its forward declaration) has no
+  dictionary of earlier names: it would be memory growing with the data.

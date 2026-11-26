@@ -17,7 +17,7 @@ Suciu 2000)이다: 태그는 골격에, 값은 경로별 컨테이너에.
 aqr-wrt, 묶음 전체에 사전 하나). aqr-jsonl과 달리 숫자를 모듈 안에서 aqr-num으로 코딩하지 않는 이유:
 
 - 프로토타입에서 숫자를 앞 값과의 차로 코딩한 것이 aqr-compress가 같은 묶음을 aqr-log로 코딩한 것보다 컸다
-  (README, "Prototype"). 열 코딩은 aqr-log·aqr-xsv에 이미 있고 그쪽의 개선이 그대로 온다.
+  (aqr-xml FORMAT.md, "Design notes"의 "Prototype"). 열 코딩은 aqr-log·aqr-xsv에 이미 있고 그쪽의 개선이 그대로 온다.
 - 모듈의 바이트는 아카이브마다 드는 비용이다.
 
 다시 볼 때: 묶음이 수백 개를 넘어 스트림마다의 비용이 보일 때(그때 작은 숫자 묶음을 모듈 안에서 코딩하는 것을 잰다).

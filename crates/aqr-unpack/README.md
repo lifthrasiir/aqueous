@@ -33,7 +33,7 @@ opened.packed();                                            // and its compresse
 opened.unpack_selected(threads, &sink, &select)?;           // some entries alone, of an archive read by several
 ```
 
-## What is kept
+## What is taken
 
 - Times: ZIP's NTFS field, else Info-ZIP's extended timestamp, else the MS-DOS time as local
   time; 7z's modification, creation and access times; RAR5's (its time record, to the
@@ -64,11 +64,11 @@ links and copies of files (and the files after a file left out in a RAR or EGG s
 and EGG's symbolic links (whose targets neither is known to store). A path given again takes the place of
 the one before (as tar has it); a file and a directory of one name keep the first.
 
-## How it does
+## Results
 
-Measured 2026-11-01 on Windows 11 (16 threads, NVMe SSD), extracting a Python 3.14 install
-(318 MB, 10,694 files) archived by 7-Zip 24 (ZIP and 7z at `-mx=5`), bsdtar, gzip -6, xz -6
--T0, zstd -3 and bzip2 -9; against 7-Zip (`7z x`) and bsdtar (`-xf`), best of two:
+Extracting a Python 3.14 install (318 MB, 10,694 files) on Windows 11 (16 threads, NVMe SSD),
+2026-11-01, against 7-Zip (`7z x`) and bsdtar (`-xf`), best of two (ZIP and 7z made by 7-Zip 24
+at `-mx=5`, the rest by bsdtar, gzip -6, xz -6 -T0, zstd -3, bzip2 -9):
 
 | Archive | aqr | 7-Zip / bsdtar | `aqr -K` (then `-t`) |
 |---|---|---|---|
@@ -80,22 +80,27 @@ Measured 2026-11-01 on Windows 11 (16 threads, NVMe SSD), extracting a Python 3.
 | tar.zst, 53.6 MB | 1.00 s | 1.47 s | |
 | tar.bz2, 54.0 MB | 2.71 s | 5.65 s | |
 
-Each program ran under a name Windows Defender's real-time scanning leaves out on that machine:
-scanned, writing these files takes 3–4 s more whatever writes them (a file's scan on its
-close), which hides the rest (aqr 4.1 s, 7-Zip 2.8 s on the ZIP archive then).
+Each program ran under a name Windows Defender's real-time scanning leaves out: scanned,
+writing these files takes 3-4 s more whatever writes them.
+
+## Tests
+
+- `tests/unpack.rs`: each format read on archives of real tools (`tests/data`, `scripts/gen-fixtures.py`; aqr-7z's 7z archives): the trees and contents they tell, and what they leave out.
+- `tests/edge.rs`: archives lying about sizes, headers disagreeing, colliding names, cut directories: an error or a note, never a panic, a hang or an allocation the data cannot hold.
 
 ## Left
 
-- Formats of whose code there is more in the repository: LHA, CAB, CHM, ISO, WIM.
-- ALZ and EGG: volumes (`.a00`…, `.vol2.egg`…), their encryptions (ZipCrypto, AES and LEA), an EGG solid
-  archive of several blocks whose decoders' state goes on across them (the archives seen have
-  one), EGG's relative names (a parent's id, flags bit 5; not seen).
-- PPMd (7z, ZIP: aqr-rar's PPMd var.H, with 7z's range coder); Deflate64; RAR's encryption.
-- RAR: volumes (a file over several archives), hard links (as link groups), self-extracting
-  archives (by name, `.exe`, they are not taken); a solid group is decoded whole in memory
-  (its window is all of it), its files given as each is done.
-- A 7z folder of LZMA (not LZMA2), a gzip member and a single-block xz decode on one thread;
-  a 7z folder is held whole until all its files are written (a window of its dictionary's size
-  would do, as 7-Zip has it).
-- Names of ZIP and tar archives neither UTF-8 nor flagged, on macOS (raw bytes, which APFS does
-  not take).
+- **Other formats.** LHA, CAB, CHM, ISO and WIM (codecs of them are in the repository).
+- **ALZ and EGG.** Volumes (`.a00`..., `.vol2.egg`...), their encryptions (ZipCrypto, AES and
+  LEA), an EGG solid archive of several blocks whose decoders' state goes on across them (the
+  archives seen have one), EGG's relative names (a parent's id, flags bit 5; not seen).
+- **Methods.** PPMd of 7z and ZIP (aqr-rar's PPMd var.H, with 7z's range coder), Deflate64,
+  RAR's encryption.
+- **RAR.** Volumes, hard links (as link groups), self-extracting archives (by name, `.exe`); a
+  solid group is decoded whole in memory (its window is all of it), its files given as each is
+  done.
+- **Threads.** A 7z folder of LZMA (not LZMA2), a gzip member and a single-block xz decode on one
+  thread; a 7z folder is held whole until all its files are written (a window of its
+  dictionary's size would do, as 7-Zip has it).
+- **Names on macOS.** ZIP and tar names neither UTF-8 nor flagged (raw bytes, which APFS does not
+  take).

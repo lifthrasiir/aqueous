@@ -288,3 +288,12 @@ the application's declared output size.
   what follows the file go in a stream of class `lzo`; the data of the split and stored blocks,
   in the file's order, in one of class `raw`, which the formula may recompress in turn. The
   records go in `lzo/record`, the index in `lzo/index`.
+- LZO1X-1's matches are, 99.9% of the time, the nearest ones of their length among the
+  positions outside earlier matches (its hash table never sees those). The match finder's
+  *skip* mode leaves them out too, which brought its records from 17% of the streams to 3.5%.
+  What is left is mostly where matches start and which of the candidates is taken, which depend
+  on its hash table's collisions and its skipping over literals.
+- LZO1X-999's matches are the nearest ones of their lengths; what is left is its parse.
+- No compressor is reproduced: LZO has many (LZO1X-1 and its 11-, 12- and 15-bit variants,
+  LZO1X-999 at nine levels, the Linux kernel's own), and LZO is GPL, so the crate holds none of
+  its code. The record codes any compressor's parse given the data.

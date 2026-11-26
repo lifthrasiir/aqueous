@@ -441,3 +441,93 @@ is rebuilt from these inputs (empty ones are not listed; the number is the input
 19 v2     05                            -3
 34 v-pred 00                            predictor 0 (previous numbers)
 ```
+
+## 8. How the encoder works (non-normative)
+
+Source files: `src/formula.rs` the module's formula of a file and its decoder; `src/codec.rs`
+blocks, their streams, verification, threads; `src/block.rs` streams, templates, line encoder
+and decoder; `src/style.rs` the number mode per kind of line (the modes are `aqr-num`);
+`src/recent.rs` equal-line references and the predictor window; `src/corner.rs` face corners;
+`src/ans.rs` rANS; `src/module.rs` the decoder alone for the Wasm module.
+
+**Blocks and lines.** A file is cut into blocks of 4 MB at line ends; each becomes a set of
+streams, each kept as is or rANS coded, whichever is smaller (the archive compresses them
+further). State (previous values, templates, recent lines and faces) carries over, its size
+independent of the file's. A `v`, `vt`, `vn`, `vp`, `f` or `l` line becomes a template (the
+separators, number formats, corner patterns, line end: one byte, nearly free once compressed)
+and values; any other line, or one that does not parse back to itself, is text. The
+verification decodes each block against the text it was coded from (`block::Check`); a number
+checked to print back to its token (`Encoder::told`) is compared by value, scale and format.
+
+**Numbers** (`aqr-num`, `src/style.rs`). A number is an integer at a scale printed in a mode,
+which may print from a float: the value is then the shortest decimal that rounds to the `f32`
+or `f64`, so a `%.17g` number costs what its double holds. Shortest decimals come from Zmij,
+exact digits of a double from 128-bit integer arithmetic; only IEEE basic operations are used,
+so decoding gives the same bytes everywhere. The mode of a kind of line is picked from a sample
+of each block (by the digits it would code and its scale changes), every number checked by
+printing it back, falling back to fixed or `%g` (or text).
+
+**Prediction.** Equal lines: a `v`, `vt` or `vn` line equal to one of the last 65,536 of its
+kind is the distance back (triangle soups repeat each vertex). Line predictors: the one that
+leaves the fewest residual bits among the previous numbers, the lines up to 16 back and the
+parallelograms `x[-1] + x[-k] - x[-k-1]`; the encoder stays with the last one unless another
+saves more than a few bits. Unit normals: the largest component from the other two,
+`+-sqrt(1 - a^2 - b^2)`. Residuals go to streams per kind and position, rANS coded per value,
+unless kept as is (repeats, which the archive's zstd sees).
+
+**Faces.** Per attribute, a move-to-front cache of the 32 last indices; an index is its cache
+position, "one more than the largest so far", one of two candidates, or an escape. The
+candidates come from a table of the last face of each vertex (direct mapped, 65,536 entries):
+for `v`, the neighbours of the previous corner's vertex there (a shared edge); for `vt` and
+`vn`, the index last paired with this vertex, and the vertex's index plus the last offset
+between them.
+
+**Portions and threads.** A file of more than 64 MiB (`formula::PORTION`, `Options::portion`,
+`-P` of `aqr-obj bench`) is cut into portions, each coded apart from no state: an application
+of the module each, of slices of the same streams (the portions' parts one after another, so
+that the archive compresses each kind of stream as one), and a Concat of them. The module holds
+its file and its streams whole, so an application takes some 2.4 times its bytes; a whole 221
+MB file needed 498 MiB, over the application bound. A portion ends at a line start, at the last
+change of statement in its last quarter (a run of `v` lines to `vt`, vertices to faces, a
+group's `g`), where the state it ends with would serve the next little; cut in a run of faces
+instead, the faces after lose their corners' candidates. Face indices need no state across
+portions: a relative one is coded against the vertices of its portion, as the decoder counts
+them. `-t N` (`Options::threads`, of `formula::decode`) gives the same output whatever the
+number of threads: the portions are coded side by side; within a portion the line coding and
+its verification stay on one thread, in order, and only the streams' rANS coding is spread.
+Decoding unpacks the streams of the blocks ahead on other threads and prints the numbers of
+decoded blocks (`block::Deferred`). The line coding and the line decoding are the limit.
+
+A synthetic file of 12 objects (221.8 MB: each its `v`, `vt` and `vn` lines, then `g`, `usemtl`
+and its faces; M4, `aqr-obj bench -t 10 -c`, 2026-11-10); through `aqr -c` it went from 20.99
+MB (the formula over the bound) in 2.51 s to 4.95 MB in 0.66 s:
+
+| portions of | at changes of statement | at the last line start | compress | decompress |
+|---|---|---|---|---|
+| (one) | 4,881,245 B | | 174 MB/s | 727 MB/s |
+| 64 MiB | 4,919,175 B | 4,901,179 B | 484 MB/s | 692 MB/s |
+| 16 MiB | 4,806,035 B | 4,880,813 B | 664 MB/s | 570 MB/s |
+| 4 MiB | 4,761,061 B | 4,869,545 B | 729 MB/s | 353 MB/s |
+| 1 MiB | 4,569,253 B | 5,190,961 B | 768 MB/s | 350 MB/s |
+
+**Memory.** The heap beyond input and output does not grow with the file: blocks of 4 MB, rings
+of the last 65,536 lines per kind, a table of 65,536 vertices, templates up to 4 MB. The Wasm
+module lays it out as a stack (`aqr_api::stack`), its limit its plan (`module::plan`): the
+file, the rings (for the lines the file could have, up to 65,536), the whole vertex table, the
+templates for as many bytes as the index tells (up to 4 MB), each stream for its longest in a
+block, all reserved before the first block; and a table of rANS as a stream is decoded.
+
+**Measured, not kept.**
+
+- An adaptive binary range coder for the values (LZMA-style): 1.5% smaller than rANS, but nine
+  serial binary decisions per value made decoding slower.
+- Contexts for the residuals (bit length of the previous one): no gain over a model per kind
+  and position.
+- rANS for the corner symbols and line ops: zstd wins (it sees the patterns).
+- Larger move-to-front caches for corner indices (128 to 2,048): worse. An escape against "one
+  more than the largest index": no gain.
+- Relative coding of the unit normal selector: slightly larger.
+- A line predictor window of 8 or 12: 2-5% faster compression, 0.2-0.4% larger. Staying with
+  the last predictor unless another saves 8 or 16 bits: mixed.
+- Faster digit output (digit pairs, tokens on the stack) and branch-free cache search: slower
+  or no change in A/B runs.

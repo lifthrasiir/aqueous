@@ -93,7 +93,7 @@ Kind를 `Kind::Format(NAME)`으로 만든다(첫 바이트부터 그 포맷으�
 | `raw` | `aqr-bits`(8/16/24/32), `aqr-channels`, `aqr-endian`(le/be), `aqr-sign` | 헤더 없는 PCM. 기본 16비트, 2채널, le, 8비트만 unsigned |
 | 모든 포맷 | `aqr-offset=N`(10진 또는 `0x`) | 그 오프셋에서 시작하는 파일(`zlib`, 헤더 없는 `deflate` 등). 앞 바이트는 다른 데이터처럼 스캔 |
 
-`tensors`는 aqr-tensors의 README("Data of no header"), `raw`와 `deflate`는 aqr-raw와 aqr-flate의 README.
+`tensors`는 aqr-tensors의 README("What is taken"), `raw`와 `deflate`는 aqr-raw와 aqr-flate의 README.
 헤더 없는 것을 받는 이름(`tensors`, `pcm`, `deflate`)은 감지하지 않는 포맷이고, 레이아웃 파라미터가 있는
 `aqr-format=raw`는 `pcm`이 된다.
 

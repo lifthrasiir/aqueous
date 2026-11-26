@@ -1,86 +1,63 @@
 # aqr-tensors
 
-Files of tensors rebuilt bit for bit (`FORMAT.md`): GGUF model files (llama.cpp's), PyTorch's
-files of `torch.save` (its ZIP format: `.pth`, `.pt`, `.ckpt`) and safetensors. The header (of a
-`.pth`, its pickle and the entries' headers) goes as it is, and the tensor data in segments of
-16 MiB, each an application of the part module `tensors-recons` (until 2026-11-12 the crate was
-aqr-gguf and the module `gguf-recons`), in which
+Files of tensors rebuilt bit for bit: GGUF model files (llama.cpp's), PyTorch's files of
+`torch.save` (its ZIP format: `.pth`, `.pt`, `.ckpt`) and safetensors. The header (of a `.pth`,
+its pickle and the entries' headers) goes as it is, and the tensor data in segments of 16 MiB,
+each an application of the part module `tensors-recons`. Weights are close to noise, so what is
+taken is the order-0 entropy of the floats' exponents and of the quantised blocks' quants, at
+the speed of a SIMD rANS (500 MB/s through `aqr`). `FORMAT.md` specifies the module and how it
+works.
 
-- the floats' (BF16, F16, F32, F64, FP8 E4M3 and E5M2) exponents are symbols, a table for each
-  tensor's part of a segment (the 15 or 16 commonest exponents, the rest escapes), and their
-  signs and mantissas go as they are, without the low bits that are zero in all of them (F16 of
-  BF16's precision: 3 bits; the few floats that are not, subnormals, are escapes whole), but
-  the top 4 bits or fewer (with the sign) are symbols by the exponent's class where a sample of
-  the tensor says they would come to 1.5% less (of FP8, of a lower precision converted); where
-  that comes to 1% less, zeros and subnormals are symbols of their own (a zero keeping its sign
-  alone, a subnormal the mantissa's bits below its top one), and where it comes to 2% less, the
-  rows of the tensor's first dimension (its output channels) are in up to 8 classes, each its
-  own table of the exponents (below, "Zeros and rows of their own scale");
-- floats that are a grid's values scaled by tiles (weights converted from a lower precision:
-  NVFP4, MXFP4, FP8 of blocks, NF4, GPTQ's and AWQ's INT4, INT8 of rows, to BF16, F16 or F32) are
-  found by a sample of the tensor and coded as the grid's indices (symbols) and the tiles'
-  scales (to the side), each scale the F32 of the fewest bits that gives all its tile's
-  elements exactly (`src/grid.rs`; below, "Conversions");
-- integers, bytes (packed FP4, E8M0 scales) and the like go as lanes, each byte of an element a
-  lane as it is or its two nibbles symbols;
-- the quantised blocks' quants are symbols: the nibbles of Q4_0, Q4_1, Q4_K, IQ4_NL, IQ4_XS
-  and MXFP4, Q6_K's low nibbles and its 2-bit high parts, Q8_0's high nibbles and the high 4
-  bits of Q5_0's, Q5_1's and Q5_K's quants (their low nibbles and lowest bits as they are),
-  Q2_K's 2-bit quants and Q3_K's 3-bit ones; the blocks' scales go to the side, for the archive
-  to compress;
-- of the types of codebooks (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S), the
-  scales of 3 or 4 bits are symbols (and Q2_K's scales and minimums), the grids' indices and the
-  signs as they are;
-- everything else (other types, padding, runs too short or that would not come to less) goes as
-  it is, and runs of 1 MiB or more of it are left out of the applications.
+```sh
+cargo rt -p aqr-tensors
+aqr-tensors-bench FILE [BYTES]   # THREADS sets the threads
+cargo test -r -p aqr-tensors --lib timing -- --ignored --nocapture   # the coder's speed
+```
 
-Weights are close to noise: what is left to take is the order-0 entropy of the exponents
-(BF16's 8 bits come to about 2.6) and of the quants (a Q4_K nibble 3.86 bits, Q8_0's high
-nibble 3.6–3.7, Q6_K's 6 bits 5.86 as nibble and crumb). Contexts were measured and give
-little: the exponent before (2.594 -> 2.592 bits), the low nibble of Q8_0 given its high one
-(3.92 of 4), the top 4 bits of BF16's mantissa given the exponent (3.93 of 4; F32's alike).
-So the model is order-0 by table, and the work is in the speed. Weights of a lower precision
-converted are not noise but a grid's values: of NVFP4's to BF16 the mantissa has 13 or 14
-values (3.7 bits of 7) and a block of 16 has 7 distinct magnitudes; as a grid, 4.2 bits a
-weight.
+`aqr-tensors-bench` prints the formula's streams, the speed of encoding and of decoding
+natively, the file rebuilt and compared, and the size of the whole file with the side bytes and
+the bytes not coded at zstd's level 3.
 
-## The coder
+## What is taken
 
-A static rANS of 32 interleaved 32-bit states, 16-bit words, probabilities of 15 bits, over
-an alphabet of 16 symbols, in groups of 32 symbols of one table (FORMAT.md §3). As all the
-states of a group have the same table, a symbol is found by comparing the slot with the 15
-cumulative frequencies, and its frequency and start are looked up by a permutation (AVX2) or a
-byte shuffle (NEON, SIMD128): no gather. The renormalisation reads the words of the states that
-need one by a table of the mask of those states. Natively the AVX2 kernels are taken where the
-processor has them, the NEON ones on AArch64 (else one state at a time); the Wasm module runs
-SIMD128. NEON compares the slots as 16 bits, 8 at a time, and divides by the 64-bit magic
-numbers of the scalar encoder (`umull`, `umlal`), not by doubles.
+- **Floats** (BF16, F16, F32, F64, FP8 E4M3 and E5M2): exponents as symbols, the signs and
+  mantissas as they are (without the low bits zero throughout); the top mantissa bits, zeros
+  and subnormals, and rows of their own scale as symbols where a sample says it pays.
+- **Grids**: floats that are a lower precision's values scaled by tiles (NVFP4, MXFP4, FP8 of
+  blocks, NF4, GPTQ's and AWQ's INT4, INT8 of rows, converted to BF16, F16 or F32), found by a
+  sample of the tensor and coded as indices and the tiles' scales.
+- **Quantised blocks** (GGUF): the quants of Q2_K to Q6_K, Q8_0, IQ4_NL, IQ4_XS and MXFP4 as
+  symbols, the scales to the side; of the codebook types (IQ1_S to IQ3_S) the scales of 3 or 4
+  bits as symbols and the grids' indices and signs as they are.
+- **Integers and bytes** (packed FP4, E8M0 scales): lanes of bytes, or their nibbles as symbols.
+- Everything else (other types, padding, runs too short or that would not come to less) goes as
+  it is; runs of 1 MiB or more of it are left out of the applications.
+- A tensor of the same bytes as one before it in the file (tied embeddings: `lm_head.weight` as
+  `model.embed_tokens.weight`) is that one's applications again; aqr-compress puts files of
+  such a tensor in common in one batch (`shared_keys`, up to 16 GiB together).
+- A file of 1 GiB or more archived alone to a file is written directly
+  (`docs/streaming-encoder-design.md`): each segment's formula is sealed into the archive as it
+  is made.
+- Data of no header (an app's weights as they are) is taken where the attributes say so
+  (docs/hints-design.md): `aqr-format=tensors` with `aqr-dtype=TYPE` (all the file one tensor of
+  `bf16`, `f16`, `f32`, `f64`, `e4m3`, `e5m2`, or `i8` to `u64` as lanes; the bytes after its
+  last whole element as they are) or `aqr-layout=FILE` (TOML, relative to the attributes'
+  directory: each `[[tensor]]` of `shape` (outermost first; the last dimension its rows, the
+  first the rows' classes) or `count`, `dtype` (else the file's top-level `dtype`, else
+  `aqr-dtype`'s) and `offset` in bytes (else where the one before ends); other keys are left;
+  tensors past the file's end or overlapping the one before are left out). A layout gives each
+  tensor its own tables, which pays (`tensors::headerless`).
+- Not taken: the trellis types (ik_llama.cpp's KT) as they are; `torch.save`'s legacy format
+  (before PyTorch 1.6) and pickles of protocols 0 and 1; storages of quantised types
+  (`QInt8Storage` and the like); ONNX, NumPy's `.npy`/`.npz`, Keras' HDF5; FP6's and FP4's
+  bytes of safetensors are lanes of a byte (FP6's 4 values in 3 bytes not taken apart).
 
-On a Ryzen 7 9700X, one thread, 64M symbols of a table of 3.67 bits (`timing::speed`):
+## Results
 
-| | Msym/s |
-|---|---|
-| encode, scalar (u32 division) | 374 |
-| encode, scalar, branchless renormalisation, Lemire's division | 726 |
-| encode, AVX2 (division by doubles, exact below 2^32) | 1555 |
-| decode, AVX2 | 1900 |
-
-On an Apple M4, the same:
-
-| | Msym/s |
-|---|---|
-| encode, scalar | 1044 |
-| encode, NEON | 1386 |
-| decode, scalar | 216 |
-| decode, NEON | 1210 |
-
-## How it does
-
-Measured 2026-11-12 on a Ryzen 7 9700X (16 threads, 125 GB), through `aqr -c` and `aqr -d` (the
-default level, verification included), each file an archive of its own, the files read in place
-from another disk; "before" is `aqr` before aqr-tensors (zstd on the file as it is). Every file came
-back the same. (Q5_0, Q5_1 and Q5_K were coded after: Qwen3.5-4B Q4_K_M's 519 MB of Q5_K come to
-2.3% less, by `aqr-tensors-bench`.)
+Ryzen 7 9700X (16 threads, 125 GB), 2026-11-12, through `aqr -c` and `aqr -d` (the default
+level, verification included), each file an archive of its own, the files read in place from
+another disk; every file came back the same. "Before" is `aqr` before aqr-tensors (zstd on the
+file as it is).
 
 | file | size | archive / input | before | compress | before | decompress | heap peak |
 |---|---|---|---|---|---|---|---|
@@ -97,82 +74,30 @@ back the same. (Q5_0, Q5_1 and Q5_K were coded after: Qwen3.5-4B Q4_K_M's 519 MB
 | Qwen3.8-27B UD-IQ1_S | 6.19 GB | 0.9714 | 0.9952 | 458 MB/s | 393 MB/s | 2764 MB/s | 1.47 GB |
 | Qwen3.8-27B UD-Q2_K_XL | 9.95 GB | 0.9765 | 0.9915 | 440 MB/s | 379 MB/s | 2980 MB/s | 1.30 GB |
 
-The last two (types below 4 bits, IQ1–IQ3 most of them) were measured after, written directly
-(below), "before" aqr-tensors without those types (and not written directly), decompressing by
-`aqr -K` (2405 and 2450 MB/s before).
+The coding itself (`aqr-tensors-bench`, 16 threads) runs at 1.6-3.8 GB/s and decodes at 5-6
+GB/s (one thread: 330-670 MB/s coding, 550-1080 decoding); the rest of `aqr`'s time is the
+archive's (probing the coded streams, writing and verifying). On the 11 files of tenz's README
+(github.com/nsiddiqui248/tenz; 0.4-17.65 GB, 35.26 GB in all; 2026-11-14), `aqr -c` takes 71.7
+s (492 MB/s) and `aqr -K` 18.4 s. A shard of 49.9 GB (Qwen3.8-Flash UD-Q4_K_XL, 2 of 4) archives
+to 47.72 GB (0.9572) in 188 s, resident peak 1.22 GB; `aqr -K` gives it back at 1055 MB/s.
 
-The coding itself (`aqr-tensors-bench`, 16 threads, the file cached) runs at 1.6–3.8 GB/s and
-decodes at 5–6 GB/s (one thread: 330–670 MB/s coding, 550–1080 decoding). Through `aqr`, the
-rest is the archive's (a 5.3 GB Q4_K_M, `--stats`): the coded streams compressed whole at zstd's
-probe level to see whether they save (about 19 thread-seconds), then writing the batch and
-verifying it, about 4.5 s of 13.6 on one thread.
-
-A file of 1 GiB or more archived alone to a file is written directly
-(`docs/streaming-encoder-design.md`, "출력에 바로 쓰기"): each segment's formula is sealed into the
-archive's sink as it is made, its blocks written to the archive as they fill, and the formula
-block put into a room left before them (its bound, `formula::formula_bound`), the rest a
-spacer. A shard of 49.9 GB (Qwen3.8-Flash UD-Q4_K_XL, 2 of 4), which before grew to 80 GB of
-memory (the spill's regions mapped, 155 of 256 MiB, and the input) and was stopped, now
-archives to 47.72 GB (0.9572) in 188 s, resident peak 1.22 GB, spill peak 18.7 KB: 72 s to
-write the archive, then 116 s verifying it on 1.8 threads. `aqr -K` gives it back at 1055 MB/s.
-The 5.3 GB Q4_K_M: 18.65 -> 13.1–13.5 s, resident peak 15.89 -> 1.26 GB, spill peak 5.66 GB ->
-15.8 MB, the archive 5,131,102,954 -> 5,131,401,818 B (the room's spacer, and the blocks in the
-order they filled).
-
-Then (2026-11-14), the file is read once for its checksum and its content hash together, the
-content hash on all the threads, and verifying compares with those, not reading it again; the
-archive's blocks stored as they are are hashed in place on all the threads, not copied four at
-a time; and each segment's `tensors/side` is a block of its own, encoded on the segment's worker
-(the side streams had been one stream of the archive, whose 128 MiB blocks were compressed one
-at a time as they filled, on the thread that seals, the segments waiting: 0.3 s each for a
-Q4_K_M, 1.25 s for Gemma's Q4_0 scales at a higher zstd level). On the 11 files of tenz's
-README (0.4–17.65 GB, 35.26 GB in all), `aqr -c` 109.6 -> 71.7 s (322 -> 492 MB/s), `aqr -K`
-22.4 -> 18.4 s, the archives -0.06% to +0.02%: gemma-4-31B-it-QAT Q4_0 62.9 -> 38.2 s,
-Qwen2.5-7B Q4_K_M 11.9 -> 8.0 s.
-
-A `.pth` is a ZIP archive of stored entries: its pickle `data.pkl` first, then each storage an
-entry `data/KEY`. The storages are found by the central directory and the persistent ids of the
-pickle (`('storage', torch.FloatStorage, KEY, …, NUMEL)`), read by a machine of the opcodes that
-keeps only strings, integers, globals and tuples: no Python object is made, nothing else of the
-pickle is run. A safetensors file's JSON header is read for each tensor's `dtype` and
-`data_offsets` alone.
-
-Segment Anything's `sam_vit_h_4b8939.pth` (2.56 GB, F32: 594 storages, the rest 0.08 MB of
-pickle and 0.4 MB of ZIP headers between them), measured 2026-11-12 the same way; before, it went
-as a ZIP archive (aqr-zip, its entries zstd'd):
+**`.pth`.** Segment Anything's `sam_vit_h_4b8939.pth` (2.56 GB, F32; 594 storages), same
+machine, against the ZIP archive of before (aqr-zip, its entries zstd'd):
 
 | | archive | archive / input | compress | decompress (`aqr -K`) | heap peak |
 |---|---|---|---|---|---|
 | before | 2,373,844,060 B | 0.9256 | 25.3 s (101 MB/s) | 736 MB/s | |
 | aqr-tensors | 2,135,171,466 B | 0.8326 | 4.77 s (537 MB/s) | 2548 MB/s | 0.82 GB |
 
-Its F32 come to their exponents' entropy (8 bits to about 2.6) and the 24 bits of sign and
-mantissa as they are (no mantissa's low bits are zero throughout): `aqr-tensors-bench`, 213 MB of
-symbols and 1923 MB raw of 2564.5 MB, coding at 4.1 GB/s, decoding at 5.2 GB/s (16 threads).
+**Tensors stored twice** (`aqr -c`, 2026-11-24): Qwen3-0.6B 997,171,204 -> 791,437,270 B (0.6633
+-> 0.5265); Qwen3-1.7B's two shards 2,685,508,834 -> 2,277,827,611 B (0.6609 -> 0.5606).
 
-## Tensors stored twice
-
-Models of embeddings tied to the output's weights (`tie_word_embeddings`) are often saved with
-both, `lm_head.weight` the same bytes as `model.embed_tokens.weight`: Qwen3-0.6B's 311 MB of
-1.50 GB, Qwen3-1.7B's 622 MB of 4.06 GB (in its second shard). A tensor of the same bytes as one
-before it in the file is that one's applications again (FORMAT.md §2), and a tensor of a
-segment's bytes or more makes segments of its own, the same wherever it is: aqr-compress puts
-files of such a tensor in common in one batch (`shared_keys`, up to 16 GiB together), where the
-archive stores their streams once. Through `aqr -c` (Ryzen 7 9700X, 2026-11-24), Qwen3-0.6B:
-997,171,204 -> 791,437,270 B (0.6633 -> 0.5265), 1.54 -> 1.52 s, `aqr -K` 3.34 -> 3.62 GB/s;
-Qwen3-1.7B's two shards: 2,685,508,834 -> 2,277,827,611 B (0.6609 -> 0.5606),
-12.1 -> 11.0 s, `aqr -K` 5.5 -> 4.8 s.
-
-## Conversions
-
-Measured 2026-11-12 on a Ryzen 7 9700X (16 threads), through `aqr -c` (the default level,
-verification included) and `aqr -K`, each file an archive of its own; "before" is `aqr` before
-the grids, lanes and the other floats (the bytes not coded zstd'd by the archive). Samples are
-in `F:\Data\aqr-corpus\tensors` (from Hugging Face; `fetch.sh` there): real conversions are
-rare there, so `dequant/` has checkpoints of NVFP4 (compressed-tensors' and ModelOpt's), FP8 of
-128 × 128 tiles, NF4 and GPTQ dequantised as the conversion scripts do (`scale * value` in F32,
-then to BF16 or F16); gpt-oss-20b's BF16 (unsloth's, its MXFP4 experts dequantised, blocks
-down the columns) is a real one (its first 2.5 GiB, cut).
+**Conversions** (2026-11-12, the same way; "before" is `aqr` before the grids, lanes and the
+other floats). Samples are in `F:\Data\aqr-corpus\tensors` (from Hugging Face; `fetch.sh`
+there): real conversions are rare there, so `dequant/` has checkpoints of NVFP4
+(compressed-tensors' and ModelOpt's), FP8 of 128 x 128 tiles, NF4 and GPTQ dequantised as the
+conversion scripts do (`scale * value` in F32, then to BF16 or F16); gpt-oss-20b's BF16
+(unsloth's, its MXFP4 experts dequantised; its first 2.5 GiB) is a real one.
 
 | file | size | archive / input | before | compress | before | decompress | before |
 |---|---|---|---|---|---|---|---|
@@ -182,121 +107,72 @@ down the columns) is a real one (its first 2.5 GiB, cut).
 | Qwen3-0.6B BF16 | 1.50 GB | 0.6633 | 0.6633 | 582 MB/s | 582 MB/s | 3360 MB/s | 3289 MB/s |
 | Qwen3-0.6B FP8 (E4M3 weights) | 1.06 GB | 0.7328 | 0.7322 | 430 MB/s | 372 MB/s | 2451 MB/s | 2680 MB/s |
 
-By `aqr-tensors-bench` (the side bytes and the bytes not coded at zstd's level 3), whole files:
-NVFP4 (ModelOpt) to BF16 0.6580 -> 0.3773, NF4 to BF16 0.6552 -> 0.3623, FP8 of tiles to BF16
-0.6635 -> 0.5163 (an FP8's 6.6 bits of entropy); the checkpoints themselves (FP8, NVFP4, NF4,
-MXFP4, GPTQ's and AWQ's I32) as lanes and FP8 come to what zstd made of them, within 0.1–0.3%.
-Of natural weights (BF16, F32) nothing changed: the sample finds no grid and the mantissa's
-top bits not worth it.
+Whole files by `aqr-tensors-bench`: NVFP4 (ModelOpt) to BF16 0.6580 -> 0.3773, NF4 to BF16
+0.6552 -> 0.3623, FP8 of tiles to BF16 0.6635 -> 0.5163. The checkpoints themselves (FP8, NVFP4,
+NF4, MXFP4, GPTQ's and AWQ's I32) come to what zstd made of them, within 0.1-0.3%; natural
+weights (BF16, F32) are unchanged. The grids' runs code at 0.8-0.9 GB/s (16 threads) and decode
+at about 1 GB/s a thread.
 
-The grids' runs code at 0.8–0.9 GB/s (16 threads; their tiles fitted, each a few passes over
-its elements) against 3.5 GB/s of floats, and decode at about 1 GB/s a thread as floats do (the
-values by AVX2 where a tile's span is 32 or more, or of F16: GPTQ's to F16 1.2 GB/s, 0.6 one at
-a time; by NEON for F16, BF16 of spans of 16 or more, and F32 of spans of 64 or more of a grid
-of 16 values at most: on an M4, `gridval::timing::speed`'s spans of 16 of BF16 1.63 -> 2.15 G
-elements/s, of F16 0.67 -> 2.33, spans of 128 of F32 2.98 -> 4.57). Through `aqr`, the NVFP4 file's compressing is held by the archive's verification on
-one thread (1.9 of 4.3 s) and the grids' coding (33 thread-seconds, 17 before).
-
-## Zeros and rows of their own scale
-
-The F16 weights of an OCR model's two networks (PP-OCR's detector and recogniser, a browser
-extension's: `docs/hints-design.md` section 5, wrapped as safetensors) are of a normalisation
-folded into each output channel: rows of their own scale, the detector's largest tensors 97–99%
-zeros (most rows all of them, of either sign: their values underflowed) and the rest many
-subnormals. Coded as other floats, a zero was its exponent symbol and its 11 bits of sign and
-mantissa, and every row's exponents of one table; xz -6 came to 5% and 2.5% less. Now a zero is
-a symbol of its own and keeps its sign alone, a subnormal is a symbol by the top bit of its
-mantissa and keeps the bits below it (the codes of FORMAT.md §4.2, `fine`), and the rows are in
-up to 8 classes by their exponents, each its own table (`rows`). Through `cargo aqr -c`
-(2026-11-24):
+**Zeros and rows of their own scale** (`cargo aqr -c`, 2026-11-24): the F16 weights of an OCR
+model's two networks (PP-OCR's detector and recogniser, `docs/hints-design.md` section 5,
+wrapped as safetensors):
 
 | | det (30,999,306 B) | rec (38,244,272 B) |
 |---|---|---|
 | before | 14,005,585 | 31,747,761 |
-| now | 12,480,081 (−10.9%) | 29,601,597 (−6.8%) |
+| now | 12,480,081 (-10.9%) | 29,601,597 (-6.8%) |
 | xz -6 | 13,285,052 | 30,962,616 |
 
-They decode at 400–600 MB/s on 16 threads (`aqr-tensors-bench`; 580 and 1320 MB/s before): a
-float of codes is put together one at a time. Natural weights take neither (their zeros and
-subnormals too few, their rows' exponents alike): on Llama-3.2-1B's BF16, row classes at a
-threshold of 0.5% would have saved 0.18% for 16% of the decoding speed, so they are taken only
-where they save 2% of a run; it codes to the same 1637.7 MB as before.
-
-## Data of no header
-
-Tensors in a file of no header (an app's weights as they are) are found by no magic bytes:
-they are taken where the attributes say so (docs/hints-design.md), `aqr-format=tensors` with
-
-- `aqr-dtype=TYPE`: all of the file one tensor of `TYPE` (`bf16`, `f16`, `f32`, `f64`, `e4m3`,
-  `e5m2`, or `i8` to `u64` as lanes of bytes), the bytes after its last whole element as they
-  are;
-- `aqr-layout=FILE`: the tensors that `FILE` (TOML, relative to the directory of the attributes)
-  tells, each a `[[tensor]]` of `shape` (outermost first; its rows the last dimension, its first
-  the rows' classes) or `count`, `dtype` (else the file's top-level `dtype`, else
-  `aqr-dtype`'s) and `offset` in bytes (else where the one before ends); other keys (`name`) are
-  left. Tensors past the file's end or overlapping the one before are left out, as of a header.
-
-The tensors are coded as those of a container are (`tensors::headerless`, the container
-`Headerless`; its header class `tensors/header`, empty). A layout gives each tensor its own
-tables, which pays: loupe's F16 weights below (aqr-compress's `tensors_told`). A file of 1 GiB
-or more archived alone is written directly as the containers' are, its formula's bound that of
-the layout told (`formula_bound_layout`).
-
-## Status
-
-Left:
-
-- The grids' indices of IQ1–IQ3 (8 to 11 bits) are as they are: they are near their entropy
-  (measured on Qwen3.8-27B's UD-IQ1_S and UD-Q2_K_XL: IQ1_S's 11 bits 10.77, IQ2_XXS's 8 bits
-  7.84–7.86, IQ2_S's 10 bits 9.63, IQ3_XXS's 8 bits 7.76–7.80; the index before as context
-  10.77 -> 10.72), worth about 1–2% of those files more, for a coder of alphabets past 16
-  symbols. The signs are at their entropy. The trellis types (ik_llama.cpp's KT) are kept as
-  they are.
-- The heap peak of the encoder reaches the budget on files of Q4_K and Q6_K (2.0–2.16 GB): the
-  symbols of every segment in flight (17 of 16 MiB) and their words.
-- Files of tens of GB in an archive of several files: a file is one leaf there, its batch held
-  whole (docs/streaming-encoder-design.md, step 7); written directly only alone, to a file
-  (not to standard output or mirrored).
-- Within the archive, the streams coded are compressed at zstd's probe level all the same,
-  whole, to see whether they would save (`How::Light`), which costs as many thread-seconds as
-  the coding (most of it the long-distance matching: zstd -1 alone is 3.4 times faster). Not
-  probing `tensors/syms` would make Qwen2.5-7B 8.65 -> 7.57 s, but 1.19 MB larger: two of its
-  blocks save 4.2% (rows repeated near each other, which zstd -1 finds without it).
-- Each segment's `tensors/side` is planned by itself (`plan_of`: a sample tried at five levels),
-  four times the thread-seconds of compressing it (Qwen2.5-7B: 13.6 of 17.1); gemma-4-31B's take
-  most of its 38 s. Alike streams of a class planned once, deterministically, would take that.
-- Reading the file through (its checksum on one thread, 4–5 GB/s) and verifying the archive
-  (its blocks hashed, decoded where they are compressed) take 2–3 s of Gemma's 38.
-- A grid's values one at a time in Wasm (SIMD128 has no conversion to F16; BF16's and F32's
-  would take a lookup of 16 values by byte shuffles, as NEON's does).
-- Grids: their coding (0.8–0.9 GB/s on 16 threads) is under the 500 MB/s through `aqr` where
-  verification is added; a tile is fitted by a few passes over it (gathered, its indices at a
-  first scale, the range of scales, the check), of which the indices and the check could be 8 at
-  a time. Not fitted: zero points that are not integers (HQQ's), and conversions computed in
-  F16 or BF16 step by step (`(q − z)` rounded, then times the scale rounded: the two roundings
-  are not the grid's one); those are escaped tiles, or floats. The rows of a `.pth`'s tensors
-  are not read (its pickle's sizes), so its grids are of rows of the whole tensor alone. The
-  scales go to the side as F32s, 2 bits a weight of NVFP4's before the archive compresses them
-  (to about 0.3); their own grid (FP8 times a global scale) is not looked for.
-- The checkpoints of lower precisions themselves (FP8, packed FP4 and their scales) come to
-  about what zstd makes of them: their values are near their entropy order 0, and nothing is
-  shared between a tensor and its scales'.
-- `torch.save`: the legacy format (before PyTorch 1.6: pickles one after another, then the
-  storages) and the pickles of protocols 0 and 1 are not taken; storages of quantised types
-  (`QInt8Storage` and the like) go as they are.
-- safetensors: F6's and F4's bytes are lanes of a byte (FP6's 4 values in 3 bytes not taken
-  apart).
-- Other containers of raw tensors (ONNX, NumPy's `.npy`/`.npz`, Keras' HDF5) are not taken.
+They decode at 400-600 MB/s on 16 threads. Natural weights take neither (Llama-3.2-1B's BF16
+codes to the same 1637.7 MB).
 
 ## Tests
 
-`cargo rt -p aqr-tensors` (made-up GGUF files of every type coded, files of `torch.save` and
-safetensors of every float and integers, weights converted from six lower precisions coded as
-grids, whole and cut, and each as a run of the grid it was made of, `synth`);
-`aqr-tensors-bench FILE [BYTES]` (the formula's streams, the speed of encoding and of decoding
-natively, the file rebuilt and compared, the size of the whole file with the side bytes and the
-bytes not coded at zstd's level 3; `THREADS` for the threads);
-`cargo test -r -p aqr-tensors --lib timing -- --ignored --nocapture` (the coder's speed).
-aqr-decompress's `tensors_plans_hold` runs the Wasm module on them within its plan. Samples
-(models of LM Studio's and Hugging Face's, Segment Anything's `.pth`, `F:\Data\aqr-corpus\tensors`)
-are read in place, not copied.
+- `tests/tensors.rs`: made-up GGUF files of every type coded, whole and in segments, the
+  formula the same whatever the threads, damaged inputs told; made-up files of `torch.save` and
+  safetensors of every float and integers; weights converted from six lower precisions coded as
+  grids, whole and cut, and each as a run of the grid it was made of (`synth`).
+- `tests/special.rs`: floats of every type with every bit pattern, the escaped tiles of grids,
+  tensors that overlap or are unsorted, lying GGUF and safetensors headers, damaged parameters,
+  a tensor over the 16 MiB segment's boundary: never a panic, hang or allocation the data
+  cannot hold.
+- `tests/edge.rs`: ZIP64 `torch.save` files, header lies, damaged inputs, the same promises.
+- aqr-decompress's `tensors_plans_hold` runs the Wasm module on them within its plan.
+
+Samples (models of LM Studio's and Hugging Face's, Segment Anything's `.pth`,
+`F:\Data\aqr-corpus\tensors`) are read in place, not copied.
+
+## Left
+
+- **IQ1-IQ3 indices.** The grids' indices (8 to 11 bits) are as they are: near their entropy
+  (IQ1_S's 11 bits 10.77, IQ2_XXS's 8 bits 7.84-7.86, IQ2_S's 10 bits 9.63, IQ3_XXS's 8 bits
+  7.76-7.80; the index before as context 10.77 -> 10.72), worth about 1-2% of those files, for
+  a coder of alphabets past 16 symbols.
+- **Encoder heap.** The peak reaches the budget on files of Q4_K and Q6_K (2.0-2.16 GB): the
+  symbols of every segment in flight (17 of 16 MiB) and their words.
+- **Several large files in one archive.** A file of tens of GB is one leaf there, its batch
+  held whole (docs/streaming-encoder-design.md, step 7); written directly only alone, to a file
+  (not to standard output or mirrored).
+- **Probing the coded streams.** The archive compresses them at zstd's probe level, whole, to
+  see whether they save (`How::Light`): as many thread-seconds as the coding (zstd's
+  long-distance matching). Not probing `tensors/syms` would make Qwen2.5-7B 8.65 -> 7.57 s,
+  but 1.19 MB larger.
+- **Side stream planning.** Each segment's `tensors/side` is planned by itself (`plan_of`: a
+  sample tried at five levels), four times the thread-seconds of compressing it (Qwen2.5-7B:
+  13.6 of 17.1; gemma-4-31B's take most of its 38 s). Alike streams of a class planned once,
+  deterministically, would take that.
+- **Reading and verifying.** The file's checksum on one thread (4-5 GB/s) and the archive's
+  verification take 2-3 s of Gemma's 38.
+- **Grids in Wasm.** A grid's values are decoded one at a time (SIMD128 has no conversion to
+  F16; BF16's and F32's would take a lookup of 16 values by byte shuffles, as NEON's does).
+- **Grids' speed and reach.** Coding (0.8-0.9 GB/s on 16 threads) is under the 500 MB/s
+  through `aqr` where verification is added; the indices and the check of a tile's fit could
+  be 8 at a time. Not fitted: zero points that are not integers (HQQ's), and conversions
+  computed in F16 or BF16 step by step (`(q - z)` rounded, then times the scale rounded);
+  those are escaped tiles, or floats. The rows of a `.pth`'s tensors are not read (its
+  pickle's sizes), so its grids are of rows of the whole tensor alone. The scales go to the
+  side as F32s (2 bits a weight of NVFP4's before the archive compresses them, to about 0.3);
+  their own grid (FP8 times a global scale) is not looked for.
+- **Lower-precision checkpoints.** FP8, packed FP4 and their scales come to about what zstd
+  makes of them: their values are near their entropy order 0, and nothing is shared between a
+  tensor and its scales.

@@ -58,3 +58,12 @@ the chunk, for each chunk rebuilt, then a slice of stream 0 to the end. The outp
 one application of `flate-set` (of the profile) split into the chunks' lengths; a single chunk is
 the application itself. Its inputs are the data (the nodes of the chunks' data, slices of the
 contents), the records and the index.
+
+## Design notes
+
+- The file table is in the header file (`data1.hdr`) and the chunks are found without it: the
+  data starts where the volume header says and the chunks follow one another to the end, so a
+  cabinet is taken alone, and a file ends where a chunk holds less than a full one. The header
+  file itself is small and kept as it is.
+- The files' data (a content of its own each) compresses far better than the chunks of 32 KiB
+  do, and other files may share it.

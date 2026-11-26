@@ -4,19 +4,11 @@ git pack recompression. A pack is rebuilt bit for bit from the data of its objec
 archive stores the data instead: it compresses better, is recompressed in turn (a PNG or a
 gzip file committed is found as such), and a blob's data is the file checked out, which the
 archive stores once. The zlib streams of the entries are rebuilt by aqr-flate's module
-(`flate-set`, one application for all of them), from records of aqr-flate's profile as
-aqr-compress picks it for any DEFLATE stream: the default (static, fast) below level 7, the
-adaptive one with zlib emulation from 7 on. With the adaptive one, the zlib settings git writes
-every object with are found once on a few of the largest streams and tried first on the
-others, which are then emulated exactly, for next to no record. Below level 7 those few streams
-are made at the adaptive profile first, and where its emulation predicts every token of at
-least half of them, all of the pack is made at it with those settings hinted (no search, which
-is what makes the profile slow), as compressed DMGs' chunks are; else at the default profile,
-and so too where the adaptive formula would need more memory than the application bound. The
-pack of this repository (53.1 MB) went so from 43.02 to 42.19 MB at the default level, in 6.27
-s against 6.47. The module `git-pack-recons` derives the
+(`flate-set`, one application for all of them); the module `git-pack-recons` derives the
 entries' headers from the sizes of their data, the zlib headers and checksums, and the pack's
-trailer (SHA-1), and keeps what is not what git writes as it is.
+trailer (SHA-1), and keeps what is not what git writes as it is. `FORMAT.md` specifies the
+module `git-pack-recons` and `git-pack-index-recons` (the pack with its index and reverse index
+after it, of which only the ids of the entries are stored), and how they work.
 
 ```sh
 cargo run --release -p aqr-git --example aqr-git-check -- [-v] [-t N] [-p PROFILE] [-z] [-i] [-d DIR] FILE_OR_DIR...
@@ -30,104 +22,70 @@ let f = formula::encode(&pack, 8).unwrap();
 // `f` rebuilds `pack` when evaluated with `formula::apply` (`MODULE` and aqr-flate's)
 ```
 
-`FORMAT.md` specifies the module `git-pack-recons`, and `git-pack-index-recons`: the pack with
-its index and reverse index after it, of which only the ids of the entries are stored. Both
-(version 2) are part modules: the pack's plan is four pieces of readers (136 KiB) whatever its
-length, the index module's 36 bytes an entry (`aqr_api::stream::Reader`; blocks of 6.5 and
-10.2 KB).
+## What is taken
 
-## The rest of a checkout
-
-aqr-git used to take a whole checkout (the working tree and `.git`) into ten streams of its
-own, with its own container; everything it did besides the packs is now what the archive does
-for any files:
-
-- **Loose objects** are zlib files: aqr-compress takes them as such (aqr-flate).
-- **The working tree** is the blobs' data again: the archive finds it in the packs' data where
-  they are archived together (in solid blocks with long-distance matching, or as slices of
-  their own for blobs of 256 KiB or more), and loose objects' data the same way.
-- **Files of the same content**, paths, symlinks, per-file checksums: the archive's.
-
-- **`.idx` and `.rev` files** (index version 2, reverse index version 1) follow from their
-  pack and the ids of its entries: aqr-compress finds them by the pack's trailer, which they
-  repeat, and codes the three as a set (`git-pack-index-recons`), storing only the ids in the
-  order of the pack. The CRC-32s, offsets, fan-out table, reverse index and checksums are
-  derived.
-
-Not taken (yet): the ids themselves, which follow from the objects (SHA-1 of each resolved,
-deltas applied) but at the cost of resolving every delta chain as `git index-pack` does; the
-`multi-pack-index`, which follows from the indexes (it compressed against the raw `.idx` files
-before, and no longer does); `commit-graph`. SHA-256 repositories (ids of 32 bytes in
-ref-deltas) are not taken as packs.
-
-On the 62 packs of 35 local repositories (592 MB, `aqr-git-check -t 10 -i`), every index and
-reverse index was taken: 29.6 MB of them, about 28.4 MB at zstd -3, become 18.48 MB of ids
-(incompressible). Finding them took 0.92 s on 10 threads (the entries parsed again, each at the
-offset the index tells, to check that they are where the layout puts them), against 13.2 s for
-the packs; decoding 7.95 s against 7.39 s.
+- Packs of SHA-1 repositories (version 2 or 3), where each entry has a zlib stream that ends
+  within the data; the entries rebuilt are those aqr-flate takes and whose record is short.
+- `.idx` (version 2) and `.rev` (version 1) files follow from their pack and the ids of its
+  entries: aqr-compress finds them by the pack's trailer, which they repeat, and codes the three
+  as a set (`git-pack-index-recons`), storing only the ids (on 62 packs of 35 local
+  repositories, 592 MB: 29.6 MB of indexes become 18.48 MB of ids, incompressible).
+- Everything else of a checkout is the archive's own: loose objects are zlib files (aqr-flate),
+  the working tree is the blobs' data again (found in the packs' data where archived together),
+  and files of the same content, paths, symlinks and checksums are the archive's.
+- Not taken: SHA-256 repositories (ids of 32 bytes in ref-deltas) are not packs here;
+  `multi-pack-index` and `commit-graph` are kept as they are.
 
 ## Results
 
 `corpus/local` (not in the repository): 15 repositories, the whole `.git` and the files git
-would track or not ignore, 1195.8 MB in all. Archived with `aqr` (level `mid`, 10 threads,
-Apple M4, 2026-10-28; the round-trip check included), against the former aqr-git (its own
-container: the whole checkout in ten streams, zstd once over each):
+would track or not ignore, 1195.8 MB in all. Archived with `aqr` (level `mid`, 10 threads, Apple
+M4, 2026-10-28; the round-trip check included):
 
 | | output | of input |
 |---|---|---|
 | `tar \| zstd -19 --long=27` | 778.6 MB | 0.651 |
-| former aqr-git, `-l 3` | 587.5 MB | 0.491 |
-| former aqr-git (default: zstd -19, 100 MB/s budget) | 540.9 MB | 0.452 |
 | **`aqr`** | **543.1 MB** | **0.454** |
-| `aqr`, packs at aqr-flate's adaptive profile (zlib emulated) | 514.7 MB | 0.430 |
-| former aqr-git, `-A` (every zlib stream rebuilt, zstd -19) | 304.8 MB | 0.255 |
+| `aqr`, packs at aqr-flate's adaptive profile (zlib emulated, as from level 7) | 514.7 MB | 0.430 |
 
-| repository | input | `aqr` | adaptive | former, `-l 3` | former, default | compress / decompress | peak RSS |
-|---|---|---|---|---|---|---|---|
-| pyre | 664.9 MB | 326.3 MB | 302.8 MB | 327.1 MB | 313.5 MB | 20.3 / 126 MB/s | 7.09 GB |
-| SaturnTranslatorInternal | 142.9 MB | 50.3 MB | 47.6 MB | 49.1 MB | 44.1 MB | 30.9 / 265 MB/s | 1.41 GB |
-| wah | 125.6 MB | 22.1 MB | 21.8 MB | 61.0 MB | 36.7 MB | 20.7 / 174 MB/s | 1.98 GB |
-| loupe | 119.0 MB | 50.8 MB | 50.8 MB | 49.4 MB | 49.4 MB | 73.9 / 372 MB/s | 0.75 GB |
-| unison | 59.6 MB | 37.3 MB | 35.9 MB | 35.0 MB | 33.3 MB | 22.7 / 86 MB/s | 0.86 GB |
-| aqueous | 38.7 MB | 31.4 MB | 31.3 MB | 32.7 MB | 32.4 MB | 24.1 / 277 MB/s | 0.53 GB |
-| sudachi.rs | 20.1 MB | 14.9 MB | 14.6 MB | 18.1 MB | 17.8 MB | 13.1 / 101 MB/s | 0.39 GB |
-| wasm3-rs | 12.0 MB | 6.4 MB | 6.2 MB | 7.9 MB | 7.7 MB | 16.0 / 109 MB/s | 0.21 GB |
-| duc | 9.0 MB | 1.9 MB | 1.9 MB | 5.8 MB | 4.5 MB | 21.9 / 180 MB/s | 0.22 GB |
+| repository | input | `aqr` | adaptive | compress / decompress | peak RSS |
+|---|---|---|---|---|---|
+| pyre | 664.9 MB | 326.3 MB | 302.8 MB | 20.3 / 126 MB/s | 7.09 GB |
+| SaturnTranslatorInternal | 142.9 MB | 50.3 MB | 47.6 MB | 30.9 / 265 MB/s | 1.41 GB |
+| wah | 125.6 MB | 22.1 MB | 21.8 MB | 20.7 / 174 MB/s | 1.98 GB |
+| loupe | 119.0 MB | 50.8 MB | 50.8 MB | 73.9 / 372 MB/s | 0.75 GB |
+| unison | 59.6 MB | 37.3 MB | 35.9 MB | 22.7 / 86 MB/s | 0.86 GB |
+| aqueous | 38.7 MB | 31.4 MB | 31.3 MB | 24.1 / 277 MB/s | 0.53 GB |
+| sudachi.rs | 20.1 MB | 14.9 MB | 14.6 MB | 13.1 / 101 MB/s | 0.39 GB |
+| wasm3-rs | 12.0 MB | 6.4 MB | 6.2 MB | 16.0 / 109 MB/s | 0.21 GB |
+| duc | 9.0 MB | 1.9 MB | 1.9 MB | 21.9 / 180 MB/s | 0.22 GB |
 
-The six smallest (0.003-1.5 MB in all 3.9 MB) come to 1.72 MB, against 1.43 MB: the archive's
-blocks of the modules they need weigh on them.
+The six smallest (0.003-1.5 MB, 3.9 MB in all) come to 1.72 MB: the archive's blocks of the
+modules they need weigh on them. Packs alone (unison's 6, 36.0 MB; `aqr-git-check`): at the
+default profile 16.9 / 27.2 MB/s on one thread with the records 1.73 MB; at the adaptive one
+with zlib emulation (`-p 10 -z`) 7.9 / 18.8 MB/s on one thread (24.5 / 88 MB/s on 10) with the
+records 254 KB, for 23,721 entries and 105.7 MB of data. pyre's pack (222 MB, 817k entries,
+490 MB of data) archives at a peak of 2.48 GB of heap (3.9 GB resident). A loose object's blob
+is a slice of its own, found where it is a file checked out: loupe's two largest files, loose,
+came to 50.8 MB from 98.0 MB.
 
-- "adaptive": the packs at aqr-flate's adaptive profile with zlib emulation, as from level 7.
-- The former aqr-git's `-A` is smaller mostly as it compressed all the packs' data of a
-  repository in one stream: the archive puts streams of a kind in solid blocks of at most 16
-  MiB (the bound of what a file read alone decodes), with long-distance matching within a
-  block. unison (adaptive): 36.0 MB, 28.2 MB with blocks of 256 MiB, 27.0 MB by the former `-A -l 3`
-  (which also derived the 0.66 MB of `.idx`). Splitting the deltas into copies and inserts, as
-  the former did, was worth 3% of their bytes.
-- Packs alone (unison's 6, 36.0 MB, `aqr-git-check`, of the packs; their data is three times
-  as much): at the default profile 16.9 / 27.2 MB/s on one thread, the records 1.73 MB (1.54 MB
-  at zstd -3); at the adaptive one with zlib emulation (`-p 10 -z`) 7.9 / 18.8 MB/s on one
-  thread, 24.5 / 88 MB/s on 10, the records 254 KB (79 KB) for 23,721 entries and 105.7 MB of
-  data. Through `aqr` on all 15, where the rest takes most of the time, the adaptive profile
-  took 75.1 s and 8.43 s against 69.8 s and 8.29 s, for 28.4 MB less (both before the
-  encoder made entries a window at a time: now 52.4 s at the default profile).
-- Memory: each entry's stream is parsed and deconstructed at once, a window of 64 MiB of
-  streams at a time put in place in order, and the encoder's check of the layout compares with
-  the pack as it goes. pyre's pack of 222 MB (817k entries, 490 MB of data) took 22 GB at first
-  (a parse and a copy of aqr-flate's options held for every entry); its archive now peaks at
-  2.48 GB of heap (3.9 GB resident), set by the archive's verification, not the encoder (1.0
-  GB). The rest of pyre (265 MB) peaks at 2.0 GB.
-- A loose object's data is its header and the blob: aqr-compress keeps the header with the
-  container's bytes, so that the blob is a slice of its own, found where it is a file checked
-  out (and in the same batch, `together`), and taken as a file of its format (text, a gzip
-  file). loupe's two loose objects of 16 and 33 MB, which are its two largest files: 98.0 MB
-  before, 50.8 MB.
+## Tests
 
-## Tools
-
-- `examples/check.rs`: the packs in files rebuilt, zstd -3 of them and of the formulas'
-  streams by class, the encoder's and modules' speeds; `-d` writes the streams out.
 - `tests/formula.rs` builds repositories with the git CLI (ofs- and ref-deltas, compression
   levels 0, 1 and 9, a tag), checks every pack rebuilt with every entry taken and next to no
-  record, the budget of inflated bytes, wrong trailers and data after the pack, and flips
-  bytes in every input of the module.
+  record, the budget of inflated bytes, wrong trailers and data after the pack, and flips bytes
+  in every input of the module.
+- `tests/part.rs`: the part modules against the whole decoding.
+- `examples/check.rs` (`aqr-git-check`): the packs in files rebuilt, zstd -3 of them and of the
+  formulas' streams by class, the encoder's and modules' speeds; `-d` writes the streams out.
+
+## Left
+
+- **Ids from the objects.** The ids follow from the objects (SHA-1 of each resolved, deltas
+  applied) but at the cost of resolving every delta chain as `git index-pack` does; they are
+  18.48 MB of incompressible bytes on the 592 MB of packs above.
+- **`multi-pack-index`.** It follows from the indexes; kept as it is.
+- **`commit-graph`.** Kept as it is.
+- **Solid blocks of packs.** The archive's 16 MiB solid-block bound keeps packs' data from
+  compressing as one stream (unison, adaptive: 36.0 MB, 28.2 MB with blocks of 256 MiB); pack
+  blobs in `together`.

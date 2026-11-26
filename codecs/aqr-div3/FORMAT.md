@@ -26,6 +26,7 @@ Contents:
 6. [Layout, skeleton and audio](#6-layout-skeleton-and-audio)
 7. [Formula module](#7-formula-module)
 8. [The encoder](#8-the-encoder-informative) *(informative)*
+9. [Design notes](#9-design-notes)
 
 ## 1. Conventions
 
@@ -265,3 +266,14 @@ once the frames in it have reached 16 MiB), and the chunks coded on `threads` th
 the stream in chunks costs 0.12% of the video; the coded model is not shared.
 
 The probing, the tables and the measurements are in `docs/div3-design.md`.
+
+## 9. Design notes
+
+- The two frame types, I and P (no B frames), are walked by one function over aqr-walk's `Io`,
+  which serves coding, decoding and a dry parse; a frame not parsing to its exact end, with at most
+  a short tail, is stored as it is (the `OK` flag, then its bytes).
+- The VLC tables (DC, intra-frame CBP, six AC tables, the P-frame macroblock types, two motion
+  vector tables) were extracted by treating an installed ffmpeg decoder and encoder as a black box,
+  probed with crafted bit strings (`scripts/div3-probe/`); no decoder's code or tables were read or
+  copied. `src/tables.rs` is generated from them by `scripts/div3-gen.py`.
+- One thread decodes the frames at 15.9 MB/s and codes at 11.2 MB/s (the dry parse included).

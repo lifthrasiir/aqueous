@@ -4,7 +4,7 @@
 //! padding, what no file points at, what is encrypted or in compressed blocks) the stream
 //! `{format}/rest`, the pack the concatenation of the two. There is no module: what the
 //! directories hold that follows from the contents (offsets, sizes) costs about as little
-//! stored as it would derived. The README ("Packs of game engines") tells of what each reader
+//! stored as it would derived. FORMAT.md (section 7, "Packs of game engines") tells of what each reader
 //! takes.
 //!
 //! The formats are named `<engine>-<extension>` (or `<middleware>-`, `<tool>-`), the names of

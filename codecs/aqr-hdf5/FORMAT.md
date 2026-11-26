@@ -163,3 +163,27 @@ error, and so are reading more than 4 bytes past the end of `model` and past the
 Each chunk's samples (`elements` of them, in order) are written with their bytes in the byte
 order of the flags; where shuffled, as HDF5's shuffle filter lays them out: the first byte of
 every sample, then the second of every sample, and so on.
+
+## Design notes
+
+- **Profile choice.** The records are of aqr-flate's profile as aqr-compress picks it for any
+  DEFLATE stream: the default (static, fast) below level 7, the adaptive one with zlib emulation
+  from 7 on. The HDF5 library deflates with zlib's `compress2`, so with the adaptive profile
+  every chunk of the corpus is emulated exactly (levels 1, 4, 6 and 9 seen) for next to no
+  record; with the default one, the records of zlib's level 1 (GOES) come to about a sixth of
+  the streams. So below level 7 a few of the largest chunks are made at the adaptive profile
+  first, and where zlib's emulation predicts every token of at least half of them, all are made
+  at it with those zlib settings hinted (no search, which is what makes the profile slow), as
+  compressed DMGs' chunks are; else at the profile asked for. With it, a GOES CMIPC file went
+  from 2.28 to 2.24 MB, a GWOSC file (16 kHz, 32 s) from 3.55 to 3.47 MB (0.22 -> 0.24 s), and
+  `made/gzip6.h5` from 23.67 to 23.28 MB (1.61 -> 1.95 s).
+- **Application bound.** Where the adaptive profile's `flate-set` would need more memory than
+  the application bound (`made/gzip1.h5`: 426 MiB of 256), the file is made again at the profile
+  asked for. The trial is given up as soon as the samples are made if the stream of one of them
+  alone is over the bound (`aqr-compress`, 256 MiB when compressing; `encode_checked` tests the
+  formula of each sample's stream alone, a lower bound of the whole): `made/gzip1.h5` 2.93 s ->
+  2.29 s (Ryzen 7 9700X), the other files the same time and size. A set over the bound by other
+  streams (the float model, or the sum of many) is still found by the whole trial.
+- **Float model.** Its coefficients are by least squares for each block of 65536; the low bits
+  zero in every sample are left out (GWOSC's Virgo strain is binary32 values in binary64).
+

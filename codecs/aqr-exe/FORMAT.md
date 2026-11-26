@@ -1320,3 +1320,108 @@ to 2.08 MB of the image's 11.42 MB as they are, and to 1.39 MB with this module 
 are a third of it); the strings 1.37 MB as they are, 1.13 MB front coded (xz -9 on the
 suffixes, 0.84 MB). Of the names, 36% are empty (in the head), 44% the next string, 14% that
 of the same value and 6% back references.
+
+# Design notes (informative)
+
+## x86 versions
+
+- Version 2 took 13 streams' worth of fields (`REX` and others that the opcodes tell, or rare ones,
+  within `OP`; 8-bit displacements by their base register; padding records): sample 0.3215 -> 0.3160
+  (-1.7%; 150 x86 files -2.1%), `large` 0.2901 -> 0.2832 (-2.4%), 3 files larger by 0.3-1.3% (x86-32)
+  (Ryzen 7 9700X, 2026-10-28).
+- Version 3 takes the opcode classes as a resource (1280 bytes), so opcodes can be added without a
+  new version: 582 B more for an archive of one file, 248 B of them the resource block.
+- Version 5 writes the jumps of 8 and 32 bits other than calls as numbers of steps (items:
+  instructions, prefixes, escaped bytes, jump tables) from the one after the jump, within 127
+  either way and 4096 bytes ahead (`JUMP8`; `JUMPN` for 32 bits), which stay where the instructions
+  between change their lengths. 2026-11-17: `large` 421,541,787 -> 414,201,191 B (-1.74%, each file
+  -0.7 to -3.8%), compressing 17.2 -> 17.7-18.4 s and testing 1.51 -> 1.64 s (16 threads);
+  AcroRd32.dll 7,677,763 -> 7,620,425 B. The block grew 6453 -> 7384 B, which an archive of little
+  code pays for (the code is then kept raw where it no longer pays).
+- Version 6 makes a side output of the code's absolute fields within the image (addresses,
+  displacements, immediates of 32 bits in x86-32, 64 in x86-64, jump tables' entries) where the
+  params ask, which `pe-reloc` 2 takes as predictions of the base relocations, keeping the wrong
+  and the unpredicted. `-Z exe:reloc-predict=false` turns it off: AcroRd32.dll 7,621,685 ->
+  7,522,921 B (-1.30%); `large` 414,203,853 -> 412,297,469 B (-0.46%; x86-32 -2.46%, -0.84%,
+  x86-64 0 to -0.18%), compressing 17.9 -> 18.6 s, testing 1.70 -> 1.76 s. Blocks +1187 B (x86
+  7384 -> 8008, pe-reloc 2581 -> 3144).
+- `pe-reloc` 3 predicts of the data sections too (words that point into the image, at multiples of
+  their size; its input, put out after the relocations): AcroRd32.dll -23 KB (129 KB at zstd -3 as
+  version 1 kept its relocations, 3 KB now), chrome.dll -84 KB (its 2 MB of relocations all
+  predicted), libcef32 -89 KB, comgr32 -30 KB, ffmpeg -17 KB, amd_comgr +1 KB; block 3144 -> 4334 B.
+  Sections of more than 48 MiB in all are not taken (a whole module holds them four times).
+- Files not coded (kept raw, their formulas archiving no smaller): 27 .NET assemblies (24 satellite
+  assemblies of resources alone, `System.Text.Encoding.CodePages.dll`, `Microsoft.SqlServer.Types.dll`
+  whose IL is in another section than its metadata, a Silverlight NGen image) and 12 native files
+  (resource-only DLLs, DirectX SDK samples, an ARM DLL, coded since by `arm64`, 0.346). What
+  `cil` keeps and the rest of an image are scanned in turn: 10 PNG files and an installer within
+  `oalinst.exe` are coded (-74 KB), at about 9% of the compression speed.
+- The filter is not what sets the speed: archive coding at `mid` and the check are.
+
+## Memory
+
+- Every module lays its memory out as a stack (`aqr_api::stack`) and declares its plan as its limit
+  (`module::plan`; `exe_x86_plans_hold`, `exe_arm64_plans_hold`, `exe_macho_codesign_plans_hold` in
+  aqr-decompress's `tests/wasm.rs` check the part modules' to the page).
+- `x86` (version 5), `arm64` (2) and `macho-codesign` (2) are part modules: their streams are read
+  in pieces and the output put out as it goes, so the plan does not depend on the lengths (a PE of
+  357 MB needed 1241 MiB as a whole module, over the encoder's bound of 256 MiB per application; a
+  196.7 MB Mach-O 753 MiB). The remaps, `arm64-delta`, `cil`, `pe-reloc` and `macho-symtab` are whole
+  modules.
+- Memory of the 2026-10-24 sample: 14 MB + 4.7x the input on the Ryzen run, 17 MB + 5.3x with
+  macOS's cache of large blocks off; with it on, two files kept raw take over twice the fit
+  (`System.ni.dll`, 106 MB for 0.7 MB; `HPFIGLHN.DLL`, 136 MB for 5.3 MB).
+
+## Remaps and differences
+
+- ARM64 remap: the functions of the two images are matched (by the hashes of their words with the
+  `BL` and `ADRP` fields cleared, then by the targets matched so far and their neighbours' shifts),
+  and the targets and pages of the matched vote for a map of the image's targets to the other's. The
+  `BL` and `ADRP` the map takes are written with the other's targets, with a flag for each and the
+  shifts of the values so written; the module needs nothing of the other image. x86 does the same
+  for the targets of `CALL rel32`, other jumps of 32-bit offsets and RIP-relative addresses, by
+  byte; the decoder notes where the flagged ones are as it decodes and adds their shifts once the
+  map is read.
+- Chrome Framework 156.0.8078.47 -> .49 arm64, B's `CODE` stream alone / against A / remapped:
+  64.13 / 33.73 / 8.18 MB; .49 -> .76 64.15 / 45.88 / 20.35 MB; Electron 42 -> 43 44.01 / 36.72 /
+  29.48 MB; aqr built 10-27 -> 10-28 3.57 / 2.05 / 1.38 MB. The map takes 1-2 s for Chrome's pair.
+- x86-64 the same, each of 13 streams against A's: Chrome .47 -> .49 78.19 / 9.20 / 1.25 MB; .49 ->
+  .76 78.36 / 21.98 / 15.46 MB; Electron 53.85 / 32.20 / 31.53 MB (whose code changed more than it
+  moved). The gains are in `JUMP`, `ADDR` and `CALL`. Instructions of the three images +17.4%, peak
+  3.58 -> 3.69 GB (the images parsed once for the plan and held through it).
+- By differences (`arm64::delta`, B in pieces of 4 MiB each against one of 16 MiB of A), B's remapped
+  `CODE` stream of the arm64 images, zstd -19: LZ (`--patch-from`) / bsdiff 4.3 / Zucchini / delta
+  whole / in pieces: Chrome .47 -> .49 8.10 / 1.01 / 0.93 / 0.87 / 0.86 MB; .49 -> .76 19.99 / 4.97 /
+  4.41 / 4.88 / 5.07 MB; Electron 43 -> 44 28.96 / 16.01 / 12.79 / 14.14 / 16.01 MB.
+- Most of what LZ leaves is where the words differ (1.4% of those copied), not what they are: the
+  differences of the words alike are 0, the others go sparse. A word of A that became another in B
+  mostly becomes it again (data moved within a page changes the low bits of every `ADD` and `LDR`
+  after an `ADRP` alike): predicted so, the differences not 0 drop from 726,440 to 262,549 for
+  Chrome's first pair.
+- Pieces of B against three of 4 MiB of A make Electron 14.96 MB, against two of 8 MiB 14.97 MB,
+  against one of 8 MiB 23.50 MB; A's stream in pieces is larger (at zstd -9 by 6.1%, 2.9%, 1.9% in
+  pieces of 4, 8, 16 MiB), and through `aqr -c` one of 16 MiB archives smallest but for Electron.
+  Differences decode at 0.9-3.1 GB/s; the streams are made at 80-210 MB/s a thread, picking A's
+  pieces 0.2-0.4 s.
+- Taking the signatures out made the rest of Deskflow's two programs, in one stream, 8.3 MB rather
+  than 9.5 MB, below the 8 MiB from which aqr-formula matched from afar, and the application 2.1%
+  larger: the threshold is 1 MiB since (`aqr::LONG`).
+- Tables of pointers (`__DATA_CONST,__const`, `__DATA,__const`, `__AUTH_CONST,__const`) archive
+  smaller on their own than amid the rest: Electron Framework 43 and 44, zeroing them made the two
+  95.18 -> 90.69 MB, though they are 1.02 and 1.03 MB apart at zstd -19. Coded against the root's
+  too (`arm64-delta`): Chrome .47 + .49 83.38 -> 82.04 MB, .49 + .76 91.60 -> 90.56 MB, Electron
+  95.18 -> 90.37 MB. Of Chrome's `__DATA_CONST,__const` of .49: 0.44 MB by `arm64-delta` (LZ 0.92 MB,
+  bsdiff 0.25 MB: bsdiff copies at any byte, where words inserted 2 bytes apart are new to whole
+  words).
+
+## ELF and others, tried
+
+- Taking `.eh_frame_hdr`'s table and the relocations (`.rela.dyn`) by `recs-fields` was left out:
+  the relocations (as deltas, or the offsets alone as deltas) archive larger than in the rest, and
+  the table's effect is that of cutting the rest elsewhere (+2.2% to -2.8% a file, not by the
+  table's size).
+- Code against another version of ELF images: `librustc_driver` 1.96.1 and 1.99.1 are too little
+  alike (0.06) to be remapped.
+- Mach-O symbol tables: Windows App.app 109.33 -> 107.20 MB (-1.9%), Blender.app -2.0%,
+  Secretive.app -9.0%; instructions +1.3% for Windows App, fewer for the others (the module takes
+  what the scan and inference spent).

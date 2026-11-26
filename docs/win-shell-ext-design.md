@@ -272,7 +272,7 @@ leaf로 둔다. 단일 파일은 압축기 확장자를 뗀 이름의 아카이�
   --delete`)와 이름 바꾸기(`--move`).
 - 손상된 아카이브의 salvage 보기.
 - ProjFS로 "폴더로 마운트".
-- Windows 11의 새 컨텍스트 메뉴(aqr-win README의 Status).
+- Windows 11의 새 컨텍스트 메뉴(aqr-win README의 Left).
 - ARM64(EC).
 - 측정(§8).
 

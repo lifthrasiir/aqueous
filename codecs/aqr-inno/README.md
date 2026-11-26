@@ -6,7 +6,7 @@ aqr-lzma into its data and a record of its parse. aqr-compress then stores the d
 turn like any file (the installer's executables, DLLs and resources are each recompressed by
 their own crate), and `lzma-recons` rebuilds the stream bit for bit. The formula is one
 application of aqr-lzma's module over a slice of the installer, so this crate has no module of
-its own; [FORMAT.md](FORMAT.md) tells what is taken. Of Inno Setup 4.0's zlib chunks, and its
+its own; [FORMAT.md](FORMAT.md) tells what is taken and how it works. Of Inno Setup 4.0's zlib chunks, and its
 setup program (a zlib stream too), this crate finds the streams; aqr-compress recompresses each in
 turn as a zlib stream (aqr-flate: zlib's level 9, what Inno Setup 4.0 wrote).
 
@@ -19,12 +19,12 @@ let t = aqr_inno::table(&exe); // the loader's offsets, None where there is no t
 let pieces = aqr_inno::split(&exe, threads); // each LZMA stream: its range, data and record
 ```
 
-aqr-compress takes the streams of a PE image from level 4 (as `.lzma` files and 7z archives:
-rebuilding LZMA is slow), each where its data may archive smaller than it (by aqr-formula's
-probe; where the data hardly compresses itself, packed executables, not counting the files in it
-as nothing), and counts the installer's data (up to the total the table gives, a certificate
-after it left to the PE extent; before 5.1.5 only where it starts with a chunk of LZMA or zlib) in
-the image's extent, what is not taken of it kept in a stream of its own.
+## What is taken
+
+Solid and per-file LZMA chunks that end with an end marker (what the Inno Setup compiler
+writes), found by the table of the loader, in a PE image; zlib chunks and the setup program of
+4.0. Not taken, kept as they are: installers of bzip2 (`compression=bzip`) and encrypted ones
+(6.4's `encryption`).
 
 ## Results
 
@@ -42,26 +42,20 @@ The record is 2.90 MB (6.7% of the stream); the rest is the data, recompressed a
 
 WinUHA 2.0's four installers (Inno Setup 4.0.0a to 5.0.4, 4.51 MB; two of zlib chunks, two of a
 solid LZMA stream): their files are executables packed by PECompact or UPX, whose streams split
-come to more than they are (Beta: 832 KB to data of 945 KB, 849 KB by a zstd sample, and a
-record of 10 KB). Of the zlib streams of the two of 4.0, 2.0a's setup program is taken: 4,340,482
--> 4,233,874 B (2026-11-15, 16 threads, 0.28 s). The rest is turned down where it is: the
-streams split come out smaller only with the others' data (a version's files alike in the next,
-measured as files apart, 4.34 -> 3.89 MB), which no probe of one stream sees; and taken whatever
-(level 9: 4.29 MB), each installer's data is archived in blocks of its own, none with another's.
+come to more than they are, so only 2.0a's setup program is taken: 4,340,482 -> 4,233,874 B
+(2026-11-15, 16 threads, 0.28 s). The rest is turned down: the streams split come out smaller
+only with the others' data (a version's files alike in the next: 4.34 -> 3.89 MB as files
+apart), which no probe of one stream sees, and each installer's data is archived in blocks of
+its own.
 
-## Status
+## Left
 
-Done: solid and per-file LZMA chunks that end with an end marker (what the Inno Setup compiler
-writes), found by the table of the loader, in a PE image.
-
-Left:
-
-- The setup header (`Inno Setup Setup Data`, blocks of 4 KiB each with a CRC-32, LZMA) and the
-  compressed setup program (the same in every installer of a version) of 4.1 on: both kept as
-  they are.
-- Installers of bzip2 (`compression=bzip`), and encrypted ones (6.4's `encryption`): no chunk is
-  taken.
-- Data in separate `setup-1.bin` files (`DiskSpanning`, the offset table's data offset is then
-  0), and the earlier tables of other versions (`rDlPtS02`, `rDlPtS06`: no sample seen).
-- Files cut apart by the header's list (for the call instruction filter `CallInstructionOptimization`
-  Inno applies to executables, and per-file kinds): the data is scanned as a whole instead.
+- **The setup header and the setup program of 4.1 on.** The header (`Inno Setup Setup Data`,
+  blocks of 4 KiB each with a CRC-32, LZMA) and the compressed setup program (the same in every
+  installer of a version) are kept as they are.
+- **Data in separate `setup-1.bin` files.** `DiskSpanning`: the offset table's data offset is
+  then 0.
+- **Earlier tables of other versions.** `rDlPtS02`, `rDlPtS06`: no sample seen.
+- **Files cut apart by the header's list.** The call instruction filter
+  `CallInstructionOptimization` Inno applies to executables, and per-file kinds: the data is
+  scanned as a whole instead.

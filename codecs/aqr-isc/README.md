@@ -8,7 +8,7 @@ stores the data (the files', a content of its own each, recompressed in turn: th
 among them), which compresses far better than the chunks of 32 KiB, and which other files may
 share. The formula is the cabinet's bytes in order with the chunks the outputs of one application
 of aqr-flate's module (`flate-set`), split, so this crate has no module of its own;
-[FORMAT.md](FORMAT.md) tells what is taken.
+[FORMAT.md](FORMAT.md) tells what is taken and how it works.
 
 The format has no public specification. It was written from `docs/installshield-cab.md`, notes of
 an agent that read the MIT-licensed unshield project's source (and no other implementation), and
@@ -23,12 +23,10 @@ cargo run --profile release-test -p aqr-isc --example aqr-isc-check -- FILE...  
 let f = aqr_isc::formula::encode(&cab, threads).unwrap();
 ```
 
-The file table is in the header file (`data1.hdr`) and the chunks are found without it: the data
-starts where the volume header says and the chunks follow one another to the end, so a cabinet
-is taken alone, and a file ends where a chunk holds less than a full one. The header file itself is
-small and kept as it is. Left: the files' names for their kinds (they come from the header file, a
-file of its own), obfuscated files (flag 2: the bytes are not chunks until undone) and stored ones
-between chunks, and data volumes past the first of a set, whose descriptors the header gives.
+## What is taken
+
+The data volumes of cabinets with chunked DEFLATE (every `ISc(` cabinet seen), alone: the
+header file (`data1.hdr`) is small and kept as it is.
 
 ## Results
 
@@ -46,7 +44,7 @@ Windows 11 machine (versions by the major number the header gives, measured on 2
 | 0.42 MB (v12) | 100.0% | 100.0% | 0.91% | 26 of 26 |
 
 (Before: the cabinet as it was, a file of unknown content to zstd at the default level. The last
-gains nothing: its chunks are rebuilt, but the archive is no smaller, so the cabinet is kept.) Splitting 7 MB takes 0.25 s, rebuilding 0.13 s.
+gains nothing, so the cabinet is kept.) Splitting 7 MB takes 0.25 s, rebuilding 0.13 s.
 
 ## Tests
 
@@ -59,10 +57,13 @@ chunks, of one, of a few bytes): taken apart, evaluated natively, compared; a da
 limit and a tail kept. aqr-compress's `installshield_cabinet_taken_apart` takes one through the
 whole recompression.
 
-## Status
+## Left
 
-Done: the data volumes of cabinets with chunked DEFLATE (every `ISc(` cabinet seen).
-
-Not yet: the file names and kinds (the header file with its cabinet: a set), obfuscated and
-stored files, files split between volumes, the older framing the notes tell of (chunks cut at
-sync-flush markers), InstallShield 3's `.Z` and `.LIB` archives (other formats).
+- **File names and kinds.** They come from the header file, a file of its own (a set with its
+  cabinet), so the files are of unknown kind.
+- **Obfuscated and stored files.** Flag 2: the bytes are not chunks until undone; stored ones
+  sit between chunks.
+- **Data volumes past the first of a set.** Files split between volumes, whose descriptors the
+  header gives.
+- **The older framing.** Chunks cut at sync-flush markers, as the notes tell of.
+- **InstallShield 3's `.Z` and `.LIB` archives.** Other formats.

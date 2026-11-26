@@ -428,3 +428,37 @@ file is stored as it is.
   past each multiple of 64 MiB (one part where two multiples fall within a packet). The
   record is the same whatever the threads that code it; decoding takes a match finder for
   each part being decoded at once, or one going on through them all.
+
+## Design notes
+
+- Speed is the match finder's: encoding and decoding the packets alone run at 75-300 MB/s. A walk
+  along a chain was one cache miss after another (70% of the time on a 7z folder, 1.2 µs a match),
+  so the chains of 4 and 16 bytes keep the newest 16 positions of each hash on one cache line (from
+  1 MiB of data; `mf::RECENT`), and inserting asks for those lines 32 positions ahead. The
+  candidates, and so the records, are the same: splitting a 7z folder of 249 MB went 9.8 -> 4.4 s,
+  the `.tar.lzma` 19 -> 39 MB/s. The bucketed tables are 132.5 MiB; the modules keep one position
+  of each hash (12.5 MiB, the same records byte for byte) at a rebuild about twice as slow in the
+  match finder (32 -> 19 MB/s on the 7 largest `.tar.lzma`, one thread), which brought the
+  8 MiB-dictionary streams under the encoder's 256 MiB bound per application (354 MiB needed
+  before).
+- The record is mostly the packet types (36%) and the lengths of matches (42%); distances are
+  16%, as a match's distance is almost always the nearest one matching for its length. Deeper
+  search (16 candidates per chain, not 4) makes the records about 6% smaller, slowly.
+- Dropped: an 8-byte chain (records +21-30% for a 6% faster split); a search depth of 4 rather than
+  16 (records +6%); a long-distance index for matches beyond the reach `F` (measured, not kept:
+  `docs/streaming-encoder-design.md`).
+- Memory of the modules by the dictionary (the plan, for data over it; `lzma_plans_hold` checks it
+  to the page, with 67 MiB of data too): 4 KiB 12.8 MiB, 1 MiB 25.8 MiB, 4 MiB 65 MiB, 8 MiB
+  118 MiB, 16 MiB 223 MiB, 32 MiB 433 MiB, 64 MiB 853 MiB; `12 × S` + 12.5 MiB + about `1.13 R` +
+  0.1 MiB, and 1.1 MiB of initial memory, whatever the lengths (before the window, the data, the
+  stream and the record were held whole: 584 MiB for a 220 MB `.xz` of an 8 MiB dictionary). A
+  stream shorter than its dictionary holds less (a ring of `min(S, N)`, a window of `N`).
+- The reach `F` is chosen by the encoder as the largest power of 2 (at most `R`) whose plan fits its
+  bound (256 MiB by default; `plan::finder_for`); `R` itself where that fits. The rings follow
+  `F`, the data window stays `R`'s, so that what a far match leaves reads the data and nothing
+  extra is stored. For 7-Zip's 64 MiB, `F` = 8 MiB (plan 186 MiB; 16 MiB would be 282). The match
+  finder's indexing by the window's base costs the split and the rebuild 4.7% of their
+  instructions natively.
+- Parts: starting a part's match finder (the 64 MiB before it inserted) takes 0.23 s; fresh
+  contexts cost 1.6 KB on a 249.4 MB folder. Natively the match finders of a process take at most
+  1 GiB of chains at once, or as much as `mf::allow_chains` lets in (aqr-compress: 2 GiB).

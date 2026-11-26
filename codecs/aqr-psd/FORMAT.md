@@ -1010,3 +1010,57 @@ eight, `l = 0 .. 63`:
     881744    1048576    1246976    1482912    1763488    2097152    2493952    2965824
    3526976    4194304    4987904    5931648    7053952    8388608    9975808   11863296
 ```
+
+## Design notes *(informative)*
+
+**Threads.** The model state is per group but all groups share one rANS stream, so model coding
+and decoding stay on one thread, in order; around it:
+
+- Encoding: spans are planned (RLE checks, tile inference, encoder ranking) in parallel and
+  added in order; embedded files are recompressed, and the composite planned and its hint
+  sampled, at the same time; for groups of at least 256K samples a thread reads the rows,
+  checks them against the encoders and renders the hint ahead (batches of about 1 MB) while
+  the first one codes them.
+- Decoding: in groups of at least 256K samples one thread reads the known planes and renders
+  the hint ahead, another re-encodes the PackBits rows behind the model decoder.
+- aqr-jpeg (rayon) and aqr-png get the threads too; a nested PSD gets one when several
+  embedded files run at once. Batches in flight add at most about 10 MB per helper pair.
+  WebAssembly runs one thread. `psd:stats` times are summed over threads.
+
+**Memory.** `psd-recons` lays its memory out as a stack (`aqr_api::stack`), so what it takes is
+its plan, which the encoder declares as the module's limit (`plan::decode`;
+docs/arena-design.md): the file, the head's vectors (each reserved at the size it ends at), the
+model's player (tables made once, with room for as many as the stream's head can have bits), and
+for each group, in the order `decode_group` makes them, the rows, the PackBits sinks' previous
+rows (one block) and, for a hinted group, the parsed layers and the renderer's vectors. Vectors
+of vectors are dropped last first (`psd::Lifo`). The plan equals what the module takes, to the
+page (`psd_plans_hold` in aqr-decompress's `wasm.rs`). ZIP channels are not decoded for the
+hint (section 9), so a file with them in its layers is coded without it. Both directions
+stream: pixel data is coded row by row from the input and decoded row by row into the output
+(allocated at its final size). Embedded files are looked for by the parts `formula::regions`
+tells (pixel data, structure, text, embedded files), not from every byte (MP3 frames were found
+in pixel data).
+
+**Speed work** (2026-10-08; subsets, one thread; compression 22-35 -> 83-123 MB/s,
+decompression 30-53 -> 103-142 MB/s), roughly by gain:
+
+- Planning on samples: PackBits rows checked and the tile cut inferred on every 8th row,
+  candidate encoders ranked on 32 rows; checking a row compares token headers only.
+- Runs: shorter (4 equal samples above) with the stretch above as context; runs of pixels equal
+  to the composite hint; the run check reads the known row above first.
+- Color planes coded pixel by pixel; second and third planes jointly when small.
+- The composite hint only when a sample shows it pays (-19% and -29% on GenPoster and
+  OpenGameArt; not on tori29umai, where it cost a third of decompression time for -4%).
+- Renderer: 8-bit integer canvases row by row, blend functions per layer, rows without
+  coverage skipped, clipping bases only where clipped layers follow.
+- 8-byte compares in PackBits encoders; 11-bit rANS probabilities with per-chunk compacted
+  decoding tables.
+
+**Tried and dropped** (no gain or a loss): contexts from the row above only; dropping
+alpha-aware prediction or the cross-plane context (ratio loss, same speed); zero-residual and
+copy-from-above runs; one rANS stream per color plane; ring-indexed rANS states; coding two rows
+in turns (2-15% slower); forced inlining of the pixel code; unchecked indexing in the pair coder
+and PGO (instructions -6-10%, cycles the same); `target-cpu=native` (no change).
+
+Profiling: `samply record --save-only`, `dsymutil` and `llvm-symbolizer --inlining`; A/B by
+cycles and instructions of `/usr/bin/time -l`, as wall-clock moved by 5% with load.

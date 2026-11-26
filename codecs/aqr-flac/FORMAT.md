@@ -275,3 +275,110 @@ exceed `len`. A Rice code can be up to 2^32 bits long.
   no final XOR. It covers the header bytes from the sync code.
 - **CRC-16** (frame): polynomial `0x8005`, initial value 0, MSB-first, no reflection, no
   final XOR. It covers every byte of the frame from the sync code up to the CRC itself.
+
+## Design notes
+
+Not normative: why the module is as it is, and what was tried.
+
+### Decomposition
+
+- Frames must parse completely with a matching CRC-16 to be taken apart; anything else is
+  junk, kept verbatim. Rice codes are unique, so writing the residuals with the same
+  parameters reproduces the bits; the CRCs are recomputed.
+- Headers are predicted from the previous one; a match costs one byte before the archive's
+  zstd. Subframe parameters and stored samples go to small byte streams (0.5% of the output
+  on CD material; warm-up samples could be predicted from the previous frame, but that needs
+  the samples, which this path never reconstructs).
+- Residuals (99% of a FLAC file) go through the model.
+
+### Residual model
+
+FLAC's predictor stays: its residuals are the input of aqr-raw's residual model (an adaptive
+sign-sign LMS stage in the residual domain, then a token under static rANS tables and raw
+bits; see aqr-raw's FORMAT.md, section 4), so neither direction ever reconstructs samples. On real CD
+material about 1.2 pp come from the entropy coding (adaptive scale against FLAC's
+partitioned Rice parameters) and about 2.3 pp from the LMS stage. The tables were trained on
+every second file of the IA, hi-res and synthetic sets (their shape is nearly universal once
+scaled; 101 contexts x 72 tokens); the resource costs about 1.6 KB per archive. The cost is
+about 30 cycles per sample each way, so speed per MB falls with the bits per sample.
+
+### Speed
+
+- Separate passes per frame: Rice decoding, the LMS stage, the token / raw bit coding and
+  Rice encoding each run over the whole frame, so that each loop is small and its dependency
+  chains are short.
+- Rice decoding takes up to three codes from each 64-bit window without branches (the second
+  and third are kept if they fit).
+- LMS: two channels run in one loop (independent chains); NEON with four independent
+  accumulators (LLVM otherwise folds the products into one serial multiply-accumulate chain);
+  the newest sample's term is added in scalar code, so decoding's chain from one sample to the
+  next is a scalar multiply-add; delayed weight updates. About 11 cycles per residual each way.
+- Entropy coding: rANS with flat alias tables (every context at a fixed stride, one load per
+  symbol), bounds checks hoisted to a per-frame check, raw bits in two streams by channel
+  parity (two independent decode chains), branchless bit writers. The per-residual work is a
+  trait method rather than a closure, so that it is always inlined and the coder state stays
+  in registers (a non-inlined closure kept it in memory: -25%). About 12 cycles per residual
+  to decode, 7 + 4 to encode.
+
+### Threads
+
+The formula is the same whatever the number of threads, and one thread runs the serial code.
+The residual model carries state across frames (LMS weights and history, scale means, the
+rANS symbol order, the raw bit writers), so it is not split across the file but by stage.
+Frames go between threads in batches of about 65,536 samples (at most 64 items), through
+bounded channels; a fixed number of batches circulates, so memory stays bounded.
+
+- Compression: parsing (CRC checks, Rice decoding, header prediction, subframe parameters) on
+  the calling thread, then the LMS stage, then coding, on two threads. The LMS stage needs the
+  scale means from before each frame; it keeps them itself with the same recurrence as the
+  coder (a few operations per residual). rANS encoding, at the end, stays serial.
+- Decompression: subframe parameters, error decoding (rANS and raw bits, which do not depend
+  on the LMS stage) and the LMS stage, each on a thread, then a pool: FLAC frames are written
+  (escape checks, Rice coding, CRCs) into per-batch buffers that the calling thread appends in
+  order. (aqr-raw's PCM runs the same stages.)
+- Errors travel down the pipeline in frame order, so a damaged file gives the same error as
+  with one thread; a frame whose long Rice codes exceed a small budget is written again in
+  order with the exact one.
+- A panic on any thread reaches the caller (pool threads forward panics; the other threads see
+  their channels close and stop), where `formula::encode` catches it.
+
+### Module
+
+- `formula::encode` gives no formula for what it does not code, and for what makes the coder
+  panic. `formula::decode` bounds every size it reads; corrupted input gives an error rather
+  than a crash, a huge allocation or a long loop (Rice codes of garbage residuals can be 2^32
+  bits long, so frame writing has a byte budget). A varint coded in more bytes than its value
+  takes is refused (no coder writes one). MD5 signatures are not checked (kept with the
+  metadata).
+- Memory: the encoder holds the whole input, plus 4 bytes per residual for the rANS symbols;
+  9 MB + 11.5x the file through `aqr-show`. The module (flac-recons 5) is a part module with
+  windows of 16 pages and lays its memory out as a stack (`aqr_api::stack`), so its limit is
+  its plan (`module::plan`), the same whatever the lengths of the file and the streams: it
+  holds neither its inputs nor its output (the metadata, which may hold pictures, are copied
+  in pieces; the junk between frames is copied from its stream where its place in the output
+  comes). The instance reads the streams through windows ahead of a frame (`audio::slide`),
+  makes the frames' headers and parameters and decodes their errors; its gang of eight tasks
+  is the LMS stage and seven workers that write the frames, which pass as messages, each task
+  taking one into a buffer and a frame reserved for the largest, of the room the params give
+  (the most samples a channel, channels and bytes of a frame: flac-recons 4); and the
+  messages its channels may hold. Natively it still decodes whole, on threads
+  (`Run::Threaded` in aqr-decompress), as pcm-recons does.
+
+### Tried and dropped
+
+Ratios are of the FLAC residual bits on 8 IA files (`examples/exp2.rs`, ideal adaptive code
+lengths), unless noted. FFmpeg's WavPack encoder at its highest level was about 1-2% smaller
+than `flac -8` on 8 IA tracks decoded to WAV (and far slower); TTA about the same as `flac -8`.
+
+| Attempt | Outcome |
+|---|---|
+| Re-predicting in the sample domain (order-1 filter + LMS 32 + 16 on decoded mid / side) | -3.0% against -3.6% for LMS on FLAC's residuals; and it needs synthesis both ways |
+| FLAC's Rice parameter as (part of) the context | No gain over the running mean |
+| Two-speed scale contexts, the other channel's magnitude as context | No gain |
+| LMS cascades (32 + 16, 256 + 16), float NLMS | At most 0.06 pp better than one 32-tap sign-sign stage |
+| 16 / 24 taps | -0.2 / -0.1 pp |
+| Cross-channel taps | < 0.1 pp |
+| Predicting from samples up to t-2 (to break the decode chain) | -1 pp; the newest term in scalar code does it for free |
+| Sign + magnitude raw bits | Same ratio as zigzag, but the decoder's bit position depended on the bits read |
+| Branchless escape decoding | Slower: the branch is well predicted and lets the CPU run ahead |
+| PCM: fixed LPC orders 2-32 | Order 4 was best on real recordings, 8 on low-passed material; higher orders lose to their coefficient cost once the LMS stage follows |

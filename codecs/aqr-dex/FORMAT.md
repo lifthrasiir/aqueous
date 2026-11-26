@@ -357,3 +357,11 @@ data 1.92 MB (4.58 MB); the code items 17.65 MB (24.98 MB). In the code items:
   (0.69 MB), and `outs_size` from the instructions;
 - streams put together in inputs by interleaving them (as fields are read) instead: 17 inputs
   cost 1.3 MB.
+
+## Design notes
+
+- Speed on a thread (M4): splitting about 130 MB/s, decoding about 290 MB/s (620 MB/s before the
+  instructions were split by field). The block is 21.0 KB (25.2 KB before the module was laid out
+  as a stack).
+- xz -9e takes the 21 files to 37.32 MB one by one, 33.21 MB as one tar; the streams under zstd -9
+  are 31.05 MB.
