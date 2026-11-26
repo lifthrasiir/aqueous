@@ -31,7 +31,7 @@ name: release
 # (v0.0.20261031 -> 20261031) as the first releases' assets were named; scripts/release-env.sh
 # tells, and fails on a tag not of a version:
 #   aqr-STEM.exe                  Windows 7 on, x86_64 (cargo +NIGHTLY win7; packed by UPX)
-#   aqr-STEM-win-install.exe      the installer: aqr.exe, aqr-win.exe, aqr-shell.dll (crates/aqr-win-install)
+#   aqr-STEM-win-install.exe      the installer: aqr.exe, aqr-win.exe, aqr-shell.dll, man.html (crates/aqr-win-install)
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal;
 #                                 man/'s pages in Contents/Resources/man/manN)
 #   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on) and man/manN/*.N, man/'s pages
@@ -231,7 +231,9 @@ jobs:
           ./smoke.exe smoke-out
           diff -r smoke smoke-out
       # build.rs packs target/x86_64-win7-windows-msvc/dist/{aqr,aqr-win}.exe and aqr_shell.dll
-      # (installed as aqr-shell.dll), as above.
+      # (installed as aqr-shell.dll), as above, and the manual as one HTML file (`aqr --help -v`
+      # opens it).
+      - run: python scripts/man2html.py --single target/x86_64-win7-windows-msvc/dist/man.html
       - run: cargo "+$AQR_NIGHTLY" win7 -p aqr-win-install
       - run: git diff --exit-code -- Cargo.lock
       - run: |

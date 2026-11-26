@@ -31,8 +31,8 @@ use crate::register::{self, Value};
 const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Aqueous";
 const ENVIRONMENT: &str = "Environment";
 
-/// The files the installer writes, but this program.
-const FILES: [&str; 2] = ["aqr.exe", SHELL_DLL];
+/// The files the installer writes, but this program (`man.html` where it carries the manual).
+const FILES: [&str; 3] = ["aqr.exe", SHELL_DLL, "man.html"];
 
 /// The shell extension (crates/aqr-win-shell), which Explorer holds once it loaded it: not
 /// deleted then but moved aside ([`set_aside`]).

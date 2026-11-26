@@ -1,11 +1,13 @@
 # aqr-win-install
 
-The installer of Aqueous on Windows: `aqr.exe`, `aqr-win.exe` and `aqr-shell.dll` (the archives
-browsed in Explorer as folders, crates/aqr-win-shell) carried in one program, installed for the
-user alone (no administrator needed) into `%LOCALAPPDATA%\Programs\Aqueous`.
+The installer of Aqueous on Windows: `aqr.exe`, `aqr-win.exe`, `aqr-shell.dll` (the archives
+browsed in Explorer as folders, crates/aqr-win-shell) and `man.html` (the manual, which `aqr
+--help -v` opens) carried in one program, installed for the user alone (no administrator
+needed) into `%LOCALAPPDATA%\Programs\Aqueous`.
 
 ```sh
 cargo build --profile dist -p aqr -p aqr-win -p aqr-win-shell   # first: the installer carries these
+python scripts/man2html.py --single target/dist/man.html       # and this, where it is there
 cargo build --profile dist -p aqr-win-install   # target/dist/aqr-win-install.exe
 aqr-win-install [--quiet]                       # asks first, unless --quiet
 ```
@@ -13,10 +15,11 @@ aqr-win-install [--quiet]                       # asks first, unless --quiet
 `build.bat` runs the two builds as the release workflow does.
 
 - `build.rs` packs `target/dist/{aqr,aqr-win}.exe` and `aqr_shell.dll` (as `aqr-shell.dll`;
-  `AQR_WIN_INSTALL_FROM` names another
-  directory, relative to the workspace's root), checks the payload by unpacking it, and is run
-  again when they change. Without them the installer is built anyway, saying so, and tells
-  whoever runs it that it carries nothing.
+  `AQR_WIN_INSTALL_FROM` names another directory, relative to the workspace's root), checks the
+  payload by unpacking it, and is run again when they change. Without them the installer is
+  built anyway, saying so, and tells whoever runs it that it carries nothing. `man.html` of the
+  same directory goes with them where it is there; without it the installer is built without
+  the manual, saying so (`aqr --help -v` then opens the site's page).
 - The files are recompressed as Aqueous would, without Aqueous (which is what is installed): the
   code sections through aqr-exe's x86 disfilter, the base relocations through its `pe-reloc`,
   and each of their streams and the rest of the file as a zstd frame of its own (level 19).

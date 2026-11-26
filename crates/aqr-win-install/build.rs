@@ -1,5 +1,6 @@
 //! Packs `aqr.exe`, `aqr-win.exe` and `aqr-shell.dll` (aqr-win-shell's library, which cargo
-//! names `aqr_shell.dll`) of the same target's `dist` (`target/dist`, or
+//! names `aqr_shell.dll`), with `man.html` (the manual, `scripts/man2html.py --single`) where it
+//! is there, of the same target's `dist` (`target/dist`, or
 //! `target/x86_64-win7-windows-msvc/dist` of `cargo win7`; or of the directory
 //! `AQR_WIN_INSTALL_FROM` names) into the payload (`src/payload.rs`), checked by unpacking it; and
 //! embeds the manifest and the icon. Where they are not there, the payload is empty and the
@@ -27,6 +28,11 @@ const FILES: [(&str, &[&str]); 3] = [
     ("aqr-shell.dll", &["aqr-shell.dll", "aqr_shell.dll"]),
 ];
 
+/// The files installed where they are there, as [`FILES`]: the manual, made by
+/// `scripts/man2html.py --single DIR/man.html` (Python), which a build of the installer alone
+/// need not have.
+const OPTIONAL: [&str; 1] = ["man.html"];
+
 /// zstd's level for every frame.
 const LEVEL: i32 = 19;
 
@@ -53,11 +59,12 @@ fn main() {
     for (_, found) in FILES {
         found.iter().for_each(|n| println!("cargo:rerun-if-changed={}", from.join(n).display()));
     }
+    OPTIONAL.iter().for_each(|n| println!("cargo:rerun-if-changed={}", from.join(n).display()));
     let files: Option<Vec<(&str, Vec<u8>)>> = FILES
         .iter()
         .map(|&(name, found)| Some((name, found.iter().find_map(|n| std::fs::read(from.join(n)).ok())?)))
         .collect();
-    let Some(files) = files else {
+    let Some(mut files) = files else {
         println!(
             "cargo:warning=no {} in {}: the installer is built without them (cargo +NIGHTLY win7 -p aqr -p aqr-win -p aqr-win-shell)",
             names.join(", "),
@@ -66,6 +73,17 @@ fn main() {
         std::fs::write(&out, b"").unwrap();
         return;
     };
+    for name in OPTIONAL {
+        match std::fs::read(from.join(name)) {
+            Ok(data) => files.push((name, data)),
+            Err(e) => println!(
+                "cargo:warning=no {name} in {} ({e}): the installer is built without it (scripts/man2html.py --single {})",
+                from.display(),
+                from.join(name).display()
+            ),
+        }
+    }
+    let names: Vec<&str> = files.iter().map(|f| f.0).collect();
     let start = Instant::now();
     let packed = pack(&files);
     let back = payload::unpack(&packed).unwrap_or_else(|e| panic!("the payload does not unpack: {e}"));

@@ -4,8 +4,8 @@ rem (.github\workflows\release.yml), for testing:
 rem
 rem   crates\aqr-win-install\build.bat
 rem
-rem aqr.exe, aqr-win.exe and aqr_shell.dll first (the dist profile), then the installer, whose
-rem build.rs packs them. AQR_VERSION, if set, is the binaries' version as a tag's run sets it
+rem aqr.exe, aqr-win.exe and aqr_shell.dll first (the dist profile) and man.html (Python's
+rem scripts\man2html.py), then the installer, whose build.rs packs them. AQR_VERSION, if set, is the binaries' version as a tag's run sets it
 rem (crates\aqr-version); otherwise `git describe`'s.
 setlocal
 if not "%~1"=="" (
@@ -14,5 +14,6 @@ if not "%~1"=="" (
 )
 cd /d "%~dp0..\.." || exit /b 1
 cargo build --profile dist -p aqr -p aqr-win -p aqr-win-shell || exit /b 1
+python scripts\man2html.py --single target\dist\man.html || exit /b 1
 cargo build --profile dist -p aqr-win-install || exit /b 1
 dir /-c target\dist\aqr.exe target\dist\aqr-win.exe target\dist\aqr-win-install.exe | findstr /i "\.exe"
