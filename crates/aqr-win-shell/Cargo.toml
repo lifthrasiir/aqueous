@@ -1,0 +1,33 @@
+[package]
+name = "aqr-win-shell"
+version = "0.1.0"
+edition = "2024"
+description = "Aqueous archives browsed in Windows Explorer: a shell namespace extension over aqr-win --serve"
+publish = false
+
+[lib]
+# aqr_shell.dll: loaded by Explorer and by every program's file dialogs
+name = "aqr_shell"
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(windows)'.dependencies]
+serde_json.workspace = true
+windows-core = { workspace = true, features = ["std"] }
+windows = { workspace = true, features = [
+    "std",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_Time",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }

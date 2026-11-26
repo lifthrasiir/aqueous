@@ -196,6 +196,32 @@ pub fn register() -> Result<(), String> {
         |ext: &str, class: &str| self::set(&format!(r"{CAPABILITIES}\FileAssociations"), Some(ext), Value::Sz(class));
     set(".aqr", None, CLASS)?;
     class(CLASS, types::AQR, 2)?;
+    // (browsed as a folder where the shell extension is beside this program: double-clicked,
+    // opened as a folder, as Windows' ZIP folders are; else extracted)
+    let dll = exe.with_file_name(SHELL_DLL);
+    let folder = folder_key();
+    match dll.is_file() {
+        true => {
+            set(&folder, None, types::AQR.text())?;
+            set(&format!(r"{folder}\InProcServer32"), None, &dll.display().to_string())?;
+            set(&format!(r"{folder}\InProcServer32"), Some("ThreadingModel"), "Apartment")?;
+            // (CATID_BrowsableShellExt: else the shell does not take the class as a junction)
+            set(&format!(r"{folder}\Implemented Categories\{BROWSABLE}"), None, "")?;
+            self::set(
+                &classes(&format!(r"{folder}\ShellFolder")),
+                Some("Attributes"),
+                Value::Dword(FOLDER_ATTRIBUTES),
+            )?;
+            set(&format!(r"{CLASS}\CLSID"), None, &crate::drop::braced(&FOLDER))?;
+            set(&format!(r"{CLASS}\shell"), None, "open")?;
+            set(&format!(r"{CLASS}\shell\open\command"), Some("DelegateExecute"), EXECUTE_FOLDER)?;
+        }
+        false => {
+            delete(&classes(&folder))?;
+            delete(&classes(&format!(r"{CLASS}\CLSID")))?;
+            delete(&classes(&format!(r"{CLASS}\shell\open")))?;
+        }
+    }
     // (the versions of an archive: one archive at a time, `.aqr` files alone)
     for (v, text) in [("extract-version", shell::EXTRACT_VERSION), ("name-version", shell::NAME_VERSION)] {
         let key = format!(r"{CLASS}\shell\{v}");
@@ -230,6 +256,27 @@ fn clsid_key(verb: &str) -> String {
     format!(r"CLSID\{}", crate::drop::braced(&crate::drop::clsid(verb).unwrap()))
 }
 
+/// The shell extension browsing archives as folders (crates/aqr-win-shell), beside this program.
+const SHELL_DLL: &str = "aqr_shell.dll";
+
+/// The class of the folders of archives (aqr-win-shell's `folder::FOLDER`).
+const FOLDER: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0xf76e4146_e32e_4811_a0de_465ae547da1d);
+
+/// What an archive file is as a folder (`SFGAO_FOLDER | SFGAO_STREAM`): a folder that is a file
+/// too.
+const FOLDER_ATTRIBUTES: u32 = 0x2000_0000 | 0x40_0000;
+
+/// `CATID_BrowsableShellExt`.
+const BROWSABLE: &str = "{00021490-0000-0000-C000-000000000046}";
+
+/// The shell's verb that opens a folder (`CLSID_ExecuteFolder`), as `DelegateExecute`.
+const EXECUTE_FOLDER: &str = "{11dbb47c-a525-400b-9e80-a54615a090c0}";
+
+/// The key (under `Software\Classes`) of the class of the folders of archives.
+fn folder_key() -> String {
+    format!(r"CLSID\{}", crate::drop::braced(&FOLDER))
+}
+
 /// The key (under `Software\Classes`) of the class of the archives browsed ([`crate::serve`]).
 fn serve_key() -> String {
     format!(r"CLSID\{}", crate::drop::braced(&crate::serve::CLSID))
@@ -240,6 +287,7 @@ pub fn unregister() -> Result<(), String> {
         delete(&classes(&clsid_key(v)))?;
     }
     delete(&classes(&serve_key()))?;
+    delete(&classes(&folder_key()))?;
     for key in COMPRESS.iter().chain(&MENU).chain(&OLD).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }

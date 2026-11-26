@@ -124,6 +124,9 @@ wasmtime = { version = "51", default-features = false, features = [
 ] }
 wat = "1"
 windows-sys = "0.61"
+# (aqr-win-shell's COM classes, by `#[implement]`)
+windows = { version = "0.62", default-features = false }
+windows-core = { version = "0.62", default-features = false }
 xxhash-rust = "0.8"
 zmij = "1"
 

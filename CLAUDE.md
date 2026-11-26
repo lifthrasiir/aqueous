@@ -47,6 +47,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     Development builds (`cargo aqr`, the tests) stay of `x86_64-pc-windows-msvc`.
   - `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
   - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
+  - `aqr-win-shell` — `aqr_shell.dll`, `.aqr` files browsed in Explorer as folders (a shell
+    namespace extension, thin: it asks `aqr-win --serve`, a COM local server, which runs `aqr
+    --serve`); `cargo aqr-win` keeps it beside aqr-win, `--register` registers it.
   - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe`, packed by its
     `build.rs` with aqr-exe's filters and zstd (Windows).
   - `aqr-l10n` — the frontends' messages (`messages/{en,ko}.toml`, English the source; a table

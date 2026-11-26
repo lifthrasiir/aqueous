@@ -1,0 +1,280 @@
+//! The archives as `aqr-win --serve` serves them (`crates/aqr-win/src/serve.rs`): its class
+//! and archive objects (late-bound), one of each for the process, kept in the Global Interface
+//! Table as they are called from any apartment (Explorer's windows each have a thread, and
+//! DefView enumerates on threads of its own). Where the server is gone (it ended idle, or
+//! failed), what was kept is dropped and the call made again, of a server started anew.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+
+use serde_json::Value;
+use windows::Win32::Foundation::{E_FAIL, SysAllocStringLen, SysFreeString, SysStringLen};
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, CoCreateInstance, DISPATCH_METHOD, DISPPARAMS, EXCEPINFO, IDispatch,
+    IGlobalInterfaceTable, IStream,
+};
+use windows::Win32::System::Variant::VARIANT;
+use windows::core::{BSTR, GUID, HRESULT, IUnknown, Interface, PCWSTR};
+
+/// The class of `aqr-win --serve`.
+pub const SERVER: GUID = GUID::from_u128(0xc6b7e992_0338_4d02_8f5f_1bbd5a9fbab9);
+
+/// The server's class, where the registry names another (for tests: `Server` under the key of
+/// the folder's class).
+static SERVER_CLASS: Mutex<Option<GUID>> = Mutex::new(None);
+
+pub fn set_server(g: GUID) {
+    *SERVER_CLASS.lock().unwrap() = Some(g);
+}
+
+/// An object kept in the Global Interface Table, by its cookie.
+struct Kept(u32);
+
+impl Kept {
+    fn of<T: Interface>(o: &T) -> windows::core::Result<Kept> {
+        // SAFETY: the system's table, and an interface of `T`
+        unsafe { Ok(Kept(git()?.RegisterInterfaceInGlobal(&o.cast::<IUnknown>()?, &T::IID)?)) }
+    }
+
+    /// The object of `cookie`, for this apartment.
+    fn get_by<T: Interface>(cookie: u32) -> windows::core::Result<T> {
+        let mut p = std::ptr::null_mut();
+        // SAFETY: the system's table: an interface of `T`, of a reference of the caller's
+        unsafe {
+            git()?.GetInterfaceFromGlobal(cookie, &T::IID, &mut p)?;
+            Ok(T::from_raw(p))
+        }
+    }
+}
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        if let Ok(g) = git() {
+            // SAFETY: a cookie of the table, revoked once
+            _ = unsafe { g.RevokeInterfaceFromGlobal(self.0) };
+        }
+    }
+}
+
+/// `CLSID_StdGlobalInterfaceTable`.
+const GLOBAL_TABLE: GUID = GUID::from_u128(0x00000323_0000_0000_c000_000000000046);
+
+fn git() -> windows::core::Result<IGlobalInterfaceTable> {
+    // SAFETY: the system's class
+    unsafe { CoCreateInstance(&GLOBAL_TABLE, None, CLSCTX_INPROC_SERVER) }
+}
+
+/// The server's class object, and the archives opened by path, each with the uses of it
+/// ([`Use`]): let go of with the last, for the server to close it (and to end, idle).
+struct Connection {
+    server: Option<Kept>,
+    archives: HashMap<PathBuf, (Option<Kept>, usize)>,
+}
+
+// (never locked over a COM call: a call from a single-threaded apartment lets in others, which
+// may come back here on the same thread)
+static CONNECTION: LazyLock<Mutex<Connection>> =
+    LazyLock::new(|| Mutex::new(Connection { server: None, archives: HashMap::new() }));
+
+/// Of the server gone: the error of a call to an object of a process no longer there.
+fn disconnected(e: &windows::core::Error) -> bool {
+    matches!(
+        e.code().0 as u32,
+        0x8001_0108 // RPC_E_DISCONNECTED
+            | 0x8007_06BA // RPC_S_SERVER_UNAVAILABLE
+            | 0x8007_06BF // RPC_S_CALL_FAILED_DNE
+            | 0x8001_0007 // RPC_E_SERVER_DIED
+            | 0x8001_0012 // RPC_E_SERVER_DIED_DNE
+            | 0x8004_01FD // CO_E_OBJNOTCONNECTED
+    )
+}
+
+/// A use of archive `path` (a folder's): the archive is kept open while it has one.
+pub struct Use(PathBuf);
+
+impl Use {
+    pub fn of(path: &Path) -> Use {
+        CONNECTION.lock().unwrap().archives.entry(path.to_owned()).or_insert((None, 0)).1 += 1;
+        Use(path.to_owned())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Use {
+    fn drop(&mut self) {
+        let gone = {
+            let mut c = CONNECTION.lock().unwrap();
+            let last = c.archives.get_mut(&self.0).map(|e| {
+                e.1 -= 1;
+                e.1 == 0
+            });
+            let archive = match last {
+                Some(true) => c.archives.remove(&self.0).and_then(|e| e.0),
+                _ => None,
+            };
+            // (none left: the server too, for it to end once idle)
+            let server = if c.archives.is_empty() { c.server.take() } else { None };
+            (archive, server)
+        };
+        drop(gone);
+    }
+}
+
+/// Archive `path` as the server has it open (opened now, where it is not).
+fn archive(path: &Path) -> windows::core::Result<IDispatch> {
+    let (archive, server) = {
+        let c = CONNECTION.lock().unwrap();
+        let archive = c.archives.get(path).and_then(|e| e.0.as_ref()).map(|k| k.0);
+        (archive, c.server.as_ref().map(|k| k.0))
+    };
+    if let Some(cookie) = archive {
+        return Kept::get_by(cookie);
+    }
+    let server: IDispatch = match server {
+        Some(cookie) => Kept::get_by(cookie)?,
+        None => {
+            let class = SERVER_CLASS.lock().unwrap().unwrap_or(SERVER);
+            // SAFETY: a class of a local server
+            let s: IDispatch = unsafe { CoCreateInstance(&class, None, CLSCTX_LOCAL_SERVER)? };
+            let kept = Kept::of(&s)?;
+            let other = CONNECTION.lock().unwrap().server.replace(kept);
+            drop(other);
+            s
+        }
+    };
+    let a = match call(&server, "Open", &[&path.to_string_lossy()])? {
+        Got::Object(o) => o.cast::<IDispatch>()?,
+        Got::Text(_) => return Err(E_FAIL.into()),
+    };
+    let kept = Kept::of(&a)?;
+    // (kept where it has a use, of which one opening it at once: the other let go of)
+    let other = {
+        let mut c = CONNECTION.lock().unwrap();
+        match c.archives.get_mut(path) {
+            Some(e) if e.0.is_none() => e.0.replace(kept),
+            _ => Some(kept),
+        }
+    };
+    drop(other);
+    Ok(a)
+}
+
+/// `f` of archive `path`; again of a server started anew, where it was gone.
+fn with<T>(path: &Path, f: impl Fn(&IDispatch) -> windows::core::Result<T>) -> windows::core::Result<T> {
+    let r = archive(path).and_then(|a| f(&a));
+    match r {
+        Err(e) if disconnected(&e) => {
+            let dropped = {
+                let mut c = CONNECTION.lock().unwrap();
+                let kept: Vec<Kept> = c.archives.values_mut().filter_map(|e| e.0.take()).collect();
+                (c.server.take(), kept)
+            };
+            drop(dropped);
+            f(&archive(path)?)
+        }
+        r => r,
+    }
+}
+
+/// What a method gave.
+enum Got {
+    Text(String),
+    Object(IUnknown),
+}
+
+/// `VARIANT`, as it is laid out (of a `BSTR` or an object here).
+#[repr(C)]
+struct Var {
+    vt: u16,
+    reserved: [u16; 3],
+    value: usize,
+    record: usize,
+}
+
+const _: () = assert!(std::mem::size_of::<Var>() == std::mem::size_of::<VARIANT>());
+
+/// Method `name` of late-bound `o` called with the strings `args`.
+fn call(o: &IDispatch, name: &str, args: &[&str]) -> windows::core::Result<Got> {
+    let w: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mut id = 0;
+    // SAFETY: COM calls of the object, of the arguments made here (strings let go of after)
+    unsafe {
+        o.GetIDsOfNames(&GUID::zeroed(), &PCWSTR(w.as_ptr()), 1, 0, &mut id)?;
+        let vs: Vec<Var> = args
+            .iter()
+            .rev()
+            .map(|a| {
+                let u: Vec<u16> = a.encode_utf16().collect();
+                let b = SysAllocStringLen(Some(&u));
+                Var { vt: 8, reserved: [0; 3], value: std::mem::transmute::<BSTR, usize>(b), record: 0 }
+            })
+            .collect();
+        let p = DISPPARAMS {
+            rgvarg: vs.as_ptr() as *mut VARIANT,
+            rgdispidNamedArgs: std::ptr::null_mut(),
+            cArgs: vs.len() as u32,
+            cNamedArgs: 0,
+        };
+        let mut r = Var { vt: 0, reserved: [0; 3], value: 0, record: 0 };
+        let mut x = EXCEPINFO::default();
+        let hr = o.Invoke(
+            id,
+            &GUID::zeroed(),
+            0,
+            DISPATCH_METHOD,
+            &p,
+            Some(&mut r as *mut Var as *mut VARIANT),
+            Some(&mut x),
+            None,
+        );
+        for v in vs {
+            SysFreeString(&std::mem::transmute::<usize, BSTR>(v.value));
+        }
+        if let Err(e) = hr {
+            let m = x.bstrDescription.to_string();
+            return Err(match m.is_empty() {
+                true => e,
+                false => windows::core::Error::new(if x.scode != 0 { HRESULT(x.scode) } else { E_FAIL }, m),
+            });
+        }
+        match r.vt {
+            8 => {
+                let b: BSTR = std::mem::transmute(r.value);
+                let n = SysStringLen(&b);
+                let t = String::from_utf16_lossy(std::slice::from_raw_parts(b.as_ptr(), n as usize));
+                Ok(Got::Text(t))
+            }
+            9 | 13 => Ok(Got::Object(IUnknown::from_raw(r.value as *mut _))),
+            _ => Err(E_FAIL.into()),
+        }
+    }
+}
+
+fn json(o: &IDispatch, name: &str, args: &[&str]) -> windows::core::Result<Value> {
+    match call(o, name, args)? {
+        Got::Text(t) => serde_json::from_str(&t).map_err(|e| windows::core::Error::new(E_FAIL, e.to_string())),
+        Got::Object(_) => Err(E_FAIL.into()),
+    }
+}
+
+/// The entries of directory `dir` (names joined with `/`) of archive `path`.
+pub fn list(path: &Path, dir: &str) -> windows::core::Result<Vec<Value>> {
+    with(path, |a| Ok(json(a, "List", &[dir])?.as_array().cloned().unwrap_or_default()))
+}
+
+/// The entry at `at` of archive `path`.
+pub fn stat(path: &Path, at: &str) -> windows::core::Result<Value> {
+    with(path, |a| json(a, "Stat", &[at]))
+}
+
+/// A stream of file `at` of archive `path`.
+pub fn stream(path: &Path, at: &str) -> windows::core::Result<IStream> {
+    with(path, |a| match call(a, "OpenStream", &[at])? {
+        Got::Object(o) => o.cast(),
+        Got::Text(_) => Err(E_FAIL.into()),
+    })
+}
