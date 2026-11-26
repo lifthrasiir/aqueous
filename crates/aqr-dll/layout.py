@@ -164,8 +164,9 @@ def main():
             f'name = "aqr-dll-{g}"',
             'version = "0.1.0"',
             'edition = "2024"',
-            f'description = "Made by layout.py: the crates that the same {len(ms)} modules use, '
-            'as a dylib that their native libraries link against"',
+            # (nothing that changes as modules come and go but the crates: the file stays as it is)
+            'description = "Made by layout.py: crates that the same modules use, as a dylib that '
+            'their native libraries link against"',
             'publish = false',
             '',
             '[lib]',
