@@ -147,13 +147,28 @@ pub fn serve(args: &[std::ffi::OsString]) -> std::process::ExitCode {
     if hr < 0 {
         return std::process::ExitCode::FAILURE;
     }
+    let mut checked = Instant::now();
+    let mut replaced = false;
     loop {
         std::thread::sleep(Duration::from_millis(250).min(linger / 4).max(Duration::from_millis(10)));
         close_lingering(Some(linger));
+        // (registered anew, of another program: a newer one. The class revoked, for clients to
+        // start that one; this one ends as soon as what it serves is let go of)
+        if !replaced && checked.elapsed() >= Duration::from_secs(2) {
+            checked = Instant::now();
+            if superseded(&clsid) {
+                // SAFETY: registered above
+                unsafe { CoRevokeClassObject(cookie) };
+                replaced = true;
+            }
+        }
         let since = *IDLE_SINCE.lock().unwrap();
+        let idle = if replaced { Duration::ZERO } else { idle };
         if OBJECTS.load(Ordering::SeqCst) == 0 && since.is_some_and(|t| t.elapsed() >= idle) {
-            // SAFETY: registered above: a client from now on starts another server
-            unsafe { CoRevokeClassObject(cookie) };
+            if !replaced {
+                // SAFETY: registered above: a client from now on starts another server
+                unsafe { CoRevokeClassObject(cookie) };
+            }
             // (an object made just before, served until it is let go of)
             while OBJECTS.load(Ordering::SeqCst) > 0 {
                 std::thread::sleep(Duration::from_millis(100));
@@ -165,6 +180,18 @@ pub fn serve(args: &[std::ffi::OsString]) -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
     }
+}
+
+/// Whether the class `clsid` is registered (for the user) as of another program than this one:
+/// this one replaced (`cargo aqr-win --register` of another build, an update installed). Not of
+/// a class not registered (a test's).
+fn superseded(clsid: &GUID) -> bool {
+    let key = format!(r"Software\Classes\CLSID\{}\LocalServer32", crate::drop::braced(clsid));
+    let Some((command, _)) = crate::register::get(&key, None) else { return false };
+    let Ok(exe) = std::env::current_exe() else { return false };
+    // (`"PATH" --serve`)
+    let registered = command.trim_start_matches('"').split('"').next().unwrap_or("");
+    !std::path::Path::new(registered).as_os_str().eq_ignore_ascii_case(exe.as_os_str())
 }
 
 /// Where the files opened of archives are written (`%LOCALAPPDATA%\Aqueous\Open`): a directory

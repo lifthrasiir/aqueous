@@ -279,3 +279,47 @@ fn served() {
     assert!(std::fs::read_dir(d.join(r"local\Aqueous\Open")).unwrap().next().is_none());
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+/// A server whose class is registered anew of another program (a newer build) ends at once,
+/// not after its idle time, for clients to start that one.
+#[test]
+fn superseded() {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
+    let clsid = "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A62}";
+    let key: Vec<u16> = format!(r"Software\Classes\CLSID\{clsid}\LocalServer32").encode_utf16().chain([0]).collect();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_aqr-win"))
+        .args(["--serve", clsid])
+        .env("AQR_SERVE_IDLE", "0.2,600")
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(server.try_wait().unwrap().is_none(), "ended though idle for less than its time");
+    let other: Vec<u16> = r#""C:\elsewhere\aqr-win.exe" --serve"#.encode_utf16().chain([0]).collect();
+    // SAFETY: a key of the user's, and a string ended by 0
+    let r = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            std::ptr::null(),
+            REG_SZ,
+            other.as_ptr() as _,
+            (other.len() * 2) as u32,
+        )
+    };
+    assert_eq!(r, 0);
+    let start = Instant::now();
+    let ended = loop {
+        if let Some(s) = server.try_wait().unwrap() {
+            break Some(s);
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            _ = server.kill();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let class: Vec<u16> = format!(r"Software\Classes\CLSID\{clsid}").encode_utf16().chain([0]).collect();
+    // SAFETY: a key of the user's
+    unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, class.as_ptr()) };
+    assert!(ended.is_some_and(|s| s.success()), "the server stayed");
+}

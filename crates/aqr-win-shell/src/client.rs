@@ -89,6 +89,9 @@ fn disconnected(e: &windows::core::Error) -> bool {
             | 0x8001_0007 // RPC_E_SERVER_DIED
             | 0x8001_0012 // RPC_E_SERVER_DIED_DNE
             | 0x8004_01FD // CO_E_OBJNOTCONNECTED
+            // (DISP_E_UNKNOWNNAME: a server of an older build, still running as a newer one is
+            // registered; it ends once what it serves is let go of)
+            | 0x8002_0006
     )
 }
 
