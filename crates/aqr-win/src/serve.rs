@@ -6,12 +6,17 @@
 //! The class's objects are late-bound (`IDispatch`, no type library: the system's proxies
 //! marshal them), their methods named:
 //!
-//! - the class: `Open(path)`, an archive object, or an error (`EXCEPINFO`'s description).
+//! - the class: `Open(path[, hwnd])`, an archive object, or an error (`EXCEPINFO`'s
+//!   description). An encrypted archive has its passphrase asked for over window `hwnd` (a
+//!   number, of the client's: its process lets this one come to the front), again where wrong;
+//!   it is kept by the archive object, to open the archive again where `aqr --serve` is gone.
 //! - an archive: `Info()` (what `open` answered, as JSON), `List(dir)` (the entries, a JSON
 //!   array), `Stat(path)` (an entry, JSON), `OpenStream(path)` (an `IStream` of the file, read
 //!   only, read a chunk of `read` after another), `Materialize(path)` (the file written out to
 //!   be opened by a program, read only, in `%LOCALAPPDATA%\Aqueous\Open\<archive>\<path>`: its
-//!   path; one there already of its size taken as it is). Once let go of (its last reference released,
+//!   path; one there already of its size taken as it is), `Progress(path)` (JSON: `aqr --serve`'s
+//!   `progress` of the archive, and `written`, `[done, total]` bytes of the file at `path` being
+//!   materialized). Once let go of (its last reference released,
 //!   by the client or by COM as the client is gone), its handle is closed a [`LINGER`] later,
 //!   unless the archive is opened again: what was evaluated of it kept while the client moves
 //!   from one folder to another.
@@ -28,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use aqr_ipc::serve::{CHUNK, Error, Served};
 use serde_json::{Value, json};
+use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Foundation::{
     CLASS_E_NOAGGREGATION, DISP_E_EXCEPTION, DISP_E_MEMBERNOTFOUND, DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, E_FAIL,
     E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, FILETIME, S_FALSE, S_OK, STG_E_ACCESSDENIED,
@@ -192,6 +198,14 @@ fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
     let r = (|| -> Result<(), String> {
         let f = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
         let mut at = 0u64;
+        let told = |at: u64| {
+            let mut w = WRITING.lock().unwrap();
+            match w.iter_mut().find(|e| e.0 == a.path && e.1 == path) {
+                Some(e) => e.2 = at,
+                None => w.push((a.path.clone(), path.to_owned(), at, size)),
+            }
+        };
+        told(0);
         while at < size {
             let d = a.with(|s, h| s.read(h, path, at, CHUNK))?;
             if d.is_empty() {
@@ -199,6 +213,7 @@ fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
             }
             write_at(&f, &d, at).map_err(|e| format!("{}: {e}", part.display()))?;
             at += d.len() as u64;
+            told(at);
         }
         if let Some(t) = file_time(e) {
             _ = f.set_modified(t);
@@ -211,6 +226,7 @@ fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
         _ = clear_readonly(&to).and_then(|()| std::fs::remove_file(&to));
         std::fs::rename(&part, &to).map_err(|e| format!("{}: {e}", to.display()))
     })();
+    WRITING.lock().unwrap().retain(|e| !(e.0 == a.path && e.1 == path));
     if r.is_err() {
         _ = clear_readonly(&part).and_then(|()| std::fs::remove_file(&part));
     }
@@ -270,23 +286,67 @@ fn remove_tree(p: &std::path::Path) {
     }
 }
 
+/// Why an archive did not open.
+enum Opening {
+    /// Encrypted: no passphrase given, or one that does not open it (`wrong`).
+    Encrypted {
+        wrong: bool,
+    },
+    Failed(String),
+}
+
+/// By archive and path, the bytes of a file written out so far ([`materialize`]), and all of it.
+static WRITING: Mutex<Vec<(PathBuf, String, u64, u64)>> = Mutex::new(Vec::new());
+
 /// An archive open: its path, and the `aqr --serve` and handle it is open in, opened again
 /// where that is gone.
 struct Archive {
     path: PathBuf,
+    /// The passphrase it was opened of, to open it again of (in this process alone).
+    passphrase: Option<String>,
     open: Mutex<(Arc<Served>, u64, Value)>,
 }
 
 impl Archive {
-    fn open(path: PathBuf) -> Result<Archive, String> {
-        let (s, h, info) = Archive::opened(&path)?;
-        Ok(Archive { path, open: Mutex::new((s, h, info)) })
+    /// Archive `path` opened: an encrypted one of a passphrase asked for over `owner` (again
+    /// where it was wrong), the user's cancel an error.
+    fn open(path: PathBuf, owner: HWND) -> Result<Archive, String> {
+        let mut passphrase = None;
+        loop {
+            match Archive::opened(&path, passphrase.as_deref()) {
+                Ok((s, h, info)) => return Ok(Archive { path, passphrase, open: Mutex::new((s, h, info)) }),
+                Err(Opening::Encrypted { wrong }) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                    // (for tests: the answer of the dialog, once, and of none again)
+                    let asked = match std::env::var("AQR_SERVE_TEST_PASSPHRASE") {
+                        Ok(p) => (!wrong).then_some(p),
+                        Err(_) => crate::passphrase::ask(owner, name.as_deref(), false, wrong, false),
+                    };
+                    match asked {
+                        Some(p) => passphrase = Some(p),
+                        None => return Err(format!("{}: encrypted, and no passphrase given", path.display())),
+                    }
+                }
+                Err(Opening::Failed(e)) => return Err(e),
+            }
+        }
     }
 
-    fn opened(path: &std::path::Path) -> Result<(Arc<Served>, u64, Value), String> {
-        let s = served()?;
-        let v = s.ask(json!({"open": path})).map_err(|e| e.to_string())?;
-        let h = v["archive"].as_u64().ok_or("no handle opened")?;
+    fn opened(path: &std::path::Path, passphrase: Option<&str>) -> Result<(Arc<Served>, u64, Value), Opening> {
+        let s = served().map_err(Opening::Failed)?;
+        let mut q = json!({"open": path});
+        if let Some(p) = passphrase {
+            q["passphrase"] = p.into();
+        }
+        let from = s.send(q).map_err(|e| Opening::Failed(e.to_string()))?;
+        let (v, _) = from.recv().map_err(|_| Opening::Failed(Error::Gone.to_string()))?;
+        if v["encrypted"] == true {
+            return Err(Opening::Encrypted { wrong: v["wrong"] == true });
+        }
+        if let Some(e) = v["error"].as_str() {
+            return Err(Opening::Failed(e.to_owned()));
+        }
+        let h = v["archive"].as_u64().ok_or(Opening::Failed("no handle opened".into()))?;
         Ok((s, h, v))
     }
 
@@ -306,7 +366,10 @@ impl Archive {
             let mut o = self.open.lock().unwrap();
             // (where another call has not opened it again already)
             if Arc::ptr_eq(&o.0, &s) {
-                *o = Archive::opened(&self.path)?;
+                *o = Archive::opened(&self.path, self.passphrase.as_deref()).map_err(|e| match e {
+                    Opening::Failed(e) => e,
+                    Opening::Encrypted { .. } => format!("{}: encrypted", self.path.display()),
+                })?;
             }
             (o.0.clone(), o.1)
         };
@@ -496,7 +559,7 @@ impl Kind {
     fn names(&self) -> &'static [&'static str] {
         match self {
             Kind::Server => &["Open"],
-            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream", "Materialize"],
+            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream", "Materialize", "Progress"],
         }
     }
 }
@@ -528,7 +591,9 @@ impl Dispatch {
         let json = |r: Result<Value, String>| r.map(|v| Out::Text(v.to_string()));
         match (&self.kind, id) {
             (Kind::Server, 1) => {
-                let a = Archive::open(PathBuf::from(arg(0)?))?;
+                // (the window to ask a passphrase over, where there is one)
+                let owner = args.get(1).and_then(|h| h.parse::<isize>().ok()).unwrap_or(0);
+                let a = Archive::open(PathBuf::from(arg(0)?), owner as HWND)?;
                 Ok(Out::Object(Dispatch::new(Kind::Archive(Arc::new(a))) as *mut c_void, true))
             }
             (Kind::Archive(a), 1) => Ok(Out::Text(a.info().to_string())),
@@ -548,6 +613,16 @@ impl Dispatch {
                     return Err(format!("{path}: not a file"));
                 }
                 Ok(Out::Object(Stream::new(a.clone(), path, e) as *mut c_void, false))
+            }
+            (Kind::Archive(a), 6) => {
+                // (how far the file at `path` is written out, and the archive's evaluation is)
+                let path = args.first().map_or("", String::as_str);
+                let mut v = a.with(|s, h| s.ask(json!({"progress": h})))?;
+                let w = WRITING.lock().unwrap();
+                if let Some(e) = w.iter().find(|e| e.0 == a.path && e.1 == path) {
+                    v["written"] = json!([e.2, e.3]);
+                }
+                Ok(Out::Text(v.to_string()))
             }
             (Kind::Archive(a), 5) => {
                 let path = arg(0)?;

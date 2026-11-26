@@ -193,11 +193,21 @@ fn served() {
     let o = Command::new(&aqr).current_dir(&d).args(["-q", "-o", "t.aqr", "t"]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 
+    for (name, pass) in [("e.aqr", "sesame"), ("w.aqr", "other")] {
+        let o = Command::new(&aqr)
+            .current_dir(&d)
+            .env("AQR_PASS", pass)
+            .args(["-q", "--passphrase-from=env:AQR_PASS", "-o", name, "t"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
     let mut server = Command::new(env!("CARGO_BIN_EXE_aqr-win"))
         .args(["--serve", "{5E1F0B6A-92C4-4D1E-A7F3-0C2B9D8E7A61}"])
         .env("AQR", &aqr)
         .env("AQR_SERVE_IDLE", "0.2,2")
         .env("LOCALAPPDATA", d.join("local"))
+        .env("AQR_SERVE_TEST_PASSPHRASE", "sesame")
         .spawn()
         .unwrap();
     // SAFETY: this thread's COM, and the objects of the server through it
@@ -235,6 +245,9 @@ fn served() {
             Ok(Got::Text(t)) => assert_eq!(PathBuf::from(t), m),
             _ => panic!("not materialized again"),
         }
+        // (none being written now: how far the archive's evaluation is, alone)
+        let p = json(a, "Progress", &["sub/big.bin"]);
+        assert!(p["evaluating"].is_u64() && p.get("written").is_none(), "{p}");
         match call(a, "OpenStream", &["nope"]) {
             Err(e) => assert!(e.contains("not in the archive"), "{e}"),
             Ok(_) => panic!("a stream of nothing"),
@@ -244,6 +257,15 @@ fn served() {
             Ok(_) => panic!("an archive of nothing"),
         }
         release(a);
+        // encrypted: of the passphrase the dialog is given (the test's), listed as any other
+        let e = object(s, "Open", &[d.join("e.aqr").to_str().unwrap()]);
+        assert_eq!(json(e, "Stat", &["sub/big.bin"])["size"], 3_000_000);
+        assert!(read_all(object(e, "OpenStream", &["sub/big.bin"]), 1 << 20) == big);
+        release(e);
+        match call(s, "Open", &[d.join("w.aqr").to_str().unwrap()]) {
+            Err(e) => assert!(e.contains("no passphrase given"), "{e}"),
+            Ok(_) => panic!("opened of a wrong passphrase"),
+        }
         release(s);
     }
     // (idle: the server ends)
