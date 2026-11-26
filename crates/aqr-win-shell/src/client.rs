@@ -346,8 +346,10 @@ fn json(o: &IDispatch, name: &str, args: &[&str]) -> windows::core::Result<Value
 }
 
 /// The entries of directory `dir` (names joined with `/`) of archive `path`.
-pub fn list(path: &Path, dir: &str) -> windows::core::Result<Vec<Value>> {
-    with(path, |a| Ok(json(a, "List", &[dir])?.as_array().cloned().unwrap_or_default()))
+/// With what `-t -v` tells too where `verbose` (all of the archive's blocks read for it, once).
+pub fn list(path: &Path, dir: &str, verbose: bool) -> windows::core::Result<Vec<Value>> {
+    let how = if verbose { "verbose" } else { "" };
+    with(path, |a| Ok(json(a, "List", &[dir, how])?.as_array().cloned().unwrap_or_default()))
 }
 
 /// The entry at `at` of archive `path`.

@@ -10,9 +10,10 @@
 //!   description). An encrypted archive has its passphrase asked for over window `hwnd` (a
 //!   number, of the client's: its process lets this one come to the front), again where wrong;
 //!   it is kept by the archive object, to open the archive again where `aqr --serve` is gone.
-//! - an archive: `Info()` (what `open` answered, as JSON), `List(dir)` (the entries, a JSON
-//!   array), `Stat(path)` (an entry, JSON), `OpenStream(path)` (an `IStream` of the file, read
-//!   only, read a chunk of `read` after another), `Materialize(path)` (the file written out to
+//! - an archive: `Info()` (what `open` answered, as JSON), `List(dir[, "verbose"])` (the
+//!   entries, a JSON array; with what `-t -v` tells too), `Stat(path[, "verbose"])` (an entry,
+//!   JSON), `OpenStream(path)` (an `IStream` of the file, read only, read a chunk of `read`
+//!   after another), `Materialize(path)` (the file written out to
 //!   be opened by a program, read only, in `%LOCALAPPDATA%\Aqueous\Open\<archive>\<path>`: its
 //!   path; one there already of its size taken as it is), `Progress(path)` (JSON: `aqr --serve`'s
 //!   `progress` of the archive, and `written`, `[done, total]` bytes of the file at `path` being
@@ -660,11 +661,14 @@ impl Dispatch {
             (Kind::Archive(a), 1) => Ok(Out::Text(a.info().to_string())),
             (Kind::Archive(a), 2) => {
                 let dir = args.first().map_or("", String::as_str);
-                json(a.with(|s, h| s.list(h, dir)).map(Value::from))
+                let verbose = args.get(1).is_some_and(|v| v == "verbose");
+                json(a.with(|s, h| s.list_with(h, dir, verbose)).map(Value::from))
             }
             (Kind::Archive(a), 3) => {
                 let path = arg(0)?;
-                json(a.with(|s, h| s.ask(json!({"stat": h, "path": path}))).map(|v| v["entry"].clone()))
+                let verbose = args.get(1).is_some_and(|v| v == "verbose");
+                let entry = a.with(|s, h| s.ask(json!({"stat": h, "path": path, "verbose": verbose})));
+                json(entry.map(|v| v["entry"].clone()))
             }
             (Kind::Archive(a), 4) => {
                 let path = arg(0)?.to_owned();

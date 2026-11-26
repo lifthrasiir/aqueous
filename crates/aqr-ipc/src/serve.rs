@@ -121,7 +121,13 @@ impl Served {
 
     /// The entries of `dir` of archive `handle`, of all the answers.
     pub fn list(&self, handle: u64, dir: &str) -> Result<Vec<Value>, Error> {
-        let from = self.send(json!({"list": handle, "dir": dir}))?;
+        self.list_with(handle, dir, false)
+    }
+
+    /// [`Served::list`], with what `-t -v` tells too where `verbose` (all of the archive's blocks
+    /// read for it, once).
+    pub fn list_with(&self, handle: u64, dir: &str, verbose: bool) -> Result<Vec<Value>, Error> {
+        let from = self.send(json!({"list": handle, "dir": dir, "verbose": verbose}))?;
         let mut all = Vec::new();
         loop {
             let (v, _) = answered(from.recv())?;

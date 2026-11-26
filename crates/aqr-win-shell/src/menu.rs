@@ -149,7 +149,7 @@ fn files_of(archive: &Path, path: &str, folder: bool) -> windows::core::Result<V
             && !stem.is_empty()
     };
     let mut dirs = Vec::new();
-    for e in client::list(archive, dir)? {
+    for e in client::list(archive, dir, false)? {
         let n = e["name"].as_str().unwrap_or("");
         let p = crate::folder::joined(dir, n);
         match e["kind"].as_str() {
@@ -159,7 +159,7 @@ fn files_of(archive: &Path, path: &str, folder: bool) -> windows::core::Result<V
         }
     }
     while let Some(d) = dirs.pop() {
-        for e in client::list(archive, &d)? {
+        for e in client::list(archive, &d, false)? {
             let p = crate::folder::joined(&d, e["name"].as_str().unwrap_or(""));
             match e["kind"].as_str() {
                 Some("dir") => dirs.push(p),

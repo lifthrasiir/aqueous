@@ -7,30 +7,25 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
 use windows::Win32::Foundation::{
-    E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_POINTER, FILETIME, HWND, LPARAM, PROPERTYKEY, S_FALSE, S_OK,
-    SysAllocStringLen,
+    E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_POINTER, HWND, LPARAM, PROPERTYKEY, S_FALSE, S_OK,
 };
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES};
 use windows::Win32::System::Com::{IBindCtx, IDataObject, IPersist_Impl, IStream};
-use windows::Win32::System::Variant::{InitVariantFromFileTime, VARIANT};
-use windows::Win32::UI::Shell::Common::{
-    ITEMIDLIST, SHCOLSTATE, SHCOLSTATE_ONBYDEFAULT, SHCOLSTATE_SECONDARYUI, SHCOLSTATE_TYPE_DATE, SHCOLSTATE_TYPE_INT,
-    SHCOLSTATE_TYPE_STR, SHELLDETAILS, STRRET,
-};
+use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::UI::Shell::Common::{ITEMIDLIST, SHCOLSTATE, SHELLDETAILS, STRRET};
 use windows::Win32::UI::Shell::{
     ASSOCCLASS_FOLDER, ASSOCIATIONELEMENT, AssocCreateForClasses, DEFCONTEXTMENU, IContextMenu, IContextMenuCB,
     IEnumExtraSearch, IEnumIDList, IEnumIDList_Impl, IExtractIconW, ILClone, ILCombine, ILFree, IPersistFolder_Impl,
     IPersistFolder2_Impl, IPersistFolder3, IPersistFolder3_Impl, IPersistIDList, IPersistIDList_Impl,
     IQueryAssociations, IShellFolder_Impl, IShellFolder2, IShellFolder2_Impl, IShellView, PERSIST_FOLDER_TARGET_INFO,
-    SFV_CREATE, SHCreateDataObject, SHCreateDefaultContextMenu, SHCreateFileExtractIconW, SHCreateShellFolderView,
-    SHFILEINFOW, SHFormatDateTimeW, SHGDN_FORPARSING, SHGDN_INFOLDER, SHGDNF, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
-    SHGetFileInfoW, SHGetNameFromIDList, SHStrDupW, SIGDN_FILESYSPATH, StrCmpLogicalW, StrFormatKBSizeW,
+    SFV_CREATE, SHCNE_UPDATEDIR, SHCNF_IDLIST, SHChangeNotify, SHCreateDataObject, SHCreateDefaultContextMenu,
+    SHCreateFileExtractIconW, SHCreateShellFolderView, SHGDN_FORPARSING, SHGDN_INFOLDER, SHGDNF, SHGetNameFromIDList,
+    SHStrDupW, SIGDN_FILESYSPATH,
 };
-use windows::Win32::UI::Shell::{SHCNE_UPDATEDIR, SHCNF_IDLIST, SHChangeNotify};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows::core::{GUID, HRESULT, HSTRING, IUnknownImpl, Interface, PCWSTR, Ref, implement};
 
 use crate::client;
+use crate::columns::{self, COLUMNS, Cell, Need, What};
 use crate::pidl::{self, Item, Kind};
 
 /// The class of the folders of archives.
@@ -56,57 +51,6 @@ const NOT_FOUND: HRESULT = HRESULT(0x8007_0002_u32 as i32);
 const SHCONTF_FOLDERS: u32 = 0x20;
 const SHCONTF_NONFOLDERS: u32 = 0x40;
 const SHCONTF_INCLUDEHIDDEN: u32 = 0x80;
-
-/// The storage properties (`FMTID_Storage`) of the columns.
-const STORAGE: GUID = GUID::from_u128(0xb725f130_47ef_101a_a5f1_02608c9eebac);
-
-/// The columns: their names (where the property system does not name them), what they are, the
-/// width in characters, and the property.
-struct Column {
-    title: &'static str,
-    state: SHCOLSTATE,
-    width: i32,
-    right: bool,
-    pid: u32,
-}
-
-const COLUMNS: [Column; 5] = [
-    Column {
-        title: "Name",
-        state: SHCOLSTATE(SHCOLSTATE_TYPE_STR.0 | SHCOLSTATE_ONBYDEFAULT.0),
-        width: 30,
-        right: false,
-        pid: 10,
-    },
-    Column {
-        title: "Date modified",
-        state: SHCOLSTATE(SHCOLSTATE_TYPE_DATE.0 | SHCOLSTATE_ONBYDEFAULT.0),
-        width: 18,
-        right: false,
-        pid: 14,
-    },
-    Column {
-        title: "Type",
-        state: SHCOLSTATE(SHCOLSTATE_TYPE_STR.0 | SHCOLSTATE_ONBYDEFAULT.0),
-        width: 18,
-        right: false,
-        pid: 4,
-    },
-    Column {
-        title: "Size",
-        state: SHCOLSTATE(SHCOLSTATE_TYPE_INT.0 | SHCOLSTATE_ONBYDEFAULT.0),
-        width: 10,
-        right: true,
-        pid: 12,
-    },
-    Column {
-        title: "Attributes",
-        state: SHCOLSTATE(SHCOLSTATE_TYPE_STR.0 | SHCOLSTATE_SECONDARYUI.0),
-        width: 6,
-        right: false,
-        pid: 13,
-    },
-];
 
 /// An ID list of COM's memory, owned.
 pub struct Pidl(*mut ITEMIDLIST);
@@ -147,6 +91,9 @@ struct At {
 pub struct Folder {
     clsid: GUID,
     at: RwLock<Option<At>>,
+    /// The entries listed, as the server tells them, by name; and whether of what `-t -v` tells
+    /// too: for the columns ([`crate::columns`]) of no server's call each.
+    listed: Mutex<(std::collections::HashMap<String, serde_json::Value>, bool)>,
     _counted: crate::Counted,
 }
 
@@ -221,89 +168,9 @@ fn strret(s: &str) -> windows::core::Result<STRRET> {
     Ok(r)
 }
 
-/// `VARIANT`, as it is laid out.
-#[repr(C)]
-struct Var {
-    vt: u16,
-    reserved: [u16; 3],
-    value: u64,
-    record: usize,
-}
-
-fn variant(vt: u16, value: u64) -> VARIANT {
-    // SAFETY: of the same layout
-    unsafe { std::mem::transmute(Var { vt, reserved: [0; 3], value, record: 0 }) }
-}
-
-fn variant_text(s: &str) -> VARIANT {
-    let w: Vec<u16> = s.encode_utf16().collect();
-    // SAFETY: a BSTR made of `w`, the VARIANT's
-    let b = unsafe { SysAllocStringLen(Some(&w)) };
-    variant(8, unsafe { std::mem::transmute::<windows::core::BSTR, usize>(b) } as u64)
-}
-
-/// What Explorer calls the type of `item` (of its extension, as of a file of that name).
-fn type_text(item: &Item) -> String {
-    let w: Vec<u16> = item.name.encode_utf16().chain([0]).collect();
-    let mut info = SHFILEINFOW::default();
-    // SAFETY: a name ended by 0, and a structure of its size
-    unsafe {
-        SHGetFileInfoW(
-            PCWSTR(w.as_ptr()),
-            file_attributes(item),
-            Some(&mut info),
-            std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES,
-        )
-    };
-    let n = info.szTypeName.iter().position(|&c| c == 0).unwrap_or(info.szTypeName.len());
-    String::from_utf16_lossy(&info.szTypeName[..n])
-}
-
-fn file_attributes(item: &Item) -> FILE_FLAGS_AND_ATTRIBUTES {
-    match item.is_dir() {
-        true => FILE_ATTRIBUTE_DIRECTORY,
-        false => FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0 | (item.attrs & 0x7)),
-    }
-}
-
-fn filetime(item: &Item) -> FILETIME {
-    FILETIME { dwLowDateTime: item.mtime as u32, dwHighDateTime: (item.mtime as u64 >> 32) as u32 }
-}
-
-/// Column `col` of `item` as it is shown.
-fn shown(item: &Item, col: usize) -> String {
-    match col {
-        0 => item.name.clone(),
-        1 if item.mtime != 0 => {
-            let mut buf = [0u16; 128];
-            // FDTF_SHORTTIME | FDTF_SHORTDATE | FDTF_NOAUTOREADINGORDER (no marks of direction)
-            let mut flags = 0x1 | 0x2 | 0x400;
-            // SAFETY: a FILETIME and a buffer of its length
-            unsafe { SHFormatDateTimeW(&filetime(item), Some(&mut flags), &mut buf) };
-            String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)])
-        }
-        2 => type_text(item),
-        3 if item.kind == Kind::File => {
-            let mut buf = [0u16; 64];
-            // SAFETY: a buffer of its length
-            match unsafe { StrFormatKBSizeW(item.size as i64, &mut buf) } {
-                p if p.is_null() => String::new(),
-                _ => String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]),
-            }
-        }
-        4 => [(0x1, 'R'), (0x2, 'H'), (0x4, 'S'), (0x20, 'A')]
-            .iter()
-            .filter(|(b, _)| item.attrs & b != 0)
-            .map(|(_, c)| *c)
-            .collect(),
-        _ => String::new(),
-    }
-}
-
 impl Folder {
     pub fn new(clsid: GUID) -> Folder {
-        Folder { clsid, at: RwLock::new(None), _counted: crate::Counted::new() }
+        Folder { clsid, at: RwLock::new(None), listed: Mutex::default(), _counted: crate::Counted::new() }
     }
 
     /// Where it is, cloned: its archive, its path in it, its ID list.
@@ -347,10 +214,48 @@ impl Folder {
         f
     }
 
-    /// The entries of the folder, as items.
+    /// The entries of the folder, as items (kept, as the server tells them).
     fn entries(&self) -> windows::core::Result<Vec<Item>> {
         let (archive, dir) = self.at()?;
-        Ok(client::list(archive.path(), &dir)?.iter().map(Item::of).collect())
+        let entries = client::list(archive.path(), &dir, false)?;
+        let items = entries.iter().map(Item::of).collect();
+        let by_name = entries.into_iter().map(|e| (e["name"].as_str().unwrap_or("").to_owned(), e)).collect();
+        *self.listed.lock().unwrap() = (by_name, false);
+        Ok(items)
+    }
+
+    /// What the server tells of entry `item` of the folder, as much as `need` asks: kept, or
+    /// asked for (of all the folder's, where it is what `-t -v` tells too).
+    fn entry(&self, item: &Item, need: Need) -> Option<serde_json::Value> {
+        if need == Need::Item {
+            return None;
+        }
+        {
+            let l = self.listed.lock().unwrap();
+            if (need == Need::Entry || l.1)
+                && let Some(e) = l.0.get(&item.name)
+            {
+                return Some(e.clone());
+            }
+        }
+        let (archive, dir) = self.at().ok()?;
+        let verbose = need == Need::Verbose;
+        match verbose {
+            true => {
+                let entries = client::list(archive.path(), &dir, true).ok()?;
+                let by_name: std::collections::HashMap<_, _> =
+                    entries.into_iter().map(|e| (e["name"].as_str().unwrap_or("").to_owned(), e)).collect();
+                let e = by_name.get(&item.name).cloned();
+                *self.listed.lock().unwrap() = (by_name, true);
+                e
+            }
+            false => client::stat(archive.path(), &joined(&dir, &item.name)).ok(),
+        }
+    }
+
+    /// Column `what` of `item`.
+    fn cell(&self, item: &Item, what: What) -> Cell {
+        columns::cell(item, self.entry(item, what.needs()).as_ref(), what)
     }
 }
 
@@ -512,7 +417,11 @@ impl IShellFolder_Impl for Folder_Impl {
             };
             let col = (lparam.0 & 0xffff) as usize;
             let canonical = lparam.0 as u32 & 0x1000_0000 != 0; // SHCIDS_CANONICALONLY
-            let n = compare(&x, &y, col, canonical);
+            let what = COLUMNS.get(col).map_or(What::Name, |c| c.what);
+            let n = compare(&x, &y, canonical, |a, b| match what {
+                What::Name => 0,
+                w => self.cell(a, w).compare(&self.cell(b, w)),
+            });
             HRESULT(n as i16 as u16 as i32)
         })
     }
@@ -593,7 +502,8 @@ impl IShellFolder_Impl for Folder_Impl {
                 if cidl == 1 && iid == IExtractIconW::IID {
                     let item = pidl::first(*apidl).ok_or(windows::core::Error::from(E_INVALIDARG))?;
                     let w: Vec<u16> = item.name.encode_utf16().chain([0]).collect();
-                    let x: IExtractIconW = SHCreateFileExtractIconW(PCWSTR(w.as_ptr()), file_attributes(&item).0)?;
+                    let x: IExtractIconW =
+                        SHCreateFileExtractIconW(PCWSTR(w.as_ptr()), columns::file_attributes(&item).0)?;
                     return x.query(riid, ppv).ok();
                 }
                 if iid == IContextMenu::IID && cidl > 0 {
@@ -695,36 +605,25 @@ impl IShellFolder_Impl for Folder_Impl {
     }
 }
 
-/// Of two ID lists, which is first by column `col` (folders first; then by name): their first
+/// Of two ID lists, which is first (folders first; then by `by`, then by name): their first
 /// items, then the rest. Of `canonical`, whether they are the same, names as they are.
-fn compare(x: &[Item], y: &[Item], col: usize, canonical: bool) -> i32 {
+fn compare(x: &[Item], y: &[Item], canonical: bool, by: impl Fn(&Item, &Item) -> i32) -> i32 {
     for (a, b) in x.iter().zip(y) {
-        let by_name = || {
-            if canonical {
-                return a.name.cmp(&b.name) as i32;
-            }
-            let (wa, wb): (Vec<u16>, Vec<u16>) =
-                (a.name.encode_utf16().chain([0]).collect(), b.name.encode_utf16().chain([0]).collect());
-            // SAFETY: two strings ended by 0
-            match unsafe { StrCmpLogicalW(PCWSTR(wa.as_ptr()), PCWSTR(wb.as_ptr())) } {
+        let by_name = || match canonical {
+            true => a.name.cmp(&b.name) as i32,
+            false => match columns::logical(&a.name, &b.name) {
                 0 => a.name.cmp(&b.name) as i32,
-                n => n.signum(),
-            }
+                n => n,
+            },
         };
         let n = match (a.is_dir(), b.is_dir()) {
             _ if canonical => by_name(),
             (true, false) => -1,
             (false, true) => 1,
-            _ => {
-                let n = match col {
-                    1 => a.mtime.cmp(&b.mtime) as i32,
-                    2 => type_text(a).to_lowercase().cmp(&type_text(b).to_lowercase()) as i32,
-                    3 => a.size.cmp(&b.size) as i32,
-                    4 => a.attrs.cmp(&b.attrs) as i32,
-                    _ => 0,
-                };
-                if n != 0 { n } else { by_name() }
-            }
+            _ => match by(a, b) {
+                0 => by_name(),
+                n => n,
+            },
         };
         if n != 0 {
             return n;
@@ -760,26 +659,16 @@ impl IShellFolder2_Impl for Folder_Impl {
     }
 
     fn GetDetailsEx(&self, pidl: *const ITEMIDLIST, key: *const PROPERTYKEY) -> windows::core::Result<VARIANT> {
+        // (of the properties asked for that are not of a column: none, quietly)
+        if key.is_null() {
+            return Err(E_POINTER.into());
+        }
+        // SAFETY: the shell's key
+        let Some(c) = columns::of_key(unsafe { &*key }) else { return Err(E_FAIL.into()) };
         guard("GetDetailsEx", || {
-            if key.is_null() {
-                return Err(E_POINTER.into());
-            }
-            // SAFETY: the shell's ID list and key
-            let (item, key) = unsafe { (pidl::first(pidl), *key) };
-            let item = item.ok_or(windows::core::Error::from(E_INVALIDARG))?;
-            if key.fmtid != STORAGE {
-                return Err(E_FAIL.into());
-            }
-            Ok(match key.pid {
-                10 => variant_text(&item.name),
-                4 => variant_text(&type_text(&item)),
-                12 if item.kind == Kind::File => variant(21, item.size), // VT_UI8
-                13 => variant(19, item.attrs as u64),                    // VT_UI4
-                // SAFETY: a FILETIME
-                14 if item.mtime != 0 => unsafe { InitVariantFromFileTime(&filetime(&item))? },
-                12 | 14 => variant(0, 0),
-                _ => return Err(E_FAIL.into()),
-            })
+            // SAFETY: the shell's ID list
+            let item = unsafe { pidl::first(pidl) }.ok_or(windows::core::Error::from(E_INVALIDARG))?;
+            self.cell(&item, c.what).variant(&item, c.what)
         })
     }
 
@@ -790,10 +679,11 @@ impl IShellFolder2_Impl for Folder_Impl {
                 return Err(E_POINTER.into());
             }
             let text = match pidl.is_null() {
-                true => c.title.to_owned(),
-                // SAFETY: the shell's ID list
+                true => (c.title)().to_owned(),
                 false => {
-                    shown(&unsafe { pidl::first(pidl) }.ok_or(windows::core::Error::from(E_INVALIDARG))?, col as usize)
+                    // SAFETY: the shell's ID list
+                    let item = unsafe { pidl::first(pidl) }.ok_or(windows::core::Error::from(E_INVALIDARG))?;
+                    self.cell(&item, c.what).shown()
                 }
             };
             // SAFETY: the caller's structure
@@ -812,7 +702,7 @@ impl IShellFolder2_Impl for Folder_Impl {
             return Err(E_POINTER.into());
         }
         // SAFETY: the caller's structure
-        unsafe { *key = PROPERTYKEY { fmtid: STORAGE, pid: c.pid } };
+        unsafe { *key = c.key };
         Ok(())
     }
 }

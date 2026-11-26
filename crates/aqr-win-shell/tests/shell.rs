@@ -271,6 +271,20 @@ fn browsed() {
             assert!(shown[1].chars().filter(char::is_ascii_digit).count() >= 8, "{shown:?}");
             assert!(shown[1].chars().all(|c| !('\u{200e}'..='\u{200f}').contains(&c)), "{shown:?}");
             assert!(shown[3].contains('1') && shown[3].contains("KB"), "{shown:?}");
+            // the columns of what -t -v tells (each named; past them, none): of a file, its data
+            // and other blocks, its ratio and segment, its flags
+            for col in 0..18 {
+                assert!(!details(std::ptr::null(), col).is_empty(), "{col}");
+            }
+            assert!(f.GetDetailsOf(std::ptr::null(), 18, &mut SHELLDETAILS::default()).is_err());
+            let verbose: Vec<String> = (4..13).map(|col| details(items[a], col)).collect();
+            assert!(verbose[0].contains("KB") && verbose[1].contains("KB"), "{verbose:?}");
+            assert!(verbose[2].ends_with('%') && verbose[3] == "1", "{verbose:?}");
+            assert_eq!(verbose[8].len(), 7, "{verbose:?}");
+            // (and as properties: the size of the data blocks, by its key)
+            let data = PROPERTYKEY { fmtid: GUID::from_u128(0xd973fccd_add6_4146_a7d7_5d7c05ef84f0), pid: 2 };
+            let v = f.GetDetailsEx(items[a], &data).unwrap();
+            assert_eq!(*(&v as *const _ as *const u16), 21, "VT_UI8");
             // (a folder first, by any column)
             for col in 0..4 {
                 let n = f.CompareIDs(LPARAM(col), items[a], items[1 - a]);

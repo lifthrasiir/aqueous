@@ -67,7 +67,7 @@ impl Files {
                 .collect();
             while let Some(d) = stack.pop() {
                 if d.item.is_dir() {
-                    let under = client::list(self.archive.path(), &d.path).map_err(|e| e.code())?;
+                    let under = client::list(self.archive.path(), &d.path, false).map_err(|e| e.code())?;
                     for e in under.iter().rev() {
                         let i = Item::of(e);
                         stack.push(Dropped {

@@ -10,6 +10,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod client;
+mod columns;
 mod data;
 pub mod folder;
 mod menu;

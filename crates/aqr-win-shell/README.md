@@ -17,8 +17,14 @@ object is released, for the server to close it a minute later (and to end, idle)
 - Folders: `IShellFolder2` (enumeration, binding to folders in it and to a file's `IStream`, as
   `BHID_Stream` asks, parsing paths, names, attributes, comparison), `IPersistFolder3`,
   `IPersistIDList`.
-- Columns: name, date modified, type (the extension's, as the system tells it), size, and the
-  attributes (`RHSA`, off by default), as the storage properties (`PKEY_Size`, ...).
+- Columns (`src/columns.rs`): all that `aqr -t -v` tells of an entry but its formula. Name,
+  date modified, type (the extension's, as the system tells it) and size by default; data,
+  overhead, ratio, segment (of the archive's listing, all of its blocks read once these are
+  asked for), owner, permissions, attributes (`RHSATI`), macOS' flags, the flags of `-t`, the
+  dates created, accessed and of a change of metadata, the comment and a link's target in
+  "More…". Those of a property of the system's are keyed by it (named and shown by the shell in
+  the user's language), the others by properties of ours named by aqr-l10n (`folder.col_*`).
+  A folder keeps what the server told of the entries it listed, for no call a cell.
 - Icons: of the name's extension (`SHCreateFileExtractIconW`).
 - Copying out (paste, drag): the shell's data object of the items' ID lists
   (`SHCreateDataObject`), which the copy engine reads as folders and streams; for other
