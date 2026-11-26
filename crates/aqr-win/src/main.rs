@@ -22,7 +22,8 @@
 //! - `name-version` and `extract-version`, on one `.aqr` file chosen (`version`): "Name this
 //!   version…" names the state the archive is in (`aqr --tag`), and "Extract a previous
 //!   version…" extracts one of the versions named (the points of its journal: `aqr -j`, `--tag`)
-//!   as it was, into a folder beside the archive named after it.
+//!   as it was, into a folder beside the archive named after it (`extract-version ARCHIVE #N`:
+//!   point N, asked for nothing: the Versions tab of the shell extension's).
 //! - Explorer drops the paths chosen on the verb's class (`drop`: `--drop VERB`, this program as
 //!   a COM local server), all at once. A verb's command, one process for each path as other
 //!   programs may run it, is gathered into the first process of the verb in a folder (`gather`).
@@ -160,15 +161,28 @@ fn main() -> std::process::ExitCode {
         "test" => Verb::Test,
         // (one archive: a verb that takes a single selection)
         "name-version" | "extract-version" => {
-            let Ok([archive]) = <[PathBuf; 1]>::try_from(paths) else { return fail(win::nothing(), win::no_path()) };
+            // (and of extract-version, the number of the point, `#N`, where it is chosen)
+            let (archive, number) = match <[PathBuf; 2]>::try_from(paths) {
+                Ok([a, n]) if name == "extract-version" => {
+                    match n.to_str().and_then(|n| n.strip_prefix('#')).and_then(|n| n.parse::<u64>().ok()) {
+                        Some(n) => (a, Some(n)),
+                        None => return fail(win::not_verb(), &n.to_string_lossy()),
+                    }
+                }
+                Ok(_) => return fail(win::nothing(), win::no_path()),
+                Err(paths) => match <[PathBuf; 1]>::try_from(paths) {
+                    Ok([a]) => (a, None),
+                    Err(_) => return fail(win::nothing(), win::no_path()),
+                },
+            };
             return match name {
                 "name-version" => version::name(archive),
-                _ => version::extract(archive),
+                _ => version::extract(archive, number),
             };
         }
         _ => {
             let usage = "aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... | \
-                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE";
+                         extract ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N]";
             return fail(win::not_verb(), usage);
         }
     };

@@ -15,6 +15,7 @@ mod data;
 pub mod delay;
 pub mod folder;
 mod handlers;
+pub mod history;
 mod menu;
 pub mod pidl;
 mod props;
@@ -121,10 +122,17 @@ impl IClassFactory_Impl for Factory_Impl {
         if outer.is_some() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
-        let r = std::panic::catch_unwind(|| {
-            let f: windows::Win32::UI::Shell::IShellFolder2 = folder::Folder::new(self.clsid).into();
-            // SAFETY: the caller's pointers, given a reference
-            unsafe { f.query(riid, ppv) }
+        let r = std::panic::catch_unwind(|| match self.clsid {
+            history::VERSIONS_PAGE | history::TEST_VERSIONS_PAGE => {
+                let p: windows::Win32::UI::Shell::IShellPropSheetExt = history::Page::default().into();
+                // SAFETY: the caller's pointers, given a reference
+                unsafe { p.query(riid, ppv) }
+            }
+            _ => {
+                let f: windows::Win32::UI::Shell::IShellFolder2 = folder::Folder::new(self.clsid).into();
+                // SAFETY: the caller's pointers, given a reference
+                unsafe { f.query(riid, ppv) }
+            }
         });
         r.unwrap_or(windows::Win32::Foundation::E_UNEXPECTED).ok()
     }
@@ -161,8 +169,8 @@ pub unsafe extern "system" fn DllGetClassObject(
         static LANGUAGE: std::sync::Once = std::sync::Once::new();
         LANGUAGE.call_once(|| _ = aqr_l10n::init(&aqr_l10n::system_languages()));
         match clsid {
-            folder::FOLDER => {}
-            folder::TEST_FOLDER => {
+            folder::FOLDER | history::VERSIONS_PAGE => {}
+            folder::TEST_FOLDER | history::TEST_VERSIONS_PAGE => {
                 // (of the test's run, where it tells one)
                 let class = std::env::var("AQR_SHELL_TEST_SERVER")
                     .ok()
@@ -176,6 +184,28 @@ pub unsafe extern "system" fn DllGetClassObject(
         let f: IClassFactory = Factory { clsid, _counted: Counted::new() }.into();
         f.query(riid, ppv)
     }
+}
+
+/// The directory of this library (where aqr-win is beside it).
+pub fn library_dir() -> Option<std::path::PathBuf> {
+    use windows::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
+        GetModuleHandleExW,
+    };
+    let mut m = windows::Win32::Foundation::HMODULE::default();
+    let mut b = vec![0u16; 32768];
+    // SAFETY: an address of this library's, a handle and a buffer to fill
+    let n = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            windows::core::PCWSTR(library_dir as *const () as *const u16),
+            &mut m,
+        )
+        .ok()?;
+        GetModuleFileNameW(Some(m), &mut b) as usize
+    };
+    let p = std::path::PathBuf::from(String::from_utf16_lossy(&b[..n]));
+    p.parent().map(|d| d.to_owned())
 }
 
 /// Whether the library may be unloaded: of no object alive.

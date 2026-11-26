@@ -112,22 +112,7 @@ impl Versions {
     /// else in a window of its own.
     fn browse(&self, pidl: *const ITEMIDLIST, hwnd: HWND) -> windows::core::Result<()> {
         // (for tests: the place told, not browsed to)
-        if let Some(told) = std::env::var_os("AQR_SHELL_TEST_OPENED") {
-            use std::io::Write;
-            // SAFETY: an ID list of the caller's
-            let name = unsafe { SHGetNameFromIDList(pidl, SIGDN_DESKTOPABSOLUTEPARSING) }?;
-            // SAFETY: a string of COM's memory, freed after
-            let text = unsafe {
-                let t = name.to_string().unwrap_or_default();
-                windows::Win32::System::Com::CoTaskMemFree(Some(name.0 as *const _));
-                t
-            };
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(told)
-                .map_err(|e| windows::core::Error::new(E_FAIL, e.to_string()))?;
-            _ = writeln!(f, "browse {text}");
+        if crate::versions::told(|| Ok(format!("browse {}", parsing_name(pidl)?)))? {
             return Ok(());
         }
         let site = self.site.lock().unwrap().clone();
@@ -147,19 +132,51 @@ impl Versions {
             // SAFETY: an ID list of the caller's
             return unsafe { b.BrowseObject(pidl, SBSP_SAMEBROWSER | SBSP_ABSOLUTE) };
         }
-        let mut info = SHELLEXECUTEINFOW {
-            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-            fMask: SEE_MASK_IDLIST | SEE_MASK_CLASSNAME,
-            hwnd,
-            lpVerb: w!("open"),
-            lpClass: w!("folder"),
-            lpIDList: pidl as *mut _,
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
-        // SAFETY: a structure of its own, of strings of their own
-        unsafe { ShellExecuteExW(&mut info) }
+        window(pidl, hwnd)
     }
+}
+
+/// For tests (`AQR_SHELL_TEST_OPENED`, the file told): the line of `what` told, not done; whether
+/// it was.
+pub fn told(what: impl FnOnce() -> windows::core::Result<String>) -> windows::core::Result<bool> {
+    use std::io::Write;
+    let Some(file) = std::env::var_os("AQR_SHELL_TEST_OPENED") else { return Ok(false) };
+    let line = what()?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .map_err(|e| windows::core::Error::new(E_FAIL, e.to_string()))?;
+    _ = writeln!(f, "{line}");
+    Ok(true)
+}
+
+/// The name ID list `pidl` is parsed by, from the desktop.
+pub fn parsing_name(pidl: *const ITEMIDLIST) -> windows::core::Result<String> {
+    // SAFETY: an ID list of the caller's
+    let name = unsafe { SHGetNameFromIDList(pidl, SIGDN_DESKTOPABSOLUTEPARSING) }?;
+    // SAFETY: a string of COM's memory, freed after
+    unsafe {
+        let t = name.to_string().unwrap_or_default();
+        windows::Win32::System::Com::CoTaskMemFree(Some(name.0 as *const _));
+        Ok(t)
+    }
+}
+
+/// Folder `pidl` opened in a window of its own.
+pub fn window(pidl: *const ITEMIDLIST, hwnd: HWND) -> windows::core::Result<()> {
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_IDLIST | SEE_MASK_CLASSNAME,
+        hwnd,
+        lpVerb: w!("open"),
+        lpClass: w!("folder"),
+        lpIDList: pidl as *mut _,
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: a structure of its own, of strings of their own
+    unsafe { ShellExecuteExW(&mut info) }
 }
 
 impl IContextMenu_Impl for Versions_Impl {

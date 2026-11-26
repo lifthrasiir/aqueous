@@ -14,6 +14,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aqr_shell::folder::{TEST_FOLDER, TEST_SERVER};
+use aqr_shell::history::TEST_VERSIONS_PAGE;
+use windows::Win32::Foundation::WPARAM;
 use windows::Win32::Foundation::{HWND, LPARAM, POINTL, PROPERTYKEY, SIZE};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, CoCreateInstance, FORMATETC, IDataObject, IStream, TYMED_HGLOBAL, TYMED_ISTREAM,
@@ -24,6 +26,9 @@ use windows::Win32::System::Ole::{DROPEFFECT_COPY, IDropTarget};
 use windows::Win32::System::Ole::{OleGetClipboard, OleInitialize, OleUninitialize};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+use windows::Win32::UI::Controls::{
+    HPROPSHEETPAGE, PROPSHEETHEADERW_V2, PROPSHEETHEADERW_V2_2, PSH_MODELESS, PSH_NOAPPLYNOW, PropertySheetW,
+};
 use windows::Win32::UI::Shell::BHID_SFUIObject;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::Common::SHELLDETAILS;
@@ -31,6 +36,7 @@ use windows::Win32::UI::Shell::{
     ASSOCF_NONE, ASSOCSTR_SHELLEXTENSION, CMINVOKECOMMANDINFO, IContextMenu, IQueryAssociations,
     IShellItemImageFactory, IThumbnailProvider, SIIGBF_THUMBNAILONLY,
 };
+use windows::Win32::UI::Shell::{BHID_DataObject, IShellExtInit, IShellPropSheetExt, SHCreateItemFromRelativeName};
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, BHID_SFObject, BHID_Stream, IEnumShellItems, IShellFolder2, IShellItem, IShellItem2, IShellView,
     SHCreateItemFromParsingName, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
@@ -38,8 +44,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::Shell::{CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FILEDESCRIPTORW};
 use windows::Win32::UI::Shell::{FILEOPERATION_FLAGS, FileOperation, IFileOperation};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GET_MENU_DEFAULT_ITEM_FLAGS, GetMenuDefaultItem, GetMenuItemCount, GetMenuItemID,
-    GetMenuState, GetMenuStringW, GetSubMenu, MF_BYPOSITION, MF_CHECKED,
+    CreatePopupMenu, DestroyMenu, DestroyWindow, DispatchMessageW, GET_MENU_DEFAULT_ITEM_FLAGS, GetMenuDefaultItem,
+    GetMenuItemCount, GetMenuItemID, GetMenuState, GetMenuStringW, GetSubMenu, IsDialogMessageW, MF_BYPOSITION,
+    MF_CHECKED, MSG, PM_REMOVE, PeekMessageW, SendDlgItemMessageW, SendMessageW, WM_COMMAND,
 };
 use windows::core::{GUID, HSTRING, Interface};
 use windows::core::{PSTR, PWSTR};
@@ -115,7 +122,11 @@ impl Registered {
             )
         };
         assert!(r.is_ok());
-        Registered(vec![".aqrtest".into(), "Aqueous.aqrtest".into(), class])
+        // (the Versions tab's class)
+        let page = format!(r"CLSID\{}", braced(&TEST_VERSIONS_PAGE));
+        set(&format!(r"{page}\InProcServer32"), None, &dll.display().to_string());
+        set(&format!(r"{page}\InProcServer32"), Some("ThreadingModel"), "Apartment");
+        Registered(vec![".aqrtest".into(), "Aqueous.aqrtest".into(), class, page])
     }
 }
 
@@ -754,7 +765,8 @@ fn browsed() {
         assert!(texts[2].starts_with("second (") && texts[3].starts_with("first ("), "{shown:?}");
         assert_eq!(shown.iter().map(|s| s.1).collect::<Vec<_>>(), [true, false, false, false]);
         let browsed = browsed.unwrap();
-        let at = browsed.strip_prefix("browse ").unwrap();
+        let at = browsed.strip_prefix("browse ").unwrap().to_owned();
+        let at = at.as_str();
         assert!(at.starts_with(&format!(r"{}\@", j.display())), "{browsed}");
         assert_eq!(entries(&item(&j)).len(), 2);
         assert_eq!(entries(&item(Path::new(at))), [("one.txt".to_owned(), false, Some(3))]);
@@ -771,6 +783,73 @@ fn browsed() {
         let (shown, browsed) = versions(Path::new(at), Some(0));
         assert_eq!(shown.iter().map(|s| s.1).collect::<Vec<_>>(), [false, false, false, true]);
         assert_eq!(browsed.unwrap(), format!("browse {}", j.display()));
+        // the Versions tab of the archive file's Properties: its points newest first, read as it
+        // is shown; Open (told: the archive as of the point), Extract (aqr-win's, told) and Name
+        // (aqr-win's, told, the list read again after)
+        // SAFETY: COM calls of the shell's objects, the sheet's window of this thread
+        unsafe {
+            let init: IShellExtInit = CoCreateInstance(&TEST_VERSIONS_PAGE, None, CLSCTX_ALL).unwrap();
+            let parent = item(&d);
+            let file: IShellItem = SHCreateItemFromRelativeName(&parent, &HSTRING::from("j.aqrtest"), None).unwrap();
+            let data: IDataObject = file.BindToHandler(None, &BHID_DataObject).unwrap();
+            init.Initialize(None, &data, Default::default()).unwrap();
+            let ext: IShellPropSheetExt = init.cast().unwrap();
+            let mut pages: Vec<HPROPSHEETPAGE> = Vec::new();
+            unsafe extern "system" fn add(p: HPROPSHEETPAGE, l: LPARAM) -> windows::core::BOOL {
+                // SAFETY: the test's list
+                unsafe { (*(l.0 as *mut Vec<HPROPSHEETPAGE>)).push(p) };
+                true.into()
+            }
+            ext.AddPages(Some(add), LPARAM(&mut pages as *mut _ as isize)).unwrap();
+            assert_eq!(pages.len(), 1);
+            let mut h = PROPSHEETHEADERW_V2 {
+                dwSize: std::mem::size_of::<PROPSHEETHEADERW_V2>() as u32,
+                dwFlags: PSH_MODELESS | PSH_NOAPPLYNOW,
+                nPages: 1,
+                Anonymous3: PROPSHEETHEADERW_V2_2 { phpage: pages.as_mut_ptr() },
+                ..Default::default()
+            };
+            let sheet = HWND(PropertySheetW(&mut h) as *mut _);
+            assert!(!sheet.0.is_null());
+            let page = HWND(SendMessageW(sheet, 0x0400 + 118, None, None).0 as *mut _); // PSM_GETCURRENTPAGEHWND
+            let rows = || -> Vec<String> {
+                let n = SendDlgItemMessageW(page, 100, 0x018B, WPARAM(0), LPARAM(0)).0; // LB_GETCOUNT
+                (0..n)
+                    .map(|k| {
+                        let mut b = [0u16; 256];
+                        let m =
+                            SendDlgItemMessageW(page, 100, 0x0189, WPARAM(k as usize), LPARAM(b.as_mut_ptr() as isize))
+                                .0; // LB_GETTEXT
+                        String::from_utf16_lossy(&b[..m as usize])
+                    })
+                    .collect()
+            };
+            let got = rows();
+            assert!(got.len() == 2 && got[0].starts_with("#2 ") && got[0].ends_with("second"), "{got:?}");
+            assert!(got[1].starts_with("#1 ") && got[1].ends_with("first"), "{got:?}");
+            _ = std::fs::remove_file(&opened);
+            // (the second chosen, the first row: then the first, by a double-click)
+            SendMessageW(page, WM_COMMAND, Some(WPARAM(101)), None);
+            SendDlgItemMessageW(page, 100, 0x0186, WPARAM(1), LPARAM(0)); // LB_SETCURSEL
+            SendMessageW(page, WM_COMMAND, Some(WPARAM(100 | 2 << 16)), None); // LBN_DBLCLK
+            SendMessageW(page, WM_COMMAND, Some(WPARAM(102)), None);
+            SendMessageW(page, WM_COMMAND, Some(WPARAM(103)), None);
+            let told: Vec<String> = std::fs::read_to_string(&opened).unwrap().lines().map(str::to_owned).collect();
+            assert_eq!(told.len(), 4, "{told:?}");
+            assert!(told[0].starts_with(&format!("open {}\\@", j.display())) && told[0] != told[1], "{told:?}");
+            assert_eq!(told[1], format!("open {at}"), "{told:?}");
+            assert_eq!(told[2], format!("run extract-version {} #1", j.display()));
+            assert_eq!(told[3], format!("run name-version {}", j.display()));
+            // (named: the list read again, as the page is told)
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if !IsDialogMessageW(sheet, &msg).as_bool() {
+                    DispatchMessageW(&msg);
+                }
+            }
+            assert_eq!(rows().len(), 2);
+            DestroyWindow(sheet).unwrap();
+        }
         // (not there: the shell's parse fails)
         // SAFETY: a path, parsed by the shell
         assert!(

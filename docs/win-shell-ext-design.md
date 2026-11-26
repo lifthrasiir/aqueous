@@ -71,6 +71,8 @@ Explorer 또는 파일 대화상자를 연 아무 프로세스
 - **더블클릭은 열어 보기다**(§10에서 결정). ProgID의 기본 동사를 `open`으로 하고, 그 command에
   `DelegateExecute = {11dbb47c-...}`(CLSID_ExecuteFolder)를 둔다. "여기에 풀기"와 "검사"는 동사로
   남는다.
+- 속성의 "버전" 탭 클래스 `CLSID\{54394c15-...}`(`InProcServer32`, 같은 DLL)와 ProgID의
+  `shellex\PropertySheetHandlers\Aqueous`(§6.8).
 - 서버 클래스 `CLSID\{c6b7e992-...}`의 `LocalServer32 = "aqr-win.exe" --serve`.
 - 다른 형식(`.zip`, `.7z`, ...)은 다루지 않는다(§9). `.zip`은 Windows의 ZIP 폴더와 부딪친다.
 
@@ -306,7 +308,10 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
      지점들(최근 것부터). 지금 보는 것에 체크가 붙는다. 지점이 없는 아카이브에는 메뉴를 넣지 않는다.
      고르면 같은 창에서 간다(사이트의 `SID_STopLevelBrowser`, 없으면 창의 `CWM_GETISHELLBROWSER`,
      그것도 없으면 새 창).
-  2. 아카이브 파일 속성의 "버전" 탭(예정).
+  2. 아카이브 파일 속성의 "버전" 탭(`src/history.rs`, property sheet handler): 지점들(최근 것부터).
+     탭이 보일 때 읽는다(암호화된 아카이브가 속성을 열 때마다 암호를 묻지 않게). "열기"(더블클릭)는
+     그 지점을 새 창으로 연다. "풀기…"는 `aqr-win extract-version ARCHIVE #N`, "이 버전에 이름
+     붙이기…"는 `aqr-win name-version ARCHIVE`이고, 이름을 붙이고 나면 목록을 다시 읽는다.
   3. 탐색기 도구 모음(`IExplorerCommandProvider`, 예정. Windows 10과 11에서 어디에 보이는지 먼저
      확인한다).
 
@@ -347,7 +352,7 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
 7. ~~썸네일과 미리 보기, 속성 시트~~.
 8. ~~설치 프로그램과 릴리스~~(§12).
 9. 그 뒤:
-   - 판(journal의 지점, §6.8): 배경 메뉴(완료), 속성 탭, 도구 모음
+   - 판(journal의 지점, §6.8): 배경 메뉴와 속성 탭(완료), 도구 모음
    - 다른 형식(aqr-unpack이 읽는 것)과 넣기(`IDropTarget` → `aqr -a`)
    - 손상된 아카이브의 salvage
    - ProjFS로 "폴더로 마운트"

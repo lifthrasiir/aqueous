@@ -215,8 +215,16 @@ pub fn register() -> Result<(), String> {
             set(&format!(r"{CLASS}\CLSID"), None, &crate::drop::braced(&FOLDER))?;
             set(&format!(r"{CLASS}\shell"), None, "open")?;
             set(&format!(r"{CLASS}\shell\open\command"), Some("DelegateExecute"), EXECUTE_FOLDER)?;
+            // (the Versions tab of the file's Properties)
+            let page = page_key();
+            set(&page, None, "Aqueous: versions")?;
+            set(&format!(r"{page}\InProcServer32"), None, &dll.display().to_string())?;
+            set(&format!(r"{page}\InProcServer32"), Some("ThreadingModel"), "Apartment")?;
+            set(&format!(r"{CLASS}\shellex\PropertySheetHandlers\Aqueous"), None, &crate::drop::braced(&PAGE))?;
         }
         false => {
+            delete(&classes(&page_key()))?;
+            delete(&classes(&format!(r"{CLASS}\shellex\PropertySheetHandlers\Aqueous")))?;
             delete(&classes(&folder))?;
             delete(&classes(&format!(r"{CLASS}\CLSID")))?;
             delete(&classes(&format!(r"{CLASS}\shell\open")))?;
@@ -262,6 +270,14 @@ const SHELL_DLL: &str = "aqr-shell.dll";
 /// The class of the folders of archives (aqr-win-shell's `folder::FOLDER`).
 const FOLDER: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0xf76e4146_e32e_4811_a0de_465ae547da1d);
 
+/// The class of the Versions tab of an archive file's Properties (aqr-win-shell's
+/// `history::VERSIONS_PAGE`).
+const PAGE: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0x54394c15_6f9d_4015_9d6c_5805da234236);
+
+fn page_key() -> String {
+    format!(r"CLSID\{}", crate::drop::braced(&PAGE))
+}
+
 /// What an archive file is as a folder (`SFGAO_FOLDER | SFGAO_STREAM`): a folder that is a file
 /// too.
 const FOLDER_ATTRIBUTES: u32 = 0x2000_0000 | 0x40_0000;
@@ -288,6 +304,7 @@ pub fn unregister() -> Result<(), String> {
     }
     delete(&classes(&serve_key()))?;
     delete(&classes(&folder_key()))?;
+    delete(&classes(&page_key()))?;
     for key in COMPRESS.iter().chain(&MENU).chain(&OLD).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }

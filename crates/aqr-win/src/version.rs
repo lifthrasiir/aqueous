@@ -6,7 +6,7 @@
 //! - `extract-version ARCHIVE`: a dialog lists the versions named (`aqr --history --json`), the
 //!   last chosen, and the one chosen is extracted as it was (`aqr -d --at`) into a folder beside
 //!   the archive named after it ([`aqr_ipc::version_folder`]), with the window of how far it is
-//!   ([`crate::run::run_at`]).
+//!   ([`crate::run::run_at`]). With `#N`, point N is extracted, asked for nothing.
 //!
 //! The dialogs are modal ones of a template made in memory ([`crate::passphrase::Template`]): task
 //! dialogs have no edit field, and a list of many versions wants a list box.
@@ -66,8 +66,9 @@ pub fn name(archive: PathBuf) -> ExitCode {
     }
 }
 
-/// `extract-version`: asks for a version of `archive`, and extracts it.
-pub fn extract(archive: PathBuf) -> ExitCode {
+/// `extract-version`: asks for a version of `archive` (but where `number` is given), and
+/// extracts it.
+pub fn extract(archive: PathBuf, number: Option<u64>) -> ExitCode {
     let shown = file_name(&archive);
     let points = match aqr_ipc::points(&aqr_ipc::aqr(), &archive) {
         Ok(p) => p,
@@ -84,6 +85,15 @@ pub fn extract(archive: PathBuf) -> ExitCode {
             None,
         );
         return ExitCode::SUCCESS;
+    }
+    if let Some(n) = number {
+        return match points.iter().find(|p| p.number == n) {
+            Some(p) => crate::run::run_at(&archive, p),
+            None => {
+                dialog::message(Icon::Error, win::could_not_list(), &format!("{shown}: #{n}"), None);
+                ExitCode::FAILURE
+            }
+        };
     }
     match choose(std::ptr::null_mut(), &shown, &points) {
         Some(k) => crate::run::run_at(&archive, &points[k]),

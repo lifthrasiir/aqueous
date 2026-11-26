@@ -56,7 +56,11 @@ object is released, for the server to close it a minute later (and to end, idle)
   "Versions", "Latest" and the points newest first, the one shown checked; one chosen is browsed
   to in the same window, the archive as of it (read only, as all of it is): the file's ID list
   with an item of the point after it (`src/pidl.rs`'s `Kind::Version`, never listed; parsed as
-  `@` and the point's offset).
+  `@` and the point's offset). And the "Versions" tab of the file's Properties
+  (`src/history.rs`, a property sheet handler): the points, read once the tab is shown; "Open"
+  (or a double-click) opens one in a window of its own, "Extract…" and "Name this version…"
+  run aqr-win (`extract-version ARCHIVE #N`, `name-version ARCHIVE`), the list read again once
+  a version is named.
 - Encrypted archives: their passphrase asked for by the server's dialog over the window of the
   shell's (the server let come to the front).
 - An archive not read (damaged): told in a box over the window, once in a while, the failure
