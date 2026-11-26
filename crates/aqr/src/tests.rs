@@ -65,7 +65,7 @@ pub(crate) fn help_options() -> Vec<String> {
 /// Every option `--help` tells of is in the manual page (`aqr.1`), as mdoc's `Fl`.
 #[test]
 fn man_page_has_every_option() {
-    let man = include_str!("../aqr.1");
+    let man = include_str!("../../../man/aqr.1");
     let missing: Vec<String> =
         help_options().into_iter().filter(|o| !man.contains(&format!("Fl {}", &o[1..]))).collect();
     assert!(missing.is_empty(), "not in aqr.1: {missing:?}");

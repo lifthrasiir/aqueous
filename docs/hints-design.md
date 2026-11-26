@@ -3,7 +3,8 @@
 헤더 없는 데이터, 다른 데이터 안의 스트림, 확장자가 흔한 이름(`.bin`, `.dat`)인 파일은 `detect`
 (`crates/aqr-compress/src/detect.rs`)와 `kind_by_name`이 놓친다. 사용자가 경로 패턴별로 포맷과 파라미터를
 알려 주는 방법이며 **[구현]**이다(`crates/aqr-compress/src/{attributes,hints}.rs`,
-`crates/aqr/src/attributes.rs`, 시험 `tests/hints.rs`). 끝낸 일의 경과는 git 이력에 있다.
+`crates/aqr/src/attributes.rs`, 시험 `tests/hints.rs`).
+끝낸 일의 경과는 git 이력에 있다. 사용자에게 보이는 설명은 `man/aqrattributes.5`다.
 
 ## 1. 원칙
 

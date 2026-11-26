@@ -1,0 +1,335 @@
+.\" Hints to aqr's compressor by path (.aqr/attributes), in mdoc(7). What is read is
+.\" crates/aqr-compress/src/{attributes,hints}.rs and crates/aqr/src/attributes.rs; the
+.\" parameters of formats are in crates/aqr-compress/src/recompressors.rs. Keep them together.
+.Dd November 27, 2026
+.Dt AQRATTRIBUTES 5
+.Os
+.Sh NAME
+.Nm aqrattributes
+.Nd hints to aqr of what files are, by their paths
+.Sh SYNOPSIS
+.Pa .aqr/attributes
+.Pp
+.Nm aqr
+.Fl -attributes Ar file
+.Ar ...
+.Sh DESCRIPTION
+.Xr aqr 1
+finds what a file is by its first bytes and by its name.
+Data of no header, streams inside other data and files of common extensions
+.Pf ( Pa .bin ,
+.Pa .dat )
+are missed so.
+A file of attributes tells
+.Nm aqr ,
+by pattern of paths, the format of such files, their kind, the formats not to look for in
+them, and the parameters that their formats cannot find on their own.
+.Pp
+Hints are taken by the compressor alone: nothing of them is in the archive (but the files of
+attributes, as files), whose formulas tell all that decoding needs.
+A hint is a guess to try first, not a fact: a format told that turns the file down leaves
+it to detection, and a wrong hint costs size and time alone.
+Hints never turn on what
+.Fl -lossy
+alone does.
+.Ss Where they are read
+In the order of their precedence, the first winning:
+.Bl -enum
+.It
+The files of
+.Fl -attributes ,
+in the order given: their patterns from the root of each input, the files their values name
+relative to their own directories.
+.It
+.Pa .aqr/attributes
+at the root of each input that is a directory (not under it: one file tells of the whole
+tree); the files its values name relative to that root.
+Its patterns may step into containers
+.Pq see Sx Members of containers .
+.It
+The
+.Pa .gitattributes
+of each directory under an input that is a directory, as
+.Xr git 1
+reads them (those of deeper directories first); only
+.Ql aqr-
+attributes and a few of git's own
+.Pq see Sx Attributes of git
+are read.
+.It
+What the bytes and the name of the file tell.
+.El
+.Pp
+Within a file, a later line wins, and within a line, a later attribute.
+An input that is a single file has no
+.Pa .aqr/attributes
+nor
+.Pa .gitattributes
+(nothing above it is looked for: a file out of the inputs would change what is made);
+.Fl -attributes
+still applies.
+With
+.Fl a ,
+those of the inputs appended are read.
+.Ss Syntax
+That of
+.Xr gitattributes 5 :
+a line each, of a pattern and attributes after it, by spaces:
+.Bd -literal -offset indent
+PATTERN attr -attr !attr attr=value ...
+.Ed
+.Pp
+.Ql attr
+sets an attribute,
+.Ql -attr
+unsets it,
+.Ql !attr
+makes it unspecified (as if no line of less precedence told it), and
+.Ql attr=value
+gives it a value (of no spaces).
+A line starting with
+.Ql #
+and a blank line are left out.
+.Pp
+The patterns are those of
+.Pa .gitignore :
+one of no
+.Ql /
+(but at its end) matches a base name at any depth; else it is a path from the directory of
+the file (or the root of the input, for
+.Pa .aqr/attributes
+and
+.Fl -attributes ) ,
+a leading
+.Ql /
+taken off.
+.Ql *
+and
+.Ql \&?
+match any bytes and one byte but
+.Ql / ,
+.Ql [...]
+one of a set,
+.Ql **
+as a component of its own any directories, and
+.Ql \e
+escapes a byte.
+A pattern ending in
+.Ql /
+matches directories, so no file: write
+.Ql dir/** .
+There are no negative patterns
+.Pq Ql \&! ;
+their lines are left out, as git does.
+A pattern may be quoted as C strings are
+.Pq Ql \(dqa b.bin\(dq .
+Names are matched as they are, case and all, on every system.
+.Pp
+.Ql [attr] Ns Ar name Ar attr ...
+defines a macro: a line setting
+.Ar name
+sets the attributes after it.
+Macros are defined in
+.Pa .aqr/attributes ,
+the files of
+.Fl -attributes
+and the
+.Pa .gitattributes
+at the root of an input.
+.Ql binary
+is git's
+.Pq Ql -diff -merge -text .
+.Ss Members of containers
+In
+.Pa .aqr/attributes
+and the files of
+.Fl -attributes ,
+.Ql >
+steps into a container: what is before it is a path of the tree, what is after it a path from
+the root of the container, each part matched on its own as above.
+A container is what
+.Nm aqr
+takes apart into members of names: ZIP, tar, 7z, ALZ and EGG archives, asar archives, the
+file systems of disk images, packs of games and the like.
+Of a stream of no names (gzip, xz, Zstandard), the part after
+.Ql >
+is empty: the one thing it holds.
+.Bd -literal -offset indent
+loupe.zip>*.bin            aqr-format=tensors aqr-dtype=f16
+game/*.pak>sounds/**       aqr-kind=compressed
+backup.tar.zst>>db/*.dat   aqr-format=sqlite
+.Ed
+.Pp
+A pattern of no
+.Ql >
+matches no member of a container: each depth wants a line of its own.
+A name with
+.Ql >
+in it is written
+.Ql \e> .
+In
+.Pa .gitattributes ,
+.Ql >
+is a byte of names as any other, and its lines tell of the files of the tree alone.
+.Sh ATTRIBUTES
+.Bl -tag -width Ds
+.It Ic aqr-format Ns = Ns Ar name
+The file is of format
+.Ar name ,
+from its first byte on: it is tried first, not detected, and where it turns the file down,
+the file is left to detection (the format its name tells too).
+The names are those that
+.Ql aqr -Z format:help
+lists
+.Po
+.Cm zlib ,
+.Cm png ,
+.Cm sqlite ,
+.Cm safetensors ,
+\&...
+.Pc ,
+among them those of data of no header, which are never detected:
+.Cm tensors ,
+.Cm raw
+(or
+.Cm pcm )
+and
+.Cm deflate .
+.It Fl aqr-format
+The file is of no format: not detected, nor taken by its name.
+.It Ic aqr-kind Ns = Ns Ar kind
+What the file is, where its format is not told:
+.Cm unknown ,
+.Cm text ,
+.Cm pixels ,
+.Cm font ,
+.Cm table ,
+or
+.Cm compressed
+(encrypted, or compressed by a format no recompressor takes: nothing is tried).
+.It Ic aqr-not Ns = Ns Ar name Ns Op , Ns Ar name ...
+The formats not looked for in the file (as
+.Fl Z Cm format:no- Ns Ar name
+does for all files).
+.It Ic aqr-offset Ns = Ns Ar n
+With
+.Ic aqr-format :
+the file is of the format from byte
+.Ar n
+on (decimal, or hexadecimal after
+.Ql 0x ) ,
+the bytes before it taken as any other data.
+.El
+.Ss Parameters of formats
+An
+.Ic aqr- Ns Ar param Ns = Ns Ar value
+of no other meaning is a parameter of the format that
+.Ic aqr-format
+tells, read of the files of that format alone.
+A value the format does not take is told and the hint left (the file to detection).
+.Pp
+.Cm tensors ,
+arrays of numbers of no header:
+.Bl -tag -width Ds
+.It Ic aqr-dtype Ns = Ns Ar type
+The whole file a tensor of
+.Ar type :
+.Cm bf16 , f16 , f32 , f64 ,
+.Cm e4m3 , e5m2
+(floats of 8 bits), or
+.Cm i8 , u8 , i16 , u16 , i32 , u32 , i64 , u64 .
+The bytes after the last whole element are kept as they are.
+.It Ic aqr-layout Ns = Ns Ar file
+The tensors the file holds, as
+.Ar file
+tells them (a TOML file; see
+.Sx Layouts ) .
+Better than
+.Ic aqr-dtype
+alone, which takes the file as one tensor.
+.El
+.Pp
+.Cm raw ,
+PCM samples of no header (taken as
+.Cm pcm
+where any of these is given):
+.Bl -tag -width Ds
+.It Ic aqr-bits Ns = Ns Cm 8 | 16 | 24 | 32
+Bits of a sample (16).
+.It Ic aqr-channels Ns = Ns Ar n
+Channels (2).
+.It Ic aqr-endian Ns = Ns Cm le | be
+Byte order
+.Pq Cm le .
+.It Ic aqr-sign Ns = Ns Cm signed | unsigned
+Signed, but unsigned of 8 bits.
+.El
+.Ss Layouts
+The file of
+.Ic aqr-layout ,
+by convention under
+.Pa .aqr/
+(archived with the rest), relative to the root of the input where
+.Pa .aqr/attributes
+names it:
+.Bd -literal -offset indent
+dtype = "f16"              # where a tensor gives none
+
+[[tensor]]
+name = "conv1.weight"      # left out
+shape = [64, 3, 7, 7]      # outermost first; or count = 9408
+offset = 0                 # bytes; else where the one before ends
+
+[[tensor]]
+shape = [64]
+dtype = "f32"
+.Ed
+.Ss Attributes of git
+Of
+.Pa .gitattributes
+alone, and weaker than what the bytes tell:
+.Ql binary
+and
+.Ql -text
+(not text: text is not looked for),
+.Ql text ,
+.Ql eol= Ns Ar ...
+and
+.Ql filter=lfs
+(text).
+.Sh EXAMPLES
+Weights of models, as arrays of 16-bit floats, in the tree and in a ZIP archive of it:
+.Bd -literal -offset indent
+[attr]f16-tensors aqr-format=tensors aqr-dtype=f16
+*_f16.bin            f16-tensors
+loupe.zip>*_f16.bin  f16-tensors
+.Ed
+.Pp
+A zlib stream after a header of 16 bytes, and audio of no header:
+.Bd -literal -offset indent
+assets/*.pkd         aqr-format=zlib aqr-offset=16
+sounds/*.raw         aqr-format=raw aqr-bits=16 aqr-channels=1
+.Ed
+.Pp
+Encrypted files, and files that only look like ZIP archives:
+.Bd -literal -offset indent
+secrets/**           aqr-kind=compressed
+*.dat                aqr-not=zip
+.Ed
+.Pp
+Hints from outside a tree that cannot be changed:
+.Dl $ aqr --attributes hints.txt -o game.aqr game
+.Sh DIAGNOSTICS
+.Nm aqr Fl v
+and
+.Fl -stats
+tell the attributes not understood, the files a format told turned down (or made no
+smaller), and the lines that matched no file; so does the
+.Ql hints
+of
+.Fl -stats Ns = Ns Ar file Ns .json .
+.Sh SEE ALSO
+.Xr aqr 1 ,
+.Xr aqrsfx 5 ,
+.Xr gitattributes 5 ,
+.Xr gitignore 5

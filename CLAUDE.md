@@ -27,6 +27,9 @@ recompressors' code; native decoding is an optimization picked by hash.
   `aqr-bincache`). One line each and more in `docs/crates.md`.
 - `codecs/` — the recompressor crates `aqr-*`, each with a `README.md` and a `FORMAT.md`; a crate
   with a `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE.
+- `man/` — the manual pages, mdoc(7): `aqr.1` (every option of `--help`, a test of crates/aqr
+  checks), `aqrsfx.5` (`.aqr/sfx/`), `aqrattributes.5` (`.aqr/attributes`). Update them with
+  what they describe.
 - `site/` — the project site; pushes to `main` deploy it and the spec (under `/spec/`) to GitHub
   Pages (`.github/workflows/spec.yml`).
 - `scripts/` — helper scripts (Python uses the `.venv` at the root).

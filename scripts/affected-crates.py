@@ -18,7 +18,8 @@ the packages whose entries changed are affected; of the root's Cargo.toml, the m
 dependency of [workspace.dependencies] that changed (everything where anything else changed).
 
 A file outside every package affects everything unless it is of the paths below that no build
-reads (documents, the site, the spec's figures) or named by some package's sources.
+reads (documents, the manual pages, the site, the spec's figures) or named by some package's
+sources.
 
 Only the standard library: CI runs it with the runner's Python.
 """
@@ -35,7 +36,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Outside the packages, read by no build or test (but where a package's sources name them).
 INERT = re.compile(
     r"""^(
-        docs/ | site/ | spec/ | third_party/ | \.github/(?!workflows/test\.yml$) |
+        docs/ | man/ | site/ | spec/ | third_party/ | \.github/(?!workflows/test\.yml$) |
         scripts/(?!affected-crates\.py$) |
         [^/]+\.md$ | LICENSE | \.gitignore$ | \.gitattributes$ | rustfmt\.toml$ | flake\.(nix|lock)$
     )""",

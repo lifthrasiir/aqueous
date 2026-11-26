@@ -5,7 +5,8 @@
 `run`, `[run.env]`, `[[shortcut]]`, `ui`의 제목과 문구, 라이선스, 배너, 경로 묻기, `pe`의 아이콘, `VERSIONINFO`,
 manifest, 서브시스템, 서명), 이 문서는 바꿀 때 필요한 결정과 이유, 남은 일을 적는다. `sfx.toml`의 키와 값은
 `crates/aqr-sfx/src/config.rs`(모듈 문서의 CDDL과 `compile`의 검증)가 원본이다. 서브시스템(GUI/CLI)과 암호는
-`encrypted-sfx-design.md`가 다룬다. 끝낸 일의 경과는 git 이력에 있다.
+`encrypted-sfx-design.md`가 다룬다.
+끝낸 일의 경과는 git 이력에 있다. 사용자에게 보이는 설명은 `man/aqrsfx.5`다.
 
 ## 1. 다른 도구들이 두는 설정 (참고)
 

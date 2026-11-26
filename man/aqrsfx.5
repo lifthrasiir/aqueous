@@ -1,0 +1,403 @@
+.\" The settings of a self-extracting program (.aqr/sfx/), in mdoc(7). What sfx.toml takes is
+.\" crates/aqr-sfx/src/config.rs's `compile`; keep the two together.
+.Dd November 27, 2026
+.Dt AQRSFX 5
+.Os
+.Sh NAME
+.Nm aqrsfx
+.Nd settings of a self-extracting program made by aqr
+.Sh SYNOPSIS
+.Pa .aqr/sfx/sfx.toml
+.Pp
+.Pa .aqr/sfx/ Ns Ar license.txt , banner.png , icon.ico , manifest.xml ...
+.Sh DESCRIPTION
+.Ql aqr --format sfx
+makes a self-extracting program for Windows: run, it writes out the files of the archive it
+carries.
+Where the root of the input has a directory
+.Pa .aqr/sfx/
+with a file
+.Pa sfx.toml
+in it, the program does what the file tells: where the files go, what is asked and told, the
+program run once they are written, the shortcuts made, and the icon, version and manifest of
+the program itself.
+.Pp
+The files of
+.Pa .aqr/sfx/
+are archived as any other, first in the archive (its first segment, which the program reads
+before the rest), so that extracting the archive and making the program again from it makes
+the same program.
+.Nm aqr
+reads them back from the archive it made and compiles the settings into the program; the
+program never reads
+.Pa sfx.toml .
+.Pp
+.Pa .aqr/sfx/
+is taken at the root of an input alone (elsewhere it is data); of several inputs, at most one
+may have it at the root of the archive.
+Without
+.Fl -format Cm sfx
+it is archived as files, and told so.
+.Pp
+A program of no settings writes the files under the working directory (or the directory
+given), a file already there failing it.
+.Ss Checks
+The settings are checked as the program is made, not as it runs: a key not known (a typo), a
+value of the wrong type, a file of
+.Pa .aqr/sfx/
+named and not there, a program to run not in the archive and settings at odds with each
+other fail
+.Nm aqr .
+.Ss Paths
+The paths of the archive in the settings
+.Pf ( Ic run.program ,
+.Ic run.cwd ,
+.Ic shortcut.target ,
+.Ic shortcut.folder )
+are relative to its root, by
+.Ql / ,
+of names alone (no
+.Ql \&. ,
+.Ql .. ,
+.Ql \e
+nor
+.Ql \&: ) .
+Those of files of the settings
+.Pf ( Ic ui.license ,
+.Ic ui.banner ,
+.Ic pe.icon )
+are as such, relative to
+.Pa .aqr/sfx/ .
+.Pp
+A destination
+.Pq Ic extract.dest
+is one of these places, and a relative path after it:
+.Bl -tag -width "{programs}" -offset indent
+.It Cm {temp}
+a new directory of the system's temporary directory;
+.It Cm {here}
+the directory of the program;
+.It Cm {cwd}
+the working directory;
+.It Cm {programs}
+the directory of programs
+.Pq Ev %ProgramFiles% .
+.El
+.Pp
+In the arguments of the program run and of shortcuts, and in the values of
+.Ic run.env ,
+.Cm {dest}
+is where the files went.
+.Ss Texts by language
+A text
+.Pf ( Ic title ,
+.Ic ui.prompt ,
+.Ic ui.finish ,
+.Ic shortcut.name ,
+.Ic shortcut.description )
+is a string, or a table of them by language tag:
+.Bd -literal -offset indent
+[ui]
+prompt = { en = "Install Tool?", ko = "도구를 설치할까요?" }
+.Ed
+.Pp
+The one shown is that of the user's language
+.Pq Ql ko-KR ,
+else of its first subtag
+.Pq Ql ko ,
+else of no language (the empty key), else English, else the first.
+A file of the settings
+.Pf ( Ic ui.license ,
+.Ic ui.banner )
+is picked so by its name: for
+.Pa license.txt ,
+.Pa license.ko-KR.txt ,
+then
+.Pa license.ko.txt ,
+then
+.Pa license.txt .
+.Sh SFX.TOML
+A TOML file, of these keys; all may be left out.
+.Ss Top level
+.Bl -tag -width Ds
+.It Ic mode No = Qo Cm extract Qc | Qo Cm run Qc
+The defaults the other keys change.
+.Cm extract
+writes the files under
+.Cm {cwd} ,
+asking before a file there is written over, and ends.
+.Cm run
+writes them under
+.Cm {temp} ,
+writing over what is there, runs
+.Ic run.program ,
+waits for it, removes what was written and ends with its exit code.
+By default
+.Cm run
+where
+.Ic run.program
+is given, else
+.Cm extract .
+.It Ic title No = Ar text
+The title of the program's windows (its file name by default).
+.El
+.Ss \&[extract\&]
+.Bl -tag -width Ds
+.It Ic dest No = Ar destination
+Where the files go
+.Pq see Sx Paths ;
+.Cm {cwd}
+of
+.Cm extract ,
+.Cm {temp}
+of
+.Cm run .
+A directory given on the command line goes before it.
+.It Ic subdir No = Ar bool
+The files under a directory of the program's name
+.Pf ( Pa setup.exe :
+.Pa setup )
+there (false).
+.It Ic ask No = Ar bool
+Ask where the files go, offering
+.Ic dest
+(false).
+.It Ic overwrite No = Qo Cm ask Qc | Qo Cm always Qc | Qo Cm never Qc | Qo Cm newer Qc
+What is done where a file is already there: asked (the default of
+.Cm extract ;
+written over without
+.Fl y ) ,
+written over (the default of
+.Cm run ) ,
+left, or written over where the archive's is newer by its modification time.
+.El
+.Ss \&[run\&]
+Only of
+.Ic mode No = Qq Cm run .
+.Bl -tag -width Ds
+.It Ic program No = [ Ar path , Ar arg ... ]
+The program run once the files are written: a path of the archive to a
+.Pa .exe
+or
+.Pa .com
+file (not in
+.Pa .aqr/ ) ,
+then its arguments.
+It is run as it is, by no shell:
+.Pa .bat ,
+.Pa .cmd
+and
+.Pa .msi
+files are not run.
+.It Ic cwd No = Ar path
+Its working directory, a directory of the archive (by default
+.Ql \&. ,
+where the files went).
+.It Ic window No = Qo Cm normal Qc | Qo Cm hidden Qc | Qo Cm minimized Qc
+How its window is shown
+.Pq Cm normal .
+.It Ic wait No = Ar bool
+Wait for it to end (true); else the self-extracting program ends as it starts it.
+.It Ic cleanup No = Ar bool
+Once it ends, remove the files and directories that were written (as
+.Ic wait ;
+not with
+.Ic wait No = Cm false ) .
+.It Ic exit-code No = Ar bool
+End with its exit code (as
+.Ic wait ;
+not with
+.Ic wait No = Cm false ) .
+.It Ic \&[run.env\&]
+Environment variables set for it, each
+.Ar name No = Qq Ar value ;
+the others are those of the self-extracting program.
+.El
+.Pp
+Of
+.Cm run ,
+the files of
+.Pa .aqr/
+are not written out (but with
+.Fl -noexec ) .
+.Ss \&[ui\&]
+.Bl -tag -width Ds
+.It Ic prompt No = Ar text
+Asked (yes or no) before anything is written; no ends the program.
+.It Ic license No = Ar file
+A license to agree to before anything is written: a UTF-8 text file of
+.Pa .aqr/sfx/ ,
+by language
+.Pq see Sx Texts by language ;
+not agreed to ends the program.
+.It Ic banner No = Ar file
+An image shown above the prompt and the license, in windows (where there is no console): a PNG, BMP,
+JPEG or GIF file of
+.Pa .aqr/sfx/ ,
+by language, at its size at 96 DPI.
+Only with
+.Ic prompt
+or
+.Ic license .
+.It Ic finish No = Ar text
+Told once done.
+.It Ic quiet No = Ar bool
+Ask and tell nothing, as
+.Fl y
+(false).
+.El
+.Ss \&[pe\&]
+What is written into the program's own image, which Windows shows before it runs.
+.Bl -tag -width Ds
+.It Ic subsystem No = Qo Cm cli Qc | Qo Cm gui Qc
+A console program (the default) or one of windows alone.
+.It Ic icon No = Ar file
+The program's icon, a
+.Pa .ico
+file of
+.Pa .aqr/sfx/ .
+.It Ic admin No = Ar bool
+Run as an administrator (false): the manifest's
+.Ql requestedExecutionLevel .
+Not with
+.Pa manifest.xml .
+.It Ic version No = Qq Ar a Ns Op . Ns Ar b Ns Op . Ns Ar c Ns Op . Ns Ar d
+Its file and product version, of numbers 0 to 65535.
+.It Ic product , Ic company , Ic description , Ic copyright No = Ar string
+Its
+.Ql ProductName ,
+.Ql CompanyName ,
+.Ql FileDescription
+and
+.Ql LegalCopyright .
+.El
+.Pp
+The program's manifest is
+.Pa .aqr/sfx/manifest.xml
+where there is one, as it is; else one made of
+.Ic admin
+and
+.Ic subsystem ,
+for Windows 7 to 11, aware of each monitor's DPI and of Common Controls 6.
+.Ss \&[\&[shortcut\&]\&]
+Each a shortcut made once the files are written, before the program is run.
+Not with
+.Ic run.cleanup .
+.Bl -tag -width Ds
+.It Ic target No = Ar path
+A file of the archive (not in
+.Pa .aqr/ ) .
+Required.
+.It Ic name No = Ar text
+The shortcut's name
+.Pq Ar name Ns Pa .lnk .
+Required.
+.It Ic at No = Qo Cm desktop Qc | Qo Cm start-menu Qc
+On the desktop or among the programs of the start menu.
+Required.
+.It Ic folder No = Ar path
+A folder of the start menu's programs it is in
+.Pq Cm start-menu No alone .
+.It Ic args No = [ Ar arg ... ]
+The arguments it gives the target.
+.It Ic description No = Ar text
+Its comment.
+.It Ic all-users No = Ar bool
+Of all users, not the user's alone (false); only of a program run as an administrator
+.Pf ( Ic pe.admin ,
+or
+.Pa manifest.xml ) .
+.El
+.Sh THE PROGRAM
+.Nm program
+.Op Fl y
+.Op Fl -noexec
+.Op Fl -keep
+.Op Ar dir
+.Bl -tag -width Ds
+.It Ar dir
+Where the files go, in place of
+.Ic extract.dest
+.Pf ( Ic extract.subdir
+and
+.Ic extract.ask
+then do nothing).
+.It Fl y , Fl -yes
+Ask nothing: a file there is written over where it would be asked.
+.It Fl -noexec
+Run nothing once the files are written (and write out
+.Pa .aqr/
+too).
+.It Fl -keep
+Leave the files where they would be removed once the program ran.
+.It Fl h , Fl -help , Cm /?
+Show a summary of the options.
+.El
+.Pp
+It ends with 0 where done (or the exit code of the program run, with
+.Ic run.exit-code ) ,
+1 where it failed, and 2 where the prompt, the license or the question of where the files go
+was declined.
+.Sh ENVIRONMENT
+Of the program, for tests:
+.Bl -tag -width Ds
+.It Ev AQR_SFX_LANG
+The language tag taken in place of the user's.
+.It Ev AQR_SFX_SHORTCUTS
+A directory where the shortcuts are made in place of the desktop and the start menu.
+.El
+.Sh EXAMPLES
+An installer, run as an administrator:
+.Bd -literal -offset indent
+title = "Tool 1.2"
+
+[extract]
+dest = "{programs}/Tool"
+ask = true
+
+[ui]
+prompt = { en = "Install Tool 1.2?", ko = "Tool 1.2를 설치할까요?" }
+license = "license.txt"   # and license.ko.txt
+banner = "banner.png"
+finish = "Done."
+
+[pe]
+subsystem = "gui"
+icon = "tool.ico"
+admin = true
+version = "1.2"
+product = "Tool"
+company = "Example"
+
+[[shortcut]]
+target = "bin/tool.exe"
+name = "Tool"
+at = "start-menu"
+all-users = true
+.Ed
+.Pp
+A program run from a temporary directory, removed once it ends:
+.Bd -literal -offset indent
+[run]
+program = ["setup.exe", "/dir", "{dest}"]
+window = "hidden"
+.Ed
+.Pp
+Made, and signed once made (on Windows, whose shell is
+.Li cmd ) :
+.Bd -literal -offset indent
+> aqr --format sfx -o tool.exe --run-after "signtool sign /a \e\(dq%AQR_OUTPUT%\e\(dq" tool
+.Ed
+.Sh SEE ALSO
+.Xr aqr 1 ,
+.Xr aqrattributes 5
+.Sh CAVEATS
+The archive in a self-extracting program is not edited
+.Pf ( Fl a ,
+.Fl s ,
+.Fl -delete ,
+.Fl -compact
+of
+.Xr aqr 1 ) :
+extract it and make the program again.
+Signing must come last, since bytes appended break the signature.

@@ -1,6 +1,6 @@
 .\" The manual page of aqr, in mdoc(7). Every option of `aqr --help` is here: a test of
 .\" crates/aqr (`man_page_has_every_option`) checks it.
-.Dd November 9, 2026
+.Dd November 27, 2026
 .Dt AQR 1
 .Os
 .Sh NAME
@@ -350,7 +350,8 @@ Its patterns are from the root of each input, before those of the
 .Pa .aqr/attributes
 at the root of an input that is a directory, which come before the
 .Pa .gitattributes
-under it.
+under it
+.Pq Xr aqrattributes 5 .
 A format told that turns the file down leaves it to detection; nothing of the hints is in
 the archive but the files.
 May be given more than once.
@@ -547,7 +548,11 @@ name.
 .Ar input Ns Pa .exe
 without
 .Fl o :
-run, it writes the files out under the directory given (the current directory by default).
+run, it writes the files out under the directory given (the current directory by default),
+or does what the
+.Pa .aqr/sfx/sfx.toml
+of the input's root tells
+.Pq Xr aqrsfx 5 .
 Not with
 .Fl a , A , P , j
 or standard input or output.
@@ -872,6 +877,8 @@ Encrypt with a passphrase of a file, then list the archive as JSON:
 .Xr 7z 1 ,
 .Xr tar 1 ,
 .Xr unzip 1 ,
-.Xr zstd 1
+.Xr zstd 1 ,
+.Xr aqrattributes 5 ,
+.Xr aqrsfx 5
 .Pp
 The Aqueous format specification.
