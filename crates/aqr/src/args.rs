@@ -323,6 +323,14 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         };
         match &*s {
             "-h" | "--help" => {
+                // (`--help -v`, `-v --help`: the manual; what follows only looked through for -v)
+                let mut verbose = a.verbose;
+                while let Some(t) = lex.next() {
+                    verbose |= matches!(&t, Tok::Opt(s, _) if s == "-v" || s == "--verbose");
+                }
+                if verbose {
+                    crate::manual::open();
+                }
                 print!("{HELP}");
                 std::process::exit(0);
             }

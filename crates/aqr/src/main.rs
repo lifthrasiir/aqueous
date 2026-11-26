@@ -330,6 +330,7 @@ mod interpret;
 mod ipc;
 mod journal;
 mod list;
+mod manual;
 mod meta;
 mod names;
 mod pass;
@@ -563,7 +564,8 @@ General:
                         Wasm modules in this process, not in workers locked down;
                         -Z interpret ARCHIVE, a command, prints the archive value an
                         archive is interpreted to (the spec's Archive model) in EDN
-  -h, --help            show this help
+  -h, --help            show this help; with -v, the manual (man 1 aqr; on Windows
+                        man.html where installed, else the site's page)
   -V, --version         show the version
       --setup-autocomplete[=SHELL]
                         alone: set up the completion of aqr's options for SHELL (zsh,
