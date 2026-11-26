@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+pub mod serve;
+
 /// The version of the protocol.
 pub const VERSION: u64 = 1;
 

@@ -148,8 +148,9 @@ fn tree(d: &Path) -> Vec<(String, Vec<u8>)> {
 fn listed(d: &Path, archive: &str) -> Vec<(String, String, Option<u64>)> {
     let t: Value = serde_json::from_str(&aqr(d, &["-t", "--json", archive])).unwrap();
     let e = t["entries"].as_array().unwrap().iter();
-    let mut out: Vec<_> =
-        e.map(|e| (e["path"].as_str().unwrap().to_owned(), e["type"].as_str().unwrap().to_owned(), e["size"].as_u64())).collect();
+    let mut out: Vec<_> = e
+        .map(|e| (e["path"].as_str().unwrap().to_owned(), e["type"].as_str().unwrap().to_owned(), e["size"].as_u64()))
+        .collect();
     out.sort();
     out
 }
@@ -324,5 +325,42 @@ fn many() {
     assert_eq!(names.len(), 5000);
     assert_eq!(s.read(&h, "f1234", 100), b"1234");
     s.end();
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// The frontends' side of the protocol (`aqr_ipc::serve`): requests from several threads at
+/// once, each waited for; the program gone, every request failing so.
+#[test]
+fn client() {
+    use aqr_ipc::serve::{Error, Served};
+    let d = common::scratch("serve", "client");
+    let files = tree(&d);
+    let s = Served::start(Path::new(env!("CARGO_BIN_EXE_aqr")), &[]).unwrap();
+    let h = s.ask(json!({"open": d.join("t.aqr")})).unwrap()["archive"].as_u64().unwrap();
+    assert_eq!(s.list(h, "sub").unwrap().len(), 22);
+    std::thread::scope(|scope| {
+        for (path, bytes) in &files {
+            let s = &s;
+            scope.spawn(move || {
+                let mut got = Vec::new();
+                loop {
+                    let d = s.read(h, path, got.len() as u64, 1 << 20).unwrap();
+                    if d.is_empty() {
+                        break;
+                    }
+                    got.extend(d);
+                }
+                assert!(got == *bytes, "{path}");
+            });
+        }
+    });
+    assert!(matches!(s.read(h, "nope", 0, 10), Err(Error::Failed(m)) if m.contains("not in the archive")));
+    // (killed: what it had open gone with it)
+    s.kill();
+    while !s.gone() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(s.list(h, ""), Err(Error::Gone));
+    drop(s);
     fs::remove_dir_all(&d).unwrap();
 }
