@@ -20,7 +20,7 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    DragQueryFileW, HDROP, ILCombine, ILCreateFromPathW, ILFree, IShellExtInit, IShellExtInit_Impl, IShellPropSheetExt,
+    DragQueryFileW, HDROP, ILCreateFromPathW, ILFree, IShellExtInit, IShellExtInit_Impl, IShellPropSheetExt,
     IShellPropSheetExt_Impl,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -30,7 +30,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, HSTRING, PCWSTR, Ref, implement};
 
 use crate::client;
-use crate::pidl::Item;
 
 /// The class of the tab (registered for `.aqr` files by aqr-win).
 pub const VERSIONS_PAGE: windows::core::GUID = windows::core::GUID::from_u128(0x54394c15_6f9d_4015_9d6c_5805da234236);
@@ -259,16 +258,13 @@ fn fill(hwnd: HWND, s: &mut State) {
 
 /// Archive `file` opened as of point `p` (as `aqr --serve` tells it), in a window of its own.
 fn open(file: &Path, p: &Value, hwnd: HWND) -> windows::core::Result<()> {
-    let item = Item::version(p, crate::folder::version_shown(p));
     // SAFETY: ID lists of their own, freed after
     unsafe {
         let f = ILCreateFromPathW(&HSTRING::from(file.as_os_str()));
         if f.is_null() {
             return Err(E_FAIL.into());
         }
-        let v = crate::pidl::of_items(&[item]);
-        let t = ILCombine(Some(f), Some(v));
-        ILFree(Some(v));
+        let t = crate::versions::target(f, Some(p));
         ILFree(Some(f));
         let r = match crate::versions::told(|| Ok(format!("open {}", crate::versions::parsing_name(t)?))) {
             Ok(true) => Ok(()),

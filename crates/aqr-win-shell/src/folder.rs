@@ -520,6 +520,15 @@ impl IShellFolder_Impl for Folder_Impl {
                             .into();
                     return m.query(riid, ppv).ok();
                 }
+                // (the commands of the view, in Explorer's command bar)
+                if *riid == windows::Win32::UI::Shell::IExplorerCommandProvider::IID {
+                    let at = self.at.read().unwrap();
+                    let at = at.as_ref().ok_or(windows::core::Error::from(E_FAIL))?;
+                    let p: windows::Win32::UI::Shell::IExplorerCommandProvider =
+                        crate::commands::Provider::new(at.archive.key().clone(), file_of(at.pidl.as_ptr()), hwnd)
+                            .into();
+                    return p.query(riid, ppv).ok();
+                }
                 if *riid != IShellView::IID {
                     return Err(E_NOINTERFACE.into());
                 }

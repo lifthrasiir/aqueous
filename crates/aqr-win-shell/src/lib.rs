@@ -11,6 +11,7 @@
 
 mod client;
 mod columns;
+mod commands;
 mod data;
 pub mod delay;
 pub mod folder;

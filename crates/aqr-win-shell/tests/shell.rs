@@ -43,6 +43,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::Shell::{CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, FILEDESCRIPTORW};
 use windows::Win32::UI::Shell::{FILEOPERATION_FLAGS, FileOperation, IFileOperation};
+use windows::Win32::UI::Shell::{IEnumExplorerCommand, IExplorerCommand, IExplorerCommandProvider};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, DestroyWindow, DispatchMessageW, GET_MENU_DEFAULT_ITEM_FLAGS, GetMenuDefaultItem,
     GetMenuItemCount, GetMenuItemID, GetMenuState, GetMenuStringW, GetSubMenu, IsDialogMessageW, MF_BYPOSITION,
@@ -781,8 +782,45 @@ fn browsed() {
         }
         // (of the point: it checked; "Latest" browses back to all of the archive)
         let (shown, browsed) = versions(Path::new(at), Some(0));
+        let latest = shown[0].0.clone();
         assert_eq!(shown.iter().map(|s| s.1).collect::<Vec<_>>(), [false, false, false, true]);
         assert_eq!(browsed.unwrap(), format!("browse {}", j.display()));
+        // the view's commands (Explorer's command bar): "Versions", its subcommands as the menu's
+        // SAFETY: COM calls of the shell's objects
+        unsafe {
+            let title = |c: &IExplorerCommand| {
+                let t = c.GetTitle(None).unwrap();
+                let s = t.to_string().unwrap();
+                windows::Win32::System::Com::CoTaskMemFree(Some(t.0 as *const _));
+                s
+            };
+            let f: IShellFolder2 = item(&j).BindToHandler(None, &BHID_SFObject).unwrap();
+            let p: IExplorerCommandProvider = f.CreateViewObject(HWND::default()).unwrap();
+            let e: IEnumExplorerCommand = p.GetCommands(None).unwrap();
+            let mut got = [None];
+            let mut n = 0;
+            assert!(e.Next(&mut got, Some(&mut n)).is_ok() && n == 1);
+            let v = got[0].take().unwrap();
+            // (its titles in the user's language: "Latest" as the menu's)
+            assert!(!title(&v).is_empty());
+            assert_eq!((v.GetFlags().unwrap() & 1, v.GetState(None, true).unwrap()), (1, 0));
+            let subs = v.EnumSubCommands().unwrap();
+            let mut all = Vec::new();
+            loop {
+                let mut got = [None];
+                if subs.Next(&mut got, None) != windows::Win32::Foundation::S_OK {
+                    break;
+                }
+                all.push(got[0].take().unwrap());
+            }
+            let titles: Vec<String> = all.iter().map(title).collect();
+            assert!(titles.len() == 3 && titles[0] == latest && titles[2].starts_with("first ("), "{titles:?}");
+            let states: Vec<u32> = all.iter().map(|c| c.GetState(None, true).unwrap()).collect();
+            assert_eq!(states, [0x18, 0, 0]);
+            _ = std::fs::remove_file(&opened);
+            all[2].Invoke(None, None).unwrap();
+            assert_eq!(std::fs::read_to_string(&opened).unwrap().trim(), format!("browse {at}"));
+        }
         // the Versions tab of the archive file's Properties: its points newest first, read as it
         // is shown; Open (told: the archive as of the point), Extract (aqr-win's, told) and Name
         // (aqr-win's, told, the list read again after)

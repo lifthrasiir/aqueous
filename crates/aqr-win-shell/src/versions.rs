@@ -86,54 +86,51 @@ impl Versions {
         *self.points.lock().unwrap() = points;
         Ok(n)
     }
+}
 
-    /// The ID list of choice `k` (0: all of the archive; else the point before it), the caller's.
-    fn target(&self, k: usize) -> windows::core::Result<*mut ITEMIDLIST> {
-        if k == 0 {
-            // SAFETY: an ID list of its own, copied
-            return Ok(unsafe { windows::Win32::UI::Shell::ILClone(self.file_ptr()) });
-        }
-        let points = self.points.lock().unwrap();
-        let p = points.get(k - 1).ok_or(windows::core::Error::from(E_INVALIDARG))?;
-        let v = crate::pidl::of_items(&[Item::version(p, crate::folder::version_shown(p))]);
-        // SAFETY: two ID lists, combined into one of COM's memory; the second freed
-        unsafe {
-            let t = ILCombine(Some(self.file_ptr()), Some(v));
-            ILFree(Some(v));
-            Ok(t)
-        }
+/// The ID list of archive `file` (its file's) as of point `p` (as `aqr --serve` tells it; none: all
+/// of it), the caller's.
+pub fn target(file: *const ITEMIDLIST, p: Option<&Value>) -> *mut ITEMIDLIST {
+    let Some(p) = p else {
+        // SAFETY: an ID list of the caller's, copied
+        return unsafe { windows::Win32::UI::Shell::ILClone(file) };
+    };
+    let v = crate::pidl::of_items(&[Item::version(p, crate::folder::version_shown(p))]);
+    // SAFETY: two ID lists, combined into one of COM's memory; the second freed
+    unsafe {
+        let t = ILCombine(Some(file), Some(v));
+        ILFree(Some(v));
+        t
     }
+}
 
-    fn file_ptr(&self) -> *const ITEMIDLIST {
-        self.file.as_ptr()
+/// Browsed to `pidl` in the window of a view: by the browser of `site`, or of window `hwnd`, else
+/// in a window of its own.
+pub fn browse(pidl: *const ITEMIDLIST, site: Option<IUnknown>, hwnd: HWND) -> windows::core::Result<()> {
+    // (for tests: the place told, not browsed to)
+    if told(|| Ok(format!("browse {}", parsing_name(pidl)?)))? {
+        return Ok(());
     }
-
-    /// Browsed to `pidl` in the window of the view: by the browser of the site, or of the window,
-    /// else in a window of its own.
-    fn browse(&self, pidl: *const ITEMIDLIST, hwnd: HWND) -> windows::core::Result<()> {
-        // (for tests: the place told, not browsed to)
-        if crate::versions::told(|| Ok(format!("browse {}", parsing_name(pidl)?)))? {
-            return Ok(());
+    let by_site = site
+        .and_then(|s| s.cast::<IServiceProvider>().ok())
+        // SAFETY: a service of the site's
+        .and_then(|sp| unsafe { sp.QueryService::<IShellBrowser>(&SID_STopLevelBrowser) }.ok());
+    // (`CWM_GETISHELLBROWSER`: the browser of the window, not referenced for the caller)
+    let by_window = || {
+        if hwnd.0.is_null() {
+            return None;
         }
-        let site = self.site.lock().unwrap().clone();
-        let by_site = site
-            .and_then(|s| s.cast::<IServiceProvider>().ok())
-            // SAFETY: a service of the site's
-            .and_then(|sp| unsafe { sp.QueryService::<IShellBrowser>(&SID_STopLevelBrowser) }.ok());
-        // (`CWM_GETISHELLBROWSER`: the browser of the window, not referenced for the caller)
-        let by_window = || {
-            // SAFETY: a message of the shell's windows
-            let p = unsafe { SendMessageW(hwnd, WM_USER + 7, Some(WPARAM(0)), Some(LPARAM(0))) };
-            let raw = p.0 as *mut core::ffi::c_void;
-            // SAFETY: the window's browser, where it is one
-            (!raw.is_null()).then(|| unsafe { IShellBrowser::from_raw_borrowed(&raw) }.cloned()).flatten()
-        };
-        if let Some(b) = by_site.or_else(by_window) {
-            // SAFETY: an ID list of the caller's
-            return unsafe { b.BrowseObject(pidl, SBSP_SAMEBROWSER | SBSP_ABSOLUTE) };
-        }
-        window(pidl, hwnd)
+        // SAFETY: a message of the shell's windows
+        let p = unsafe { SendMessageW(hwnd, WM_USER + 7, Some(WPARAM(0)), Some(LPARAM(0))) };
+        let raw = p.0 as *mut core::ffi::c_void;
+        // SAFETY: the window's browser, where it is one
+        (!raw.is_null()).then(|| unsafe { IShellBrowser::from_raw_borrowed(&raw) }.cloned()).flatten()
+    };
+    if let Some(b) = by_site.or_else(by_window) {
+        // SAFETY: an ID list of the caller's
+        return unsafe { b.BrowseObject(pidl, SBSP_SAMEBROWSER | SBSP_ABSOLUTE) };
     }
+    window(pidl, hwnd)
 }
 
 /// For tests (`AQR_SHELL_TEST_OPENED`, the file told): the line of `what` told, not done; whether
@@ -213,9 +210,15 @@ impl IContextMenu_Impl for Versions_Impl {
             return Err(E_INVALIDARG.into());
         }
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let t = self.target(verb)?;
+            let p = match verb {
+                0 => None,
+                k => Some(
+                    self.points.lock().unwrap().get(k - 1).cloned().ok_or(windows::core::Error::from(E_INVALIDARG))?,
+                ),
+            };
+            let t = target(self.file.as_ptr(), p.as_ref());
             let hwnd = if hwnd.0.is_null() { HWND(self.hwnd as *mut _) } else { hwnd };
-            let r = self.browse(t, hwnd);
+            let r = browse(t, self.site.lock().unwrap().clone(), hwnd);
             // SAFETY: of its own
             unsafe { ILFree(Some(t)) };
             r
