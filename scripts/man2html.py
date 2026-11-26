@@ -242,8 +242,9 @@ def page_html(name, section):
     body = mandoc(f"{name}.{section}")
     nd = text(re.search(r'<span class="Nd"[^>]*>(.*?)</span>', body, re.S).group(1))
     names = ", ".join(text(n) for n in re.findall(r'<code class="Nm">(.*?)</code>', body.split("</section>")[0]))
-    date = text(re.search(r'<span class="foot-date">(.*?)</span>', body, re.S).group(1))
-    body = re.search(r'<main class="manual-text">(.*)</main>', body, re.S).group(1)
+    # (mandoc 1.14.6, Ubuntu's: the footer a table and the text a div; later ones: a div and main)
+    date = text(re.search(r'<(span|td) class="foot-date">(.*?)</\1>', body, re.S).group(2))
+    body = re.search(r'<(main|div) class="manual-text">(.*)</\1>', body, re.S).group(2)
     body = re.sub(r'<section class="Sh">\s*<h2 class="Sh" id="NAME">.*?</section>\s*', "", body, count=1, flags=re.S)
     body = fix_ids(body)
     return body, nd, names, date
