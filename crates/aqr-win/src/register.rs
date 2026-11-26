@@ -186,6 +186,10 @@ pub fn register() -> Result<(), String> {
         set(class, None, name.text())?;
         set(class, Some("FriendlyTypeName"), &indirect(name))?;
         set(&format!(r"{class}\DefaultIcon"), None, &format!("\"{}\",-{icon}", exe.display()))?;
+        // (the program's name in "Open with": else of the verb's program, which is the shell's
+        // own, ExplorerFrame, where `open` browses the archive as a folder)
+        set(&format!(r"{class}\Application"), Some("ApplicationName"), APPLICATION)?;
+        set(&format!(r"{class}\Application"), Some("ApplicationIcon"), &format!("\"{}\",-{icon}", exe.display()))?;
         set(&format!(r"{class}\shell"), None, "extract")?;
         for (v, text) in [("extract", shell::EXTRACT), ("test", shell::TEST)] {
             verb(&format!(r"{class}\shell\{v}"), text, v)?;

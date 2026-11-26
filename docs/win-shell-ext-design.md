@@ -70,7 +70,8 @@ Explorer 또는 파일 대화상자를 연 아무 프로세스
   (또는 `IPersistFolder::Initialize`)로 아카이브 파일의 ID list를 넘겨준다.
 - **더블클릭은 열어 보기다**(§10에서 결정). ProgID의 기본 동사를 `open`으로 하고, 그 command에
   `DelegateExecute = {11dbb47c-...}`(CLSID_ExecuteFolder)를 둔다. "여기에 풀기"와 "검사"는 동사로
-  남는다.
+  남는다. 그러면 "연결 프로그램"에 보이는 이름이 동사의 프로그램, 곧 셸 자신의 것(ExplorerFrame)이
+  되므로, ProgID에 `Application\ApplicationName = Aqueous`(와 `ApplicationIcon`)를 둔다.
 - 속성의 "버전" 탭 클래스 `CLSID\{54394c15-...}`(`InProcServer32`, 같은 DLL)와 ProgID의
   `shellex\PropertySheetHandlers\Aqueous`(§6.8). 넣기의 drop handler 클래스 `CLSID\{6a3e2f84-...}`와
   `shellex\DropHandler`(§6.9). 폴더 클래스의 `Attributes`에는 `SFGAO_DROPTARGET`도 둔다.
