@@ -16,6 +16,9 @@ pub(crate) struct Args {
     pub(crate) output: Option<PathBuf>,
     /// Decompressing, a single entry at the top beside the archive, else a directory of its name.
     pub(crate) auto_dir: bool,
+    /// `--into DIR`: decompressing, the entries at the top of every archive into `DIR` as it
+    /// is, beside what is there (of `-C`'s directory where relative).
+    pub(crate) into: Option<PathBuf>,
     pub(crate) force: bool,
     /// `--rm`: the inputs removed once their archive is made, or an archive once extracted.
     pub(crate) rm: bool,
@@ -234,6 +237,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         interpret: false,
         output: None,
         auto_dir: false,
+        into: None,
         force: false,
         rm: false,
         run_before: Vec::new(),
@@ -353,6 +357,7 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
                 (dir, last_dir) = (to, Some(a.inputs.len()));
             }
             "--auto-dir" => a.auto_dir = true,
+            "--into" => a.into = Some(value("--into")?.into()),
             "-f" | "--force" => a.force = true,
             "--rm" => a.rm = true,
             "--run-before" => a.run_before.push(text(value("--run-before")?)),
@@ -807,6 +812,17 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
     }
     if a.rm && a.select.is_some() {
         return Err("--rm with paths of an archive (it is removed once extracted whole)".into());
+    }
+    if a.into.is_some() {
+        let not = |what: &str| Err(format!("--into with {what}"));
+        match () {
+            _ if !a.decompress => return Err("--into is for decompressing (-d)".into()),
+            _ if a.test => return not("-K"),
+            _ if a.output.is_some() => return not("-o"),
+            _ if a.auto_dir => return not("--auto-dir"),
+            _ if a.inputs.iter().any(|i| stdio::is(i)) => return not("- (standard input)"),
+            _ => {}
+        }
     }
     if a.decompress && a.output.is_some() && a.inputs.len() > 1 && !a.auto_dir {
         return Err("-o with several archives to decompress".into());

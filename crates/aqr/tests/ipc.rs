@@ -147,6 +147,68 @@ fn auto_dir() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// `--into DIR` (as the frontends' "Extract to…" extracts): every archive's top into the
+/// directory as it is, beside what is there; asked of the directory once where something there
+/// would be replaced, and skipped or written over as answered.
+#[test]
+fn into() {
+    let d = scratch("into");
+    fs::create_dir_all(d.join("src/inner")).unwrap();
+    fs::write(d.join("src/inner/f"), b"f").unwrap();
+    fs::write(d.join("src/g"), b"g").unwrap();
+    fs::write(d.join("one"), b"one").unwrap();
+    let aqr = || Command::new(env!("CARGO_BIN_EXE_aqr"));
+    assert!(aqr().arg("-q").arg(d.join("src")).status().unwrap().success());
+    let zip = d.join("z.zip");
+    assert!(aqr().args(["-q", "--format", "zip", "-o"]).arg(&zip).arg(d.join("src/g")).status().unwrap().success());
+    assert!(aqr().arg("-q").arg(d.join("one")).status().unwrap().success());
+    fs::remove_dir_all(d.join("src")).unwrap();
+    fs::remove_file(d.join("one")).unwrap();
+    let out = d.join("out");
+    let (src, one) = (d.join("src.aqr"), d.join("one.aqr"));
+    let args = ["-d", "--each", "--into"].map(std::ffi::OsStr::new);
+    let args: Vec<&std::ffi::OsStr> =
+        args.into_iter().chain([out.as_os_str(), src.as_os_str(), one.as_os_str()]).collect();
+    let (mut c, lines) = start(&args, &["overwrite"]);
+    let seen = run(&mut c, lines, false);
+    assert!(c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["begin", "end", "begin", "end"]);
+    assert_eq!(seen[0]["output"], out.display().to_string());
+    assert_eq!(fs::read(out.join("inner/f")).unwrap(), b"f");
+    assert_eq!(fs::read(out.join("g")).unwrap(), b"g");
+    assert_eq!(fs::read(out.join("one")).unwrap(), b"one");
+    // beside what is there, a directory of the archive's too
+    fs::write(out.join("inner/f"), b"changed").unwrap();
+    fs::write(out.join("kept"), b"kept").unwrap();
+    let (mut c, lines) = start(&args[..5], &["overwrite"]);
+    let seen = run(&mut c, lines, false);
+    assert!(c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["begin", "overwrite", "skipped"]);
+    assert_eq!(seen[1]["path"], out.display().to_string());
+    assert_eq!(fs::read(out.join("inner/f")).unwrap(), b"changed");
+    let (mut c, lines) = start(&args[..5], &["overwrite"]);
+    let seen = run(&mut c, lines, true);
+    assert!(c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["begin", "overwrite", "end"]);
+    assert_eq!(fs::read(out.join("inner/f")).unwrap(), b"f");
+    assert_eq!(fs::read(out.join("kept")).unwrap(), b"kept");
+    // an archive of another format: the same
+    fs::write(out.join("g"), b"changed").unwrap();
+    let (mut c, lines) = start(&[args[0], args[2], args[3], zip.as_os_str()], &["overwrite"]);
+    let seen = run(&mut c, lines, true);
+    assert!(c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["begin", "overwrite", "end"]);
+    assert_eq!(fs::read(out.join("g")).unwrap(), b"g");
+    // not asked: an error, but with -f
+    fs::write(out.join("g"), b"changed").unwrap();
+    let r = aqr().args(&args[..5]).stderr(Stdio::piped()).output().unwrap();
+    assert!(!r.status.success());
+    assert!(String::from_utf8_lossy(&r.stderr).contains("exists (-f to overwrite)"), "{r:?}");
+    assert!(aqr().args(&args[..5]).arg("-f").status().unwrap().success());
+    assert_eq!(fs::read(out.join("g")).unwrap(), b"g");
+    fs::remove_dir_all(&d).unwrap();
+}
+
 /// Cancelled once begun, by a message (`by_message`) or by standard input closed: stopped,
 /// nothing left of the archive.
 fn cancel(by_message: bool) {

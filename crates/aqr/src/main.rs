@@ -84,6 +84,11 @@
 //!   the archive is extracted into a directory of its name without its extension, beside it
 //!   (`foo.zip` of `foo/` into `foo/`, never `foo/foo/`). `-o` is where it goes instead of
 //!   beside it, a directory (with several archives too).
+//! - `--into DIR` (as the frontends' "Extract to…" extracts): the entries at the top of every
+//!   archive into `DIR` as it is, beside what is there (`DIR` made where it is not, its metadata
+//!   left as it is where it is); where something there would be replaced, the frontend is asked
+//!   of `DIR` once (else an error, but with `-f`). An archive of a single file is written into
+//!   `DIR` under the archive's name without its extension.
 //! - `-K` (`--test`): each archive decoded as `-d` does, but nothing written (its checksums checked); and
 //!   where it has mirror blocks (or with `-v`), told how far it conforms to the archival profile
 //!   and how many of its blocks are mirrored ([`tell_archival`]).
@@ -456,6 +461,9 @@ Output:
       --auto-dir        decompressing, a single entry at an archive's top beside it,
                         else a directory of its name without its extension beside it
                         (-o: in that directory instead of beside it)
+      --into DIR        decompressing, the entries at the top of every archive into DIR
+                        as it is, beside what is there (asked of first where a file there
+                        would be replaced; -f not to ask)
   -f, --force           overwrite outputs
       --rm              remove the inputs once archived, or archives once extracted
                         (what changed meanwhile kept, as directories not left empty)

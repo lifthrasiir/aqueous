@@ -396,6 +396,14 @@ Decompressing, extract a single entry at the top of an archive beside it, else i
 directory of the archive's name without its extension beside it;
 .Fl o
 is where it goes instead of beside it.
+.It Fl -into Ar dir
+Decompressing, extract the entries at the top of every archive into
+.Ar dir
+as it is, beside what is there (made where it is not); an archive of a single file is
+written into it under the archive's name without its extension.
+Where a file there would be replaced, it is an error, but with
+.Fl f
+(a frontend is asked).
 .It Fl f , Fl -force
 Overwrite outputs.
 .It Fl -rm

@@ -54,8 +54,10 @@ pub enum Place<'a> {
     /// before); the root's metadata its.
     Own(&'a Path),
     /// Into a directory as it is, beside what is there: made where it is not (the root's
-    /// metadata its then). The current one where empty.
-    Into(&'a Path),
+    /// metadata its then). The current one where empty. Where something there would be
+    /// replaced (but where forced), the ask, where given, is asked of the directory once:
+    /// written over, or the output skipped; else (or where it fails) an error.
+    Into(&'a Path, Option<&'a Ask<'a>>),
     /// A single entry at the top into `base` as it is, where nothing is there of its name or that
     /// is `own`'s; else into `own`, a directory of the archive's own. `ask` is asked of what is
     /// there.
@@ -296,14 +298,14 @@ impl<'a> Extractor<'a> {
     ) -> Result<Self, String> {
         let (top, ours) = match place {
             // (made as something goes there)
-            Place::Into(dir) if sel.is_some() => (Some(dir.to_owned()), false),
+            Place::Into(dir, _) if sel.is_some() => (Some(dir.to_owned()), false),
             _ if sel.is_some() => return Err("paths selected of an archive extracted, not into a directory".into()),
             Place::Own(out) => {
                 own_dir(out, force)?;
                 (Some(out.to_owned()), true)
             }
-            Place::Into(dir) if dir.as_os_str().is_empty() || dir.is_dir() => (Some(dir.to_owned()), false),
-            Place::Into(dir) => {
+            Place::Into(dir, _) if dir.as_os_str().is_empty() || dir.is_dir() => (Some(dir.to_owned()), false),
+            Place::Into(dir, _) => {
                 fs::create_dir_all(dir).map_err(|e| err(dir, e))?;
                 (Some(dir.to_owned()), true)
             }
@@ -311,7 +313,7 @@ impl<'a> Extractor<'a> {
         };
         // (of where the entries go, or beside it: decided before any name is mapped)
         let folding = Folding::of(match place {
-            Place::Own(d) | Place::Into(d) | Place::Auto { base: d, .. } => d,
+            Place::Own(d) | Place::Into(d, _) | Place::Auto { base: d, .. } => d,
         });
         Ok(Extractor {
             place,
@@ -386,7 +388,7 @@ impl<'a> Extractor<'a> {
             }
         }
         let top = s.top.clone().unwrap();
-        let force = self.force.load(Relaxed);
+        let mut force = self.force.load(Relaxed);
         // the entries of names the file system takes as an earlier one's, not made (nor what is
         // under them)
         let (folding, short) = *s.folding.get_or_insert_with(|| Folding::of(&top));
@@ -496,6 +498,21 @@ impl<'a> Extractor<'a> {
                 }
             }
             let path = s.paths[i].clone();
+            // (of what is there, the directory asked of once: written over, or skipped)
+            if let Place::Into(dir, Some(ask)) = self.place
+                && !force
+                && s.made[i].is_none()
+                && fs::symlink_metadata(&path).is_ok_and(|m| !(m.is_dir() && kind == Kind::Dir))
+            {
+                match ask(dir) {
+                    Ok(Some(true)) => {
+                        force = true;
+                        self.force.store(true, Relaxed);
+                    }
+                    Ok(_) => return Err(self.skip()),
+                    Err(_) => return Err(format!("{} exists (-f to overwrite)", path.display())),
+                }
+            }
             // told again: a file of the content it had kept as it is (now in a link group)
             if let (Some(Kind::File), EntryNode::File(c)) = (s.made[i], &e.node)
                 && s.content[i] == Some(*c)

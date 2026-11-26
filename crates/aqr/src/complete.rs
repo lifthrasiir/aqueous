@@ -126,6 +126,7 @@ pub const OPTIONS: &[Opt] = &[
     opt(Some('o'), Some("output"), Value::File, "write to OUTPUT (- standard output)"),
     many(Some('C'), Some("directory"), Value::Dir, "the inputs after it in DIR; extract into DIR"),
     opt(None, Some("auto-dir"), Value::None, "extract beside the archive, into a directory where needed"),
+    opt(None, Some("into"), Value::Dir, "extract every archive's top into DIR as it is"),
     opt(Some('f'), Some("force"), Value::None, "overwrite outputs"),
     opt(None, Some("rm"), Value::None, "remove the inputs once archived, or archives once extracted"),
     many(None, Some("run-before"), Value::Text, "run CMD by the shell before each archive is written"),

@@ -30,11 +30,13 @@ fn decompress_each(a: &Args) -> Result<(), String> {
             false => named.map(|n| a.dir.join(n.file_name().unwrap())),
         };
         let output = a.output.as_ref().map(|o| a.dir.join(o));
+        let into = a.into.as_ref().map(|o| a.dir.join(o));
         let to = match (named, &output, a.auto_dir) {
             _ if a.stdout && foreign.is_some() => {
                 return Err(format!("{}: -o - (standard output) of Aqueous archives alone", input.display()));
             }
             _ if a.stdout => To { named: PathBuf::from("-"), base: a.dir.clone() },
+            (Some(n), ..) if let Some(i) = &into => To { named: i.join(n.file_name().unwrap()), base: i.clone() },
             (Some(n), Some(o), true) => To { named: o.join(n.file_name().unwrap()), base: o.clone() },
             (Some(n), None, true) => To { base: n.parent().unwrap_or(Path::new("")).to_owned(), named: n },
             (_, Some(o), false) => To { named: o.clone(), base: o.clone() },
@@ -65,9 +67,9 @@ fn decompress_each(a: &Args) -> Result<(), String> {
 }
 
 /// Where an archive is decoded: `named`, its name without its extension beside it (or in
-/// `-o`, with `--auto-dir`), or `-o`; `base`, the directory that it is extracted into as it is
-/// (`-o`, or the current directory where empty), or (with `--auto-dir`) that its single entry
-/// at the top goes into.
+/// `-o`, with `--auto-dir`, or in `--into`'s), or `-o`; `base`, the directory that it is
+/// extracted into as it is (`-o`, `--into`, or the current directory where empty), or (with
+/// `--auto-dir`) that its single entry at the top goes into.
 pub(crate) struct To {
     pub(crate) named: PathBuf,
     base: PathBuf,
@@ -83,10 +85,14 @@ impl To {
         ask: &'p extract::Ask<'p>,
     ) -> Result<Option<(extract::Place<'p>, bool)>, String> {
         Ok(Some(match (a.auto_dir, foreign) {
+            // (asked of as something there would be replaced)
+            _ if a.into.is_some() => (extract::Place::Into(&self.base, Some(ask)), a.force),
             // (some paths: into a directory as it is, made where something goes there)
-            _ if a.select.is_some() => (extract::Place::Into(if foreign { &self.base } else { &self.named }), a.force),
+            _ if a.select.is_some() => {
+                (extract::Place::Into(if foreign { &self.base } else { &self.named }, None), a.force)
+            }
             (true, _) => (extract::Place::Auto { base: &self.base, own: &self.named, ask }, a.force),
-            (false, true) => (extract::Place::Into(&self.base), a.force),
+            (false, true) => (extract::Place::Into(&self.base, None), a.force),
             (false, false) => match output(a, &self.named)? {
                 Some(f) => (extract::Place::Own(&self.named), f),
                 None => return Ok(None),
@@ -112,7 +118,13 @@ impl To {
                 None => return Ok(None),
             },
             (false, false) => match output(a, &self.named)? {
-                Some(f) => (None, f),
+                Some(f) => {
+                    // (in `--into`'s directory, made where it is not)
+                    if a.into.is_some() {
+                        fs::create_dir_all(&self.base).map_err(|e| format!("{}: {e}", self.base.display()))?;
+                    }
+                    (None, f)
+                }
                 None => return Ok(None),
             },
         }))
@@ -132,8 +144,8 @@ impl To {
 pub(crate) fn shown<'p>(p: &extract::Place<'p>) -> Option<&'p Path> {
     match *p {
         extract::Place::Own(o) => Some(o),
-        extract::Place::Into(d) if d.as_os_str().is_empty() => Some(Path::new(".")),
-        extract::Place::Into(d) => Some(d),
+        extract::Place::Into(d, _) if d.as_os_str().is_empty() => Some(Path::new(".")),
+        extract::Place::Into(d, _) => Some(d),
         extract::Place::Auto { .. } => None,
     }
 }
