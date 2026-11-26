@@ -62,7 +62,7 @@ aqr-log로 바뀌었고 `benchmarks/primes`가 −9.2 MB.) 프로토타입(zstd 
 
 ## 4. 남은 일
 
-(CLAUDE.md와 `codecs/aqr-log/README.md`가 이 절을 가리킨다.)
+(`docs/crates.md`와 `codecs/aqr-log/README.md`가 이 절을 가리킨다.)
 
 - **IPv6**, 그리고 주소 뒤의 포트 같은 이웃 정수와의 결합. aqr-xsv의 열에 든 IP는 아직 글자다.
 - **aqr-xsv에 열의 단위(gcd)와 주소**: SMARD처럼 4분의 1 단위 값이면 log가 훨씬 작아(load_2 535,732 → 389,698)

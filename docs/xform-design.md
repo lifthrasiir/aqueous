@@ -11,7 +11,7 @@ Aqueous의 WebAssembly 기반 전처리기(RarVM의 현대판)의 설계이다. 
 - **[제안]** 제안되었으나 아직 검토하지 않은 것
 - **[구현]** 명세와 코드에 들어간 것(근거와 노트만 남긴다)
 
-크레이트의 배치와 역할은 `CLAUDE.md`와 각 크레이트의 README가, 재압축기의 포맷은 각자의 `FORMAT.md`가 적는다. 끝낸 일의
+크레이트의 배치와 역할은 `docs/crates.md`와 각 크레이트의 README가, 재압축기의 포맷은 각자의 `FORMAT.md`가 적는다. 끝낸 일의
 경과는 git 이력에 있다.
 
 ---
@@ -218,7 +218,7 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 
 `apply`의 출력 k개, formula 블록의 출력 여럿, 모듈의 출력별 메모리는 명세 "Formula data", "Formula evaluation",
 "Module execution"에 있다. 쓰는 곳은 차분 이미지 세트(`png-set`)와 클래스별 패치(`Formula::merge_classes`)이다.
-남은 것: 엔트리를 꺼낼 때 의존 폐포의 바이트 상한(랜덤 액세스; `CLAUDE.md`의 Project notes), 출력별 진입점(§4.3의 부분 디코드와 같은 장치).
+남은 것: 엔트리를 꺼낼 때 의존 폐포의 바이트 상한(랜덤 액세스; `docs/crates.md`의 "Archive features in brief"), 출력별 진입점(§4.3의 부분 디코드와 같은 장치).
 
 > **근거: 차분 이미지 세트(2026-10-26).** 같은 그림의 레이어를 켜고 끈 변형 PNG(Clip Studio Paint, RGBA 683.7 MB,
 > 같은 크기 그룹이 13–88장)에서 부모와 다른 픽셀은 4–18%이지만 그 차이가 행의 74–91%에 걸친다.
@@ -295,7 +295,7 @@ Wasm 3.0 core를 deterministic profile로 실행하고, 3.0에서 더해진 기�
 ### 5.3 데이터 전달과 ABI [구현]
 
 메모리 import(작업, 파라미터, 리소스, 입력, 출력), 전체형과 부분형, 창과 ring, `request`/`release`/`commit`/
-`heartbeat`/`log`는 명세 "Module execution"에 있다. 어느 모듈이 부분형인지는 `CLAUDE.md`의 Modules와
+`heartbeat`/`log`는 명세 "Module execution"에 있다. 어느 모듈이 부분형인지는 `docs/modules.md`와
 `crates/aqr-modules/src/bin`이 적는다. 창은 모듈이 `entry! { part fn … windows(…) }`로 선언하고 aqr-ld가 import의
 maximum으로 바꾼다.
 
@@ -546,7 +546,7 @@ module 블록과 resource 블록은 명세에 있다. `apply`는 `(모듈, 리�
    시간을 추정해(rms 9.3%, 14.2%) 입력 크기 × 10 ns/B 안에 들도록 다시 만들 zlib 스트림을 고르고, 예산에 넣는 *순서*
    (아끼는 바이트 / 시간)가 예산만큼 중요했다. 선언한다면 ns가 아니라 기계 독립 단위여야 한다.
 6. **표준 모듈과 리소스를 아카이브에서 생략할지.** 모듈은 명세의 Modules Registry와 shorthand block으로 생략할 수
-   있게 되었다(명세 "Registered blocks"). 남은 것: 내장 사전의 데이터와 해시(명세의 Issue, `CLAUDE.md`의 계획), 리소스의
+   있게 되었다(명세 "Registered blocks"). 남은 것: 내장 사전의 데이터와 해시(명세의 Issue, `docs/modules.md`의 Planned), 리소스의
    생략, 적합성 수준 1(§5.7)을 registry의 어느 판으로 정할지.
 7. **중첩 깊이와 노드망 크기의 상한.** 포맷마다 따로 정하고 있고(aqr-jpeg, aqr-psd 깊이 3, aqr-compress의 깊이),
    서로 다른 포맷의 중첩을 합산하는 장치와 import와 `patch` 사슬의 길이 상한이 없다. 모듈 *안*의 의존 사슬(aqr-git의

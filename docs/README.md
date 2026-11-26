@@ -3,6 +3,7 @@ Most of them are currently written in Korean, sorry. They keep what is useful no
 in the spec or the crates' READMEs, final measurements, rejected approaches, and what is left;
 the history of finished work is in git.
 
+- `crates.md`, `modules.md` (English): what each crate holds; the rules for code a module links (CLAUDE.md's details).
 - `glossary.md` (English): words of the codebase not obvious at a glance, informally.
 - `10gb-todo.md`, `bench-scenarios.md`, `cli-todo.md`, `edge-tests-todo.md` (English),
   `macos-app-todo.md`: what is left for the 10 GB benchmark, other benchmark scenarios, the

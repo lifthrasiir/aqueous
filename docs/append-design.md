@@ -36,14 +36,14 @@ aqr-compress의 `Output`·`Stop`·`Appending`, `crates/aqr-archive/src/rewrite.r
 - **Windows**: 파일 잠금(`File::try_lock`)과 콘솔 닫힘의 처리는 type check만 하고 실행해 보지 않았다.
 - **10gb에서 commit의 비용과 멈출 때의 지연**은 Mac에서 재야 한다(이 머신에서 16 MB 시험 디렉터리를
   `-T 1 -B 100K -S 1`로 만들면 SIGTERM부터 끝까지 50 ms 안에 끝났다).
-- **internal import**(블록 58–5F)가 디코더에 없다(CLAUDE.md의 Project notes). 이것이 없으면 옮기거나 이름을
+- **internal import**(블록 58–5F)가 디코더에 없다(`docs/crates.md`). 이것이 없으면 옮기거나 이름을
   바꾼 파일, mtime만 바뀐 파일의 내용을 다시 저장한다. 증분 백업을 실용적으로 만드는 다음 작업.
 - **암호화한 증분 백업**: 별도 설계가 필요하다. 증분마다 따로 암호화한 overlay 아카이브의 사슬이나, commit마다
   새 `payload_nonce`로 STREAM을 잇는 spec 확장이 후보.
 - **시간으로 닫는 segment**(예: 10분): `-S`를 크기로 줄이면 비용이 크므로(`recovery-design.md` §5.1) 나중에
   고려한다.
 - **segment마다 드는 고정 비용**(모듈, 리소스, 사전). 작은 증분이 잦으면 지배한다. 등록된 모듈의 shorthand
-  block과 계획 중인 내장 사전(CLAUDE.md의 Modules 절)이 줄인다.
+  block과 계획 중인 내장 사전(`docs/modules.md`)이 줄인다.
 - **`-I`의 `--at`**과 `--history`의 엔트리 수·크기는 아직 없다(저널링 절). `--merge-segments` 같은 segment 합치기도
   필요해지면 따로.
 - 시험 가운데 비어 있을 수 있는 것: 각 쓰기 사이에서 죽이는 fault injection으로 아래 표의 모든 행을 확인하는

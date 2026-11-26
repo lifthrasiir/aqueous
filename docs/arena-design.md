@@ -36,7 +36,7 @@
 - 인코더는 계획을 Apply의 한도로 선언한다. 디코더가 그만큼 주지 못하면 시작 전에 resource failure이고, 시작했으면 한도 안의
   `memory.grow`는 성공한다(spec "Module execution"). 모듈이 계획을 어기면(구멍, 순서를 어긴 해제) 한도에서 막혀 실패한다.
   그래서 모듈은 계획만큼의 메모리가 늘 있다고 가정한다. 단위는 페이지(64 KiB).
-- 클래스마다 동시에 도는 태스크는 최대 그 클래스의 slots개다(spec "Tasks"; `aqr_task_slots`, CLAUDE.md의 Modules 절). 호스트의
+- 클래스마다 동시에 도는 태스크는 최대 그 클래스의 slots개다(spec "Tasks"; `aqr_task_slots`, `docs/modules.md`). 호스트의
   스레드 수는 상한에 들지 않는다. 디코더는 동시성을 1부터 slots 사이에서 고른다(`choose_concurrency`, `-M`이면 낮춘다).
   파이프라인은 단계가 slots를 넘으면 교착(잘못된 아카이브)이다.
 

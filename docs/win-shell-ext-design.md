@@ -151,7 +151,7 @@ PIDL). PIDL은 즐겨찾기, 최근 항목, 점프 목록에 오래 남으므로
   출력은 임시 파일로 spill한다. 다만 평가하는 동안 leaf 전체가 메모리에 한 번 올라온다. 근본 해결은
   aqr-archive에 트리 아카이브 content를 흘려 쓰는 경로를 두는 것이다(`write_file`의 `eval::run`식. 단일
   파일 아카이브는 이미 흘려 쓴다).
-- **leaf 하나의 비용**: 작은 파일 하나에 큰 solid leaf 전체를 풀어야 할 수 있다. CLAUDE.md의 남은 과제
+- **leaf 하나의 비용**: 작은 파일 하나에 큰 solid leaf 전체를 풀어야 할 수 있다. `docs/crates.md`의 남은 과제
   "top-level 엔트리 의존 closure의 바이트 상한"이 여기서 체감 지연으로 드러난다.
 - **임시 파일**: `Materialize`(§6.3)는 `%LOCALAPPDATA%\Aqueous\Open\<경로와 identity의 해시>\<아카이브 안
   경로>`에 `.part`로 쓰고 이름을 바꾼다. 수정 시각은 항목의 것이고 읽기 전용 특성을 붙인다(임시 사본을

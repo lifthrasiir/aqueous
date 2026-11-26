@@ -117,7 +117,7 @@ aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭
 
 - **GIF.** [완료] aqr-gif. Precomp(giflib 인코더를 다시 돌려 다른 곳만 적는다)와 paq8px(clear 위치 하나와 최장 일치가 아닌 위치 목록, 다르면 포기)와 달리, 화소가 주어졌을 때 코드열을 최장 일치에 견주어 부호화하므로 어떤 코드열이든 받는다. 본 인코더는 모두 최장 일치에 사전이 가득 차면 clear였다. 남은 것은 그 README의 Status이다.
   - flexiGIF 2018.11a의 최적화 옵션(clear 시점, 탐욕 대 lookahead, 첫 clear 생략, 사전 4093 제한)이 만드는 코드열도 레코드가 받지만, 최적화된 파일로 비용을 재 보지는 않았다.
-- **camera RAW.** [채택] aqr-jpeg의 SOF3(`jpeg-lossless-recons`). 남은 것은 aqr-jpeg README와 CLAUDE.md의 Left. 다른 컨테이너(NEF, ARW2, RW2, ORF…)는 아직이다(rawspeed의 디코더 목록이 지도).
+- **camera RAW.** [채택] aqr-jpeg의 SOF3(`jpeg-lossless-recons`). 남은 것은 aqr-jpeg README. 다른 컨테이너(NEF, ARW2, RW2, ORF…)는 아직이다(rawspeed의 디코더 목록이 지도).
 - **BC7, BC6H, KTX**: [채택] BC7은 aqr-tex의 `bc7-recons`(README의 BC7). BC6H와 KTX는 aqr-tex README를 본다.
 - **래스터 모델(aqr-raw).** fNBLI(GPL-3.0, 실행 파일만)는 CLIC2021 585장에서 PNG 대비 −29.8%를 압축 94.8 MB/s, 해제 149 MB/s(한 스레드)로 낸다. 약 100 MB/s 목표가 비현실적이지 않다는 근거이다. QLIC(https://github.com/OzzyMitchell/QLIC, Apache-2.0)과 같은 계열인 aqr-raw에서 값싸게 더 얻을 후보:
   - 이미지마다 색 변환을 고른다(G 델타, B 델타, 가중 블렌드 등). 인코더 시간만 들고 디코더는 한 번만 분기한다.
