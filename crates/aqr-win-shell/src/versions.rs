@@ -76,7 +76,7 @@ impl Versions {
             return Ok(0);
         }
         let mut index = index;
-        if self.key.at.is_none() {
+        if client::appendable(&self.key) {
             // SAFETY: a menu of the shell's
             unsafe {
                 let files = IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok();
@@ -301,7 +301,7 @@ impl IContextMenu_Impl for Versions_Impl {
 impl Versions {
     /// The files on the clipboard (of the file system's) added to the folder.
     fn paste(&self, hwnd: HWND) -> windows::core::Result<()> {
-        if self.key.at.is_some() {
+        if !client::appendable(&self.key) {
             return Err(E_INVALIDARG.into());
         }
         // SAFETY: the clipboard's data object

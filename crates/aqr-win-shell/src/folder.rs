@@ -100,6 +100,8 @@ pub struct Folder {
     /// The entries listed, as the server tells them, by name; and whether of what `-t -v` tells
     /// too: for the columns ([`crate::columns`]) of no server's call each.
     listed: Mutex<(std::collections::HashMap<String, serde_json::Value>, bool)>,
+    /// Its columns: of what the archive's format has, asked for once.
+    columns: std::sync::OnceLock<Vec<&'static columns::Column>>,
     _counted: crate::Counted,
 }
 
@@ -176,7 +178,13 @@ fn strret(s: &str) -> windows::core::Result<STRRET> {
 
 impl Folder {
     pub fn new(clsid: GUID) -> Folder {
-        Folder { clsid, at: RwLock::new(None), listed: Mutex::default(), _counted: crate::Counted::new() }
+        Folder {
+            clsid,
+            at: RwLock::new(None),
+            listed: Mutex::default(),
+            columns: std::sync::OnceLock::new(),
+            _counted: crate::Counted::new(),
+        }
     }
 
     /// Where it is, cloned: its archive, its path in it, its ID list.
@@ -267,6 +275,14 @@ impl Folder {
             }
             false => client::stat(archive.key(), &joined(&dir, &item.name), false).ok(),
         }
+    }
+
+    /// Its columns ([`columns::of_archive`]; all, where the archive does not open).
+    fn columns(&self) -> &[&'static columns::Column] {
+        self.columns.get_or_init(|| {
+            let info = self.at().ok().and_then(|(a, _)| client::info(a.key()).ok());
+            info.map_or_else(|| COLUMNS.iter().collect(), |i| columns::of_archive(&i))
+        })
     }
 
     /// Column `what` of `item`.
@@ -488,7 +504,7 @@ impl IShellFolder_Impl for Folder_Impl {
             };
             let col = (lparam.0 & 0xffff) as usize;
             let canonical = lparam.0 as u32 & 0x1000_0000 != 0; // SHCIDS_CANONICALONLY
-            let what = COLUMNS.get(col).map_or(What::Name, |c| c.what);
+            let what = self.columns().get(col).map_or(What::Name, |c| c.what);
             let n = compare(&x, &y, canonical, |a, b| match what {
                 What::Name => 0,
                 w => self.cell(a, w).compare(&self.cell(b, w)),
@@ -516,7 +532,7 @@ impl IShellFolder_Impl for Folder_Impl {
                 if *riid == windows::Win32::System::Ole::IDropTarget::IID {
                     let at = self.at.read().unwrap();
                     let at = at.as_ref().ok_or(windows::core::Error::from(E_FAIL))?;
-                    if at.archive.key().at.is_some() {
+                    if !client::appendable(at.archive.key()) {
                         return Err(E_NOINTERFACE.into());
                     }
                     let t = crate::drop::target(at.archive.path().to_owned(), at.dir.clone(), hwnd);
@@ -570,8 +586,8 @@ impl IShellFolder_Impl for Folder_Impl {
             if inout.is_null() {
                 return Err(E_POINTER.into());
             }
-            // (folders take files dropped, but of a journal point's)
-            let drops = self.at().is_ok_and(|(a, _)| a.key().at.is_none());
+            // (folders take files dropped, but of a journal point's and of another format's)
+            let drops = self.at().is_ok_and(|(a, _)| client::appendable(a.key()));
             let mut all = FOLDER_ATTR | HASSUBFOLDER | READONLY | if drops { DROPTARGET } else { 0 };
             if cidl > 0 {
                 all = u32::MAX;
@@ -619,7 +635,7 @@ impl IShellFolder_Impl for Folder_Impl {
                     && let Some(item) = pidl::first(*apidl).filter(Item::is_dir)
                 {
                     let (archive, dir) = self.at()?;
-                    if archive.key().at.is_some() {
+                    if !client::appendable(archive.key()) {
                         return Err(E_NOINTERFACE.into());
                     }
                     let t = crate::drop::target(archive.path().to_owned(), joined(&dir, &item.name), hwnd);
@@ -814,7 +830,7 @@ impl IShellFolder2_Impl for Folder_Impl {
     }
 
     fn GetDefaultColumnState(&self, col: u32) -> windows::core::Result<SHCOLSTATE> {
-        COLUMNS.get(col as usize).map(|c| c.state).ok_or(E_INVALIDARG.into())
+        self.columns().get(col as usize).map(|c| c.state).ok_or(E_INVALIDARG.into())
     }
 
     fn GetDetailsEx(&self, pidl: *const ITEMIDLIST, key: *const PROPERTYKEY) -> windows::core::Result<VARIANT> {
@@ -833,7 +849,7 @@ impl IShellFolder2_Impl for Folder_Impl {
 
     fn GetDetailsOf(&self, pidl: *const ITEMIDLIST, col: u32, details: *mut SHELLDETAILS) -> windows::core::Result<()> {
         guard("GetDetailsOf", || {
-            let c = COLUMNS.get(col as usize).ok_or(windows::core::Error::from(E_INVALIDARG))?;
+            let c = *self.columns().get(col as usize).ok_or(windows::core::Error::from(E_INVALIDARG))?;
             if details.is_null() {
                 return Err(E_POINTER.into());
             }
@@ -856,7 +872,7 @@ impl IShellFolder2_Impl for Folder_Impl {
     }
 
     fn MapColumnToSCID(&self, col: u32, key: *mut PROPERTYKEY) -> windows::core::Result<()> {
-        let c = COLUMNS.get(col as usize).ok_or(windows::core::Error::from(E_INVALIDARG))?;
+        let c = *self.columns().get(col as usize).ok_or(windows::core::Error::from(E_INVALIDARG))?;
         if key.is_null() {
             return Err(E_POINTER.into());
         }

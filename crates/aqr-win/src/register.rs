@@ -248,6 +248,19 @@ pub fn register() -> Result<(), String> {
     for (ext, icon, name) in FORMATS {
         let (ext, progid) = (format!(".{ext}"), format!("Aqueous.{ext}"));
         class(&progid, name, icon)?;
+        // (browsed as a folder too, where the shell extension is: where Aqueous opens the type,
+        // the user's choice or none else's)
+        match dll.is_file() {
+            true => {
+                set(&format!(r"{progid}\CLSID"), None, &crate::drop::braced(&FOLDER))?;
+                set(&format!(r"{progid}\shell"), None, "open")?;
+                set(&format!(r"{progid}\shell\open\command"), Some("DelegateExecute"), EXECUTE_FOLDER)?;
+            }
+            false => {
+                delete(&classes(&format!(r"{progid}\CLSID")))?;
+                delete(&classes(&format!(r"{progid}\shell\open")))?;
+            }
+        }
         set(&format!(r"{ext}\OpenWithProgids"), Some(&progid), "")?;
         if !has_default(&ext) {
             set(&ext, None, &progid)?;

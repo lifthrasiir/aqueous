@@ -509,6 +509,17 @@ pub fn read_all(key: &Key, at: &str, max: u64) -> windows::core::Result<Vec<u8>>
     })
 }
 
+/// What the server answered as it opened archive `key` (`aqr --serve`'s `open`: its `fields`).
+pub fn info(key: &Key) -> windows::core::Result<Value> {
+    with(key, |a| json(a, "Info", &[]))
+}
+
+/// Whether files may be added to archive `key` (`aqr -a`): an Aqueous archive's, all of it (not
+/// as of a journal point; nor of another format, which the server tells of its `fields`).
+pub fn appendable(key: &Key) -> bool {
+    key.at.is_none() && info(key).is_ok_and(|i| i.get("fields").is_none())
+}
+
 /// The journal points of archive `key` (its named versions): a JSON array of `aqr --serve`'s.
 pub fn journal(key: &Key) -> windows::core::Result<Vec<Value>> {
     with(key, |a| Ok(json(a, "Journal", &[])?.as_array().cloned().unwrap_or_default()))

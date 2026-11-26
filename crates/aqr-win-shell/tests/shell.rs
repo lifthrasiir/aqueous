@@ -35,6 +35,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Shell::BHID_SFUIObject;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::Common::SHELLDETAILS;
+use windows::Win32::UI::Shell::IPersistFolder;
 use windows::Win32::UI::Shell::{
     ASSOCF_NONE, ASSOCSTR_SHELLEXTENSION, CMINVOKECOMMANDINFO, IContextMenu, IQueryAssociations,
     IShellItemImageFactory, IThumbnailProvider, SIIGBF_THUMBNAILONLY,
@@ -893,6 +894,46 @@ fn browsed() {
             _ = windows::Win32::System::Ole::OleSetClipboard(None);
             let told = std::fs::read_to_string(&opened).unwrap();
             assert_eq!(told.trim(), format!("run add {}  {}", archive.display(), new.display()));
+        }
+        // archives of other formats: the folder of a ZIP's and a tar.gz's file (as Explorer makes
+        // it where Aqueous opens the type: not registered here, not to take `.zip` of the user's),
+        // their entries and a file read, only the columns their formats have, nothing added
+        for (name, columns) in [("o.zip", 10), ("o.tar.gz", 9)] {
+            let o = Command::new(bin.join("aqr.exe")).current_dir(&d).args(["-q", "-o", name, "t"]).output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            // SAFETY: COM calls of the shell's objects
+            unsafe {
+                let p: IPersistFolder = CoCreateInstance(&TEST_FOLDER, None, CLSCTX_ALL).unwrap();
+                let at = windows::Win32::UI::Shell::ILCreateFromPathW(&HSTRING::from(d.join(name).as_os_str()));
+                p.Initialize(at).unwrap();
+                windows::Win32::UI::Shell::ILFree(Some(at));
+                let f: IShellFolder2 = p.cast().unwrap();
+                let n = (0..40).take_while(|&k| {
+                    let mut sd = SHELLDETAILS::default();
+                    f.GetDetailsOf(std::ptr::null(), k, &mut sd).is_ok()
+                });
+                assert_eq!(n.count(), columns, "{name}");
+                let mut e = None;
+                assert!(f.EnumObjects(HWND::default(), 0x20 | 0x40, &mut e).is_ok());
+                let mut got = [std::ptr::null_mut()];
+                let mut fetched = 0;
+                assert!(e.unwrap().Next(&mut got, Some(&mut fetched)).is_ok() && fetched == 1);
+                windows::Win32::UI::Shell::ILFree(Some(got[0]));
+                let mut a = [std::ptr::null_mut()];
+                f.ParseDisplayName(
+                    HWND::default(),
+                    None,
+                    windows::core::w!("t/a.txt"),
+                    None,
+                    &mut a[0],
+                    std::ptr::null_mut(),
+                )
+                .unwrap();
+                let st: IStream = f.BindToObject(a[0], None).unwrap();
+                assert_eq!(read(&st), b"some text\n".repeat(100), "{name}");
+                windows::Win32::UI::Shell::ILFree(Some(a[0]));
+                assert!(f.CreateViewObject::<IDropTarget>(HWND::default()).is_err(), "{name}");
+            }
         }
         // the Versions tab of the archive file's Properties: its points newest first, read as it
         // is shown; Open (told: the archive as of the point), Extract (aqr-win's, told) and Name

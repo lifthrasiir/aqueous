@@ -128,6 +128,10 @@ pub fn add(file: &std::path::Path, dir: &str, paths: Vec<PathBuf>, hwnd: HWND) -
         return Ok(false);
     }
     let key = client::Key { path: file.to_owned(), at: None };
+    // (of another format: none)
+    if !client::appendable(&key) {
+        return Ok(false);
+    }
     let there: std::collections::HashSet<String> = client::list(&key, dir, false)
         .map(|l| l.iter().filter_map(|e| e["name"].as_str().map(str::to_lowercase)).collect())
         .unwrap_or_default();

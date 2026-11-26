@@ -54,7 +54,7 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   registering again.
 
 - Where `aqr-shell.dll` (crates/aqr-win-shell) is beside this program, `--register` registers
-  it too: a `.aqr` file double-clicked opens as a folder in Explorer (its class's `CLSID`, the
+  it too: a `.aqr` file (and one of the other formats Aqueous opens) double-clicked opens as a folder in Explorer (its class's `CLSID`, the
   verb `open` the shell's `ExecuteFolder`), "Extract here" staying a verb; and the "Versions"
   tab of a `.aqr` file's Properties (a property sheet handler of the library's), which runs
   `extract-version ARCHIVE #N` (point N extracted, asked for nothing) and `name-version`; and

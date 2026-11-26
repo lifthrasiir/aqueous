@@ -75,7 +75,9 @@ Explorer 또는 파일 대화상자를 연 아무 프로세스
   `shellex\PropertySheetHandlers\Aqueous`(§6.8). 넣기의 drop handler 클래스 `CLSID\{6a3e2f84-...}`와
   `shellex\DropHandler`(§6.9). 폴더 클래스의 `Attributes`에는 `SFGAO_DROPTARGET`도 둔다.
 - 서버 클래스 `CLSID\{c6b7e992-...}`의 `LocalServer32 = "aqr-win.exe" --serve`.
-- 다른 형식(`.zip`, `.7z`, ...)은 다루지 않는다(§9). `.zip`은 Windows의 ZIP 폴더와 부딪친다.
+- 다른 형식(§6.10)의 ProgID(`Aqueous.zip`, `Aqueous.7z`, ...)에도 같은 `CLSID`와 `open` 동사를 둔다.
+  확장자의 기본 ProgID는 다른 프로그램이 없을 때만 우리 것으로 둔다(지금까지와 같다). 그래서 `.zip`은
+  사용자가 Aqueous를 고르기 전까지 Windows의 ZIP 폴더로 남는다.
 
 ### 3.2 PIDL
 
@@ -334,6 +336,21 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
   보여 준다(`-a`가 nonce를 다시 쓰지 않도록, docs/append-design.md).
 - 넣은 뒤에는 아카이브 파일이 바뀌므로 감시(§6.5)가 보기를 새로 고친다.
 
+### 6.10 다른 형식
+
+- aqr-unpack이 읽는 것(ZIP, 7z, RAR, ALZ, EGG, tar와 그 압축기, `.gz` 같은 단일 파일)을 같은 폴더
+  클래스가 보여 준다. 서버(`aqr --serve`)가 이름으로 형식을 알아보고 aqr-unpack으로 연다.
+  - 목록: ZIP, 7z, RAR, ALZ, EGG는 목록(central directory, 헤더)만 읽는다. 크기는 aqr-unpack의
+    `Opened::sizes`. tar는 목록이 없으므로 열 때 한 번 다 읽는다.
+  - 읽기: 파일 하나만 푼다(`Opened::unpack_selected`). tar는 처음 읽을 때 전부 풀어 하나의 leaf로
+    둔다. 단일 파일은 그 한 파일의 아카이브처럼 보이고 이름은 압축기 확장자를 뗀 것이다.
+  - 암호화(ZIP, 7z): `.aqr`처럼 서버의 대화상자가 암호를 묻는다.
+- 열(column): `open`의 답에 형식이 가질 수 있는 필드(`fields`)가 오고, 폴더는 그 열만 보인다. 이름,
+  형식, 크기는 언제나 있다. 데이터, 오버헤드, 비율, 세그먼트(블록에 대한 `-t -v`), 주석, macOS 플래그,
+  `-t`의 플래그는 `.aqr`에만 있다.
+- 넣기, 판(배경 메뉴의 붙여넣기와 버전, 명령 모음의 버전), 속성의 버전 탭은 없다(`client::appendable`:
+  `fields`가 없는 아카이브만).
+
 ## 7. 암호와 손상
 
 - **암호화된 아카이브**
@@ -372,7 +389,7 @@ u16 cb | u32 magic 'AQRI' | u8 version (1) | u8 kind (dir, file, link, other, jo
 8. ~~설치 프로그램과 릴리스~~(§12).
 9. 그 뒤:
    - 판(journal의 지점, §6.8): 배경 메뉴, 속성 탭, 도구 모음(Windows 10, 11에서 보이는지 확인)
-   - 다른 형식(aqr-unpack이 읽는 것)
+   - ~~다른 형식~~(§6.10). 남은 것: 다른 형식에 넣기(aqr-pack으로 다시 쓰기)
    - ~~넣기~~(§6.9). 남은 것: 가상 파일(다른 아카이브, 메일 첨부)의 넣기, 지우기(`aqr --delete`)와
      이름 바꾸기(`--move`)
    - 손상된 아카이브의 salvage

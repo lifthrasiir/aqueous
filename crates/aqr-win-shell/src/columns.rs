@@ -56,6 +56,39 @@ pub enum What {
     Target,
 }
 
+impl What {
+    /// The field of the server's it is of (as `open` tells an archive's `fields`), where it is not
+    /// of every archive's (its name, type and size).
+    pub fn field(self) -> Option<&'static str> {
+        use What::*;
+        Some(match self {
+            Name | Type | Size => return None,
+            Modified => "modified",
+            Data => "data",
+            Overhead => "overhead",
+            Ratio => "ratio",
+            Segment => "segment",
+            Owner => "owner",
+            Mode => "mode",
+            Attributes => "attributes",
+            Mac => "mac",
+            Flags => "flags",
+            Created => "created",
+            Accessed => "accessed",
+            Changed => "changed",
+            Comment => "comment",
+            Target => "target",
+        })
+    }
+}
+
+/// The columns of an archive that `info` (what the server answered as it opened it) tells:
+/// those of the fields its format has (all, of an Aqueous archive: no `fields`).
+pub fn of_archive(info: &Value) -> Vec<&'static Column> {
+    let Some(fields) = info["fields"].as_array() else { return COLUMNS.iter().collect() };
+    COLUMNS.iter().filter(|c| c.what.field().is_none_or(|f| fields.iter().any(|g| g == f))).collect()
+}
+
 /// What a column takes of an entry: its item ID alone, what the server tells of it, or that and
 /// what `-t -v` tells (all of the archive's blocks read for it).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
