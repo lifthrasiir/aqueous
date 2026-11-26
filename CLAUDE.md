@@ -29,7 +29,9 @@ recompressors' code; native decoding is an optimization picked by hash.
   with a `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE.
 - `man/` — the manual pages, mdoc(7): `aqr.1` (every option of `--help`, a test of crates/aqr
   checks), `aqrsfx.5` (`.aqr/sfx/`), `aqrattributes.5` (`.aqr/attributes`). Update them with
-  what they describe. The site's `man/` is made of them in CI (`scripts/man2html.py OUT`, mandoc).
+  what they describe. The site's `man/` is made of them in CI (`scripts/man2html.py OUT`, mandoc);
+  `--single FILE` makes them one HTML file linked by fragments (for Windows). The Mac and Linux
+  release archives carry the pages themselves.
 - `site/` — the project site; pushes to `main` deploy it and the spec (under `/spec/`) to GitHub
   Pages (`.github/workflows/spec.yml`).
 - `scripts/` — helper scripts (Python uses the `.venv` at the root).

@@ -2,6 +2,7 @@
 """The manual pages (man/) as pages of the site, between its header and footer.
 
     scripts/man2html.py OUT
+    scripts/man2html.py --single FILE
 
 writes OUT/man/aqr.html, aqrsfx.html, aqrattributes.html and index.html (to aqr.html). Each is
 mandoc's HTML of the page (`mandoc -T html -O fragment`) inside site/index.html's head, header
@@ -11,10 +12,17 @@ and footer (their links made relative to man/), styled as the site is:
   `Nm aqr` and `Xr` to the pages here (git's to git-scm.com), the specification to ../spec/;
 - a table of the pages and of the sections of this one beside it, where there is room.
 
+--single writes all the pages into FILE alone (for Windows, which has no man(1)), linked by
+fragments: FILE shows aqr(1), FILE#aqrsfx.5 aqrsfx(5), FILE#aqr.1:o what aqr.html#o is, every id
+of a page taking its NAME.SECTION: before it. A page is shown by CSS (`:has(:target)`), with no
+script; a browser without `:has` shows them all, one after another. The site's links are made
+absolute, its icon a data: URL.
+
 The spec workflow (.github/workflows/spec.yml) runs it, so that nothing generated is committed.
 Needs mandoc; only the standard library.
 """
 
+import base64
 import html
 import os
 import re
@@ -26,6 +34,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The pages, in the order they are listed: (name, section).
 PAGES = [("aqr", 1), ("aqrsfx", 5), ("aqrattributes", 5)]
 OURS = {n for n, _ in PAGES}
+
+# Where the site is, for the links of --single.
+SITE = "https://lifthrasiir.github.io/aqueous/"
 
 # Pages of other projects linked where they are named.
 ELSEWHERE = {
@@ -102,6 +113,12 @@ CSS = """
 .manual table.Nm + br { display: none; }
 """
 
+# (--single: a page shown as targeted, or one of its ids; aqr(1) when nothing is)
+CSS_SINGLE = """
+.mpage:not(:target):not(:has(:target)) { display: none; }
+main:not(:has(:target)) .mpage.default { display: grid; }
+"""
+
 
 def mandoc(page):
     """mandoc's HTML of man/PAGE (its fragment)."""
@@ -149,16 +166,17 @@ def options(body):
     return out
 
 
-def link_options(body, own, aqr):
-    """Each `Fl` out of its own `.It`, linked to where it is told: of this page, else of aqr(1)."""
+def link_options(body, own, aqr, ref):
+    """Each `Fl` out of its own `.It`, linked to where it is told: of this page, else of aqr(1).
+    REF(page, id) is the link to an id of a page (of this one if PAGE is None)."""
     parts = re.split(r"(<dt\b.*?</dt>|<a\b.*?</a>)", body, flags=re.S)
 
     def one(m):
         t = text(m.group(1))
         if t in own:
-            href = f"#{own[t]}"
+            href = ref(None, own[t])
         elif t in aqr:
-            href = f"aqr.html#{aqr[t]}"
+            href = ref("aqr", aqr[t])
         else:
             return m.group(0)
         return f'<a class="opt" href="{href}">{m.group(0)}</a>'
@@ -168,14 +186,15 @@ def link_options(body, own, aqr):
     )
 
 
-def link_names(body, name):
-    """`Nm aqr` of the other pages to aqr(1); `Xr` to the pages here or elsewhere, else no link."""
+def link_names(body, name, ref, spec):
+    """`Nm aqr` of the other pages to aqr(1); `Xr` to the pages here or elsewhere, else no link.
+    REF(page, None) is the link to a page, SPEC to the specification."""
 
     def xr(m):
         label = m.group(1)
         target = text(label).split("(")[0]
         if target in OURS:
-            return f'<a class="Xr" href="{target}.html">{label}</a>'
+            return f'<a class="Xr" href="{ref(target, None)}">{label}</a>'
         if target in ELSEWHERE:
             return f'<a class="Xr" href="{ELSEWHERE[target]}">{label}</a>'
         return f'<span class="Xr">{label}</span>'
@@ -183,9 +202,9 @@ def link_names(body, name):
     body = re.sub(r'<a class="Xr"[^>]*>(.*?)</a>', xr, body, flags=re.S)
     if name != "aqr":
         nm = '<code class="Nm">aqr</code>'
-        body = body.replace(nm, f'<a class="opt" href="aqr.html">{nm}</a>')
+        body = body.replace(nm, f'<a class="opt" href="{ref("aqr", None)}">{nm}</a>')
     return body.replace(
-        "The Aqueous format specification.", 'The Aqueous <a href="../spec/">format specification</a>.'
+        "The Aqueous format specification.", f'The Aqueous <a href="{spec}">format specification</a>.'
     )
 
 
@@ -210,9 +229,10 @@ def toc(body):
     return "<ul>" + "".join(out) + "</ul>"
 
 
-def site_parts():
+def site_parts(up_link):
     """site/index.html's head (to its style's end), its sprite of icons with the droplet the
-    header draws, its header and its footer, their links made relative to man/."""
+    header draws, its header and its footer, each relative link of the last two as UP_LINK makes
+    it (of the site's root: `#`, `spec/`, `man/`)."""
     with open(os.path.join(ROOT, "site", "index.html"), encoding="utf-8") as f:
         page = f.read()
     head = page[: page.index("</style>")]
@@ -231,7 +251,7 @@ def site_parts():
             h = m.group(2)
             if re.match(r"[a-z]+:", h):
                 return m.group(0)
-            return f'{m.group(1)}../{"" if h == "#" else h}"'
+            return f'{m.group(1)}{up_link("" if h == "#" else h)}"'
 
         return re.sub(r'(<a\b[^>]*\bhref=")([^"]*)"', one, part)
 
@@ -250,35 +270,36 @@ def page_html(name, section):
     return body, nd, names, date
 
 
-def write(out):
-    rendered = {name: page_html(name, s) for name, s in PAGES}
+def prefixed(body, prefix):
+    """BODY's ids and links within it, PREFIX before each."""
+    body = re.sub(r' id="([^"]+)"', lambda m: f' id="{prefix}{m.group(1)}"', body)
+    return re.sub(r' href="#([^"]+)"', lambda m: f' href="#{prefix}{m.group(1)}"', body)
+
+
+def head_of(head, title, desc, nd):
+    """The site's HEAD with the title and descriptions of a page."""
+    h = re.sub(r"<title>.*?</title>", f"<title>{html.escape(title)} · Aqueous</title>", head)
+    h = re.sub(r'(<meta name="description" content=")[^"]*', lambda m: m.group(1) + html.escape(desc), h)
+    h = re.sub(r'(<meta property="og:title" content=")[^"]*', lambda m: m.group(1) + html.escape(title), h)
+    return re.sub(r'(<meta property="og:description" content=")[^"]*', lambda m: m.group(1) + html.escape(nd), h)
+
+
+def manual(rendered, name, section, ref, spec, single=None):
+    """The pages' table and the page NAME, as the `.man` block of a document; SINGLE the classes
+    of the block in a document of all the pages (its ids then prefixed)."""
+    body, nd, names, date = rendered[name]
     aqr_options = options(rendered["aqr"][0])
-    head, sprite, header, footer = site_parts()
-    os.makedirs(os.path.join(out, "man"), exist_ok=True)
-    for name, section in PAGES:
-        body, nd, names, date = rendered[name]
-        body = link_names(link_options(body, options(body), aqr_options), name)
-        title = f"{name}({section})"
-        desc = f"{title}: {nd}. A manual page of Aqueous."
-        h = re.sub(r"<title>.*?</title>", f"<title>{html.escape(title)} · Aqueous</title>", head)
-        h = re.sub(r'(<meta name="description" content=")[^"]*', lambda m: m.group(1) + html.escape(desc), h)
-        h = re.sub(r'(<meta property="og:title" content=")[^"]*', lambda m: m.group(1) + html.escape(title), h)
-        h = re.sub(r'(<meta property="og:description" content=")[^"]*', lambda m: m.group(1) + html.escape(nd), h)
-        h = re.sub(r'(<link rel="canonical" href="[^"]*/)"', rf'\1man/{name}.html"', h)
-        h = h.replace('href="droplet.svg"', 'href="../droplet.svg"')
-        pages = "".join(
-            f'<li><a href="{n}.html"{" aria-current=page" if n == name else ""}>{n}({s})</a></li>' for n, s in PAGES
-        )
-        doc = f"""{h}{CSS}</style>
-</head>
-<body>
-
-{sprite}
-
-{header}
-
-<main>
-<div class="wrap man">
+    own = options(body)
+    attrs = ""
+    if single is not None:
+        body = prefixed(body, f"{name}.{section}:")
+        attrs = f' id="{name}.{section}" class="wrap man {single}"'
+    body = link_names(link_options(body, own, aqr_options, ref), name, ref, spec)
+    pages = "".join(
+        f'<li><a href="{ref(n, None)}"{" aria-current=page" if n == name else ""}>{n}({s})</a></li>'
+        for n, s in PAGES
+    )
+    return f"""<div{attrs or ' class="wrap man"'}>
   <aside class="toc">
     <nav class="pages" aria-label="Manual pages"><h2>Manual</h2><ul>{pages}</ul></nav>
     <nav class="sections" aria-label="On this page"><h2>On this page</h2>{toc(body)}</nav>
@@ -291,13 +312,43 @@ def write(out):
     </header>
 {body.strip()}
   </article>
-</div>
+</div>"""
+
+
+def document(head, css, sprite, header, mains, footer):
+    return f"""{head}{css}</style>
+</head>
+<body>
+
+{sprite}
+
+{header}
+
+<main>
+{mains}
 </main>
 
 {footer}
 </body>
 </html>
 """
+
+
+def write(out):
+    rendered = {name: page_html(name, s) for name, s in PAGES}
+    head, sprite, header, footer = site_parts(lambda h: f"../{h}")
+    os.makedirs(os.path.join(out, "man"), exist_ok=True)
+    for name, section in PAGES:
+
+        def ref(page, id_):
+            return (f"{page}.html" if page else "") + (f"#{id_}" if id_ else "")
+
+        nd = rendered[name][1]
+        title = f"{name}({section})"
+        h = head_of(head, title, f"{title}: {nd}. A manual page of Aqueous.", nd)
+        h = re.sub(r'(<link rel="canonical" href="[^"]*/)"', rf'\1man/{name}.html"', h)
+        h = h.replace('href="droplet.svg"', 'href="../droplet.svg"')
+        doc = document(h, CSS, sprite, header, manual(rendered, name, section, ref, "../spec/"), footer)
         with open(os.path.join(out, "man", f"{name}.html"), "w", encoding="utf-8") as f:
             f.write(doc)
     with open(os.path.join(out, "man", "index.html"), "w", encoding="utf-8") as f:
@@ -309,7 +360,48 @@ def write(out):
         )
 
 
+def write_single(path):
+    rendered = {name: page_html(name, s) for name, s in PAGES}
+    sections = dict(PAGES)
+
+    def up_link(h):
+        # (the manual's own links to its fragments: `man/`, `man/aqr.html#o`)
+        m = re.fullmatch(r"man/(?:([a-z]+)\.html)?(?:#(.*))?", h)
+        if m:
+            return ref(m.group(1) or "aqr", m.group(2), None)
+        return SITE + h
+
+    def ref(page, id_, name):
+        page = page or name
+        return f"#{page}.{sections[page]}" + (f":{id_}" if id_ else "")
+
+    head, sprite, header, footer = site_parts(up_link)
+    listed = ", ".join(f"{n}({s})" for n, s in PAGES)
+    h = head_of(head, "Manual", f"The manual pages of Aqueous: {listed}.", "The manual pages.")
+    h = re.sub(r'<link rel="canonical" href="[^"]*">', f'<link rel="canonical" href="{SITE}man/">', h)
+    h = re.sub(r'<meta property="og:image" content="[^"]*">\n', "", h)
+    with open(os.path.join(ROOT, "droplet.svg"), "rb") as f:
+        icon = "data:image/svg+xml;base64," + base64.b64encode(f.read()).decode()
+    h = h.replace('href="droplet.svg"', f'href="{icon}"')
+    mains = "\n".join(
+        manual(
+            rendered,
+            name,
+            section,
+            lambda page, id_, name=name: ref(page, id_, name),
+            SITE + "spec/",
+            "mpage default" if name == "aqr" else "mpage",
+        )
+        for name, section in PAGES
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(document(h, CSS + CSS_SINGLE, sprite, header, mains, footer))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit(__doc__.strip().splitlines()[2].strip())
-    write(sys.argv[1])
+    if len(sys.argv) == 2 and not sys.argv[1].startswith("-"):
+        write(sys.argv[1])
+    elif len(sys.argv) == 3 and sys.argv[1] == "--single":
+        write_single(sys.argv[2])
+    else:
+        sys.exit("usage:\n" + "\n".join(__doc__.strip().splitlines()[2:4]))
