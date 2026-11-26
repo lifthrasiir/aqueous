@@ -278,6 +278,20 @@ fn jsonl_alike() {
     alike("jsonl-recons", "jsonl", &first_part(&f));
 }
 
+#[test]
+fn xml_alike() {
+    use aqr_xml::formula::{CONTAINERS, DEPTH, Limits, encode_with};
+    let mut d = String::from("<?xml version=\"1.0\"?>\n<root>\n");
+    for i in 0..300 {
+        d +=
+            &format!("<rec id=\"{i}\" k='{}'><t>line {i}\nmore\x01</t><e/>{}</rec>\n", i % 7, "<a>1</a>".repeat(i % 3));
+    }
+    d += &"<n>".repeat(DEPTH + 5);
+    d += "</root>\n";
+    let (f, _) = encode_with(d.as_bytes(), &Limits { segment: 1 << 30, containers: CONTAINERS, depth: DEPTH });
+    alike("xml-recons", "xml", &first_part(&f));
+}
+
 // ---- tensors
 
 /// A safetensors file of tensors `(dtype, row, data)`.

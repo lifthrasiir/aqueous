@@ -6744,6 +6744,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wrt-recons.wasm" title="crates/aqr-modules/wasm/wrt-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md" title="codecs/aqr-wrt/FORMAT.md">R</a>
     <tr>
+      <td><code>68dcdd9a0ab5b58a79b9e10f180e0b9a7aed12076a8e8c81241303fb84a26bca</code>
+      <td>xml-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/xml-recons.wasm" title="crates/aqr-modules/wasm/xml-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-xml/FORMAT.md" title="codecs/aqr-xml/FORMAT.md">R</a>
+    <tr>
       <td><code>6a05fd8f201436c10905534a5332a000e6290ca7dff066202fa186a66cea98d8</code>
       <td>xpress-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/xpress-recons.wasm" title="crates/aqr-modules/wasm/xpress-recons.wasm">D</a>

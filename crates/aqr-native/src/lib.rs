@@ -470,6 +470,7 @@ pub const NATIVE: &[Native] = &[
     bare("hdf5-recons-float", |p, _, i, n, _| aqr_hdf5::module::float(p, i, n).map_err(err)),
     bare("xsv-recons", |p, _, i, n, t| aqr_xsv::module::decode(p, i, n, t).map_err(err)),
     bare("jsonl-recons", |p, _, i, n, t| aqr_jsonl::module::decode(p, i, n, t).map_err(err)),
+    bare("xml-recons", |p, _, i, n, t| aqr_xml::module::decode(p, i, n, t).map_err(err)),
     part(
         "b2t-recons",
         false,

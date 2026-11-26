@@ -5453,6 +5453,51 @@ fn jsonl_plans_hold() {
     }
 }
 
+/// xml-recons lays its memory out as a stack, its limit its plan: of elements with attributes and
+/// text (values with LF among them, in containers with lengths), contexts of a few and of many
+/// (the table of them), elements nested deep, and a text cut into segments, each its own
+/// application (its names open at its start in its params).
+#[test]
+fn xml_plans_hold() {
+    use aqr_xml::formula::{CONTAINERS, DEPTH, Limits, encode_with};
+    let mut records = String::from("<?xml version=\"1.0\"?>\n<root>\n");
+    for i in 0..400 {
+        records += &format!(
+            "  <rec id=\"{i}\" k='{}'><name>n{}</name><text>line {i}\nand more {}</text><e/><v>{}</v></rec>\n",
+            i % 9,
+            i % 17,
+            "x".repeat(i % 5),
+            i * 7
+        );
+        if i % 100 == 0 {
+            records += "<!-- a comment <tag> --><![CDATA[ <raw> ]]>stray text\n</rec>\n";
+        }
+    }
+    records += "</root>\n";
+    let deep = "<a b='1'>".repeat(150) + "x<c d=\"2\">y</c>z" + &"</a>".repeat(150) + "<a>w</a>";
+    let mut many = String::from("<r>");
+    for i in 0..600 {
+        many += &format!("<e{i} a{i}='{i}' b='x'>t{i}</e{i}>");
+    }
+    many += "</r>";
+    let whole = Limits { segment: 1 << 30, containers: CONTAINERS, depth: DEPTH };
+    let cases = [
+        ("records", &records, whole),
+        ("segments", &records, Limits { segment: 3000, ..whole }),
+        ("deep", &deep, whole),
+        ("bounded", &deep, Limits { depth: 40, ..whole }),
+        ("many", &many, whole),
+        ("many bounded", &many, Limits { containers: 100, ..whole }),
+    ];
+    for (t, d, lim) in cases {
+        let d = d.as_bytes();
+        let (f, containers) = encode_with(d, &lim);
+        assert!(containers > 0, "{t}");
+        let applied = applications_hold(&format!("xml {t}"), &f, d, |_| 0);
+        assert_eq!(applied > 1, t == "segments", "{t}: {applied}");
+    }
+}
+
 /// b2t-recons (a part module of windows of four pages) lays its memory out as a stack, its limit
 /// its plan, the same whatever the lengths: blocks of a MIME message and of a JSON file, of
 /// every length mod 3 and past the pieces it takes (text, bytes and layout), padded and not,

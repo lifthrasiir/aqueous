@@ -1,6 +1,6 @@
 # The `xml-recons` module
 
-*Draft: no module of this version is built yet; it may change until one is.*
+*Version 1. Implemented by `src/module.rs` (the module) and `src/formula.rs` (the encoder).*
 
 This document specifies the module `xml-recons` of aqr-formula entry formulas. The module
 rebuilds XML (or any text of tags) from a *skeleton*, the text with each element's text and each
@@ -38,13 +38,21 @@ Contents:
 - **Params**, in order:
   - varint `containers`: the number of containers (§4);
   - varint `depth`: the most elements open at once while the text is rebuilt (the stack's
-    bound, for the memory plan); more is an error;
+    bound, for the memory plan); more is an error. At most 1024;
   - varint `k`, then `k` strings: the names of the elements open where the text starts, the
     outermost first (§4; `k` at most `depth`).
+
+  `containers` is at most 65536, and at most half the length of `table` (each entry of it has
+  two bytes at least).
 
   Nothing may follow.
 - **Resources**: none.
 - **Inputs**: four, in order: `skeleton`, `table`, `lens` and `values` (§3).
+- **Memory**: the module's working memory is laid out as a stack in this order, each block
+  rounded up to 16 bytes and held to the end (the plan, `module::plan`): after the copies of
+  the params and inputs, the stack of names (`depth` entries of 12 bytes on WebAssembly), the
+  containers (`containers` entries of 12), the table of contexts (§4: `max(2, 2 * containers
+  rounded up to a power of two)` entries of 24) and the text (its declared length).
 - **Output**: the text of the declared length (§5). Any inconsistency (a stream ending early or
   with bytes left, a container's part not read to its end, a length other than the declared
   one) is an error.
@@ -80,7 +88,8 @@ Every value is taken in a *context*, a key of three parts:
 - an attribute's value, taken in a tag of OPEN: (1, e, a), where e is the tag's name and a the
   attribute's.
 
-Each context has a container. Containers are numbered from 0 in the order they are *made*: the
+Each context has a container. (A decoder keeps them in an open-addressing table of a size fixed
+by `containers`, names as slices of the skeleton and the params.) Containers are numbered from 0 in the order they are *made*: the
 first value taken in a context makes its container, the next of the table, whose flags it has;
 making a container when all of the table's are made is an error. A value is taken from the next
 bytes of its container's part (and, where its flags have bit 0, the next varint of `lens`).
@@ -109,8 +118,9 @@ The skeleton is read from its start, and at each step its next byte b determines
 - CLOSE: `</`, the innermost name of the stack, and `>`; the name is popped. CLOSE with the
   stack empty is an error.
 - END: an end tag written otherwise (spaces before its `>`, another name): the bytes after it up
-  to and including the next `>`, as they are, none of them special; the innermost name of the
-  stack is popped. END with the stack empty is an error.
+  to and including the next `>`, which are the whole tag, `</` and all, output as they are. They
+  must start with `</` and hold no special byte, and there must be a `>`; the innermost name of
+  the stack is popped. END with the stack empty is an error.
 
 The text is what the steps output, one after the other; output past the declared length is an
 error, and so is a skeleton that ends within a step.
@@ -119,21 +129,39 @@ error, and so is a skeleton that ends within a step.
 
 - **Tokens.** The text is cut into tags and the text between them. Comments (`<!--` to `-->`),
   CDATA sections (`<![CDATA[` to `]]>`), processing instructions (`<?` to `?>`) and other
-  declarations (`<!` to the next `>`, a DOCTYPE's internal subset between `[` and `]` too) are
-  kept in the skeleton as they are. A start tag is coded by OPEN where it matches `tag` with its
-  values cut out (each value the bytes between its quotes, whatever they are); an end tag by CLOSE where it
-  is `</`, the innermost name and `>`, else by END where it is `</`, any bytes but `>` and
-  specials, and `>`, with an element open. Anything else, a `<` of no tag among it, is text.
-- **Values.** The text between two tags is cut out as a value, VALUE in its place, where an
-  element is open and it holds a byte other than a space; else it is kept in the skeleton (the
-  whitespace of the layout). A special byte kept in the skeleton is preceded by ESC.
+  declarations (`<!` to the next `>`; where a `[` comes first, past the next `]` and the `>`
+  after it: a DOCTYPE's internal subset) are kept in the skeleton as they are, and so is any
+  that has no end. A start tag is coded by OPEN where it matches `tag` (each value the bytes
+  between its quotes, whatever they are, at most 1 GiB), the element's name pushed unless it
+  ends with `/>`. An end tag, `</`, bytes none of them `<` or special, and `>`, with an element
+  open, is coded by CLOSE where it is `</`, the innermost name and `>`, else by END. Anything
+  else, a `<` of no token among it (an unterminated tag, a start tag of attributes with no
+  value, an end tag with nothing open), is text.
+- **Values.** The text between two tokens (a `<` of no token in it is text) is cut out as a
+  value, VALUE in its place, where an element is open and it holds a byte other than a space;
+  else it is kept in the skeleton (the whitespace of the layout). A special byte kept in the
+  skeleton is preceded by ESC.
+- **Bounds.** A segment makes at most 4096 containers (`CONTAINERS`) and has at most 256
+  elements open (`DEPTH`); past them, a start tag that would pass one (a tag with a value in a
+  context that has no container yet, or an element that would be the 257th) is kept in the
+  skeleton as text, escaped, and is an element the module does not know (a *phantom*): the
+  encoder keeps it on its own stack, its end tag kept as text too and its text, and the module's
+  stack and its contexts are those of the elements around it. The values of a text context that
+  has no container yet stay in the skeleton.
 - **Flags.** A container's values end at LF where none of them holds one; else their lengths
   are in `lens`.
-- **Streams.** The skeleton, `table` and `lens` are the module's own. The part of each container
-  is a stream of its own, of `Kind::Text`, a content: aqr-compress recompresses each in turn as
-  text (aqr-xsv or aqr-log where it takes it, as with columns of numbers or times; else aqr-wrt,
-  with one dictionary of all the parts' text), and `values` is their slices one after the other.
-- **Segments.** A text is cut, after the end tags that leave one element or none open, into
-  segments of 64 MiB at least, each an application of the module of its own, the names open at
-  its start in its params. The formula is their concatenation.
-- **Files taken.** Not settled: `docs/xml-design.md`, "Choosing".
+- **Streams.** The skeleton (`xml/skeleton`, `Kind::Text`), `table` and `lens` are the module's
+  own. The part of each container is a stream of its own, of `Kind::Text`, a content
+  (`xml/values`): aqr-compress recompresses each in turn as text (aqr-xsv or aqr-log where it
+  takes it, as with columns of numbers or times; else aqr-wrt), and `values` is their slices one
+  after the other. The parts of fewer than 4096 bytes share one stream, a slice of it for each.
+  Streams of one class and kind are put in one when the formula is archived
+  (`Formula::merged`), contents that were recompressed or not alike.
+- **Segments.** A text is cut after the end tags and the empty-element tags (`<a/>`) that leave
+  at most four elements open, all of them known to the module, once the segment is 64 MiB
+  (`xml:segment`) long at least. Each is an application of the module of its own, the names open
+  at its start in its params, its contexts and containers its own. The formula is their
+  concatenation.
+- **Taken.** A text shorter than 64 KiB (`MIN_LEN`) is not taken, nor one that has no value cut
+  out; `starts` tells a text that begins as XML does. Which texts to take where it pays is for
+  aqr-compress (`docs/xml-design.md`, "Choosing").

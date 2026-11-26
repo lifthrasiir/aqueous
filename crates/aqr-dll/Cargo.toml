@@ -100,5 +100,6 @@ aqr-wrt.workspace = true
 aqr-wasm.workspace = true
 aqr-xsv.workspace = true
 aqr-jsonl.workspace = true
+aqr-xml.workspace = true
 aqr-log.workspace = true
 aqr-zip.workspace = true

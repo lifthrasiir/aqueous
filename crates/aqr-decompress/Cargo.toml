@@ -73,6 +73,7 @@ aqr-clip = { workspace = true, default-features = true }
 aqr-obj = { workspace = true, default-features = true }
 aqr-xsv = { workspace = true, default-features = true }
 aqr-jsonl = { workspace = true, default-features = true }
+aqr-xml = { workspace = true, default-features = true }
 aqr-log = { workspace = true, default-features = true }
 aqr-raw = { workspace = true, default-features = true }
 aqr-infer-recs = { workspace = true, default-features = true }

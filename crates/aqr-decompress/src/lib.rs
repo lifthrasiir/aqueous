@@ -420,6 +420,8 @@ pub const HDF5_FLOAT: Module = aqr_hdf5::formula::FLOAT;
 pub const XSV: Module = aqr_xsv::formula::MODULE;
 /// JSON lines from their values stored by key path (aqr-jsonl).
 pub const JSONL: Module = aqr_jsonl::formula::MODULE;
+/// XML from its skeleton and its values in containers by context (aqr-xml).
+pub const XML: Module = aqr_xml::formula::MODULE;
 /// A text file from its text without base64 and hexadecimal blocks, the bytes of the blocks and a
 /// layout writing them again (aqr-b2t). A part module. No params or resources.
 pub const B2T: Module = aqr_b2t::formula::MODULE;
@@ -565,6 +567,7 @@ const NATIVE: &[Known] = &[
     entry(HDF5_FLOAT),
     entry(XSV),
     entry(JSONL),
+    entry(XML),
     entry(B2T),
     entry(B2T_QUOPRI),
     entry(LOG),

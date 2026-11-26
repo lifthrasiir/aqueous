@@ -220,6 +220,7 @@ aqr-wasmrt = { path = "crates/aqr-wasmrt", default-features = false }
 aqr-wim = { path = "codecs/aqr-wim" }
 aqr-wrt = { path = "codecs/aqr-wrt", default-features = false }
 aqr-wwise = { path = "codecs/aqr-wwise" }
+aqr-xml = { path = "codecs/aqr-xml", default-features = false }
 aqr-xpress = { path = "codecs/aqr-xpress", default-features = false }
 aqr-xsv = { path = "codecs/aqr-xsv", default-features = false }
 aqr-zip = { path = "codecs/aqr-zip", default-features = false }

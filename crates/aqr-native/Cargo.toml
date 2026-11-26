@@ -38,6 +38,7 @@ aqr-msadpcm.workspace = true
 aqr-infer-recs.workspace = true
 aqr-jpeg.workspace = true
 aqr-jsonl.workspace = true
+aqr-xml.workspace = true
 aqr-log.workspace = true
 aqr-lha.workspace = true
 aqr-lz4.workspace = true

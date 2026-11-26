@@ -459,6 +459,7 @@ dependencies = [
  "aqr-wasm",
  "aqr-wasmrt",
  "aqr-wrt",
+ "aqr-xml",
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
@@ -623,6 +624,7 @@ dependencies = [
  "aqr-vorbis",
  "aqr-wasm",
  "aqr-wrt",
+ "aqr-xml",
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
@@ -1450,6 +1452,7 @@ dependencies = [
  "aqr-vorbis",
  "aqr-wasm",
  "aqr-wrt",
+ "aqr-xml",
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
@@ -1554,6 +1557,7 @@ dependencies = [
  "aqr-vorbis",
  "aqr-wasm",
  "aqr-wrt",
+ "aqr-xml",
  "aqr-xpress",
  "aqr-xsv",
  "aqr-zip",
@@ -1979,6 +1983,14 @@ dependencies = [
 [[package]]
 name = "aqr-xml"
 version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-formula",
+ "aqr-testkit",
+ "memchr",
+ "zstd",
+]
 
 [[package]]
 name = "aqr-xpress"

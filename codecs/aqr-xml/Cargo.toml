@@ -2,7 +2,28 @@
 name = "aqr-xml"
 version = "0.1.0"
 edition = "2024"
-description = "XML rebuilt bit for bit from its skeleton and its values in containers by path (after XMill)"
+description = "XML rebuilt bit for bit from its skeleton and its values in containers by context (after XMill)"
 publish = false
 
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula", "dep:memchr"]
+
 [dependencies]
+aqr-api.workspace = true
+aqr-common.workspace = true
+aqr-formula = { workspace = true, optional = true }
+memchr = { workspace = true, optional = true }
+
+[dev-dependencies]
+aqr-testkit.workspace = true
+zstd.workspace = true
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-xml-bench"
+path = "examples/bench.rs"
+required-features = ["encode"]

@@ -598,6 +598,12 @@ pub static KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/wrt-recons.block"),
     },
     Known {
+        name: "xml-recons",
+        version: 1,
+        sha512_256: hex("68dcdd9a0ab5b58a79b9e10f180e0b9a7aed12076a8e8c81241303fb84a26bca"),
+        block: include_bytes!("../wasm/xml-recons.block"),
+    },
+    Known {
         name: "xpress-recons",
         version: 1,
         sha512_256: hex("6a05fd8f201436c10905534a5332a000e6290ca7dff066202fa186a66cea98d8"),
