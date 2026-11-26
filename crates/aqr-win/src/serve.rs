@@ -1,0 +1,969 @@
+//! `aqr-win --serve`: the archives a shell extension browses (`docs/win-shell-ext-design.md`),
+//! served by a COM local server (`LocalServer32`, of [`CLSID`]) over `aqr --serve` (one
+//! process for all, started as it is first needed and again where it is gone:
+//! `aqr_ipc::serve`), so that what decodes is in no process that loaded the extension.
+//!
+//! The class's objects are late-bound (`IDispatch`, no type library: the system's proxies
+//! marshal them), their methods named:
+//!
+//! - the class: `Open(path)`, an archive object, or an error (`EXCEPINFO`'s description).
+//! - an archive: `Info()` (what `open` answered, as JSON), `List(dir)` (the entries, a JSON
+//!   array), `Stat(path)` (an entry, JSON), `OpenStream(path)` (an `IStream` of the file, read
+//!   only, read a chunk of `read` after another). Once let go of (its last reference released,
+//!   by the client or by COM as the client is gone), its handle is closed a [`LINGER`] later,
+//!   unless the archive is opened again: what was evaluated of it kept while the client moves
+//!   from one folder to another.
+//!
+//! The program ends once it has served no object for [`IDLE`] (the class revoked first, so that
+//! a client coming then starts another).
+
+use std::ffi::c_void;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use aqr_ipc::serve::{CHUNK, Error, Served};
+use serde_json::{Value, json};
+use windows_sys::Win32::Foundation::{
+    CLASS_E_NOAGGREGATION, DISP_E_EXCEPTION, DISP_E_MEMBERNOTFOUND, DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, E_FAIL,
+    E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, FILETIME, S_FALSE, S_OK, STG_E_ACCESSDENIED,
+    STG_E_INVALIDFUNCTION, STG_E_READFAULT, SysAllocStringLen, SysStringLen,
+};
+use windows_sys::Win32::System::Com::{
+    CLSCTX_LOCAL_SERVER, CLSIDFromString, COINIT_MULTITHREADED, CoInitializeEx, CoRegisterClassObject,
+    CoRevokeClassObject, CoTaskMemAlloc, REGCLS_MULTIPLEUSE,
+};
+use windows_sys::core::{GUID, HRESULT};
+
+/// The class of the server.
+pub const CLSID: GUID = GUID::from_u128(0xc6b7e992_0338_4d02_8f5f_1bbd5a9fbab9);
+
+/// How long an archive let go of stays open, for a client opening it again.
+const LINGER: Duration = Duration::from_secs(60);
+
+/// How long the program stays with no object served.
+const IDLE: Duration = Duration::from_secs(600);
+
+/// The objects served (the class's, archives, streams) and the locks of the server: none for
+/// [`IDLE`], the program ends.
+static OBJECTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Since when no object is served.
+static IDLE_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn object_made() {
+    OBJECTS.fetch_add(1, Ordering::SeqCst);
+}
+
+fn object_gone() {
+    if OBJECTS.fetch_sub(1, Ordering::SeqCst) == 1 {
+        *IDLE_SINCE.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+/// `aqr --serve`, once started.
+static SERVED: Mutex<Option<Arc<Served>>> = Mutex::new(None);
+
+/// `aqr --serve`, started where it is not, or again where it is gone.
+fn served() -> Result<Arc<Served>, String> {
+    let mut s = SERVED.lock().unwrap();
+    if let Some(s) = s.as_ref().filter(|s| !s.gone()) {
+        return Ok(s.clone());
+    }
+    let aqr = aqr_ipc::aqr();
+    let started = Served::start(&aqr, &[]).map_err(|e| format!("{}: {e}", aqr.display()))?;
+    Ok(s.insert(Arc::new(started)).clone())
+}
+
+/// The handles let go of, closed once they have lingered ([`LINGER`]).
+static LINGERING: Mutex<Vec<(Arc<Served>, u64, Instant)>> = Mutex::new(Vec::new());
+
+/// The handles that have lingered `linger` closed (all of them, where none).
+fn close_lingering(linger: Option<Duration>) {
+    let now = Instant::now();
+    let done: Vec<_> = {
+        let mut l = LINGERING.lock().unwrap();
+        let (done, kept) = l.drain(..).partition(|(_, _, at)| linger.is_none_or(|t| now.duration_since(*at) >= t));
+        *l = kept;
+        done
+    };
+    for (s, h, _) in done {
+        _ = s.ask(json!({"close": h}));
+    }
+}
+
+/// Serves the class until it has been idle for [`IDLE`] (`args`: COM's `-Embedding`; for tests,
+/// the class's CLSID in place of [`CLSID`], and `AQR_SERVE_IDLE` the seconds of [`LINGER`] and
+/// [`IDLE`]).
+pub fn serve(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    let mut clsid = CLSID;
+    for a in args {
+        let a = a.to_string_lossy();
+        if a.starts_with('{') {
+            let w: Vec<u16> = a.encode_utf16().chain([0]).collect();
+            // SAFETY: a string ended by 0, and a GUID to fill
+            if unsafe { CLSIDFromString(w.as_ptr(), &mut clsid) } < 0 {
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
+    let (linger, idle) = match std::env::var("AQR_SERVE_IDLE").ok().and_then(|v| {
+        let (l, i) = v.split_once(',')?;
+        Some((Duration::from_secs_f64(l.parse().ok()?), Duration::from_secs_f64(i.parse().ok()?)))
+    }) {
+        Some(t) => t,
+        None => (LINGER, IDLE),
+    };
+    // SAFETY: this thread's, of no other COM use; the calls come on COM's threads
+    let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
+    if hr < 0 {
+        return std::process::ExitCode::FAILURE;
+    }
+    *IDLE_SINCE.lock().unwrap() = Some(Instant::now());
+    let factory = Box::into_raw(Box::new(Factory { vtbl: &FACTORY_VTBL, refs: AtomicU32::new(1) }));
+    let mut cookie = 0;
+    // SAFETY: a class object of a static vtable, alive until the process ends
+    let hr = unsafe {
+        CoRegisterClassObject(
+            &clsid,
+            factory as *mut c_void,
+            CLSCTX_LOCAL_SERVER,
+            REGCLS_MULTIPLEUSE as u32,
+            &mut cookie,
+        )
+    };
+    if hr < 0 {
+        return std::process::ExitCode::FAILURE;
+    }
+    loop {
+        std::thread::sleep(Duration::from_millis(250).min(linger / 4).max(Duration::from_millis(10)));
+        close_lingering(Some(linger));
+        let since = *IDLE_SINCE.lock().unwrap();
+        if OBJECTS.load(Ordering::SeqCst) == 0 && since.is_some_and(|t| t.elapsed() >= idle) {
+            // SAFETY: registered above: a client from now on starts another server
+            unsafe { CoRevokeClassObject(cookie) };
+            // (an object made just before, served until it is let go of)
+            while OBJECTS.load(Ordering::SeqCst) > 0 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            close_lingering(None);
+            drop(SERVED.lock().unwrap().take());
+            return std::process::ExitCode::SUCCESS;
+        }
+    }
+}
+
+/// An archive open: its path, and the `aqr --serve` and handle it is open in, opened again
+/// where that is gone.
+struct Archive {
+    path: PathBuf,
+    open: Mutex<(Arc<Served>, u64, Value)>,
+}
+
+impl Archive {
+    fn open(path: PathBuf) -> Result<Archive, String> {
+        let (s, h, info) = Archive::opened(&path)?;
+        Ok(Archive { path, open: Mutex::new((s, h, info)) })
+    }
+
+    fn opened(path: &std::path::Path) -> Result<(Arc<Served>, u64, Value), String> {
+        let s = served()?;
+        let v = s.ask(json!({"open": path})).map_err(|e| e.to_string())?;
+        let h = v["archive"].as_u64().ok_or("no handle opened")?;
+        Ok((s, h, v))
+    }
+
+    /// `f` of the server and handle; again of the archive opened again, where that server is
+    /// gone.
+    fn with<T>(&self, f: impl Fn(&Served, u64) -> Result<T, Error>) -> Result<T, String> {
+        // (not locked while it is at work: the requests of an archive at once)
+        let (s, h) = {
+            let o = self.open.lock().unwrap();
+            (o.0.clone(), o.1)
+        };
+        match f(&s, h) {
+            Err(Error::Gone) => {}
+            r => return r.map_err(|e| e.to_string()),
+        }
+        let (s, h) = {
+            let mut o = self.open.lock().unwrap();
+            // (where another call has not opened it again already)
+            if Arc::ptr_eq(&o.0, &s) {
+                *o = Archive::opened(&self.path)?;
+            }
+            (o.0.clone(), o.1)
+        };
+        f(&s, h).map_err(|e| e.to_string())
+    }
+
+    fn info(&self) -> Value {
+        self.open.lock().unwrap().2.clone()
+    }
+}
+
+impl Drop for Archive {
+    fn drop(&mut self) {
+        let (s, h, _) = &*self.open.lock().unwrap();
+        if !s.gone() {
+            LINGERING.lock().unwrap().push((s.clone(), *h, Instant::now()));
+        }
+    }
+}
+
+// ---- COM: the class object, the late-bound objects, the streams ----
+
+const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
+const IID_ICLASSFACTORY: GUID = GUID::from_u128(0x00000001_0000_0000_c000_000000000046);
+const IID_IDISPATCH: GUID = GUID::from_u128(0x00020400_0000_0000_c000_000000000046);
+const IID_ISEQUENTIALSTREAM: GUID = GUID::from_u128(0x0c733a30_2a1c_11ce_ade5_00aa0044773d);
+const IID_ISTREAM: GUID = GUID::from_u128(0x0000000c_0000_0000_c000_000000000046);
+
+fn same(a: &GUID, b: &GUID) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
+/// The class object.
+#[repr(C)]
+struct Factory {
+    vtbl: &'static FactoryVtbl,
+    refs: AtomicU32,
+}
+
+#[repr(C)]
+struct FactoryVtbl {
+    query_interface: unsafe extern "system" fn(*mut Factory, *const GUID, *mut *mut c_void) -> HRESULT,
+    add_ref: unsafe extern "system" fn(*mut Factory) -> u32,
+    release: unsafe extern "system" fn(*mut Factory) -> u32,
+    create_instance: unsafe extern "system" fn(*mut Factory, *mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+    lock_server: unsafe extern "system" fn(*mut Factory, i32) -> HRESULT,
+}
+
+static FACTORY_VTBL: FactoryVtbl = FactoryVtbl {
+    query_interface: factory_qi,
+    add_ref: factory_add_ref,
+    release: factory_release,
+    create_instance,
+    lock_server,
+};
+
+unsafe extern "system" fn factory_qi(this: *mut Factory, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
+    if out.is_null() || iid.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: COM's pointers, valid for the call
+    unsafe {
+        if same(&*iid, &IID_IUNKNOWN) || same(&*iid, &IID_ICLASSFACTORY) {
+            factory_add_ref(this);
+            *out = this as *mut c_void;
+            S_OK
+        } else {
+            *out = std::ptr::null_mut();
+            E_NOINTERFACE
+        }
+    }
+}
+
+unsafe extern "system" fn factory_add_ref(this: *mut Factory) -> u32 {
+    // SAFETY: the class object, alive as long as the process
+    unsafe { (*this).refs.fetch_add(1, Ordering::AcqRel) + 1 }
+}
+
+unsafe extern "system" fn factory_release(this: *mut Factory) -> u32 {
+    // (never freed: the one of the process)
+    // SAFETY: the class object, alive as long as the process
+    unsafe { (*this).refs.fetch_sub(1, Ordering::AcqRel).saturating_sub(1) }
+}
+
+unsafe extern "system" fn create_instance(
+    _: *mut Factory,
+    outer: *mut c_void,
+    iid: *const GUID,
+    out: *mut *mut c_void,
+) -> HRESULT {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: COM's pointers, valid for the call
+    unsafe {
+        *out = std::ptr::null_mut();
+        if !outer.is_null() {
+            return CLASS_E_NOAGGREGATION;
+        }
+        let d = Dispatch::new(Kind::Server);
+        let hr = dispatch_qi(d, iid, out);
+        dispatch_release(d);
+        hr
+    }
+}
+
+unsafe extern "system" fn lock_server(_: *mut Factory, lock: i32) -> HRESULT {
+    match lock {
+        0 => object_gone(),
+        _ => object_made(),
+    }
+    S_OK
+}
+
+/// `VARIANT`, of the kinds taken and given here (windows-sys's wants more features).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Variant {
+    vt: u16,
+    reserved: [u16; 3],
+    value: usize,
+    record: usize,
+}
+
+const VT_EMPTY: u16 = 0;
+const VT_BSTR: u16 = 8;
+const VT_DISPATCH: u16 = 9;
+const VT_VARIANT: u16 = 12;
+const VT_UNKNOWN: u16 = 13;
+const VT_BYREF: u16 = 0x4000;
+
+#[repr(C)]
+struct DispParams {
+    args: *const Variant,
+    named: *const i32,
+    count: u32,
+    named_count: u32,
+}
+
+#[repr(C)]
+struct ExcepInfo {
+    code: u16,
+    reserved: u16,
+    source: *mut u16,
+    description: *mut u16,
+    help_file: *mut u16,
+    help_context: u32,
+    reserved2: *mut c_void,
+    deferred: *mut c_void,
+    scode: i32,
+}
+
+/// A string as a `BSTR`, owned by whom it is given.
+fn bstr(s: &str) -> *mut u16 {
+    let w: Vec<u16> = s.encode_utf16().collect();
+    // SAFETY: `w.len()` units of `w`
+    unsafe { SysAllocStringLen(w.as_ptr(), w.len() as u32) as *mut u16 }
+}
+
+/// The text of argument `v` (a `BSTR`, or one by reference).
+unsafe fn text_of(v: &Variant) -> Option<String> {
+    // SAFETY: a VARIANT of the caller's, of the kind its `vt` tells
+    unsafe {
+        let b = match v.vt {
+            VT_BSTR => v.value as *const u16,
+            x if x == VT_BSTR | VT_BYREF => *(v.value as *const *const u16),
+            x if x == VT_VARIANT | VT_BYREF => return text_of(&*(v.value as *const Variant)),
+            _ => return None,
+        };
+        if b.is_null() {
+            return Some(String::new());
+        }
+        let n = SysStringLen(b);
+        Some(String::from_utf16_lossy(std::slice::from_raw_parts(b, n as usize)))
+    }
+}
+
+/// What a late-bound object is.
+enum Kind {
+    /// The class's: `Open`.
+    Server,
+    /// An archive's: `Info`, `List`, `Stat`, `OpenStream`.
+    Archive(Arc<Archive>),
+}
+
+impl Kind {
+    fn names(&self) -> &'static [&'static str] {
+        match self {
+            Kind::Server => &["Open"],
+            Kind::Archive(_) => &["Info", "List", "Stat", "OpenStream"],
+        }
+    }
+}
+
+/// What a method gives.
+enum Out {
+    Text(String),
+    /// An object, of a reference of its own, as `IDispatch` or else `IUnknown`.
+    Object(*mut c_void, bool),
+}
+
+#[repr(C)]
+struct Dispatch {
+    vtbl: &'static DispatchVtbl,
+    refs: AtomicU32,
+    kind: Kind,
+}
+
+impl Dispatch {
+    /// A new object of `kind`, of one reference.
+    fn new(kind: Kind) -> *mut Dispatch {
+        object_made();
+        Box::into_raw(Box::new(Dispatch { vtbl: &DISPATCH_VTBL, refs: AtomicU32::new(1), kind }))
+    }
+
+    /// Method `id` (from 1, of [`Kind::names`]) called with `args` (in their order).
+    fn call(&self, id: i32, args: &[String]) -> Result<Out, String> {
+        let arg = |k: usize| args.get(k).map(String::as_str).ok_or_else(|| "an argument missing".to_owned());
+        let json = |r: Result<Value, String>| r.map(|v| Out::Text(v.to_string()));
+        match (&self.kind, id) {
+            (Kind::Server, 1) => {
+                let a = Archive::open(PathBuf::from(arg(0)?))?;
+                Ok(Out::Object(Dispatch::new(Kind::Archive(Arc::new(a))) as *mut c_void, true))
+            }
+            (Kind::Archive(a), 1) => Ok(Out::Text(a.info().to_string())),
+            (Kind::Archive(a), 2) => {
+                let dir = args.first().map_or("", String::as_str);
+                json(a.with(|s, h| s.list(h, dir)).map(Value::from))
+            }
+            (Kind::Archive(a), 3) => {
+                let path = arg(0)?;
+                json(a.with(|s, h| s.ask(json!({"stat": h, "path": path}))).map(|v| v["entry"].clone()))
+            }
+            (Kind::Archive(a), 4) => {
+                let path = arg(0)?.to_owned();
+                let e = a.with(|s, h| s.ask(json!({"stat": h, "path": path})))?;
+                let e = &e["entry"];
+                if e["kind"] != "file" {
+                    return Err(format!("{path}: not a file"));
+                }
+                Ok(Out::Object(Stream::new(a.clone(), path, e) as *mut c_void, false))
+            }
+            _ => Err("no such method".into()),
+        }
+    }
+}
+
+#[repr(C)]
+struct DispatchVtbl {
+    query_interface: unsafe extern "system" fn(*mut Dispatch, *const GUID, *mut *mut c_void) -> HRESULT,
+    add_ref: unsafe extern "system" fn(*mut Dispatch) -> u32,
+    release: unsafe extern "system" fn(*mut Dispatch) -> u32,
+    type_info_count: unsafe extern "system" fn(*mut Dispatch, *mut u32) -> HRESULT,
+    type_info: unsafe extern "system" fn(*mut Dispatch, u32, u32, *mut *mut c_void) -> HRESULT,
+    ids_of_names:
+        unsafe extern "system" fn(*mut Dispatch, *const GUID, *const *const u16, u32, u32, *mut i32) -> HRESULT,
+    invoke: unsafe extern "system" fn(
+        *mut Dispatch,
+        i32,
+        *const GUID,
+        u32,
+        u16,
+        *const DispParams,
+        *mut Variant,
+        *mut ExcepInfo,
+        *mut u32,
+    ) -> HRESULT,
+}
+
+static DISPATCH_VTBL: DispatchVtbl = DispatchVtbl {
+    query_interface: dispatch_qi,
+    add_ref: dispatch_add_ref,
+    release: dispatch_release,
+    type_info_count,
+    type_info,
+    ids_of_names,
+    invoke,
+};
+
+unsafe extern "system" fn dispatch_qi(this: *mut Dispatch, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
+    if out.is_null() || iid.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: COM's pointers, valid for the call; `this` a live object
+    unsafe {
+        if same(&*iid, &IID_IUNKNOWN) || same(&*iid, &IID_IDISPATCH) {
+            dispatch_add_ref(this);
+            *out = this as *mut c_void;
+            S_OK
+        } else {
+            *out = std::ptr::null_mut();
+            E_NOINTERFACE
+        }
+    }
+}
+
+unsafe extern "system" fn dispatch_add_ref(this: *mut Dispatch) -> u32 {
+    // SAFETY: a live object
+    unsafe { (*this).refs.fetch_add(1, Ordering::AcqRel) + 1 }
+}
+
+unsafe extern "system" fn dispatch_release(this: *mut Dispatch) -> u32 {
+    // SAFETY: a live object, boxed by `Dispatch::new`, freed with its last reference
+    unsafe {
+        let n = (*this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+        if n == 0 {
+            drop(Box::from_raw(this));
+            object_gone();
+        }
+        n
+    }
+}
+
+unsafe extern "system" fn type_info_count(_: *mut Dispatch, n: *mut u32) -> HRESULT {
+    if n.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: COM's pointer, valid for the call
+    unsafe { *n = 0 };
+    S_OK
+}
+
+unsafe extern "system" fn type_info(_: *mut Dispatch, _: u32, _: u32, out: *mut *mut c_void) -> HRESULT {
+    if !out.is_null() {
+        // SAFETY: COM's pointer, valid for the call
+        unsafe { *out = std::ptr::null_mut() };
+    }
+    E_NOTIMPL
+}
+
+unsafe extern "system" fn ids_of_names(
+    this: *mut Dispatch,
+    _: *const GUID,
+    names: *const *const u16,
+    count: u32,
+    _: u32,
+    ids: *mut i32,
+) -> HRESULT {
+    if names.is_null() || ids.is_null() {
+        return E_POINTER;
+    }
+    let mut hr = S_OK;
+    // SAFETY: COM's arrays of `count` names (each ended by 0) and ids; `this` a live object
+    unsafe {
+        let known = (*this).kind.names();
+        for k in 0..count as usize {
+            let p = *names.add(k);
+            let n = (0..).take_while(|&i| *p.add(i) != 0).count();
+            let name = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            // (the first the method; the others, its arguments' names, not known)
+            let id = match k {
+                0 => known.iter().position(|m| m.eq_ignore_ascii_case(&name)).map(|i| i as i32 + 1),
+                _ => None,
+            };
+            *ids.add(k) = id.unwrap_or(-1);
+            if id.is_none() {
+                hr = DISP_E_UNKNOWNNAME;
+            }
+        }
+    }
+    hr
+}
+
+unsafe extern "system" fn invoke(
+    this: *mut Dispatch,
+    id: i32,
+    _: *const GUID,
+    _: u32,
+    _: u16,
+    params: *const DispParams,
+    result: *mut Variant,
+    excep: *mut ExcepInfo,
+    _: *mut u32,
+) -> HRESULT {
+    // SAFETY: COM's pointers, valid for the call; the arguments in reverse order; `this` a live
+    // object
+    unsafe {
+        if id < 1 || id as usize > (*this).kind.names().len() {
+            return DISP_E_MEMBERNOTFOUND;
+        }
+        let mut args = Vec::new();
+        if let Some(p) = params.as_ref() {
+            for k in (0..p.count as usize).rev() {
+                match text_of(&*p.args.add(k)) {
+                    Some(t) => args.push(t),
+                    None => return DISP_E_TYPEMISMATCH,
+                }
+            }
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (*this).call(id, &args)));
+        let r = r.unwrap_or_else(|_| Err("the call failed (a panic)".into()));
+        match r {
+            Ok(out) => {
+                let v = match out {
+                    Out::Text(t) => Variant { vt: VT_BSTR, reserved: [0; 3], value: bstr(&t) as usize, record: 0 },
+                    Out::Object(o, dispatch) => {
+                        let vt = if dispatch { VT_DISPATCH } else { VT_UNKNOWN };
+                        Variant { vt, reserved: [0; 3], value: o as usize, record: 0 }
+                    }
+                };
+                match result.as_mut() {
+                    Some(r) => *r = v,
+                    // (given nowhere: let go of)
+                    None => release_variant(v),
+                }
+                S_OK
+            }
+            Err(e) => {
+                if let Some(r) = result.as_mut() {
+                    *r = Variant { vt: VT_EMPTY, reserved: [0; 3], value: 0, record: 0 };
+                }
+                match excep.as_mut() {
+                    Some(x) => {
+                        *x = ExcepInfo {
+                            code: 0,
+                            reserved: 0,
+                            source: bstr("Aqueous"),
+                            description: bstr(&e),
+                            help_file: std::ptr::null_mut(),
+                            help_context: 0,
+                            reserved2: std::ptr::null_mut(),
+                            deferred: std::ptr::null_mut(),
+                            scode: E_FAIL,
+                        };
+                        DISP_E_EXCEPTION
+                    }
+                    None => E_FAIL,
+                }
+            }
+        }
+    }
+}
+
+/// A result nobody took, let go of.
+unsafe fn release_variant(v: Variant) {
+    // SAFETY: of the kinds made here: a BSTR, or a COM object of a reference
+    unsafe {
+        match v.vt {
+            VT_BSTR => windows_sys::Win32::Foundation::SysFreeString(v.value as *const u16),
+            VT_DISPATCH | VT_UNKNOWN => {
+                let vtbl = *(v.value as *const *const usize);
+                let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vtbl.add(2));
+                release(v.value as *mut c_void);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A file of an archive, read as an `IStream`.
+#[repr(C)]
+struct Stream {
+    vtbl: &'static StreamVtbl,
+    refs: AtomicU32,
+    archive: Arc<Archive>,
+    path: String,
+    size: u64,
+    mtime: FILETIME,
+    at: Mutex<u64>,
+}
+
+impl Stream {
+    /// A stream of file `path` of `archive` (`entry`, as `stat` tells it), of one reference.
+    fn new(archive: Arc<Archive>, path: String, entry: &Value) -> *mut Stream {
+        let size = entry["size"].as_u64().unwrap_or(0);
+        object_made();
+        Box::into_raw(Box::new(Stream {
+            vtbl: &STREAM_VTBL,
+            refs: AtomicU32::new(1),
+            archive,
+            path,
+            size,
+            mtime: filetime(entry),
+            at: Mutex::new(0),
+        }))
+    }
+
+    /// Up to `into.len()` bytes from `at`: how many (fewer only at the end).
+    fn read_at(&self, at: u64, into: &mut [u8]) -> Result<usize, String> {
+        let mut n = 0;
+        while n < into.len() && at + (n as u64) < self.size {
+            let want = (into.len() - n).min(CHUNK);
+            let d = self.archive.with(|s, h| s.read(h, &self.path, at + n as u64, want))?;
+            if d.is_empty() {
+                break;
+            }
+            into[n..n + d.len()].copy_from_slice(&d);
+            n += d.len();
+        }
+        Ok(n)
+    }
+}
+
+/// The modification time of `entry` (as `list` and `stat` tell it), as a `FILETIME` (zero where
+/// none is told).
+pub fn filetime(entry: &Value) -> FILETIME {
+    let (Some(s), Some(n)) = (entry["mtime"][0].as_i64(), entry["mtime"][1].as_u64()) else {
+        return FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    };
+    // (100 ns since 1601)
+    let t = (s as i128 + 11_644_473_600) * 10_000_000 + n as i128 / 100;
+    let t = t.clamp(0, u64::MAX as i128) as u64;
+    FILETIME { dwLowDateTime: t as u32, dwHighDateTime: (t >> 32) as u32 }
+}
+
+type Unk = *mut c_void;
+
+#[repr(C)]
+struct StreamVtbl {
+    query_interface: unsafe extern "system" fn(*mut Stream, *const GUID, *mut Unk) -> HRESULT,
+    add_ref: unsafe extern "system" fn(*mut Stream) -> u32,
+    release: unsafe extern "system" fn(*mut Stream) -> u32,
+    read: unsafe extern "system" fn(*mut Stream, *mut c_void, u32, *mut u32) -> HRESULT,
+    write: unsafe extern "system" fn(*mut Stream, *const c_void, u32, *mut u32) -> HRESULT,
+    seek: unsafe extern "system" fn(*mut Stream, i64, u32, *mut u64) -> HRESULT,
+    set_size: unsafe extern "system" fn(*mut Stream, u64) -> HRESULT,
+    copy_to: unsafe extern "system" fn(*mut Stream, Unk, u64, *mut u64, *mut u64) -> HRESULT,
+    commit: unsafe extern "system" fn(*mut Stream, u32) -> HRESULT,
+    revert: unsafe extern "system" fn(*mut Stream) -> HRESULT,
+    lock_region: unsafe extern "system" fn(*mut Stream, u64, u64, u32) -> HRESULT,
+    unlock_region: unsafe extern "system" fn(*mut Stream, u64, u64, u32) -> HRESULT,
+    stat: unsafe extern "system" fn(*mut Stream, *mut StatStg, u32) -> HRESULT,
+    clone: unsafe extern "system" fn(*mut Stream, *mut Unk) -> HRESULT,
+}
+
+static STREAM_VTBL: StreamVtbl = StreamVtbl {
+    query_interface: stream_qi,
+    add_ref: stream_add_ref,
+    release: stream_release,
+    read: stream_read,
+    write: stream_write,
+    seek: stream_seek,
+    set_size: stream_set_size,
+    copy_to: stream_copy_to,
+    commit: stream_commit,
+    revert: stream_revert,
+    lock_region: stream_lock,
+    unlock_region: stream_lock,
+    stat: stream_stat,
+    clone: stream_clone,
+};
+
+/// `STATSTG` (windows-sys's is the same; this keeps the features few).
+#[repr(C)]
+struct StatStg {
+    name: *mut u16,
+    kind: u32,
+    size: u64,
+    mtime: FILETIME,
+    ctime: FILETIME,
+    atime: FILETIME,
+    mode: u32,
+    locks: u32,
+    clsid: GUID,
+    state: u32,
+    reserved: u32,
+}
+
+unsafe extern "system" fn stream_qi(this: *mut Stream, iid: *const GUID, out: *mut Unk) -> HRESULT {
+    if out.is_null() || iid.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: COM's pointers, valid for the call; `this` a live stream
+    unsafe {
+        let iid = &*iid;
+        if same(iid, &IID_IUNKNOWN) || same(iid, &IID_ISEQUENTIALSTREAM) || same(iid, &IID_ISTREAM) {
+            stream_add_ref(this);
+            *out = this as Unk;
+            S_OK
+        } else {
+            *out = std::ptr::null_mut();
+            E_NOINTERFACE
+        }
+    }
+}
+
+unsafe extern "system" fn stream_add_ref(this: *mut Stream) -> u32 {
+    // SAFETY: a live stream
+    unsafe { (*this).refs.fetch_add(1, Ordering::AcqRel) + 1 }
+}
+
+unsafe extern "system" fn stream_release(this: *mut Stream) -> u32 {
+    // SAFETY: a live stream, boxed by `Stream::new`, freed with its last reference
+    unsafe {
+        let n = (*this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+        if n == 0 {
+            drop(Box::from_raw(this));
+            object_gone();
+        }
+        n
+    }
+}
+
+unsafe extern "system" fn stream_read(this: *mut Stream, into: *mut c_void, n: u32, read: *mut u32) -> HRESULT {
+    if into.is_null() && n > 0 {
+        return E_POINTER;
+    }
+    // SAFETY: COM's buffer of `n` bytes; `this` a live stream
+    unsafe {
+        let s = &*this;
+        let buf = std::slice::from_raw_parts_mut(into as *mut u8, n as usize);
+        let mut at = s.at.lock().unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.read_at(*at, buf)));
+        let got = match r {
+            Ok(Ok(got)) => got,
+            _ => {
+                if !read.is_null() {
+                    *read = 0;
+                }
+                return STG_E_READFAULT;
+            }
+        };
+        *at += got as u64;
+        if !read.is_null() {
+            *read = got as u32;
+        }
+        if got < n as usize { S_FALSE } else { S_OK }
+    }
+}
+
+unsafe extern "system" fn stream_write(_: *mut Stream, _: *const c_void, _: u32, written: *mut u32) -> HRESULT {
+    if !written.is_null() {
+        // SAFETY: COM's pointer, valid for the call
+        unsafe { *written = 0 };
+    }
+    STG_E_ACCESSDENIED
+}
+
+unsafe extern "system" fn stream_seek(this: *mut Stream, by: i64, from: u32, to: *mut u64) -> HRESULT {
+    // SAFETY: a live stream; COM's pointer, valid for the call
+    unsafe {
+        let s = &*this;
+        let mut at = s.at.lock().unwrap();
+        let base = match from {
+            0 => 0,
+            1 => *at as i128,
+            2 => s.size as i128,
+            _ => return STG_E_INVALIDFUNCTION,
+        };
+        let new = base + by as i128;
+        if new < 0 {
+            return STG_E_INVALIDFUNCTION;
+        }
+        *at = new as u64;
+        if !to.is_null() {
+            *to = *at;
+        }
+        S_OK
+    }
+}
+
+unsafe extern "system" fn stream_set_size(_: *mut Stream, _: u64) -> HRESULT {
+    STG_E_ACCESSDENIED
+}
+
+unsafe extern "system" fn stream_copy_to(
+    this: *mut Stream,
+    to: Unk,
+    n: u64,
+    read: *mut u64,
+    written: *mut u64,
+) -> HRESULT {
+    if to.is_null() {
+        return E_POINTER;
+    }
+    type Write = unsafe extern "system" fn(Unk, *const c_void, u32, *mut u32) -> HRESULT;
+    // SAFETY: a live stream; `to` an ISequentialStream (or IStream): Write the fifth of its
+    // vtable (after IUnknown's three and Read)
+    unsafe {
+        let s = &*this;
+        let write: Write = std::mem::transmute(*(*(to as *const *const usize)).add(4));
+        let mut buf = vec![0u8; CHUNK];
+        let (mut r, mut w) = (0u64, 0u64);
+        let mut hr = S_OK;
+        let mut at = s.at.lock().unwrap();
+        while r < n {
+            let want = (n - r).min(CHUNK as u64) as usize;
+            let got = match s.read_at(*at, &mut buf[..want]) {
+                Ok(0) => break,
+                Ok(got) => got,
+                Err(_) => {
+                    hr = STG_E_READFAULT;
+                    break;
+                }
+            };
+            *at += got as u64;
+            r += got as u64;
+            let mut put = 0;
+            hr = write(to, buf.as_ptr() as *const c_void, got as u32, &mut put);
+            w += put as u64;
+            if hr < 0 {
+                break;
+            }
+        }
+        if !read.is_null() {
+            *read = r;
+        }
+        if !written.is_null() {
+            *written = w;
+        }
+        if hr < 0 { hr } else { S_OK }
+    }
+}
+
+unsafe extern "system" fn stream_commit(_: *mut Stream, _: u32) -> HRESULT {
+    S_OK
+}
+
+unsafe extern "system" fn stream_revert(_: *mut Stream) -> HRESULT {
+    E_NOTIMPL
+}
+
+unsafe extern "system" fn stream_lock(_: *mut Stream, _: u64, _: u64, _: u32) -> HRESULT {
+    STG_E_INVALIDFUNCTION
+}
+
+unsafe extern "system" fn stream_stat(this: *mut Stream, stat: *mut StatStg, flag: u32) -> HRESULT {
+    if stat.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: a live stream; COM's structure to fill; the name of COM's memory, the caller's
+    unsafe {
+        let s = &*this;
+        let name = match flag & 1 {
+            // STATFLAG_NONAME
+            1 => std::ptr::null_mut(),
+            _ => {
+                let leaf = s.path.rsplit('/').next().unwrap_or("");
+                let w: Vec<u16> = leaf.encode_utf16().chain([0]).collect();
+                let p = CoTaskMemAlloc(w.len() * 2) as *mut u16;
+                if p.is_null() {
+                    return E_OUTOFMEMORY;
+                }
+                std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
+                p
+            }
+        };
+        *stat = StatStg {
+            name,
+            kind: 2, // STGTY_STREAM
+            size: s.size,
+            mtime: s.mtime,
+            ctime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+            atime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+            mode: 0, // STGM_READ
+            locks: 0,
+            clsid: GUID::from_u128(0),
+            state: 0,
+            reserved: 0,
+        };
+        S_OK
+    }
+}
+
+unsafe extern "system" fn stream_clone(this: *mut Stream, out: *mut Unk) -> HRESULT {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: a live stream; COM's pointer, valid for the call
+    unsafe {
+        let s = &*this;
+        let at = *s.at.lock().unwrap();
+        object_made();
+        let c = Box::into_raw(Box::new(Stream {
+            vtbl: &STREAM_VTBL,
+            refs: AtomicU32::new(1),
+            archive: s.archive.clone(),
+            path: s.path.clone(),
+            size: s.size,
+            mtime: s.mtime,
+            at: Mutex::new(at),
+        }));
+        *out = c as Unk;
+        S_OK
+    }
+}

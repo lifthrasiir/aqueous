@@ -26,6 +26,8 @@
 //! - Explorer drops the paths chosen on the verb's class (`drop`: `--drop VERB`, this program as
 //!   a COM local server), all at once. A verb's command, one process for each path as other
 //!   programs may run it, is gathered into the first process of the verb in a folder (`gather`).
+//! - `--serve`: the archives that Explorer browses in its windows (a shell extension), served
+//!   as a COM local server over `aqr --serve` (`serve`).
 //! - `aqr.exe` is the one beside this program, else the one on `PATH` (`AQR` names another).
 //!
 //! The window is a task dialog (`dialog`): what is being done, a bar of how far, the file at
@@ -53,6 +55,8 @@ mod register;
 #[cfg(windows)]
 mod run;
 #[cfg(windows)]
+mod serve;
+#[cfg(windows)]
 mod version;
 
 #[cfg(not(windows))]
@@ -77,6 +81,10 @@ fn main() -> std::process::ExitCode {
         ExitCode::FAILURE
     };
     // (`--drop VERB`, and COM's `-Embedding`: the paths dropped by Explorer, all at once)
+    // (`--serve`: COM's `-Embedding` after it; the archives a shell extension browses)
+    if verb == "--serve" {
+        return serve::serve(&args[1..]);
+    }
     let (verb, paths, dropped) = match verb {
         "--drop" => {
             let v = args.get(1).and_then(|a| a.to_str()).unwrap_or("");

@@ -158,6 +158,10 @@ pub fn register() -> Result<(), String> {
         set(&key, None, &format!("Aqueous {v}"))?;
         set(&format!(r"{key}\LocalServer32"), None, &format!("\"{}\" --drop {v}", exe.display()))?;
     }
+    // (the archives browsed: `crate::serve`)
+    let key = serve_key();
+    set(&key, None, "Aqueous archives")?;
+    set(&format!(r"{key}\LocalServer32"), None, &format!("\"{}\" --serve", exe.display()))?;
     for (key, menu) in COMPRESS.into_iter().zip(MENU) {
         verb(key, shell::COMPRESS, "compress")?;
         set(key, Some("Icon"), &icon)?;
@@ -226,10 +230,16 @@ fn clsid_key(verb: &str) -> String {
     format!(r"CLSID\{}", crate::drop::braced(&crate::drop::clsid(verb).unwrap()))
 }
 
+/// The key (under `Software\Classes`) of the class of the archives browsed ([`crate::serve`]).
+fn serve_key() -> String {
+    format!(r"CLSID\{}", crate::drop::braced(&crate::serve::CLSID))
+}
+
 pub fn unregister() -> Result<(), String> {
     for v in crate::drop::VERBS {
         delete(&classes(&clsid_key(v)))?;
     }
+    delete(&classes(&serve_key()))?;
     for key in COMPRESS.iter().chain(&MENU).chain(&OLD).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }

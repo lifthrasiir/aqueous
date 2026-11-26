@@ -10,6 +10,9 @@ aqr-ipc.workspace = true
 aqr-l10n.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [build-dependencies]
 aqr-l10n.workspace = true
 aqr-version.workspace = true

@@ -53,6 +53,13 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   the string table in `aqr-win.rc`, so they follow a change of Windows' language without
   registering again.
 
+- `aqr-win --serve` is the COM local server of the archives a shell extension browses
+  (`docs/win-shell-ext-design.md`, `src/serve.rs`): late-bound objects (`IDispatch`, marshaled
+  by the system's proxies, no type library) over one `aqr --serve`, an archive's handle closed a
+  minute after its object is let go of, the program ending after ten minutes of none.
+  `tests/serve.rs` drives it from another process (ignored: it needs `aqr.exe` built beside,
+  `cargo rt -p aqr -p aqr-win --test serve -- --ignored`).
+
 ## Status
 
 Left: the menu of Windows 11 (an `IExplorerCommand` DLL and a sparse package), a list
