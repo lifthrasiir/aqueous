@@ -426,3 +426,90 @@ fn empty_segments_are_merged() {
     assert_eq!(h.lines().count(), 8, "{h}");
     ok(&d, None, &["-q", "-K", "a.aqr"]);
 }
+
+/// `--rollback SPEC`: the archive cut back in place to a point, byte for byte as it was then
+/// (later points and segments of no point alike gone), and appended to after; `--convert
+/// --keep-until SPEC`: the same state written into another file, the archive left as it is.
+#[test]
+fn rolling_back_to_a_point() {
+    let d = scratch("rollback");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), words(1, 20_000)).unwrap();
+    ok(&d, Some(&day(0)), &["-q", "-j", "p1", "-o", "a.aqr", "src"]);
+    // a.txt replaced, b.txt added
+    fs::write(src.join("a.txt"), words(2, 21_000)).unwrap();
+    fs::write(src.join("b.txt"), words(3, 5_000)).unwrap();
+    ok(&d, Some(&day(1)), &["-q", "-a", "-j", "p2", "a.aqr", "src"]);
+    let at2 = fs::read(d.join("a.aqr")).unwrap();
+    // b.txt taken away
+    fs::remove_file(src.join("b.txt")).unwrap();
+    ok(&d, Some(&day(2)), &["-q", "-s", "-j", "p3", "a.aqr", "src"]);
+    let at3 = fs::read(d.join("a.aqr")).unwrap();
+    // c.txt added, of no point
+    fs::write(src.join("c.txt"), words(4, 6_000)).unwrap();
+    ok(&d, Some(&day(3)), &["-q", "-a", "a.aqr", "src"]);
+    let before = states(&d, "a.aqr", 3);
+    let all = fs::read(d.join("a.aqr")).unwrap();
+
+    // in place: as it was at p2, byte for byte
+    fs::write(d.join("r.aqr"), &all).unwrap();
+    let o = ok(&d, None, &["--rollback", "@p2", "r.aqr"]);
+    assert!(stderr(&o).contains("back to #2"), "{}", stderr(&o));
+    assert!(fs::read(d.join("r.aqr")).unwrap() == at2, "not as it was at p2");
+    assert_eq!(states(&d, "r.aqr", 2), before[..2]);
+    ok(&d, None, &["-q", "-K", "r.aqr"]);
+    // there already: nothing done
+    let o = ok(&d, None, &["--rollback", "#-1", "r.aqr"]);
+    assert!(stderr(&o).contains("nothing after it"), "{}", stderr(&o));
+    assert!(fs::read(d.join("r.aqr")).unwrap() == at2);
+    // appended to after, a point of its own
+    ok(&d, Some(&day(5)), &["-q", "-a", "-j", "again", "r.aqr", "src"]);
+    let h = stdout(&ok(&d, None, &["--history", "r.aqr"]));
+    let labels: Vec<&str> = h.lines().map(|l| l.rsplit("  ").next().unwrap()).collect();
+    assert_eq!(labels, ["p1", "p2", "again"], "{h}");
+    assert_eq!(listed(&d, &["-t", "-q", "r.aqr"]), ["a.txt", "b.txt", "c.txt"]);
+    // the last point: what followed it, of no point, gone
+    fs::write(d.join("r.aqr"), &all).unwrap();
+    ok(&d, None, &["-q", "--rollback", "#-1", "r.aqr"]);
+    assert!(fs::read(d.join("r.aqr")).unwrap() == at3, "not as it was at p3");
+
+    // into another file, the archive as it is
+    ok(&d, None, &["-q", "--convert", "--keep-until", "@p2", "-o", "k.aqr", "a.aqr"]);
+    assert!(fs::read(d.join("a.aqr")).unwrap() == all);
+    let h = stdout(&ok(&d, None, &["--history", "k.aqr"]));
+    assert_eq!(h.lines().count(), 2, "{h}");
+    assert_eq!(states(&d, "k.aqr", 2), before[..2]);
+    ok(&d, None, &["-q", "-K", "k.aqr"]);
+    // with the points from one on, or none
+    ok(&d, None, &["-q", "--convert", "--keep-until", "@p3", "--keep-since", "@p2", "-o", "ks.aqr", "a.aqr"]);
+    assert_eq!(states(&d, "ks.aqr", 2), before[1..3]);
+    ok(&d, None, &["-q", "--convert", "--keep-until", "@p2", "--drop-history", "-o", "kd.aqr", "a.aqr"]);
+    assert!(!aqr_at(&d, None, &["--history", "kd.aqr"]).status.success());
+    assert_eq!(listed(&d, &["-t", "-q", "kd.aqr"]), ["a.txt", "b.txt"]);
+    // encrypted too
+    let pass = d.join("pass");
+    fs::write(&pass, "secret\n").unwrap();
+    let from = pass.display().to_string();
+    ok(&d, None, &["-q", "--convert", "-P", "--passphrase-from", &from, "-o", "e.aqr", "a.aqr"]);
+    ok(&d, None, &["-q", "--convert", "--keep-until", "#1", "--passphrase-from", &from, "-o", "e1.aqr", "e.aqr"]);
+    let o = ok(&d, None, &["-t", "-q", "--passphrase-from", &from, "e1.aqr"]);
+    assert_eq!(stdout(&o).trim(), "a.txt");
+    // (an encrypted archive is not cut back in place)
+    assert!(!aqr_at(&d, None, &["--rollback", "#1", "--passphrase-from", &from, "e.aqr"]).status.success());
+
+    // not where they have no meaning, nor of a point not there; the archive left as it is
+    for args in [
+        ["--rollback", "#9", "a.aqr"].as_slice(),
+        &["--rollback", "#1", "-t", "a.aqr"],
+        &["--rollback", "#1", "a.aqr", "k.aqr"],
+        &["--rollback", "#1", "-o", "x.aqr", "a.aqr"],
+        &["--keep-until", "#1", "-t", "a.aqr"],
+        &["--convert", "--keep-until", "@p1", "--keep-since", "@p2", "-o", "y.aqr", "a.aqr"],
+    ] {
+        let o = aqr_at(&d, None, args);
+        assert!(!o.status.success(), "{args:?} succeeded");
+    }
+    assert!(fs::read(d.join("a.aqr")).unwrap() == all);
+    assert!(!d.join("y.aqr").exists());
+}

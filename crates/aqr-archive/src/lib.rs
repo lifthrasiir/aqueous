@@ -84,7 +84,10 @@ use parse::*;
 pub use program::*;
 pub use rewrite::{History, Layers, Rewritten, rewrite, rewrite_as, rewrite_layered, rewrite_payload};
 pub use runner::*;
-pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter, crossing, kill, precompress_leaves};
+pub use segment::{
+    Batch, ContentAt, Layout, Leaf, Placed, Rollback, Segment, SegmentWriter, crossing, kill, precompress_leaves,
+    rollback,
+};
 pub use slices::*;
 pub use stand_in::*;
 pub use tree::{

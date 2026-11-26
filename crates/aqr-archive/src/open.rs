@@ -146,6 +146,12 @@ pub fn open_payload<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Arch
     open_as(c, runner, true)
 }
 
+/// [`open_payload`] of the archive as it is after the segment whose metadata block is at
+/// `metadata`, as [`open_upto`] has it.
+pub fn open_payload_upto<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, metadata: usize) -> Decoded<Archive<'c, 'n>> {
+    open_with(c, runner, true, false, Some(metadata))
+}
+
 /// Archive `c` (the payload of an encrypted archive where `sealed`) opened as [`open`] does, but
 /// salvaged (spec, "Salvage"): a file whose block is not there (an archive repaired from a
 /// truncation, [`mirror::repair`]) is lost rather than the archive invalid, and so is a file of a

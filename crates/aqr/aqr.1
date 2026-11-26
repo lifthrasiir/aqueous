@@ -60,8 +60,13 @@
 .Fl -convert
 .Op Fl P | -no-passphrase
 .Op Fl A | -no-archival
+.Op Fl -keep-until Ar spec
 .Op Fl o Ar output
 .Ar archive ...
+.Nm
+.Fl -rollback Ar spec
+.Op Fl q
+.Ar archive
 .Nm unaqr
 .Op Ar options
 .Ar archive
@@ -215,7 +220,10 @@ Its segments and journal points are kept as they are, but as
 and
 .Fl -drop-history
 tell, as of
-.Fl -compact .
+.Fl -compact ,
+and as of the point
+.Fl -keep-until
+picks.
 A damaged archive is repaired as it is written, from its mirror blocks; one that would lose a
 file so is not written
 .Pq Fl d No salvages what is left .
@@ -252,6 +260,39 @@ write the archive without mirror blocks.
 Elsewhere it does nothing (the default), but with
 .Fl A
 it is an error.
+.It Fl -keep-until Ar spec
+With
+.Fl -convert :
+write the archive as it was at the journal point
+.Ar spec
+picks
+.Pq as Fl -at ,
+the segments after the point's left out
+.Pq those of later points and of none ;
+with
+.Fl -keep-since
+or
+.Fl -drop-history ,
+those apply to the states up to it.
+.It Fl -rollback Ar spec
+Cut an archive back in place to the journal point
+.Ar spec
+picks
+.Pq as Fl -at :
+what was written after the point's segment is taken out of the file, not written again as
+.Fl -compact
+does, and the archive is then the file it was at the point, byte for byte.
+The footer that the next commit made a spacer block is written again first, so that the file
+holds the archive as it was or as cut back whatever happens meanwhile.
+Not of an encrypted archive, one of mirror blocks
+.Pq Fl A
+or one after other bytes:
+.Fl -convert Fl -keep-until
+writes the state into another file.
+Where another program has the file mapped (Windows does not cut it then), what followed the
+point is left after the archive as bytes readers leave out, and the next
+.Fl a
+takes it out.
 .El
 .Ss Inputs
 .Bl -tag -width Ds
@@ -429,6 +470,9 @@ As
 .Fl -ipc ,
 started before the frontend knows what to do: told its inputs to count while a compression
 dialog is open, and then what to do with them.
+.It Fl -serve
+Serve a frontend (a shell extension's) the entries and files of archives through standard
+input and output.
 .El
 .Ss Compression
 .Bl -tag -width Ds

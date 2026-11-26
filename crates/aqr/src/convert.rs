@@ -244,7 +244,31 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
         true => aqr_archive::open_payload(read, &aqr_archive::NoModules),
         false => aqr_archive::open(read, &aqr_archive::NoModules),
     };
-    let archive = opened.map_err(|e| err(&exit::seen(e)))?;
+    let mut archive = opened.map_err(|e| err(&exit::seen(e)))?;
+    // (as of the point --keep-until picks, where segments follow its own: opened again up to it)
+    let mut until = None;
+    if let Some(at) = &a.keep_until {
+        let points = archive.journal();
+        let p = crate::journal::pick(points, at).map_err(|e| err(&format!("--keep-until: {e}")))?;
+        let n = points.iter().position(|q| q.metadata == p.metadata && q.time == p.time).unwrap_or(0);
+        if let Some(since) = &a.keep_since {
+            let q = crate::journal::pick(points, since).map_err(|e| err(&format!("--keep-since: {e}")))?;
+            if q.metadata > p.metadata {
+                return Err(err(&"--keep-since picks a point after the one --keep-until picks"));
+            }
+        }
+        let last = archive.segment_metadata().map_err(|e| err(&e))?.last().copied();
+        if last != Some(p.metadata) {
+            until = Some((p.metadata, format!("#{} {:?}", n + 1, p.label)));
+            let m = p.metadata;
+            drop(archive);
+            let opened = match sealed {
+                true => aqr_archive::open_payload_upto(read, &aqr_archive::NoModules, m),
+                false => aqr_archive::open_upto(read, &aqr_archive::NoModules, m),
+            };
+            archive = opened.map_err(|e| err(&exit::seen(e)))?;
+        }
+    }
     let tree = archive.tree().cloned().ok_or_else(|| err(&"an archive of a single file is not converted yet"))?;
     let sizes: Vec<u64> = (0..archive.contents_len()).map(|c| archive.content_size(c).unwrap_or(u64::MAX)).collect();
     let journal: Vec<(u64, String)> = archive.journal().iter().map(|p| (p.time, p.label.clone())).collect();
@@ -281,6 +305,7 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
         _ if a.no_archival => false,
         _ => !check.mirrors.is_empty(),
     };
+    let after = until.as_ref().map(|(_, told)| format!("as of {told}, the states after it dropped"));
     let mut changes = Vec::new();
     if repaired || !erased.is_empty() {
         changes.push("repaired");
@@ -301,8 +326,11 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
         History::Drop if !journal.is_empty() => changes.push("journal points dropped"),
         _ => {}
     }
+    if let Some(after) = &after {
+        changes.push(after);
+    }
     if changes.is_empty() {
-        tell("nothing to change (as -P, --no-passphrase, -A and --no-archival tell)");
+        tell("nothing to change (as -P, --no-passphrase, -A, --no-archival and --keep-until tell)");
         crate::end(None, 0, map.len() as u64, 0, start);
         return Ok(());
     }
@@ -326,7 +354,7 @@ fn convert_aqr(a: &Args, input: &Path, file: &fs::File, map: &[u8]) -> Result<()
     let (mut out, _guard) =
         stop::create(&part, || fs::OpenOptions::new().read(true).write(true).create_new(true).open(&part))
             .map_err(|e| perr(&e))?;
-    let layers = Layers { mirrors, size_hint: !matches!(sealing, Sealing::None) };
+    let layers = Layers { mirrors, size_hint: !matches!(sealing, Sealing::None), until: until.as_ref().map(|u| u.0) };
     let r = (|| -> Result<(aqr_archive::Rewritten, Option<envelope::Opener>), String> {
         let payload = match &streaming {
             Some(d) if restored.is_none() => aqr_archive::Payload::Sealed(d),

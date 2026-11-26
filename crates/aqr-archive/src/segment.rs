@@ -253,6 +253,70 @@ pub fn crossing(at: u64, n: usize) -> bool {
     at % 512 + n as u64 > 512
 }
 
+/// How archive `a` (unencrypted, from its header magic, at `base` in its file) is cut back to its
+/// state after the segment whose metadata block is at `metadata` ([`rollback`]; spec, "Appending
+/// to an archive": roll back).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rollback {
+    /// The bytes to write at each offset (of `a`), in order, each durably written before the next:
+    /// the last one makes the footer after the metadata block, from which on the file holds the
+    /// archive as of that segment, what follows trailing bytes.
+    pub writes: Vec<(usize, Vec<u8>)>,
+    /// The length of the archive then, to cut the file to.
+    pub len: usize,
+    /// Whether the footer is the one that was there, made a spacer block by the commit after it:
+    /// the archive then as it was, byte for byte (else a footer written over the blocks after the
+    /// metadata block, where the commit after it wrote over the footer, which crossed a sector).
+    pub restored: bool,
+}
+
+/// How archive `a` is cut back to its state after the segment whose metadata block is at
+/// `metadata` (from the header magic; `base`: where `a` is in its file): its footer then written
+/// again after the metadata block ([`Rollback`]). Where the commit after it made its footer a
+/// spacer block, that footer is restored, its first bytes last (a write in a sector, as the commit
+/// made it); else a footer is written right after the metadata block (with a spacer block before
+/// it where it would cross a sector), over the blocks of the segments after it. `None` where no
+/// metadata block is there, or it is the last.
+pub fn rollback(a: &[u8], metadata: usize, base: u64) -> Option<Rollback> {
+    let (ty, end) = super::block_at(a, metadata)?;
+    let (footer, _) = super::footer_of(a)?;
+    if !(0x10..=0x17).contains(&ty) || end >= footer.start {
+        return None;
+    }
+    let footer_at = |at: usize| {
+        let mut f = Vec::new();
+        footer_with(&mut f, at - HEADER_MAGIC.len(), (at + FOOTER_MAGIC.len() + 2 - metadata) as u64);
+        f
+    };
+    // the footer made a spacer block: a spacer block of its length (after those placing it), its
+    // first bytes those of the commit
+    let mut at = end;
+    while let Some((0..=3, next)) = super::block_at(a, at) {
+        let f = footer_at(at);
+        let k = kill(f.len());
+        if next == at + f.len() + f.len() % 2 && a[at..].starts_with(&k) && !crossing(base + at as u64, k.len()) {
+            let writes = vec![(at + k.len(), f[k.len()..].to_vec()), (at, f[..k.len()].to_vec())];
+            return Some(Rollback { writes, len: at + f.len(), restored: true });
+        }
+        at = next;
+    }
+    // (none: a footer written whole in a sector, a spacer block first where it is moved, written
+    // before it: either alone leaves the archive as it is)
+    let mut room = 0;
+    while crossing(base + (end + room) as u64, footer_at(end + room).len()) {
+        room += 2;
+    }
+    let f = footer_at(end + room);
+    let mut writes = Vec::new();
+    if room > 0 {
+        let mut s = vec![0, (room - 2) as u8];
+        s.resize(room, 0);
+        writes.push((end, s));
+    }
+    writes.push((end + room, f.clone()));
+    Some(Rollback { writes, len: end + room + f.len(), restored: false })
+}
+
 impl Default for SegmentWriter {
     fn default() -> SegmentWriter {
         SegmentWriter::new()
@@ -1810,6 +1874,79 @@ mod tests {
         let mut first = SegmentWriter::new();
         assert!(first.close_as(&enc, &Tree::default(), &[], Status::Complete).is_err());
         assert!(first.set_journal(vec![(1, "a".into()), (1, "b".into())]).is_err());
+    }
+
+    /// An archive cut back to a segment ([`rollback`]): where the footer after it is still a
+    /// spacer block, the archive as it was then, byte for byte; else (a footer that would have
+    /// crossed a sector, at the base given) a footer written over what follows. Either way, the
+    /// file is the archive after the last write, and the one before it after any other.
+    #[test]
+    fn rollbacks() {
+        let names = ["a", "b", "c"];
+        let mut f = Formula::default();
+        let lits: Vec<Node> = names.iter().map(|n| f.push(*n, n.repeat(5).into_bytes())).collect();
+        let enc = Encoder::new(Level::Zstd(3));
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        // (the archive after each commit, and the metadata block of each)
+        let mut states: Vec<(Vec<u8>, usize)> = Vec::new();
+        for k in 0..names.len() {
+            out.extend_from_slice(w.pad());
+            let b = w.batch(&enc, &f, &[Leaf { outputs: vec![lits[k].clone()], sums: vec![None] }]).unwrap();
+            w.commit(&b);
+            out.extend_from_slice(b.blocks());
+            let t = Tree { root: Extra::default(), entries: vec![entry(None, names[k], EntryNode::File(0))] };
+            let contents = [ContentAt { leaf: b.leaf_at[0], output: 0, size: 5 }];
+            let metadata = out.len();
+            out.extend_from_slice(&w.close_as(&enc, &t, &contents, Status::Complete).unwrap());
+            let (end, old) = w.footer(0);
+            out.extend_from_slice(&end);
+            if let Some(old) = old {
+                out = killed(&out, old);
+            }
+            states.push((out.clone(), metadata));
+        }
+        let nat = natives();
+        let names_of = |a: &[u8]| -> Vec<Vec<u8>> {
+            let mut n: Vec<_> = open(a, &nat).unwrap().tree().unwrap().entries.iter().map(|e| e.name.clone()).collect();
+            n.sort();
+            n
+        };
+        let applied = |r: &Rollback, n: usize| {
+            let mut c = out.clone();
+            for (at, b) in &r.writes[..n] {
+                c[*at..*at + b.len()].copy_from_slice(b);
+            }
+            c
+        };
+        for (k, (was, metadata)) in states.iter().enumerate().take(names.len() - 1) {
+            let r = rollback(&out, *metadata, 0).unwrap();
+            assert!(r.restored);
+            for n in 0..r.writes.len() {
+                assert_eq!(locate(&applied(&r, n)), Some(0..out.len()), "#{k}: {n} writes");
+            }
+            let done = applied(&r, r.writes.len());
+            assert_eq!(locate(&done), Some(0..r.len));
+            assert_eq!(&done[..r.len], &was[..], "#{k}");
+            assert_eq!(names_of(&done[..r.len]).len(), k + 1);
+            // (a base at which the footer's first bytes would cross a sector: written anew)
+            let at = r.writes.last().unwrap().0 as u64;
+            let base = (512 - at % 512 - 1) % 512;
+            let r = rollback(&out, *metadata, base).unwrap();
+            assert!(!r.restored);
+            let (at, f) = r.writes.last().unwrap();
+            assert!(!crossing(base + *at as u64, f.len()));
+            for n in 0..r.writes.len() {
+                assert_eq!(locate(&applied(&r, n)), Some(0..out.len()), "#{k} at {base}: {n} writes");
+            }
+            let done = applied(&r, r.writes.len());
+            assert_eq!(locate(&done), Some(0..r.len));
+            assert_eq!(names_of(&done[..r.len]), names_of(was));
+        }
+        // the last metadata block, or none there
+        let last = states.last().unwrap().1;
+        assert_eq!(rollback(&out, last, 0), None);
+        assert_eq!(rollback(&out, states[0].1 + 1, 0), None);
     }
 
     #[test]

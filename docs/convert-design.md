@@ -180,7 +180,7 @@ B가 기대는 디코더 모듈은 다음과 같다(지금 있는 것 기준).
 재압축은 하지 않는다. 바꾸는 것은 블록 위의 층뿐이다. 미러 블록은 블록 사이와 footer 앞에, 암호화는
 아카이브 전체를 감싸는 age STREAM이다. 아카이브 자체는 **그대로 둔다**. segment, 덧붙이기가 덮어쓴 항목,
 tombstone, `segment-status`, journal의 지점이 모두 입력과 같다. `--convert`는 `--compact`가 아니다.
-아카이브를 줄이는 것은 journal에 대한 지시(`--keep-since`, `--drop-history`)가 있을 때뿐이다.
+아카이브를 줄이는 것은 journal에 대한 지시(`--keep-since`, `--drop-history`, `--keep-until`)가 있을 때뿐이다.
 
 1. 열기: `append::open`처럼 잠그고 연다(커밋되지 않은 꼬리는 그쪽 규칙대로 처리한다). 암호화되었으면
    복호화한다(`envelope::open`, `decrypt_into`). 미러 블록이 있으면 `mirror::check`로 확인하고,
@@ -201,6 +201,7 @@ tombstone, `segment-status`, journal의 지점이 모두 입력과 같다. `--co
 | 미러 넣기 | `-A` | 미러 블록을 넣는다. 암호화된 출력이면 봉한 헤더의 미러(`ENCRYPTED_MIRRORED_HEADER_MAGIC`)도 |
 | 미러 빼기 | `--no-archival` | 미러 블록을 뺀다 |
 | journal | `--keep-since`, `--drop-history` | `--compact`와 같다 |
+| journal | `--keep-until SPEC` | 고른 지점의 상태까지만 읽는다(그 segment 뒤를 버린다, `Layers::until`). 앞의 둘과 함께 쓰면 그 상태까지에 그것을 적용한다. 마지막 segment의 지점이면 바뀌는 것이 없다. 제자리에서는 `--rollback`(`append-design.md`)이 다시 쓰지 않고 자른다 |
 
 - 주지 않은 축은 **입력의 설정을 이어받는다**. `-c`처럼 "주지 않으면 없음"으로 하면 `aqr --convert -A
   x.aqr` 하나로 암호가 조용히 벗겨진다. 그래서 벗기는 것은 `--no-passphrase`, `--no-archival`로만 한다.

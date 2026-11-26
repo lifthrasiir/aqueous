@@ -45,6 +45,11 @@ pub(crate) struct Args {
     /// (with the states between); `--drop-history`: dropping them all, with those states.
     pub(crate) keep_since: Option<journal::At>,
     pub(crate) drop_history: bool,
+    /// `--keep-until SPEC`: `--convert` of the archive as it was at the point `SPEC` picks, the
+    /// states after it dropped.
+    pub(crate) keep_until: Option<journal::At>,
+    /// `--rollback SPEC`: the archive cut back in place to the point `SPEC` picks ([`crate::rollback`]).
+    pub(crate) rollback: Option<journal::At>,
     /// `-a`: compressing, the inputs appended to an archive ([`append`]), the first input or `-o`.
     pub(crate) append: bool,
     /// `-s` (with `append`): what the archive holds that the inputs do not taken away too.
@@ -243,6 +248,8 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         from: None,
         keep_since: None,
         drop_history: false,
+        keep_until: None,
+        rollback: None,
         append: false,
         sync: false,
         edit: None,
@@ -359,6 +366,8 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             "--from" => a.from = Some(journal::at_of(&text(value("--from")?))?),
             "--keep-since" => a.keep_since = Some(journal::at_of(&text(value("--keep-since")?))?),
             "--drop-history" => a.drop_history = true,
+            "--keep-until" => a.keep_until = Some(journal::at_of(&text(value("--keep-until")?))?),
+            "--rollback" => a.rollback = Some(journal::at_of(&text(value("--rollback")?))?),
             "-a" | "--append" => (a.append, a.sync) = (true, false),
             "-s" | "--sync" => (a.append, a.sync) = (true, true),
             "-L" | "--dereference" => a.dereference = true,
@@ -590,9 +599,46 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
             return Err(format!("{o} with {what} (it is of an archive written)"));
         }
     }
+    if a.rollback.is_some() {
+        let others = a.convert
+            || a.edit.is_some()
+            || a.compact
+            || a.decompress
+            || a.list
+            || a.info
+            || a.tag.is_some()
+            || a.history
+            || a.diff
+            || a.append
+            || a.journal.is_some()
+            || a.output.is_some()
+            || a.at.is_some()
+            || a.from.is_some()
+            || a.keep_since.is_some()
+            || a.keep_until.is_some()
+            || a.drop_history
+            || a.passphrase
+            || a.rm
+            || hooks(&a).is_some()
+            || !renames.is_empty()
+            || last_dir.is_some();
+        if others {
+            return Err("--rollback takes a point and an archive alone (--convert --keep-until writes the state to another file)".into());
+        }
+        if a.inputs.len() != 1 {
+            return Err("--rollback takes one archive".into());
+        }
+        if a.inputs.iter().any(|i| stdio::is(i)) {
+            return Err("--rollback: an archive in place, not - (standard input)".into());
+        }
+        return Ok(a);
+    }
     if a.convert {
         convert_args(&mut a, renames, last_dir.is_some())?;
         return Ok(a);
+    }
+    if a.keep_until.is_some() {
+        return Err("--keep-until is for --convert (--rollback cuts the archive back in place)".into());
     }
     if a.edit.is_some() || a.compact {
         edit_args(&mut a, renames, last_dir.is_some())?;

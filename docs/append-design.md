@@ -393,6 +393,24 @@ aqr-incomplete = {
     실행, `--tag`)의 사슬은 `--keep-since`가 앞 segment 하나에 지점을 맵째 합쳐 쓴다(같은 시각이 겹치면 합치지
     않는다). 지점도 상태도 그대로이고 segment와 metadata block만 줄어든다. 지점을 하나도 버리지 않고 합치려면
     `--keep-since #1`을 쓴다(첫 지점 앞의 이름 없는 상태만 접힌다).
+- **되돌리기: `--rollback SPEC`과 `--convert --keep-until SPEC`.** 고른 지점 P 뒤의 상태를 모두 버린다
+  (`--compact`처럼 다시 쓰지 않고, `--delete`처럼 남겨 두지도 않는다). P의 segment 뒤에 이름 없는 segment(주기적
+  commit, `-j` 없는 `-a`)가 있으면 그것도 버린다.
+  - `--rollback`은 제자리에서 자른다. 덧붙이기의 commit을 거꾸로 하는 셈이다. P의 metadata block 뒤에서 다음
+    commit이 spacer로 죽인 footer를 찾아(그 자리, 길이, 첫 바이트가 `kill`의 것인 spacer) 본문을 먼저 쓰고 sync,
+    첫 2바이트를 써서 sync한다(이것이 commit이다. 그 순간부터 trim이 그 footer를 처음 footer로 보므로 P의 상태가
+    된다). 그다음 파일을 그 footer 끝에서 자른다. 결과는 P 때의 파일과 바이트 단위로 같다. 죽인 footer가 없으면
+    (sector를 넘어 다음 commit이 덮어쓴 경우) metadata block 바로 뒤에 한 sector 안에 드는 footer를 새로 쓴다
+    (넘으면 2바이트 spacer를 앞에 먼저 쓴다. 어느 쪽만 쓰여도 옛 상태다). `aqr_archive::rollback`.
+  - 열기는 `-a`와 같다(잠금, 커밋되지 않은 꼬리 자르기). 암호화, 미러 블록, 앞에 다른 데이터가 있는 아카이브는
+    제자리에서 고치지 않으므로 거절하고 `--convert --keep-until`을 쓴다.
+  - Windows는 다른 프로세스가 매핑한 파일을 자르지 못한다(`ERROR_USER_MAPPED_FILE`; 탐색기의 폴더 보기가
+    `aqr --serve`로 열어 둔 경우). 5초 동안 다시 시도하고, 그래도 안 되면 뒤의 바이트를 꼬리로 남긴다. 읽는
+    쪽은 꼬리를 빼고 읽고, 다음 `-a`가 잘라 낸다.
+  - `--convert --keep-until`은 P까지의 상태를 다른 파일(또는 rename으로 제자리)에 쓴다(`Layers::until`).
+    `--keep-since`, `--drop-history`와 함께 쓰면 P까지의 이력에 그것을 적용한다.
+  - 탐색기: 속성의 "버전" 탭의 "이후 버전 삭제…"(`aqr-win rollback-version ARCHIVE #N`)가 확인을 받고
+    `--rollback`을 하거나, "새 아카이브로 저장"을 고르면 `--convert --keep-until`로 `이름 (라벨).aqr`을 쓴다.
 - **라벨의 placeholder.** `{today}`는 지역 날짜 `YYYY-MM-DD`, `{now}`는 지역 시각 `YYYY-MM-DD HH:MM:SS`다.
   `{{`와 `}}`는 괄호 자체이고, 모르는 이름은 오류다. 시각 키(UTC ms)와는 별개로 라벨 문자열만 바꾼다.
 - **`--at SPEC`**(`-t`, `-I`, `-d`, 이후 `--diff`)은 지점 중에서만 고른다.

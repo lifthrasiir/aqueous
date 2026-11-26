@@ -134,7 +134,8 @@ pub enum History {
     Whole,
 }
 
-/// What is written around the blocks of an archive written again ([`rewrite_layered`]).
+/// What is written around the blocks of an archive written again ([`rewrite_layered`]), and how
+/// far it is read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Layers {
     /// Mirror blocks, as `aqr -c -A` writes them ([`Mirroring`]; the last metadata block's before
@@ -143,6 +144,11 @@ pub struct Layers {
     /// A size hint block after the header, to be filled in, as an encrypted archive's payload has
     /// to begin ([`super::envelope::Sealer`]); its mirror blocks then placed as in a payload.
     pub size_hint: bool,
+    /// The archive read as it is after the segment whose metadata block is at this offset
+    /// ([`super::JournalPoint::metadata`]; `aqr --convert --keep-until`): the segments after it
+    /// left out, as if the archive ended there, and the points of its `journal` with them; the
+    /// segments up to it written as `history` tells.
+    pub until: Option<usize>,
 }
 
 /// Where [`rewrite_layered`] writes: as it is, or through [`Mirroring`].
@@ -263,22 +269,39 @@ pub fn rewrite_payload(
         History::Keep { from, since } => Some((from, since)),
         _ => None,
     };
-    let (blocks, tree, _, _, mut archive) = opened(c, false, false, keeping.map(|k| k.0)).map_err(fail)?;
+    let until = layers.until;
+    let (blocks, tree, _, _, mut archive) = opened(c, false, false, keeping.map(|k| k.0).or(until)).map_err(fail)?;
     let (own, refs) = tree.ok_or_else(|| Error::new("an archive of a single file, not of paths"))?;
     // (the segments before the first point kept, as one state; and each segment as it is told)
     let mut infos: Vec<SegmentInfo> = Vec::new();
+    let at = |s: &super::Segmented| s.metadata.as_ref().map(|m| m.0);
+    // (the segments read: up to the one it is to end with)
+    let end_n = match until {
+        Some(u) => {
+            blocks
+                .segments
+                .iter()
+                .position(|s| at(s) == Some(u))
+                .ok_or_else(|| Error::new("no metadata block where the archive is to end"))?
+                + 1
+        }
+        None => blocks.segments.len(),
+    };
     let base_n = match keeping {
         None if whole => {
-            opened_with(c, false, false, None, Some(&mut infos)).map_err(fail)?;
+            opened_with(c, false, false, until, Some(&mut infos)).map_err(fail)?;
             0
         }
         Some((from, _)) => {
-            opened_with(c, false, false, None, Some(&mut infos)).map_err(fail)?;
-            let at = |s: &super::Segmented| s.metadata.as_ref().map(|m| m.0);
+            opened_with(c, false, false, until, Some(&mut infos)).map_err(fail)?;
             let k = blocks.segments.iter().position(|s| at(s) == Some(from));
-            k.ok_or_else(|| Error::new("no metadata block where the first point is"))? + 1
+            let k = k.ok_or_else(|| Error::new("no metadata block where the first point is"))? + 1;
+            if k > end_n {
+                return Err(Error::new("the first point kept after the archive's end"));
+            }
+            k
         }
-        None => blocks.segments.len(),
+        None => end_n,
     };
     let t = if keeping.is_some() || whole { &own } else { t };
     if t.entries.is_empty() {
@@ -294,6 +317,9 @@ pub fn rewrite_payload(
         let kind = match ty {
             0x10..=0x17 => {
                 segments.push(Vec::new());
+                if until == Some(at) {
+                    break;
+                }
                 continue;
             }
             0x20..=0x37 | 0x70..=0x77 => {
@@ -316,7 +342,7 @@ pub fn rewrite_payload(
     }
     // (none after the last metadata block, as the archive opened)
     segments.pop();
-    debug_assert_eq!(segments.len(), blocks.segments.len());
+    debug_assert_eq!(segments.len(), end_n);
 
     // the leaves the tree's contents are of, and the segment of each
     let mut live = vec![false; blocks.leaves.len()];
@@ -335,7 +361,7 @@ pub fn rewrite_payload(
         live[r.0] = true;
     }
     // (the segments after the first point kept are copied whole)
-    for seg in &blocks.segments[base_n..] {
+    for seg in &blocks.segments[base_n..end_n] {
         live[seg.first.leaves..seg.end.leaves].fill(true);
     }
     let segment_of = |leaf: usize| blocks.segments.iter().position(|s| (s.first.leaves..s.end.leaves).contains(&leaf));
@@ -1107,6 +1133,60 @@ mod tests {
         (out, r)
     }
 
+    /// Written again up to a segment ([`Layers::until`]), an archive is as it was after it, as
+    /// each `history` has it: whole (its segments as they were, the point of the last), the
+    /// points from one on kept, or dropped (the state alone).
+    #[test]
+    fn until_a_segment() {
+        let c = segmented();
+        let nat = natives();
+        let whole_a = open(&c, &nat).unwrap();
+        let ends = whole_a.segment_metadata().unwrap();
+        let point = whole_a.journal()[0].clone();
+        assert_eq!(point.metadata, ends[1]);
+        let names = |a: &[u8]| -> Vec<Vec<u8>> {
+            let mut n: Vec<_> = open(a, &nat).unwrap().tree().unwrap().entries.iter().map(|e| e.name.clone()).collect();
+            n.sort();
+            n
+        };
+        let upto = |m: usize| {
+            let a = super::super::open_upto(&c, &nat, m).unwrap();
+            let mut n: Vec<_> = a.tree().unwrap().entries.iter().map(|e| e.name.clone()).collect();
+            n.sort();
+            n
+        };
+        // (the tree of the state, as the caller gives it: of use dropping the points alone)
+        let written = |history: History, until: usize| {
+            let mut out = Vec::new();
+            let t = super::super::open_upto(&c, &nat, until).unwrap().tree().unwrap().clone();
+            let layers = Layers { until: Some(until), ..Layers::default() };
+            let r = rewrite_layered(&c, &t, Level::Zstd(3), 1, &mut out, history, layers).unwrap();
+            assert_eq!(r.len, out.len() as u64);
+            (out, r)
+        };
+        for (history, segments, points) in [
+            (History::Whole, 2, 1),
+            (History::Keep { from: point.metadata, since: point.time }, 2, 1),
+            (History::Drop, 2, 0),
+        ] {
+            let (out, r) = written(history, ends[1]);
+            assert_eq!(r.segments, (segments, 3), "{history:?}");
+            assert_eq!(names(&out), upto(ends[1]), "{history:?}");
+            assert_eq!(names(&out), [b"a".to_vec(), b"b".to_vec()]);
+            assert_eq!(open(&out, &nat).unwrap().journal().len(), points, "{history:?}");
+        }
+        let (out, r) = written(History::Whole, ends[0]);
+        assert_eq!((r.segments, names(&out)), ((1, 3), vec![b"a".to_vec()]));
+        assert!(open(&out, &nat).unwrap().journal().is_empty());
+        // (the first point kept after the end, or no segment ending there)
+        let mut out = Vec::new();
+        let keep = History::Keep { from: point.metadata, since: point.time };
+        let layers = Layers { until: Some(ends[0]), ..Layers::default() };
+        assert!(rewrite_layered(&c, &Tree::default(), Level::Zstd(3), 1, &mut out, keep, layers).is_err());
+        let layers = Layers { until: Some(ends[0] + 1), ..Layers::default() };
+        assert!(rewrite_layered(&c, &Tree::default(), Level::Zstd(3), 1, &mut out, History::Whole, layers).is_err());
+    }
+
     /// Written again whole, an archive of several segments, a journal point and a tombstone is the
     /// same, byte for byte; with mirror blocks, mirrored, and the same again once they are left out.
     #[test]
@@ -1115,7 +1195,7 @@ mod tests {
         let (out, r) = whole(&c, Layers::default());
         assert_eq!(out, c);
         assert_eq!(r.segments, (3, 3));
-        let (m, _) = whole(&c, Layers { mirrors: true, size_hint: false });
+        let (m, _) = whole(&c, Layers { mirrors: true, size_hint: false, until: None });
         assert!(m.len() > c.len());
         let check = super::super::mirror::check(&m);
         assert!(check.mirrored(&m, false), "{check:?}");
@@ -1138,7 +1218,7 @@ mod tests {
         let c = segmented();
         for mirrors in [false, true] {
             let mut s = envelope::Sealer::new(std::io::Cursor::new(Vec::new()), b"p", 12, mirrors).unwrap();
-            let layers = Layers { mirrors, size_hint: true };
+            let layers = Layers { mirrors, size_hint: true, until: None };
             rewrite_layered(&c, &Tree::default(), Level::Zstd(3), 1, &mut s, History::Whole, layers).unwrap();
             let sealed = s.into_inner().unwrap().into_inner();
             let d = envelope::open(&sealed).unwrap().unlock(b"p").unwrap().decrypt(1).unwrap();
@@ -1155,7 +1235,7 @@ mod tests {
         use super::super::envelope;
         let seal = |c: &[u8]| {
             let mut s = envelope::Sealer::new(std::io::Cursor::new(Vec::new()), b"p", 12, false).unwrap();
-            let layers = Layers { mirrors: false, size_hint: true };
+            let layers = Layers { mirrors: false, size_hint: true, until: None };
             rewrite_layered(c, &Tree::default(), Level::Zstd(3), 1, &mut s, History::Whole, layers).unwrap();
             s.into_inner().unwrap().into_inner()
         };

@@ -7,7 +7,8 @@
 //! aqr -d \[OPTIONS\] ARCHIVE [PATH [--rename TO]]...; aqr -d --each \[OPTIONS\] ARCHIVE...; aqr -t [-q | -v] ARCHIVE \[PATH\]...;
 //! aqr -t --each [-q | -v] ARCHIVE...; aqr --delete [--compact] [-q] ARCHIVE PATH...;
 //! aqr --move [-q | -v] ARCHIVE PATH --rename TO...; aqr --compact [-q | -v] ARCHIVE;
-//! aqr --convert [-P | --no-passphrase] [-A | --no-archival] [-o OUTPUT] ARCHIVE...
+//! aqr --convert [-P | --no-passphrase] [-A | --no-archival] [--keep-until SPEC] [-o OUTPUT] ARCHIVE...;
+//! aqr --rollback SPEC [-q] ARCHIVE
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -139,7 +140,8 @@
 //!   `docs/convert-design.md`), nothing compressed again: encrypted (`-P`, a new passphrase
 //!   asked for after the input's) or decrypted (`--no-passphrase`), mirrored (`-A`) or not
 //!   (`--no-archival`), as the input is where neither is given; its segments and journal points as
-//!   they are (but as `--keep-since` and `--drop-history` tell, as of `--compact`); repaired
+//!   they are (but as `--keep-since` and `--drop-history` tell, as of `--compact`, and as of the
+//!   point `--keep-until SPEC` picks: the states after it dropped, [`aqr_archive::Layers::until`]); repaired
 //!   where damaged, its mirror blocks restoring what they can (what would lose a file is not
 //!   written). In place (beside it and checked first), or to `-o`; nothing to change, nothing
 //!   written. `--passphrase-from` gives as many sources as passphrases are needed, the input's
@@ -147,6 +149,9 @@
 //!   written as an Aqueous archive of the same tree as aqr-unpack reads it, its files
 //!   compressed as `-c` compresses them (its options taken), into its name without the format's
 //!   suffix and `.aqr` (or `-o`); an entry left out fails it.
+//! - `--rollback SPEC ARCHIVE`: the archive cut back in place to the journal point `SPEC` picks
+//!   (as `--at`), what was written after the point's segment taken out of the file, the footer
+//!   after it written again before the file is cut ([`rollback`]).
 //! - `--move ARCHIVE PATH --rename TO...`: each path moved to its `TO` (in the order given, the
 //!   directories on the way made, without their metadata), the archive written again as
 //!   `--compact` writes it, as a segment cannot take the contents of another but by an import
@@ -325,6 +330,7 @@ mod names;
 mod pass;
 #[cfg(all(windows, target_vendor = "win7"))]
 mod random;
+mod rollback;
 mod serve;
 mod session;
 mod sfx;
@@ -364,7 +370,9 @@ usage: aqr [OPTIONS] INPUT [--rename TO]...
        aqr --delete [--compact] [-q] ARCHIVE PATH...
        aqr --move [-q | -v] ARCHIVE PATH --rename TO...
        aqr --compact [-q | -v] [--keep-since SPEC | --drop-history] ARCHIVE
-       aqr --convert [-P | --no-passphrase] [-A | --no-archival] [-o OUTPUT] ARCHIVE...
+       aqr --convert [-P | --no-passphrase] [-A | --no-archival] [--keep-until SPEC]
+                     [-o OUTPUT] ARCHIVE...
+       aqr --rollback SPEC [-q] ARCHIVE
        unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
@@ -402,6 +410,11 @@ Modes:
       --no-passphrase   with --convert: the archive written decrypted (else no -P)
       --no-archival     with --convert: the archive written without mirror blocks (else
                         no -A)
+      --keep-until SPEC
+                        with --convert: the archive as it was at the journal point SPEC
+                        picks (as --at), the states after it dropped
+      --rollback SPEC   cut an archive back in place to the journal point SPEC picks
+                        (as --at): what was written after it taken out of the file
 
 Compressing (aqr -o ARCHIVE INPUT [--rename TO]...):
   INPUT                 a file or directory; several of them archived by their paths,
@@ -641,6 +654,7 @@ fn main() -> ExitCode {
         };
     }
     let r = aqr_common::pool::run(|| match () {
+        _ if args.rollback.is_some() => rollback::rollback(&args),
         _ if args.convert => convert::convert_all(&args),
         _ if args.edit.is_some() || args.compact => edit::edit(&args),
         _ if args.interpret => interpret::interpret(&args),

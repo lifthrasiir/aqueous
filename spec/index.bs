@@ -1212,6 +1212,26 @@ A compressor appending to an archive MUST NOT leave a footer other than the one 
 except while it is writing; another compressor appending to such an archive MUST first remove the trailing bytes or complete the commit.
 Each metadata block whose segment ends a commit SHOULD have `segment-status` ([[#segment-status]]).
 
+The same steps in reverse cut an archive back to an earlier state, e.g. that of a [=journal point=] ([[#journal]]),
+in place and without rewriting it.
+To <dfn>roll back</dfn> an archive |a| in a file to the state after a segment other than its last,
+whose metadata block is followed by a spacer block made of the footer |F| of the commit that ended it:
+
+<ol class=algorithm>
+    1. Overwrite the bytes of |F| but its first ones with those of |F| as they were, i.e. a footer for the archive ending with that metadata block,
+        and make sure that they are durably written.
+    2. Overwrite the first bytes of |F| with its own, and make sure that they are durably written.
+    3. Remove the bytes after |F| from the file.
+</ol>
+
+The step 1 changes only the [=spacer/space=] of a spacer block.
+After the step 2, the file holds the archive as it was after that segment, followed by trailing bytes
+that [=trim a located archive|trimming=] leaves out, as |F| is then the first footer after a metadata block;
+the next appending removes them if the step 3 didn't.
+If the commit after that segment overwrote |F| instead (since |F| crossed a sector),
+a footer is written after the metadata block, preceded by a spacer block where needed to keep the footer within a sector,
+and the spacer block is durably written before the footer.
+
 <div class=note>
   An [[#encrypted-archive|encrypted archive]] can't be appended to.
   The last encrypted chunk of its payload is marked as the last one,
@@ -5414,6 +5434,7 @@ Journal points need not be unique in their labels.
 The `journal` doesn't affect the result of [=interpret an archive|interpreting an archive=] ([[#interpretation]]),
 and it is not a part of the [=archive value/extra=] of the result.
 A decompressor MAY be asked for the state of a point, and then interprets only the segments up to the point's.
+An archive in a file may also be [=roll back|rolled back=] to the state of a point ([[#appending]]), the later segments removed.
 Which point is meant by a time or a label, if the user gives one, is up to the decompressor:
 it SHOULD take the latest point whose time is not after the given time,
 and the last of the points of the label.
