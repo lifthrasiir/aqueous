@@ -13,4 +13,5 @@ Most of them are currently written in Korean, sorry.
 - `disk-image-design.md`: the plan for disk images (file systems, partition tables, virtual disks).
 - `other-projects.md`: survey of other projects.
 - `encrypted-sfx-design.md`: self-extracting programs of encrypted archives: the subsystem patched per program, decryption and its UI as blobs.
+- `win-shell-ext-design.md`: archives browsed in Explorer as folders (a shell namespace extension), decoded by `aqr --serve` behind a COM local server.
 - `rar3-decoding.md`, `rar5-decoding.md`: notes on the RAR formats for the clean-room aqr-rar.
