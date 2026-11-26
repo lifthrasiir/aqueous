@@ -4,7 +4,9 @@
 //! the shell calls from: Explorer's windows each have a thread of their own, which ends as the
 //! window is closed, and what an apartment gone held (its proxies, its entries of the Global
 //! Interface Table) is gone with it (`E_INVALIDARG` of a cookie no longer there). A thread of
-//! this library's keeps the apartment for as long as the process (the library pinned). Where
+//! this library's keeps the apartment for as long as the process (the library pinned), and
+//! looks at the archives' files every [`WATCH`]: one changed is let go of, the views of its
+//! folders told to refresh ([`watch`]). Where
 //! the server is gone (it ended, or failed), what was held is dropped and the call made again, of
 //! a server started anew.
 
@@ -62,8 +64,10 @@ fn on_mta<R: Send>(f: impl FnOnce() -> R + Send) -> R {
             // SAFETY: this thread's COM, for as long as the process
             _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             _ = ready.send(());
+            // (and the archives' files watched, while it waits)
             loop {
-                std::thread::park();
+                std::thread::sleep(WATCH);
+                watch();
             }
         });
         _ = started.recv();
@@ -234,6 +238,77 @@ pub fn changed(path: &Path) -> bool {
     };
     release(gone.into_iter().collect());
     true
+}
+
+/// How often the files of the archives in use are looked at ([`watch`]).
+const WATCH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The views of folders of archives (by archive: their ID lists, absolute), told to refresh as
+/// an archive's file changes.
+static VIEWS: Mutex<Vec<(u64, PathBuf, Vec<u8>)>> = Mutex::new(Vec::new());
+
+/// A folder of archive `path` at ID list `pidl` (absolute), told to refresh where the archive's
+/// file changes, for as long as it is kept.
+pub struct View(u64);
+
+impl View {
+    /// # Safety
+    ///
+    /// `pidl` is an ID list.
+    pub unsafe fn of(path: &Path, pidl: *const windows::Win32::UI::Shell::Common::ITEMIDLIST) -> View {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: as the caller's
+        let ids = unsafe { crate::pidl::ids(pidl) };
+        let mut bytes: Vec<u8> = ids.concat();
+        bytes.extend([0, 0]);
+        VIEWS.lock().unwrap().push((id, path.to_owned(), bytes));
+        View(id)
+    }
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        VIEWS.lock().unwrap().retain(|v| v.0 != self.0);
+    }
+}
+
+/// The archives whose files changed since they were opened (their size or time), let go of (to
+/// be opened anew), and the views of their folders told to refresh. On the keeper's thread.
+fn watch() {
+    let stamps: Vec<(PathBuf, (u64, Option<std::time::SystemTime>))> =
+        CONNECTION.lock().unwrap().stamps.iter().map(|(p, s)| (p.clone(), *s)).collect();
+    for (path, was) in stamps {
+        if stamp(&path) == was {
+            continue;
+        }
+        let gone = {
+            let mut c = CONNECTION.lock().unwrap();
+            // (where nothing else saw it first)
+            if c.stamps.get(&path) != Some(&was) {
+                continue;
+            }
+            c.stamps.remove(&path);
+            c.archives.get_mut(&path).and_then(|e| e.0.take())
+        };
+        drop(gone);
+        crate::log(|| format!("watched: {} changed", path.display()));
+        if crate::TESTING.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
+        let views: Vec<Vec<u8>> = VIEWS.lock().unwrap().iter().filter(|v| v.1 == path).map(|v| v.2.clone()).collect();
+        for v in views {
+            // SAFETY: an ID list of its own
+            unsafe {
+                windows::Win32::UI::Shell::SHChangeNotify(
+                    windows::Win32::UI::Shell::SHCNE_UPDATEDIR,
+                    windows::Win32::UI::Shell::SHCNF_IDLIST,
+                    Some(v.as_ptr() as *const _),
+                    None,
+                )
+            };
+        }
+    }
 }
 
 /// Lets the process of `server` come to the front (its dialogs, asked for by a call).

@@ -460,6 +460,16 @@ fn browsed() {
             drop(f);
             assert_eq!(count(&kept), 2);
             let told = std::fs::read_to_string(&log).unwrap_or_default();
+            // (changed again while the folder is kept, not enumerated: watched, let go of)
+            let f = std::fs::File::options().write(true).open(&archive).unwrap();
+            f.set_modified(std::time::SystemTime::now() + Duration::from_secs(9)).unwrap();
+            drop(f);
+            let start = Instant::now();
+            while !std::fs::read_to_string(&log).unwrap_or_default().contains("watched: ") {
+                assert!(start.elapsed() < Duration::from_secs(10), "not watched");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert_eq!(count(&kept), 2);
             assert!(
                 told.contains("changed: "),
                 "{}",

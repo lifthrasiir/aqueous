@@ -43,8 +43,9 @@ object is released, for the server to close it a minute later (and to end, idle)
   shell's (the server let come to the front).
 - An archive not read (damaged): told in a box over the window, once in a while, the failure
   then one the shell tells nothing of.
-- An archive whose file changed (its size or time) as a folder of it is enumerated again: opened
-  anew, the views of the folder told (`SHCNE_UPDATEDIR`).
+- An archive whose file changed (its size or time): looked for every 2 s (by the library's
+  thread of the MTA) and as a folder of it is enumerated again; let go of, to be opened anew,
+  and the views of its folders told to refresh (`SHCNE_UPDATEDIR`), with no F5.
 
 `cargo aqr-win --register` registers the library kept beside aqr-win (`aqr-win --register`
 registers the folder where `aqr_shell.dll` is beside it; the double-click then opens the
@@ -59,6 +60,5 @@ beside the library (`cargo rt -p aqr -p aqr-win -p aqr-win-shell --test shell --
 ## Status
 
 Left: the installer and the release carrying the library (and its uninstall, the library being
-held by Explorer), the archive's file watched (it is checked as a folder is enumerated, F5),
-salvaging damaged archives, ARM64. The progress window is tested by hand only, and
+held by Explorer), salvaging damaged archives, ARM64. The progress window is tested by hand only, and
 `AQR_SHELL_TEST_OPENED=FILE` has "Open" tell the file in FILE rather than run it (for tests).

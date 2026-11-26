@@ -85,6 +85,8 @@ struct At {
     archive: Arc<client::Use>,
     /// Its path in the archive, names joined with `/` (empty: the root).
     dir: String,
+    /// Its view, told to refresh where the archive's file changes.
+    _view: client::View,
 }
 
 #[implement(IShellFolder2, IPersistFolder3, IPersistIDList)]
@@ -203,14 +205,18 @@ impl Folder {
         let pidl = Pidl(unsafe { ILClone(pidl) });
         let archive = Arc::new(client::Use::of(Path::new(&path)));
         crate::log(|| format!("initialized: {path} at {names:?}"));
-        *self.at.write().unwrap() = Some(At { pidl, archive, dir: names.join("/") });
+        // SAFETY: an ID list of its own
+        let _view = unsafe { client::View::of(archive.path(), pidl.as_ptr()) };
+        *self.at.write().unwrap() = Some(At { pidl, archive, dir: names.join("/"), _view });
         Ok(())
     }
 
     /// The folder of path `dir` of the same archive, at absolute ID list `pidl`.
     fn child(&self, archive: Arc<client::Use>, dir: String, pidl: *mut ITEMIDLIST) -> Folder {
         let f = Folder::new(self.clsid);
-        *f.at.write().unwrap() = Some(At { pidl: Pidl(pidl), archive, dir });
+        // SAFETY: an ID list, made the folder's
+        let _view = unsafe { client::View::of(archive.path(), pidl) };
+        *f.at.write().unwrap() = Some(At { pidl: Pidl(pidl), archive, dir, _view });
         f
     }
 
