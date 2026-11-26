@@ -1,5 +1,6 @@
 #!/bin/sh
-# Builds Aqueous.app (aqr-mac and aqr, the dist profile) and Aqueous.zip in target/dist:
+# Builds Aqueous.app (aqr-mac and aqr, the dist profile, and the manual pages of man/ in
+# Contents/Resources/man/manN) and Aqueous.zip in target/dist:
 #
 #   crates/aqr-mac/bundle.sh [--no-build] [--universal]
 #
@@ -48,6 +49,11 @@ cp "$here/droplet.icns" "$here"/icons/*.icns "$app/Contents/Resources/"
 # (the .strings of each language: Finder's names of the types and the services, by aqr-l10n's
 # catalogs; the app's own messages are in its binary)
 cargo run -q -p aqr-l10n -- lproj "$app/Contents/Resources"
+# (the manual pages by section, for the cask's manpage stanzas)
+for m in "$root"/man/*.[1-9]; do
+    mkdir -p "$app/Contents/Resources/man/man${m##*.}"
+    cp "$m" "$app/Contents/Resources/man/man${m##*.}/"
+done
 codesign --force --sign - "$app/Contents/MacOS/aqr"
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"

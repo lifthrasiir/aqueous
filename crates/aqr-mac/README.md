@@ -15,7 +15,8 @@ crates/aqr-mac/icns.sh     # droplet.icns, from droplet.svg at the root (committ
 ```
 
 Aqueous is distributed as `Aqueous.zip`, holding `Aqueous.app` (`aqr-mac` and `aqr` in
-`Contents/MacOS`). There is no installer.
+`Contents/MacOS`, the manual pages of `man/` in `Contents/Resources/man/manN`). There is no
+installer.
 
 - Move the app to Applications and open it once. A launch of its own (not for a file or a
   service) registers it with Launch Services (`LSRegisterURL`: the `.aqr` type and its icon,

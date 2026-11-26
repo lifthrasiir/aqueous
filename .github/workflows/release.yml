@@ -32,8 +32,9 @@ name: release
 # tells, and fails on a tag not of a version:
 #   aqr-STEM.exe                  Windows 7 on, x86_64 (cargo +NIGHTLY win7; packed by UPX)
 #   aqr-STEM-win-install.exe      the installer: aqr.exe, aqr-win.exe, aqr-shell.dll (crates/aqr-win-install)
-#   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
-#   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on)
+#   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal;
+#                                 man/'s pages in Contents/Resources/man/manN)
+#   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on) and man/manN/*.N, man/'s pages
 #   aqr-STEM-linux-aarch64.tar.xz
 #   SHA256SUMS                    the SHA-256s of the above (their provenance attested)
 #
@@ -378,8 +379,13 @@ jobs:
       - env:
           ARCH: ${{ matrix.arch }}
         run: |
-          mkdir out
-          tar -C target/dist -cJf "out/aqr-$STEM-linux-$ARCH.tar.xz" aqr
+          mkdir -p out pack
+          cp target/dist/aqr pack/
+          for m in man/*.[1-9]; do
+              mkdir -p "pack/man/man${m##*.}"
+              cp "$m" "pack/man/man${m##*.}/"
+          done
+          tar -C pack -cJf "out/aqr-$STEM-linux-$ARCH.tar.xz" aqr man
       # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
       - run: git diff --exit-code -- Cargo.lock
       - uses: actions/upload-artifact@v7.0.2
