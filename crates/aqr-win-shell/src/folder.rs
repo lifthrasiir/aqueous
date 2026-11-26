@@ -11,19 +11,20 @@ use windows::Win32::Foundation::{
     SysAllocStringLen,
 };
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES};
-use windows::Win32::System::Com::{IBindCtx, IPersist_Impl, IStream};
+use windows::Win32::System::Com::{IBindCtx, IDataObject, IPersist_Impl, IStream};
 use windows::Win32::System::Variant::{InitVariantFromFileTime, VARIANT};
 use windows::Win32::UI::Shell::Common::{
     ITEMIDLIST, SHCOLSTATE, SHCOLSTATE_ONBYDEFAULT, SHCOLSTATE_SECONDARYUI, SHCOLSTATE_TYPE_DATE, SHCOLSTATE_TYPE_INT,
     SHCOLSTATE_TYPE_STR, SHELLDETAILS, STRRET,
 };
 use windows::Win32::UI::Shell::{
+    ASSOCCLASS_FOLDER, ASSOCIATIONELEMENT, AssocCreateForClasses, DEFCONTEXTMENU, IContextMenu, IContextMenuCB,
     IEnumExtraSearch, IEnumIDList, IEnumIDList_Impl, IExtractIconW, ILClone, ILCombine, ILFree, IPersistFolder_Impl,
     IPersistFolder2_Impl, IPersistFolder3, IPersistFolder3_Impl, IPersistIDList, IPersistIDList_Impl,
-    IShellFolder_Impl, IShellFolder2, IShellFolder2_Impl, IShellView, PERSIST_FOLDER_TARGET_INFO, SFV_CREATE,
-    SHCreateFileExtractIconW, SHCreateShellFolderView, SHFILEINFOW, SHFormatDateTimeW, SHGDN_FORPARSING,
-    SHGDN_INFOLDER, SHGDNF, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHGetNameFromIDList, SHStrDupW,
-    SIGDN_FILESYSPATH, StrCmpLogicalW, StrFormatKBSizeW,
+    IQueryAssociations, IShellFolder_Impl, IShellFolder2, IShellFolder2_Impl, IShellView, PERSIST_FOLDER_TARGET_INFO,
+    SFV_CREATE, SHCreateDataObject, SHCreateDefaultContextMenu, SHCreateFileExtractIconW, SHCreateShellFolderView,
+    SHFILEINFOW, SHFormatDateTimeW, SHGDN_FORPARSING, SHGDN_INFOLDER, SHGDNF, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHGetNameFromIDList, SHStrDupW, SIGDN_FILESYSPATH, StrCmpLogicalW, StrFormatKBSizeW,
 };
 use windows::core::{GUID, HRESULT, IUnknownImpl, Interface, PCWSTR, Ref, implement};
 
@@ -520,7 +521,7 @@ impl IShellFolder_Impl for Folder_Impl {
 
     fn GetUIObjectOf(
         &self,
-        _: HWND,
+        hwnd: HWND,
         cidl: u32,
         apidl: *const *const ITEMIDLIST,
         riid: *const GUID,
@@ -540,6 +541,55 @@ impl IShellFolder_Impl for Folder_Impl {
                     let w: Vec<u16> = item.name.encode_utf16().chain([0]).collect();
                     let x: IExtractIconW = SHCreateFileExtractIconW(PCWSTR(w.as_ptr()), file_attributes(&item).0)?;
                     return x.query(riid, ppv).ok();
+                }
+                if iid == IContextMenu::IID && cidl > 0 {
+                    let ids = std::slice::from_raw_parts(apidl, cidl as usize);
+                    let items: Vec<Item> = ids.iter().filter_map(|&p| pidl::first(p)).collect();
+                    if items.len() != ids.len() {
+                        return Err(E_INVALIDARG.into());
+                    }
+                    let (archive, dir) = self.at()?;
+                    // (a file alone: "Open" ours; folders: the verbs of folders)
+                    let open = match &items[..] {
+                        [i] if !i.is_dir() => Some((archive, joined(&dir, &i.name))),
+                        _ => None,
+                    };
+                    let assoc: Option<windows::core::IUnknown> = match items.iter().all(Item::is_dir) {
+                        true => AssocCreateForClasses::<IQueryAssociations>(&[ASSOCIATIONELEMENT {
+                            ac: ASSOCCLASS_FOLDER,
+                            hkClass: Default::default(),
+                            pszClass: PCWSTR::null(),
+                        }])
+                        .ok()
+                        .map(|a| a.into()),
+                        false => None,
+                    };
+                    let cb: IContextMenuCB = crate::menu::Menu { open, _counted: crate::Counted::new() }.into();
+                    let folder = self.at.read().unwrap().as_ref().map_or(std::ptr::null_mut(), |a| a.pidl.0);
+                    let dcm = DEFCONTEXTMENU {
+                        hwnd,
+                        pcmcb: std::mem::ManuallyDrop::new(Some(cb)),
+                        pidlFolder: folder,
+                        psf: std::mem::ManuallyDrop::new(Some(self.to_interface::<IShellFolder2>().into())),
+                        cidl,
+                        apidl: apidl as *mut *mut ITEMIDLIST,
+                        punkAssociationInfo: std::mem::ManuallyDrop::new(assoc),
+                        cKeys: 0,
+                        aKeys: std::ptr::null(),
+                    };
+                    let m = SHCreateDefaultContextMenu::<IContextMenu>(&dcm);
+                    drop(std::mem::ManuallyDrop::into_inner(dcm.pcmcb));
+                    drop(std::mem::ManuallyDrop::into_inner(dcm.psf));
+                    drop(std::mem::ManuallyDrop::into_inner(dcm.punkAssociationInfo));
+                    return m?.query(riid, ppv).ok();
+                }
+                if iid == IDataObject::IID && cidl > 0 {
+                    // (the shell's, of the items' ID lists: what it copies, reading them as
+                    // folders and streams)
+                    let items = std::slice::from_raw_parts(apidl, cidl as usize);
+                    let folder = self.at.read().unwrap().as_ref().map(|a| a.pidl.as_ptr());
+                    let d: IDataObject = SHCreateDataObject(folder, Some(items), None)?;
+                    return d.query(riid, ppv).ok();
                 }
                 Err(E_NOINTERFACE.into())
             }

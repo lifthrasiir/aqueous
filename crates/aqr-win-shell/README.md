@@ -20,6 +20,12 @@ object is released, for the server to close it a minute later (and to end, idle)
 - Columns: name, date modified, type (the extension's, as the system tells it), size, and the
   attributes (`RHSA`, off by default), as the storage properties (`PKEY_Size`, ...).
 - Icons: of the name's extension (`SHCreateFileExtractIconW`).
+- Copying out (paste, drag): the shell's data object of the items' ID lists
+  (`SHCreateDataObject`), which the copy engine reads as folders and streams.
+- The context menu (`src/menu.rs`): the shell's (`SHCreateDefaultContextMenu`: Copy,
+  Properties; of folders, the verbs of folders), with "Open" first of a file chosen alone, the
+  default: written out by the server (`Materialize`) on a thread of its own and opened as the
+  system opens a file of its type.
 
 `cargo aqr-win --register` registers the library kept beside aqr-win (`aqr-win --register`
 registers the folder where `aqr_shell.dll` is beside it; the double-click then opens the
@@ -33,7 +39,8 @@ beside the library (`cargo rt -p aqr -p aqr-win -p aqr-win-shell --test shell --
 
 ## Status
 
-Left (the design's phases 4 on): dragging and copying files out (`IDataObject`, asynchronous),
-opening a file (a temporary copy, `Materialize`), context menus, encrypted and damaged archives
-told, `SHChangeNotify` where an archive changed, the installer and the release carrying the
-library, ARM64.
+Left (the design's phases): the formats of other programs' drops (`CFSTR_FILEDESCRIPTOR` and
+`CFSTR_FILECONTENTS`: a browser, a mail program), a window of how far a big file opened is
+decoded, the siblings of a file opened with it, encrypted and damaged archives told,
+`SHChangeNotify` where an archive changed, the installer and the release carrying the library,
+ARM64. "Open" itself (`ShellExecuteEx`) is not tested but by hand.

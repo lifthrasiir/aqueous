@@ -346,3 +346,8 @@ tip_module_memory = "--application-bound: recompressions needing more are not us
 accept_license = "Do you accept the license?"
 extract_to = "Extract to:"
 replace = "Replace the file {path}?"
+
+# aqr-win-shell: archives browsed as folders in Explorer.
+[folder]
+open = "Open"
+not_opened = "{name} could not be opened"

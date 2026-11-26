@@ -15,13 +15,21 @@ use std::time::{Duration, Instant};
 
 use aqr_shell::folder::{TEST_FOLDER, TEST_SERVER};
 use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY};
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, IStream};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, IDataObject, IStream};
+use windows::Win32::System::Ole::{OleGetClipboard, OleInitialize, OleUninitialize};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::Common::SHELLDETAILS;
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, BHID_SFObject, BHID_Stream, IEnumShellItems, IShellFolder2, IShellItem, IShellItem2, IShellView,
     SHCreateItemFromParsingName, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
+use windows::Win32::UI::Shell::{CMINVOKECOMMANDINFO, IContextMenu};
+use windows::Win32::UI::Shell::{FILEOPERATION_FLAGS, FileOperation, IFileOperation};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreatePopupMenu, DestroyMenu, GET_MENU_DEFAULT_ITEM_FLAGS, GetMenuDefaultItem, GetMenuItemCount, GetMenuItemID,
+};
+use windows::core::PSTR;
 use windows::core::{GUID, HSTRING, Interface};
 
 /// The directory of the binaries built (of this test's, `deps` in it).
@@ -166,8 +174,13 @@ fn browsed() {
     // (once it has registered its class)
     std::thread::sleep(Duration::from_millis(500));
     let archive = d.join("t.aqrtest");
+    let d_out = || {
+        let o = d.join("out");
+        std::fs::create_dir_all(&o).unwrap();
+        o
+    };
     // SAFETY: this thread's COM
-    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+    unsafe { OleInitialize(None).unwrap() };
     {
         let root = item(&archive);
         assert_eq!(entries(&root), [("a.txt".to_owned(), false, Some(1000)), ("sub".to_owned(), true, None)]);
@@ -224,6 +237,54 @@ fn browsed() {
                 let n = f.CompareIDs(LPARAM(col), items[a], items[1 - a]);
                 assert_eq!(n.0 as i16, 1, "{col}");
             }
+            // copied out (as a paste does: the copy engine, of the folder's data object)
+            let out = d_out();
+            let ids: Vec<*const ITEMIDLIST> = items.iter().map(|&p| p as *const _).collect();
+            let data: IDataObject = f.GetUIObjectOf(HWND::default(), &ids, None).unwrap();
+            let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL).unwrap();
+            // FOF_NO_UI
+            op.SetOperationFlags(FILEOPERATION_FLAGS(0x4 | 0x10 | 0x200 | 0x400)).unwrap();
+            op.CopyItems(&data, &item(&out)).unwrap();
+            op.PerformOperations().unwrap();
+            assert!(!op.GetAnyOperationsAborted().unwrap().as_bool());
+            assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"some text\n".repeat(100));
+            assert!(std::fs::read(out.join(r"sub\big.bin")).unwrap() == big);
+            assert_eq!(std::fs::read(out.join(r"sub\deep\c.txt")).unwrap(), b"deep");
+            // the menu of a file: "open" ours, the default; "copy" the shell's, which puts it on
+            // the clipboard, to be pasted
+            let file = [items[a] as *const ITEMIDLIST];
+            let m: IContextMenu = f.GetUIObjectOf(HWND::default(), &file, None).unwrap();
+            let menu = CreatePopupMenu().unwrap();
+            assert!(m.QueryContextMenu(menu, 0, 1, 0x7fff, 0).is_ok());
+            let verbs: Vec<(u32, String)> = (0..GetMenuItemCount(Some(menu)))
+                .map(|k| GetMenuItemID(menu, k))
+                .filter(|&id| id != u32::MAX && id >= 1)
+                .filter_map(|id| {
+                    let mut b = [0u16; 64];
+                    m.GetCommandString((id - 1) as usize, 4, None, PSTR(b.as_mut_ptr() as *mut u8), 64).ok()?; // GCS_VERBW
+                    Some((id, String::from_utf16_lossy(&b[..b.iter().position(|&c| c == 0)?])))
+                })
+                .collect();
+            let default = GetMenuDefaultItem(menu, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0));
+            assert!(verbs.iter().any(|(id, v)| v == "open" && *id == default), "{verbs:?} {default}");
+            assert!(verbs.iter().any(|(_, v)| v == "copy"), "{verbs:?}");
+            DestroyMenu(menu).unwrap();
+            let copy = windows::core::s!("copy");
+            let info = CMINVOKECOMMANDINFO {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+                lpVerb: copy,
+                nShow: 1,
+                ..Default::default()
+            };
+            m.InvokeCommand(&info).unwrap();
+            let pasted = d_out().with_file_name("pasted");
+            std::fs::create_dir_all(&pasted).unwrap();
+            let clip = OleGetClipboard().unwrap();
+            let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL).unwrap();
+            op.SetOperationFlags(FILEOPERATION_FLAGS(0x4 | 0x10 | 0x200 | 0x400)).unwrap();
+            op.CopyItems(&clip, &item(&pasted)).unwrap();
+            op.PerformOperations().unwrap();
+            assert_eq!(std::fs::read(pasted.join("a.txt")).unwrap(), b"some text\n".repeat(100));
             items.into_iter().for_each(|p| windows::Win32::UI::Shell::ILFree(Some(p)));
         }
         // (not there: the shell's parse fails)
@@ -236,7 +297,11 @@ fn browsed() {
         );
     }
     // SAFETY: initialized above, its objects let go of
-    unsafe { CoUninitialize() };
+    unsafe {
+        // (the clipboard's data object, ours, let go of)
+        _ = windows::Win32::System::Ole::OleSetClipboard(None);
+        OleUninitialize();
+    }
     // (its objects let go of: the server ends, idle)
     let start = Instant::now();
     while server.try_wait().unwrap().is_none() {

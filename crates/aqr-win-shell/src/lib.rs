@@ -11,6 +11,7 @@
 
 mod client;
 pub mod folder;
+mod menu;
 pub mod pidl;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -118,6 +119,8 @@ pub unsafe extern "system" fn DllGetClassObject(
         *ppv = std::ptr::null_mut();
         let clsid = *clsid;
         log(|| format!("DllGetClassObject {clsid:?}"));
+        static LANGUAGE: std::sync::Once = std::sync::Once::new();
+        LANGUAGE.call_once(|| _ = aqr_l10n::init(&aqr_l10n::system_languages()));
         match clsid {
             folder::FOLDER => {}
             folder::TEST_FOLDER => client::set_server(folder::TEST_SERVER),

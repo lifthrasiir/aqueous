@@ -313,3 +313,7 @@ tip_module_memory = "--application-bound: 이보다 메모리가 더 필요한 �
 accept_license = "사용권 계약에 동의합니까?"
 extract_to = "압축을 풀 위치:"
 replace = "{path} 파일을 덮어쓸까요?"
+
+[folder]
+open = "열기"
+not_opened = "{name}을(를) 열지 못했습니다"

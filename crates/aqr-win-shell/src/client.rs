@@ -278,3 +278,11 @@ pub fn stream(path: &Path, at: &str) -> windows::core::Result<IStream> {
         Got::Text(_) => Err(E_FAIL.into()),
     })
 }
+
+/// File `at` of archive `path` written out by the server, to be opened by a program: its path.
+pub fn materialize(path: &Path, at: &str) -> windows::core::Result<PathBuf> {
+    with(path, |a| match call(a, "Materialize", &[at])? {
+        Got::Text(t) => Ok(PathBuf::from(t)),
+        Got::Object(_) => Err(E_FAIL.into()),
+    })
+}
