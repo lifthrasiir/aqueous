@@ -5,8 +5,8 @@
     scripts/man2html.py --single FILE
 
 writes OUT/man/aqr.html, aqrsfx.html, aqrattributes.html and index.html (to aqr.html). Each is
-mandoc's HTML of the page (`mandoc -T html -O fragment`) inside site/index.html's head, header
-and footer (their links made relative to man/), styled as the site is:
+the HTML of the page inside site/index.html's head, header and footer (their links made relative
+to man/), styled as the site is:
 
 - every option (`Fl`) links to where its page tells it (its `.It`), else to where aqr(1) does;
   `Nm aqr` and `Xr` to the pages here (git's to git-scm.com), the specification to ../spec/;
@@ -18,15 +18,19 @@ of a page taking its NAME.SECTION: before it. A page is shown by CSS (`:has(:tar
 script; a browser without `:has` shows them all, one after another. The site's links are made
 absolute, its icon a data: URL.
 
+The pages are rendered here (Mdoc), not by mandoc, so that it runs wherever Python does (the
+release's Windows job): only the part of mdoc(7) that the pages use, in the HTML that `mandoc -T
+html` makes of it (its classes, ids and permalinks). Anything else in a page (a macro, an escape,
+a kind of list or display) is an error naming its line: render it here first.
+
 The spec workflow (.github/workflows/spec.yml) runs it, so that nothing generated is committed.
-Needs mandoc; only the standard library.
+Only the standard library.
 """
 
 import base64
 import html
 import os
 import re
-import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -120,16 +124,6 @@ main:not(:has(:target)) .mpage.default { display: grid; }
 """
 
 
-def mandoc(page):
-    """mandoc's HTML of man/PAGE (its fragment)."""
-    return subprocess.run(
-        ["mandoc", "-T", "html", "-O", "fragment", "-I", "os=Aqueous", os.path.join(ROOT, "man", page)],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-
-
 def text(fragment):
     """The text of an HTML fragment."""
     return html.unescape(re.sub(r"<[^>]+>", "", fragment)).strip()
@@ -139,22 +133,433 @@ def slug(s):
     return re.sub(r"[^A-Za-z0-9.-]+", "_", s).strip("_")
 
 
-def fix_ids(body):
-    """Ids of the text of their element where mandoc's lost it (`[extract]`: `_extract`)."""
-    taken = set(re.findall(r' id="([^"]+)"', body))
+class MdocError(Exception):
+    pass
 
-    def one(m):
-        tag, old, inner = m.group(1), m.group(2), m.group(3)
-        if not (old.startswith("_") or old.endswith("_")):
-            return m.group(0)
-        new = slug(text(inner).split(",")[0]) or old
-        while new != old and new in taken:
-            new += "_"
-        taken.add(new)
-        inner = inner.replace(f'href="#{old}"', f'href="#{new}"', 1)
-        return f'<{tag} id="{new}"{inner}'
 
-    return re.sub(r'<(dt|h2 class="Sh"|h3 class="Ss") id="([^"]+)"(.*?</(?:dt|h2|h3)>)', one, body, flags=re.S)
+# The mdoc(7) macros that may be called on a macro line: those not rendered here are errors, as
+# mandoc would take them for macros too.
+CALLABLE = set(
+    "Ac Ad An Ao Ap Aq Ar At Bc Bo Bq Brc Bro Brq Bsx Bx Cd Cm Dc Do Dq Dv Dx Ec Em En Eo Er Es Ev "
+    "Fa Fc Fl Fn Fo Fr Fx Ic In Lb Li Lk Ms Mt Nm No Ns Nx Oc Oo Op Ot Ox Pa Pc Pf Po Pq Qc Ql Qo Qq "
+    "Rs Sc So Sq St Sx Sy Ta Tn Ux Va Vt Xc Xo Xr".split()
+)
+
+# Macros of words, each the element its words go into.
+WORDS = {
+    "Ar": ("var", "Ar"),
+    "Cm": ("code", "Cm"),
+    "Ev": ("code", "Ev"),
+    "Fl": ("code", "Fl"),
+    "Ic": ("code", "Ic"),
+    "Li": ("code", "Li"),
+    "Nm": ("code", "Nm"),
+    "No": ("span", "No"),
+    "Pa": ("span", "Pa"),
+}
+
+# Enclosures to the end of the line (before the delimiters that end it): their open and close.
+ENCLOSE = {
+    "Op": ("[", "]"),
+    "Pq": ("(", ")"),
+    "Qq": ('"', '"'),
+    "Sq": ("&#x2018;", "&#x2019;"),
+    "Ql": ('&#x2018;<code class="Li">', "</code>&#x2019;"),
+}
+
+OPENING, CLOSING, MIDDLE = {"(", "["}, {".", ",", ":", ";", ")", "]", "?", "!"}, {"|"}
+
+# Enclosures opened and closed by macros of their own, over lines too.
+PAIRS = {"Qo": ("Qc", '"', '"'), "Po": ("Pc", "(", ")")}
+CLOSERS = {c: o for o, (c, _, _) in PAIRS.items()}
+
+ESCAPES = {"&": "", "e": "\\", "(dq": '"'}
+
+
+def permalink(id_, h):
+    return f'<a class="permalink" href="#{id_}">{h}</a>'
+
+
+class Mdoc:
+    """The subset of mdoc(7) that man/'s pages use, rendered as HTML of the classes mandoc gives
+    (`mandoc -T html`), which the site's style is written for. Anything else (a macro, an
+    escape, a list or display of another kind) is an error, naming the file and the line."""
+
+    def __init__(self, path, reserved=frozenset()):
+        self.path = path
+        self.reserved = reserved  # the ids of headings and tags as they are written
+        self.out = []
+        self.names, self.nd, self.date, self.default = [], "", "", None
+        self.taken, self.refs, self.clean = set(), [], set()
+        self.sh = None  # the section's title
+        self.ss = False  # in a subsection
+        self.blocks = []  # lists and their items: ["tag"|"enum", item open]
+        self.para = "want"  # "want" (a paragraph opened by what comes), "open", or None (bare)
+        self.space = False  # a space before the next word
+        self.synopsis = False  # in a table of the synopsis' Nm
+        self.literal = None  # the lines of a literal display
+        self.pairs = []  # the enclosures of PAIRS open
+
+    def fail(self, msg):
+        raise MdocError(f"{self.path}:{self.line}: {msg}")
+
+    # Words and escapes
+
+    def unescape(self, s):
+        def one(m):
+            e = m.group(1)
+            if e not in ESCAPES:
+                self.fail(f"escape \\{e} not known")
+            return ESCAPES[e]
+
+        if re.search(r"\\(?!&|e|\(dq)", s):
+            self.fail(f"escape not known in {s!r}")
+        return html.escape(re.sub(r"\\(&|e|\(dq)", one, s), quote=False)
+
+    def tokens(self, s):
+        """A macro line's arguments: (raw, quoted)."""
+        out, i = [], 0
+        while i < len(s):
+            if s[i] == " ":
+                i += 1
+            elif s[i] == '"':
+                j, word = i + 1, ""
+                while True:
+                    if j >= len(s):
+                        self.fail("a quoted argument not ended")
+                    if s[j] == '"':
+                        if s[j + 1 : j + 2] == '"':
+                            word, j = word + '"', j + 2
+                            continue
+                        break
+                    word, j = word + s[j], j + 1
+                out.append((word, True))
+                i = j + 1
+            else:
+                j = s.find(" ", i)
+                j = len(s) if j < 0 else j
+                out.append((s[i:j], False))
+                i = j
+        return out
+
+    # Output
+
+    def nl(self, h):
+        """HTML of a block, on a line of its own."""
+        self.out.append("\n" + h)
+
+    def block(self, h):
+        """HTML of a block, ending the paragraph."""
+        self.end_para()
+        self.nl(h)
+        self.space = False
+
+    def end_para(self):
+        if self.para == "open":
+            self.nl("</p>")
+            self.para = "want"
+        if self.synopsis:
+            self.nl("</td>\n  </tr>\n</table>")
+            self.synopsis = False
+
+    def word(self, h, kind="word"):
+        """HTML of the flow: a word, or a delimiter (opening, closing, middle)."""
+        if self.sh is None:
+            self.fail("text before the first section")
+        if self.para == "want" and not self.synopsis:
+            self.out.append('<p class="Pp">')
+            self.para, self.space = "open", False
+        if self.space and kind != "closing":
+            self.out.append(" ")
+        self.out.append(h)
+        self.space = kind != "opening"
+
+    # Lines
+
+    def render(self):
+        with open(self.path, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        for self.line, s in enumerate(lines, 1):
+            if self.literal is not None:
+                if s == ".Ed":
+                    self.block(f"<pre>{chr(10).join(self.literal)}</pre>\n</div>")
+                    self.literal = None
+                elif s.startswith("."):
+                    self.fail("a macro in a literal display")
+                else:
+                    self.literal.append(self.unescape(s))
+            elif s.startswith('.\\"'):
+                continue
+            elif s.startswith("."):
+                self.macro_line(s[1:])
+            elif s == "" or s[0] in " \t":
+                self.fail("a blank line or one starting with a space")
+            else:
+                self.word(self.unescape(s))
+        self.line = len(lines)
+        if self.blocks or self.literal is not None or self.pairs:
+            self.fail("a list, a display or an enclosure not ended")
+        self.end_section(True)
+        ids = self.taken
+        for r in self.refs:
+            if r not in ids:
+                raise MdocError(f"{self.path}: Sx {r} names no section")
+        return "".join(self.out).lstrip("\n")
+
+    def heading(self, args):
+        if any(not q and t in CALLABLE for t, q in args):
+            self.fail("a macro in a section's title")
+        title = " ".join(self.unescape(t) for t, _ in args)
+        if not title:
+            self.fail("a section without a title")
+        return title
+
+    def new_id(self, s):
+        """The id of a heading or a tag: its text (`~2` and so on after the first), but where
+        that is not a valid id as it is (`{cwd}`, `[run]`), its letters followed by `_`s so as
+        not to take another's (`cwd_`)."""
+        s = html.unescape(s)
+        base = slug(s)
+        if not base:
+            self.fail(f"no id of {s!r}")
+        id_, n = base, 1
+        if base == s:
+            self.clean.add(base)
+            while id_ in self.taken:
+                n += 1
+                id_ = f"{base}~{n}"
+        else:
+            while id_ in self.taken or id_ in self.reserved:
+                id_ += "_"
+        self.taken.add(id_)
+        return id_
+
+    def end_section(self, sh):
+        if self.blocks:
+            self.fail("a section within a list")
+        self.end_para()
+        if self.ss:
+            self.nl("</section>")
+            self.ss = False
+        if sh and self.sh not in (None, "NAME"):
+            self.nl("</section>")
+
+    def macro_line(self, s):
+        args = self.tokens(s)
+        if not args:
+            self.fail("an empty macro line")
+        (name, _), rest = args[0], args[1:]
+        if name == "Dd":
+            self.date = " ".join(t for t, _ in rest)
+        elif name in ("Dt", "Os"):
+            pass
+        elif name == "Sh":
+            title = self.heading(rest)
+            self.end_section(True)
+            self.sh, self.para = title, "want"
+            if title != "NAME":
+                id_ = self.new_id(title)
+                self.nl(f'<section class="Sh">\n<h2 class="Sh" id="{id_}">{permalink(id_, title)}</h2>')
+        elif name == "Ss":
+            title = self.heading(rest)
+            self.end_section(False)
+            id_ = self.new_id(title)
+            self.nl(f'<section class="Ss">\n<h3 class="Ss" id="{id_}">{permalink(id_, title)}</h3>')
+            self.ss, self.para = True, "want"
+        elif self.sh == "NAME":
+            if name == "Nm" and rest:
+                self.names.append(self.unescape(rest[0][0]))
+                self.default = self.default or self.names[0]
+            elif name == "Nd":
+                self.nd = " ".join(self.unescape(t) for t, _ in rest)
+            else:
+                self.fail(f"{name} in NAME")
+        elif name == "Pp":
+            self.end_para()
+            self.para, self.space = "want", False
+        elif name == "Bl":
+            self.list_begin(rest)
+        elif name == "It":
+            self.item(rest)
+        elif name == "El":
+            if not self.blocks:
+                self.fail("El of no list")
+            kind, item, indent = self.blocks.pop()
+            self.end_para()
+            if item:
+                self.nl("</dd>" if kind == "tag" else "</li>")
+            self.nl("</dl>" if kind == "tag" else "</ol>")
+            if indent:
+                self.nl("</div>")
+            self.para = "want" if not self.blocks else None
+        elif name == "Bd":
+            if [t for t, _ in rest] != ["-literal", "-offset", "indent"]:
+                self.fail("a display but -literal -offset indent")
+            self.block('<div class="Bd Pp Bd-indent Li">')
+            self.literal = []
+        elif name == "Dl":
+            self.end_para()
+            saved, self.para = self.para, None
+            self.nl('<div class="Bd Bd-indent"><code class="Li">')
+            self.space = False
+            self.inline(rest)
+            self.nl("</code></div>")
+            self.para, self.space = saved if saved != "open" else "want", False
+        elif name == "Nm" and self.sh == "SYNOPSIS":
+            self.end_para()
+            nm = self.unescape(rest[0][0]) if rest else self.default
+            self.nl(f'<table class="Nm">\n  <tr>\n    <td><code class="Nm">{nm}</code></td>\n    <td>')
+            self.synopsis, self.space = True, False
+            self.inline(rest[1:])
+        elif name in CALLABLE:
+            self.inline(args)
+        else:
+            self.fail(f"macro {name} not known")
+
+    def list_begin(self, args):
+        opts = [t for t, _ in args]
+        kind = {"-tag": "tag", "-enum": "enum"}.get(opts[0] if opts else "")
+        if kind is None:
+            self.fail(f"a list of {opts[:1]} (only -tag and -enum)")
+        classes, indent, i = [f"Bl-{kind}"], False, 1
+        while i < len(opts):
+            if opts[i] == "-width" and i + 1 < len(opts):
+                i += 2
+            elif opts[i] == "-offset" and opts[i + 1 : i + 2] == ["indent"]:
+                indent, i = True, i + 2
+            elif opts[i] == "-compact":
+                classes.append("Bl-compact")
+                i += 1
+            else:
+                self.fail(f"list option {opts[i]} not known")
+        tag = "dl" if kind == "tag" else "ol"
+        self.block(('<div class="Bd-indent">\n' if indent else "") + f'<{tag} class="{" ".join(classes)}">')
+        self.blocks.append([kind, False, indent])
+
+    def item(self, args):
+        if not self.blocks:
+            self.fail("It out of a list")
+        b = self.blocks[-1]
+        self.end_para()
+        if b[1]:
+            self.nl("</dd>" if b[0] == "tag" else "</li>")
+        b[1] = True
+        if b[0] == "enum":
+            if args:
+                self.fail("It of an -enum list with arguments")
+            self.nl("  <li>")
+            self.para, self.space = None, False
+            return
+        if not args:
+            self.fail("It of a -tag list without a head")
+        start = len(self.out)
+        self.para, self.space = None, False
+        self.inline(args)
+        head = "".join(self.out[start:])
+        del self.out[start:]
+        first = args[0]
+        # (as mandoc: of a macro of words but Ar and No, by its first)
+        if not first[1] and first[0] in WORDS.keys() - {"Ar", "No"} and len(args) > 1:
+            id_ = self.new_id(args[1][0].lstrip("-") if first[0] == "Fl" else self.unescape(args[1][0]))
+            m = re.match(r"<(code|var|span) [^>]*>.*?</\1>", head)
+            if m is None:
+                self.fail("no element to link in the head")
+            head = permalink(id_, m.group(0)) + head[m.end() :]
+            self.nl(f'  <dt id="{id_}">{head}</dt>\n  <dd>')
+        else:
+            self.nl(f"  <dt>{head}</dt>\n  <dd>")
+        self.space = False
+
+    def inline(self, args):
+        """A macro line of callable macros, words and delimiters."""
+        args = list(args)
+
+        def delim(a):
+            t, q = a
+            if q:
+                return None
+            return "opening" if t in OPENING else "closing" if t in CLOSING else "middle" if t in MIDDLE else None
+
+        trail = []
+        while args and delim(args[-1]) == "closing":
+            trail.insert(0, args.pop())
+        closes = []  # the enclosures open
+        cur, words, had = None, [], False
+
+        def flush():
+            nonlocal words, had
+            if cur in WORDS:
+                tag, cls = WORDS[cur]
+                if not words and not had:
+                    if cur == "Nm" and self.default:
+                        words = [self.default]
+                    elif cur == "Fl":
+                        words = [""]
+                    else:
+                        self.fail(f"{cur} without arguments")
+                if cur == "Fl":
+                    for w in words:
+                        self.word(f'<code class="Fl">-{w}</code>')
+                elif words:
+                    self.word(f'<{tag} class="{cls}">{" ".join(words)}</{tag}>')
+            elif cur == "Sx":
+                if not words:
+                    self.fail("Sx without a title")
+                title = " ".join(words)
+                id_ = slug(html.unescape(title))
+                self.refs.append(id_)
+                self.word(f'<a class="Sx" href="#{id_}">{title}</a>')
+            else:
+                for w in words:
+                    self.word(w)
+            had = had or bool(words)
+            words = []
+
+        i = 0
+        while i < len(args):
+            t, q = args[i]
+            if not q and t in CALLABLE:
+                flush()
+                cur, had = None, False
+                if t == "Ns":
+                    self.space = False
+                elif t == "Pf":
+                    if i + 1 >= len(args):
+                        self.fail("Pf without a prefix")
+                    self.word(self.unescape(args[i + 1][0]), "opening")
+                    i += 1
+                elif t in ENCLOSE:
+                    self.word(ENCLOSE[t][0], "opening")
+                    closes.append(t)
+                elif t in PAIRS:
+                    self.word(PAIRS[t][1], "opening")
+                    self.pairs.append(t)
+                elif t in CLOSERS:
+                    if not self.pairs or self.pairs[-1] != CLOSERS[t]:
+                        self.fail(f"{t} of no {CLOSERS[t]}")
+                    self.word(PAIRS[self.pairs.pop()][2], "closing")
+                elif t == "Xr":
+                    if len(args) - i < 3:
+                        self.fail("Xr without a name and a section")
+                    self.word(f'<a class="Xr">{self.unescape(args[i + 1][0])}({self.unescape(args[i + 2][0])})</a>')
+                    i += 2
+                elif t in WORDS or t == "Sx":
+                    cur = t
+                else:
+                    self.fail(f"macro {t} not known")
+            elif delim(args[i]):
+                flush()
+                self.word(t, delim(args[i]))
+            else:
+                words.append(self.unescape(t))
+            i += 1
+        flush()
+        for c in reversed(closes):
+            self.word(ENCLOSE[c][1], "closing")
+        for t, _ in trail:
+            self.word(t, "closing")
 
 
 def options(body):
@@ -203,9 +608,7 @@ def link_names(body, name, ref, spec):
     if name != "aqr":
         nm = '<code class="Nm">aqr</code>'
         body = body.replace(nm, f'<a class="opt" href="{ref("aqr", None)}">{nm}</a>')
-    return body.replace(
-        "The Aqueous format specification.", f'The Aqueous <a href="{spec}">format specification</a>.'
-    )
+    return body.replace("The Aqueous format specification.", f'The Aqueous <a href="{spec}">format specification</a>.')
 
 
 def toc(body):
@@ -259,15 +662,14 @@ def site_parts(up_link):
 
 
 def page_html(name, section):
-    body = mandoc(f"{name}.{section}")
-    nd = text(re.search(r'<span class="Nd"[^>]*>(.*?)</span>', body, re.S).group(1))
-    names = ", ".join(text(n) for n in re.findall(r'<code class="Nm">(.*?)</code>', body.split("</section>")[0]))
-    # (mandoc 1.14.6, Ubuntu's: the footer a table and the text a div; later ones: a div and main)
-    date = text(re.search(r'<(span|td) class="foot-date">(.*?)</\1>', body, re.S).group(2))
-    body = re.search(r'<(main|div) class="manual-text">(.*)</\1>', body, re.S).group(2)
-    body = re.sub(r'<section class="Sh">\s*<h2 class="Sh" id="NAME">.*?</section>\s*', "", body, count=1, flags=re.S)
-    body = fix_ids(body)
-    return body, nd, names, date
+    """The HTML of man/NAME.SECTION but its NAME section, its description, names and date."""
+    path = os.path.join(ROOT, "man", f"{name}.{section}")
+    # (twice: the ids of headings and tags as written known before those made of others)
+    first = Mdoc(path)
+    first.render()
+    m = Mdoc(path, frozenset(first.clean))
+    body = m.render()
+    return body, html.unescape(m.nd), html.unescape(", ".join(m.names)), m.date
 
 
 def prefixed(body, prefix):
@@ -296,8 +698,7 @@ def manual(rendered, name, section, ref, spec, single=None):
         attrs = f' id="{name}.{section}" class="wrap man {single}"'
     body = link_names(link_options(body, own, aqr_options, ref), name, ref, spec)
     pages = "".join(
-        f'<li><a href="{ref(n, None)}"{" aria-current=page" if n == name else ""}>{n}({s})</a></li>'
-        for n, s in PAGES
+        f'<li><a href="{ref(n, None)}"{" aria-current=page" if n == name else ""}>{n}({s})</a></li>' for n, s in PAGES
     )
     return f"""<div{attrs or ' class="wrap man"'}>
   <aside class="toc">
@@ -399,9 +800,12 @@ def write_single(path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2 and not sys.argv[1].startswith("-"):
-        write(sys.argv[1])
-    elif len(sys.argv) == 3 and sys.argv[1] == "--single":
-        write_single(sys.argv[2])
-    else:
-        sys.exit("usage:\n" + "\n".join(__doc__.strip().splitlines()[2:4]))
+    try:
+        if len(sys.argv) == 2 and not sys.argv[1].startswith("-"):
+            write(sys.argv[1])
+        elif len(sys.argv) == 3 and sys.argv[1] == "--single":
+            write_single(sys.argv[2])
+        else:
+            sys.exit("usage:\n" + "\n".join(__doc__.strip().splitlines()[2:4]))
+    except MdocError as e:
+        sys.exit(f"man2html.py: {e}")

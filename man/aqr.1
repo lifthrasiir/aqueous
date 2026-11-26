@@ -872,7 +872,7 @@ Archive on another machine and extract here:
 .Pp
 Encrypt with a passphrase of a file, then list the archive as JSON:
 .Dl $ aqr --passphrase-from=key.txt -o secret.aqr secret
-.Dl $ aqr -t --json --passphrase-from=key.txt secret.aqr | jq .
+.Dl $ aqr -t --json --passphrase-from=key.txt secret.aqr | jq \&.
 .Sh SEE ALSO
 .Xr 7z 1 ,
 .Xr tar 1 ,
