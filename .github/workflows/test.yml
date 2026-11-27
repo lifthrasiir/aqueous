@@ -3,11 +3,15 @@ name: test
 # The tests (cargo-nextest, .config/nextest.toml's profile ci, at the profile release-test) of the
 # packages a change can affect, on Linux and Windows (x86-64), and by schedule and by hand on
 # macOS (arm64, where the tests are run as the code is written): scripts/affected-crates.py takes
-# the changed files from the merge base (the commit before the push, or the pull request's base)
-# and adds the packages depending on theirs. The scheduled runs, by hand and of a push of no base
-# known (a new branch, a force push) test the whole workspace (but aqr-dll's dylibs, whose tests
-# do not build). Doctests are not run (5 in the workspace; building them took longer than the
-# tests of most packages).
+# the changed files from the merge base and adds the packages depending on theirs. The base of a
+# push is the last commit of main (an ancestor of the one pushed) whose run passed, not the commit
+# before the push: what a failed run selected is selected again until a run passes (a run passing
+# from a base that passed tests all that changed since). That of a pull request is its base. The
+# scheduled runs, by hand and of a push of no base known (no run of an ancestor passed among the
+# last 100 that did) test the whole workspace (but aqr-dll's dylibs, whose tests do not build).
+# A selection of no tests (aqr-win-install has none) is no failure.
+# Doctests are not run (5 in the workspace; building them took longer than the tests of most
+# packages).
 #
 # Measured on an M4 (10 cores), 2026-11-20: building every test from nothing 270 s (2170 CPU
 # seconds), the tests 216 s through nextest (700 s through cargo test, one binary at a time). The
@@ -58,6 +62,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # (the runs that passed, for the base)
+      actions: read
     outputs:
       args: ${{ steps.select.outputs.args }}
       whole: ${{ steps.select.outputs.whole }}
@@ -73,13 +79,25 @@ jobs:
       - id: select
         env:
           EVENT: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
+          base=
           case "$EVENT" in
-            push) base=$BEFORE ;;
+            push)
+              # (the latest of the commits that passed, by their ancestors' count: the runs
+              # need not have finished in the order of their commits)
+              best=-1
+              for sha in $(gh api "repos/$REPO/actions/workflows/test.yml/runs?branch=main&status=success&per_page=100"                   --jq '.workflow_runs[] | select(.event != "pull_request") | .head_sha' | sort -u); do
+                if git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+                  n=$(git rev-list --count "$sha")
+                  if [ "$n" -gt "$best" ]; then best=$n; base=$sha; fi
+                fi
+              done
+              echo "base: ${base:-none} (the last commit passed)"
+              ;;
             pull_request) base=$PR_BASE ;;
-            *) base= ;;
           esac
           if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
             python3 scripts/affected-crates.py "$base" HEAD > selection
@@ -161,4 +179,4 @@ jobs:
           # (no mapfile: macOS's bash is 3.2)
           args=()
           while IFS= read -r a; do args+=("$a"); done <<< "$ARGS"
-          cargo nextest run --profile ci --cargo-profile release-test --locked "${args[@]}"
+          cargo nextest run --profile ci --cargo-profile release-test --locked --no-tests=warn "${args[@]}"
