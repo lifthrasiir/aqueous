@@ -2,13 +2,14 @@
 name = "aqr-win-install"
 version = "0.1.0"
 edition = "2024"
-description = "An installer of aqr.exe and aqr-win.exe for the user, carrying them recompressed (aqr-exe's filters and zstd)"
+description = "An installer of aqr.exe and aqr-win.exe for the user, carrying them recompressed (aqr-exe's filters and LZMA2)"
 publish = false
 
 [dependencies]
 aqr-l10n.workspace = true
 aqr-exe = { workspace = true, features = ["decode"] }
-zstd.workspace = true
+# XZ Utils' liblzma (0BSD), built from its source, for the payload's raw LZMA2 frames
+liblzma = { workspace = true, features = ["static"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -23,7 +24,7 @@ windows-sys = { workspace = true, features = [
 aqr-exe = { workspace = true, default-features = true }
 aqr-version.workspace = true
 embed-resource.workspace = true
-zstd.workspace = true
+liblzma = { workspace = true, features = ["static"] }
 
 [[bin]]
 name = "aqr-win-install"

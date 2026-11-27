@@ -1955,8 +1955,8 @@ dependencies = [
  "aqr-l10n",
  "aqr-version",
  "embed-resource",
+ "liblzma",
  "windows-sys",
- "zstd",
 ]
 
 [[package]]

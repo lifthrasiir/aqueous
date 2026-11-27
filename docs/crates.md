@@ -18,7 +18,7 @@ more there.
   --serve`, a COM local server, which runs `aqr --serve`; `docs/win-shell-ext-design.md`);
   `cargo aqr-win` keeps it beside aqr-win, `--register` registers it, the installer carries it.
 - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe` and `aqr-shell.dll`,
-  packed by its `build.rs` with aqr-exe's filters and zstd (Windows).
+  packed by its `build.rs` with aqr-exe's filters and solid LZMA2 (Windows).
 - `aqr-l10n` — the frontends' messages (`messages/{en,ko}.toml`, English the source; a table of
   each section, so that the SFX stub carries only its `sfx`), and what the systems read of them:
   Windows' string table, the bundle's `.lproj/*.strings`.

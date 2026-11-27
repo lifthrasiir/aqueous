@@ -21,10 +21,11 @@ aqr-win-install [--quiet]                       # asks first, unless --quiet
   same directory goes with them where it is there; without it the installer is built without
   the manual, saying so (`aqr --help -v` then opens the site's page).
 - The files are recompressed as Aqueous would, without Aqueous (which is what is installed): the
-  code sections through aqr-exe's x86 disfilter, the base relocations through its `pe-reloc`,
-  and each of their streams and the rest of the file as a zstd frame of its own (level 19).
-  The installer depends on aqr-exe's decoders and zstd's alone. The layout is in
-  `src/payload.rs`.
+  code sections through aqr-exe's x86 disfilter, the base relocations through its `pe-reloc`.
+  The streams of a kind of all the files are one raw LZMA2 frame (solid; preset 9e, lc/lp/pb
+  chosen for each kind), as are the rest of the images and that of the other files, decoded
+  each on a thread of its own. The installer depends on aqr-exe's decoders and liblzma's
+  alone. The layout is in `src/payload.rs`.
 - `%LOCALAPPDATA%\Programs` is the user's own folder of programs (`FOLDERID_UserProgramFiles`),
   where per-user installers put them (Chrome without an administrator went to
   `%LOCALAPPDATA%\Google\Chrome`), not `%APPDATA%`, which a roaming profile copies about.
@@ -48,12 +49,26 @@ Measured on 2026-10-31 on a Ryzen 7 9700X: `aqr.exe` and `aqr-win.exe` of `targe
 |---|---|---|
 | zstd -19, each file | 9,138,000 | |
 | xz -9e, each file | 8,474,364 | |
-| the payload | 7,553,736 | −17.3% of zstd's, −10.9% of xz's |
+| the payload (zstd -19, each stream) | 7,553,736 | −17.3% of zstd's, −10.9% of xz's |
 | the installer | 7,973,376 | |
 
-Packing takes 13 s (`build.rs`'s dependencies are not optimised); the installer's own code
-(fat LTO as `dist` builds it: zstd's decoder, the x86 decoder, the dialogs), the icon and the
-resources are some 0.4 MB.
+Measured on 2026-11-27 on the same machine: the four files of `target/dist` at `6505eaa8`
+(27,806,289 bytes), each stream (and rest) of each file a frame of its own, or those of a kind
+one frame (solid):
+
+| | each | solid |
+|---|---|---|
+| zstd -19 | 8,745,224 | 8,550,705 |
+| zstd -22 | 8,735,854 | 8,538,670 |
+| LZMA2 9e (lc 3, lp 0, pb 2) | 8,088,275 | 7,895,732 |
+| LZMA2 9e, lc/lp/pb of each kind | | 7,836,872 |
+
+One frame of all of it was no better (7,893,517 bytes of LZMA2, 8,599,556 of zstd -19). Of
+the last, the payload is 7,837,451 bytes (8,745,447 before) and the installer 8,307,712
+(9,243,648): −10.1%. Unpacking takes 167 ms (96 ms of zstd), the longest frame (`ST_OP`, 16
+MB) on its own thread; packing 9.3 s (10.9 s), `build.rs`'s dependencies not optimised. The
+installer's own code (fat LTO as `dist` builds it: liblzma's decoder, the x86 decoder, the
+dialogs), the icon and the resources are 470 KB (498 KB with zstd's decoder).
 
 ## Left
 

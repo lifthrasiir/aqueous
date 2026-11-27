@@ -33,9 +33,6 @@ const FILES: [(&str, &[&str]); 3] = [
 /// need not have.
 const OPTIONAL: [&str; 1] = ["man.html"];
 
-/// zstd's level for every frame.
-const LEVEL: i32 = 19;
-
 fn main() {
     println!("cargo:rerun-if-changed=aqr-win-install.manifest");
     println!("cargo:rerun-if-changed=aqr-win-install.rc");
@@ -114,6 +111,7 @@ fn source() -> PathBuf {
 fn pack(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut p = payload::MAGIC.to_vec();
     p.push(files.len() as u8);
+    let mut frames: [Vec<u8>; payload::FRAMES] = std::array::from_fn(|_| Vec::new());
     for (name, data) in files {
         p.push(name.len() as u8);
         p.extend_from_slice(name.as_bytes());
@@ -125,34 +123,74 @@ fn pack(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
         for r in &regions {
             rest.extend_from_slice(&data[at..r.off]);
             at = r.off + r.len;
+            p.extend_from_slice(&r.head);
+            for (&f, st) in r.frames.iter().zip(&r.streams) {
+                p.extend_from_slice(&u32::try_from(st.len()).unwrap().to_le_bytes());
+                frames[f].extend_from_slice(st);
+            }
         }
         rest.extend_from_slice(&data[at..]);
-        // (the frames compressed at once, each on a thread of its own)
-        std::thread::scope(|s| {
-            let rest = s.spawn(|| frame(&rest));
-            let frames: Vec<Vec<_>> =
-                regions.iter().map(|r| r.streams.iter().map(|st| s.spawn(move || frame(st))).collect()).collect();
-            for (r, f) in regions.iter().zip(frames) {
-                p.extend_from_slice(&r.head);
-                f.into_iter().for_each(|f| p.extend(f.join().unwrap()));
-            }
-            p.extend(rest.join().unwrap());
-        });
+        let frame = if regions.is_empty() { payload::OTHER } else { payload::REST };
+        p.extend_from_slice(&u32::try_from(rest.len()).unwrap().to_le_bytes());
+        p.push(frame);
+        frames[frame as usize].extend(rest);
     }
+    // (the frames compressed at once, each on a thread of its own)
+    std::thread::scope(|s| {
+        let z: Vec<_> = frames.iter().enumerate().map(|(i, f)| s.spawn(move || frame(f, props(i)))).collect();
+        z.into_iter().for_each(|z| p.extend(z.join().unwrap()));
+    });
     p
 }
 
-fn frame(d: &[u8]) -> Vec<u8> {
-    let mut z = zstd::bulk::Compressor::new(LEVEL).unwrap();
-    // (a window as large as the data, and no larger than the decoder takes by default)
-    let log = (usize::BITS - d.len().max(1).leading_zeros()).clamp(10, 27);
-    z.set_parameter(zstd::zstd_safe::CParameter::WindowLog(log)).unwrap();
-    z.set_parameter(zstd::zstd_safe::CParameter::ContentSizeFlag(false)).unwrap();
-    z.set_parameter(zstd::zstd_safe::CParameter::ChecksumFlag(false)).unwrap();
-    let z = z.compress(d).unwrap();
+/// LZMA's literal context bits, literal position bits and position bits of frame `frame`
+/// (`payload::FRAMES`: the x86 streams of `x86::STREAM_NAMES`, the base relocations' two, the
+/// rest of the images and of the others), each the best of those with lc + lp <= 4 on the
+/// files of 2026-11-27 (`target/dist`, 27,806,289 bytes): 7,895,588 -> 7,836,872 bytes in all
+/// against (3, 0, 2) everywhere, the streams of 32-bit fields taking (0, 2, 2).
+fn props(frame: usize) -> (u32, u32, u32) {
+    match frame {
+        payload::RELOC_FRAME => return (1, 0, 0),
+        f if f == payload::RELOC_FRAME + 1 => return (0, 0, 0),
+        f if f == payload::REST as usize => return (0, 2, 2),
+        f if f == payload::OTHER as usize => return (3, 0, 0),
+        _ => {}
+    }
+    match x86::STREAM_NAMES[frame] {
+        "ST_OP" | "ST_JUMP8" => (4, 0, 0),
+        "ST_JUMPN" => (4, 0, 2),
+        "ST_JUMP" | "ST_CALL" | "ST_ADDR" => (0, 2, 2),
+        "ST_DISP32" => (1, 1, 2),
+        "ST_CALL_IDX" | "ST_IMM32" => (3, 0, 1),
+        "ST_DISP8" | "ST_SIB" => (2, 0, 0),
+        "ST_DISP8_SP" | "ST_DISP8_BP" => (1, 0, 0),
+        "ST_DISP8_IDX" => (0, 0, 0),
+        _ => (3, 0, 2),
+    }
+}
+
+/// Raw LZMA2 of `d` (preset 9e, the dictionary `payload::dict`, `props` as [`props`]), as a
+/// frame of the payload.
+fn frame(d: &[u8], (lc, lp, pb): (u32, u32, u32)) -> Vec<u8> {
+    use liblzma::stream::{Action, Filters, LzmaOptions, PRESET_EXTREME, Status, Stream};
+    let mut opts = LzmaOptions::new_preset(9 | PRESET_EXTREME).unwrap();
+    opts.dict_size(payload::dict(d.len())).literal_context_bits(lc).literal_position_bits(lp).position_bits(pb);
+    let mut f = Filters::new();
+    f.lzma2(&opts);
+    let mut s = Stream::new_raw_encoder(&f).unwrap();
+    let mut z = Vec::with_capacity(d.len() / 2 + 4096);
+    loop {
+        let at = s.total_in() as usize;
+        if z.capacity() - z.len() < 4096 {
+            z.reserve(z.capacity() / 2 + 4096);
+        }
+        if s.process_vec(&d[at..], &mut z, Action::Finish).unwrap() == Status::StreamEnd {
+            break;
+        }
+    }
     let mut f = Vec::with_capacity(8 + z.len());
-    f.extend_from_slice(&(d.len() as u32).to_le_bytes());
-    f.extend_from_slice(&(z.len() as u32).to_le_bytes());
+    f.extend_from_slice(&u32::try_from(d.len()).unwrap().to_le_bytes());
+    f.extend_from_slice(&u32::try_from(z.len()).unwrap().to_le_bytes());
     f.extend(z);
     f
 }
@@ -163,6 +201,8 @@ struct Region {
     /// The kind, offset, length and parameters, as written.
     head: Vec<u8>,
     streams: Vec<Vec<u8>>,
+    /// The frame of each stream.
+    frames: Vec<usize>,
 }
 
 /// The code sections (x86 or x86-64) and the base relocations of the PE image `d`, in order and
@@ -185,7 +225,13 @@ fn regions(d: &[u8]) -> Vec<Region> {
             let mut h = head(payload::X86, off, size);
             h.extend_from_slice(&st.origin().to_le_bytes());
             h.extend([st.sentinel_size(), code.is64 as u8]);
-            regions.push(Region { off, len: size, head: h, streams: st.streams().to_vec() });
+            regions.push(Region {
+                off,
+                len: size,
+                head: h,
+                streams: st.streams().to_vec(),
+                frames: (0..x86::NUM_STREAMS).collect(),
+            });
         }
     }
     for t in pe::tables(d) {
@@ -199,7 +245,8 @@ fn regions(d: &[u8]) -> Vec<Region> {
         };
         let mut h = head(payload::RELOC, t.off, t.len);
         h.push(align);
-        regions.push(Region { off: t.off, len: t.len, head: h, streams: streams.to_vec() });
+        let frames = vec![payload::RELOC_FRAME, payload::RELOC_FRAME + 1];
+        regions.push(Region { off: t.off, len: t.len, head: h, streams: streams.to_vec(), frames });
     }
     regions.sort_by_key(|r| r.off);
     // (the first of those that overlap)
