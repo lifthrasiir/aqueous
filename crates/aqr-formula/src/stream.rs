@@ -176,7 +176,10 @@ pub enum Kind {
 /// What the entries of an archive are by their names (paths in it), as a recompressor of
 /// archives is told: by default all of [`Kind::Unknown`].
 #[derive(Clone)]
-pub struct Kinds(std::sync::Arc<dyn Fn(&[u8]) -> Kind + Send + Sync>);
+pub struct Kinds(std::sync::Arc<KindOf>);
+
+/// What tells the kind of an entry by its name ([`Kinds`]).
+type KindOf = dyn Fn(&[u8]) -> Kind + Send + Sync;
 
 impl Kinds {
     pub fn new(f: impl Fn(&[u8]) -> Kind + Send + Sync + 'static) -> Kinds {

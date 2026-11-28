@@ -57,7 +57,7 @@ fn show() -> Result<(), String> {
     // SAFETY: the function looked up, of ShellExecuteW's type; strings ended by 0, the others
     // null as allowed
     let r = unsafe {
-        std::mem::transmute::<_, ShellExecute>(f)(
+        std::mem::transmute::<unsafe extern "system" fn() -> isize, ShellExecute>(f)(
             std::ptr::null_mut(),
             open.as_ptr(),
             wide.as_ptr(),
