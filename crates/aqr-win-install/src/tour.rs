@@ -41,7 +41,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawEdge, DrawTextW,
     EDGE_ETCHED, EDGE_RAISED, EndPaint, FW_BOLD, FillRect, GdiFlush, GetDC, GetMonitorInfoW, GetSysColor,
     GetSysColorBrush, HBITMAP, HDC, HFONT, HGDIOBJ, InvalidateRect, LOGFONTW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
+    MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, SetBkColor, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -49,8 +50,9 @@ use windows_sys::Win32::UI::Accessibility::NotifyWinEvent;
 use windows_sys::Win32::UI::Controls::{
     CloseThemeData, DrawThemeBackground, DrawThemeText, GetThemeInt, GetThemeMargins, GetThemePartSize, HTHEME,
     ILD_TRANSPARENT, ImageList_GetIcon, LISS_SELECTED, LVP_LISTITEM, MARGINS, MENU_POPUPBACKGROUND, MENU_POPUPBORDERS,
-    MENU_POPUPCHECK, MENU_POPUPGUTTER, MENU_POPUPITEM, MENU_POPUPSEPARATOR, MENU_POPUPSUBMENU, MPI_DISABLED,
-    MPI_DISABLEDHOT, MPI_HOT, MPI_NORMAL, MSM_NORMAL, OpenThemeData, TMT_BORDERSIZE, TMT_CONTENTMARGINS, TS_TRUE,
+    MENU_POPUPCHECK, MENU_POPUPCHECKBACKGROUND, MENU_POPUPGUTTER, MENU_POPUPITEM, MENU_POPUPSEPARATOR,
+    MENU_POPUPSUBMENU, MPI_DISABLED, MPI_DISABLEDHOT, MPI_HOT, MPI_NORMAL, MSM_NORMAL, OpenThemeData, TMT_BORDERSIZE,
+    TMT_CONTENTMARGINS, TS_TRUE,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_RIGHT,
@@ -164,9 +166,12 @@ struct At {
     sub: Option<usize>,
 }
 
-/// The layout of a menu, in pixels at 96 DPI (scaled by [`App::s`]).
+/// The layout of a menu, in pixels at 96 DPI (scaled by [`App::s`]), or of the theme's metrics,
+/// which are the device's pixels at the DPI already (`device`; Windows 7's menus at 144 DPI
+/// are laid out of them as they are, not scaled: a check of 18 pixels, its margins of 3).
 #[derive(Clone, Copy)]
 struct Layout {
+    device: bool,
     /// From the window's top (and bottom) to the first item's, the border's pixel included.
     pad: i32,
     /// An item's height, at least; with an icon, at least; and above the text's line.
@@ -182,8 +187,12 @@ struct Layout {
     right: i32,
     /// The arrow of a submenu's box, its right in from the window's right.
     arrow_right: i32,
-    /// The separator's line, in from the sides.
+    /// The separator's line, in from the left and the right.
     separator_inset: i32,
+    separator_right: i32,
+    /// The gutter's right (none where 0), and the box of a submenu's arrow.
+    gutter: i32,
+    arrow: (i32, i32),
     /// A submenu's left in from its parent's right.
     overlap: i32,
     radius: i32,
@@ -196,6 +205,7 @@ struct Layout {
 impl Layout {
     /// Windows 11 (measured of a menu of `TrackPopupMenu`, `MNS_CHECKORBMP` as Explorer's).
     const WIN11: Layout = Layout {
+        device: false,
         pad: 3,
         item: 22,
         icon_item: 22,
@@ -207,6 +217,9 @@ impl Layout {
         right: 60,
         arrow_right: 13,
         separator_inset: 9,
+        separator_right: 9,
+        gutter: 0,
+        arrow: (11, 10),
         overlap: 6,
         radius: 8,
         shadow: 12,
@@ -217,6 +230,7 @@ impl Layout {
     /// Without visual styles (the classic look of Windows 7, Windows Server's): measured of a
     /// menu of `TrackPopupMenu` there, of 96 DPI.
     const PLAIN: Layout = Layout {
+        device: false,
         pad: 3,
         item: 0,
         icon_item: 19,
@@ -228,6 +242,9 @@ impl Layout {
         right: 39,
         arrow_right: 8,
         separator_inset: 4,
+        separator_right: 4,
+        gutter: 0,
+        arrow: (4, 7),
         overlap: 6,
         radius: 0,
         shadow: 4,
@@ -235,33 +252,49 @@ impl Layout {
         border: 0,
     };
 
-    /// Before, from the theme's metrics where it gives them.
+    /// Before, from the theme's metrics, as Windows 7's are laid out (measured there, of
+    /// Windows 7 Basic: the check's box and its background's margin, the gutter ending there, the
+    /// text after the background's border; the arrow's box of its margins).
     fn classic(theme: HTHEME) -> Layout {
         let mut item = MARGINS::default();
-        let mut check = MARGINS::default();
+        let mut check = MARGINS { cxLeftWidth: 3, cxRightWidth: 3, cyTopHeight: 3, cyBottomHeight: 3 };
+        let mut background = MARGINS { cxRightWidth: 6, ..MARGINS::default() };
+        let mut arrow_margins = MARGINS { cxLeftWidth: 2, cxRightWidth: 7, cyTopHeight: 3, cyBottomHeight: 3 };
         let mut check_size = SIZE { cx: 16, cy: 16 };
-        let mut border = 0;
+        let mut gutter = SIZE { cx: 3, cy: 1 };
+        let mut arrow = SIZE { cx: 9, cy: 9 };
+        let mut border = 4;
         // SAFETY: the theme open, the values written to locals (left as they were on failure)
         unsafe {
-            GetThemeMargins(theme, null_mut(), MENU_POPUPITEM, 0, TMT_CONTENTMARGINS as i32, null(), &mut item);
-            GetThemeMargins(theme, null_mut(), MENU_POPUPCHECK, 0, TMT_CONTENTMARGINS as i32, null(), &mut check);
+            let content = TMT_CONTENTMARGINS as i32;
+            GetThemeMargins(theme, null_mut(), MENU_POPUPITEM, 0, content, null(), &mut item);
+            GetThemeMargins(theme, null_mut(), MENU_POPUPCHECK, 0, content, null(), &mut check);
+            GetThemeMargins(theme, null_mut(), MENU_POPUPCHECKBACKGROUND, 0, content, null(), &mut background);
+            GetThemeMargins(theme, null_mut(), MENU_POPUPSUBMENU, 0, content, null(), &mut arrow_margins);
             GetThemePartSize(theme, null_mut(), MENU_POPUPCHECK, 0, null(), TS_TRUE, &mut check_size);
+            GetThemePartSize(theme, null_mut(), MENU_POPUPGUTTER, 0, null(), TS_TRUE, &mut gutter);
+            GetThemePartSize(theme, null_mut(), MENU_POPUPSUBMENU, 0, null(), TS_TRUE, &mut arrow);
             GetThemeInt(theme, MENU_POPUPBACKGROUND, 0, TMT_BORDERSIZE as i32, &mut border);
         }
-        let gutter = check.cxLeftWidth + check_size.cx + check.cxRightWidth;
+        let check_box = check.cxLeftWidth + check_size.cx + check.cxRightWidth;
+        let gutter_right = 3 + check_box + background.cxRightWidth;
         Layout {
+            device: true,
             pad: 3,
             item: check.cyTopHeight + check_size.cy + check.cyBottomHeight,
             icon_item: check.cyTopHeight + check_size.cy + check.cyBottomHeight,
-            text_pad: 4,
+            text_pad: 3,
             separator: 9,
             hot_inset: 3,
             icon_x: 3 + check.cxLeftWidth,
-            text_x: 3 + gutter + border.clamp(2, 8) + item.cxLeftWidth,
-            right: 48,
-            arrow_right: 8,
-            separator_inset: 3 + gutter + border.clamp(2, 8),
-            overlap: 3,
+            text_x: gutter_right + border.clamp(0, 8) + item.cxLeftWidth,
+            right: 3 + arrow_margins.cxLeftWidth + arrow.cx + arrow_margins.cxRightWidth + 34,
+            arrow_right: 3 + arrow_margins.cxRightWidth,
+            separator_inset: gutter_right,
+            separator_right: 3,
+            gutter: gutter_right,
+            arrow: (arrow.cx, arrow.cy),
+            overlap: 6,
             radius: 0,
             shadow: 5,
             shadow_alpha: 0.22,
@@ -544,6 +577,11 @@ impl App {
         (v as i64 * self.dpi as i64 / 96) as i32
     }
 
+    /// `v` of the layout, in pixels: scaled, unless of the theme's metrics.
+    fn px(&self, v: i32) -> i32 {
+        if self.layout.device { v } else { self.s(v) }
+    }
+
     /// The fonts, themes, icons and layout at the DPI, the windows placed and sized.
     fn build(&mut self) {
         self.free();
@@ -631,36 +669,35 @@ impl App {
     fn lay_menu(&self, dc: HDC, rows: &[Row], x: i32, y: i32) -> Placed {
         let ly = self.layout;
         let (_, line) = self.measure(dc, self.menu_font, "Ag", 0);
-        let item = self.s(ly.item).max(line + self.s(ly.text_pad));
+        let item = self.px(ly.item).max(line + self.px(ly.text_pad));
         let mut width = 0;
-        let mut top = self.s(ly.pad);
+        let mut top = self.px(ly.pad);
         let mut out = Vec::new();
         for r in rows {
             let h = if r.is_separator() {
-                self.s(ly.separator)
+                self.px(ly.separator)
             } else {
                 let font = if r.bold { self.bold_font } else { self.menu_font };
                 width = width.max(self.measure(dc, font, &r.text, DT_HIDEPREFIX).0);
-                if r.icon { item.max(self.s(ly.icon_item)) } else { item }
+                if r.icon { item.max(self.px(ly.icon_item)) } else { item }
             };
             out.push((top, h));
             top += h;
         }
-        let w = self.s(ly.text_x) + width + self.s(ly.right);
-        Placed { rect: RECT { left: x, top: y, right: x + w, bottom: y + top + self.s(ly.pad) }, rows: out }
+        let w = self.px(ly.text_x) + width + self.px(ly.right);
+        Placed { rect: RECT { left: x, top: y, right: x + w, bottom: y + top + self.px(ly.pad) }, rows: out }
     }
 
-    /// Everything laid out at the DPI: the scenes side by side, the line under them and "OK"
-    /// under it; the window sized to them.
-    fn place(&mut self) {
+    /// The scenes laid out from the window's margin, side by side or one under the other: them,
+    /// the width of the client area they need and their bottom.
+    fn arrange(&self, dc: HDC, stacked: bool) -> (Vec<ScenePlaced>, i32, i32) {
         let margin = self.s(16);
-        let shadow = self.s(self.layout.shadow);
-        // SAFETY: the screen's DC, released; this program's windows
+        let shadow = self.px(self.layout.shadow);
+        let (mut x, mut y) = (margin, margin);
+        let (mut width, mut bottom) = (0, 0);
+        let mut placed = Vec::new();
+        // SAFETY: a DC of the screen's, its font put back
         unsafe {
-            let dc = GetDC(null_mut());
-            let mut placed = Vec::new();
-            let mut x = margin;
-            let mut bottom = 0;
             for scene in &self.scenes {
                 let tile_w = self.s(84);
                 let icon = self.s(48);
@@ -670,7 +707,7 @@ impl App {
                 let old = SelectObject(dc, self.label_font as HGDIOBJ);
                 DrawTextW(dc, t.as_ptr(), -1, &mut lr, DT_CALCRECT | DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
                 SelectObject(dc, old);
-                let top = margin;
+                let top = y;
                 let icon_r = RECT {
                     left: x + (tile_w - icon) / 2,
                     top: top + self.s(6),
@@ -686,20 +723,43 @@ impl App {
                 let tile = RECT { left: x, top, right: x + tile_w, bottom: label.bottom + self.s(4) };
                 // (where it was right-clicked: in the tile, to the right of the icon, its name
                 // left to be read)
-                let menu = self.lay_menu(dc, &scene.menu, tile.right - self.s(14), icon_r.top + self.s(30));
+                let menu = self.lay_menu(dc, &scene.menu, tile.right - self.s(4), icon_r.top + self.s(30));
                 let sub = scene.menu.iter().position(|r| !r.sub.is_empty()).map(|i| {
                     let (row_top, _) = menu.rows[i];
-                    let sub_x = menu.rect.right - self.s(self.layout.overlap);
-                    let sub_y = menu.rect.top + row_top - self.s(self.layout.pad);
+                    let sub_x = menu.rect.right - self.px(self.layout.overlap);
+                    let sub_y = menu.rect.top + row_top - self.px(self.layout.pad);
                     (i, self.lay_menu(dc, &scene.menu[i].sub, sub_x, sub_y))
                 });
                 let right = sub.as_ref().map_or(menu.rect.right, |(_, s)| s.rect.right).max(tile.right) + shadow;
-                bottom =
-                    bottom.max(menu.rect.bottom + shadow).max(sub.as_ref().map_or(0, |(_, s)| s.rect.bottom + shadow));
+                let low = menu.rect.bottom.max(sub.as_ref().map_or(0, |(_, s)| s.rect.bottom)) + shadow;
+                bottom = bottom.max(low);
+                width = width.max(right - shadow + margin);
                 placed.push(ScenePlaced { tile, icon: icon_r, label, menu, sub });
-                x = right + self.s(24);
+                match stacked {
+                    true => y = low + self.s(8),
+                    false => x = right + self.s(24),
+                }
             }
-            let width = x - self.s(24) + margin - shadow;
+        }
+        (placed, width, bottom)
+    }
+
+    /// Everything laid out at the DPI: the scenes side by side (one under the other where the
+    /// window would be wider than the screen), the line under them and "OK" under it; the
+    /// window sized to them.
+    fn place(&mut self) {
+        let margin = self.s(16);
+        // SAFETY: the screen's DC, released; this program's windows
+        unsafe {
+            let dc = GetDC(null_mut());
+            // (the screen's width for the client area, of the window's monitor)
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(MonitorFromWindow(self.main, MONITOR_DEFAULTTONEAREST), &mut mi);
+            let room = mi.rcWork.right - mi.rcWork.left - self.s(16);
+            let side = self.arrange(dc, false);
+            let (placed, width, bottom) = if side.1 > room { self.arrange(dc, true) } else { side };
+
             // (the line as high as the longest it may be, so that nothing moves)
             let about_w = width - 2 * margin;
             let old = SelectObject(dc, self.text_font as HGDIOBJ);
@@ -960,7 +1020,7 @@ impl App {
     fn draw_menu(&self, dc: HDC, m: &Placed, rows: &[Row], hot: impl Fn(usize) -> bool) {
         let ly = self.layout;
         let (w, h) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
-        let radius = self.s(ly.radius) as f32;
+        let radius = self.px(ly.radius) as f32;
         if self.shadows {
             self.shadow(dc, &m.rect, radius);
         }
@@ -976,9 +1036,11 @@ impl App {
                 }
                 let inner = if self.win11 { full } else { RECT { left: 1, top: 1, right: w - 1, bottom: h - 1 } };
                 DrawThemeBackground(theme, mem, MENU_POPUPBACKGROUND, 0, &inner, null());
-                if !self.win11 {
-                    let gx = self.s(ly.separator_inset) - self.s(3);
-                    let g = RECT { left: self.s(3), top: 1, right: gx, bottom: h - 1 };
+                if ly.gutter > 0 {
+                    let mut size = SIZE { cx: 3, cy: 1 };
+                    GetThemePartSize(theme, mem, MENU_POPUPGUTTER, 0, null(), TS_TRUE, &mut size);
+                    let right = self.px(ly.gutter);
+                    let g = RECT { left: right - size.cx, top: 1, right, bottom: h - 1 };
                     DrawThemeBackground(theme, mem, MENU_POPUPGUTTER, 0, &g, null());
                 }
             } else {
@@ -990,14 +1052,14 @@ impl App {
             let icon = self.s(16);
             for (i, (r, &(top, rh))) in rows.iter().zip(&m.rows).enumerate() {
                 if r.is_separator() {
-                    let inset = self.s(ly.separator_inset);
+                    let inset = self.px(ly.separator_inset);
                     let mut size = SIZE { cx: 1, cy: 1 };
                     if theme != 0 {
                         GetThemePartSize(theme, mem, MENU_POPUPSEPARATOR, 0, null(), TS_TRUE, &mut size);
                     }
                     let lh = if self.win11 { self.s(1).max(1) } else { size.cy.max(1) };
                     let y = top + (rh - lh) / 2;
-                    let line = RECT { left: inset, top: y, right: w - inset, bottom: y + lh };
+                    let line = RECT { left: inset, top: y, right: w - self.px(ly.separator_right), bottom: y + lh };
                     if theme == 0 {
                         let mut line = RECT { top: top + self.s(3), bottom: top + self.s(3) + 2, ..line };
                         DrawEdge(mem, &mut line, EDGE_ETCHED, BF_TOP);
@@ -1015,7 +1077,8 @@ impl App {
                     (true, false) => MPI_DISABLED,
                     (true, true) => MPI_DISABLEDHOT,
                 };
-                let item = RECT { left: self.s(ly.hot_inset), top, right: w - self.s(ly.hot_inset), bottom: top + rh };
+                let item =
+                    RECT { left: self.px(ly.hot_inset), top, right: w - self.px(ly.hot_inset), bottom: top + rh };
                 if is_hot && self.win11 {
                     // (Windows 11's own, not the theme's: gray, its corners rounded)
                     GdiFlush();
@@ -1028,12 +1091,12 @@ impl App {
                 }
                 if r.icon && !self.item_icon.is_null() {
                     let y = top + (rh - icon) / 2;
-                    DrawIconEx(mem, self.s(ly.icon_x), y, self.item_icon, icon, icon, 0, null_mut(), DI_NORMAL);
+                    DrawIconEx(mem, self.px(ly.icon_x), y, self.item_icon, icon, icon, 0, null_mut(), DI_NORMAL);
                 }
                 let font = if r.bold { self.bold_font } else { self.menu_font };
                 let old = SelectObject(mem, font as HGDIOBJ);
                 let text = wide(&r.text);
-                let tr = RECT { left: self.s(ly.text_x), top, right: w - self.s(ly.right) / 2, bottom: top + rh };
+                let tr = RECT { left: self.px(ly.text_x), top, right: w - self.px(ly.right) / 2, bottom: top + rh };
                 let mut flags = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
                 if !self.cues {
                     flags |= DT_HIDEPREFIX;
@@ -1059,15 +1122,15 @@ impl App {
                 }
                 SelectObject(mem, old);
                 if !r.sub.is_empty() && theme != 0 {
-                    let (aw, ah) = (self.s(11), self.s(10));
-                    let ax = w - self.s(ly.arrow_right) - aw;
+                    let (aw, ah) = (self.px(ly.arrow.0), self.px(ly.arrow.1));
+                    let ax = w - self.px(ly.arrow_right) - aw;
                     let a =
                         RECT { left: ax, top: top + (rh - ah) / 2, right: ax + aw, bottom: top + (rh - ah) / 2 + ah };
                     DrawThemeBackground(theme, mem, MENU_POPUPSUBMENU, MSM_NORMAL, &a, null());
                 } else if !r.sub.is_empty() {
                     // (the classic arrow: a triangle of the text's color, 4 wide and 7 high)
                     let (aw, ah) = (self.s(4), self.s(7) | 1);
-                    let ax = w - self.s(ly.arrow_right) - aw;
+                    let ax = w - self.px(ly.arrow_right) - aw;
                     let ay = top + (rh - ah) / 2;
                     let c = GetSysColor(color);
                     for i in 0..aw {
@@ -1118,7 +1181,7 @@ impl App {
 
     /// The shadow of a menu at `r` (of corners of `radius`), as DWM draws it: soft, under it more.
     fn shadow(&self, dc: HDC, r: &RECT, radius: f32) {
-        let reach = self.s(self.layout.shadow);
+        let reach = self.px(self.layout.shadow);
         let drop = self.s(2) as f32;
         let (w, h) = (r.right - r.left + 2 * reach, r.bottom - r.top + 2 * reach);
         let alpha = self.layout.shadow_alpha;
