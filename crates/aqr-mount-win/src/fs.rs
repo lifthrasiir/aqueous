@@ -7,6 +7,8 @@
 //! (`\a\b`) and are walked component by component, in any case.
 
 use std::ffi::{OsStr, c_void};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aqr_mount::{Attr, Case, Kind, NodeId, Tree};
 use winfsp::filesystem::{
@@ -70,6 +72,9 @@ pub struct Handle {
 
 struct Volume {
     tree: Box<dyn Tree>,
+    /// The handles of files open, of their programs (of directories not: Explorer keeps the one
+    /// it shows open): counted as they are opened and cleaned up.
+    open: Arc<AtomicUsize>,
 }
 
 impl Volume {
@@ -113,6 +118,9 @@ impl FileSystemContext for Volume {
             _ => {}
         }
         fill(node, &attr, file_info.as_mut());
+        if attr.kind == Kind::File {
+            self.open.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(Handle { node, kind: attr.kind, listing: DirBuffer::new() })
     }
 
@@ -142,6 +150,13 @@ impl FileSystemContext for Volume {
         _replace_if_exists: bool,
     ) -> winfsp::Result<()> {
         Err(FspError::NTSTATUS(STATUS_MEDIA_WRITE_PROTECTED))
+    }
+
+    /// The handle closed by its program (`close` comes later, once the cache lets go of it).
+    fn cleanup(&self, handle: &Handle, _file_name: Option<&U16CStr>, _flags: u32) {
+        if handle.kind == Kind::File {
+            self.open.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     fn close(&self, _handle: Handle) {}
@@ -202,8 +217,25 @@ impl FileSystemContext for Volume {
     }
 }
 
-/// Mounts the volume and serves it until the process ends.
-pub fn serve(tree: Box<dyn Tree>, mount_point: Option<&OsStr>) -> winfsp::Result<()> {
+/// The volume mounted, served by WinFsp's dispatcher threads until it is unmounted (or the
+/// process ends).
+pub struct Mounted {
+    host: FileSystemHost<Volume>,
+    /// How many files of it are open.
+    pub open: Arc<AtomicUsize>,
+}
+
+impl Mounted {
+    /// Unmounted: the files open fail from then on.
+    pub fn unmount(mut self) {
+        self.host.unmount();
+        self.host.stop();
+    }
+}
+
+/// Mounts the volume at `mount_point` (a drive letter, or a directory not there) and starts
+/// serving it.
+pub fn mount(tree: Box<dyn Tree>, mount_point: &OsStr) -> winfsp::Result<Mounted> {
     let mtime_ns = tree.attr(aqr_mount::ROOT).map(|a| a.mtime_ns).unwrap_or(0);
     let mut params = VolumeParams::new();
     params
@@ -220,14 +252,9 @@ pub fn serve(tree: Box<dyn Tree>, mount_point: Option<&OsStr>) -> winfsp::Result
         .unicode_on_disk(true)
         .read_only_volume(true);
     // (the fine guard: callbacks of many dispatcher threads at once, Volume and Handle being Sync)
-    let mut host: FileSystemHost<Volume> = FileSystemHost::new(params, Volume { tree })?;
-    match mount_point {
-        Some(point) => host.mount(point)?,
-        None => host.mount(winfsp::host::MountPoint::NextFreeDrive)?,
-    }
+    let open = Arc::new(AtomicUsize::new(0));
+    let mut host: FileSystemHost<Volume> = FileSystemHost::new(params, Volume { tree, open: open.clone() })?;
+    host.mount(mount_point)?;
     host.start()?;
-    eprintln!("aqr-mount: mounted; end the program to unmount");
-    loop {
-        std::thread::park();
-    }
+    Ok(Mounted { host, open })
 }

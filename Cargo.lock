@@ -1485,6 +1485,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-ipc",
  "aqr-mount",
+ "serde_json",
  "windows-sys",
  "winfsp",
 ]

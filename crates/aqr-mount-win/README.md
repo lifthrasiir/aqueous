@@ -1,12 +1,27 @@
 # aqr-mount-win
 
-`aqr-mount.exe ARCHIVE [MOUNTPOINT]` mounts the archive as a read-only volume through
+`aqr-mount.exe [--json] ARCHIVE [MOUNTPOINT]` mounts the archive as a read-only volume through
 [WinFsp](https://winfsp.dev) where it is installed. MOUNTPOINT is a drive letter (`X:`) or a
-directory that does not exist yet; without one, the next free drive letter is taken. The volume is there for as long as the
-program runs: ending it in any way (Ctrl+C, a kill, a crash) unmounts, as the driver tears
-down a volume whose process has closed its handle. Neither mounting nor the driver's start
-needs an administrator (WinFsp's installer lets everyone start its driver), and nothing is
-written to the registry (the Launcher's `Services` keys are for `net use` and are not used).
+directory that does not exist yet; without one, the last free drive letter is taken. The
+volume is there until it is ejected through its control (below) or the program ends: ending it
+in any way (Ctrl+C, a kill, a crash) unmounts, as the driver tears down a volume whose process
+has closed its handle. With `--json`, what becomes of it is a line on standard output
+(`{"mounted":"Q:","control":PIPE}`, or `{"error":...}`), for aqr-win.
+
+The control of a mount (`src/control.rs`) is a named pipe, `\\.\pipe\Aqueous.Mount.Q` of drive
+Q: (of a directory, a hash of its path), of the user who mounted alone: a line of JSON asked,
+a line answered. `status` tells the archive, the mount point and how many files are open (by
+their programs: counted as they are opened and cleaned up; directories not, as Explorer keeps
+the one it shows open); `eject` unmounts and ends the program, unless files are open (their
+number answered), or where `force` is given.
+
+`aqr-mount --install` copies the program (and `COPYING` beside it) into Aqueous's folder,
+`%LOCALAPPDATA%\Programs\Aqueous`, where the installer put aqr-win: the shell extension then
+offers to mount archives.
+
+Neither mounting nor the driver's start needs an administrator (WinFsp's installer lets
+everyone start its driver), and nothing is written to the registry (the Launcher's `Services`
+keys are for `net use` and are not used).
 
 The volume serves aqr-mount's tree of the archive (`ServedTree`, over an `aqr --serve`;
 `src/fs.rs` is the adapter): names in any case, the volume's label the archive's name. `aqr` is
@@ -50,7 +65,8 @@ says it is the program of Windows.
 `tests/mount.rs` mounts an archive on a directory (a junction WinFsp makes, of no
 administrator) as the program is run (the `aqr` built beside it: `cargo rt -p aqr -p
 aqr-mount-win`): its files read whole and in another case, writes refused, the directory gone
-with the process killed. It is skipped where WinFsp is not installed (CI's runners).
+with the process killed; and through its control, the files open counted, an eject refused
+while one is, then forced, the program ending well. It is skipped where WinFsp is not installed (CI's runners).
 
 ## Left
 
