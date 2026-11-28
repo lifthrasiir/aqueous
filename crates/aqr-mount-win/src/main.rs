@@ -26,6 +26,7 @@ mod load;
 fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
+    keep_standard_handles();
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if args.len() == 1 && args[0] == "--install" {
         return match install() {
@@ -93,6 +94,20 @@ fn main() -> std::process::ExitCode {
     _ = ejected.recv();
     mounted.unmount();
     ExitCode::SUCCESS
+}
+
+/// This program's standard handles kept from its children (`aqr --serve`, which std's
+/// `Command` would give every handle that may be inherited): what started this program reads
+/// its output (aqr-win, the line of `--json`) and waits for the pipe's end, which a child
+/// holding it would put off for as long as it runs.
+#[cfg(windows)]
+fn keep_standard_handles() {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: this process's standard handles, where it has them (a null one fails alone)
+        unsafe { SetHandleInformation(GetStdHandle(which), HANDLE_FLAG_INHERIT, 0) };
+    }
 }
 
 /// The last drive letter free (from Z:, as WinFsp takes them), D: at the first: of no volume

@@ -14,10 +14,10 @@
 //! The controls' protocol is aqr-mount's (`src/control.rs`): a line of JSON asked of
 //! `\\.\pipe\Aqueous.Mount.Q`, a line answered.
 
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 
 use aqr_l10n::win;
 use serde_json::{Value, json};
@@ -94,6 +94,150 @@ fn mounts() -> Vec<(char, Value)> {
         .collect()
 }
 
+/// aqr-mount started, as [`start`] starts it: killed or waited for.
+struct Started(windows_sys::Win32::Foundation::HANDLE);
+
+impl Started {
+    fn kill(&self) {
+        use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+        // SAFETY: the process's handle, of this struct's
+        unsafe {
+            TerminateProcess(self.0, 1);
+            WaitForSingleObject(self.0, 5000);
+        }
+    }
+
+    /// Its exit code, once it has ended.
+    fn wait(&self) -> Option<u32> {
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+        let mut code = 0;
+        // SAFETY: the process's handle, of this struct's
+        let ended = unsafe { WaitForSingleObject(self.0, INFINITE) == 0 && GetExitCodeProcess(self.0, &mut code) != 0 };
+        ended.then_some(code)
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        // SAFETY: the process's handle, of this struct's
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+/// `exe` started with `args` and `flags` (`CREATE_*`), its standard output a pipe read here,
+/// its input and error `NUL`, and no other handle of this program's given it
+/// (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`): std's `Command` gives a child every handle that may be
+/// inherited, and aqr-mount outlives this program, holding what it was given (a pipe or a file
+/// of what started this program: a test's output redirected, which its waiting then never saw
+/// end).
+fn start(exe: &Path, args: &[&OsStr], flags: u32) -> std::io::Result<(Started, std::fs::File)> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        SetHandleInformation,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, UpdateProcThreadAttribute,
+    };
+    let last = std::io::Error::last_os_error;
+    // (`"exe" "arg" ...`: paths hold no quotes)
+    let mut line: Vec<u16> = Vec::new();
+    for a in std::iter::once(exe.as_os_str()).chain(args.iter().copied()) {
+        if !line.is_empty() {
+            line.push(u16::from(b' '));
+        }
+        line.push(u16::from(b'"'));
+        line.extend(a.encode_wide());
+        line.push(u16::from(b'"'));
+    }
+    line.push(0);
+    let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
+    let nul_w: Vec<u16> = "NUL".encode_utf16().chain([0]).collect();
+    let inherited = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    // SAFETY: handles made here and closed here (but the pipe's end read, given to the file, and
+    // the process's, to `Started`); the attribute list in a buffer of the size it asks for,
+    // alive through the call
+    unsafe {
+        let (mut read, mut write): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
+        if CreatePipe(&mut read, &mut write, &inherited, 0) == 0 {
+            return Err(last());
+        }
+        SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
+        let read = std::fs::File::from_raw_handle(read as _);
+        let nul = CreateFileW(
+            nul_w.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &inherited,
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if nul == INVALID_HANDLE_VALUE {
+            let e = last();
+            CloseHandle(write);
+            return Err(e);
+        }
+        let mut size = 0;
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
+        let mut buffer = vec![0u64; size.div_ceil(8)];
+        let list = buffer.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+        let handles = [write, nul];
+        let made = InitializeProcThreadAttributeList(list, 1, 0, &mut size) != 0
+            && UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr().cast(),
+                size_of_val(&handles),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            ) != 0;
+        let mut si: STARTUPINFOEXW = std::mem::zeroed();
+        si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput = nul;
+        si.StartupInfo.hStdOutput = write;
+        si.StartupInfo.hStdError = nul;
+        si.lpAttributeList = list;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let ok = made
+            && CreateProcessW(
+                exe_w.as_ptr(),
+                line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                flags | EXTENDED_STARTUPINFO_PRESENT,
+                std::ptr::null(),
+                std::ptr::null(),
+                &si.StartupInfo,
+                &mut pi,
+            ) != 0;
+        let e = last();
+        if made {
+            DeleteProcThreadAttributeList(list);
+        }
+        CloseHandle(write);
+        CloseHandle(nul);
+        if !ok {
+            return Err(e);
+        }
+        CloseHandle(pi.hThread);
+        Ok((Started(pi.hProcess), read))
+    }
+}
+
 /// The drive opened in Explorer.
 fn open(letter: char) {
     _ = Command::new("explorer.exe").arg(format!(r"{letter}:\")).spawn();
@@ -121,25 +265,15 @@ pub fn mount(archive: &Path) -> ExitCode {
         let dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.display().to_string()));
         return fail(&win::no_mount_program(dir.unwrap_or_default()));
     };
-    let start = |flags: u32| {
-        Command::new(&exe)
-            .arg("--json")
-            .arg(&archive)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(flags)
-            .spawn()
-    };
+    let args = [OsStr::new("--json"), archive.as_os_str()];
     // (out of the job where it may be; in it where it may not)
-    let child = start(NO_WINDOW | BREAKAWAY).or_else(|_| start(NO_WINDOW));
-    let mut child = match child {
+    let started = start(&exe, &args, NO_WINDOW | BREAKAWAY).or_else(|_| start(&exe, &args, NO_WINDOW));
+    let (child, out) = match started {
         Ok(c) => c,
         Err(e) => return fail(&format!("{}: {e}", exe.display())),
     };
     // (its line read on a thread, waited for under a dialog: a big archive takes a while to be
     // opened, and Cancel ends it)
-    let out = child.stdout.take().unwrap();
     let told = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     {
         let told = told.clone();
@@ -151,8 +285,7 @@ pub fn mount(archive: &Path) -> ExitCode {
     }
     let done = || told.lock().unwrap().is_some();
     if !dialog::waiting(&win::mounting(&name), &archive.display().to_string(), &done) {
-        _ = child.kill();
-        _ = child.wait();
+        child.kill();
         return ExitCode::SUCCESS;
     }
     let line = told.lock().unwrap().take().unwrap_or_default();
@@ -167,7 +300,7 @@ pub fn mount(archive: &Path) -> ExitCode {
         (None, Some(e)) => fail(e),
         // (ended before it told anything)
         (None, None) => {
-            let status = child.wait().map(|s| s.to_string()).unwrap_or_default();
+            let status = child.wait().map(|c| format!("exit code {c}")).unwrap_or_default();
             fail(&format!("{}: {status}", exe.display()))
         }
     }
