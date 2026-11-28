@@ -10,6 +10,7 @@ cargo build --profile dist -p aqr -p aqr-win -p aqr-win-shell   # first: the ins
 python scripts/man2html.py --single target/dist/man.html       # and this, where it is there
 cargo build --profile dist -p aqr-win-install   # target/dist/aqr-win-install.exe
 aqr-win-install [--quiet]                       # asks first, unless --quiet
+aqr-win-install --tour                          # the window after installing, installing nothing
 ```
 
 `build.bat` runs the two builds as the release workflow does.
@@ -37,6 +38,15 @@ aqr-win-install [--quiet]                       # asks first, unless --quiet
   (`*.old`, deleted by the next install or the uninstall). `aqr-shell.dll`, which Explorer holds
   once it loaded it, is replaced so too, and Explorer runs the one it had until it is started
   again, as the installer then says.
+- Installed, a window shows what was installed as Explorer shows it (`src/tour.rs`): a file and
+  a `.aqr` file right-clicked, their menus open, the submenu "Aqueous" too, drawn by the theme's
+  parts of menus (laid out as measured of Windows 11's menus, from the theme's metrics before
+  it). The line under them tells what the command pointed at or chosen does (every command is a
+  stop of Tab, the arrows move as in a menu), else what was installed, that on Windows 11 the
+  menus are under "Show more options", and that Explorer must be restarted after an update.
+  "Mount as a drive" is drawn disabled unless aqr-mount and WinFsp are installed, as the menu
+  shows it then, its line telling what it needs. `AQR_TOUR_CLASSIC` draws the layout of
+  Windows 10 and before on Windows 11, to look at it.
 - The manifest asks for no elevation (`asInvoker`): Windows would otherwise ask for an
   administrator for a program named so.
 

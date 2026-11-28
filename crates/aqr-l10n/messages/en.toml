@@ -181,7 +181,31 @@ what = "aqr and the verbs of Explorer, for this user alone, into\n{dir}\n\nThe f
 what_control_panel = "aqr and the verbs of Explorer, for this user alone, into\n{dir}\n\nThe folder goes on PATH; Control Panel's Programs and Features uninstalls it."
 install = "Install"
 installed = "Aqueous is installed"
-done = "\"{compress}\" is on files and folders, \"{extract}\", \"{extract_to}\", \"{test}\", \"{name_version}\" and \"{extract_version}\" on .aqr files. aqr is on PATH in terminals opened from now on."
+# The window after installing (aqr-win-install's tour.rs): Explorer's menus of two files drawn,
+# what each command does told under them as it is pointed at or chosen.
+installed_line = "Aqueous is installed: the menus below are on files and folders in Explorer, and aqr is on PATH in terminals opened from now on."
+sample_file = "notes.txt"
+sample_archive = "photos.aqr"
+# Explorer's own commands as Explorer's menu writes them (& before the access key).
+open = "&Open"
+properties = "P&roperties"
+about_open = "Windows' own: opens the file with its program."
+about_open_archive = "Opens the archive as a folder, as a double click does: its files are opened, copied out and searched there, and files dropped into it are added."
+about_properties = "Windows' own: what Windows knows of the file."
+about_properties_archive = "Of a .aqr file, its \"Versions\" tab lists the versions the archive has kept: each is opened, extracted or named from there."
+about_compress = "Compresses what is chosen into a .aqr archive beside it: one file or folder into its name with .aqr, several into one named after their folder."
+about_menu = "The commands used less often, of what is chosen."
+about_extract = "Extracts the archive beside it: a single file or folder at its top as it is, else into a folder of the archive's name."
+about_extract_to = "Asks for a folder and extracts the archive into it."
+about_test = "Checks that every file of the archive comes out intact, writing nothing."
+about_mount = "Opens the archive as a read-only drive, for programs that read files by their paths; \"Eject\" in the drive's menu takes it away."
+about_mount_missing = "Needs aqr-mount, released beside this installer, and WinFsp (winfsp.dev): with both installed, run \"aqr-mount --install\" once."
+about_extract_version = "Extracts the archive as it was at one of its named versions, into a folder beside it."
+about_name_version = "Names the state the archive is in now, so that it can be extracted as it is later, whatever is added after."
+about_compress_passphrase = "Compresses into an archive encrypted with a passphrase, which is asked for."
+about_compress_zip = "Compresses into a .zip archive, which every system opens."
+about_compress_7z = "Compresses into a .7z archive."
+about_compress_options = "A dialog of the format, the level and the other options first."
 empty = "This installer was built without aqr.exe and aqr-win.exe (target/dist)."
 damaged = "This installer is damaged: {error}"
 not_made = "{path} is not made: {error}"
@@ -189,9 +213,9 @@ not_written = "{path} is not written: {error}"
 not_replaced = "{path} is not replaced: {error}"
 not_run = "aqr-win.exe does not run: {error}"
 
-# aqr-mac.
 restart_explorer = "Explorer still runs the earlier version of the folders of archives: it takes this one once you sign out and in again, or Explorer is restarted."
 
+# aqr-mac.
 [mac]
 extract_into = "Extract into the folder all the same? Its files of the same names are replaced."
 extract = "Extract"

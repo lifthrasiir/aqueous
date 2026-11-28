@@ -4,7 +4,10 @@
 //! Explorer, the folder of archives, the folder on the user's `PATH` and the uninstaller
 //! (`aqr-win --uninstall`, in Settings' Apps).
 //!
-//! usage: aqr-win-install [--quiet]
+//! usage: aqr-win-install [--quiet | --tour]
+//!
+//! Installed, a window shows the menus of Explorer that it made, and what each command does
+//! (`tour`); `--tour` shows it alone, installing nothing.
 //!
 //! They are carried in the binary (`payload`, packed by `build.rs` from `target/dist`). Files
 //! there already are replaced; one running is renamed aside first (`*.old`, deleted by the next
@@ -15,6 +18,8 @@
 
 #[cfg(windows)]
 mod payload;
+#[cfg(windows)]
+mod tour;
 
 #[cfg(not(windows))]
 fn main() {
@@ -29,15 +34,16 @@ static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.bin"))
 fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
-    use aqr_l10n::{install as l, shell};
+    use aqr_l10n::install as l;
 
     aqr_l10n::init(&aqr_l10n::system_languages());
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let quiet = match &args[..] {
-        [] => false,
-        [q] if q == "--quiet" => true,
+    let (quiet, tour) = match &args[..] {
+        [] => (false, false),
+        [q] if q == "--quiet" => (true, false),
+        [t] if t == "--tour" => (false, true),
         _ => {
-            ui::message(ui::Icon::Error, l::not_option(), "usage: aqr-win-install [--quiet]");
+            ui::message(ui::Icon::Error, l::not_option(), "usage: aqr-win-install [--quiet | --tour]");
             return ExitCode::FAILURE;
         }
     };
@@ -46,6 +52,10 @@ fn main() -> std::process::ExitCode {
         ui::message(ui::Icon::Error, l::failed(), l::no_local_app_data());
         return ExitCode::FAILURE;
     };
+    if tour {
+        tour::show(&dir, false);
+        return ExitCode::SUCCESS;
+    }
     // (where it is uninstalled from: Settings' Apps of Windows 10 on, else Control Panel's)
     let what = match aqr_l10n::windows_10_on() {
         true => l::what(dir.display()),
@@ -57,29 +67,8 @@ fn main() -> std::process::ExitCode {
     match install(&dir) {
         Ok(held) => {
             if !quiet {
-                let done = l::done(
-                    shell::compress(),
-                    shell::extract(),
-                    shell::extract_to(),
-                    shell::test(),
-                    shell::name_version(),
-                    shell::extract_version(),
-                );
-                let done = match aqr_l10n::windows_11_on() {
-                    true => format!(
-                        "{done}
-
-{}",
-                        aqr_l10n::win::more_options()
-                    ),
-                    false => done,
-                };
                 // (an update: Explorer runs the folder of archives it had until it is started again)
-                let done = match held {
-                    true => format!("{done}\n\n{}", l::restart_explorer()),
-                    false => done,
-                };
-                ui::message(ui::Icon::Information, l::installed(), &done);
+                tour::show(&dir, held);
             }
             ExitCode::SUCCESS
         }
@@ -157,14 +146,13 @@ mod ui {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, S_OK, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Controls::{
-        LIM_LARGE, LIM_SMALL, LoadIconMetric, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TD_ERROR_ICON, TD_INFORMATION_ICON,
-        TDCBF_CANCEL_BUTTON, TDCBF_CLOSE_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TDN_CREATED, TaskDialogIndirect,
+        LIM_LARGE, LIM_SMALL, LoadIconMetric, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TD_ERROR_ICON, TDCBF_CANCEL_BUTTON,
+        TDCBF_CLOSE_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TDN_CREATED, TaskDialogIndirect,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{HICON, ICON_BIG, ICON_SMALL, SendMessageW, WM_SETICON};
     use windows_sys::core::{HRESULT, PCWSTR};
 
     pub enum Icon {
-        Information,
         Error,
     }
 
@@ -204,7 +192,6 @@ mod ui {
         c.pszMainInstruction = main.as_ptr();
         c.pszContent = content.as_ptr();
         c.Anonymous1.pszMainIcon = match icon {
-            Some(Icon::Information) => TD_INFORMATION_ICON,
             Some(Icon::Error) => TD_ERROR_ICON,
             None => std::ptr::null(),
         };
