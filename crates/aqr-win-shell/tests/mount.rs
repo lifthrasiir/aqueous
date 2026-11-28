@@ -1,8 +1,9 @@
-//! "Mount as a drive" and "Eject" as Explorer has them: the library loaded (`aqr_shell.dll`, of
-//! the classes `mount::MOUNT_COMMAND` and `EJECT_COMMAND`), the commands asked their state of
-//! shell items and invoked. Mount is shown where aqr-mount.exe is beside the library and WinFsp
-//! is installed; Eject of aqr-mount's drives alone, and invoked it ejects (by aqr-win beside the
-//! library). Nothing is registered.
+//! The menu "Aqueous" and "Eject" as Explorer has them: the library loaded (`aqr_shell.dll`, of
+//! the classes `more::MENU` and `mount::EJECT_COMMAND`), the commands asked their state of shell
+//! items and invoked. The menu's commands of archives are shown of archives alone ("Mount as a
+//! drive" where aqr-mount.exe is beside the library and WinFsp is installed, the versions' of a
+//! `.aqr` file), those of compressing of all; Eject of aqr-mount's drives alone, and invoked it
+//! ejects (by aqr-win beside the library). Nothing is registered.
 //!
 //! It needs aqr.exe, aqr-win.exe and aqr-mount.exe built beside the library (`cargo rt -p aqr -p
 //! aqr-win -p aqr-mount-win -p aqr-win-shell --test mount`); what needs WinFsp is skipped where
@@ -13,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use aqr_shell::mount::{EJECT_COMMAND, MOUNT_COMMAND};
+use aqr_shell::more::{Item, MENU};
+use aqr_shell::mount::EJECT_COMMAND;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, IClassFactory};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -91,20 +93,53 @@ fn commands() {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
     let d = std::env::temp_dir().join(format!("aqr-shell-mount-{}", std::process::id()));
     let t = archive(&d);
-    let (mount, eject) = (command(MOUNT_COMMAND), command(EJECT_COMMAND));
+    let (menu, eject) = (command(MENU), command(EJECT_COMMAND));
+    // (the menu's commands by their canonical names)
+    let subs: Vec<IExplorerCommand> = {
+        // SAFETY: the menu's enumeration, read to its end
+        let e = unsafe { menu.EnumSubCommands().unwrap() };
+        let mut all = Vec::new();
+        loop {
+            let mut one = [None];
+            let mut n = 0;
+            // SAFETY: an array of one, and its count
+            if unsafe { e.Next(&mut one, Some(&mut n)) }.is_err() || n == 0 {
+                break;
+            }
+            all.push(one[0].take().unwrap());
+        }
+        all
+    };
+    let sub = |item: Item| {
+        // SAFETY: the commands' names
+        subs.iter().find(|c| unsafe { c.GetCanonicalName() }.ok() == Some(item.canonical())).unwrap()
+    };
+    assert_eq!(subs.len(), 8);
     // SAFETY: the commands' titles, of COM's memory
     unsafe {
-        for c in [&mount, &eject] {
+        for c in subs.iter().chain([&menu, &eject]) {
             let title = c.GetTitle(None).unwrap();
             assert!(!title.to_string().unwrap().is_empty());
             windows::Win32::System::Com::CoTaskMemFree(Some(title.0 as *const _));
         }
     }
 
-    // Mount, where aqr-mount is beside the library and WinFsp is installed
+    // of the archive: all (Mount where aqr-mount is beside the library and WinFsp is
+    // installed); of a file of another type, those of compressing alone
     let available = built().join("aqr-mount.exe").is_file() && winfsp();
-    let expected = if available { ENABLED } else { HIDDEN };
-    assert_eq!(state(&mount, t.to_str().unwrap(), false).unwrap(), expected);
+    let archive = t.to_str().unwrap();
+    let other = d.join("t").join("a.txt");
+    let other = other.to_str().unwrap();
+    assert_eq!(state(sub(Item::Mount), archive, false).unwrap(), if available { ENABLED } else { HIDDEN });
+    for item in [Item::Test, Item::ExtractVersion, Item::NameVersion, Item::CompressZip, Item::CompressOptions] {
+        assert_eq!(state(sub(item), archive, false).unwrap(), ENABLED, "{item:?}");
+    }
+    for item in [Item::Test, Item::Mount, Item::ExtractVersion, Item::NameVersion] {
+        assert_eq!(state(sub(item), other, false).unwrap(), HIDDEN, "{item:?}");
+    }
+    for item in [Item::CompressPassphrase, Item::CompressZip, Item::Compress7z, Item::CompressOptions] {
+        assert_eq!(state(sub(item), other, false).unwrap(), ENABLED, "{item:?}");
+    }
     // Eject: not of a drive of another file system
     let system = std::env::var("SystemDrive").unwrap_or("C:".into());
     assert_eq!(state(&eject, &format!(r"{system}\"), true).unwrap(), HIDDEN);

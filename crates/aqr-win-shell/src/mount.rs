@@ -1,19 +1,15 @@
-//! "Mount as a drive" (of an archive's class) and "Eject" (of `Drive`): commands of the menu
-//! (`IExplorerCommand`, the verbs' `ExplorerCommandHandler`), shown where they apply and run by
-//! aqr-win (`mount ARCHIVE`, `eject DRIVE`: its `mount`), which aqr-mount (crates/aqr-mount-win)
-//! mounts and ejects through.
+//! "Eject" (of `Drive`): a command of the menu (`IExplorerCommand`, the verb's
+//! `ExplorerCommandHandler`), shown of aqr-mount's drives alone and run by aqr-win (`eject DRIVE`:
+//! its `mount`), which ejects through aqr-mount's control (crates/aqr-mount-win). And whether
+//! "Mount as a drive" of the menu "Aqueous" ([`crate::more`]) is shown: [`available`].
 //!
-//! What they are shown by is told at once, as Explorer asks it building the menu:
+//! Whether Eject is shown is told at once, as Explorer asks it building the menu: of drives
+//! whose file system is `aqr` (aqr-mount's volumes), by the shell item's
+//! `System.Volume.FileSystem`, which the shell has; where it has it not, by the volume itself
+//! (`GetVolumeInformationW`), which may be slow (a network drive's): then put off as Explorer
+//! allows (`E_PENDING` where it is not to be slow, asked again on a thread of its own).
 //!
-//! - "Mount as a drive": aqr-mount.exe beside this library (where `aqr-mount --install` copies
-//!   it, aqr-win's folder) and WinFsp installed (its `InstallDir` in the registry), of one
-//!   archive chosen; else hidden. A file and a key looked at: no process asked.
-//! - "Eject": of drives whose file system is `aqr` (aqr-mount's volumes), by the shell item's
-//!   `System.Volume.FileSystem`, which the shell has; where it has it not, by the volume itself
-//!   (`GetVolumeInformationW`), which may be slow (a network drive's): then put off as Explorer
-//!   allows (`E_PENDING` where it is not to be slow, asked again on a thread of its own).
-//!
-//! Invoked, each runs aqr-win and returns: the work and its dialogs are aqr-win's.
+//! Invoked, it runs aqr-win and returns: the work and its dialogs are aqr-win's.
 
 use std::path::PathBuf;
 
@@ -25,8 +21,6 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{BOOL, GUID, HSTRING, Interface, PWSTR, Ref, implement};
 
-/// The class of "Mount as a drive".
-pub const MOUNT_COMMAND: GUID = GUID::from_u128(0x8d2b6f31_4c7a_4e95_b1d8_63a0f2e9c574);
 /// The class of "Eject".
 pub const EJECT_COMMAND: GUID = GUID::from_u128(0x2e94c7a6_5f1b_4d38_a0c2_b7d6e18f4b93);
 
@@ -43,19 +37,18 @@ const VOLUME_FILE_SYSTEM: PROPERTYKEY =
 
 #[implement(IExplorerCommand)]
 pub struct Command {
-    eject: bool,
     _counted: crate::Counted,
-}
-
-impl Command {
-    pub fn new(clsid: GUID) -> Command {
-        Command { eject: clsid == EJECT_COMMAND, _counted: crate::Counted::new() }
-    }
 }
 
 /// aqr-win and aqr-mount, beside this library.
 fn beside(name: &str) -> Option<PathBuf> {
     crate::library_dir().map(|d| d.join(name))
+}
+
+/// Whether archives may be mounted: aqr-mount.exe beside this library (aqr-win's folder, where
+/// `aqr-mount --install` copies it) and WinFsp installed. A file and a key: no process asked.
+pub fn available() -> bool {
+    beside("aqr-mount.exe").is_some_and(|p| p.is_file()) && winfsp()
 }
 
 /// Whether WinFsp is installed: its installer's `InstallDir` (of the 32-bit key on x64).
@@ -122,15 +115,11 @@ fn dup(s: &str) -> windows::core::Result<PWSTR> {
 
 impl IExplorerCommand_Impl for Command_Impl {
     fn GetTitle(&self, _: Ref<IShellItemArray>) -> windows::core::Result<PWSTR> {
-        dup(if self.eject { aqr_l10n::shell::eject() } else { aqr_l10n::shell::mount() })
+        dup(aqr_l10n::shell::eject())
     }
 
-    /// aqr-win's icon (resource 1) of "Mount as a drive"; none of "Eject".
     fn GetIcon(&self, _: Ref<IShellItemArray>) -> windows::core::Result<PWSTR> {
-        match (self.eject, beside("aqr-win.exe")) {
-            (false, Some(exe)) => dup(&format!("{},-1", exe.display())),
-            _ => Err(E_NOTIMPL.into()),
-        }
+        Err(E_NOTIMPL.into())
     }
 
     fn GetToolTip(&self, _: Ref<IShellItemArray>) -> windows::core::Result<PWSTR> {
@@ -138,7 +127,7 @@ impl IExplorerCommand_Impl for Command_Impl {
     }
 
     fn GetCanonicalName(&self) -> windows::core::Result<GUID> {
-        Ok(if self.eject { EJECT_COMMAND } else { MOUNT_COMMAND })
+        Ok(EJECT_COMMAND)
     }
 
     fn GetState(&self, items: Ref<IShellItemArray>, slow: BOOL) -> windows::core::Result<u32> {
@@ -146,16 +135,12 @@ impl IExplorerCommand_Impl for Command_Impl {
             let Some(items) = items.as_ref() else { return Ok(HIDDEN) };
             // SAFETY: the shell's array
             let n = unsafe { items.GetCount()? };
-            if self.eject {
-                for i in 0..n {
-                    if !of_aqr(items, i, slow.as_bool())? {
-                        return Ok(HIDDEN);
-                    }
+            for i in 0..n {
+                if !of_aqr(items, i, slow.as_bool())? {
+                    return Ok(HIDDEN);
                 }
-                return Ok(if n > 0 { ENABLED } else { HIDDEN });
             }
-            let available = beside("aqr-mount.exe").is_some_and(|p| p.is_file()) && winfsp();
-            Ok(if n == 1 && available { ENABLED } else { HIDDEN })
+            Ok(if n > 0 { ENABLED } else { HIDDEN })
         });
         r.unwrap_or(Ok(HIDDEN))
     }
@@ -163,7 +148,7 @@ impl IExplorerCommand_Impl for Command_Impl {
     fn Invoke(&self, items: Ref<IShellItemArray>, _: Ref<IBindCtx>) -> windows::core::Result<()> {
         let items = items.ok()?;
         let Some(exe) = beside("aqr-win.exe") else { return Err(E_NOTIMPL.into()) };
-        let verb = if self.eject { "eject" } else { "mount" };
+        let verb = "eject";
         for p in paths(items)? {
             crate::log(|| format!("mount: {verb} {p}"));
             // (run, not waited for: the dialogs are aqr-win's)
@@ -183,7 +168,7 @@ impl IExplorerCommand_Impl for Command_Impl {
     }
 }
 
-/// A command of `clsid` (of [`MOUNT_COMMAND`] or [`EJECT_COMMAND`]), as an interface.
-pub fn command(clsid: GUID) -> IExplorerCommand {
-    Command::new(clsid).into()
+/// "Eject", as an interface.
+pub fn eject() -> IExplorerCommand {
+    Command { _counted: crate::Counted::new() }.into()
 }

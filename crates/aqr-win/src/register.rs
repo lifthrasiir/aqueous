@@ -2,16 +2,17 @@
 //! needed):
 //!
 //! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`,
-//!   with this program's icon; and beside it `Aqueous.more`, the menu "Aqueous" of the other
-//!   verbs ([`more`]: "Compress with passphrase…", `aqr -P`; then, after a separator, "Compress
-//!   into .zip", ".7z" and the other formats `aqr` makes, [`OTHER_FORMATS`]; and, after another,
-//!   "Compress with options…", `aqr-win compress-options`: the dialog of the options). The menu is made
-//!   by the registry alone: `SubCommands` (empty) on the key has its own `shell` key taken as
-//!   the submenu's verbs, in the order of their keys' names; `CommandFlags` of
-//!   `ECF_SEPARATORBEFORE` puts the separator.
+//!   with this program's icon; and beside it `Aqueous.more`, the menu "Aqueous", the shell
+//!   extension's (aqr-win-shell's `more`, its `ExplorerCommandHandler`), each of whose commands
+//!   shows itself of what is chosen: of archives, "Test", "Mount as a drive" (of one, where
+//!   aqr-mount and WinFsp are), "Extract a previous version…" and "Name this version…" (of one
+//!   `.aqr` file: [`crate::version`]); then of all [`more`]'s ("Compress with passphrase…",
+//!   `aqr -P`; after a separator "Compress into .zip", ".7z", [`OTHER_FORMATS`]; after another
+//!   "Compress with options…", the dialog of the options). Those of many paths are dropped on
+//!   their classes, as the verbs' `DropTarget`s are.
+//! - `Drive\shell\Aqueous.eject`: "Eject" of aqr-mount's drives (the shell extension's `mount`).
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
-//!   click) and `test`, and `name-version` and `extract-version` ([`crate::version`]: one file
-//!   at a time, `MultiSelectModel` `Single`), and whose icon (`DefaultIcon`) is resource 2: this program's drop with
+//!   click) and `extract-to`, and whose icon (`DefaultIcon`) is resource 2: this program's drop with
 //!   a label, "AQR" (`scripts/icons.py`).
 //! - The other formats `aqr` extracts ([`FORMATS`]), each of a class of its own
 //!   (`Aqueous.zip`, ...) with the same verbs and its own icon (the drop in gray, labeled).
@@ -92,9 +93,6 @@ const OLD: [&str; 2] = [r"*\shell\Aqueous.compress-passphrase", r"Directory\shel
 /// it from the string table), after the separator.
 pub const OTHER_FORMATS: [(&str, Msg); 2] = [("zip", shell::COMPRESS_ZIP), ("7z", shell::COMPRESS_7Z)];
 
-/// `ECF_SEPARATORBEFORE` of `CommandFlags`.
-const SEPARATOR_BEFORE: u32 = 0x20;
-
 /// The verbs of [`MENU`], in order: the key's name (which orders them), the text and the verb.
 fn more() -> Vec<(String, Msg, String)> {
     let mut v = vec![("1-passphrase".into(), shell::COMPRESS_PASSPHRASE, "compress-passphrase".into())];
@@ -114,12 +112,13 @@ pub fn told() -> String {
     let told = win::told(
         shell::compress(),
         menu.join(", "),
+        formats.join(" "),
         shell::extract(),
         shell::extract_to(),
         shell::test(),
+        shell::mount(),
         shell::name_version(),
         shell::extract_version(),
-        formats.join(" "),
     );
     match aqr_l10n::windows_11_on() {
         true => format!(
@@ -163,24 +162,21 @@ pub fn register() -> Result<(), String> {
     let key = serve_key();
     set(&key, None, "Aqueous archives")?;
     set(&format!(r"{key}\LocalServer32"), None, &format!("\"{}\" --serve", exe.display()))?;
+    // (the shell extension, beside this program: the menu "Aqueous" is its, and so are the
+    // folders of archives)
+    let dll = exe.with_file_name(SHELL_DLL);
     for (key, menu) in COMPRESS.into_iter().zip(MENU) {
         verb(key, shell::COMPRESS, "compress")?;
         set(key, Some("Icon"), &icon)?;
-        // (made anew: no verbs left of another version)
+        // (made anew: no verbs left of another version, of the registry's own submenu)
         delete(&classes(menu))?;
-        set(menu, Some("MUIVerb"), "Aqueous")?;
-        set(menu, Some("SubCommands"), "")?;
-        // (else of `Document`, the default: Explorer leaves the menu out where over 15 paths are
-        // chosen, whatever its verbs take)
-        set(menu, Some("MultiSelectModel"), "Player")?;
-        set(menu, Some("Icon"), &icon)?;
-        for (i, (name, text, v)) in more().into_iter().enumerate() {
-            let key = format!(r"{menu}\shell\{name}");
-            verb(&key, text, &v)?;
-            // (a separator before the formats, and before the dialog of the options)
-            if i == 1 || i == OTHER_FORMATS.len() + 1 {
-                self::set(&classes(&key), Some("CommandFlags"), Value::Dword(SEPARATOR_BEFORE))?;
-            }
+        if dll.is_file() {
+            set(menu, Some("MUIVerb"), "Aqueous")?;
+            // (else of `Document`, the default: Explorer leaves the menu out where over 15 paths
+            // are chosen, whatever its commands take)
+            set(menu, Some("MultiSelectModel"), "Player")?;
+            set(menu, Some("Icon"), &icon)?;
+            set(menu, Some("ExplorerCommandHandler"), &crate::drop::braced(&MORE))?;
         }
     }
     let class = |class: &str, name: Msg, icon: u16| -> Result<(), String> {
@@ -192,8 +188,12 @@ pub fn register() -> Result<(), String> {
         set(&format!(r"{class}\Application"), Some("ApplicationName"), APPLICATION)?;
         set(&format!(r"{class}\Application"), Some("ApplicationIcon"), &format!("\"{}\",-{icon}", exe.display()))?;
         set(&format!(r"{class}\shell"), None, "extract")?;
-        for (v, text) in [("extract", shell::EXTRACT), ("extract-to", shell::EXTRACT_TO), ("test", shell::TEST)] {
+        for (v, text) in [("extract", shell::EXTRACT), ("extract-to", shell::EXTRACT_TO)] {
             verb(&format!(r"{class}\shell\{v}"), text, v)?;
+        }
+        // (in the menu "Aqueous" now, and the versions' and Mount: of the verbs before)
+        for v in ["test", "extract-version", "name-version", MOUNT_VERB] {
+            delete(&classes(&format!(r"{class}\shell\{v}")))?;
         }
         Ok(())
     };
@@ -203,7 +203,6 @@ pub fn register() -> Result<(), String> {
     class(CLASS, types::AQR, 2)?;
     // (browsed as a folder where the shell extension is beside this program: double-clicked,
     // opened as a folder, as Windows' ZIP folders are; else extracted)
-    let dll = exe.with_file_name(SHELL_DLL);
     let folder = folder_key();
     match dll.is_file() {
         true => {
@@ -243,12 +242,6 @@ pub fn register() -> Result<(), String> {
             delete(&classes(&format!(r"{CLASS}\shell\open")))?;
         }
     }
-    // (the versions of an archive: one archive at a time, `.aqr` files alone)
-    for (v, text) in [("extract-version", shell::EXTRACT_VERSION), ("name-version", shell::NAME_VERSION)] {
-        let key = format!(r"{CLASS}\shell\{v}");
-        verb(&key, text, v)?;
-        set(&key, Some("MultiSelectModel"), "Single")?;
-    }
     capability(".aqr", CLASS)?;
     for (ext, icon, name) in FORMATS {
         let (ext, progid) = (format!(".{ext}"), format!("Aqueous.{ext}"));
@@ -272,23 +265,16 @@ pub fn register() -> Result<(), String> {
         }
         capability(&ext, &progid)?;
     }
-    // "Mount as a drive" of the archives and "Eject" of the drives (aqr-win-shell's `mount`:
-    // commands that show themselves where aqr-mount and WinFsp are, and of aqr-mount's drives)
-    let mounted = [CLASS.to_owned()].into_iter().chain(FORMATS.iter().map(|(ext, ..)| format!("Aqueous.{ext}")));
+    // The menu "Aqueous" (aqr-win-shell's `more`: its commands show themselves of what is
+    // chosen) and "Eject" of the drives (its `mount`: of aqr-mount's drives alone)
     match dll.is_file() {
         true => {
-            for (clsid, name) in [(MOUNT_COMMAND, "Aqueous: mount"), (EJECT_COMMAND, "Aqueous: eject")] {
+            delete(&classes(&format!(r"CLSID\{}", crate::drop::braced(&MOUNT_COMMAND))))?;
+            for (clsid, name) in [(MORE, "Aqueous: menu"), (EJECT_COMMAND, "Aqueous: eject")] {
                 let key = format!(r"CLSID\{}", crate::drop::braced(&clsid));
                 set(&key, None, name)?;
                 set(&format!(r"{key}\InProcServer32"), None, &dll.display().to_string())?;
                 set(&format!(r"{key}\InProcServer32"), Some("ThreadingModel"), "Apartment")?;
-            }
-            for class in mounted {
-                let key = format!(r"{class}\shell\{MOUNT_VERB}");
-                set(&key, None, shell::MOUNT.text())?;
-                set(&key, Some("MUIVerb"), &indirect(shell::MOUNT))?;
-                set(&key, Some("MultiSelectModel"), "Single")?;
-                set(&key, Some("ExplorerCommandHandler"), &crate::drop::braced(&MOUNT_COMMAND))?;
             }
             set(EJECT_KEY, None, shell::EJECT.text())?;
             set(EJECT_KEY, Some("MUIVerb"), &indirect(shell::EJECT))?;
@@ -328,21 +314,24 @@ const PAGE: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0x54394
 const DROP_HANDLER: windows_sys::core::GUID =
     windows_sys::core::GUID::from_u128(0x6a3e2f84_1c5d_4b7a_9e08_d2f4c6b1a937);
 
-/// The classes of "Mount as a drive" and "Eject" (aqr-win-shell's `mount::MOUNT_COMMAND` and
-/// `EJECT_COMMAND`).
+/// The class of the menu "Aqueous" (aqr-win-shell's `more::MENU`).
+const MORE: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0x5b17e3a9_d64c_4f20_8e71_a92c0b6d4f38);
+
+/// The classes of "Mount as a drive" as a verb of its own (before it went into the menu: taken
+/// away) and "Eject" (aqr-win-shell's `mount::EJECT_COMMAND`).
 const MOUNT_COMMAND: windows_sys::core::GUID =
     windows_sys::core::GUID::from_u128(0x8d2b6f31_4c7a_4e95_b1d8_63a0f2e9c574);
 const EJECT_COMMAND: windows_sys::core::GUID =
     windows_sys::core::GUID::from_u128(0x2e94c7a6_5f1b_4d38_a0c2_b7d6e18f4b93);
 
-/// The verb of "Mount as a drive", of each archive's class.
+/// The verb "Mount as a drive" of each archive's class was (taken away).
 const MOUNT_VERB: &str = "Aqueous.mount";
 /// The verb of "Eject", of the drives.
 const EJECT_KEY: &str = r"Drive\shell\Aqueous.eject";
 
-/// "Mount as a drive" and "Eject" taken away (their classes, the verbs).
+/// The menu's, Mount's and Eject's classes taken away, and their verbs.
 fn unregister_mount() -> Result<(), String> {
-    for clsid in [MOUNT_COMMAND, EJECT_COMMAND] {
+    for clsid in [MORE, MOUNT_COMMAND, EJECT_COMMAND] {
         delete(&classes(&format!(r"CLSID\{}", crate::drop::braced(&clsid))))?;
     }
     for class in [CLASS.to_owned()].into_iter().chain(FORMATS.iter().map(|(ext, ..)| format!("Aqueous.{ext}"))) {
@@ -660,10 +649,18 @@ mod tests {
             t.contains("\"Compress with passphrase…\", \"Compress into .zip\", \"Compress into .7z\", \"Compress with options…\""),
             "{t}"
         );
-        assert!(t.contains("(.zip .7z .rar") && t.contains(".zst)"), "{t}");
-        assert!(t.contains("\"Extract here\", \"Extract to…\" and \"Test\""), "{t}");
+        assert!(t.contains("(.zip .7z .rar") && t.contains(".zst and .aqr)"), "{t}");
+        assert!(t.contains("\"Extract here\" and \"Extract to…\""), "{t}");
+        assert!(t.contains("\"Test\" and \"Mount as a drive\""), "{t}");
         // (the verbs of the versions of an archive, on .aqr files alone)
         assert!(t.contains("\"Name this version…\"") && t.contains("\"Extract a previous version…\""), "{t}");
+    }
+
+    /// The formats registered are those the shell extension takes for archives (aqr-ipc's).
+    #[test]
+    fn formats_as_shared() {
+        let ours: Vec<&str> = std::iter::once("aqr").chain(FORMATS.iter().map(|(e, ..)| *e)).collect();
+        assert_eq!(ours, aqr_ipc::shell::ARCHIVES);
     }
 
     /// `FORMATS`' icons are the resources of aqr-win.rc by those numbers, and are there.

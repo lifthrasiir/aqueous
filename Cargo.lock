@@ -1992,6 +1992,7 @@ dependencies = [
 name = "aqr-win-shell"
 version = "0.1.0"
 dependencies = [
+ "aqr-ipc",
  "aqr-l10n",
  "serde_json",
  "windows 0.62.2",

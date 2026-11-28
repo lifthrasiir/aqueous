@@ -11,6 +11,7 @@ name = "aqr_shell"
 crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(windows)'.dependencies]
+aqr-ipc.workspace = true
 aqr-l10n.workspace = true
 serde_json.workspace = true
 windows-core = { workspace = true, features = ["std"] }

@@ -143,9 +143,9 @@ not_uninstalled = "Aqueous is not uninstalled"
 not_verb = "Not a verb of Aqueous"
 nothing = "Nothing to work on"
 no_path = "No path given."
-# What --register made: the verbs ({menu}: those of the menu "Aqueous", each `quoted`) and the
-# formats.
-told = "Files and folders have \"{compress}\", and the menu \"Aqueous\": {menu}.\n\n.aqr files open with Aqueous (extracted beside them), and have \"{extract}\", \"{extract_to}\" and \"{test}\", and for the versions of an archive \"{name_version}\" and \"{extract_version}\"; the other archives ({formats}) have the first three, and open with Aqueous where no other program opens them (else Windows offers it)."
+# What --register made: the verbs ({menu}: those of the menu "Aqueous" of all files, each
+# `quoted`; the menu has those of archives too) and the formats.
+told = "Files and folders have \"{compress}\", and the menu \"Aqueous\": {menu}.\n\nArchives ({formats} and .aqr) have \"{extract}\" and \"{extract_to}\", and in the menu \"Aqueous\" \"{test}\" and \"{mount}\" (where aqr-mount is installed); .aqr files open with Aqueous (extracted beside them), and their menu has the versions' \"{name_version}\" and \"{extract_version}\" too. The other archives open with Aqueous where no other program opens them (else Windows offers it)."
 # (after `told` and `done` on Windows 11)
 more_options = "On Windows 11 these are under \"Show more options\"."
 quoted = "\"{text}\""

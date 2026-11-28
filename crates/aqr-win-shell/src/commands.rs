@@ -185,14 +185,14 @@ impl IExplorerCommand_Impl for Command_Impl {
 
 /// Commands, as an enumeration.
 #[implement(IEnumExplorerCommand)]
-struct Commands {
+pub(crate) struct Commands {
     all: Vec<IExplorerCommand>,
     at: Mutex<usize>,
     _counted: crate::Counted,
 }
 
 impl Commands {
-    fn new(all: Vec<IExplorerCommand>) -> Commands {
+    pub(crate) fn new(all: Vec<IExplorerCommand>) -> Commands {
         Commands { all, at: Mutex::new(0), _counted: crate::Counted::new() }
     }
 }

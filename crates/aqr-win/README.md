@@ -1,11 +1,13 @@
 # aqr-win
 
-Aqueous in Windows Explorer: "Compress with Aqueous" on files and folders, and beside it the
-menu "Aqueous" of the rest ("Compress with options…", the dialog of the options, `aqr --session`; "Compress with passphrase…", encrypted, `aqr -P`; a separator;
-"Compress into .zip" and ".7z", `aqr --format zip`, `7z`), "Extract here" (also the
-double-click), "Extract to…" (a folder picked, the root of what each archive holds: `aqr -d
---each --into`, the user asked once where files there would be replaced) and "Test" on `.aqr`
-files and the other archives `aqr` extracts, and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
+Aqueous in Windows Explorer: "Compress with Aqueous" on files and folders, "Extract here"
+(also the double-click) and "Extract to…" (a folder picked, the root of what each archive
+holds: `aqr -d --each --into`, the user asked once where files there would be replaced) on
+`.aqr` files and the other archives `aqr` extracts, and beside them the menu "Aqueous" of the
+rest (of archives "Test", "Mount as a drive" and of `.aqr` files the versions'; then
+"Compress with passphrase…", encrypted, `aqr -P`; "Compress into .zip" and ".7z", `aqr
+--format zip`, `7z`; "Compress with options…", the dialog of the options, `aqr --session`),
+and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
 `crates/aqr/src/ipc.rs`); this program is the window and the verbs, about 1 MB (550 KB of it
 the icons: `droplet.ico`, the program's, and `icons/*.ico`, the files', from `scripts/icons.py`;
 in the installer they take some 230 KB, the drop being the same bytes in each).
@@ -20,9 +22,9 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
 (the verbs, the folder on the user's `PATH`, the uninstaller in Settings' Apps) and
 `aqr-win --uninstall [--quiet]` (all that taken away, and the folder: `src/install.rs`).
 
-- The menu "Aqueous" is the registry's own (`SubCommands` and a `shell` key under the verb,
-  the verbs in the order of their keys' names, `CommandFlags` for the separator): no shell
-  extension. Compressing into another format is a verb `compress-FORMAT` for each format of
+- The menu "Aqueous" is the shell extension's (aqr-win-shell's `more`, the verb's
+  `ExplorerCommandHandler`), each command shown of what is chosen; those of many paths dropped
+  on this program's classes of them, as the verbs' `DropTarget`s are. Compressing into another format is a verb `compress-FORMAT` for each format of
   `OTHER_FORMATS` (`src/register.rs`), the archive of several paths named after their folder
   with that extension.
 - The verbs are registered for the user alone, no administrator needed; "Compress with Aqueous"
@@ -62,10 +64,10 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   `rollback-version ARCHIVE #N` (asked first: the versions after point N deleted, `aqr
   --rollback`, or point N saved as a new archive beside it, `aqr --convert --keep-until`); and
   its drop handler: files dropped on a `.aqr` file, or in its folder, are added to it by
-  `aqr-win add ARCHIVE DIR PATH...` (`aqr -a`, each `--rename DIR/NAME`); and "Mount as a
-  drive" of the archives and "Eject" of the drives (the library's `IExplorerCommand`s, the
-  verbs' `ExplorerCommandHandler`, shown where they apply: aqr-mount and WinFsp installed,
-  aqr-mount's drives), which run `aqr-win mount ARCHIVE` (aqr-mount, crates/aqr-mount-win,
+  `aqr-win add ARCHIVE DIR PATH...` (`aqr -a`, each `--rename DIR/NAME`); and the menu
+  "Aqueous" (the library's, its commands shown of what is chosen: of archives "Test", "Mount
+  as a drive", the versions'; of all the ways to compress) and "Eject" of the drives (of
+  aqr-mount's), the verbs' `ExplorerCommandHandler`s; Mount and Eject run `aqr-win mount ARCHIVE` (aqr-mount, crates/aqr-mount-win,
   beside this program: `aqr-mount --install`; a dialog with Cancel while it opens the archive,
   then the drive opened in Explorer, or the one it is mounted as already) and `aqr-win eject
   DRIVE` (asked first where files of it are open, then forced).

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 pub mod serve;
+pub mod shell;
 
 /// The version of the protocol.
 pub const VERSION: u64 = 1;

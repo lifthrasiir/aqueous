@@ -32,25 +32,13 @@ use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE
 use windows_sys::Win32::UI::Shell::DragQueryFileW;
 use windows_sys::core::{GUID, HRESULT};
 
-/// The verbs taking many paths, each a class of its own: its CLSID is [`BASE`] with its index in
-/// the last byte. Never reorder (the CLSIDs registered would go to other verbs); add at the end.
-pub const VERBS: [&str; 8] = [
-    "compress",
-    "compress-passphrase",
-    "compress-zip",
-    "compress-7z",
-    "compress-options",
-    "extract",
-    "test",
-    "extract-to",
-];
-
-/// The CLSID of the verbs' classes, the last byte the verb's index.
-const BASE: u128 = 0x88c8460e_ca88_454d_b38c_3b192ee4e700;
+/// The verbs taking many paths, each a class of its own (aqr-ipc's, which the shell extension's
+/// menu drops on too).
+pub const VERBS: [&str; 8] = aqr_ipc::shell::DROP_VERBS;
 
 /// The CLSID of `verb`'s class, where it is one of [`VERBS`].
 pub fn clsid(verb: &str) -> Option<GUID> {
-    VERBS.iter().position(|&v| v == verb).map(|i| GUID::from_u128(BASE | i as u128))
+    aqr_ipc::shell::drop_class(verb).map(GUID::from_u128)
 }
 
 /// `{...}`, as the registry writes a CLSID.

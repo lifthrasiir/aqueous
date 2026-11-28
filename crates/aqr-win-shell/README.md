@@ -63,14 +63,20 @@ object is released, for the server to close it a minute later (and to end, idle)
   `rollback-version ARCHIVE #N`), the list read again once a version is named or the later
   ones deleted. And a command "Versions" of the view, its subcommands the menu's
   (`src/commands.rs`, `IExplorerCommandProvider`), which Explorer may show in its command bar.
-- "Mount as a drive" and "Eject" (`src/mount.rs`): commands of the menu (`IExplorerCommand`,
-  as the verbs' `ExplorerCommandHandler` of the archives' classes and of `Drive`), each of which
-  tells at once whether it is shown, as Explorer asks building the menu: Mount where
-  aqr-mount.exe is beside the library and WinFsp is installed (a file and a key), Eject of
-  drives of the file system `aqr` (the item's `System.Volume.FileSystem`, else the volume's,
-  put off by `E_PENDING` where that is not to be slow). Invoked, they run aqr-win (`mount`,
-  `eject`) and return. `tests/mount.rs` loads the library built and asks them (`cargo rt -p
-  aqr -p aqr-win -p aqr-mount-win -p aqr-win-shell --test mount`; ejecting where WinFsp is).
+- The menu "Aqueous" of files and folders (`src/more.rs`, an `IExplorerCommand` of
+  subcommands: the verb `Aqueous.more`'s `ExplorerCommandHandler`), beside the verbs "Compress
+  with Aqueous", "Extract here" and "Extract to…": of archives (by extension, aqr-ipc's
+  `shell::ARCHIVES`) "Test", "Mount as a drive" (of one, where aqr-mount.exe is beside the
+  library and WinFsp is installed: a file and a key), "Extract a previous version…" and "Name
+  this version…" (of one `.aqr` file); then of all the ways to compress. Each command tells at
+  once whether it is shown of the items it is asked of (the menu itself is told nothing of
+  them). Invoked, a verb of many paths drops them on aqr-win's class of it (as Explorer does on
+  a verb's `DropTarget`: all at once), the others run aqr-win on the one.
+- "Eject" of `Drive` (`src/mount.rs`, the verb's `ExplorerCommandHandler`): of drives of the
+  file system `aqr` (the item's `System.Volume.FileSystem`, else the volume's, put off by
+  `E_PENDING` where that is not to be slow); invoked, it runs `aqr-win eject`.
+  `tests/mount.rs` loads the library built and asks the menu's commands and Eject (`cargo rt
+  -p aqr -p aqr-win -p aqr-mount-win -p aqr-win-shell --test mount`; ejecting where WinFsp is).
 - Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and its compressors, a single file
   compressed), browsed alike where Aqueous opens their type: read by `aqr --serve` through
   aqr-unpack, the columns those their format has (the server's `fields`: Data, a file's compressed bytes,
