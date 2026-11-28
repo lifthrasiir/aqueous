@@ -1464,11 +1464,16 @@ dependencies = [
 [[package]]
 name = "aqr-mount"
 version = "0.1.0"
+dependencies = [
+ "aqr-ipc",
+ "serde_json",
+]
 
 [[package]]
 name = "aqr-mount-fuse"
 version = "0.1.0"
 dependencies = [
+ "aqr-ipc",
  "aqr-mount",
  "fuser",
  "libc",
@@ -1478,6 +1483,7 @@ dependencies = [
 name = "aqr-mount-win"
 version = "0.1.0"
 dependencies = [
+ "aqr-ipc",
  "aqr-mount",
  "windows-sys",
  "winfsp",

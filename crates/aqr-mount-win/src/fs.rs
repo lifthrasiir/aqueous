@@ -197,7 +197,7 @@ impl FileSystemContext for Volume {
     fn get_volume_info(&self, info: &mut VolumeInfo) -> winfsp::Result<()> {
         info.total_size = 0;
         info.free_size = 0;
-        info.set_volume_label("Aqueous");
+        info.set_volume_label(self.tree.label());
         Ok(())
     }
 }

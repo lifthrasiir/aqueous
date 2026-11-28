@@ -1,9 +1,11 @@
-//! `aqr-mount [MOUNTPOINT]`: a read-only volume of WinFsp, mounted at MOUNTPOINT (a drive
-//! letter such as `X:`, or a directory that does not exist yet; the next free drive letter
-//! without one) for as long as the program runs. Ending it, however it ends, unmounts.
+//! `aqr-mount ARCHIVE [MOUNTPOINT]`: the archive as a read-only volume of WinFsp, mounted at
+//! MOUNTPOINT (a drive letter such as `X:`, or a directory that does not exist yet; the next
+//! free drive letter without one) for as long as the program runs. Ending it, however it ends,
+//! unmounts.
 //!
-//! The volume is an aqr-mount tree; for now `OneFile`, `\hello.txt` of fixed contents, until
-//! archives are served.
+//! The volume is aqr-mount's tree of the archive, as an `aqr --serve` serves it: `aqr` is
+//! `AQR`, else the one beside this program, else the one on `PATH` (where the installer puts
+//! its folder).
 
 #[cfg(windows)]
 mod fs;
@@ -18,8 +20,20 @@ fn main() -> std::process::ExitCode {
         eprintln!("aqr-mount: {e}");
         return ExitCode::from(2);
     }
-    let mount_point = std::env::args_os().nth(1);
-    match fs::serve(Box::new(aqr_mount::OneFile::hello()), mount_point.as_deref()) {
+    let mut args = std::env::args_os().skip(1);
+    let (Some(archive), mount_point, None) = (args.next(), args.next(), args.next()) else {
+        eprintln!("usage: aqr-mount ARCHIVE [MOUNTPOINT]");
+        return ExitCode::from(2);
+    };
+    let archive = std::path::PathBuf::from(archive);
+    let tree = match aqr_mount::ServedTree::open(&aqr_ipc::aqr(), &archive) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("aqr-mount: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match fs::serve(Box::new(tree), mount_point.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("aqr-mount: {e}");

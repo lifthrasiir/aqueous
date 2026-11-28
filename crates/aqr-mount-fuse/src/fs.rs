@@ -172,7 +172,7 @@ pub fn serve(tree: Box<dyn Tree>, mount_point: &Path) -> io::Result<()> {
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let mut config = Config::default();
     config.mount_options = vec![
-        MountOption::FSName("aqr".into()),
+        MountOption::FSName(tree.label()),
         MountOption::Subtype("aqr".into()),
         MountOption::RO,
         MountOption::NoDev,
@@ -182,7 +182,7 @@ pub fn serve(tree: Box<dyn Tree>, mount_point: &Path) -> io::Result<()> {
     ];
     config.n_threads = Some(std::thread::available_parallelism().map_or(1, |n| n.get()));
     let session = fuser::spawn_mount(Fs { tree, uid, gid }, mount_point, &config)?;
-    eprintln!("aqr-mount-fuse: mounted; end the program (Ctrl+C) to unmount");
+    eprintln!("aqr-mount: mounted; end the program (Ctrl+C) to unmount");
     let mut signal = 0;
     let rc = unsafe { libc::sigwait(&signals, &mut signal) };
     if rc != 0 {

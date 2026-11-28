@@ -34,7 +34,8 @@ name: release
 #   aqr-STEM-win-install.exe      the installer: aqr.exe, aqr-win.exe, aqr-shell.dll, man.html (crates/aqr-win-install)
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal;
 #                                 man/'s pages in Contents/Resources/man/manN)
-#   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on) and man/manN/*.N, man/'s pages
+#   aqr-STEM-linux-x86_64.tar.xz  aqr and aqr-mount (aqr-mount-fuse's), glibc of Ubuntu 22.04
+#                                 on, and man/manN/*.N, man/'s pages
 #   aqr-STEM-linux-aarch64.tar.xz
 #   SHA256SUMS                    the SHA-256s of the above (their provenance attested)
 #
@@ -371,9 +372,12 @@ jobs:
       # Built with its debug information (profile.dist strips it), which is split off into
       # aqr.debug for the artifact debug-linux-*: the binary as strip = "debuginfo" leaves it, with
       # a .gnu_debuglink to aqr.debug.
+      # aqr-mount-fuse (FUSE through fusermount3: no libfuse to link) keeps no debug information
+      # (dist's strip).
       - run: cargo build --profile dist -p aqr --bin aqr
         env:
           CARGO_PROFILE_DIST_STRIP: none
+      - run: cargo build --profile dist -p aqr-mount-fuse
       - run: |
           cd target/dist
           objcopy --only-keep-debug --compress-debug-sections aqr aqr.debug
@@ -383,11 +387,12 @@ jobs:
         run: |
           mkdir -p out pack
           cp target/dist/aqr pack/
+          cp target/dist/aqr-mount-fuse pack/aqr-mount
           for m in man/*.[1-9]; do
               mkdir -p "pack/man/man${m##*.}"
               cp "$m" "pack/man/man${m##*.}/"
           done
-          tar -C pack -cJf "out/aqr-$STEM-linux-$ARCH.tar.xz" aqr man
+          tar -C pack -cJf "out/aqr-$STEM-linux-$ARCH.tar.xz" aqr aqr-mount man
       # (built by Cargo.lock as committed: cargo would have rewritten it otherwise)
       - run: git diff --exit-code -- Cargo.lock
       - uses: actions/upload-artifact@v7.0.2

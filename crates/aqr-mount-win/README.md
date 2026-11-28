@@ -1,16 +1,17 @@
 # aqr-mount-win
 
-`aqr-mount.exe [MOUNTPOINT]` mounts a read-only volume through [WinFsp](https://winfsp.dev) where
-it is installed. MOUNTPOINT is a drive letter (`X:`) or a directory that does not exist yet;
-without one, the next free drive letter is taken. The volume is there for as long as the
+`aqr-mount.exe ARCHIVE [MOUNTPOINT]` mounts the archive as a read-only volume through
+[WinFsp](https://winfsp.dev) where it is installed. MOUNTPOINT is a drive letter (`X:`) or a
+directory that does not exist yet; without one, the next free drive letter is taken. The volume is there for as long as the
 program runs: ending it in any way (Ctrl+C, a kill, a crash) unmounts, as the driver tears
 down a volume whose process has closed its handle. Neither mounting nor the driver's start
 needs an administrator (WinFsp's installer lets everyone start its driver), and nothing is
 written to the registry (the Launcher's `Services` keys are for `net use` and are not used).
 
-The volume serves a tree of aqr-mount (the core the mounting programs share; `src/fs.rs` is
-the adapter): for now `OneFile`, a single file of fixed contents, `\hello.txt`, until archives
-are served.
+The volume serves aqr-mount's tree of the archive (`ServedTree`, over an `aqr --serve`;
+`src/fs.rs` is the adapter): names in any case, the volume's label the archive's name. `aqr` is
+`AQR`, else the one beside the program, else the one on `PATH`, where the installer puts its
+folder. `aqr --serve` ends with the program, however it ends (its standard input closed).
 
 It is to be released on its own, as `aqr-mount.exe` beside the installer, not in it: it is of
 use only where WinFsp is installed, and its license is not the others'. (The release workflow
@@ -43,7 +44,6 @@ says it is the program of Windows.
 
 ## Left
 
-- An archive's entries through aqr's listing and extraction, and reading at an offset.
 - `aqr mount` and aqr-win's verb starting it, and unmounting it.
 - Its place in the release (a job of the release workflow, signed like the others).
 - A security descriptor of the volume (none is given now: WinFsp then grants what a read-only

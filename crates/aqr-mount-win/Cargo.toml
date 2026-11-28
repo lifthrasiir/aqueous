@@ -10,6 +10,7 @@ name = "aqr-mount"
 path = "src/main.rs"
 
 [dependencies]
+aqr-ipc.workspace = true
 aqr-mount.workspace = true
 
 [target.'cfg(windows)'.dependencies]

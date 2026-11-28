@@ -1,9 +1,11 @@
-//! `aqr-mount-fuse MOUNTPOINT`: a read-only FUSE file system at MOUNTPOINT (an existing
-//! directory) for as long as the program runs. SIGINT, SIGTERM and SIGHUP unmount and end it;
-//! a process killed otherwise leaves the mount point unusable until `fusermount3 -u`.
+//! `aqr-mount ARCHIVE MOUNTPOINT`: the archive as a read-only FUSE file system at MOUNTPOINT
+//! (an existing directory) for as long as the program runs. SIGINT, SIGTERM and SIGHUP unmount
+//! and end it; a process killed otherwise leaves the mount point unusable until `fusermount3
+//! -u`. Released so named: the package's binary is aqr-mount-fuse, aqr-mount-win's stub taking
+//! the name `aqr-mount` here.
 //!
-//! The file system is an aqr-mount tree; for now `OneFile`, `/hello.txt` of fixed contents,
-//! until archives are served.
+//! The file system is aqr-mount's tree of the archive, as an `aqr --serve` serves it: `aqr` is
+//! `AQR`, else the one beside this program, else the one on `PATH`.
 
 #[cfg(target_os = "linux")]
 mod fs;
@@ -13,14 +15,22 @@ fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
     let mut args = std::env::args_os().skip(1);
-    let (Some(mount_point), None) = (args.next(), args.next()) else {
-        eprintln!("usage: aqr-mount-fuse MOUNTPOINT");
+    let (Some(archive), Some(mount_point), None) = (args.next(), args.next(), args.next()) else {
+        eprintln!("usage: aqr-mount ARCHIVE MOUNTPOINT");
         return ExitCode::from(2);
     };
-    match fs::serve(Box::new(aqr_mount::OneFile::hello()), mount_point.as_ref()) {
+    let archive = std::path::PathBuf::from(archive);
+    let tree = match aqr_mount::ServedTree::open(&aqr_ipc::aqr(), &archive) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("aqr-mount: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match fs::serve(Box::new(tree), mount_point.as_ref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("aqr-mount-fuse: {}: {e}", mount_point.display());
+            eprintln!("aqr-mount: {}: {e}", mount_point.display());
             ExitCode::FAILURE
         }
     }
@@ -28,6 +38,6 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(not(target_os = "linux"))]
 fn main() -> std::process::ExitCode {
-    eprintln!("aqr-mount-fuse: this is the program of Linux (FUSE)");
+    eprintln!("aqr-mount: this is the program of Linux (FUSE)");
     std::process::ExitCode::from(2)
 }

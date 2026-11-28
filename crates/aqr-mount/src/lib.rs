@@ -6,9 +6,17 @@
 //! WinFsp's paths walked component by component. Names are the archive's, UTF-8.
 //!
 //! Whether a lookup folds case is the caller's ([`Case`]): Windows asks for names in any case.
-//! A tree whose names differ only in case resolves such a lookup to the first in its order.
+//! A tree whose names differ only in case resolves such a lookup to the one named exactly so,
+//! else to the first in its order.
+//!
+//! [`ServedTree`] is the tree of an archive, as `aqr --serve` serves it; [`OneFile`] a tree of
+//! one fixed file, for the tests.
 
 use std::fmt;
+
+mod served;
+
+pub use served::ServedTree;
 
 /// A node of a [`Tree`].
 pub type NodeId = u64;
@@ -80,8 +88,13 @@ pub trait Tree: Send + Sync {
     /// The entries of `dir` in a stable order (neither `.` nor `..`).
     fn entries(&self, dir: NodeId) -> Result<Vec<Entry>>;
 
-    /// Reads from `offset` into `buf`; 0 at and past the end.
+    /// Reads from `offset` into `buf`, all of it but at the end; 0 at and past the end.
     fn read(&self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize>;
+
+    /// The name of the volume, where a system shows one.
+    fn label(&self) -> String {
+        "Aqueous".into()
+    }
 }
 
 /// The node of a path of components split by `sep` (`\` on Windows), from the root.

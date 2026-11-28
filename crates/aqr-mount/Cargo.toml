@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "What the mounting programs share: a read-only tree of nodes, independent of the system's interface"
 publish = false
+
+[dependencies]
+aqr-ipc.workspace = true
+serde_json.workspace = true

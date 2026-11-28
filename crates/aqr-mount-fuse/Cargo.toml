@@ -6,6 +6,7 @@ description = "aqr-mount-fuse: archives mounted through FUSE (Linux)"
 publish = false
 
 [dependencies]
+aqr-ipc.workspace = true
 aqr-mount.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
