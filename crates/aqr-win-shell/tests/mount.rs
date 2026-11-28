@@ -32,11 +32,34 @@ fn built() -> PathBuf {
     std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned()
 }
 
-/// The command of `clsid`, of the library built.
-fn command(clsid: GUID) -> IExplorerCommand {
-    type GetClassObject = unsafe extern "system" fn(*const GUID, *const GUID, *mut *mut core::ffi::c_void) -> HRESULT;
-    let dll = built().join("aqr_shell.dll");
+/// A directory of the library of this build and the programs built beside it, copied: `cargo
+/// test` writes the library in `deps`, beside this test (the one in the directory above only as
+/// `cargo build` does, and it may be of another build), and it looks for aqr-win and aqr-mount
+/// beside itself. Loaded, the library is not removed until the process ends: those of earlier
+/// runs are removed here.
+fn library() -> PathBuf {
+    let dll = std::env::current_exe().unwrap().with_file_name("aqr_shell.dll");
     assert!(dll.is_file(), "{}: not built", dll.display());
+    let temp = std::env::temp_dir();
+    for e in std::fs::read_dir(&temp).unwrap().flatten() {
+        if e.file_name().to_string_lossy().starts_with("aqr-shell-mount-lib-") {
+            _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+    let lib = temp.join(format!("aqr-shell-mount-lib-{}", std::process::id()));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::copy(&dll, lib.join("aqr_shell.dll")).unwrap();
+    for f in ["aqr.exe", "aqr-win.exe", "aqr-mount.exe"] {
+        if built().join(f).is_file() {
+            std::fs::copy(built().join(f), lib.join(f)).unwrap();
+        }
+    }
+    lib
+}
+
+/// The command of `clsid`, of the library `dll`.
+fn command(dll: &Path, clsid: GUID) -> IExplorerCommand {
+    type GetClassObject = unsafe extern "system" fn(*const GUID, *const GUID, *mut *mut core::ffi::c_void) -> HRESULT;
     // SAFETY: the library built, its entry point of COM's signature, its class factory
     unsafe {
         let m: HMODULE = LoadLibraryW(&HSTRING::from(dll.as_os_str())).unwrap();
@@ -94,7 +117,9 @@ fn commands() {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
     let d = std::env::temp_dir().join(format!("aqr-shell-mount-{}", std::process::id()));
     let t = archive(&d);
-    let (menu, eject) = (command(MENU), command(EJECT_COMMAND));
+    let lib = library();
+    let dll = lib.join("aqr_shell.dll");
+    let (menu, eject) = (command(&dll, MENU), command(&dll, EJECT_COMMAND));
     // (the menu's commands by their canonical names)
     let subs: Vec<IExplorerCommand> = {
         // SAFETY: the menu's enumeration, read to its end
@@ -127,7 +152,7 @@ fn commands() {
 
     // of the archive: all (Mount disabled unless aqr-mount is beside the library and WinFsp is
     // installed); of a file of another type, those of compressing alone
-    let available = built().join("aqr-mount.exe").is_file() && winfsp();
+    let available = lib.join("aqr-mount.exe").is_file() && winfsp();
     let archive = t.to_str().unwrap();
     let other = d.join("t").join("a.txt");
     let other = other.to_str().unwrap();
@@ -151,7 +176,7 @@ fn commands() {
     }
 
     // a drive of aqr-mount's: Eject shown, and invoked, ejected
-    let mut child = Command::new(built().join("aqr-mount.exe"))
+    let mut child = Command::new(lib.join("aqr-mount.exe"))
         .arg("--json")
         .arg(&t)
         .stdout(Stdio::piped())
