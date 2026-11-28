@@ -163,6 +163,7 @@ registry_not_set = "Not set: HKEY_CURRENT_USER\\{key}: {error}"
 registry_not_deleted = "Not deleted: HKEY_CURRENT_USER\\{key}: {error}"
 # "Mount as a drive" and "Eject" (`shell.mount`, `shell.eject`: aqr-mount's drives).
 mount_failed = "{name} could not be mounted"
+mounting = "Mounting {name}…"
 no_mount_program = "Mounting needs aqr-mount.exe in {dir}."
 not_a_mount = "{drive} is not a drive that Aqueous mounted."
 eject_ask = "Eject {drive} ({name}) anyway?"

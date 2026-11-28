@@ -5,7 +5,8 @@
 //! - `mount`: where the archive is mounted already (a drive of the file system `aqr` whose
 //!   control tells it of the same path), that drive is opened; else `aqr-mount --json ARCHIVE`
 //!   is started, of no window and out of this program's job, and once it tells the drive it
-//!   mounted (the last free letter), the drive is opened in Explorer. It goes on after this
+//!   mounted (the last free letter), the drive is opened in Explorer. While it opens the archive
+//!   (a while of a big one), a dialog tells so, its Cancel ending it. It goes on after this
 //!   program ends, until the drive is ejected.
 //! - `eject`: the drive's control asked to eject it; where files of it are open, the user is
 //!   asked whether to all the same (then forced).
@@ -136,8 +137,25 @@ pub fn mount(archive: &Path) -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(&format!("{}: {e}", exe.display())),
     };
-    let mut line = String::new();
-    _ = BufReader::new(child.stdout.take().unwrap()).read_line(&mut line);
+    // (its line read on a thread, waited for under a dialog: a big archive takes a while to be
+    // opened, and Cancel ends it)
+    let out = child.stdout.take().unwrap();
+    let told = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    {
+        let told = told.clone();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            _ = BufReader::new(out).read_line(&mut line);
+            *told.lock().unwrap() = Some(line);
+        });
+    }
+    let done = || told.lock().unwrap().is_some();
+    if !dialog::waiting(&win::mounting(&name), &archive.display().to_string(), &done) {
+        _ = child.kill();
+        _ = child.wait();
+        return ExitCode::SUCCESS;
+    }
+    let line = told.lock().unwrap().take().unwrap_or_default();
     let told: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
     match (told["mounted"].as_str(), told["error"].as_str()) {
         (Some(m), _) => {

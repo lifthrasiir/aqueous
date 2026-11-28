@@ -28,10 +28,10 @@ use windows_sys::Win32::UI::Controls::{
 use windows_sys::Win32::UI::Controls::{
     LIM_LARGE, LIM_SMALL, LoadIconMetric, PBST_PAUSED, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TD_ERROR_ICON,
     TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDCBF_CLOSE_BUTTON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON,
-    TDE_CONTENT, TDE_MAIN_INSTRUCTION, TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDF_SHOW_PROGRESS_BAR,
-    TDF_USE_COMMAND_LINKS, TDM_CLICK_BUTTON, TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS,
-    TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE, TDN_BUTTON_CLICKED, TDN_CREATED, TDN_TIMER,
-    TaskDialogIndirect,
+    TDE_CONTENT, TDE_MAIN_INSTRUCTION, TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER,
+    TDF_SHOW_MARQUEE_PROGRESS_BAR, TDF_SHOW_PROGRESS_BAR, TDF_USE_COMMAND_LINKS, TDM_CLICK_BUTTON,
+    TDM_SET_ELEMENT_TEXT, TDM_SET_MARQUEE_PROGRESS_BAR, TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE,
+    TDM_SET_PROGRESS_BAR_STATE, TDN_BUTTON_CLICKED, TDN_CREATED, TDN_TIMER, TaskDialogIndirect,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -202,6 +202,53 @@ struct Window<'a> {
 
 /// The time a job may take without a window.
 const UNSEEN: Duration = Duration::from_millis(400);
+
+/// What [`waiting`] waits for, as its dialog's callback sees it.
+struct Waiting<'a> {
+    done: &'a dyn Fn() -> bool,
+    finished: Cell<bool>,
+}
+
+/// Waits for `done` (asked again and again), a dialog of `main` and `content` with a bar of no
+/// measure and Cancel shown where it takes over [`UNSEEN`]: whether it was done (else
+/// cancelled).
+pub fn waiting(main: &str, content: &str, done: &dyn Fn() -> bool) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < UNSEEN {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let w = Waiting { done, finished: Cell::new(false) };
+    let mut d = Config::new(std::ptr::null_mut(), None, main, content);
+    d.c.dwFlags = TDF_SHOW_MARQUEE_PROGRESS_BAR | TDF_CALLBACK_TIMER | TDF_ALLOW_DIALOG_CANCELLATION;
+    d.c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    d.c.cxWidth = 300;
+    d.c.pfCallback = Some(waiting_callback);
+    d.c.lpCallbackData = &w as *const Waiting as isize;
+    d.show();
+    w.finished.get() || done()
+}
+
+unsafe extern "system" fn waiting_callback(hwnd: HWND, msg: u32, _: WPARAM, _: LPARAM, data: isize) -> HRESULT {
+    // SAFETY: what `waiting` gave the dialog, which it outlives
+    let w = unsafe { &*(data as *const Waiting) };
+    match msg as i32 {
+        TDN_CREATED => {
+            set_icon(hwnd);
+            // SAFETY: the dialog's own message: the bar moving, every 30 ms
+            unsafe { SendMessageW(hwnd, TDM_SET_MARQUEE_PROGRESS_BAR as u32, 1, 30) };
+        }
+        TDN_TIMER if !w.finished.get() && (w.done)() => {
+            w.finished.set(true);
+            // SAFETY: the dialog's own message, handled once this callback is done
+            unsafe { PostMessageW(hwnd, TDM_CLICK_BUTTON as u32, IDCANCEL as usize, 0) };
+        }
+        _ => {}
+    }
+    S_OK
+}
 
 /// Shows `job` as it goes, `child` being its `aqr`, until it is done: what it ended with
 /// (`None`: unknown).
