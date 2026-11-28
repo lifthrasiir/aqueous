@@ -33,7 +33,7 @@
 - 용례 1의 기본 출력은 형식을 알아보는 접미사를 뗀 이름에 `.aqr`(`foo.tar.gz` → `foo.aqr`)이다. 입력은
   남기고, 출력은 다 쓰고 검증한 뒤 제자리에 놓는다.
 - 받는 옵션: 쓰는 쪽은 `-c`의 압축 옵션(용례 2는 4.1절), 읽는 쪽은 `--encoding`과 입력의 암호(4.3절).
-  `--ipc`는 `mode`가 `convert`/`convert-new`다(`crates/aqr/src/ipc.rs`).
+  `--ipc`는 `mode`가 `convert`/`convert-new`다(`man/aqripc.7`).
 - `--convert` 바깥의 `--no-passphrase`, `--no-archival`은 기본값이므로 아무 일도 하지 않는다(`-P`, `-A`와
   함께면 오류).
 

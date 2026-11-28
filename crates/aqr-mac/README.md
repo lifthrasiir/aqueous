@@ -6,7 +6,7 @@ with Aqueous" work on `.aqr` files and the other archives `aqr` extracts, and op
 double-click) extracts it. The other formats are taken from no app: Aqueous opens them where
 nothing else does, and is an alternative elsewhere (Get Info, Open with). The progress shows on the file itself in Finder. As in aqr-win
 (`crates/aqr-win`), the work is done by `aqr --ipc` in a process of its own (the protocol:
-`crates/aqr/src/ipc.rs`). This program only hands Finder's requests to it.
+`man/aqripc.7`). This program only hands Finder's requests to it.
 
 ```sh
 crates/aqr-mac/bundle.sh   # target/dist/Aqueous.app and Aqueous.zip (dist profile)

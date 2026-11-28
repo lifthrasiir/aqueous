@@ -8,7 +8,7 @@ rest (of archives "Test", "Mount as a drive" and of `.aqr` files the versions'; 
 "Compress with passphrase…", encrypted, `aqr -P`; "Compress into .zip" and ".7z", `aqr
 --format zip`, `7z`; "Compress with options…", the dialog of the options, `aqr --ipc`),
 and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
-`crates/aqr/src/ipc.rs`); this program is the window and the verbs, about 1 MB (550 KB of it
+`man/aqripc.7`); this program is the window and the verbs, about 1 MB (550 KB of it
 the icons: `droplet.ico`, the program's, and `icons/*.ico`, the files', from `scripts/icons.py`;
 in the installer they take some 230 KB, the drop being the same bytes in each).
 

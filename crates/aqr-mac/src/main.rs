@@ -1,5 +1,5 @@
 //! Aqueous in Finder: services on files, folders and archives, and `.aqr` files opened, the work
-//! done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own and shown on its file
+//! done by `aqr --ipc` (`man/aqripc.7`) in a process of its own and shown on its file
 //! in Finder ([`app`]). Bundled as `Aqueous.app` by `bundle.sh`, `aqr` beside this program in
 //! `Contents/MacOS` (else the one on `PATH`; `AQR` names another).
 

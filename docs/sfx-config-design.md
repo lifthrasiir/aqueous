@@ -132,7 +132,7 @@ aqr은 SFX 속의 아카이브를 열고 풀고 시험할 수 있지만 고치�
   `signed_afterwards`가 OpenSSL 인증서와 `signtool`로 시험한다(없으면 건너뜀). 서명은 `--run-after
   "signtool sign ... \"%AQR_OUTPUT%\""` hook(`crates/aqr/src/hooks.rs`)으로 잇는다. 다 만든 SFX에 서명이 없으면
   aqr이 알린다(stderr 한 줄, `-q`면 없음. 프런트엔드에는 `{"event":"notice","kind":"unsigned"}`,
-  `crates/aqr/src/ipc.rs`; aqr-win은 경고 대화상자, 문구는 aqr-l10n의 `common.unsigned*`).
+  `man/aqripc.7`; aqr-win은 경고 대화상자, 문구는 aqr-l10n의 `common.unsigned*`).
 
 ## 9. 남은 일
 

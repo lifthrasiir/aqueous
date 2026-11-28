@@ -1,5 +1,5 @@
 //! Aqueous in Explorer: verbs on files, folders and archives, and a window of how far the work
-//! is, the work done by `aqr --ipc` (`crates/aqr/src/ipc.rs`) in a process of its own.
+//! is, the work done by `aqr --ipc` (`man/aqripc.7`) in a process of its own.
 //!
 //! usage: aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... |
 //!        extract ARCHIVE... | extract-to ARCHIVE... | test ARCHIVE... | name-version ARCHIVE |
