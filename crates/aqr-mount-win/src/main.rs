@@ -95,12 +95,37 @@ fn main() -> std::process::ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The last drive letter free (from Z:, as WinFsp takes them), D: at the first.
+/// The last drive letter free (from Z:, as WinFsp takes them), D: at the first: of no volume
+/// (`GetLogicalDrives`), no device name (`QueryDosDeviceW`: a `subst`, another's of the
+/// session) and no network drive remembered (`HKCU\Network\L`: one disconnected is in neither,
+/// and Explorer would show its name on the volume).
 #[cfg(windows)]
 fn free_drive() -> Option<std::ffi::OsString> {
+    use windows_sys::Win32::Storage::FileSystem::{GetLogicalDrives, QueryDosDeviceW};
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW};
     // SAFETY: of no arguments
-    let used = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
-    (3..26u32).rev().find(|&i| used & (1 << i) == 0).map(|i| format!("{}:", (b'A' + i as u8) as char).into())
+    let used = unsafe { GetLogicalDrives() };
+    let taken = |l: char| {
+        let device: Vec<u16> = format!("{l}:").encode_utf16().chain([0]).collect();
+        let mut target = [0u16; 1024];
+        // SAFETY: a name ending in NUL, a buffer of its length
+        let named = unsafe { QueryDosDeviceW(device.as_ptr(), target.as_mut_ptr(), target.len() as u32) } != 0;
+        let key: Vec<u16> = format!(r"Network\{l}").encode_utf16().chain([0]).collect();
+        let mut k = std::ptr::null_mut();
+        // SAFETY: a key's name ending in NUL, the key opened closed at once
+        let remembered = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, key.as_ptr(), 0, KEY_READ, &mut k) } == 0;
+        if remembered {
+            // SAFETY: the key opened above
+            unsafe { RegCloseKey(k) };
+        }
+        named || remembered
+    };
+    (3..26u32)
+        .rev()
+        .filter(|&i| used & (1 << i) == 0)
+        .map(|i| (b'A' + i as u8) as char)
+        .find(|&l| !taken(l))
+        .map(|l| format!("{l}:").into())
 }
 
 /// This program copied into Aqueous's folder (`%LOCALAPPDATA%\Programs\Aqueous`, where
