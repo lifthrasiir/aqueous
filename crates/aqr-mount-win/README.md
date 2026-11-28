@@ -13,9 +13,12 @@ The volume serves aqr-mount's tree of the archive (`ServedTree`, over an `aqr --
 `AQR`, else the one beside the program, else the one on `PATH`, where the installer puts its
 folder. `aqr --serve` ends with the program, however it ends (its standard input closed).
 
-It is to be released on its own, as `aqr-mount.exe` beside the installer, not in it: it is of
-use only where WinFsp is installed, and its license is not the others'. (The release workflow
-does not build it yet.)
+It is released on its own, beside the installer and not in it: it is of use only where WinFsp
+is installed, and its license is not the others'. The release's `aqr-STEM-win-mount.zip`
+(`.github/workflows/release.yml`, job `windows-mount`: the Windows 7 target, as the others)
+holds `aqr-mount.exe` and `COPYING`, the GPL's text (here as Debian's
+`/usr/share/common-licenses/GPL-3` has it, verbatim); its source is the tag's, with the crates
+of Cargo.lock. The job checks that it starts where WinFsp is not installed, and says so.
 
 ## License
 
@@ -52,7 +55,6 @@ with the process killed. It is skipped where WinFsp is not installed (CI's runne
 ## Left
 
 - `aqr mount` and aqr-win's verb starting it, and unmounting it.
-- Its place in the release (a job of the release workflow, signed like the others).
 - A security descriptor of the volume (none is given now: WinFsp then grants what a read-only
   volume allows).
 - Not tried on Windows 7 itself: WinFsp 2.1's support of it is unverified.

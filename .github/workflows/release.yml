@@ -32,6 +32,8 @@ name: release
 # tells, and fails on a tag not of a version:
 #   aqr-STEM.exe                  Windows 7 on, x86_64 (cargo +NIGHTLY win7; packed by UPX)
 #   aqr-STEM-win-install.exe      the installer: aqr.exe, aqr-win.exe, aqr-shell.dll, man.html (crates/aqr-win-install)
+#   aqr-STEM-win-mount.zip        aqr-mount.exe (crates/aqr-mount-win, where WinFsp is installed;
+#                                 GPL-3.0 as built) and COPYING, the GPL's text
 #   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal;
 #                                 man/'s pages in Contents/Resources/man/manN)
 #   aqr-STEM-linux-x86_64.tar.xz  aqr and aqr-mount (aqr-mount-fuse's), glibc of Ubuntu 22.04
@@ -40,7 +42,7 @@ name: release
 #   SHA256SUMS                    the SHA-256s of the above (their provenance attested)
 #
 # The debug information of each binary is not in the assets but in the run's artifacts named
-# debug-* (kept as the repository's retention allows): Windows' PDBs, the dSYMs of the Mac's,
+# debug-* (kept as the repository's retention allows): Windows' PDBs (aqr-mount's of its own), the dSYMs of the Mac's,
 # Linux's aqr.debug (split off by objcopy, the binary pointing to it by .gnu_debuglink). To
 # debug a release, take them from the run of its tag (aqr.exe unpacked by `upx -d` first).
 
@@ -174,6 +176,52 @@ jobs:
             target/x86_64-win7-windows-msvc/dist/aqr.pdb
             target/x86_64-win7-windows-msvc/dist/aqr_win.pdb
             target/x86_64-win7-windows-msvc/dist/aqr_shell.pdb
+          if-no-files-found: error
+
+  # aqr-mount.exe (crates/aqr-mount-win), an asset of its own: it links WinFsp's bindings,
+  # GPL-3.0, so neither aqr.exe nor the installer carries it; it is zipped with the GPL's text.
+  # winfsp-sys makes its bindings by bindgen, of the runner's LLVM (its libclang, and Visual
+  # Studio's headers that clang finds). The program finds aqr.exe on PATH (the installer's).
+  windows-mount:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: sh scripts/release-env.sh >> "$GITHUB_ENV"
+      - run: |
+          echo "AQR_NIGHTLY=$(cat nightly-toolchain)" >> "$GITHUB_ENV"
+          rustup toolchain install "$(cat nightly-toolchain)" --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2.9.3
+        if: github.ref_type != 'tag' # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo "+$AQR_NIGHTLY" win7 -p aqr-mount-win
+      - run: git diff --exit-code -- Cargo.lock
+      # (it starts where WinFsp is not installed, and says so)
+      - run: |
+          set +e
+          target/x86_64-win7-windows-msvc/dist/aqr-mount.exe x.aqr 2> err.txt
+          code=$?
+          set -e
+          cat err.txt
+          test "$code" = 2 && grep -q 'WinFsp is not installed' err.txt
+      - run: |
+          mkdir -p out pack
+          cp target/x86_64-win7-windows-msvc/dist/aqr-mount.exe crates/aqr-mount-win/COPYING pack/
+          (cd pack && 7z a -tzip -mx=9 "../out/aqr-$STEM-win-mount.zip" aqr-mount.exe COPYING)
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: bin-windows-mount
+          path: out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: debug-windows-mount
+          path: target/x86_64-win7-windows-msvc/dist/aqr_mount.pdb
           if-no-files-found: error
 
   windows-release:
@@ -408,7 +456,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: [windows-release, mac, linux]
+    needs: [windows-release, windows-mount, mac, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write # the release made and its assets uploaded
