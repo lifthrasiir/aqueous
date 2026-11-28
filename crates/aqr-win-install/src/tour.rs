@@ -7,9 +7,13 @@
 //!   background, the item hot or disabled, the separator, the arrow of a submenu), in the menu
 //!   font, laid out as Windows lays out the menus of Explorer (icons beside the text): measured
 //!   on Windows 11 (`Layout::WIN11`, at 96 DPI; the rounded corners and the shadow, which DWM
-//!   draws of a real menu, drawn here too), from the theme's metrics before it. The files'
-//!   icons are the system's (of their extensions, `.aqr` registered just now), selected as a
-//!   list view of Explorer's draws them (`Explorer::ListView`).
+//!   draws of a real menu, drawn here too), from the theme's metrics before it. Without visual
+//!   styles (Windows 7's classic look, Windows Server's) they are drawn as classic menus are, of
+//!   the system's colors (the raised edge, the disabled text embossed, the arrow a triangle),
+//!   laid out as measured there (`Layout::PLAIN`); shadows and underlined access keys as the
+//!   user has them. The files' icons are the system's (of their extensions, `.aqr` registered
+//!   just now), selected as a list view of Explorer's draws them (`Explorer::ListView`; without
+//!   it, the name on the highlight).
 //! - The commands are those that `aqr-win --install` registered and aqr-win-shell's menu
 //!   "Aqueous" shows of such files, with Explorer's own "Open" and "Properties" (whose tab
 //!   "Versions" is Aqueous's, of `.aqr` files). "Mount as a drive" is disabled where aqr-mount
@@ -30,13 +34,14 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint, BitBlt,
-    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW,
-    DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_HIDEPREFIX, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FW_BOLD, FillRect, GdiFlush, GetDC,
-    GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBITMAP, HDC, HFONT, HGDIOBJ, InvalidateRect, LOGFONTW,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, SetBkColor,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BF_RECT, BF_TOP, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    BeginPaint, BitBlt, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+    COLOR_MENU, COLOR_MENUTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateDIBSection, CreateFontIndirectW, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_HIDEPREFIX,
+    DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawEdge, DrawTextW,
+    EDGE_ETCHED, EDGE_RAISED, EndPaint, FW_BOLD, FillRect, GdiFlush, GetDC, GetMonitorInfoW, GetSysColor,
+    GetSysColorBrush, HBITMAP, HDC, HFONT, HGDIOBJ, InvalidateRect, LOGFONTW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -164,8 +169,10 @@ struct At {
 struct Layout {
     /// From the window's top (and bottom) to the first item's, the border's pixel included.
     pad: i32,
-    /// An item's height, at least.
+    /// An item's height, at least; with an icon, at least; and above the text's line.
     item: i32,
+    icon_item: i32,
+    text_pad: i32,
     separator: i32,
     /// The hot item's background, in from the sides.
     hot_inset: i32,
@@ -191,6 +198,8 @@ impl Layout {
     const WIN11: Layout = Layout {
         pad: 3,
         item: 22,
+        icon_item: 22,
+        text_pad: 4,
         separator: 9,
         hot_inset: 6,
         icon_x: 9,
@@ -203,6 +212,27 @@ impl Layout {
         shadow: 12,
         shadow_alpha: 0.16,
         border: rgb(229, 229, 229),
+    };
+
+    /// Without visual styles (the classic look of Windows 7, Windows Server's): measured of a
+    /// menu of `TrackPopupMenu` there, of 96 DPI.
+    const PLAIN: Layout = Layout {
+        pad: 3,
+        item: 0,
+        icon_item: 19,
+        text_pad: 3,
+        separator: 9,
+        hot_inset: 3,
+        icon_x: 5,
+        text_x: 22,
+        right: 39,
+        arrow_right: 8,
+        separator_inset: 4,
+        overlap: 6,
+        radius: 0,
+        shadow: 4,
+        shadow_alpha: 0.35,
+        border: 0,
     };
 
     /// Before, from the theme's metrics where it gives them.
@@ -222,6 +252,8 @@ impl Layout {
         Layout {
             pad: 3,
             item: check.cyTopHeight + check_size.cy + check.cyBottomHeight,
+            icon_item: check.cyTopHeight + check_size.cy + check.cyBottomHeight,
+            text_pad: 4,
             separator: 9,
             hot_inset: 3,
             icon_x: 3 + check.cxLeftWidth,
@@ -285,6 +317,9 @@ struct App {
     pointed: Option<At>,
     chosen: Option<At>,
     focused: bool,
+    /// Whether menus have shadows, and their access keys are underlined.
+    shadows: bool,
+    cues: bool,
     tracking: bool,
 }
 
@@ -419,6 +454,8 @@ pub fn show(dir: &Path, held: bool) {
             pointed: None,
             chosen: None,
             focused: false,
+            shadows: true,
+            cues: false,
             tracking: false,
         };
         APP.with(|a| *a.borrow_mut() = Some(Box::new(app)));
@@ -527,7 +564,18 @@ impl App {
             self.text_font = CreateFontIndirectW(&ncm.lfMessageFont);
             self.menu_theme = OpenThemeData(self.canvas, w!("MENU"));
             self.list_theme = OpenThemeData(self.canvas, w!("Explorer::ListView"));
-            self.layout = if self.win11 { Layout::WIN11 } else { Layout::classic(self.menu_theme) };
+            self.layout = match (self.win11, self.menu_theme) {
+                (true, _) => Layout::WIN11,
+                (false, 0) => Layout::PLAIN,
+                (false, theme) => Layout::classic(theme),
+            };
+            // (menus' shadows and access keys underlined, as the user has them)
+            let mut on = 0i32;
+            SystemParametersInfoW(0x1024, 0, &mut on as *mut _ as *mut c_void, 0); // SPI_GETDROPSHADOW
+            self.shadows = on != 0 || self.win11;
+            on = 0;
+            SystemParametersInfoW(0x100A, 0, &mut on as *mut _ as *mut c_void, 0); // SPI_GETKEYBOARDCUES
+            self.cues = on != 0;
             let small = self.s(16);
             self.item_icon =
                 LoadImageW(GetModuleHandleW(null()), 1 as PCWSTR, IMAGE_ICON, small, small, LR_DEFAULTCOLOR);
@@ -583,7 +631,7 @@ impl App {
     fn lay_menu(&self, dc: HDC, rows: &[Row], x: i32, y: i32) -> Placed {
         let ly = self.layout;
         let (_, line) = self.measure(dc, self.menu_font, "Ag", 0);
-        let item = self.s(ly.item).max(line + self.s(4));
+        let item = self.s(ly.item).max(line + self.s(ly.text_pad));
         let mut width = 0;
         let mut top = self.s(ly.pad);
         let mut out = Vec::new();
@@ -593,7 +641,7 @@ impl App {
             } else {
                 let font = if r.bold { self.bold_font } else { self.menu_font };
                 width = width.max(self.measure(dc, font, &r.text, DT_HIDEPREFIX).0);
-                item
+                if r.icon { item.max(self.s(ly.icon_item)) } else { item }
             };
             out.push((top, h));
             top += h;
@@ -860,11 +908,10 @@ impl App {
             SetBkMode(dc, TRANSPARENT as i32);
             let current = self.current();
             for (scene, sp) in self.placed.iter().enumerate() {
-                // the file, selected
-                if self.list_theme != 0 {
+                // the file, selected: of the theme, its tile; else its name on the highlight
+                let themed = self.list_theme != 0;
+                if themed {
                     DrawThemeBackground(self.list_theme, dc, LVP_LISTITEM, LISS_SELECTED, &sp.tile, null());
-                } else {
-                    FillRect(dc, &sp.tile, GetSysColorBrush(13)); // COLOR_HIGHLIGHT
                 }
                 let icon = self.file_icons[scene];
                 if !icon.is_null() {
@@ -872,10 +919,23 @@ impl App {
                     DrawIconEx(dc, x, y, icon, size, size, 0, null_mut(), DI_NORMAL);
                 }
                 let old = SelectObject(dc, self.label_font as HGDIOBJ);
-                SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
                 let name = wide(&self.scenes[scene].name);
+                let flags = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX;
+                if !themed {
+                    let mut fit = sp.label;
+                    DrawTextW(dc, name.as_ptr(), -1, &mut fit, flags | DT_CALCRECT);
+                    let (fw, mid) = (fit.right - fit.left, (sp.label.left + sp.label.right) / 2);
+                    let back = RECT {
+                        left: mid - fw / 2 - 2,
+                        top: sp.label.top,
+                        right: mid + fw - fw / 2 + 2,
+                        bottom: sp.label.bottom,
+                    };
+                    FillRect(dc, &back, GetSysColorBrush(COLOR_HIGHLIGHT));
+                }
+                SetTextColor(dc, GetSysColor(if themed { COLOR_WINDOWTEXT } else { COLOR_HIGHLIGHTTEXT }));
                 let mut lr = sp.label;
-                DrawTextW(dc, name.as_ptr(), -1, &mut lr, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+                DrawTextW(dc, name.as_ptr(), -1, &mut lr, flags);
                 SelectObject(dc, old);
                 // the menu, the submenu over it
                 let menu = &self.scenes[scene].menu;
@@ -901,7 +961,9 @@ impl App {
         let ly = self.layout;
         let (w, h) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
         let radius = self.s(ly.radius) as f32;
-        self.shadow(dc, &m.rect, radius);
+        if self.shadows {
+            self.shadow(dc, &m.rect, radius);
+        }
         // SAFETY: a bitmap of ours of w × h pixels of 32 bits, drawn into and blended, freed
         unsafe {
             let Some((mem, bits, bmp)) = bitmap(dc, w, h) else { return };
@@ -920,7 +982,9 @@ impl App {
                     DrawThemeBackground(theme, mem, MENU_POPUPGUTTER, 0, &g, null());
                 }
             } else {
-                FillRect(mem, &full, GetSysColorBrush(4)); // COLOR_MENU
+                let mut edge = full;
+                FillRect(mem, &full, GetSysColorBrush(COLOR_MENU));
+                DrawEdge(mem, &mut edge, EDGE_RAISED, BF_RECT);
             }
             SetBkMode(mem, TRANSPARENT as i32);
             let icon = self.s(16);
@@ -934,7 +998,10 @@ impl App {
                     let lh = if self.win11 { self.s(1).max(1) } else { size.cy.max(1) };
                     let y = top + (rh - lh) / 2;
                     let line = RECT { left: inset, top: y, right: w - inset, bottom: y + lh };
-                    if self.win11 || theme == 0 {
+                    if theme == 0 {
+                        let mut line = RECT { top: top + self.s(3), bottom: top + self.s(3) + 2, ..line };
+                        DrawEdge(mem, &mut line, EDGE_ETCHED, BF_TOP);
+                    } else if self.win11 {
                         fill(mem, &line, rgb(215, 215, 215));
                     } else {
                         DrawThemeBackground(theme, mem, MENU_POPUPSEPARATOR, 0, &line, null());
@@ -956,6 +1023,8 @@ impl App {
                     round_fill(px, w, &item, self.s(4) as f32, rgb(240, 240, 240));
                 } else if is_hot && theme != 0 {
                     DrawThemeBackground(theme, mem, MENU_POPUPITEM, state, &item, null());
+                } else if is_hot {
+                    FillRect(mem, &item, GetSysColorBrush(COLOR_HIGHLIGHT));
                 }
                 if r.icon && !self.item_icon.is_null() {
                     let y = top + (rh - icon) / 2;
@@ -965,12 +1034,27 @@ impl App {
                 let old = SelectObject(mem, font as HGDIOBJ);
                 let text = wide(&r.text);
                 let tr = RECT { left: self.s(ly.text_x), top, right: w - self.s(ly.right) / 2, bottom: top + rh };
-                let flags = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX | DT_END_ELLIPSIS;
+                let mut flags = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
+                if !self.cues {
+                    flags |= DT_HIDEPREFIX;
+                }
+                let color = match (r.disabled, is_hot) {
+                    (false, false) => COLOR_MENUTEXT,
+                    (false, true) => COLOR_HIGHLIGHTTEXT,
+                    (true, _) => COLOR_GRAYTEXT,
+                };
                 if theme != 0 {
                     DrawThemeText(theme, mem, MENU_POPUPITEM, state, text.as_ptr(), -1, flags, 0, &tr);
                 } else {
+                    // (disabled, embossed: its highlight a pixel down and right, unless hot)
+                    if r.disabled && !is_hot {
+                        let mut lit =
+                            RECT { left: tr.left + 1, top: tr.top + 1, right: tr.right + 1, bottom: tr.bottom + 1 };
+                        SetTextColor(mem, GetSysColor(COLOR_3DHILIGHT));
+                        DrawTextW(mem, text.as_ptr(), -1, &mut lit, flags);
+                    }
                     let mut tr = tr;
-                    SetTextColor(mem, GetSysColor(if r.disabled { 17 } else { 7 })); // GRAYTEXT, MENUTEXT
+                    SetTextColor(mem, GetSysColor(if r.disabled && !is_hot { COLOR_3DSHADOW } else { color }));
                     DrawTextW(mem, text.as_ptr(), -1, &mut tr, flags);
                 }
                 SelectObject(mem, old);
@@ -980,6 +1064,22 @@ impl App {
                     let a =
                         RECT { left: ax, top: top + (rh - ah) / 2, right: ax + aw, bottom: top + (rh - ah) / 2 + ah };
                     DrawThemeBackground(theme, mem, MENU_POPUPSUBMENU, MSM_NORMAL, &a, null());
+                } else if !r.sub.is_empty() {
+                    // (the classic arrow: a triangle of the text's color, 4 wide and 7 high)
+                    let (aw, ah) = (self.s(4), self.s(7) | 1);
+                    let ax = w - self.s(ly.arrow_right) - aw;
+                    let ay = top + (rh - ah) / 2;
+                    let c = GetSysColor(color);
+                    for i in 0..aw {
+                        let half = (ah / 2) * (aw - i) / aw;
+                        let col = RECT {
+                            left: ax + i,
+                            top: ay + ah / 2 - half,
+                            right: ax + i + 1,
+                            bottom: ay + ah / 2 + half + 1,
+                        };
+                        fill(mem, &col, c);
+                    }
                 }
             }
             // the corners and the border, the alpha premultiplied

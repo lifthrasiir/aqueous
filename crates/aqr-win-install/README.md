@@ -41,7 +41,8 @@ aqr-win-install --tour                          # the window after installing, i
 - Installed, a window shows what was installed as Explorer shows it (`src/tour.rs`): a file and
   a `.aqr` file right-clicked, their menus open, the submenu "Aqueous" too, drawn by the theme's
   parts of menus (laid out as measured of Windows 11's menus, from the theme's metrics before
-  it). The line under them tells what the command pointed at or chosen does (every command is a
+  it; without visual styles, as classic menus, measured on Windows Server 2008 R2, which was
+  looked at at 96 and 144 DPI). The line under them tells what the command pointed at or chosen does (every command is a
   stop of Tab, the arrows move as in a menu), else what was installed, that on Windows 11 the
   menus are under "Show more options", and that Explorer must be restarted after an update.
   "Mount as a drive" is drawn disabled unless aqr-mount and WinFsp are installed, as the menu
