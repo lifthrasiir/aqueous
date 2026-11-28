@@ -1,12 +1,14 @@
-//! The volume: a root directory holding `hello.txt`, of fixed contents.
+//! The volume: an aqr-mount [`Tree`] served through WinFsp.
 //!
 //! WinFsp's driver asks the dispatcher threads (in this process) for what the cache and its
 //! own checks cannot answer. With a read-only volume and information that never times out
 //! (`file_info_timeout(u32::MAX)`), what comes here is the opening of names, the first read of
-//! each page (the cache manager's paging reads) and directory listings.
+//! each page (the cache manager's paging reads) and directory listings. Paths come whole
+//! (`\a\b`) and are walked component by component, in any case.
 
 use std::ffi::{OsStr, c_void};
 
+use aqr_mount::{Attr, Case, Kind, NodeId, Tree};
 use winfsp::filesystem::{
     DirBuffer, DirInfo, DirMarker, FileInfo, FileSecurity, FileSystemContext, OpenFileInfo, VolumeInfo, WideNameInfo,
 };
@@ -24,63 +26,60 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_DIRECTORY_FILE: u32 = 0x1;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
 
-/// 2026-01-01 00:00 UTC as a FILETIME (100 ns since 1601).
-const TIME: u64 = (1_767_225_600 + 11_644_473_600) * 10_000_000;
+/// 1970-01-01 as a FILETIME (100 ns since 1601).
+const UNIX_EPOCH: i64 = 11_644_473_600 * 10_000_000;
 
-const NAME: &str = "hello.txt";
-const DATA: &[u8] = b"Hello from Aqueous, through WinFsp.\r\n";
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Node {
-    Root,
-    File,
-}
-
-impl Node {
-    /// `\` or `\hello.txt`, in any case (the volume is case-insensitive).
-    fn lookup(name: &U16CStr) -> Option<Node> {
-        let name = name.to_string_lossy();
-        match name.strip_prefix('\\') {
-            Some("") => Some(Node::Root),
-            Some(rest) if rest.eq_ignore_ascii_case(NAME) => Some(Node::File),
-            _ => None,
-        }
-    }
-
-    fn attributes(self) -> u32 {
-        match self {
-            Node::Root => FILE_ATTRIBUTE_DIRECTORY,
-            Node::File => FILE_ATTRIBUTE_READONLY,
-        }
-    }
-
-    fn fill(self, info: &mut FileInfo) {
-        let size = match self {
-            Node::Root => 0,
-            Node::File => DATA.len() as u64,
-        };
-        info.file_attributes = self.attributes();
-        info.reparse_tag = 0;
-        info.file_size = size;
-        info.allocation_size = size.next_multiple_of(4096);
-        info.creation_time = TIME;
-        info.last_access_time = TIME;
-        info.last_write_time = TIME;
-        info.change_time = TIME;
-        info.index_number = self as u64 + 1;
-        info.hard_links = 0;
-        info.ea_size = 0;
+fn status(e: aqr_mount::Error) -> FspError {
+    match e {
+        aqr_mount::Error::NotFound => FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND),
+        aqr_mount::Error::NotADirectory => FspError::NTSTATUS(STATUS_NOT_A_DIRECTORY),
+        aqr_mount::Error::IsADirectory => FspError::NTSTATUS(STATUS_FILE_IS_A_DIRECTORY),
+        aqr_mount::Error::Io(e) => e.into(),
     }
 }
 
-/// An open handle: the node, and for the root the listing WinFsp keeps between the calls of
-/// one enumeration.
+fn attributes(attr: &Attr) -> u32 {
+    match attr.kind {
+        Kind::Dir => FILE_ATTRIBUTE_DIRECTORY,
+        Kind::File => FILE_ATTRIBUTE_READONLY,
+    }
+}
+
+fn fill(node: NodeId, attr: &Attr, info: &mut FileInfo) {
+    let time = (UNIX_EPOCH + attr.mtime_ns.div_euclid(100)).max(0) as u64;
+    info.file_attributes = attributes(attr);
+    info.reparse_tag = 0;
+    info.file_size = attr.size;
+    info.allocation_size = attr.size.next_multiple_of(4096);
+    info.creation_time = time;
+    info.last_access_time = time;
+    info.last_write_time = time;
+    info.change_time = time;
+    info.index_number = node;
+    info.hard_links = 0;
+    info.ea_size = 0;
+}
+
+/// An open handle: the node, and for a directory the listing WinFsp keeps between the calls
+/// of one enumeration.
 pub struct Handle {
-    node: Node,
+    node: NodeId,
+    kind: Kind,
     listing: DirBuffer,
 }
 
-struct Volume;
+struct Volume {
+    tree: Box<dyn Tree>,
+}
+
+impl Volume {
+    /// The node of a path; a name that is not UTF-16 is in no archive.
+    fn lookup(&self, path: &U16CStr) -> winfsp::Result<(NodeId, Attr)> {
+        let path = path.to_string().map_err(|_| FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND))?;
+        let node = aqr_mount::lookup_path(&*self.tree, &path, '\\', Case::Insensitive).map_err(status)?;
+        Ok((node, self.tree.attr(node).map_err(status)?))
+    }
+}
 
 impl FileSystemContext for Volume {
     type FileContext = Handle;
@@ -92,8 +91,8 @@ impl FileSystemContext for Volume {
         _security_descriptor: Option<&mut [c_void]>,
         _reparse_point_resolver: impl FnOnce(&U16CStr) -> Option<FileSecurity>,
     ) -> winfsp::Result<FileSecurity> {
-        let node = Node::lookup(file_name).ok_or(FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND))?;
-        Ok(FileSecurity { reparse: false, sz_security_descriptor: 0, attributes: node.attributes() })
+        let (_, attr) = self.lookup(file_name)?;
+        Ok(FileSecurity { reparse: false, sz_security_descriptor: 0, attributes: attributes(&attr) })
     }
 
     fn open(
@@ -103,18 +102,18 @@ impl FileSystemContext for Volume {
         _granted_access: u32,
         file_info: &mut OpenFileInfo,
     ) -> winfsp::Result<Handle> {
-        let node = Node::lookup(file_name).ok_or(FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND))?;
-        match node {
-            Node::File if create_options & FILE_DIRECTORY_FILE != 0 => {
+        let (node, attr) = self.lookup(file_name)?;
+        match attr.kind {
+            Kind::File if create_options & FILE_DIRECTORY_FILE != 0 => {
                 return Err(FspError::NTSTATUS(STATUS_NOT_A_DIRECTORY));
             }
-            Node::Root if create_options & FILE_NON_DIRECTORY_FILE != 0 => {
+            Kind::Dir if create_options & FILE_NON_DIRECTORY_FILE != 0 => {
                 return Err(FspError::NTSTATUS(STATUS_FILE_IS_A_DIRECTORY));
             }
             _ => {}
         }
-        node.fill(file_info.as_mut());
-        Ok(Handle { node, listing: DirBuffer::new() })
+        fill(node, &attr, file_info.as_mut());
+        Ok(Handle { node, kind: attr.kind, listing: DirBuffer::new() })
     }
 
     /// What would create reaches here despite the read-only volume (the driver turns away
@@ -148,25 +147,21 @@ impl FileSystemContext for Volume {
     fn close(&self, _handle: Handle) {}
 
     fn get_file_info(&self, handle: &Handle, file_info: &mut FileInfo) -> winfsp::Result<()> {
-        handle.node.fill(file_info);
+        let attr = self.tree.attr(handle.node).map_err(status)?;
+        fill(handle.node, &attr, file_info);
         Ok(())
     }
 
     fn read(&self, handle: &Handle, buffer: &mut [u8], offset: u64) -> winfsp::Result<u32> {
-        let data = match handle.node {
-            Node::Root => return Err(FspError::NTSTATUS(STATUS_FILE_IS_A_DIRECTORY)),
-            Node::File => DATA,
-        };
-        let Some(rest) = usize::try_from(offset).ok().and_then(|o| data.get(o..)).filter(|r| !r.is_empty()) else {
-            return Err(FspError::NTSTATUS(STATUS_END_OF_FILE));
-        };
-        let n = rest.len().min(buffer.len());
-        buffer[..n].copy_from_slice(&rest[..n]);
-        Ok(n as u32)
+        match self.tree.read(handle.node, offset, buffer).map_err(status)? {
+            0 if !buffer.is_empty() => Err(FspError::NTSTATUS(STATUS_END_OF_FILE)),
+            n => Ok(n as u32),
+        }
     }
 
-    /// The root's one entry. The pattern (`*.txt`) is the driver's to apply (the volume does
-    /// not ask for it), and the root of a volume lists neither `.` nor `..`.
+    /// The directory's entries, sorted by WinFsp as the buffer is released. The pattern
+    /// (`*.txt`) is the driver's to apply (the volume does not ask for it). `.` and `..` are
+    /// listed but in the root, as NTFS does.
     fn read_directory(
         &self,
         handle: &Handle,
@@ -174,21 +169,33 @@ impl FileSystemContext for Volume {
         marker: DirMarker,
         buffer: &mut [u8],
     ) -> winfsp::Result<u32> {
-        if handle.node != Node::Root {
+        if handle.kind != Kind::Dir {
             return Err(FspError::NTSTATUS(STATUS_NOT_A_DIRECTORY));
         }
         // (filled at the first call of an enumeration, then read on from the marker)
         if let Ok(lock) = handle.listing.acquire(marker.is_none(), None) {
             let mut entry: DirInfo = DirInfo::new();
-            Node::File.fill(entry.file_info_mut());
-            entry.set_name(OsStr::new(NAME))?;
-            lock.write(&mut entry)?;
+            let mut add = |name: &str, node: NodeId| -> winfsp::Result<()> {
+                let attr = self.tree.attr(node).map_err(status)?;
+                entry.reset();
+                fill(node, &attr, entry.file_info_mut());
+                entry.set_name(OsStr::new(name))?;
+                lock.write(&mut entry)
+            };
+            if handle.node != aqr_mount::ROOT {
+                add(".", handle.node)?;
+                // (the parent is not known to the tree: the directory's own information)
+                add("..", handle.node)?;
+            }
+            for e in self.tree.entries(handle.node).map_err(status)? {
+                add(&e.name, e.node)?;
+            }
         }
         Ok(handle.listing.read(marker, buffer))
     }
 
     fn get_volume_info(&self, info: &mut VolumeInfo) -> winfsp::Result<()> {
-        info.total_size = DATA.len().next_multiple_of(4096) as u64;
+        info.total_size = 0;
         info.free_size = 0;
         info.set_volume_label("Aqueous");
         Ok(())
@@ -196,14 +203,15 @@ impl FileSystemContext for Volume {
 }
 
 /// Mounts the volume and serves it until the process ends.
-pub fn serve(mount_point: Option<&OsStr>) -> winfsp::Result<()> {
+pub fn serve(tree: Box<dyn Tree>, mount_point: Option<&OsStr>) -> winfsp::Result<()> {
+    let mtime_ns = tree.attr(aqr_mount::ROOT).map(|a| a.mtime_ns).unwrap_or(0);
     let mut params = VolumeParams::new();
     params
         .filesystem_name("aqr")
         .sector_size(4096)
         .sectors_per_allocation_unit(1)
         .max_component_length(255)
-        .volume_creation_time(TIME)
+        .volume_creation_time((UNIX_EPOCH + mtime_ns.div_euclid(100)).max(0) as u64)
         .volume_serial_number(0x4151_5231)
         // (nothing ever changes: the driver keeps what it was told)
         .file_info_timeout(u32::MAX)
@@ -212,7 +220,7 @@ pub fn serve(mount_point: Option<&OsStr>) -> winfsp::Result<()> {
         .unicode_on_disk(true)
         .read_only_volume(true);
     // (the fine guard: callbacks of many dispatcher threads at once, Volume and Handle being Sync)
-    let mut host: FileSystemHost<Volume> = FileSystemHost::new(params, Volume)?;
+    let mut host: FileSystemHost<Volume> = FileSystemHost::new(params, Volume { tree })?;
     match mount_point {
         Some(point) => host.mount(point)?,
         None => host.mount(winfsp::host::MountPoint::NextFreeDrive)?,

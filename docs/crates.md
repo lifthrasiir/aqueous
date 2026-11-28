@@ -19,9 +19,14 @@ more there.
   `cargo aqr-win` keeps it beside aqr-win, `--register` registers it, the installer carries it.
 - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe` and `aqr-shell.dll`,
   packed by its `build.rs` with aqr-exe's filters and solid LZMA2 (Windows).
-- `aqr-mount` — `aqr-mount.exe`, a read-only drive of WinFsp where WinFsp is installed (mounted
-  while it runs; for now one fixed file). A program of its own: it links the bindings of WinFsp,
-  GPL-3.0, and is GPL-3.0 as built (its README).
+- `aqr-mount` — what the mounting programs share: a read-only tree of nodes (`Tree`: lookup in
+  a directory, in any case or not, attributes, entries, reads at an offset), each program
+  serving it through its system's interface; for now `OneFile`, one fixed file. Each system's
+  program is released its own way: Windows' aqr-mount-win, macOS's to be in aqr-mac, Linux's
+  to be a FUSE one.
+- `aqr-mount-win` — `aqr-mount.exe`, a read-only drive of WinFsp where WinFsp is installed
+  (mounted while it runs). It links the bindings of WinFsp, GPL-3.0, so it is GPL-3.0 as built
+  and released on its own, not in the installer (its README).
 - `aqr-l10n` — the frontends' messages (`messages/{en,ko}.toml`, English the source; a table of
   each section, so that the SFX stub carries only its `sfx`), and what the systems read of them:
   Windows' string table, the bundle's `.lproj/*.strings`.

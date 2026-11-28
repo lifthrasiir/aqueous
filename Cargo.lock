@@ -1464,7 +1464,12 @@ dependencies = [
 [[package]]
 name = "aqr-mount"
 version = "0.1.0"
+
+[[package]]
+name = "aqr-mount-win"
+version = "0.1.0"
 dependencies = [
+ "aqr-mount",
  "windows-sys",
  "winfsp",
 ]

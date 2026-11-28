@@ -1,0 +1,17 @@
+[package]
+name = "aqr-mount-win"
+version = "0.1.0"
+edition = "2024"
+description = "aqr-mount.exe: archives mounted as drives through WinFsp where it is installed (released on its own: it links GPL-3.0 bindings)"
+publish = false
+
+[[bin]]
+name = "aqr-mount"
+path = "src/main.rs"
+
+[dependencies]
+aqr-mount.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winfsp.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_System_Registry"] }
