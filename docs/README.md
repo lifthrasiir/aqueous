@@ -18,5 +18,6 @@ the history of finished work is in git.
 - `log-design.md`, `xml-design.md`, `div3-design.md`, `pak-inference-design.md`, `azo-x86-filter-search.md`: notes behind aqr-log, aqr-xml, aqr-div3, aqr-infer-pak and AZO's x86 filter.
 - `sfx-config-design.md`, `encrypted-sfx-design.md`: self-extracting programs' settings (`.aqr/sfx/`), and those of encrypted archives (mostly not done).
 - `win-shell-ext-design.md`: archives browsed in Explorer as folders (a shell namespace extension), decoded by `aqr --serve` behind a COM local server.
+- `ipc-design.md`: the frontends' protocols (`--ipc`, `--session`, `--serve`) made one, documented (`man/aqripc.7`, to be); not done yet.
 - `other-projects.md`: survey of other projects.
 - `rar3-decoding.md`, `rar5-decoding.md`, `installshield-cab.md` (English): notes on the RAR formats for the clean-room aqr-rar, and on InstallShield cabinets.
