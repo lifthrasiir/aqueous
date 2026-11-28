@@ -12,3 +12,6 @@ aqr-mount.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser.workspace = true
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true

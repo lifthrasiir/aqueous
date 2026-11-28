@@ -42,11 +42,17 @@ and the Windows SDK's `ucrt`, `um` and `shared`. Both x86_64-pc-windows-msvc and
 Windows 7 target (`cargo +NIGHTLY win7 -p aqr-mount-win`) build. Other systems build a stub that
 says it is the program of Windows.
 
+## Tests
+
+`tests/mount.rs` mounts an archive on a directory (a junction WinFsp makes, of no
+administrator) as the program is run (the `aqr` built beside it: `cargo rt -p aqr -p
+aqr-mount-win`): its files read whole and in another case, writes refused, the directory gone
+with the process killed. It is skipped where WinFsp is not installed (CI's runners).
+
 ## Left
 
 - `aqr mount` and aqr-win's verb starting it, and unmounting it.
 - Its place in the release (a job of the release workflow, signed like the others).
 - A security descriptor of the volume (none is given now: WinFsp then grants what a read-only
   volume allows).
-- Tests (they need WinFsp installed; CI's Windows runner does not have it).
 - Not tried on Windows 7 itself: WinFsp 2.1's support of it is unverified.

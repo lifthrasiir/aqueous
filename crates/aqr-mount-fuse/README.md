@@ -23,8 +23,12 @@ The package's binary is `aqr-mount-fuse`, released as `aqr-mount` (the Linux rel
 would take the name `aqr-mount` too, and the two would overwrite each other in one target
 directory.
 
+## Tests
+
+`tests/mount.rs` mounts an archive as the program is run (the `aqr` built beside it: `cargo rt
+-p aqr -p aqr-mount-fuse`), reads its files whole, has writes refused and SIGTERM unmount. It
+is skipped where there is no `/dev/fuse` or `fusermount3` (a container).
+
 ## Left
 
-- Tests: they need `/dev/fuse` and `fusermount3`. Tried by hand in WSL2 (Ubuntu, kernel 6.18):
-  `ls -la`, `cat`, `stat`, a read at an offset, `df`, a name in another case not found,
-  writes refused as `EROFS`, SIGINT unmounting.
+- A manual page (`man/`), with the release archive's.
