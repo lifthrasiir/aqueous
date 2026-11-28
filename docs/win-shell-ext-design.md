@@ -271,7 +271,7 @@ leaf로 둔다. 단일 파일은 압축기 확장자를 뗀 이름의 아카이�
 - 다른 형식에 넣기(aqr-pack으로 다시 쓰기). 넣기의 가상 파일(다른 아카이브, 메일 첨부), 지우기(`aqr
   --delete`)와 이름 바꾸기(`--move`).
 - 손상된 아카이브의 salvage 보기.
-- ProjFS로 "폴더로 마운트".
+- ProjFS로 "폴더로 마운트"(WinFsp가 설치된 곳에서는 "드라이브로 마운트": `crates/aqr-mount-win`, aqr-win-shell의 `mount`).
 - Windows 11의 새 컨텍스트 메뉴(aqr-win README의 Left).
 - ARM64(EC).
 - 측정(§8).

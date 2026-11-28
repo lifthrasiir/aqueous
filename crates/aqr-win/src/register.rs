@@ -272,6 +272,30 @@ pub fn register() -> Result<(), String> {
         }
         capability(&ext, &progid)?;
     }
+    // "Mount as a drive" of the archives and "Eject" of the drives (aqr-win-shell's `mount`:
+    // commands that show themselves where aqr-mount and WinFsp are, and of aqr-mount's drives)
+    let mounted = [CLASS.to_owned()].into_iter().chain(FORMATS.iter().map(|(ext, ..)| format!("Aqueous.{ext}")));
+    match dll.is_file() {
+        true => {
+            for (clsid, name) in [(MOUNT_COMMAND, "Aqueous: mount"), (EJECT_COMMAND, "Aqueous: eject")] {
+                let key = format!(r"CLSID\{}", crate::drop::braced(&clsid));
+                set(&key, None, name)?;
+                set(&format!(r"{key}\InProcServer32"), None, &dll.display().to_string())?;
+                set(&format!(r"{key}\InProcServer32"), Some("ThreadingModel"), "Apartment")?;
+            }
+            for class in mounted {
+                let key = format!(r"{class}\shell\{MOUNT_VERB}");
+                set(&key, None, shell::MOUNT.text())?;
+                set(&key, Some("MUIVerb"), &indirect(shell::MOUNT))?;
+                set(&key, Some("MultiSelectModel"), "Single")?;
+                set(&key, Some("ExplorerCommandHandler"), &crate::drop::braced(&MOUNT_COMMAND))?;
+            }
+            set(EJECT_KEY, None, shell::EJECT.text())?;
+            set(EJECT_KEY, Some("MUIVerb"), &indirect(shell::EJECT))?;
+            set(EJECT_KEY, Some("ExplorerCommandHandler"), &crate::drop::braced(&EJECT_COMMAND))?;
+        }
+        false => unregister_mount()?,
+    }
     for (name, value) in [
         ("ApplicationName", "Aqueous"),
         ("ApplicationDescription", &indirect(shell::DESCRIPTION)),
@@ -303,6 +327,29 @@ const PAGE: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0x54394
 /// The class of the archive files' drop handler (aqr-win-shell's `drop::DROP_HANDLER`).
 const DROP_HANDLER: windows_sys::core::GUID =
     windows_sys::core::GUID::from_u128(0x6a3e2f84_1c5d_4b7a_9e08_d2f4c6b1a937);
+
+/// The classes of "Mount as a drive" and "Eject" (aqr-win-shell's `mount::MOUNT_COMMAND` and
+/// `EJECT_COMMAND`).
+const MOUNT_COMMAND: windows_sys::core::GUID =
+    windows_sys::core::GUID::from_u128(0x8d2b6f31_4c7a_4e95_b1d8_63a0f2e9c574);
+const EJECT_COMMAND: windows_sys::core::GUID =
+    windows_sys::core::GUID::from_u128(0x2e94c7a6_5f1b_4d38_a0c2_b7d6e18f4b93);
+
+/// The verb of "Mount as a drive", of each archive's class.
+const MOUNT_VERB: &str = "Aqueous.mount";
+/// The verb of "Eject", of the drives.
+const EJECT_KEY: &str = r"Drive\shell\Aqueous.eject";
+
+/// "Mount as a drive" and "Eject" taken away (their classes, the verbs).
+fn unregister_mount() -> Result<(), String> {
+    for clsid in [MOUNT_COMMAND, EJECT_COMMAND] {
+        delete(&classes(&format!(r"CLSID\{}", crate::drop::braced(&clsid))))?;
+    }
+    for class in [CLASS.to_owned()].into_iter().chain(FORMATS.iter().map(|(ext, ..)| format!("Aqueous.{ext}"))) {
+        delete(&classes(&format!(r"{class}\shell\{MOUNT_VERB}")))?;
+    }
+    delete(&classes(EJECT_KEY))
+}
 
 fn drop_handler_key() -> String {
     format!(r"CLSID\{}", crate::drop::braced(&DROP_HANDLER))
@@ -340,6 +387,7 @@ pub fn unregister() -> Result<(), String> {
     delete(&classes(&folder_key()))?;
     delete(&classes(&page_key()))?;
     delete(&classes(&drop_handler_key()))?;
+    unregister_mount()?;
     for key in COMPRESS.iter().chain(&MENU).chain(&OLD).copied().chain([CLASS]) {
         delete(&classes(key))?;
     }

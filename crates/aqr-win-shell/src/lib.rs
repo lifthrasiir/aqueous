@@ -19,6 +19,7 @@ pub mod folder;
 mod handlers;
 pub mod history;
 mod menu;
+pub mod mount;
 pub mod pidl;
 mod props;
 mod versions;
@@ -130,6 +131,11 @@ impl IClassFactory_Impl for Factory_Impl {
                 // SAFETY: the caller's pointers, given a reference
                 unsafe { p.query(riid, ppv) }
             }
+            mount::MOUNT_COMMAND | mount::EJECT_COMMAND => {
+                let c = mount::command(self.clsid);
+                // SAFETY: the caller's pointers, given a reference
+                unsafe { c.query(riid, ppv) }
+            }
             history::VERSIONS_PAGE | history::TEST_VERSIONS_PAGE => {
                 let p: windows::Win32::UI::Shell::IShellPropSheetExt = history::Page::default().into();
                 // SAFETY: the caller's pointers, given a reference
@@ -176,7 +182,11 @@ pub unsafe extern "system" fn DllGetClassObject(
         static LANGUAGE: std::sync::Once = std::sync::Once::new();
         LANGUAGE.call_once(|| _ = aqr_l10n::init(&aqr_l10n::system_languages()));
         match clsid {
-            folder::FOLDER | history::VERSIONS_PAGE | drop::DROP_HANDLER => {}
+            folder::FOLDER
+            | history::VERSIONS_PAGE
+            | drop::DROP_HANDLER
+            | mount::MOUNT_COMMAND
+            | mount::EJECT_COMMAND => {}
             folder::TEST_FOLDER | history::TEST_VERSIONS_PAGE | drop::TEST_DROP_HANDLER => {
                 // (of the test's run, where it tells one)
                 let class = std::env::var("AQR_SHELL_TEST_SERVER")

@@ -62,7 +62,13 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   `rollback-version ARCHIVE #N` (asked first: the versions after point N deleted, `aqr
   --rollback`, or point N saved as a new archive beside it, `aqr --convert --keep-until`); and
   its drop handler: files dropped on a `.aqr` file, or in its folder, are added to it by
-  `aqr-win add ARCHIVE DIR PATH...` (`aqr -a`, each `--rename DIR/NAME`).
+  `aqr-win add ARCHIVE DIR PATH...` (`aqr -a`, each `--rename DIR/NAME`); and "Mount as a
+  drive" of the archives and "Eject" of the drives (the library's `IExplorerCommand`s, the
+  verbs' `ExplorerCommandHandler`, shown where they apply: aqr-mount and WinFsp installed,
+  aqr-mount's drives), which run `aqr-win mount ARCHIVE` (aqr-mount, crates/aqr-mount-win,
+  beside this program: `aqr-mount --install`; a dialog with Cancel while it opens the archive,
+  then the drive opened in Explorer, or the one it is mounted as already) and `aqr-win eject
+  DRIVE` (asked first where files of it are open, then forced).
 - `aqr-win --serve` is the COM local server of the archives a shell extension browses
   (`docs/win-shell-ext-design.md`, `src/serve.rs`): late-bound objects (`IDispatch`, marshaled
   by the system's proxies, no type library) over one `aqr --serve`, an archive's handle closed a
