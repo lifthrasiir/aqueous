@@ -23,8 +23,8 @@ recompressors' code; native decoding is an optimization picked by hash.
   `aqr-foreign`), modules and their runtimes (`aqr-api`, `aqr-ld`, `aqr-modules`, `aqr-wasmrt`,
   `aqr-blob`, `aqr-interp`, `aqr-dll`), self-extracting programs (`aqr-sfx`, `aqr-sfx-shim`),
   frontends (`aqr-ipc`, `aqr-win`, `aqr-win-shell`, `aqr-win-install`, `aqr-mac`, `aqr-l10n`,
-  `aqr-mount-win`) and shared parts (`aqr-common`, `aqr-testkit`, `aqr-num`, `aqr-walk`,
-  `aqr-version`, `aqr-bincache`, `aqr-mount`). One line each and more in `docs/crates.md`.
+  `aqr-mount-win`, `aqr-mount-fuse`) and shared parts (`aqr-common`, `aqr-testkit`,
+  `aqr-num`, `aqr-walk`, `aqr-version`, `aqr-bincache`, `aqr-mount`). One line each and more in `docs/crates.md`.
 - `codecs/` — the recompressor crates `aqr-*`, each with a `README.md` and a `FORMAT.md`; a crate
   with a `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE.
 - `man/` — the manual pages, mdoc(7): `aqr.1` (every option of `--help`, a test of crates/aqr

@@ -10,7 +10,7 @@ whole, as WinFsp gives them.
 |---|---|---|
 | Windows | `aqr-mount-win` (`aqr-mount.exe`, WinFsp) | on its own, beside the installer |
 | macOS | to be in `aqr-mac` | in the app |
-| Linux | to be a FUSE one | — |
+| Linux | `aqr-mount-fuse` (FUSE through fusermount3) | to be decided |
 
 ## Left
 

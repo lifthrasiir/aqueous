@@ -1,5 +1,5 @@
 //! What the mounting programs share: a read-only [`Tree`] of nodes, which each program serves
-//! through its system's interface (aqr-mount-win through WinFsp, a FUSE one, aqr-mac's).
+//! through its system's interface (aqr-mount-win through WinFsp, aqr-mount-fuse, aqr-mac's).
 //!
 //! Nodes are named by a [`NodeId`], the root being [`ROOT`] (1, FUSE's root inode); names are
 //! looked up one component at a time in a directory. That suits FUSE's inodes as it is and

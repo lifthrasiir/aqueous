@@ -45,6 +45,8 @@ ctr = "0.9"
 embed-resource = "3"
 encoding_rs = "0.8"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# FUSE (aqr-mount-fuse): the protocol in Rust, mounted through fusermount3; no libfuse.
+fuser = "0.19"
 getrandom = "0.4"
 hkdf = "0.12"
 hmac = "0.12"

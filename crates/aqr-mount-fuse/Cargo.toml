@@ -1,0 +1,13 @@
+[package]
+name = "aqr-mount-fuse"
+version = "0.1.0"
+edition = "2024"
+description = "aqr-mount-fuse: archives mounted through FUSE (Linux)"
+publish = false
+
+[dependencies]
+aqr-mount.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser.workspace = true
+libc.workspace = true

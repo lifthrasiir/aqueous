@@ -23,10 +23,12 @@ more there.
   a directory, in any case or not, attributes, entries, reads at an offset), each program
   serving it through its system's interface; for now `OneFile`, one fixed file. Each system's
   program is released its own way: Windows' aqr-mount-win, macOS's to be in aqr-mac, Linux's
-  to be a FUSE one.
+  aqr-mount-fuse.
 - `aqr-mount-win` — `aqr-mount.exe`, a read-only drive of WinFsp where WinFsp is installed
   (mounted while it runs). It links the bindings of WinFsp, GPL-3.0, so it is GPL-3.0 as built
   and released on its own, not in the installer (its README).
+- `aqr-mount-fuse` — a read-only FUSE file system (Linux), mounted while it runs, ended by a
+  signal; fuser (MIT) speaks the protocol and mounts through `fusermount3`, no libfuse.
 - `aqr-l10n` — the frontends' messages (`messages/{en,ko}.toml`, English the source; a table of
   each section, so that the SFX stub carries only its `sfx`), and what the systems read of them:
   Windows' string table, the bundle's `.lproj/*.strings`.
