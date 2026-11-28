@@ -127,6 +127,9 @@ windows-sys = "0.61"
 # (aqr-win-shell's COM classes, by `#[implement]`)
 windows = { version = "0.62", default-features = false }
 windows-core = { version = "0.62", default-features = false }
+# The bindings of WinFsp (GPL-3.0: only aqr-mount, a program of its own, takes them). Delay-loaded:
+# the program runs where WinFsp is not installed and says so.
+winfsp = { version = "0.13", default-features = false, features = ["delayload"] }
 xxhash-rust = "0.8"
 zmij = "1"
 

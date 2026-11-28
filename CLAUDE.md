@@ -22,9 +22,9 @@ recompressors' code; native decoding is an optimization picked by hash.
   `aqr-compress`, `aqr-decompress`, `aqr-native`), other formats (`aqr-unpack`, `aqr-pack`,
   `aqr-foreign`), modules and their runtimes (`aqr-api`, `aqr-ld`, `aqr-modules`, `aqr-wasmrt`,
   `aqr-blob`, `aqr-interp`, `aqr-dll`), self-extracting programs (`aqr-sfx`, `aqr-sfx-shim`),
-  frontends (`aqr-ipc`, `aqr-win`, `aqr-win-shell`, `aqr-win-install`, `aqr-mac`, `aqr-l10n`) and
-  shared parts (`aqr-common`, `aqr-testkit`, `aqr-num`, `aqr-walk`, `aqr-version`,
-  `aqr-bincache`). One line each and more in `docs/crates.md`.
+  frontends (`aqr-ipc`, `aqr-win`, `aqr-win-shell`, `aqr-win-install`, `aqr-mac`, `aqr-l10n`,
+  `aqr-mount`) and shared parts (`aqr-common`, `aqr-testkit`, `aqr-num`, `aqr-walk`,
+  `aqr-version`, `aqr-bincache`). One line each and more in `docs/crates.md`.
 - `codecs/` — the recompressor crates `aqr-*`, each with a `README.md` and a `FORMAT.md`; a crate
   with a `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE.
 - `man/` — the manual pages, mdoc(7): `aqr.1` (every option of `--help`, a test of crates/aqr
@@ -106,7 +106,9 @@ Details in `docs/modules.md`.
     libarchive's RAR readers (have a note written instead), and never unrar's source.
   - bzip2 (libbzip2), LZFSE (Apple's lzfse), zstd's compressor, LHA, ProRes decoders, AZO: black
     boxes only (`docs/crates.md`, "Notes by codec").
-- No GPL code is looked at.
+- No GPL code is looked at (codecs and the rest), except where Aqueous must work with a GPL
+  program, and then only that much: aqr-mount links the GPL-3.0 bindings of WinFsp, a program
+  of its own, so that the others keep their license.
 - Private data (browser profiles and the like) is measured by the user; don't copy it.
 - Design documents: don't repeat what `spec/index.bs` already says; point to the spec section or
   drop the text. Update them (and READMEs) in the same commit as the change.

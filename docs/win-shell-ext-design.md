@@ -14,7 +14,7 @@
 | VirtDisk | ISO, VHD, VHDX만 받는다. 내용을 콜백으로 공급할 수 없다 |
 | ProjFS | 선택 기능이라 켜야 하고, 읽은 파일은 디스크에 hydrate된다 |
 | Cloud Files (cfapi) | sync root 등록과 정리가 무겁고, 동기화 상태 아이콘이 뜬다 |
-| WinFsp, Dokany | 드라이버 설치가 필요하고, 라이선스가 퍼블릭 도메인 배포와 맞지 않는다 |
+| WinFsp, Dokany | 드라이버 설치가 필요하고, 라이선스가 퍼블릭 도메인 배포와 맞지 않는다(설치된 WinFsp에 마운트하는 것은 별도 프로그램 `crates/aqr-mount`) |
 | 별도 창 (7-Zip, WinRAR) | 탐색기와 똑같이 만들 수 없다 |
 | **Shell namespace extension** | **채택** |
 
