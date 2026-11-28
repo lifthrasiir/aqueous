@@ -422,7 +422,7 @@ mod tests {
     1"
             )
             .count(),
-            26 * LANGS.len()
+            28 * LANGS.len()
         );
     }
 
