@@ -18,7 +18,7 @@ is for the tests. The tests of `ServedTree` run the `aqr` built beside them (`ca
 | System | Program | Released |
 |---|---|---|
 | Windows | `aqr-mount-win` (`aqr-mount.exe`, WinFsp) | on its own, beside the installer |
-| macOS | to be in `aqr-mac` | in the app |
+| macOS | to be in `aqr-mac` (deferred: macFUSE/FUSE-T, a local NFS server or FSKit) | in the app |
 | Linux | `aqr-mount-fuse` (FUSE through fusermount3) | as `aqr-mount`, in the release archive |
 
 ## Left
