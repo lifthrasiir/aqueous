@@ -1,8 +1,8 @@
 //! The menu "Aqueous" and "Eject" as Explorer has them: the library loaded (`aqr_shell.dll`, of
 //! the classes `more::MENU` and `mount::EJECT_COMMAND`), the commands asked their state of shell
 //! items and invoked. The menu's commands of archives are shown of archives alone ("Mount as a
-//! drive" where aqr-mount.exe is beside the library and WinFsp is installed, the versions' of a
-//! `.aqr` file), those of compressing of all; Eject of aqr-mount's drives alone, and invoked it
+//! drive" disabled unless aqr-mount.exe is beside the library and WinFsp is installed, the
+//! versions' of a `.aqr` file), those of compressing of all; Eject of aqr-mount's drives alone, and invoked it
 //! ejects (by aqr-win beside the library). Nothing is registered.
 //!
 //! It needs aqr.exe, aqr-win.exe and aqr-mount.exe built beside the library (`cargo rt -p aqr -p
@@ -25,6 +25,7 @@ use windows::Win32::UI::Shell::{
 use windows::core::{GUID, HRESULT, HSTRING, Interface, s};
 
 const ENABLED: u32 = 0;
+const DISABLED: u32 = 0x1;
 const HIDDEN: u32 = 0x2;
 
 fn built() -> PathBuf {
@@ -124,13 +125,13 @@ fn commands() {
         }
     }
 
-    // of the archive: all (Mount where aqr-mount is beside the library and WinFsp is
+    // of the archive: all (Mount disabled unless aqr-mount is beside the library and WinFsp is
     // installed); of a file of another type, those of compressing alone
     let available = built().join("aqr-mount.exe").is_file() && winfsp();
     let archive = t.to_str().unwrap();
     let other = d.join("t").join("a.txt");
     let other = other.to_str().unwrap();
-    assert_eq!(state(sub(Item::Mount), archive, false).unwrap(), if available { ENABLED } else { HIDDEN });
+    assert_eq!(state(sub(Item::Mount), archive, false).unwrap(), if available { ENABLED } else { DISABLED });
     for item in [Item::Test, Item::ExtractVersion, Item::NameVersion, Item::CompressZip, Item::CompressOptions] {
         assert_eq!(state(sub(item), archive, false).unwrap(), ENABLED, "{item:?}");
     }

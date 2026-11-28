@@ -4,8 +4,8 @@
 //! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`,
 //!   with this program's icon; and beside it `Aqueous.more`, the menu "Aqueous", the shell
 //!   extension's (aqr-win-shell's `more`, its `ExplorerCommandHandler`), each of whose commands
-//!   shows itself of what is chosen: of archives, "Test", "Mount as a drive" (of one, where
-//!   aqr-mount and WinFsp are), "Extract a previous version…" and "Name this version…" (of one
+//!   shows itself of what is chosen: of archives, "Test", "Mount as a drive" (of one, disabled
+//!   unless aqr-mount and WinFsp are installed), "Extract a previous version…" and "Name this version…" (of one
 //!   `.aqr` file: [`crate::version`]); then of all [`more`]'s ("Compress with passphrase…",
 //!   `aqr -P`; after a separator "Compress into .zip", ".7z", [`OTHER_FORMATS`]; after another
 //!   "Compress with options…", the dialog of the options). Those of many paths are dropped on

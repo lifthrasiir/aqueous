@@ -66,8 +66,8 @@ object is released, for the server to close it a minute later (and to end, idle)
 - The menu "Aqueous" of files and folders (`src/more.rs`, an `IExplorerCommand` of
   subcommands: the verb `Aqueous.more`'s `ExplorerCommandHandler`), beside the verbs "Compress
   with Aqueous", "Extract here" and "Extract to…": of archives (by extension, aqr-ipc's
-  `shell::ARCHIVES`) "Test", "Mount as a drive" (of one, where aqr-mount.exe is beside the
-  library and WinFsp is installed: a file and a key), "Extract a previous version…" and "Name
+  `shell::ARCHIVES`) "Test", "Mount as a drive" (of one; disabled unless aqr-mount.exe is beside
+  the library and WinFsp is installed, a file and a key, so that it is seen to need them), "Extract a previous version…" and "Name
   this version…" (of one `.aqr` file); then of all the ways to compress. Each command tells at
   once whether it is shown of the items it is asked of (the menu itself is told nothing of
   them). Invoked, a verb of many paths drops them on aqr-win's class of it (as Explorer does on

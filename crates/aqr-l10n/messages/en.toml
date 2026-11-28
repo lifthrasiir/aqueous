@@ -83,7 +83,7 @@ test = "Test"
 name_version = "Name this version…"
 extract_version = "Extract a previous version…"
 description = "Archives recompressed losslessly; other formats extracted"
-# Of an archive, where aqr-mount and WinFsp are installed; of a drive it mounted.
+# Of an archive (disabled unless aqr-mount and WinFsp are installed); of a drive it mounted.
 mount = "Mount as a drive"
 eject = "Eject"
 

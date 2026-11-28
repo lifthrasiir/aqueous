@@ -3,8 +3,9 @@
 //! Aqueous", "Extract here" and "Extract to…", which stay verbs of their own, what is used less.
 //!
 //! - Of archives (their extensions: aqr-ipc's `shell::ARCHIVES`) chosen: "Test"; "Mount as a
-//!   drive" of one, where aqr-mount and WinFsp are ([`crate::mount::available`]); "Extract a
-//!   previous version…" and "Name this version…" of one `.aqr` file;
+//!   drive" of one, disabled where aqr-mount or WinFsp is not installed
+//!   ([`crate::mount::available`]: shown all the same, so that it is seen to need them);
+//!   "Extract a previous version…" and "Name this version…" of one `.aqr` file;
 //! - then, of all, after a separator: "Compress with passphrase…", "Compress into .zip" and
 //!   ".7z", and after another, "Compress with options…".
 //!
@@ -33,6 +34,7 @@ pub const MENU: GUID = GUID::from_u128(0x5b17e3a9_d64c_4f20_8e71_a92c0b6d4f38);
 const HAS_SUBCOMMANDS: u32 = 0x1;
 const SEPARATOR_BEFORE: u32 = 0x20;
 const ENABLED: u32 = 0;
+const DISABLED: u32 = 0x1;
 const HIDDEN: u32 = 0x2;
 
 /// The commands of the menu, in its order.
@@ -97,6 +99,16 @@ impl Item {
         GUID::from_u128(MENU.to_u128() ^ i as u128)
     }
 
+    /// Its state of `paths`, the items chosen: shown or not, and Mount disabled where it cannot
+    /// mount.
+    fn state(self, paths: &[String]) -> u32 {
+        match self.shown(paths) {
+            false => HIDDEN,
+            true if self == Item::Mount && !crate::mount::available() => DISABLED,
+            true => ENABLED,
+        }
+    }
+
     /// Whether it is shown of `paths`, the items chosen.
     fn shown(self, paths: &[String]) -> bool {
         let archives = !paths.is_empty() && paths.iter().all(|p| aqr_ipc::shell::is_archive(Path::new(p)));
@@ -104,7 +116,7 @@ impl Item {
         match self {
             Item::Menu => true,
             Item::Test => archives,
-            Item::Mount => archives && one && crate::mount::available(),
+            Item::Mount => archives && one,
             Item::ExtractVersion | Item::NameVersion => one && aqr_ipc::shell::is_aqueous(Path::new(&paths[0])),
             Item::CompressPassphrase | Item::CompressZip | Item::Compress7z | Item::CompressOptions => {
                 !paths.is_empty()
@@ -183,7 +195,7 @@ impl IExplorerCommand_Impl for Command_Impl {
     fn GetState(&self, items: Ref<IShellItemArray>, _: BOOL) -> windows::core::Result<u32> {
         let r = std::panic::catch_unwind(|| {
             let paths = items.as_ref().and_then(|i| paths(i).ok()).unwrap_or_default();
-            if self.item.shown(&paths) { ENABLED } else { HIDDEN }
+            self.item.state(&paths)
         });
         Ok(r.unwrap_or(HIDDEN))
     }
