@@ -1,0 +1,415 @@
+.\" The protocol of aqr --ipc, in mdoc(7). The implementation is crates/aqr/src/ipc.rs (the
+.\" requests and the run), session.rs (inventory) and serve.rs (the archives browsed), and the
+.\" frame crates/aqr-ipc/src/wire.rs, which the frontends' side (crates/aqr-ipc) shares. Keep
+.\" them together.
+.Dd November 28, 2026
+.Dt AQRIPC 7
+.Os
+.Sh NAME
+.Nm aqripc
+.Nd the protocol by which a program drives aqr
+.Sh SYNOPSIS
+.Nm aqr
+.Op Ar options
+.Fl -ipc
+.Sh DESCRIPTION
+.Ql aqr --ipc
+is driven by another program (a graphical frontend, a mount) through its standard input and
+output, both ways at once.
+It takes no inputs: the work comes with its requests.
+The options of its command line (such as
+.Fl T
+and
+.Fl Z )
+are those of everything it serves.
+Its standard error is a log for a person, not part of the protocol.
+.Pp
+This is version 2 of the protocol.
+Until Aqueous 1.0, a version may change in ways that are not compatible, and its number is
+raised; after, it only grows (new requests, new fields), its number raised where anything is
+taken away or changes its meaning.
+.Ss Messages
+A message is a line of JSON, an object, and where it has
+.Ql \(dqblob\(dq: Ns Ar N
+at its top,
+.Ar N
+bytes right after the line's newline, as they are (no encoding).
+No other field is so read, at any depth: a field of the same name inside an object is only data.
+Both sides send messages so.
+A line that is not an object of JSON is ignored.
+.Pp
+A request is
+.Ql {\(dqq\(dq: Ns Ar N , Ns \(dqop\(dq: Ns Ar OP , Ns ...} ,
+numbered by the side that sends it (each side numbers its own: the numbers of the two sides are
+unrelated).
+Its replies are
+.Ql {\(dqr\(dq: Ns Ar N , Ns ...} ,
+each but the last with
+.Ql \(dqmore\(dq:true ;
+the last has no
+.Ql more .
+Replies of different requests come in any order.
+A request that fails has as its last reply
+.Ql {\(dqr\(dq: Ns Ar N , Ns \(dqerror\(dq:{\(dqkind\(dq: Ns Ar K , Ns \(dqmessage\(dq: Ns Ar M Ns }} ,
+.Ar K
+a word for programs (see
+.Sx ERRORS ) ,
+.Ar M
+a sentence in English, which a frontend that does not know
+.Ar K
+shows as it is.
+.Pp
+A path is a string, or where it is not text (a name of Windows of a lone surrogate, a name of
+Unix not of UTF-8)
+.Ql {\(dqraw\(dq: Ns Ar HEX Ns } :
+on Windows its units of UTF-16, little-endian, else its bytes.
+Names inside archives are strings, of
+.Ql /
+between them, as
+.Ql aqr -d
+writes them.
+.Ss Hello
+The frontend's first message is its hello, which aqr answers before anything else:
+.Bd -literal -offset indent
+> {"hello":2,"answers":["overwrite","passphrase"],"chunk":4194304}
+< {"hello":2,"ops":["run","inventory","open",...],"chunk":4194304}
+.Ed
+.Pp
+.Ql answers
+are the kinds of question the frontend answers (see
+.Sx QUESTIONS ) ;
+aqr asks no others.
+.Ql chunk
+is the most bytes of a blob the frontend wants, between 1 MiB (the default) and 4 MiB; aqr
+answers what it takes.
+.Ql ops
+are the requests it serves.
+A frontend of an older version than aqr knows is refused: aqr ends, telling so on its standard
+error.
+.Pp
+Standard input closed cancels the run where one is at work (as
+.Ic cancel
+does), else ends aqr.
+.Sh REQUESTS
+.Bl -tag -width Ds
+.It Ic run Pq Ar args
+Does what
+.Nm aqr
+would with the arguments
+.Ar args
+(an array of strings, or paths as above), once a process.
+Its replies tell how far it is
+.Pq see Sx EVENTS ;
+its last is
+.Ql {\(dqexit\(dq: Ns Ar CODE } ,
+as the process ends with that code.
+A second run is refused
+.Pq Ql busy ;
+the requests of the other kinds go on being served while one is at work.
+.It Ic inventory Pq Ar args
+Gathers the inputs of a compression of
+.Ar args
+ahead of it, as a dialog of options asks while its user chooses them (only
+.Fl x ,
+.Fl L ,
+.Fl p ,
+.Fl -rm
+and the inputs bear on it).
+Its replies, now and then, have
+.Ql files
+(found so far),
+.Ql bytes
+(of those read so far),
+.Ql walked
+(whether the directories are all walked) and
+.Ql done ,
+true of the last.
+A new inventory replaces the one at work, whose last reply is then the error
+.Ql cancelled ;
+of the same inputs, it is the same work, replied to the new request.
+A run of the same inputs takes what was gathered, or waits for it where it is at work.
+.It Ic cancel Pq Ar of , Op Ar finish
+Cancels request
+.Ar of :
+a run, its output being written removed (with
+.Ar finish
+true, an archive being written is ended as it is, of the files written; an extraction is always
+ended so, the file being written removed); an inventory; a read, before its next reply.
+Its reply is empty.
+.It Ic open Pq Ar path , Op Ar passphrase , Op Ar at
+Opens the archive at
+.Ar path ,
+by its metadata alone: its reply has
+.Ql archive ,
+a handle the other requests name,
+.Ql identity
+(the file opened, by volume, number, size and time),
+.Ql single
+(an archive of a single file, whose one entry is the name it is extracted as) and, of an
+archive of another format,
+.Ql fields ,
+what its entries may have.
+The same file opened again while it is open is the same handle (closed as many times); a file
+changed at the path is opened anew,
+.Ql changed
+true, the handle before staying of the file it was.
+An encrypted archive is opened of
+.Ar passphrase
+(else the error
+.Ql encrypted ,
+or
+.Ql wrong-passphrase ) .
+.Ar at ,
+the
+.Ql metadata
+of a journal point, opens the archive as it was then, as
+.Fl -at
+does.
+Archives of other formats that
+.Nm aqr
+reads (ZIP, 7z, RAR, tar, ...) and single files compressed are opened alike.
+.It Ic list Pq Ar archive , Ar dir , Op Ar verbose
+The entries of directory
+.Ar dir
+(names joined by
+.Ql / ,
+empty for the root), in replies of at most 4096
+.Ql entries .
+An entry has its
+.Ql name ,
+its
+.Ql kind
+.Pq Cm dir , Cm file , Cm link , Cm other
+and what is known of it: a file's
+.Ql size ,
+.Ql mtime
+(seconds and nanoseconds since 1970;
+.Ql local
+true of a local time of no known zone;
+.Ql crtime ,
+.Ql atime ,
+.Ql ctime
+alike),
+.Ql attrs ,
+.Ql owner ,
+.Ql mode ,
+.Ql win ,
+.Ql mac ,
+.Ql flags ,
+.Ql comment ,
+a link's
+.Ql target .
+With
+.Ar verbose
+true, what
+.Ql aqr -t -v
+tells of a file too
+.Pq Cm data , Cm overhead , Cm share , Cm ratio , Cm segment , Cm formula , Cm nodes .
+.It Ic stat Pq Ar archive , Ar path , Op Ar verbose
+The entry at
+.Ar path ,
+as
+.Ql entry
+(the root's of no name).
+.It Ic read Pq Ar archive , Ar path , Ar offset , Ar len
+The bytes of the file at
+.Ar path
+from
+.Ar offset ,
+at most
+.Ar len
+(fewer only at the end of the file, none past it), as the blobs of its replies, each at most
+the hello's
+.Ql chunk .
+The first read of a file decodes all of what it is decoded with, which is kept for the reads
+after (in memory, or spilled to files past a bound,
+.Fl Z Cm serve:cache ) .
+.It Ic close Pq Ar archive
+Gives the handle back; once all of a file's are, the archive is let go of.
+.It Ic journal Pq Ar archive
+Its journal points (its named versions), as
+.Ql points :
+each its
+.Ql metadata
+(what
+.Ic open
+takes as
+.Ar at ) ,
+.Ql time
+(milliseconds since 1970),
+.Ql shown
+and
+.Ql label .
+.It Ic progress Pq Ar archive
+How far the decoding of its files is:
+.Ql decompressed
+and
+.Ql evaluated ,
+.Ql [ Ns Ar done , Ar total ]
+bytes, and
+.Ql evaluating .
+.It Ic trim
+The files kept dropped:
+.Ql trimmed ,
+their bytes.
+.El
+.Sh EVENTS
+The replies of a run, each with
+.Ql event :
+.Bl -tag -width Ds
+.It Cm begin
+An archive to make
+.Pq Ar mode Cm compress
+or decode
+.Pq Cm decompress , Cm test ,
+of
+.Ql inputs
+into
+.Ql output
+(null testing, and with
+.Fl -auto-dir
+where it is not decided yet).
+.It Cm output
+With
+.Fl -auto-dir ,
+what the archive is extracted as, once decided.
+.It Cm progress
+How far it is, a few times a second: compressing,
+.Ql probe ,
+.Ql analysis
+and
+.Ql compression ,
+each
+.Ql [ Ns Ar done , Ar total ]
+(files of the probe, bytes otherwise), and while the files are listed
+.Ql listed
+.Pq Ql [ Ns Ar files , Ar bytes ] ,
+.Ql read
+and
+.Ql dir ;
+decoding,
+.Ql decompressed
+and
+.Ql evaluated
+(bytes); converting an Aqueous archive,
+.Ql written .
+With
+.Ql file ,
+where one is worked on long:
+.Ql {\(dqpath\(dq,\(dqseconds\(dq}
+(and its
+.Ql len
+and
+.Ql done
+where told).
+.It Cm end
+An archive done:
+.Ql output ,
+.Ql files ,
+.Ql read ,
+.Ql written
+and
+.Ql seconds .
+.It Cm skipped
+An archive not made, as the frontend answered
+.Pq Ql output .
+.It Cm notice
+Something to tell of an archive made that does not fail it:
+.Ql kind ,
+.Ql output ,
+.Ql message .
+Of kind
+.Ql unsigned :
+a self-extracting program is not signed.
+.It Cm error
+The failure that the run ends with
+.Pq Ql message .
+.It Cm stopped
+Stopped as the frontend asked; of an archive ended as it was,
+.Ql kept :
+.Ql {\(dqfiles\(dq,\(dqbytes\(dq}
+it holds, or null.
+.El
+.Sh QUESTIONS
+Where the options leave something open, aqr asks the frontend by a request of its own, and
+the work that asks waits for its reply:
+.Bd -literal -offset indent
+< {"q":1,"op":"ask","job":7,"kind":"overwrite","path":"x.aqr"}
+> {"r":1,"value":true}
+.Ed
+.Pp
+.Ql job
+is the run's request.
+.Bl -tag -width Ds
+.It Cm overwrite Pq Ar path
+Whether the output at
+.Ar path ,
+there already, is written over (true) or the archive skipped.
+.It Cm passphrase Pq Ar path , Ar mode , Ar again , Ar confirm
+The passphrase (a string, empty or not), or null to give up: compressing with
+.Fl P
+.Pq Ar mode Cm compress , Ar path No null , to be typed twice as Ar confirm No tells ;
+decoding, as
+.Fl P
+begins or as archive
+.Ar path
+needs one,
+.Ar again
+where the one before was wrong; converting, the input's, then the new one's
+.Pq Ar mode Ql convert-new .
+.El
+.Pp
+Each kind but
+.Cm passphrase
+has an option that answers it before it is asked
+.Pf ( Cm overwrite : Fl f ) ,
+and where the frontend does not take a kind, aqr does as it does with no one to ask.
+.Sh ERRORS
+.Bl -tag -width Ds -compact
+.It Cm bad-request
+A request of missing or wrong fields, or of arguments
+.Nm aqr
+does not take.
+.It Cm not-known
+A request of no kind served.
+.It Cm busy
+A second run, or no thread for the request.
+.It Cm cancelled
+Cancelled, or replaced.
+.It Cm no-archive
+No archive open of the handle.
+.It Cm not-found
+No such file, or no such entry in the archive.
+.It Cm not-a-directory , Cm not-a-file
+An entry of another kind than the request's.
+.It Cm encrypted , Cm wrong-passphrase
+An archive encrypted, opened of no passphrase or of a wrong one.
+.It Cm failed
+Anything else.
+.El
+.Sh EXAMPLES
+A compression dialog: the inputs counted while the options are chosen, then the run.
+.Bd -literal -offset indent
+> {"hello":2,"answers":["overwrite"]}
+< {"hello":2,"ops":[...],"chunk":1048576}
+> {"q":1,"op":"inventory","args":["-c","--","D:\e\ea"]}
+< {"r":1,"more":true,"files":120,"bytes":3400000,"walked":false,"done":false}
+< {"r":1,"files":1400,"bytes":61000000,"walked":true,"done":true}
+> {"q":2,"op":"run","args":["-c","-l","7","-o","D:\e\ea.aqr","--","D:\e\ea"]}
+< {"r":2,"more":true,"event":"begin","mode":"compress",...}
+< {"r":2,"more":true,"event":"progress",...}
+< {"r":2,"more":true,"event":"end",...}
+< {"r":2,"exit":0}
+.Ed
+.Pp
+A file of an archive read, in replies of the chunk:
+.Bd -literal -offset indent
+> {"q":1,"op":"open","path":"x.aqr"}
+< {"r":1,"archive":1,"identity":"...","single":false}
+> {"q":2,"op":"read","archive":1,"path":"a/b.bin","offset":0,"len":3000000}
+< {"r":2,"more":true,"blob":1048576}   followed by its bytes
+< {"r":2,"more":true,"blob":1048576}   ...
+< {"r":2,"blob":902848}                ...
+.Ed
+.Sh SEE ALSO
+.Xr aqr 1

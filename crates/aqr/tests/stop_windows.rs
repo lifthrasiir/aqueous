@@ -230,27 +230,17 @@ fn atomic_append_stopped() {
 /// spacer of restored), where it can still be appended to.
 #[test]
 fn ipc_append_cancelled_restores() {
-    use std::io::{BufRead, BufReader, Write};
+    use common::frontend;
     let d = scratch("ipc-cancel");
     many(&d);
     copy_of(&d, 50);
     ok(&d, &["-q", "-o", "b.aqr", "half"]);
     let out = d.join("b.aqr");
     let before = fs::read(&out).unwrap();
-    let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
-        .current_dir(&d)
-        .args(["--ipc", "-a", "-T", "1", "-B", "100K", "-S", "1", "b.aqr", "src"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let i = c.stdin.as_mut().unwrap();
-    writeln!(i, r#"{{"hello":1,"answers":[]}}"#).unwrap();
-    i.flush().unwrap();
-    let mut lines = BufReader::new(c.stdout.take().unwrap()).lines().map(|l| l.unwrap());
-    assert!(lines.next().unwrap().contains("hello"));
-    assert!(lines.next().unwrap().contains("begin"));
+    let args = ["-a", "-T", "1", "-B", "100K", "-S", "1", "b.aqr", "src"].map(std::ffi::OsStr::new);
+    let (mut c, rx) = frontend::start(Some(&d), &args, &[], Stdio::null());
+    let mut lines = rx.into_iter();
+    assert_eq!(lines.next().unwrap()["event"], "begin");
     // (some segments committed)
     let start = Instant::now();
     while fs::metadata(&out).unwrap().len() < before.len() as u64 + 200_000 && start.elapsed() < Duration::from_secs(5)
@@ -258,12 +248,10 @@ fn ipc_append_cancelled_restores() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(c.try_wait().unwrap().is_none(), "done before it was cancelled");
-    let i = c.stdin.as_mut().unwrap();
-    writeln!(i, r#"{{"control":"cancel"}}"#).unwrap();
-    i.flush().unwrap();
-    let rest: Vec<String> = lines.filter(|l| !l.contains("progress")).collect();
+    frontend::send(&mut c, &serde_json::json!({"control": "cancel"}));
+    let rest: Vec<serde_json::Value> = lines.filter(|v| v["event"] != "progress").collect();
     assert_eq!(c.wait().unwrap().code(), Some(130), "{rest:?}");
-    assert!(rest.iter().any(|l| l.contains("stopped")), "{rest:?}");
+    assert!(rest.iter().any(|v| v["event"] == "stopped"), "{rest:?}");
     assert_eq!(fs::read(&out).unwrap(), before);
     let t = ok(&d, &["-K", "b.aqr"]);
     assert!(!stderr(&t).contains("footer made again"), "{}", stderr(&t));

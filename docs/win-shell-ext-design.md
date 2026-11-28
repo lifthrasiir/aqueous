@@ -4,7 +4,7 @@
 여는 기능이다. Windows의 ZIP 폴더(`zipfldr.dll`)와 같은 자리다. 구현은 끝났고(열어 보기, 복사, 열기,
 암호, 썸네일, 속성, 판, 넣기, 다른 형식, 설치), 이 문서는 지금 코드를 바꿀 때 필요한 결정과 이유, 남은
 일만 적는다. 끝낸 일의 경과는 git 이력에 있다. 구현은 세 crate에 나뉜다: `crates/aqr/src/serve.rs`
-(`aqr --serve`, 프로토콜은 그 모듈 문서), `crates/aqr-win/src/serve.rs`(`aqr-win --serve`),
+(`aqr --ipc`, 프로토콜은 그 모듈 문서), `crates/aqr-win/src/serve.rs`(`aqr-win --serve`),
 `crates/aqr-win-shell`(`aqr-shell.dll`, README와 각 파일의 모듈 문서).
 
 ## 1. 방식의 선택
@@ -29,16 +29,16 @@ Explorer 또는 파일 대화상자를 연 아무 프로세스
   └ aqr-shell.dll (in-proc, 얇게)       IShellFolder2, PIDL, IDataObject, 메뉴, 열, 썸네일
         │ COM (CLSCTX_LOCAL_SERVER, IDispatch)
   aqr-win --serve (COM local server)   활성화, 수명, 암호 대화상자, IStream, Materialize
-        │ 표준 입출력 (aqr --serve 프로토콜)
-  aqr --serve                          아카이브 열기, 디코딩, 캐시
+        │ 표준 입출력 (aqr --ipc 프로토콜)
+  aqr --ipc                          아카이브 열기, 디코딩, 캐시
 ```
 
 - **aqr-shell.dll**은 공용 파일 대화상자를 여는 모든 프로세스에 로드되므로 디코더, Wasm 엔진, 큰 캐시를
   넣지 않는다. 남의 프로세스가 같이 죽지 않게 모든 COM 진입점에서 panic을 `catch_unwind`로 잡아 실패로
   바꾼다. cargo의 결과는 `aqr_shell.dll`이고 배포 이름은 `aqr-shell.dll`이다(복사할 때 바꾼다).
 - **aqr-win --serve**는 `LocalServer32`이고 GUI 서브시스템이라 콘솔 창이 뜨지 않는다. 디코더는 링크하지
-  않고 `aqr --serve` 자식 하나(`CREATE_NO_WINDOW`)에 맡긴다. 모든 아카이브가 그 하나를 같이 쓴다(§10).
-- **aqr --serve**는 디코딩과 캐시를 맡는다(코덱, 네이티브 모듈, 샌드박스가 이미 있다). 표준 입출력
+  않고 `aqr --ipc` 자식 하나(`CREATE_NO_WINDOW`)에 맡긴다. 모든 아카이브가 그 하나를 같이 쓴다(§10).
+- **aqr --ipc**는 디코딩과 캐시를 맡는다(코덱, 네이티브 모듈, 샌드박스가 이미 있다). 표준 입출력
   프로토콜이라 COM 없이 테스트하고(`crates/aqr/tests/serve.rs`) macOS File Provider에서도 다시 쓸 수 있다.
   프론트엔드 쪽 구현은 `aqr_ipc::serve`다.
 
@@ -124,18 +124,18 @@ PIDL). PIDL은 즐겨찾기, 최근 항목, 점프 목록에 오래 남으므로
 - 확인하지 않은 것: RDP 세션 여럿이나 사용자 전환에서 따로 뜨는지, 관리자 권한(high IL) 프로세스의 파일
   대화상자에서 부를 때 별도 인스턴스가 뜨는지.
 
-### 4.2 aqr --serve (프로토콜)
+### 4.2 aqr --ipc (프로토콜)
 
-한 줄에 JSON 하나(`--ipc`처럼), 모든 요청에 `id`, 응답 순서는 바뀔 수 있다. 요청: `hello`, `open`,
-`list`, `stat`, `read`, `progress`, `journal`, `trim`, `close`. 전체는 `crates/aqr/src/serve.rs`의 모듈
-문서다. 결정만 적는다.
+프로토콜은 `man/aqripc.7`(규범)이고, 탐색 요청(`open`, `list`, `stat`, `read`, `progress`, `journal`, `trim`,
+`close`)의 구현은 `crates/aqr/src/serve.rs`다. 처음에는 `--serve`라는 별도 옵션이었다(`docs/ipc-design.md`).
+결정만 적는다.
 
 - `open`은 같은 파일(경로와 identity)이면 같은 handle이다. 암호는 `passphrase`로 받고, 없으면 `encrypted`,
-  틀리면 `wrong` 오류다.
+  틀리면 `wrong-passphrase` 오류다.
 - `list`/`stat`의 `verbose` 값(`data`, `overhead`, `ratio`, ...)은 블록을 다 읽어야 해서 처음 한 번 만들어
   둔다. 디렉터리는 4096개씩 나눠 보낸다.
-- `read`는 한 번에 1 MiB까지다(큰 읽기 하나가 다른 응답을 오래 막지 않게). `progress`는 요청별로 나뉘지
-  않는다(§10).
+- `read`는 길이 제한이 없고, 응답이 chunk(기본 1 MiB, hello로 4 MiB까지)씩 나뉘어 온다. 큰 읽기 하나가 다른
+  응답을 오래 막지 않게 하려는 것이다. 셸 확장은 1 MiB씩 읽는다. `progress`는 요청별로 나뉘지 않는다(§10).
 - `open`의 `at`은 journal 지점의 `metadata`이고, 그 지점의 아카이브(그 뒤의 지점을 모른다)를 따로 연다.
 
 ## 5. 캐시
@@ -252,7 +252,7 @@ leaf로 둔다. 단일 파일은 압축기 확장자를 뗀 이름의 아카이�
 
 - 암호화된 아카이브: 서버(aqr-win)가 `passphrase.rs`의 대화상자로 묻는다(부모는 DLL이 넘긴 셸 창, DLL이
   `CoAllowSetForegroundWindow`로 앞으로 올린다). 틀리면 다시 묻고, 취소하면 그 폴더는 조용히 실패한다.
-  아카이브 객체가 암호를 갖고 있다가 `aqr --serve`가 다시 뜨면 그것으로 다시 연다.
+  아카이브 객체가 암호를 갖고 있다가 `aqr --ipc`가 다시 뜨면 그것으로 다시 연다.
 - 손상: 메타데이터를 읽지 못하면 열거가 실패한다. DLL이 `aqr`의 메시지를 상자로 보이고(같은 것은 10초에 한
   번) 셸에는 `ERROR_CANCELLED`를 돌려 탐색기가 오류를 또 보이지 않게 한다. salvage(`open_salvaging`)로 읽은
   부분만 보이는 것은 하지 않았다(§10).
@@ -313,7 +313,7 @@ leaf로 둔다. 단일 파일은 압축기 확장자를 뗀 이름의 아카이�
   서버는 등록된 경로가 자기 것과 같아 교체된 줄 모르고 옛 코드로 계속 응답한다(VM에서 겪었다). 탐색기가
   로드한 DLL은 지울 수 없지만 이름은 바꿀 수 있으므로 `.old`로 비키고 새 것을 쓴다. 탐색기는 다시 시작할
   때까지 이전 것을 쓰므로(DLL은 pin) 설치 프로그램이 알려 준다.
-- 제거(`aqr-win --uninstall`): 먼저 종료 이벤트로 서버들을 끝낸다(`aqr --serve`의 aqr.exe가 실행 중이면 지울 수
+- 제거(`aqr-win --uninstall`): 먼저 종료 이벤트로 서버들을 끝낸다(`aqr --ipc`의 aqr.exe가 실행 중이면 지울 수
   없다). 탐색기가 잡은 DLL은 임시 디렉터리로 옮기고 다음 로그인 때 지우도록 `RunOnce`에 적는다(값 이름은
   옮긴 파일의 것: 거듭돼도 앞의 것을 덮지 않는다). aqr-win.exe는 `cmd.exe`가 지운다.
 - Windows 7 VM에서 설치, 열어 보기와 복사, DLL을 잡은 채 업데이트, 제거, 다음 로그인의 삭제까지 확인했다.

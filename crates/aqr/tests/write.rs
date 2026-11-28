@@ -204,7 +204,7 @@ fn signalled(dir: &Path, args: &[&str], when: &dyn Fn() -> bool, signals: &[&str
 /// stopped, and the archive appended to is not removed: it holds what it did before.
 #[test]
 fn ipc_append_cancelled() {
-    use std::io::{BufRead, BufReader, Write};
+    use common::frontend;
     for by_message in [true, false] {
         let d = scratch(if by_message { "ipc-cancel" } else { "ipc-eof" });
         let want = source(&d, 3);
@@ -218,30 +218,18 @@ fn ipc_append_cancelled() {
             })
             .collect();
         fs::write(d.join("src/big"), data).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
-            .current_dir(&d)
-            .args(["--ipc", "-a", "b.aqr", "src"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let i = c.stdin.as_mut().unwrap();
-        writeln!(i, r#"{{"hello":1,"answers":[]}}"#).unwrap();
-        i.flush().unwrap();
-        let mut lines = BufReader::new(c.stdout.take().unwrap()).lines().map(|l| l.unwrap());
-        assert!(lines.next().unwrap().contains("hello"));
-        assert!(lines.next().unwrap().contains("begin"));
+        let args = ["-a", "b.aqr", "src"].map(std::ffi::OsStr::new);
+        let (mut c, rx) = frontend::start(Some(&d), &args, &[], Stdio::null());
+        let mut lines = rx.into_iter();
+        assert_eq!(lines.next().unwrap()["event"], "begin");
         if by_message {
-            let i = c.stdin.as_mut().unwrap();
-            writeln!(i, r#"{{"control":"cancel"}}"#).unwrap();
-            i.flush().unwrap();
+            frontend::send(&mut c, &serde_json::json!({"control": "cancel"}));
         } else {
             drop(c.stdin.take());
         }
-        let rest: Vec<String> = lines.filter(|l| !l.contains("progress")).collect();
+        let rest: Vec<serde_json::Value> = lines.filter(|v| v["event"] != "progress").collect();
         assert_eq!(c.wait().unwrap().code(), Some(130), "{rest:?}");
-        assert!(rest.iter().any(|l| l.contains("stopped")), "{rest:?}");
+        assert!(rest.iter().any(|v| v["event"] == "stopped"), "{rest:?}");
         // (as it was, or whole with what was committed of the append: never gone nor torn)
         let after = fs::read(d.join("b.aqr")).expect("the archive appended to removed");
         assert!(after.len() >= before.len());
@@ -858,43 +846,34 @@ fn damaged_files_named() {
     fs::remove_dir_all(&d).unwrap();
 }
 
-/// `aqr --ipc args` in `dir`, greeted: the child and the lines it tells (JSON), through a channel.
+/// `aqr --ipc` in `dir`, greeted, then run with `args`: the child and its messages (as
+/// `common::frontend::seen`, the hello first), through a channel.
 #[cfg(unix)]
 fn ipc_start(
     dir: &Path,
     args: &[&str],
     answers: &[&str],
 ) -> (std::process::Child, std::sync::mpsc::Receiver<serde_json::Value>) {
-    use std::io::{BufRead, BufReader, Write};
+    use common::frontend;
     let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
         .current_dir(dir)
         .arg("--ipc")
-        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    writeln!(c.stdin.as_mut().unwrap(), r#"{{"hello":1,"answers":{}}}"#, serde_json::json!(answers)).unwrap();
-    let out = c.stdout.take().unwrap();
-    let (to, from) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for l in BufReader::new(out).lines() {
-            let Ok(l) = l else { return };
-            if to.send(serde_json::from_str(&l).unwrap()).is_err() {
-                return;
-            }
-        }
-    });
-    (c, from)
+    frontend::send(&mut c, &serde_json::json!({"hello": 1, "answers": answers}));
+    let rx = frontend::messages(&mut c);
+    frontend::send(&mut c, &serde_json::json!({"control": "begin", "args": args}));
+    (c, rx)
 }
 
+/// A line as the tests write it (`common::frontend::send_bytes`); nothing where the process is
+/// done and gone already.
 #[cfg(unix)]
 fn ipc_send(c: &mut std::process::Child, bytes: &[u8]) {
-    use std::io::Write;
-    let i = c.stdin.as_mut().unwrap();
-    // (the process may be done and gone already)
-    _ = i.write_all(bytes).and_then(|_| i.flush());
+    common::frontend::send_bytes(c, bytes);
 }
 
 /// out/5: a frontend (`--ipc`) ending an extraction (`-d`) by `finish`, by `cancel` and by
@@ -915,7 +894,7 @@ fn ipc_extraction_ended() {
     for how in ["finish", "cancel", "eof"] {
         let _ = fs::remove_dir_all(d.join("x"));
         let (mut c, rx) = ipc_start(&d, &["-d", "-o", "x", "a.aqr"], &[]);
-        assert_eq!(rx.recv().unwrap()["hello"], 1);
+        assert_eq!(rx.recv().unwrap()["hello"], 2);
         assert_eq!(rx.recv().unwrap()["event"], "begin");
         let start = std::time::Instant::now();
         while walk_len(&d.join("x")) == 0 && start.elapsed() < std::time::Duration::from_secs(5) {
@@ -985,7 +964,7 @@ fn ipc_ignores_unreadable_lines() {
     let d = scratch("out5-lines");
     let want = archive_and_directory(&d);
     let (mut c, rx) = ipc_start(&d, &["-d", "-f", "-o", "x", "a.aqr"], &["overwrite"]);
-    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    assert_eq!(rx.recv().unwrap()["hello"], 2);
     assert_eq!(next_event(&rx)["event"], "begin");
     for line in [
         &b"\xff\xfe\xfd\n"[..],
@@ -1014,7 +993,7 @@ fn ipc_gone_with_a_question_open() {
     archive_and_directory(&d);
     for how in ["eof", "cancel", "finish"] {
         let (mut c, rx) = ipc_start(&d, &["-d", "-o", "x", "a.aqr"], &["overwrite"]);
-        assert_eq!(rx.recv().unwrap()["hello"], 1);
+        assert_eq!(rx.recv().unwrap()["hello"], 2);
         // (the question comes before the work begins, or after: either way, open)
         let mut q = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         if q["event"] == "begin" {
@@ -1045,13 +1024,13 @@ fn ipc_non_ascii_paths() {
     fs::write(src.join("é.txt"), text(2, 2000)).unwrap();
     let want = files(&src);
     let (mut c, rx) = ipc_start(&d, &["-c", "-o", "압축 파일.aqr", "원본 폴더"], &[]);
-    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    assert_eq!(rx.recv().unwrap()["hello"], 2);
     let (begin, end) = (next_event(&rx), next_event(&rx));
     assert_eq!(begin["output"], "압축 파일.aqr");
     assert_eq!((end["event"].as_str(), end["files"].as_u64()), (Some("end"), Some(2)), "{end}");
     assert!(c.wait().unwrap().success());
     let (mut c, rx) = ipc_start(&d, &["-d", "-o", "출력 폴더", "압축 파일.aqr"], &[]);
-    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    assert_eq!(rx.recv().unwrap()["hello"], 2);
     let (begin, end) = (next_event(&rx), next_event(&rx));
     assert_eq!(begin["output"], "출력 폴더");
     assert_eq!(end["event"], "end", "{end}");
@@ -1075,7 +1054,7 @@ fn ipc_closed_after_the_end() {
     for args in [&["-c", "-o", "a.aqr", "src"][..], &["-d", "-o", "x", "a.aqr"]] {
         let args: Vec<_> = ["-Z", "test:linger=300"].iter().chain(args).copied().collect();
         let (mut c, rx) = ipc_start(&d, &args, &[]);
-        assert_eq!(rx.recv().unwrap()["hello"], 1);
+        assert_eq!(rx.recv().unwrap()["hello"], 2);
         let (begin, end) = (next_event(&rx), next_event(&rx));
         assert_eq!((begin["event"].as_str(), end["event"].as_str()), (Some("begin"), Some("end")), "{args:?}: {end}");
         drop(c.stdin.take());
@@ -1100,7 +1079,7 @@ fn ipc_closed_between_archives() {
     ok(&d, &["-q", "-o", "a.aqr", "src"]);
     ok(&d, &["-q", "-o", "b.aqr", "src"]);
     let (mut c, rx) = ipc_start(&d, &["-Z", "test:linger=300", "-d", "--each", "a.aqr", "b.aqr"], &[]);
-    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    assert_eq!(rx.recv().unwrap()["hello"], 2);
     let (begin, end) = (next_event(&rx), next_event(&rx));
     assert_eq!((begin["output"].as_str(), end["event"].as_str()), (Some("a"), Some("end")), "{end}");
     drop(c.stdin.take());
@@ -1112,9 +1091,9 @@ fn ipc_closed_between_archives() {
     fs::remove_dir_all(&d).unwrap();
 }
 
-/// out/5: a session's requests that are wrong are answered by an error (or ignored where they
-/// are not requests), the session going on to answer a right one; a `begin` without arguments
-/// ends it with an error, and the frontend gone before `begin` ends it as stopped.
+/// out/5: inventories that are wrong are answered by an error (or ignored where they are not
+/// requests), the process going on to answer a right one; a run without arguments is answered
+/// by an error too, and the frontend gone before any run ends the process as it is (exit 0).
 #[cfg(unix)]
 #[test]
 fn session_wrong_requests() {
@@ -1123,32 +1102,20 @@ fn session_wrong_requests() {
     fs::write(d.join("src/a.txt"), b"aaaa").unwrap();
     let start = || {
         let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
-            .arg("--session")
+            .arg("--ipc")
             .current_dir(&d)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        ipc_send(&mut c, b"{\"hello\":1,\"answers\":[]}\n");
+        ipc_send(&mut c, b"{\"hello\":2,\"answers\":[]}\n");
         c
     };
-    let events = |c: &mut std::process::Child| {
-        use std::io::{BufRead, BufReader};
-        let out = c.stdout.take().unwrap();
-        let (to, from) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for l in BufReader::new(out).lines().map_while(Result::ok) {
-                if to.send(serde_json::from_str::<serde_json::Value>(&l).unwrap()).is_err() {
-                    return;
-                }
-            }
-        });
-        from
-    };
+    let events = |c: &mut std::process::Child| common::frontend::messages(c);
     let mut c = start();
     let rx = events(&mut c);
-    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    assert_eq!(rx.recv().unwrap()["hello"], 2);
     for (req, error) in [
         (&br#"{"control":"inventory","id":1}"#[..], "without args"),
         (br#"{"control":"inventory","id":2,"args":[1,{"a":2}]}"#, "strings"),
@@ -1175,23 +1142,15 @@ fn session_wrong_requests() {
         (Some(9), Some(1), &serde_json::json!(true)),
         "{v}"
     );
-    // a begin of no args ends the session
+    // a run of no args: an error, the process going on
     ipc_send(&mut c, b"{\"control\":\"begin\"}\n");
-    // (standard input kept open: `wait` would close it, the frontend gone)
-    let _stdin = c.stdin.take();
-    let status = c.wait().unwrap();
-    let mut err = String::new();
-    std::io::Read::read_to_string(&mut c.stderr.take().unwrap(), &mut err).unwrap();
-    assert_eq!(status.code(), Some(1), "{err}");
-    assert!(err.contains("a request without args"), "{err}");
-    // the frontend gone before it begins
-    let mut c = start();
-    let rx = events(&mut c);
-    assert_eq!(rx.recv().unwrap()["hello"], 1);
+    let v = next_event(&rx);
+    assert!(v["event"] == "error" && v["message"].as_str().is_some_and(|m| m.contains("without args")), "{v}");
+    // the frontend gone before any run: the process ends as it is
     drop(c.stdin.take());
     let rest: Vec<_> = rx.iter().collect();
-    assert_eq!(c.wait().unwrap().code(), Some(130));
-    assert!(rest.iter().any(|v| v["event"] == "stopped"), "{rest:?}");
+    assert_eq!(c.wait().unwrap().code(), Some(0), "{rest:?}");
+    assert!(rest.is_empty(), "{rest:?}");
     fs::remove_dir_all(&d).unwrap();
 }
 

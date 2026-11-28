@@ -1,39 +1,35 @@
-//! `--session`: this program started for a frontend before it knows what to do, as a compression
-//! dialog does: it asks, while its user chooses the options, how many files the inputs are and
-//! how big, and when the user is done it has the archive made, in this process, with what it
-//! found meanwhile ([`ipc`]'s requests, `crates/aqr/src/ipc.rs` for the rest of the protocol).
+//! `inventory` requests (`--ipc`, `man/aqripc.7`): the inputs of a compression gathered ahead of
+//! it, as a compression dialog asks while its user chooses the options (how many files, how
+//! big); the `run` that compresses the same takes what was gathered ([`take`]).
 //!
 //! ```text
-//! > {"control":"inventory","id":7,"args":["-c","-x","node_modules","--","a","b"]}
-//! < {"event":"inventory","id":7,"files":120,"bytes":3400000,"walked":false,"done":false}
-//! < {"event":"inventory","id":7,"files":1400,"bytes":61000000,"walked":true,"done":true}
-//! > {"control":"begin","args":["-c","-l","7","-x","node_modules","-o","a.aqr","--","a","b"]}
+//! > {"q":7,"op":"inventory","args":["-c","-x","node_modules","--","a","b"]}
+//! < {"r":7,"more":true,"files":120,"bytes":3400000,"walked":false,"done":false}
+//! < {"r":7,"files":1400,"bytes":61000000,"walked":true,"done":true}
+//! > {"q":8,"op":"run","args":["-c","-l","7","-x","node_modules","-o","a.aqr","--","a","b"]}
 //! ```
 //!
-//! - `inventory`: the arguments are what `aqr` is given to compress (only those that bear on
-//!   what is gathered need be there: `-x`, `-L`, `-p`, `--rm`, and the inputs). It is answered
-//!   by `inventory` events of its `id`, now and then while the files are listed (`files` found,
-//!   `bytes` of those read so far, `walked`: whether all the directories are walked, the bytes
-//!   still growing until `done`), the last with `done` true; or one with `error`. Nothing is
-//!   known for a while after a request: the frontend shows what it has, or nothing. A new
-//!   request replaces the one at work (its work stopped), unless it gathers the same: then
-//!   it is the same work, told by the new `id`.
-//! - `begin`: the arguments of the compression, as `aqr` would be run with them; from here this
-//!   process does what they ask, as it would have without a session. What was gathered by the
-//!   inventory of the same inputs, exclusions, `-L`, `-p` and `--rm` is taken for it ([`cached`]),
-//!   or waited for where it is at work; anything else is gathered again.
+//! - The arguments are what `aqr` is given to compress (only those that bear on what is gathered
+//!   need be there: `-x`, `-L`, `-p`, `--rm`, and the inputs). Replies come now and then while
+//!   the files are listed (`files` found, `bytes` of those read so far, `walked`: whether all the
+//!   directories are walked, the bytes still growing until `done`), the last with `done` true;
+//!   or an error. Nothing is known for a while after a request.
+//! - A new request replaces the one at work (its work stopped, its last reply an error
+//!   `cancelled`), unless it gathers the same: then it is the same work, replied to the new one.
+//! - The `run` of the same inputs, exclusions, `-L`, `-p` and `--rm` takes what was gathered
+//!   ([`cached`]), or waits for it where it is at work; anything else is gathered again.
 //!
-//! The pool of threads is of the size `aqr` had on start (`-T` of `begin` does not change it).
+//! The pool of threads is of the size `aqr` had on start (`-T` of the run does not change it).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use aqr_ipc::{BEGIN, INVENTORY};
+use aqr_ipc::wire::kind;
 use serde_json::{Value, json};
 
-use crate::{Args, Exclude, Gathered, Inputs, Mapper, gather, ipc, parse_from, view};
+use crate::{Args, Exclude, Gathered, Inputs, Mapper, gather, ipc, view};
 
 /// What a gathering depends on.
 #[derive(Clone, PartialEq)]
@@ -73,20 +69,10 @@ pub fn cached(a: &Args, inputs: Inputs) -> Option<Gathered> {
     if c.as_ref().is_some_and(|(k, _)| *k == Key::new(a, inputs)) { c.take().map(|(_, g)| g) } else { None }
 }
 
-/// The arguments of a request, parsed as `aqr` would have them.
-fn request(v: &Value) -> Result<Args, String> {
-    let args = v["args"].as_array().ok_or("--session: a request without args")?;
-    let mut argv: Vec<std::ffi::OsString> = vec!["aqr".into(), "--ipc".into()];
-    for a in args {
-        argv.push(a.as_str().ok_or("--session: args are strings")?.into());
-    }
-    parse_from(argv)
-}
-
 /// An inventory at work.
 struct Running {
     key: Key,
-    /// The id the events are told by: the last request's.
+    /// The request replied to: the last one's.
     id: Arc<AtomicU64>,
     listing: Arc<view::Listing>,
     /// The last event, once it is done.
@@ -110,31 +96,42 @@ impl Running {
         Running { key, id, listing, last, handle }
     }
 
-    /// Told again by request `id`, as the same.
+    /// Replied to request `id` from now on, as the same (the one before told so, where it was
+    /// not done: its last reply then given already).
     fn adopt(&self, id: u64) {
-        self.id.store(id, Ordering::Relaxed);
-        if let Some(mut v) = self.last.lock().unwrap().clone() {
-            v["id"] = id.into();
-            ipc::tell(v);
+        let last = self.last.lock().unwrap();
+        let before = self.id.swap(id, Ordering::Relaxed);
+        match last.clone() {
+            Some(v) => reply(id, v),
+            None => ipc::fail(before, kind::CANCELLED, "inventory: replaced by another of the same"),
         }
     }
 
-    /// Stopped, and waited for.
+    /// Stopped, and waited for: its request told so where it was not done.
     fn stop(self) {
         self.listing.cancel();
         _ = self.handle.join();
+        if self.last.lock().unwrap().is_none() {
+            ipc::fail(self.id.load(Ordering::Relaxed), kind::CANCELLED, "inventory: cancelled");
+        }
     }
 }
 
-fn event(id: &AtomicU64, l: &view::Listing, done: bool) -> Value {
+fn event(l: &view::Listing, done: bool) -> Value {
     let (files, bytes, walked) = l.counts();
-    json!({"event": "inventory", "id": id.load(Ordering::Relaxed), "files": files, "bytes": bytes, "walked": walked, "done": done})
+    json!({"files": files, "bytes": bytes, "walked": walked, "done": done})
+}
+
+/// Replies `v` to inventory `id`: the last where it is `done`.
+fn reply(id: u64, v: Value) {
+    let more = v["done"] != true;
+    ipc::reply(id, v, more, &[]);
 }
 
 /// Gathers `a`'s inputs as a compression would, telling how far it is; what is gathered is kept
 /// for [`cached`].
 fn inventory(key: Key, a: Args, id: &AtomicU64, l: &view::Listing, last: &Mutex<Option<Value>>) {
-    let r = crate::ticked(true, &|| ipc::tell(event(id, l, false)), || {
+    let r = crate::ticked(true, &|| reply(id.load(Ordering::Relaxed), event(l, false)), || {
         aqr_common::pool::run(|| -> Result<Gathered, String> {
             let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
             let mut g = Gathered::new(mapper, a.preserve);
@@ -146,60 +143,59 @@ fn inventory(key: Key, a: Args, id: &AtomicU64, l: &view::Listing, last: &Mutex<
     match r {
         Ok(g) => {
             *CACHE.lock().unwrap() = Some((key, g));
-            let v = event(id, l, true);
+            let v = event(l, true);
             *last.lock().unwrap() = Some(v.clone());
-            ipc::tell(v);
+            reply(id.load(Ordering::Relaxed), v);
         }
         Err(e) if e == CANCELLED => {}
         Err(e) => {
-            let v = json!({"event": "inventory", "id": id.load(Ordering::Relaxed), "error": e, "done": true});
+            let v = json!({"error": aqr_ipc::wire::error(kind::FAILED, e), "done": true});
             *last.lock().unwrap() = Some(v.clone());
-            ipc::tell(v);
+            reply(id.load(Ordering::Relaxed), v);
         }
     }
 }
 
-/// Serves the frontend's requests until it begins: the arguments of the compression then.
-pub fn serve(a: Args) -> Result<Args, String> {
-    aqr_common::pool::init(a.opt.threads);
-    let requests = ipc::requests().ok_or("--session: no requests to read")?;
-    let mut running: Option<Running> = None;
-    // (the reader ends the process where the frontend is gone)
-    while let Ok(v) = requests.recv() {
-        let id = v["id"].as_u64().unwrap_or(0);
-        match v["control"].as_str() {
-            Some(INVENTORY) => match request(&v) {
-                Err(e) => ipc::tell(json!({"event": "inventory", "id": id, "error": e, "done": true})),
-                Ok(a) => {
-                    let key = Key::new(&a, Inputs::of(&a));
-                    match running.take() {
-                        Some(r) if r.key == key => {
-                            r.adopt(id);
-                            running = Some(r);
-                        }
-                        other => {
-                            if let Some(r) = other {
-                                r.stop();
-                            }
-                            running = Some(Running::start(id, a));
-                        }
-                    }
-                }
-            },
-            Some(BEGIN) => {
-                let a = request(&v)?;
-                if let Some(r) = running.take() {
-                    // (the same gathering is waited for: it is the work to be done)
-                    if r.key == Key::new(&a, Inputs::of(&a)) {
-                        _ = r.handle.join();
-                    } else {
-                        r.stop();
-                    }
-                }
-                return Ok(a);
+/// The inventory at work, or done last.
+static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+/// Request `inventory` `v`, numbered `q`.
+pub fn request(q: u64, v: &Value) {
+    let a = match ipc::args_of(v) {
+        Ok(a) => a,
+        Err(e) => return ipc::fail(q, kind::BAD_REQUEST, format!("inventory: {e}")),
+    };
+    let key = Key::new(&a, Inputs::of(&a));
+    let mut running = RUNNING.lock().unwrap();
+    match running.take() {
+        Some(r) if r.key == key => {
+            r.adopt(q);
+            *running = Some(r);
+        }
+        other => {
+            if let Some(r) = other {
+                r.stop();
             }
-            _ => {}
+            *running = Some(Running::start(q, a));
         }
     }
-    Err("--session: the frontend is gone".into())
+}
+
+/// Inventory `of` cancelled, where it is the one at work.
+pub fn cancel(of: u64) {
+    let mut running = RUNNING.lock().unwrap();
+    if running.as_ref().is_some_and(|r| r.id.load(Ordering::Relaxed) == of) {
+        running.take().unwrap().stop();
+    }
+}
+
+/// Before the run of `a`: the inventory of the same waited for (it is the work to be done, taken
+/// by [`cached`]), another stopped.
+pub fn take(a: &Args) {
+    let Some(r) = RUNNING.lock().unwrap().take() else { return };
+    if r.key == Key::new(a, Inputs::of(a)) {
+        _ = r.handle.join();
+    } else {
+        r.stop();
+    }
 }

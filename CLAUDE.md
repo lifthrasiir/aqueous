@@ -28,7 +28,8 @@ recompressors' code; native decoding is an optimization picked by hash.
 - `codecs/` — the recompressor crates `aqr-*`, each with a `README.md` and a `FORMAT.md`; a crate
   with a `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE.
 - `man/` — the manual pages, mdoc(7): `aqr.1` (every option of `--help`, a test of crates/aqr
-  checks), `aqrsfx.5` (`.aqr/sfx/`), `aqrattributes.5` (`.aqr/attributes`). Update them with
+  checks), `aqrsfx.5` (`.aqr/sfx/`), `aqrattributes.5` (`.aqr/attributes`), `aqripc.7` (the
+  protocol of `--ipc`, which the frontends and the mounts speak). Update them with
   what they describe. The site's `man/` is made of them in CI (`scripts/man2html.py OUT`, which
   renders the part of mdoc they use and fails on the rest); `--single FILE` makes them one HTML
   file linked by fragments (for Windows). The Mac and Linux release archives carry the pages.

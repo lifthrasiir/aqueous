@@ -121,7 +121,7 @@ fn combinations_refused() {
         (&["-q", "--format", "nonsense", "in.txt"][..], "not a format to compress into"),
         (&["-q", "--stats=x.txt", "in.txt"], "--stats= takes a file named .json or .html"),
         (&["-q", "--files-from", "list", "in.txt"], "(standard input) among the paths"),
-        (&["--session", "in.txt"], "--session takes no inputs"),
+        (&["--ipc", "in.txt"], "--ipc takes no inputs"),
         (&["--history", "-o", "x", "in.txt"], "takes an archive"),
         (&["--json", "in.txt"], "--json is for -t, --history and --diff"),
         (&["-I", "--rm", "in.txt"], "-I takes an archive and its paths alone"),

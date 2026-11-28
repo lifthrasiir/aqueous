@@ -1,4 +1,4 @@
-//! `aqr --serve` driven as a shell extension drives it: archives opened, their directories
+//! `aqr --ipc`'s archives browsed as a shell extension and a mount browse them: archives opened, their directories
 //! listed as `aqr -t --json` lists them, their files read in pieces as `aqr -d` writes them
 //! (kept in memory, or spilled where they are over the bound), several reads at once, handles
 //! shared and closed, and an archive changed opened anew.
@@ -7,7 +7,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
@@ -19,7 +19,44 @@ fn aqr(d: &Path, args: &[&str]) -> String {
     String::from_utf8(o.stdout).unwrap()
 }
 
-/// `aqr --serve` greeted, and what it answers by request.
+/// Request `v` as the tests write it (`{"open": PATH}`, `{"list": H, "dir": D}`, ...) as it is
+/// sent (`{"op": "open", "path": PATH}`, `{"op": "list", "archive": H, ...}`).
+fn request(mut v: Value) -> Value {
+    let o = v.as_object_mut().unwrap();
+    for op in ["open", "list", "stat", "read", "close", "journal", "progress", "trim"] {
+        if let Some(x) = o.remove(op) {
+            o.insert("op".into(), op.into());
+            match op {
+                "open" => _ = o.insert("path".into(), x),
+                "trim" => {}
+                _ => _ = o.insert("archive".into(), x),
+            }
+            break;
+        }
+    }
+    v
+}
+
+/// Reply `v` as the tests check it: an error as its message (and `encrypted`, `wrong` of an
+/// archive not opened so), a list's last of `more` false.
+fn reply(mut v: Value) -> Value {
+    if let Some(e) = v.get("error").cloned() {
+        let kind = e["kind"].as_str().unwrap_or("");
+        v["error"] = e["message"].clone();
+        if kind == "encrypted" || kind == "wrong-passphrase" {
+            v["encrypted"] = true.into();
+        }
+        if kind == "wrong-passphrase" {
+            v["wrong"] = true.into();
+        }
+    }
+    if v.get("entries").is_some() && v.get("more").is_none() {
+        v["more"] = false.into();
+    }
+    v
+}
+
+/// `aqr --ipc` greeted, and what it replies by request.
 struct Served {
     child: Child,
     out: BufReader<ChildStdout>,
@@ -31,8 +68,8 @@ struct Served {
 impl Served {
     fn start(args: &[&str]) -> Served {
         let mut child = Command::new(env!("CARGO_BIN_EXE_aqr"))
-            .arg("--serve")
             .args(args)
+            .arg("--ipc")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -40,9 +77,9 @@ impl Served {
             .unwrap();
         let out = BufReader::new(child.stdout.take().unwrap());
         let mut s = Served { child, out, early: Vec::new(), next: 0 };
-        s.line(json!({"hello": 1}));
+        s.line(json!({"hello": 2}));
         let (hello, _) = s.message();
-        assert_eq!(hello["hello"], 1);
+        assert_eq!(hello["hello"], 2);
         s
     }
 
@@ -52,32 +89,30 @@ impl Served {
         i.flush().unwrap();
     }
 
-    /// `v` sent as a request: its id.
-    fn send(&mut self, mut v: Value) -> u64 {
+    /// `v` sent as a request ([`request`]): its number.
+    fn send(&mut self, v: Value) -> u64 {
         self.next += 1;
-        v["id"] = self.next.into();
+        let mut v = request(v);
+        v["q"] = self.next.into();
         self.line(v);
         self.next
     }
 
-    /// The next answer, with the bytes after it.
+    /// The next message, with its blob.
     fn message(&mut self) -> (Value, Vec<u8>) {
-        let mut l = String::new();
-        assert!(self.out.read_line(&mut l).unwrap() > 0, "the server ended");
-        let v: Value = serde_json::from_str(&l).unwrap();
-        let mut d = vec![0; v["data"].as_u64().unwrap_or(0) as usize];
-        self.out.read_exact(&mut d).unwrap();
-        (v, d)
+        let m = aqr_ipc::wire::read(&mut self.out).unwrap();
+        let (v, d) = m.expect("the server ended");
+        (reply(v), d)
     }
 
-    /// The next answer to request `id`.
+    /// The next reply to request `id`.
     fn answer(&mut self, id: u64) -> (Value, Vec<u8>) {
-        if let Some(k) = self.early.iter().position(|(v, _)| v["id"] == id) {
+        if let Some(k) = self.early.iter().position(|(v, _)| v["r"] == id) {
             return self.early.remove(k);
         }
         loop {
             let m = self.message();
-            if m.0["id"] == id {
+            if m.0["r"] == id {
                 return m;
             }
             self.early.push(m);
@@ -107,18 +142,26 @@ impl Served {
         }
     }
 
-    /// File `path` read whole, `len` bytes a request.
+    /// File `path` read whole, `len` bytes a request (each in replies of the chunk, 1 MiB).
     fn read(&mut self, h: &Value, path: &str, len: u64) -> Vec<u8> {
         let mut all = Vec::new();
         loop {
             let id = self.send(json!({"read": h, "path": path, "offset": all.len(), "len": len}));
-            let (v, d) = self.answer(id);
-            assert!(v.get("error").is_none(), "{path}: {v}");
-            assert!(d.len() as u64 <= len.min(1 << 20));
-            if d.is_empty() {
+            let mut got = Vec::new();
+            loop {
+                let (v, d) = self.answer(id);
+                assert!(v.get("error").is_none(), "{path}: {v}");
+                assert!(d.len() <= 1 << 20);
+                got.extend(d);
+                if v["more"] != true {
+                    break;
+                }
+            }
+            assert!(got.len() as u64 <= len);
+            if got.is_empty() {
                 return all;
             }
-            all.extend(d);
+            all.extend(got);
         }
     }
 
@@ -206,7 +249,7 @@ fn listed_and_read() {
     let id = s.send(json!({"read": h, "path": "sub/big.txt", "offset": 1_000_000, "len": 10}));
     assert_eq!(s.answer(id).1, files.iter().find(|f| f.0 == "sub/big.txt").unwrap().1[1_000_000..1_000_010]);
     let id = s.send(json!({"read": h, "path": "a.txt", "offset": 9999, "len": 10}));
-    assert_eq!(s.answer(id), (json!({"id": id, "data": 0}), Vec::new()));
+    assert_eq!(s.answer(id), (json!({"r": id}), Vec::new()));
 
     // failures, each told by its request
     for (r, what) in [
@@ -215,7 +258,7 @@ fn listed_and_read() {
         (json!({"list": h, "dir": "a.txt"}), "not a directory"),
         (json!({"list": h, "dir": "a.txt/x"}), "not in the archive"),
         (json!({"list": 999}), "no archive open"),
-        (json!({"what": 1}), "not known"),
+        (json!({"op": "what"}), "not known"),
     ] {
         let v = s.ask(r.clone());
         assert!(v["error"].as_str().is_some_and(|e| e.contains(what)), "{r}: {v}");
@@ -349,25 +392,17 @@ fn client() {
     let d = common::scratch("serve", "client");
     let files = tree(&d);
     let s = Served::start(Path::new(env!("CARGO_BIN_EXE_aqr")), &[]).unwrap();
-    let h = s.ask(json!({"open": d.join("t.aqr")})).unwrap()["archive"].as_u64().unwrap();
+    let h = s.ask(json!({"op": "open", "path": d.join("t.aqr")})).unwrap()["archive"].as_u64().unwrap();
     assert_eq!(s.list(h, "sub").unwrap().len(), 22);
     std::thread::scope(|scope| {
         for (path, bytes) in &files {
             let s = &s;
-            scope.spawn(move || {
-                let mut got = Vec::new();
-                loop {
-                    let d = s.read(h, path, got.len() as u64, 1 << 20).unwrap();
-                    if d.is_empty() {
-                        break;
-                    }
-                    got.extend(d);
-                }
-                assert!(got == *bytes, "{path}");
-            });
+            // (whole, in one request: its replies of the chunk gathered)
+            scope.spawn(move || assert!(s.read(h, path, 0, 8 << 20).unwrap() == *bytes, "{path}"));
         }
     });
-    assert!(matches!(s.read(h, "nope", 0, 10), Err(Error::Failed(m)) if m.contains("not in the archive")));
+    let e = s.read(h, "nope", 0, 10).unwrap_err();
+    assert!(e.is(aqr_ipc::wire::kind::NOT_FOUND) && e.to_string().contains("not in the archive"), "{e}");
     // (killed: what it had open gone with it)
     s.kill();
     while !s.gone() {

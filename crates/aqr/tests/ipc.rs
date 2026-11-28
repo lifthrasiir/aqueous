@@ -1,12 +1,14 @@
-//! `aqr --ipc` driven as a frontend drives it: the hello, the events of an archive, the
+//! `aqr --ipc`'s run driven as a frontend drives it: the hello, the events of an archive, the
 //! overwrite question answered both ways (and not taken), and the work cancelled by a message
 //! and by standard input closed.
 
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdout, Command, Stdio};
+mod common;
 
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+
+use common::frontend;
 use serde_json::{Value, json};
 
 /// A directory of its own for test `name`, empty.
@@ -17,30 +19,15 @@ fn scratch(name: &str) -> PathBuf {
     d
 }
 
-/// `aqr --ipc` with `args`, greeted with the hello taking `answers`: the process and its
-/// messages, the answer to the hello read.
+/// `aqr --ipc` greeted with the hello taking `answers`, then run with `args`: the process and
+/// its messages (as [`frontend::seen`]), the answer to the hello read.
 fn start(args: &[&std::ffi::OsStr], answers: &[&str]) -> (Child, impl Iterator<Item = Value> + use<>) {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
-        .arg("--ipc")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    send(&mut c, json!({"hello": 1, "answers": answers}));
-    let out: ChildStdout = c.stdout.take().unwrap();
-    let mut lines = BufReader::new(out).lines().map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap());
-    let hello = lines.next().unwrap();
-    assert_eq!(hello["hello"], 1);
-    assert_eq!(hello["controls"], json!(["cancel", "finish"]));
-    (c, lines)
+    let (c, rx) = frontend::start(None, args, answers, Stdio::null());
+    (c, rx.into_iter())
 }
 
 fn send(c: &mut Child, v: Value) {
-    let i = c.stdin.as_mut().unwrap();
-    writeln!(i, "{v}").unwrap();
-    i.flush().unwrap();
+    frontend::send(c, &v);
 }
 
 /// The events (not `progress`) and questions until the end, the questions answered `answer`.
@@ -318,9 +305,10 @@ fn frontend_job() {
     fs::write(d.join("b.txt"), "the second file\n".repeat(100)).unwrap();
     let run = |verb: Verb, paths: Vec<PathBuf>| -> State {
         let aqr = std::path::Path::new(env!("CARGO_BIN_EXE_aqr"));
-        let (mut cmd, count) = aqr_ipc::command(aqr, verb, paths, false, "aqr");
-        let mut child = cmd.spawn().unwrap();
-        let job = Job::new(verb, count, child.stdin.take());
+        let mut r = aqr_ipc::command(aqr, verb, paths, false, "aqr");
+        let mut child = r.command.spawn().unwrap();
+        let job = Job::new(verb, r.count, child.stdin.take());
+        job.run(&r.args);
         let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
         std::thread::scope(|s| {
             s.spawn(|| job.read_err(err));
@@ -373,9 +361,9 @@ fn extracting_a_point() {
     assert!(out.join("a.txt").exists() && !out.join("b.txt").exists());
 }
 
-/// `aqr --session`: asked how many files the inputs are while the options are chosen (the same
+/// Inventories: asked how many files the inputs are while the options are chosen (the same
 /// request again told by its new id, another one replacing it, a missing input an error), then
-/// begun with the arguments of the compression.
+/// the run of the compression.
 #[test]
 fn session() {
     let d = scratch("session");
@@ -385,7 +373,7 @@ fn session() {
     fs::write(src.join("b.txt"), "b".repeat(200)).unwrap();
     fs::write(src.join("skip").join("c.txt"), "c".repeat(400)).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_aqr"))
-        .arg("--session")
+        .arg("--ipc")
         .current_dir(&d)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -393,10 +381,9 @@ fn session() {
         .spawn()
         .unwrap();
     send(&mut c, json!({"hello": 1, "answers": []}));
-    let out: ChildStdout = c.stdout.take().unwrap();
-    let mut lines = BufReader::new(out).lines().map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap());
+    let mut lines = frontend::messages(&mut c).into_iter();
     let hello = lines.next().unwrap();
-    assert_eq!(hello["controls"], json!(["cancel", "finish", "inventory", "begin"]));
+    assert!(hello["ops"].as_array().unwrap().iter().any(|o| o == "inventory"), "{hello}");
     // (the events of an id up to the one that is done)
     let mut done = |id: u64| loop {
         let v = lines.next().unwrap();

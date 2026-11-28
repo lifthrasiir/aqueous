@@ -1,9 +1,10 @@
-//! The protocol of `aqr --serve` (`crates/aqr/src/serve.rs` tells it), as a frontend browsing
-//! archives speaks it: `aqr --serve` run ([`Served::start`]), requests sent from any thread and
-//! each waited for by its id, the answers read by a thread of their own.
+//! `aqr --ipc` serving archives (`man/aqripc.7`; `crates/aqr/src/serve.rs` tells the
+//! requests), as a frontend browsing them speaks to it: `aqr` run ([`Served::start`]), requests
+//! sent from any thread and each waited for by its number, the replies read by a thread of their
+//! own.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::BufReader;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -12,63 +13,67 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-/// The version of the protocol.
-pub const VERSION: u64 = 1;
+use crate::wire;
 
-/// The most bytes a `read` is answered with.
-pub const CHUNK: usize = 1 << 20;
+/// The most bytes of a blob, the hello's: a read longer comes in several replies.
+pub const CHUNK: usize = wire::CHUNK;
 
 /// Why a request was not answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// `aqr --serve` is gone (it ended, or failed to start): what it had open is gone with it.
+    /// `aqr` is gone (it ended, or failed to start): what it had open is gone with it.
     Gone,
-    /// It answered with an error: its message.
-    Failed(String),
+    /// It failed: of what kind (`wire::kind`), and its message.
+    Failed { kind: String, message: String },
+}
+
+impl Error {
+    /// Whether it failed of `kind`.
+    pub fn is(&self, kind: &str) -> bool {
+        matches!(self, Error::Failed { kind: k, .. } if k == kind)
+    }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Error::Gone => f.write_str("aqr --serve is gone"),
-            Error::Failed(m) => f.write_str(m),
+            Error::Gone => f.write_str("aqr --ipc is gone"),
+            Error::Failed { message, .. } => f.write_str(message),
         }
     }
 }
 
-/// An answer: its line, and the bytes after it (of a `read`).
+/// A reply: its line, and its blob.
 pub type Answer = (Value, Vec<u8>);
 
-/// `aqr --serve` at work.
+/// `aqr --ipc` at work.
 pub struct Served {
     child: Mutex<Child>,
     stdin: Mutex<Option<ChildStdin>>,
-    /// By request, where its answers go.
+    /// By request, where its replies go.
     pending: Arc<Mutex<HashMap<u64, Sender<Answer>>>>,
     next: AtomicU64,
     gone: Arc<AtomicBool>,
 }
 
 impl Served {
-    /// `aqr --serve` (the program at `aqr`, with `args` before) started and greeted, of no
-    /// console (none made for it).
+    /// `aqr --ipc` (the program at `aqr`, with `args` before) started and greeted, of no console
+    /// (none made for it).
     pub fn start(aqr: &Path, args: &[&str]) -> std::io::Result<Served> {
         let mut cmd = Command::new(aqr);
         #[cfg(windows)]
         std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
-        cmd.args(args).arg("--serve").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.args(args).arg("--ipc").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         let mut child = cmd.spawn()?;
         let mut stdin = child.stdin.take().expect("piped");
         let mut out = BufReader::new(child.stdout.take().expect("piped"));
         let greeted = (|| {
-            writeln!(stdin, "{}", json!({"hello": VERSION}))?;
-            stdin.flush()?;
-            let mut l = String::new();
-            out.read_line(&mut l)?;
-            let hello: Value = serde_json::from_str(&l).map_err(std::io::Error::other)?;
+            // (the largest chunk: reads of a mount are long, a shell extension's of a chunk each)
+            wire::write(&mut stdin, &json!({"hello": wire::VERSION, "chunk": wire::CHUNK_MAX}), &[])?;
+            let hello = wire::read(&mut out)?.map(|(v, _)| v).unwrap_or(Value::Null);
             match hello["hello"].as_u64() {
-                Some(v) if v >= VERSION => Ok(()),
-                _ => Err(std::io::Error::other(format!("aqr --serve: no hello ({})", l.trim()))),
+                Some(v) if v >= wire::VERSION => Ok(()),
+                _ => Err(std::io::Error::other(format!("aqr --ipc: no hello ({hello})"))),
             }
         })();
         if let Err(e) = greeted {
@@ -80,46 +85,47 @@ impl Served {
         let gone = Arc::new(AtomicBool::new(false));
         {
             let (pending, gone) = (pending.clone(), gone.clone());
-            std::thread::Builder::new().name("aqr-serve".into()).spawn(move || read(out, &pending, &gone))?;
+            std::thread::Builder::new().name("aqr-ipc".into()).spawn(move || read(out, &pending, &gone))?;
         }
         Ok(Served { child: Mutex::new(child), stdin: Mutex::new(Some(stdin)), pending, next: AtomicU64::new(1), gone })
     }
 
-    /// Whether `aqr --serve` is gone: every request fails ([`Error::Gone`]).
+    /// Whether `aqr` is gone: every request fails ([`Error::Gone`]).
     pub fn gone(&self) -> bool {
         self.gone.load(Ordering::SeqCst)
     }
 
-    /// `aqr --serve` killed (as one hung is): gone, every request waiting failing.
+    /// `aqr` killed (as one hung is): gone, every request waiting failing.
     pub fn kill(&self) {
         _ = self.child.lock().unwrap().kill();
     }
 
-    /// Request `v` sent (its `id` given here): where its answers come.
+    /// Request `v` (its `op` and fields) sent, numbered here: where its replies come, each but
+    /// the last with `more`.
     pub fn send(&self, mut v: Value) -> Result<Receiver<Answer>, Error> {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        v["id"] = id.into();
+        let q = self.next.fetch_add(1, Ordering::Relaxed);
+        v["q"] = q.into();
         let (to, from) = channel();
-        self.pending.lock().unwrap().insert(id, to);
+        self.pending.lock().unwrap().insert(q, to);
         let mut stdin = self.stdin.lock().unwrap();
         let sent = match stdin.as_mut() {
-            Some(i) if !self.gone() => writeln!(i, "{v}").and_then(|_| i.flush()).is_ok(),
+            Some(i) if !self.gone() => wire::write(i, &v, &[]).is_ok(),
             _ => false,
         };
         if !sent {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending.lock().unwrap().remove(&q);
             return Err(Error::Gone);
         }
         Ok(from)
     }
 
-    /// The answer to request `v` (of one answer): its line, or its error.
+    /// The reply to request `v` (of one reply): its line, or its error.
     pub fn ask(&self, v: Value) -> Result<Value, Error> {
         let (v, _) = answered(self.send(v)?.recv())?;
         Ok(v)
     }
 
-    /// The entries of `dir` of archive `handle`, of all the answers.
+    /// The entries of `dir` of archive `handle`, of all the replies.
     pub fn list(&self, handle: u64, dir: &str) -> Result<Vec<Value>, Error> {
         self.list_with(handle, dir, false)
     }
@@ -127,7 +133,7 @@ impl Served {
     /// [`Served::list`], with what `-t -v` tells too where `verbose` (all of the archive's blocks
     /// read for it, once).
     pub fn list_with(&self, handle: u64, dir: &str, verbose: bool) -> Result<Vec<Value>, Error> {
-        let from = self.send(json!({"list": handle, "dir": dir, "verbose": verbose}))?;
+        let from = self.send(json!({"op": "list", "archive": handle, "dir": dir, "verbose": verbose}))?;
         let mut all = Vec::new();
         loop {
             let (v, _) = answered(from.recv())?;
@@ -140,19 +146,33 @@ impl Served {
         }
     }
 
-    /// At most `len` bytes of file `path` of archive `handle` from `offset` (at most [`CHUNK`]:
-    /// fewer only at its end).
+    /// At most `len` bytes of file `path` of archive `handle` from `offset` (fewer only at its
+    /// end), of all the replies.
     pub fn read(&self, handle: u64, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
-        let from = self.send(json!({"read": handle, "path": path, "offset": offset, "len": len}))?;
-        Ok(answered(from.recv())?.1)
+        let from = self.send(json!({"op": "read", "archive": handle, "path": path, "offset": offset, "len": len}))?;
+        let mut all = Vec::new();
+        loop {
+            let (v, d) = answered(from.recv())?;
+            if all.is_empty() {
+                all = d;
+            } else {
+                all.extend_from_slice(&d);
+            }
+            if v["more"] != true {
+                return Ok(all);
+            }
+        }
     }
 }
 
-/// An answer received, or why there is none.
+/// A reply received, or why there is none.
 fn answered(r: Result<Answer, std::sync::mpsc::RecvError>) -> Result<Answer, Error> {
     match r {
         Err(_) => Err(Error::Gone),
-        Ok((v, _)) if v.get("error").is_some() => Err(Error::Failed(v["error"].as_str().unwrap_or("").to_owned())),
+        Ok((v, _)) if v.get("error").is_some() => Err(Error::Failed {
+            kind: v["error"]["kind"].as_str().unwrap_or(wire::kind::FAILED).to_owned(),
+            message: v["error"]["message"].as_str().unwrap_or("").to_owned(),
+        }),
         Ok(a) => Ok(a),
     }
 }
@@ -173,30 +193,19 @@ impl Drop for Served {
     }
 }
 
-/// Reads the answers, each to its request's channel (kept while it has `more`), until the
+/// Reads the replies, each to its request's channel (kept while it has `more`), until the
 /// program is gone: then every request waiting fails.
-fn read(mut out: impl BufRead, pending: &Mutex<HashMap<u64, Sender<Answer>>>, gone: &AtomicBool) {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let Ok(n) = out.read_line(&mut line) else { break };
-        if n == 0 {
-            break;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { break };
-        let mut data = vec![0; v["data"].as_u64().unwrap_or(0) as usize];
-        if out.read_exact(&mut data).is_err() {
-            break;
-        }
-        let Some(id) = v["id"].as_u64() else { continue };
+fn read(mut out: impl std::io::BufRead, pending: &Mutex<HashMap<u64, Sender<Answer>>>, gone: &AtomicBool) {
+    while let Ok(Some((v, blob))) = wire::read(&mut out) {
+        let Some(r) = v["r"].as_u64() else { continue };
         let mut p = pending.lock().unwrap();
         let to = match v["more"] == true {
-            true => p.get(&id).cloned(),
-            false => p.remove(&id),
+            true => p.get(&r).cloned(),
+            false => p.remove(&r),
         };
         drop(p);
         if let Some(to) = to {
-            _ = to.send((v, data));
+            _ = to.send((v, blob));
         }
     }
     gone.store(true, Ordering::SeqCst);

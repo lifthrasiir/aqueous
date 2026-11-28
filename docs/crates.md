@@ -6,22 +6,23 @@ more there.
 
 ## The CLI and its frontends
 
-- `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`). `--ipc` drives it from a frontend (`src/ipc.rs`);
-  `--session` serves a compression dialog's questions before it begins (`src/session.rs`);
-  `--serve` serves a shell extension the entries and files of archives, leaves evaluated kept
+- `aqr` — the CLI (`aqr -c/-d/-K/-t/-I`). `--ipc` has another program drive it by the protocol
+  of `man/aqripc.7` (`src/ipc.rs`): a run, the inputs of a compression counted ahead of it
+  (`src/session.rs`), the entries and files of archives browsed, leaves evaluated kept
   (`src/serve.rs`, `docs/win-shell-ext-design.md`). `--format sfx` (`src/sfx.rs`, Windows x86-64)
   makes a self-extracting program: see "Self-extracting programs" below.
-- `aqr-ipc` — the frontends' side of `--ipc`: `aqr` run on the paths, what it tells taken.
+- `aqr-ipc` — the frontends' side of `--ipc`: the frame (`wire`, aqr's too), a run of `aqr` on
+  the paths and what it tells taken (`Job`), the archives browsed (`serve::Served`).
 - `aqr-win` — Explorer's verbs and a progress window over `aqr --ipc` (Windows).
 - `aqr-win-shell` — `aqr-shell.dll` (cargo's `aqr_shell.dll`, renamed as it is copied), `.aqr`
   files browsed in Explorer as folders (a shell namespace extension, thin: it asks `aqr-win
-  --serve`, a COM local server, which runs `aqr --serve`; `docs/win-shell-ext-design.md`);
+  --serve`, a COM local server, which runs `aqr --ipc`; `docs/win-shell-ext-design.md`);
   `cargo aqr-win` keeps it beside aqr-win, `--register` registers it, the installer carries it.
 - `aqr-win-install` — the installer carrying `target/dist/{aqr,aqr-win}.exe` and `aqr-shell.dll`,
   packed by its `build.rs` with aqr-exe's filters and solid LZMA2 (Windows).
 - `aqr-mount` — what the mounting programs share: a read-only tree of nodes (`Tree`: lookup in
   a directory, in any case or not, attributes, entries, reads at an offset), each program
-  serving it through its system's interface; `ServedTree`, an archive's, over `aqr --serve`
+  serving it through its system's interface; `ServedTree`, an archive's, over `aqr --ipc`
   (what decodes in aqr's process). Each system's
   program is released its own way: Windows' aqr-mount-win, macOS's to be in aqr-mac, Linux's
   aqr-mount-fuse (as `aqr-mount`).

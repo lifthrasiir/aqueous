@@ -1,53 +1,49 @@
-//! `--serve`: this program serving another (a shell extension browsing archives, through
-//! `aqr-win --serve`: `docs/win-shell-ext-design.md`) the entries of archives and the bytes of
-//! their files, through its standard input and output: requests, each a JSON object on a line,
-//! answered as they are done (not in their order: each request has an `id`, which its answers
-//! carry).
+//! The archives browsed (`--ipc`'s requests `open`, `list`, `stat`, `read`, `close`, `journal`,
+//! `progress`, `trim`; `man/aqripc.7`): a shell extension's (through `aqr-win --serve`), a
+//! mount's (aqr-mount). Each request is served on the reader's thread, but those that evaluate or
+//! map an archive (`open`, `read`), which have one of their own.
 //!
 //! ```text
-//! > {"hello":1}
-//! < {"hello":1}
-//! > {"id":1,"open":"D:\\x.aqr"}
-//! < {"id":1,"archive":7,"identity":"...","single":false}
-//! > {"id":2,"list":7,"dir":"a/b"}
-//! < {"id":2,"entries":[{"name":"c.txt","kind":"file","size":123,"mtime":[1700000000,0]},...]}
-//! > {"id":3,"read":7,"path":"a/b/c.txt","offset":0,"len":1048576}
-//! < {"id":3,"data":1048576}            then the 1048576 bytes as they are
-//! > {"id":4,"close":7}
-//! < {"id":4,"closed":7}
+//! > {"q":1,"op":"open","path":"D:\\x.aqr"}
+//! < {"r":1,"archive":7,"identity":"...","single":false}
+//! > {"q":2,"op":"list","archive":7,"dir":"a/b"}
+//! < {"r":2,"entries":[{"name":"c.txt","kind":"file","size":123,"mtime":[1700000000,0]},...]}
+//! > {"q":3,"op":"read","archive":7,"path":"a/b/c.txt","offset":0,"len":3000000}
+//! < {"r":3,"more":true,"blob":1048576}   then the 1048576 bytes as they are, and so on
+//! > {"q":4,"op":"close","archive":7}
+//! < {"r":4,"closed":7}
 //! ```
 //!
-//! - `open` (a path): the archive opened, by its metadata blocks alone, as a handle (`archive`)
+//! - `open` (`path`): the archive opened, by its metadata blocks alone, as a handle (`archive`)
 //!   that the other requests name. `identity` tells the file opened (its volume and number, its
 //!   size and modification time): the same path opened again while it is open, and the same
 //!   file, is the same handle (closed as many times); a file there now that is not the one open
 //!   is opened anew (`changed` true), the handle before staying of the file it was. `single`: an
 //!   archive of a single file (no metadata block), whose one entry at the root is the name the
 //!   archive is extracted as. An encrypted archive is opened of `passphrase` given with `open`
-//!   (decrypted as it is read); without it, an `error` with `encrypted` true, and `wrong` too
-//!   where the passphrase given does not open it.
-//! - `list` (a handle, and `dir`: names from the root joined with `/`, empty for the root): the
-//!   entries of the directory, in answers of at most [`LISTED`] entries, each but the last with
-//!   `more` true. An entry has its `name` (as `aqr -d` writes it: [`crate::names`]), its `kind`
-//!   (`dir`, `file`, `link`, `other`) and what is known of it: a file's `size`, `mtime` (seconds
-//!   and nanoseconds since the epoch; `local` true where it is a local time of an unknown time
-//!   zone; `crtime`, `atime`, `ctime` alike), `attrs` (Windows' attributes), as `-t -v` shows
-//!   them `owner`, `mode`, `win`, `mac` and `flags`, its `comment`, a link's `target`. With
-//!   `verbose` true, a file's `data`, `overhead`, `share`, `ratio`, `segment`, `formula` and
-//!   `nodes` (its instructions) too (as `-t -v`'s:
-//!   all of the archive's blocks read for them, once).
-//! - `stat` (a handle, and `path`): the entry at the path, as `entry` (the root's of no name).
-//! - `read` (a handle, `path`, `offset`, `len`): bytes of the file at `path` from `offset`, at
-//!   most `len` and [`CHUNK`]: `data` tells how many, and that many bytes follow the line as
-//!   they are (fewer than asked only at the end of the file, none past it). The first read of a
-//!   file evaluates its leaf, all of whose files are kept ([`Cache`]) for the reads after.
-//! - `close` (a handle): the handle given back; once all of a file's are, the archive is let go
+//!   (decrypted as it is read); without it, the error `encrypted`, and `wrong-passphrase` where
+//!   the passphrase given does not open it.
+//! - `list` (`archive`, and `dir`: names from the root joined with `/`, empty for the root): the
+//!   entries of the directory, in replies of at most [`LISTED`] entries. An entry has its `name`
+//!   (as `aqr -d` writes it: [`crate::names`]), its `kind` (`dir`, `file`, `link`, `other`) and
+//!   what is known of it: a file's `size`, `mtime` (seconds and nanoseconds since the epoch;
+//!   `local` true where it is a local time of an unknown time zone; `crtime`, `atime`, `ctime`
+//!   alike), `attrs` (Windows' attributes), as `-t -v` shows them `owner`, `mode`, `win`, `mac`
+//!   and `flags`, its `comment`, a link's `target`. With `verbose` true, a file's `data`,
+//!   `overhead`, `share`, `ratio`, `segment`, `formula` and `nodes` (its instructions) too (as
+//!   `-t -v`'s: all of the archive's blocks read for them, once).
+//! - `stat` (`archive`, `path`): the entry at the path, as `entry` (the root's of no name).
+//! - `read` (`archive`, `path`, `offset`, `len`): bytes of the file at `path` from `offset`, at
+//!   most `len` (fewer only at the end of the file, none past it), as the blobs of the replies,
+//!   each at most the hello's chunk. The first read of a file evaluates its leaf, all of whose
+//!   files are kept ([`Cache`]) for the reads after. `cancel` of it stops it between replies.
+//! - `close` (`archive`): the handle given back; once all of a file's are, the archive is let go
 //!   of (the file no longer mapped) and its files kept dropped.
-//! - `journal` (a handle): its journal points (named versions, `--tag` and `-j`), in their order:
-//!   `metadata` (what `open` takes as `at`), `time` (milliseconds since the epoch), `shown` (in
-//!   local time, as `aqr` shows it) and `label`. `open` with `at` (a point's `metadata`) opens the
-//!   archive as it was at that point, as `--at` does: a handle of its own.
-//! - `progress` (a handle): how far the evaluation of its leaves is (`decompressed` and
+//! - `journal` (`archive`): its journal points (named versions, `--tag` and `-j`), in their
+//!   order: `metadata` (what `open` takes as `at`), `time` (milliseconds since the epoch), `shown`
+//!   (in local time, as `aqr` shows it) and `label`. `open` with `at` (a point's `metadata`)
+//!   opens the archive as it was at that point, as `--at` does: a handle of its own.
+//! - `progress` (`archive`): how far the evaluation of its leaves is (`decompressed` and
 //!   `evaluated`, `[done, total]` bytes of what is evaluated at once, as the archive last told
 //!   it: of the evaluations at work of several requests, any of them), and `evaluating`, how many
 //!   leaves are.
@@ -64,27 +60,21 @@
 //! A single file compressed (`.gz`, `.xz`, ...) is served as an archive of a single file, its
 //! name without the compressor's extension.
 //!
-//! A request that fails is answered by `error` (a message). The program ends once its standard
-//! input is closed; what it spilled to files is gone with it.
+//! Errors are of the kinds `bad-request`, `no-archive`, `not-found`, `not-a-directory`,
+//! `not-a-file`, `encrypted`, `wrong-passphrase`, `cancelled` and `failed`. What was spilled to
+//! files is gone with the process.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aqr_archive::{Archive, EntryNode, Extra, Zone, name_bytes};
+use aqr_ipc::wire::{self, kind};
 use serde_json::{Value, json};
 
 use crate::names::Names;
-use crate::{Args, Decoder};
-
-/// The version of the protocol.
-pub const VERSION: u64 = 1;
-
-/// The most bytes a `read` is answered with: a long read is several, so that one does not hold
-/// the others' answers back long.
-pub const CHUNK: usize = 1 << 20;
+use crate::{Args, Decoder, ipc};
 
 /// The most entries an answer to `list` has.
 pub const LISTED: usize = 4096;
@@ -333,8 +323,11 @@ enum At {
 impl Opened {
     /// Archive `path` opened, as handle `handle`.
     fn open(handle: u64, path: &Path, passphrase: Option<&str>, at: Option<usize>, a: &Args) -> Result<Opened, Value> {
-        let err = |e: &dyn std::fmt::Display| json!({"error": format!("{}: {e}", path.display())});
-        let file = File::open(path).map_err(|e| err(&e))?;
+        let err = |e: &dyn std::fmt::Display| wire::error(kind::FAILED, format!("{}: {e}", path.display()));
+        let file = File::open(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => wire::error(kind::NOT_FOUND, format!("{}: {e}", path.display())),
+            _ => err(&e),
+        })?;
         let identity = Identity::of(&file).map_err(|e| err(&e))?;
         // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
         let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
@@ -345,14 +338,14 @@ impl Opened {
         // (an encrypted one of the passphrase given: its payload decrypted as it is read)
         if encrypted {
             let Some(p) = passphrase else {
-                return Err(json!({"error": format!("{}: encrypted", path.display()), "encrypted": true}));
+                return Err(wire::error(kind::ENCRYPTED, format!("{}: encrypted", path.display())));
             };
             let (e, _) = aqr_archive::envelope::open_damaged(map).map_err(|e| err(&e))?;
             match e.unlock(p.as_bytes()) {
                 Ok(u) => leaked.sealed = Some(Box::leak(Box::new(u.decrypting()))),
                 Err(aqr_archive::Failure::Decryption(_)) => {
                     let m = format!("{}: encrypted, and the passphrase does not open it", path.display());
-                    return Err(json!({"error": m, "encrypted": true, "wrong": true}));
+                    return Err(wire::error(kind::WRONG_PASSPHRASE, m));
                 }
                 Err(f) => return Err(err(&f)),
             }
@@ -428,15 +421,15 @@ impl Opened {
         passphrase: Option<&str>,
         a: &Args,
     ) -> Result<(Source, View, Arc<Progress>), Value> {
-        let err = |e: &dyn std::fmt::Display| json!({"error": format!("{}: {e}", path.display())});
+        let err = |e: &dyn std::fmt::Display| wire::error(kind::FAILED, format!("{}: {e}", path.display()));
         let mut opened = aqr_unpack::Opened::open_with(f, map, &a.names.encoding).map_err(|e| err(&e))?;
         if opened.encrypted() {
             let Some(p) = passphrase else {
-                return Err(json!({"error": format!("{}: encrypted", path.display()), "encrypted": true}));
+                return Err(wire::error(kind::ENCRYPTED, format!("{}: encrypted", path.display())));
             };
             if !opened.unlock(p.as_bytes()).map_err(|e| err(&e))? {
                 let m = format!("{}: encrypted, and the passphrase does not open it", path.display());
-                return Err(json!({"error": m, "encrypted": true, "wrong": true}));
+                return Err(wire::error(kind::WRONG_PASSPHRASE, m));
             }
         }
         let progress = Arc::new(Progress::default());
@@ -508,8 +501,8 @@ impl Opened {
     }
 
     /// What `path` (names joined with `/`) names.
-    fn at(&self, path: &str) -> Result<At, String> {
-        let none = || format!("{path}: not in the archive");
+    fn at(&self, path: &str) -> Result<At, Value> {
+        let none = || wire::error(kind::NOT_FOUND, format!("{path}: not in the archive"));
         match &self.view {
             View::Single { name, .. } => match path {
                 "" => Ok(At::Root),
@@ -838,24 +831,84 @@ struct Handles {
     open: HashMap<u64, (Arc<Opened>, usize)>,
 }
 
-struct Server<'a> {
-    args: &'a Args,
+struct Server {
+    /// The options of the command line.
+    args: &'static Args,
     handles: Mutex<Handles>,
     cache: Mutex<Cache>,
 }
 
-/// What a request is answered with: a line, and the bytes after it.
-type Answer = (Value, Vec<u8>);
+/// The server, once `--ipc` has begun ([`init`]).
+static SERVER: OnceLock<Server> = OnceLock::new();
 
-impl Server<'_> {
-    fn opened(&self, v: &Value, key: &str) -> Result<Arc<Opened>, String> {
-        let h = v[key].as_u64().ok_or_else(|| format!("{key}: not a handle"))?;
+/// The reads cancelled (`cancel` of them), until they stop.
+static CANCELLED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
+
+/// A failure of kind `failed`.
+fn failed(m: impl Into<String>) -> Value {
+    wire::error(kind::FAILED, m)
+}
+
+/// The server made, of `a`, the options of the command line.
+pub fn init(a: &'static Args) {
+    _ = DECODER.set(Decoder::new(a.opt.threads));
+    let cap = CACHE.get().unwrap_or_else(|| aqr_common::budget::total().map_or(CACHE_MAX, |t| (t / 8).min(CACHE_MAX)));
+    _ = SERVER.set(Server {
+        args: a,
+        handles: Mutex::default(),
+        cache: Mutex::new(Cache { cap, used: 0, tick: 0, slots: HashMap::new() }),
+    });
+}
+
+/// Request `v` (numbered `q`) served: on a thread of its own where it evaluates or maps an
+/// archive, else at once.
+pub fn request(q: u64, v: Value) {
+    let Some(s) = SERVER.get() else { return ipc::fail(q, kind::FAILED, "not served") };
+    let long = v["op"] == "open" || v["op"] == "read";
+    let work = move || {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.answer(q, &v)));
+        if r.is_err() {
+            ipc::fail(q, kind::FAILED, "the request failed (a panic)");
+        }
+    };
+    if !long {
+        return work();
+    }
+    if std::thread::Builder::new().name("serve".into()).spawn(work).is_err() {
+        ipc::fail(q, kind::BUSY, "no thread for the request");
+    }
+}
+
+/// Read `of` cancelled, where it is one at work: it stops before its next reply.
+pub fn cancel(of: u64) {
+    CANCELLED.lock().unwrap().get_or_insert_default().insert(of);
+}
+
+/// Whether read `q` is cancelled (forgotten once told).
+fn cancelled(q: u64) -> bool {
+    CANCELLED.lock().unwrap().as_mut().is_some_and(|c| c.remove(&q))
+}
+
+/// The last reply of `q`: `r`, or its error.
+fn done(q: u64, r: Result<Value, Value>) {
+    match r {
+        Ok(v) => ipc::reply(q, v, false, &[]),
+        Err(e) => ipc::send(&json!({"r": q, "error": e}), &[]),
+    }
+}
+
+impl Server {
+    fn opened(&self, v: &Value) -> Result<Arc<Opened>, Value> {
+        let h = v["archive"].as_u64().ok_or_else(|| wire::error(kind::BAD_REQUEST, "archive: not a handle"))?;
         let handles = self.handles.lock().unwrap();
-        handles.open.get(&h).map(|(o, _)| o.clone()).ok_or_else(|| format!("{h}: no archive open so"))
+        handles
+            .open
+            .get(&h)
+            .map(|(o, _)| o.clone())
+            .ok_or_else(|| wire::error(kind::NO_ARCHIVE, format!("{h}: no archive open so")))
     }
 
-    fn open(&self, path: &str, passphrase: Option<&str>, at: Option<usize>) -> Result<Value, Value> {
-        let path = Path::new(path);
+    fn open(&self, path: &Path, passphrase: Option<&str>, at: Option<usize>) -> Result<Value, Value> {
         // (as given: an archive opened by another path is opened again, to be closed apart)
         let now = File::open(path).and_then(|f| Identity::of(&f));
         let mut changed = false;
@@ -899,9 +952,9 @@ impl Server<'_> {
         v
     }
 
-    /// The entries of `dir`, a [`LISTED`] at a time.
-    fn list(&self, v: &Value) -> Result<Vec<Value>, String> {
-        let o = self.opened(v, "list")?;
+    /// The entries of `dir`, a [`LISTED`] at a time (each reply but the last of `more`).
+    fn list(&self, v: &Value) -> Result<Vec<Value>, Value> {
+        let o = self.opened(v)?;
         let dir = v["dir"].as_str().unwrap_or("");
         let verbose = v["verbose"] == true;
         let entries: Vec<Value> = match (o.at(dir)?, &o.view) {
@@ -912,27 +965,28 @@ impl Server<'_> {
             (At::Entry(d), View::Tree { children, .. }) if o.tree().unwrap().entries[d].node == EntryNode::Dir => {
                 children.get(&Some(d)).into_iter().flatten().map(|&i| o.entry(At::Entry(i), verbose)).collect()
             }
-            _ => return Err(format!("{dir}: not a directory")),
+            _ => return Err(wire::error(kind::NOT_A_DIRECTORY, format!("{dir}: not a directory"))),
         };
-        let mut answers: Vec<Value> = entries.chunks(LISTED).map(|c| json!({"entries": c, "more": true})).collect();
-        match answers.last_mut() {
-            Some(last) => last["more"] = false.into(),
-            None => answers.push(json!({"entries": [], "more": false})),
+        let mut answers: Vec<Value> = entries.chunks(LISTED).map(|c| json!({"entries": c})).collect();
+        if answers.is_empty() {
+            answers.push(json!({"entries": []}));
         }
         Ok(answers)
     }
 
-    fn stat(&self, v: &Value) -> Result<Value, String> {
-        let o = self.opened(v, "stat")?;
+    fn stat(&self, v: &Value) -> Result<Value, Value> {
+        let o = self.opened(v)?;
         let at = o.at(v["path"].as_str().unwrap_or(""))?;
         Ok(json!({"entry": o.entry(at, v["verbose"] == true)}))
     }
 
-    fn read(&self, v: &Value) -> Result<Answer, String> {
-        let o = self.opened(v, "read")?;
+    /// Read `q` (`v`): its replies sent, each of a chunk, the last where it fails.
+    fn read(&self, q: u64, v: &Value) -> Result<(), Value> {
+        let o = self.opened(v)?;
         let path = v["path"].as_str().unwrap_or("");
         let offset = v["offset"].as_u64().unwrap_or(0);
-        let len = v["len"].as_u64().unwrap_or(CHUNK as u64).min(CHUNK as u64);
+        let chunk = ipc::get().map_or(wire::CHUNK, |i| i.chunk) as u64;
+        let len = v["len"].as_u64().unwrap_or(chunk);
         let (key, output, size) = match (o.at(path)?, &o.view) {
             (At::Single, View::Single { size, .. }) => ((o.handle, 0), 0, *size),
             (At::Entry(i), _) => match o.tree().unwrap().entries[i].node {
@@ -950,11 +1004,11 @@ impl Server<'_> {
                         }
                     }
                 },
-                _ => return Err(format!("{path}: not a file")),
+                _ => return Err(wire::error(kind::NOT_A_FILE, format!("{path}: not a file"))),
             },
-            _ => return Err(format!("{path}: not a file")),
+            _ => return Err(wire::error(kind::NOT_A_FILE, format!("{path}: not a file"))),
         };
-        let err = |e: &dyn std::fmt::Display| format!("{}: {path}: {e}", o.path.display());
+        let err = |e: &dyn std::fmt::Display| failed(format!("{}: {path}: {e}", o.path.display()));
         let leaf = Cache::get(&self.cache, key, || self.evaluate(&o, key.1)).map_err(|e| err(&e))?;
         let held = leaf.outputs.get(output).ok_or_else(|| err(&"a file of an output its leaf does not have"))?;
         // (of another format, a file not decoded: told why)
@@ -964,12 +1018,23 @@ impl Server<'_> {
         if held.len() != size {
             return Err(err(&"a file of another size than its entry's"));
         }
-        let n = len.min(size.saturating_sub(offset)) as usize;
-        let d = match n {
-            0 => Vec::new(),
-            n => held.read(offset, n).map_err(|e| err(&e))?,
-        };
-        Ok((json!({"data": n}), d))
+        let end = offset.saturating_add(len.min(size.saturating_sub(offset)));
+        let mut at = offset;
+        loop {
+            if cancelled(q) {
+                return Err(wire::error(kind::CANCELLED, format!("{path}: read cancelled")));
+            }
+            let n = (end - at).min(chunk) as usize;
+            let d = match n {
+                0 => Vec::new(),
+                n => held.read(at, n).map_err(|e| err(&e))?,
+            };
+            at += n as u64;
+            ipc::reply(q, json!({}), at < end, &d);
+            if at >= end {
+                return Ok(());
+            }
+        }
     }
 
     /// Leaf `leaf` of `o` evaluated.
@@ -1044,10 +1109,12 @@ impl Server<'_> {
         Ok(Leaf { outputs, bytes })
     }
 
-    fn close(&self, v: &Value) -> Result<Value, String> {
-        let h = v["close"].as_u64().ok_or("close: not a handle")?;
+    fn close(&self, v: &Value) -> Result<Value, Value> {
+        let h = v["archive"].as_u64().ok_or_else(|| wire::error(kind::BAD_REQUEST, "archive: not a handle"))?;
         let mut handles = self.handles.lock().unwrap();
-        let Some((_, refs)) = handles.open.get_mut(&h) else { return Err(format!("{h}: no archive open so")) };
+        let Some((_, refs)) = handles.open.get_mut(&h) else {
+            return Err(wire::error(kind::NO_ARCHIVE, format!("{h}: no archive open so")));
+        };
         *refs -= 1;
         if *refs == 0 {
             // (let go of once the reads at work are done with it)
@@ -1057,66 +1124,70 @@ impl Server<'_> {
         Ok(json!({"closed": h}))
     }
 
-    /// Request `v` done: its answers.
-    fn answer(&self, v: &Value) -> Vec<Answer> {
-        let plain = |r: Result<Value, String>| vec![(r.unwrap_or_else(|e| json!({"error": e})), Vec::new())];
-        if let Some(p) = v.get("open") {
-            let r = match p.as_str() {
-                Some(p) => self.open(p, v["passphrase"].as_str(), v["at"].as_u64().map(|m| m as usize)),
-                None => Err(json!({"error": "open: not a path"})),
-            };
-            return vec![(r.unwrap_or_else(|e| e), Vec::new())];
-        }
-        if v.get("list").is_some() {
-            return match self.list(v) {
-                Ok(l) => l.into_iter().map(|v| (v, Vec::new())).collect(),
-                Err(e) => plain(Err(e)),
-            };
-        }
-        if v.get("stat").is_some() {
-            return plain(self.stat(v));
-        }
-        if v.get("read").is_some() {
-            return vec![self.read(v).unwrap_or_else(|e| (json!({"error": e}), Vec::new()))];
-        }
-        if v.get("close").is_some() {
-            return plain(self.close(v));
-        }
-        if v.get("journal").is_some() {
-            return plain(self.opened(v, "journal").map(|o| {
-                let journal = match &o.source {
-                    Source::Aqr(a) => a.journal(),
-                    Source::Foreign(_) => &[],
-                };
-                let points: Vec<Value> = journal
-                    .iter()
-                    .map(|p| {
-                        json!({
-                            "metadata": p.metadata,
-                            "time": p.time,
-                            "shown": crate::journal::show(p.time),
-                            "label": p.label,
-                        })
-                    })
-                    .collect();
-                json!({"points": points})
-            }));
-        }
-        if v.get("progress").is_some() {
-            return plain(self.opened(v, "progress").map(|o| {
-                let r = *o.progress.reached.lock().unwrap();
-                let mut a = json!({"evaluating": o.progress.evaluating.load(std::sync::atomic::Ordering::Relaxed)});
-                if let Some(r) = r {
-                    a["decompressed"] = json!([r.decompressed.0, r.decompressed.1]);
-                    a["evaluated"] = json!([r.evaluated.0, r.evaluated.1]);
+    /// Request `v` (numbered `q`) answered: its replies sent.
+    fn answer(&self, q: u64, v: &Value) {
+        match v["op"].as_str().unwrap_or("") {
+            "open" => done(
+                q,
+                match wire::os_of(&v["path"]) {
+                    Some(p) => self.open(Path::new(&p), v["passphrase"].as_str(), v["at"].as_u64().map(|m| m as usize)),
+                    None => Err(wire::error(kind::BAD_REQUEST, "open: not a path")),
+                },
+            ),
+            "list" => match self.list(v) {
+                Ok(l) => {
+                    let n = l.len();
+                    for (i, a) in l.into_iter().enumerate() {
+                        ipc::reply(q, a, i + 1 < n, &[]);
+                    }
                 }
-                a
-            }));
+                Err(e) => done(q, Err(e)),
+            },
+            "stat" => done(q, self.stat(v)),
+            "read" => {
+                if let Err(e) = self.read(q, v) {
+                    done(q, Err(e));
+                }
+                // (forgotten, whether or not it came)
+                cancelled(q);
+            }
+            "close" => done(q, self.close(v)),
+            "journal" => done(
+                q,
+                self.opened(v).map(|o| {
+                    let journal = match &o.source {
+                        Source::Aqr(a) => a.journal(),
+                        Source::Foreign(_) => &[],
+                    };
+                    let points: Vec<Value> = journal
+                        .iter()
+                        .map(|p| {
+                            json!({
+                                "metadata": p.metadata,
+                                "time": p.time,
+                                "shown": crate::journal::show(p.time),
+                                "label": p.label,
+                            })
+                        })
+                        .collect();
+                    json!({"points": points})
+                }),
+            ),
+            "progress" => done(
+                q,
+                self.opened(v).map(|o| {
+                    let r = *o.progress.reached.lock().unwrap();
+                    let mut a = json!({"evaluating": o.progress.evaluating.load(std::sync::atomic::Ordering::Relaxed)});
+                    if let Some(r) = r {
+                        a["decompressed"] = json!([r.decompressed.0, r.decompressed.1]);
+                        a["evaluated"] = json!([r.evaluated.0, r.evaluated.1]);
+                    }
+                    a
+                }),
+            ),
+            "trim" => done(q, Ok(json!({"trimmed": self.cache.lock().unwrap().trim()}))),
+            op => done(q, Err(wire::error(kind::NOT_KNOWN, format!("{op}: a request not known")))),
         }
-        if v.get("trim").is_some() {
-            return plain(Ok(json!({"trimmed": self.cache.lock().unwrap().trim()})));
-        }
-        plain(Err("a request not known".into()))
     }
 }
 
@@ -1130,72 +1201,4 @@ fn select_of(t: &aqr_archive::Tree, c: usize) -> Option<aqr_unpack::Select> {
     }
     names.reverse();
     Some(aqr_unpack::Select::new(vec![names]))
-}
-
-/// Answers `a` to request `id`, each line with the bytes after it, at once.
-fn send(id: &Value, answers: Vec<Answer>) {
-    let mut out = std::io::stdout().lock();
-    for (mut v, d) in answers {
-        v["id"] = id.clone();
-        // (nothing to do where the frontend is gone: its end of standard input closes too)
-        if writeln!(out, "{v}").and_then(|_| out.write_all(&d)).is_err() {
-            return;
-        }
-    }
-    _ = out.flush();
-}
-
-/// Serves the frontend until it is gone.
-pub fn serve(a: &Args) -> Result<(), String> {
-    let mut stdin = std::io::stdin().lock();
-    let mut line = String::new();
-    stdin.read_line(&mut line).map_err(|e| format!("--serve: {e}"))?;
-    let hello: Value = serde_json::from_str(&line).map_err(|_| "--serve: no hello from the frontend")?;
-    match hello["hello"].as_u64() {
-        Some(v) if v >= VERSION => {}
-        Some(v) => return Err(format!("--serve: version {v} of the protocol is not known")),
-        None => return Err("--serve: no hello from the frontend".into()),
-    }
-    _ = DECODER.set(Decoder::new(a.opt.threads));
-    let cap = CACHE.get().unwrap_or_else(|| aqr_common::budget::total().map_or(CACHE_MAX, |t| (t / 8).min(CACHE_MAX)));
-    let server = Server {
-        args: a,
-        handles: Mutex::default(),
-        cache: Mutex::new(Cache { cap, used: 0, tick: 0, slots: HashMap::new() }),
-    };
-    {
-        let mut out = std::io::stdout().lock();
-        _ = writeln!(out, "{}", json!({"hello": VERSION})).and_then(|_| out.flush());
-    }
-    let server = &server;
-    std::thread::scope(|s| {
-        for line in stdin.lines() {
-            let line = match line {
-                Ok(line) => line,
-                // (a line that is not text is not understood: answered as such)
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
-                Err(_) => break,
-            };
-            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            let id = v["id"].clone();
-            // (what evaluates or maps an archive on a thread of its own, the rest at once)
-            let long = v.get("open").is_some() || v.get("read").is_some();
-            let failed = id.clone();
-            let run = move || {
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.answer(&v)));
-                let answers =
-                    r.unwrap_or_else(|_| vec![(json!({"error": "the request failed (a panic)"}), Vec::new())]);
-                send(&id, answers);
-            };
-            if long {
-                if std::thread::Builder::new().name("serve".into()).spawn_scoped(s, run).is_err() {
-                    send(&failed, vec![(json!({"error": "no thread for the request"}), Vec::new())]);
-                }
-            } else {
-                run();
-            }
-        }
-        // (the frontend gone: the work at it not waited for)
-        std::process::exit(0);
-    })
 }

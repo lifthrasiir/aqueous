@@ -319,7 +319,7 @@ impl Opts {
         a
     }
 
-    /// The arguments that bear on what is gathered of `inputs` (`aqr --session`'s inventory
+    /// The arguments that bear on what is gathered of `inputs` (`aqr --ipc`'s inventory
     /// asks by them), which `args` has the same of.
     fn gather_args(&self, inputs: &[String]) -> Vec<String> {
         let mut a: Vec<String> = vec!["-c".into()];

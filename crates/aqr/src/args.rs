@@ -92,12 +92,9 @@ pub(crate) struct Args {
     pub(crate) renames: Vec<Option<PathBuf>>,
     /// What `--stats` asked for.
     pub(crate) stats: Option<&'static stats::Stats>,
-    /// Driven by a frontend ([`ipc`]).
+    /// Driven by a frontend ([`ipc`]): of the command line, its requests served (no inputs); of
+    /// a run's arguments, the work told it.
     pub(crate) ipc: bool,
-    /// Started for a frontend that tells what to do later ([`session`]).
-    pub(crate) session: bool,
-    /// Serving a frontend the entries and files of archives ([`serve`]).
-    pub(crate) serve: bool,
     /// Listing as JSON (`--json`).
     pub(crate) json: bool,
     /// Compressing, into archives of this format (`--format`, or `-o`'s name).
@@ -274,8 +271,6 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         renames: Vec::new(),
         stats: None,
         ipc: false,
-        session: false,
-        serve: false,
         json: false,
         format: Pack::Aqr,
         level: None,
@@ -453,8 +448,6 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
                 application_bound = Some(bound_of(&v)?);
             }
             "--ipc" => a.ipc = true,
-            "--session" => (a.session, a.ipc) = (true, true),
-            "--serve" => a.serve = true,
             "--json" => a.json = true,
             "--setup-autocomplete" => return Err("--setup-autocomplete is a command alone (no other argument)".into()),
             "-P" | "--passphrase" => a.passphrase = true,
@@ -542,11 +535,11 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         });
     }
     // (none given, of standard input where it is not a terminal: as zstd and gzip have it)
-    if a.inputs.is_empty() && !listed && !a.list && !a.info && !a.ipc && !a.serve && !std::io::stdin().is_terminal() {
+    if a.inputs.is_empty() && !listed && !a.list && !a.info && !a.ipc && !std::io::stdin().is_terminal() {
         a.inputs.push("-".into());
         dirs.push(dir.clone());
     }
-    if a.inputs.is_empty() && !a.session && !a.serve {
+    if a.inputs.is_empty() && !a.ipc {
         return Err("no input".into());
     }
     if stats || !stats_to.is_empty() {
@@ -587,16 +580,8 @@ pub(crate) fn parse_from(all: Vec<OsString>) -> Result<Args, String> {
         }
         a.opt.lossy = Some(aqr_compress::lossy::Lossy::parse(spec)?);
     }
-    if a.serve {
-        if !a.inputs.is_empty() || a.ipc {
-            return Err("--serve takes no inputs (they come with its requests), nor --ipc".into());
-        }
-        return Ok(a);
-    }
-    if a.session {
-        if !a.inputs.is_empty() {
-            return Err("--session takes no inputs (they come with its begin)".into());
-        }
+    // (the command line of --ipc: its requests bring the rest)
+    if a.ipc && a.inputs.is_empty() {
         return Ok(a);
     }
     if let Some(o) = hooks(&a) {

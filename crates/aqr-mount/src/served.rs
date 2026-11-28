@@ -1,4 +1,4 @@
-//! A [`Tree`] of an archive, as `aqr --serve` serves it (`crates/aqr/src/serve.rs`; the client
+//! A [`Tree`] of an archive, as `aqr --ipc` serves it (`crates/aqr/src/serve.rs`; the client
 //! is aqr-ipc's): what aqr reads (Aqueous archives, and the other formats of a tree, the
 //! compressed single files) is mounted as aqr-win's shell extension browses it, and what
 //! decodes is in a process of its own (aqr's), not the mounting program.
@@ -6,13 +6,13 @@
 //! Directories are listed as they are first looked in, and their entries given node IDs then,
 //! in the order listed; nothing is ever forgotten, the archive not changing. Links and the
 //! entries of no kind known here are left out for now. Reads go to `read` in pieces of at most
-//! [`CHUNK`]: the first of a file evaluates its leaf, which `aqr --serve` keeps for the others.
+//! the hello's chunk: the first of a file evaluates its leaf, which `aqr --ipc` keeps for the others.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
 
-use aqr_ipc::serve::{CHUNK, Served};
+use aqr_ipc::serve::Served;
 use serde_json::{Value, json};
 
 use crate::{Attr, Case, Entry, Error, Kind, NodeId, Result, Tree, same_name};
@@ -31,7 +31,7 @@ struct Nodes {
     listed: HashMap<NodeId, Vec<Entry>>,
 }
 
-/// An archive open in `aqr --serve`.
+/// An archive open in `aqr --ipc`.
 pub struct ServedTree {
     served: Served,
     handle: u64,
@@ -42,7 +42,13 @@ pub struct ServedTree {
 }
 
 fn failed(e: aqr_ipc::serve::Error) -> Error {
-    Error::Io(std::io::Error::other(e.to_string()))
+    use aqr_ipc::wire::kind;
+    match e {
+        e if e.is(kind::NOT_FOUND) => Error::NotFound,
+        e if e.is(kind::NOT_A_DIRECTORY) => Error::NotADirectory,
+        e if e.is(kind::NOT_A_FILE) => Error::IsADirectory,
+        e => Error::Io(std::io::Error::other(e.to_string())),
+    }
 }
 
 /// What the entry `v` (of `list`) is, where it is of a kind served.
@@ -60,23 +66,22 @@ fn attr_of(v: &Value) -> Option<Attr> {
 }
 
 impl ServedTree {
-    /// `archive` opened in an `aqr --serve` of the program at `aqr` (started here, ended as the
+    /// `archive` opened in an `aqr --ipc` of the program at `aqr` (started here, ended as the
     /// tree is dropped). An encrypted archive is an error for now. The errors name the path
     /// (`aqr`'s, or the archive's) themselves.
     pub fn open(aqr: &Path, archive: &Path) -> Result<ServedTree> {
         let served = Served::start(aqr, &[])
             .map_err(|e| Error::Io(std::io::Error::new(e.kind(), format!("{}: {e}", aqr.display()))))?;
-        let opened = served.send(json!({"open": archive})).map_err(failed)?.recv();
-        let (v, _) = opened.map_err(|_| failed(aqr_ipc::serve::Error::Gone))?;
-        if v["encrypted"] == true {
-            return Err(Error::Io(std::io::Error::other(format!(
-                "{}: encrypted (not mounted yet)",
-                archive.display()
-            ))));
-        }
-        if let Some(e) = v["error"].as_str() {
-            return Err(Error::Io(std::io::Error::other(e.to_owned())));
-        }
+        let path = aqr_ipc::wire::os_value(archive.as_os_str());
+        let v = match served.ask(json!({"op": "open", "path": path})) {
+            Ok(v) => v,
+            Err(e) if e.is(aqr_ipc::wire::kind::ENCRYPTED) => {
+                let m = format!("{}: encrypted (not mounted yet)", archive.display());
+                return Err(Error::Io(std::io::Error::other(m)));
+            }
+            // (the message names the archive)
+            Err(e) => return Err(Error::Io(std::io::Error::other(e.to_string()))),
+        };
         let handle = v["archive"].as_u64().ok_or_else(|| Error::Io(std::io::Error::other("no handle opened")))?;
         // (the root has no time of its own: the archive's)
         let mtime_ns = std::fs::metadata(archive)
@@ -150,18 +155,11 @@ impl Tree for ServedTree {
         if attr.kind == Kind::Dir {
             return Err(Error::IsADirectory);
         }
-        let mut have = 0;
-        while have < buf.len() {
-            let want = (buf.len() - have).min(CHUNK);
-            let d = self.served.read(self.handle, &path, offset + have as u64, want).map_err(failed)?;
-            if d.is_empty() {
-                break;
-            }
-            let n = d.len().min(buf.len() - have);
-            buf[have..have + n].copy_from_slice(&d[..n]);
-            have += n;
-        }
-        Ok(have)
+        // (one request, its replies of the hello's chunk)
+        let d = self.served.read(self.handle, &path, offset, buf.len()).map_err(failed)?;
+        let n = d.len().min(buf.len());
+        buf[..n].copy_from_slice(&d[..n]);
+        Ok(n)
     }
 
     fn label(&self) -> String {
@@ -171,6 +169,6 @@ impl Tree for ServedTree {
 
 impl Drop for ServedTree {
     fn drop(&mut self) {
-        _ = self.served.ask(json!({"close": self.handle}));
+        _ = self.served.ask(json!({"op": "close", "archive": self.handle}));
     }
 }

@@ -1,5 +1,5 @@
 //! `aqr-win --serve`: the archives a shell extension browses (`docs/win-shell-ext-design.md`),
-//! served by a COM local server (`LocalServer32`, of [`CLSID`]) over `aqr --serve` (one
+//! served by a COM local server (`LocalServer32`, of [`CLSID`]) over `aqr --ipc` (one
 //! process for all, started as it is first needed and again where it is gone:
 //! `aqr_ipc::serve`), so that what decodes is in no process that loaded the extension.
 //!
@@ -10,16 +10,16 @@
 //!   offset `Journal` tells, where it is given), or an error (`EXCEPINFO`'s
 //!   description). An encrypted archive has its passphrase asked for over window `hwnd` (a
 //!   number, of the client's: its process lets this one come to the front), again where wrong;
-//!   it is kept by the archive object, to open the archive again where `aqr --serve` is gone.
+//!   it is kept by the archive object, to open the archive again where `aqr --ipc` is gone.
 //! - an archive: `Info()` (what `open` answered, as JSON), `List(dir[, "verbose"])` (the
 //!   entries, a JSON array; with what `-t -v` tells too), `Stat(path[, "verbose"])` (an entry,
 //!   JSON), `OpenStream(path)` (an `IStream` of the file, read only, read a chunk of `read`
 //!   after another), `Materialize(path)` (the file written out to
 //!   be opened by a program, read only, in `%LOCALAPPDATA%\Aqueous\Open\<archive>\<path>`: its
-//!   path; one there already of its size taken as it is), `Progress(path)` (JSON: `aqr --serve`'s
+//!   path; one there already of its size taken as it is), `Progress(path)` (JSON: `aqr --ipc`'s
 //!   `progress` of the archive, and `written`, `[done, total]` bytes of the file at `path` being
 //!   materialized), `Journal()` (its journal points, the named versions: a JSON array of
-//!   `aqr --serve`'s), `Cancel(path)` (the file at `path` being materialized stopped at its next
+//!   `aqr --ipc`'s), `Cancel(path)` (the file at `path` being materialized stopped at its next
 //!   piece, its part removed, the Materialize failing; what is evaluated of it kept). Once let
 //!   go of (its last reference released,
 //!   by the client or by COM as the client is gone), its handle is closed a [`LINGER`] later,
@@ -82,10 +82,10 @@ fn object_gone() {
     }
 }
 
-/// `aqr --serve`, once started.
+/// `aqr --ipc`, once started.
 static SERVED: Mutex<Option<Arc<Served>>> = Mutex::new(None);
 
-/// `aqr --serve`, started where it is not, or again where it is gone.
+/// `aqr --ipc`, started where it is not, or again where it is gone.
 fn served() -> Result<Arc<Served>, String> {
     let mut s = SERVED.lock().unwrap();
     if let Some(s) = s.as_ref().filter(|s| !s.gone()) {
@@ -109,7 +109,7 @@ fn close_lingering(linger: Option<Duration>) {
         done
     };
     for (s, h, _) in done {
-        _ = s.ask(json!({"close": h}));
+        _ = s.ask(json!({"op": "close", "archive": h}));
     }
 }
 
@@ -235,7 +235,7 @@ fn quit_event() -> Option<HANDLE> {
 }
 
 /// Has every server of the session end at once, what it serves gone with it (for the uninstall:
-/// its files to be deleted, aqr.exe's of `aqr --serve` among them); whether there was one.
+/// its files to be deleted, aqr.exe's of `aqr --ipc` among them); whether there was one.
 pub fn quit_all() -> bool {
     let name: Vec<u16> = quit_name().encode_utf16().chain([0]).collect();
     // SAFETY: a name ended by 0; the event set and its handle closed
@@ -259,7 +259,7 @@ fn opened_dir() -> Option<PathBuf> {
 /// File `path` of archive `a` written out to be opened by a program (read only, so that a change
 /// made to it is saved elsewhere, not lost), where it is not already: its path.
 fn materialize(a: &Archive, path: &str) -> Result<PathBuf, String> {
-    let e = a.with(|s, h| s.ask(json!({"stat": h, "path": path})))?;
+    let e = a.with(|s, h| s.ask(json!({"op": "stat", "archive": h, "path": path})))?;
     let e = &e["entry"];
     if e["kind"] != "file" {
         return Err(format!("{path}: not a file"));
@@ -413,13 +413,13 @@ impl Writing {
     }
 }
 
-/// An archive open: its path, and the `aqr --serve` and handle it is open in, opened again
+/// An archive open: its path, and the `aqr --ipc` and handle it is open in, opened again
 /// where that is gone.
 struct Archive {
     path: PathBuf,
     /// The passphrase it was opened of, to open it again of (in this process alone).
     passphrase: Option<String>,
-    /// The journal point it is opened as of, where it is (`aqr --serve`'s `at`).
+    /// The journal point it is opened as of, where it is (`aqr --ipc`'s `at`).
     at: Option<u64>,
     open: Mutex<(Arc<Served>, u64, Value)>,
 }
@@ -455,7 +455,7 @@ impl Archive {
         at: Option<u64>,
     ) -> Result<(Arc<Served>, u64, Value), Opening> {
         let s = served().map_err(Opening::Failed)?;
-        let mut q = json!({"open": path});
+        let mut q = json!({"op": "open", "path": aqr_ipc::wire::os_value(path.as_os_str())});
         if let Some(m) = at {
             q["at"] = m.into();
         }
@@ -464,11 +464,11 @@ impl Archive {
         }
         let from = s.send(q).map_err(|e| Opening::Failed(e.to_string()))?;
         let (v, _) = from.recv().map_err(|_| Opening::Failed(Error::Gone.to_string()))?;
-        if v["encrypted"] == true {
-            return Err(Opening::Encrypted { wrong: v["wrong"] == true });
-        }
-        if let Some(e) = v["error"].as_str() {
-            return Err(Opening::Failed(e.to_owned()));
+        match v["error"]["kind"].as_str() {
+            Some(aqr_ipc::wire::kind::ENCRYPTED) => return Err(Opening::Encrypted { wrong: false }),
+            Some(aqr_ipc::wire::kind::WRONG_PASSPHRASE) => return Err(Opening::Encrypted { wrong: true }),
+            Some(_) => return Err(Opening::Failed(v["error"]["message"].as_str().unwrap_or("").to_owned())),
+            None => {}
         }
         let h = v["archive"].as_u64().ok_or(Opening::Failed("no handle opened".into()))?;
         Ok((s, h, v))
@@ -731,12 +731,12 @@ impl Dispatch {
             (Kind::Archive(a), 3) => {
                 let path = arg(0)?;
                 let verbose = args.get(1).is_some_and(|v| v == "verbose");
-                let entry = a.with(|s, h| s.ask(json!({"stat": h, "path": path, "verbose": verbose})));
+                let entry = a.with(|s, h| s.ask(json!({"op": "stat", "archive": h, "path": path, "verbose": verbose})));
                 json(entry.map(|v| v["entry"].clone()))
             }
             (Kind::Archive(a), 4) => {
                 let path = arg(0)?.to_owned();
-                let e = a.with(|s, h| s.ask(json!({"stat": h, "path": path})))?;
+                let e = a.with(|s, h| s.ask(json!({"op": "stat", "archive": h, "path": path})))?;
                 let e = &e["entry"];
                 if e["kind"] != "file" {
                     return Err(format!("{path}: not a file"));
@@ -746,7 +746,7 @@ impl Dispatch {
             (Kind::Archive(a), 6) => {
                 // (how far the file at `path` is written out, and the archive's evaluation is)
                 let path = args.first().map_or("", String::as_str);
-                let mut v = a.with(|s, h| s.ask(json!({"progress": h})))?;
+                let mut v = a.with(|s, h| s.ask(json!({"op": "progress", "archive": h})))?;
                 let w = WRITING.lock().unwrap();
                 if let Some(e) = w.iter().find(|e| e.of(&a.path, path)) {
                     v["written"] = json!([e.done, e.size]);
@@ -761,7 +761,7 @@ impl Dispatch {
                 Ok(Out::Text(serde_json::json!({"cancelled": found > 0}).to_string()))
             }
             (Kind::Archive(a), 8) => {
-                let v = a.with(|s, h| s.ask(json!({"journal": h})))?;
+                let v = a.with(|s, h| s.ask(json!({"op": "journal", "archive": h})))?;
                 Ok(Out::Text(v["points"].to_string()))
             }
             (Kind::Archive(a), 5) => {

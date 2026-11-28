@@ -11,7 +11,7 @@ copied in), the view being the shell's own (DefView).
 The library is loaded by Explorer and by every program that opens a file dialog, so it holds
 nothing but the items: what it lists and reads it asks `aqr-win --serve` (`src/client.rs`: the
 server's late-bound objects, kept in the Global Interface Table as the shell calls from several
-apartments, made again where the server is gone), which runs `aqr --serve`. A panic is caught at
+apartments, made again where the server is gone), which runs `aqr --ipc`. A panic is caught at
 every entry point. A folder holds a use of its archive; once the last is let go of, the archive
 object is released, for the server to close it a minute later (and to end, idle).
 
@@ -78,7 +78,7 @@ object is released, for the server to close it a minute later (and to end, idle)
   `tests/mount.rs` loads the library built and asks the menu's commands and Eject (`cargo rt
   -p aqr -p aqr-win -p aqr-mount-win -p aqr-win-shell --test mount`; ejecting where WinFsp is).
 - Archives of other formats (ZIP, 7z, RAR, ALZ, EGG, tar and its compressors, a single file
-  compressed), browsed alike where Aqueous opens their type: read by `aqr --serve` through
+  compressed), browsed alike where Aqueous opens their type: read by `aqr --ipc` through
   aqr-unpack, the columns those their format has (the server's `fields`: Data, a file's compressed bytes,
   and Ratio of all but tar's; never Segment nor Overhead), nothing added nor versions.
 - Adding files (`src/drop.rs`): files of the file system's dropped on a view, on a folder in it

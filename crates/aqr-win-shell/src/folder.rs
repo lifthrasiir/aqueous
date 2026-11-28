@@ -303,7 +303,7 @@ fn version_named(archive: &client::Use, n: &str) -> Option<Item> {
     Some(Item::version(p, version_shown(p)))
 }
 
-/// Journal point `p` (as `aqr --serve` tells it) as it is shown: its label and time.
+/// Journal point `p` (as `aqr --ipc` tells it) as it is shown: its label and time.
 pub(crate) fn version_shown(p: &serde_json::Value) -> String {
     let label = p["label"].as_str().unwrap_or("");
     let time = p["shown"].as_str().unwrap_or("");

@@ -285,12 +285,10 @@
 //! failures are), 7 where it is done but for what it told it left out, 2 of the arguments, 130
 //! stopped.
 //!
-//! `--ipc` has this program driven by another (a graphical frontend) through standard input
-//! and output ([`ipc`]): what it shows as it goes told there, and the frontend asked what the
-//! options leave open. `--session` is that started before the work is known, as a compression
-//! dialog does: asked how many files the inputs are while the options are chosen, then begun
-//! ([`session`]). `--serve` has it serve another the entries of archives and the bytes of their
-//! files, as a shell extension browsing them asks ([`serve`]).
+//! `--ipc` has this program driven by another (a graphical frontend, a mount) through standard
+//! input and output, by the protocol of `man/aqripc.7` ([`ipc`]): the work of a `run` (what it
+//! shows as it goes told there, and the frontend asked what the options leave open), the
+//! inventory of its inputs ahead of it ([`session`]), the archives browsed ([`serve`]).
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -481,9 +479,7 @@ Output:
       --stats[=FILE]    tell what stands out after each archive; FILE.json or FILE.html
                         writes all that was sampled (may be given more than once)
       --ipc             be driven by a frontend through standard input and output
-      --session         as --ipc, told what to do later (a compression dialog's)
-      --serve           serve a frontend the entries and files of archives through
-                        standard input and output (a shell extension's)
+                        (the protocol: aqripc(7))
 
 Compression:
   -P, --passphrase      encrypt the archives with a passphrase asked for (decompressing:
@@ -618,24 +614,37 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if args.ipc
-        && let Err(e) = ipc::start(args.session)
-    {
-        eprintln!("aqr: {e}");
-        return ExitCode::FAILURE;
-    }
-    // (a session: its requests served until it begins, and then as if run with what it began with)
-    let args = match args.session {
-        true => match session::serve(args) {
-            Ok(a) => a,
-            Err(e) => {
+    // (driven by a frontend: its requests served, until its run comes, and then as if run with
+    // its arguments; or until it is gone)
+    let args = match args.ipc {
+        true => {
+            if !args.inputs.is_empty() {
+                eprintln!("aqr: --ipc takes no inputs (they come with its requests)");
+                return ExitCode::from(2);
+            }
+            let cli: &'static Args = Box::leak(Box::new(args));
+            aqr_common::pool::init(cli.opt.threads);
+            if let Err(e) = ipc::start(cli) {
                 eprintln!("aqr: {e}");
-                ipc::tell(serde_json::json!({"event": "error", "message": e}));
                 return ExitCode::FAILURE;
             }
-        },
+            match ipc::wait_run() {
+                Some(a) => {
+                    session::take(&a);
+                    a
+                }
+                None => return ExitCode::SUCCESS,
+            }
+        }
         false => args,
     };
+    let code = run(args);
+    ipc::ended(code.into());
+    ExitCode::from(code)
+}
+
+/// The work of `args`: its exit code.
+fn run(args: Args) -> u8 {
     // (of --convert, asked for as each archive needs them: [`convert`])
     let (given, from) = match args.convert {
         true => (false, None),
@@ -646,23 +655,13 @@ fn main() -> ExitCode {
         eprintln!("aqr: {e}");
         ipc::tell(serde_json::json!({"event": "error", "message": e}));
         // (none given: none to open an archive with)
-        return ExitCode::from(exit::Code::Decryption as u8);
+        return exit::Code::Decryption as u8;
     }
     // (before the pool is made, for its workers to be sampled)
     if args.stats.is_some() {
         aqr_common::trace::enable();
     }
     aqr_common::pool::init(args.opt.threads);
-    // (served until the frontend is gone: not on a worker, which the requests' work takes)
-    if args.serve {
-        return match serve::serve(&args) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("aqr: {e}");
-                ExitCode::FAILURE
-            }
-        };
-    }
     let r = aqr_common::pool::run(|| match () {
         _ if args.rollback.is_some() => rollback::rollback(&args),
         _ if args.convert => convert::convert_all(&args),
@@ -682,11 +681,11 @@ fn main() -> ExitCode {
         _ => r,
     };
     match r {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => 0,
         Err(e) => {
             eprintln!("aqr: {e}");
             ipc::tell(serde_json::json!({"event": "error", "message": e}));
-            ExitCode::from(exit::code())
+            exit::code()
         }
     }
 }

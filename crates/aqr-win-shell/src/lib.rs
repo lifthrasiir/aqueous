@@ -2,7 +2,7 @@
 //! shell namespace extension, `aqr_shell.dll`, of the class of `.aqr` files
 //! ([`folder::FOLDER`], a junction as Windows' ZIP folders are). It is loaded into Explorer
 //! and into every program that opens a file dialog, so it is thin: what it lists and reads it
-//! asks `aqr-win --serve` ([`client`]), a COM local server over `aqr --serve`, and a panic in
+//! asks `aqr-win --serve` ([`client`]), a COM local server over `aqr --ipc`, and a panic in
 //! it is caught at every entry point (a failure, not another program's crash).
 #![cfg(windows)]
 // (the COM methods take their callers' pointers as their interfaces have them, of signatures the

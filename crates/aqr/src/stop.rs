@@ -162,6 +162,8 @@ pub fn now(code: i32) -> ! {
         None => {}
     }
     end();
+    // (the run's last reply, of a frontend: its exit code)
+    crate::ipc::ended(code);
     std::mem::forget(gate);
     std::process::exit(code)
 }
@@ -172,6 +174,7 @@ pub fn exit(code: i32) -> ! {
     imp::set(None);
     UNDO.lock().unwrap_or_else(|e| e.into_inner()).take();
     end();
+    crate::ipc::ended(code);
     std::mem::forget(gate);
     std::process::exit(code)
 }

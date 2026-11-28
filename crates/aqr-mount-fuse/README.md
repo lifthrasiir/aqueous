@@ -7,7 +7,7 @@ and SIGHUP unmount and end it. A process killed otherwise (SIGKILL, a crash) lea
 `auto_unmount` would clean that up, but fusermount3 takes it only with `allow_other` or
 `allow_root`, which need `user_allow_other` in `/etc/fuse.conf`.
 
-The file system serves aqr-mount's tree of the archive (`ServedTree`, over an `aqr --serve`:
+The file system serves aqr-mount's tree of the archive (`ServedTree`, over an `aqr --ipc`:
 `AQR`, else the `aqr` beside the program, else the one on `PATH`; `src/fs.rs` is the adapter),
 named after the archive in the mount table. Names are case-sensitive and must be UTF-8; owners
 are the mounting user, modes 0555 and 0444, and the kernel checks them itself (`default_permissions`).

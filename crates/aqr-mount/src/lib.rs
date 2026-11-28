@@ -9,7 +9,7 @@
 //! A tree whose names differ only in case resolves such a lookup to the one named exactly so,
 //! else to the first in its order.
 //!
-//! [`ServedTree`] is the tree of an archive, as `aqr --serve` serves it; [`OneFile`] a tree of
+//! [`ServedTree`] is the tree of an archive, as `aqr --ipc` serves it; [`OneFile`] a tree of
 //! one fixed file, for the tests.
 
 use std::fmt;

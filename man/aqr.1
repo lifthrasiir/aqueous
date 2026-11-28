@@ -473,15 +473,12 @@ a line each comparison: the states, the changes
 .Pq added, changed, removed
 and their numbers.
 .It Fl -ipc
-Be driven by a graphical frontend through standard input and output.
-.It Fl -session
-As
-.Fl -ipc ,
-started before the frontend knows what to do: told its inputs to count while a compression
-dialog is open, and then what to do with them.
-.It Fl -serve
-Serve a frontend (a shell extension's) the entries and files of archives through standard
-input and output.
+Be driven by another program (a graphical frontend, a mount) through standard input and
+output, by the protocol of
+.Xr aqripc 7 :
+the work its run asks for, as these options would have it, the inputs counted ahead of it, the
+archives browsed.
+It takes no inputs: they come with its requests.
 .El
 .Ss Compression
 .Bl -tag -width Ds
@@ -888,6 +885,7 @@ Encrypt with a passphrase of a file, then list the archive as JSON:
 .Xr unzip 1 ,
 .Xr zstd 1 ,
 .Xr aqrattributes 5 ,
-.Xr aqrsfx 5
+.Xr aqrsfx 5 ,
+.Xr aqripc 7
 .Pp
 The Aqueous format specification.

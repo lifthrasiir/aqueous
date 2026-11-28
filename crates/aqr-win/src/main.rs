@@ -12,7 +12,7 @@
 //!   other archives `aqr` extracts. `--unregister` takes them away.
 //! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
 //!   (`install`): the former run by the installer, the latter by Settings' Apps.
-//! - `compress-options`: the dialog of the options first (`options`), `aqr --session` beside it
+//! - `compress-options`: the dialog of the options first (`options`), `aqr --ipc` beside it
 //!   finding out how many files and how big the paths are; Compress then has that `aqr` make the
 //!   archive, as `compress` does. `options-preview` shows the dialog alone, on examples.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
@@ -36,7 +36,7 @@
 //!   a COM local server), all at once. A verb's command, one process for each path as other
 //!   programs may run it, is gathered into the first process of the verb in a folder (`gather`).
 //! - `--serve`: the archives that Explorer browses in its windows (a shell extension), served
-//!   as a COM local server over `aqr --serve` (`serve`).
+//!   as a COM local server over `aqr --ipc` (`serve`).
 //! - `mount ARCHIVE` and `eject DRIVE` (the shell extension's "Mount as a drive" and "Eject"):
 //!   the archive mounted as a drive by aqr-mount where it is installed beside this program, and
 //!   opened; a drive of it ejected, the user asked first where files of it are open (`mount`).

@@ -23,10 +23,10 @@ Neither mounting nor the driver's start needs an administrator (WinFsp's install
 everyone start its driver), and nothing is written to the registry (the Launcher's `Services`
 keys are for `net use` and are not used).
 
-The volume serves aqr-mount's tree of the archive (`ServedTree`, over an `aqr --serve`;
+The volume serves aqr-mount's tree of the archive (`ServedTree`, over an `aqr --ipc`;
 `src/fs.rs` is the adapter): names in any case, the volume's label the archive's name. `aqr` is
 `AQR`, else the one beside the program, else the one on `PATH`, where the installer puts its
-folder. `aqr --serve` ends with the program, however it ends (its standard input closed).
+folder. `aqr --ipc` ends with the program, however it ends (its standard input closed).
 
 It is released on its own, beside the installer and not in it: it is of use only where WinFsp
 is installed, and its license is not the others'. The release's `aqr-STEM-win-mount.zip`

@@ -4,7 +4,7 @@
 //! -u`. Released so named: the package's binary is aqr-mount-fuse, aqr-mount-win's stub taking
 //! the name `aqr-mount` here.
 //!
-//! The file system is aqr-mount's tree of the archive, as an `aqr --serve` serves it: `aqr` is
+//! The file system is aqr-mount's tree of the archive, as an `aqr --ipc` serves it: `aqr` is
 //! `AQR`, else the one beside this program, else the one on `PATH`.
 
 #[cfg(target_os = "linux")]

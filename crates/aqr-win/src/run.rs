@@ -1,4 +1,4 @@
-//! The work: `aqr --ipc` run on the paths, what it tells taken into a [`Job`] (aqr-ipc) that
+//! The work: `aqr --ipc` run on the paths (a `run`), what it tells taken into a [`Job`] (aqr-ipc) that
 //! the window shows ([`crate::dialog::progress`]), and what came of it shown at the end.
 
 use std::os::windows::process::CommandExt;
@@ -13,8 +13,7 @@ use crate::options;
 /// Runs `aqr` on `paths` (`-P` where `encrypt`; compressing, into archives of `format`, `aqr`
 /// or another that `aqr --format` takes), and shows how far it is.
 pub fn run(verb: Verb, paths: Vec<PathBuf>, encrypt: bool, format: &str) -> ExitCode {
-    let (cmd, count) = aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, format);
-    drive(verb, cmd, count)
+    drive(verb, aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, format))
 }
 
 /// "Extract to…": asks for a folder (opened at the archives' own), and runs `aqr` extracting
@@ -29,36 +28,32 @@ pub fn run_into(paths: Vec<PathBuf>) -> ExitCode {
     let Some(into) = crate::folder::pick(start, &title, aqr_l10n::win::extract_to_button()) else {
         return ExitCode::SUCCESS;
     };
-    let (cmd, count) = aqr_ipc::command_into(&aqr_ipc::aqr(), paths, &into);
-    drive(Verb::Extract, cmd, count)
+    drive(Verb::Extract, aqr_ipc::command_into(&aqr_ipc::aqr(), paths, &into))
 }
 
 /// Runs `aqr` extracting `archive` as it was at `point`, into a folder beside it named after the
 /// version ([`aqr_ipc::version_folder`]), and shows how far it is.
 pub fn run_at(archive: &Path, point: &Point) -> ExitCode {
     let into = aqr_ipc::version_folder(archive, point);
-    let (cmd, count) = aqr_ipc::command_at(&aqr_ipc::aqr(), archive, point, &into);
-    drive(Verb::Extract, cmd, count)
+    drive(Verb::Extract, aqr_ipc::command_at(&aqr_ipc::aqr(), archive, point, &into))
 }
 
 /// Runs `aqr` writing `archive` as it was at `point` into a new archive beside it named after
 /// the version ([`aqr_ipc::version_archive`]: the later versions left out), and shows how far it is.
 pub fn run_keep_until(archive: &Path, point: &Point) -> ExitCode {
     let into = aqr_ipc::version_archive(archive, point);
-    let (cmd, count) = aqr_ipc::command_keep_until(&aqr_ipc::aqr(), archive, point, &into);
-    drive(Verb::Convert, cmd, count)
+    drive(Verb::Convert, aqr_ipc::command_keep_until(&aqr_ipc::aqr(), archive, point, &into))
 }
 
 /// Runs `aqr` adding `paths` to `archive` under `dir` in it ([`aqr_ipc::command_add`]: the
 /// Explorer folders' drops), and shows how far it is.
 pub fn run_add(archive: &Path, dir: &str, paths: &[PathBuf]) -> ExitCode {
-    let (cmd, count) = aqr_ipc::command_add(&aqr_ipc::aqr(), archive, dir, paths);
-    drive(Verb::Compress, cmd, count)
+    drive(Verb::Compress, aqr_ipc::command_add(&aqr_ipc::aqr(), archive, dir, paths))
 }
 
-/// Runs `aqr --session` beside the compression dialog on `paths` ([`options::open`]): it finds
-/// out what they are as the options are chosen, and once the user presses Compress it makes the
-/// archive, the window of how far it is shown and what came of it.
+/// Runs `aqr --ipc` beside the compression dialog on `paths` ([`options::open`]): it finds out
+/// what they are as the options are chosen (inventories), and once the user presses Compress it
+/// makes the archive (its run), the window of how far it is shown and what came of it.
 pub fn run_options(mut paths: Vec<PathBuf>) -> ExitCode {
     paths.sort();
     let cmd = aqr_ipc::session_command(&aqr_ipc::aqr(), paths[0].parent());
@@ -74,7 +69,7 @@ pub fn run_options(mut paths: Vec<PathBuf>) -> ExitCode {
         s.spawn(move || reading.read_err(err));
         let status = match options::open(Some(job.clone()), paths) {
             Some(args) => {
-                job.begin(&args);
+                job.run(&args);
                 dialog::progress(&job, &mut child)
             }
             // (given up: nothing to wait for)
@@ -108,12 +103,14 @@ fn spawn(verb: Verb, mut cmd: std::process::Command, count: usize) -> Result<(st
     Ok((child, job))
 }
 
-/// Runs `cmd` (of `count` archives), the window of how far it is shown and what came of it.
-fn drive(verb: Verb, cmd: std::process::Command, count: usize) -> ExitCode {
-    let (mut child, job) = match spawn(verb, cmd, count) {
+/// Runs `run`, the window of how far it is shown and what came of it.
+fn drive(verb: Verb, run: aqr_ipc::Run) -> ExitCode {
+    let count = run.count;
+    let (mut child, job) = match spawn(verb, run.command, count) {
         Ok(c) => c,
         Err(code) => return code,
     };
+    job.run(&run.args);
     let (out, err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
     let status = std::thread::scope(|s| {
         let job = &job;

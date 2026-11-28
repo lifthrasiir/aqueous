@@ -6,7 +6,7 @@ holds: `aqr -d --each --into`, the user asked once where files there would be re
 `.aqr` files and the other archives `aqr` extracts, and beside them the menu "Aqueous" of the
 rest (of archives "Test", "Mount as a drive" and of `.aqr` files the versions'; then
 "Compress with passphrase…", encrypted, `aqr -P`; "Compress into .zip" and ".7z", `aqr
---format zip`, `7z`; "Compress with options…", the dialog of the options, `aqr --session`),
+--format zip`, `7z`; "Compress with options…", the dialog of the options, `aqr --ipc`),
 and a window of how far the work is. The work is done by `aqr --ipc` in a process of its own (the protocol:
 `crates/aqr/src/ipc.rs`); this program is the window and the verbs, about 1 MB (550 KB of it
 the icons: `droplet.ico`, the program's, and `icons/*.ico`, the files', from `scripts/icons.py`;
@@ -73,7 +73,7 @@ Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win -
   DRIVE` (asked first where files of it are open, then forced).
 - `aqr-win --serve` is the COM local server of the archives a shell extension browses
   (`docs/win-shell-ext-design.md`, `src/serve.rs`): late-bound objects (`IDispatch`, marshaled
-  by the system's proxies, no type library) over one `aqr --serve`, an archive's handle closed a
+  by the system's proxies, no type library) over one `aqr --ipc`, an archive's handle closed a
   minute after its object is let go of, the program ending after ten minutes of none, at once
   where its class is registered as another program's or not at all, or as the session's event
   `Local\Aqueous.Serve.Quit` is set (the uninstall: then `aqr-shell.dll`, held by Explorer, is

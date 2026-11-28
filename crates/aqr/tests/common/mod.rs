@@ -1,6 +1,8 @@
 //! What the integration tests share.
 #![allow(dead_code)]
 
+pub mod frontend;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;

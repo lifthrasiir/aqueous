@@ -187,7 +187,6 @@ mod packed {
     /// (`--ipc`) as a `notice` of kind `unsigned`.
     #[test]
     fn told_unsigned() {
-        use std::io::{BufRead, Write};
         let d = scratch("unsigned");
         fs::create_dir_all(d.join("in")).unwrap();
         fs::write(d.join("in/a.txt"), prose(20_000)).unwrap();
@@ -197,17 +196,9 @@ mod packed {
         let o = aqr_in(&d, &["-c", "-q", "-f", "--format", "sfx", "-o", "a.exe", "in"]);
         assert!(o.status.success() && !String::from_utf8_lossy(&o.stderr).contains("not signed"));
         // the frontend's
-        let mut c = Command::new(aqr())
-            .current_dir(&d)
-            .args(["--ipc", "-c", "-f", "--format", "sfx", "-o", "a.exe", "in"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        writeln!(c.stdin.as_mut().unwrap(), "{{\"hello\":1,\"answers\":[]}}").unwrap();
-        let out = std::io::BufReader::new(c.stdout.take().unwrap());
-        let told: Vec<serde_json::Value> = out.lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+        let args = ["-c", "-f", "--format", "sfx", "-o", "a.exe", "in"].map(std::ffi::OsStr::new);
+        let (mut c, rx) = common::frontend::start_of(aqr(), Some(&d), &args, &[], std::process::Stdio::null());
+        let told: Vec<serde_json::Value> = rx.into_iter().collect();
         assert!(c.wait().unwrap().success());
         let notice = told.iter().find(|v| v["event"] == "notice").expect("a notice");
         assert_eq!(notice["kind"], "unsigned");

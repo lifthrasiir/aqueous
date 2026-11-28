@@ -1,23 +1,26 @@
-//! The protocol of `aqr --ipc` (`crates/aqr/src/ipc.rs` tells it), as the frontends speak it:
-//! `aqr` run on the paths given ([`command`]), what it tells taken into a [`State`] by threads
-//! reading it ([`Job::read_out`], [`Job::read_err`]), questions answered and the work stopped
-//! ([`Job::send`]). What is shown, and how, is the frontend's (aqr-win's window, aqr-mac's
-//! Finder progress).
+//! The protocol of `aqr --ipc` (`man/aqripc.7`, the frame: [`wire`]), as the frontends speak
+//! it: a run of `aqr` on the paths given ([`command`], [`Run`]), what it tells taken into a
+//! [`State`] by threads reading it ([`Job::read_out`], [`Job::read_err`]), questions answered
+//! and the work stopped ([`Job::answer`], [`Job::cancel`]); the archives browsed ([`serve`]).
+//! What is shown, and how, is the frontend's (aqr-win's window, aqr-mac's Finder progress).
 
-use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 pub mod serve;
 pub mod shell;
+pub mod wire;
 
 /// The version of the protocol.
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = wire::VERSION;
 
 /// The time given `aqr` to stop before it is killed.
 pub const STOP: Duration = Duration::from_secs(10);
@@ -30,18 +33,32 @@ pub mod ask {
     pub const PASSPHRASE: &str = "passphrase";
 }
 
-/// The control that stops the work, undoing what was done to its output.
-pub const CANCEL: &str = "cancel";
+/// A run of `aqr`: the command (`aqr --ipc`, in the inputs' directory, its standard streams
+/// piped) and the arguments of its `run` ([`Job::run`]), and the number of archives it makes or
+/// decodes.
+pub struct Run {
+    pub command: Command,
+    pub args: Vec<OsString>,
+    pub count: usize,
+}
 
-/// The controls of a session (`aqr --session`, `crates/aqr/src/session.rs`): asking how many
-/// files and bytes inputs are (answered by `inventory` events), and beginning the work.
-pub const INVENTORY: &str = "inventory";
-pub const BEGIN: &str = "begin";
+impl Run {
+    fn new(aqr: &Path, dir: Option<&Path>, args: Vec<OsString>, count: usize) -> Run {
+        let mut command = ipc_command(aqr, dir);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        Run { command, args, count }
+    }
+}
 
-/// The control that stops the work keeping what was done: an archive being written ended as
-/// it is, of the files written (and the work cancelled where it cannot be: `aqr` tells the
-/// controls it takes in its hello).
-pub const FINISH: &str = "finish";
+/// `aqr --ipc` (the program at that path), in `dir` where it is one.
+fn ipc_command(aqr: &Path, dir: Option<&Path>) -> Command {
+    let mut cmd = aqr_command(aqr);
+    cmd.arg("--ipc");
+    if let Some(dir) = dir.filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    cmd
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verb {
@@ -112,41 +129,36 @@ pub fn archive_of(paths: &[PathBuf], format: &str) -> PathBuf {
     dir.join(format!("{name}.{format}"))
 }
 
-/// The command running `aqr` (the program at that path, as [`aqr()`] finds it) on `paths` (not
-/// empty; sorted here) with `--ipc`, its standard streams piped (`-P` where `encrypt`;
-/// compressing, into an archive of `format`, `aqr` or another that `aqr --format` takes); and
-/// the number of archives it makes or decodes.
-pub fn command(aqr: &Path, verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool, format: &str) -> (Command, usize) {
+/// The run of `aqr` (the program at that path, as [`aqr()`] finds it) on `paths` (not empty;
+/// sorted here): `-P` where `encrypt`; compressing, into an archive of `format`, `aqr` or another
+/// that `aqr --format` takes.
+pub fn command(aqr: &Path, verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool, format: &str) -> Run {
     paths.sort();
-    let mut cmd = aqr_command(aqr);
-    cmd.arg("--ipc").arg(verb.flag());
+    let mut args: Vec<OsString> = vec![verb.flag().into()];
     if encrypt {
-        cmd.arg("-P");
+        args.push("-P".into());
     }
     if verb == Verb::Compress && format != "aqr" {
-        cmd.arg("--format").arg(format);
+        args.extend(["--format".into(), format.into()]);
     }
     // (every path an archive: several of them selected; a single entry at the top beside the
     // archive, else a directory of its name)
     if verb != Verb::Compress {
-        cmd.arg("--each");
+        args.push("--each".into());
     }
     if verb == Verb::Extract {
-        cmd.arg("--auto-dir");
+        args.push("--auto-dir".into());
     }
     let count = match verb {
         Verb::Compress if paths.len() > 1 => {
-            cmd.arg("-o").arg(archive_of(&paths, format));
+            args.extend(["-o".into(), archive_of(&paths, format).into()]);
             1
         }
         _ => paths.len(),
     };
-    cmd.arg("--").args(&paths);
-    if let Some(dir) = paths[0].parent().filter(|d| d.is_dir()) {
-        cmd.current_dir(dir);
-    }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    (cmd, count)
+    args.push("--".into());
+    args.extend(paths.iter().map(OsString::from));
+    Run::new(aqr, paths[0].parent(), args, count)
 }
 
 /// A command running the `aqr` at that path: where it is a console program started by a program
@@ -159,15 +171,11 @@ fn aqr_command(aqr: &Path) -> Command {
     cmd
 }
 
-/// The command running `aqr --session` (the program at that path), its standard streams piped,
-/// in `dir` where there is one: told what to do later ([`Job::request_inventory`],
-/// [`Job::begin`]), as a compression dialog does.
+/// The command running `aqr --ipc` (the program at that path), its standard streams piped, in
+/// `dir` where there is one, for a run told later ([`Job::request_inventory`], [`Job::run`]), as
+/// a compression dialog does.
 pub fn session_command(aqr: &Path, dir: Option<&Path>) -> Command {
-    let mut cmd = aqr_command(aqr);
-    cmd.arg("--session");
-    if let Some(dir) = dir.filter(|d| d.is_dir()) {
-        cmd.current_dir(dir);
-    }
+    let mut cmd = ipc_command(aqr, dir);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
 }
@@ -287,62 +295,56 @@ pub fn version_archive(archive: &Path, point: &Point) -> PathBuf {
     name.into()
 }
 
-/// The command writing `archive` as it was at `point` into the archive `into` (`aqr --ipc
-/// --convert --keep-until`: the versions after it left out), its standard streams piped: one
-/// archive, as [`command`] has it.
-pub fn command_keep_until(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Command, usize) {
-    let mut cmd = aqr_command(aqr);
-    cmd.arg("--ipc").arg("--convert").arg("--keep-until").arg(format!("#{}", point.number));
-    cmd.arg("-o").arg(into).arg("--").arg(archive);
-    if let Some(dir) = archive.parent().filter(|d| d.is_dir()) {
-        cmd.current_dir(dir);
-    }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    (cmd, 1)
+/// The run writing `archive` as it was at `point` into the archive `into` (`--convert
+/// --keep-until`: the versions after it left out): one archive, as [`command`] has it.
+pub fn command_keep_until(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> Run {
+    let args: Vec<OsString> = vec![
+        "--convert".into(),
+        "--keep-until".into(),
+        format!("#{}", point.number).into(),
+        "-o".into(),
+        into.into(),
+        "--".into(),
+        archive.into(),
+    ];
+    Run::new(aqr, archive.parent(), args, 1)
 }
 
-/// The command extracting `archive` as it was at `point` into `into` (`aqr --ipc -d --at`), its
-/// standard streams piped: one archive, as [`command`] has it.
-pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> (Command, usize) {
-    let mut cmd = aqr_command(aqr);
-    cmd.arg("--ipc").arg("-d").arg("--at").arg(format!("#{}", point.number)).arg("-o").arg(into).arg("--").arg(archive);
-    if let Some(dir) = archive.parent().filter(|d| d.is_dir()) {
-        cmd.current_dir(dir);
-    }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    (cmd, 1)
+/// The run extracting `archive` as it was at `point` into `into` (`-d --at`): one archive, as
+/// [`command`] has it.
+pub fn command_at(aqr: &Path, archive: &Path, point: &Point, into: &Path) -> Run {
+    let args: Vec<OsString> = vec![
+        "-d".into(),
+        "--at".into(),
+        format!("#{}", point.number).into(),
+        "-o".into(),
+        into.into(),
+        "--".into(),
+        archive.into(),
+    ];
+    Run::new(aqr, archive.parent(), args, 1)
 }
 
-/// The command extracting each archive of `paths` (not empty; sorted here) into the folder
-/// `into` as it is (`aqr --ipc -d --each --into`: the entries at the top of each in it, beside
-/// what is there), its standard streams piped; and the number of archives.
-pub fn command_into(aqr: &Path, mut paths: Vec<PathBuf>, into: &Path) -> (Command, usize) {
+/// The run extracting each archive of `paths` (not empty; sorted here) into the folder `into`
+/// as it is (`-d --each --into`: the entries at the top of each in it, beside what is there).
+pub fn command_into(aqr: &Path, mut paths: Vec<PathBuf>, into: &Path) -> Run {
     paths.sort();
-    let mut cmd = aqr_command(aqr);
-    cmd.arg("--ipc").arg("-d").arg("--each").arg("--into").arg(into).arg("--").args(&paths);
-    if let Some(dir) = paths[0].parent().filter(|d| d.is_dir()) {
-        cmd.current_dir(dir);
-    }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    (cmd, paths.len())
+    let mut args: Vec<OsString> = vec!["-d".into(), "--each".into(), "--into".into(), into.into(), "--".into()];
+    args.extend(paths.iter().map(OsString::from));
+    let count = paths.len();
+    Run::new(aqr, paths[0].parent(), args, count)
 }
 
-/// The command running `aqr` adding `paths` to `archive` (`-a`: what is not in it, or changed),
-/// each at its name under `dir` in the archive (names between `/`; empty: its root), with
-/// `--ipc`.
-pub fn command_add(aqr: &Path, archive: &Path, dir: &str, paths: &[PathBuf]) -> (Command, usize) {
-    let mut cmd = aqr_command(aqr);
-    cmd.arg("--ipc").arg("-a").arg("-o").arg(archive);
+/// The run adding `paths` to `archive` (`-a`: what is not in it, or changed), each at its name
+/// under `dir` in the archive (names between `/`; empty: its root).
+pub fn command_add(aqr: &Path, archive: &Path, dir: &str, paths: &[PathBuf]) -> Run {
+    let mut args: Vec<OsString> = vec!["-a".into(), "-o".into(), archive.into()];
     for p in paths {
         let name = p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         let to = if dir.is_empty() { name } else { format!("{dir}/{name}") };
-        cmd.arg(p).arg("--rename").arg(to);
+        args.extend([p.into(), "--rename".into(), to.into()]);
     }
-    if let Some(d) = archive.parent().filter(|d| d.is_dir()) {
-        cmd.current_dir(d);
-    }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    (cmd, 1)
+    Run::new(aqr, archive.parent(), args, 1)
 }
 
 /// The lines of `aqr`'s standard error kept, the last.
@@ -365,14 +367,15 @@ pub struct Inventory {
 }
 
 impl Inventory {
-    fn of(v: &Value) -> Option<Inventory> {
+    /// Of reply `v` to the caller's request `id`.
+    fn of(id: u64, v: &Value) -> Option<Inventory> {
         Some(Inventory {
-            id: v["id"].as_u64()?,
+            id,
             files: v["files"].as_u64().unwrap_or(0),
             bytes: v["bytes"].as_u64().unwrap_or(0),
             walked: v["walked"].as_bool().unwrap_or(false),
             done: v["done"].as_bool().unwrap_or(false),
-            error: v["error"].as_str().map(String::from),
+            error: v["error"]["message"].as_str().map(String::from),
         })
     }
 }
@@ -380,6 +383,11 @@ impl Inventory {
 /// What `aqr` told so far.
 #[derive(Default)]
 pub struct State {
+    /// The run's request, once sent ([`Job::run`]), and the inventories' (by the caller's ids).
+    run: Option<u64>,
+    inventories: HashMap<u64, u64>,
+    /// The run's exit code, its last reply.
+    pub exit: Option<i64>,
     /// A session's last inventory event ([`Job::request_inventory`]).
     pub inventory: Option<Inventory>,
     /// The archives begun, and of the last: its inputs, its output (none testing, and with
@@ -421,16 +429,36 @@ impl State {
         shown.map(file_name).unwrap_or_default()
     }
 
-    /// Takes a line `aqr` told.
-    fn take(&mut self, line: &str) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return;
-        };
-        if v.get("ask").is_some() {
+    /// Takes a message `aqr` told: a question (its request `ask`), a reply of the run, of an
+    /// inventory.
+    fn take(&mut self, v: Value) {
+        if v["op"] == "ask" {
             self.questions.push_back(v);
             return;
         }
-        let path = |v: &Value| v.as_str().map(PathBuf::from);
+        let Some(r) = v["r"].as_u64() else { return };
+        if let Some(&id) = self.inventories.get(&r) {
+            // (one replaced or cancelled: of no more interest)
+            if v["error"]["kind"] != wire::kind::CANCELLED {
+                self.inventory = Inventory::of(id, &v);
+            }
+            if v["more"] != true {
+                self.inventories.remove(&r);
+            }
+            return;
+        }
+        if Some(r) != self.run {
+            return;
+        }
+        if let Some(code) = v["exit"].as_i64() {
+            self.exit = Some(code);
+            return;
+        }
+        if let Some(m) = v["error"]["message"].as_str() {
+            self.error = Some(m.to_owned());
+            return;
+        }
+        let path = |v: &Value| wire::os_of(v).map(PathBuf::from);
         match v["event"].as_str() {
             Some("begin") => {
                 self.begun += 1;
@@ -442,7 +470,6 @@ impl State {
             // (with --auto-dir, what is extracted once decided)
             Some("output") => self.output = path(&v["output"]),
             Some("progress") => self.progress = Some(v),
-            Some("inventory") => self.inventory = Inventory::of(&v),
             Some("end") => {
                 let name = self.name();
                 self.ended.push((name, v));
@@ -463,13 +490,15 @@ pub struct Job {
     pub count: usize,
     pub state: Mutex<State>,
     input: Mutex<Option<ChildStdin>>,
+    /// The frontend's requests, numbered.
+    next: AtomicU64,
 }
 
 impl Job {
     /// The job of `aqr` reading `input` (the [`command`] of `verb` making or decoding `count`
     /// archives), told the frontend's hello: it answers both kinds of question ([`ask`]).
     pub fn new(verb: Verb, count: usize, input: Option<ChildStdin>) -> Job {
-        let job = Job { verb, count, state: Mutex::default(), input: Mutex::new(input) };
+        let job = Job { verb, count, state: Mutex::default(), input: Mutex::new(input), next: AtomicU64::new(1) };
         job.send(&json!({"hello": VERSION, "answers": [ask::OVERWRITE, ask::PASSPHRASE]}));
         job
     }
@@ -477,37 +506,60 @@ impl Job {
     /// Sends `aqr` `v` (nothing where it is gone).
     pub fn send(&self, v: &Value) {
         if let Some(i) = self.input.lock().unwrap().as_mut() {
-            _ = writeln!(i, "{v}").and_then(|_| i.flush());
+            _ = wire::write(i, v, &[]);
         }
     }
 
-    /// Asks a session's `aqr` how many files the inputs of `args` (what it would be run with to
-    /// compress: only `-x`, `-L`, `-p`, `--rm` and the inputs count) are, as `id`: it answers by
-    /// `inventory` events of that id ([`State::inventory`]), now and then until it is known, and
-    /// takes a later request as replacing this one.
+    /// Request `op` of `v`'s fields sent: its number.
+    fn request(&self, op: &str, mut v: Value) -> u64 {
+        let q = self.next.fetch_add(1, Ordering::Relaxed);
+        v["q"] = q.into();
+        v["op"] = op.into();
+        self.send(&v);
+        q
+    }
+
+    /// Has `aqr` run as `args` say (the [`Run`]'s: once), using what an inventory found of the
+    /// same inputs.
+    pub fn run<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) {
+        let args: Vec<Value> = args.iter().map(|a| wire::os_value(a.as_ref())).collect();
+        // (numbered as the state takes it, before a reply can come)
+        let mut s = self.state.lock().unwrap();
+        s.run = Some(self.request("run", json!({"args": args})));
+    }
+
+    /// Asks `aqr` how many files the inputs of `args` (what it would be run with to compress:
+    /// only `-x`, `-L`, `-p`, `--rm` and the inputs count) are, as `id`: it replies now and then
+    /// until it is known ([`State::inventory`], of that id), and takes a later request as
+    /// replacing this one.
     pub fn request_inventory(&self, id: u64, args: &[String]) {
-        self.send(&json!({"control": INVENTORY, "id": id, "args": args}));
+        let mut s = self.state.lock().unwrap();
+        let q = self.request("inventory", json!({"args": args}));
+        s.inventories.insert(q, id);
     }
 
-    /// Has a session's `aqr` begin to compress as `args` say, using what its inventory found
-    /// of the same inputs.
-    pub fn begin(&self, args: &[String]) {
-        self.send(&json!({"control": BEGIN, "args": args}));
-    }
-
-    /// Answers question `q` with `value`.
+    /// Answers question `q` (its request) with `value`.
     pub fn answer(&self, q: &Value, value: Value) {
-        self.send(&json!({"answer": q["ask"], "value": value}));
+        self.send(&json!({"r": q["q"], "value": value}));
     }
 
-    /// Asks `aqr` to stop, its output being written removed.
+    /// Asks `aqr` to stop, its output being written removed (where nothing runs, it is let go
+    /// of by [`Job::close`]).
     pub fn cancel(&self) {
-        self.send(&json!({"control": CANCEL}));
+        self.stop(false);
     }
 
-    /// Asks `aqr` to stop, keeping what was done ([`FINISH`]).
+    /// Asks `aqr` to stop, keeping what was done: an archive being written ended as it is, of the
+    /// files written (and the work cancelled where it cannot be).
     pub fn finish(&self) {
-        self.send(&json!({"control": FINISH}));
+        self.stop(true);
+    }
+
+    fn stop(&self, finish: bool) {
+        let run = self.state.lock().unwrap().run;
+        if let Some(r) = run {
+            self.request("cancel", json!({"of": r, "finish": finish}));
+        }
     }
 
     /// Closes `aqr`'s standard input: it stops where it has not, and the readers end.
@@ -517,9 +569,9 @@ impl Job {
 
     /// Takes what `aqr` tells on `out`, its standard output, until it closes.
     pub fn read_out(&self, out: impl Read) {
-        for line in BufReader::new(out).lines() {
-            let Ok(line) = line else { break };
-            self.state.lock().unwrap().take(&line);
+        let mut out = BufReader::new(out);
+        while let Ok(Some((v, _))) = wire::read(&mut out) {
+            self.state.lock().unwrap().take(v);
         }
         self.state.lock().unwrap().eof = true;
     }
@@ -649,6 +701,25 @@ pub fn outcome(verb: Verb, count: usize, s: &State, status: Option<std::process:
 mod tests {
     use super::*;
 
+    impl State {
+        /// `line` taken as `aqr` tells it: an event as a reply of the run (numbered 1), the rest
+        /// as it is.
+        fn told(&mut self, line: &str) {
+            let Ok(mut v) = serde_json::from_str::<Value>(line) else { return };
+            if v.get("event").is_some() {
+                self.run = Some(1);
+                v["r"] = 1.into();
+                v["more"] = true.into();
+            }
+            self.take(v);
+        }
+    }
+
+    /// The arguments of `run`'s request, as text.
+    fn run_args(r: &Run) -> Vec<String> {
+        r.args.iter().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
     /// The notices told, in the frontend's words of the kinds it knows (English here), aqr's of
     /// the others; each text once.
     #[test]
@@ -660,7 +731,7 @@ mod tests {
             r#"{"event":"notice","kind":"unsigned","output":"d/b.exe","message":"not signed: ..."}"#,
             r#"{"event":"notice","kind":"later","output":"d/c.aqr","message":"something new"}"#,
         ] {
-            s.take(line);
+            s.told(line);
         }
         let (main, text) = notice(&s).unwrap();
         assert_eq!(main, "a.exe is not signed");
@@ -676,24 +747,26 @@ mod tests {
             r#"{"event":"begin","mode":"test","inputs":["d/a.aqr"],"output":null}"#,
             r#"{"event":"progress","decompressed":[5,10],"evaluated":[0,10]}"#,
             r#"{"event":"end","output":null,"files":3,"read":100,"written":2000,"seconds":0.5}"#,
-            r#"{"ask":1,"kind":"passphrase","path":"d/b.aqr","mode":"test","again":false,"confirm":false}"#,
+            r#"{"q":1,"op":"ask","kind":"passphrase","path":"d/b.aqr","mode":"test","again":false,"confirm":false}"#,
             "not json",
             r#"{"event":"begin","mode":"compress","inputs":["x","y"],"output":"d/xy.aqr"}"#,
             r#"{"event":"skipped","output":"d/xy.aqr"}"#,
             r#"{"event":"error","message":"no"}"#,
         ] {
-            s.take(line);
+            s.told(line);
         }
         assert_eq!(s.begun, 2);
         assert_eq!(s.name(), "xy.aqr");
         assert_eq!(s.input(), Some(Path::new("x")));
         assert!(s.progress.is_none());
-        s.take(r#"{"event":"inventory","id":4,"files":12,"bytes":300,"walked":false,"done":false}"#);
+        s.inventories.insert(5, 4);
+        s.told(r#"{"r":5,"more":true,"files":12,"bytes":300,"walked":false,"done":false}"#);
         assert_eq!(
             s.inventory,
             Some(Inventory { id: 4, files: 12, bytes: 300, walked: false, done: false, error: None })
         );
-        s.take(r#"{"event":"inventory","id":4,"error":"no way","done":true}"#);
+        s.told(r#"{"r":5,"error":{"kind":"failed","message":"no way"},"done":true}"#);
+        assert!(s.inventories.is_empty());
         assert_eq!(s.inventory.as_ref().unwrap().error.as_deref(), Some("no way"));
         assert_eq!(s.ended.len(), 1);
         assert_eq!(s.ended[0].0, "a.aqr");
@@ -716,20 +789,18 @@ mod tests {
         assert_eq!(version_folder(a, &points[1]), Path::new("d/backup (#2)"));
         let odd = Point { number: 3, shown: String::new(), label: " a/b:c? 2026. ".into() };
         assert_eq!(version_folder(a, &odd), Path::new("d/backup (a_b_c_ 2026)"));
-        let (cmd, count) = command_at(Path::new("aqr"), a, &points[0], Path::new("d/out"));
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(args, ["--ipc", "-d", "--at", "#1", "-o", "d/out", "--", "d/backup.aqr"]);
-        assert_eq!(count, 1);
+        let r = command_at(Path::new("aqr"), a, &points[0], Path::new("d/out"));
+        assert_eq!(run_args(&r), ["-d", "--at", "#1", "-o", "d/out", "--", "d/backup.aqr"]);
+        assert_eq!(r.count, 1);
         let v = Point { number: 2, shown: String::new(), label: "v1.2".into() };
         assert_eq!(version_archive(a, &v), Path::new("d/backup (v1.2).aqr"));
         let into = version_archive(a, &v);
-        let (cmd, count) = command_keep_until(Path::new("aqr"), a, &v, &into);
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let r = command_keep_until(Path::new("aqr"), a, &v, &into);
         assert_eq!(
-            args,
-            ["--ipc", "--convert", "--keep-until", "#2", "-o", &into.to_string_lossy(), "--", "d/backup.aqr"]
+            run_args(&r),
+            ["--convert", "--keep-until", "#2", "-o", &into.to_string_lossy(), "--", "d/backup.aqr"]
         );
-        assert_eq!(count, 1);
+        assert_eq!(r.count, 1);
         assert_eq!(
             last_line(
                 b"x
@@ -745,7 +816,7 @@ aqr: not there
     fn share_of_progress() {
         let job = Job::new(Verb::Extract, 1, None);
         assert_eq!(job.share(), 0.0);
-        job.state.lock().unwrap().take(r#"{"event":"progress","decompressed":[10,10],"evaluated":[5,10]}"#);
+        job.state.lock().unwrap().told(r#"{"event":"progress","decompressed":[10,10],"evaluated":[5,10]}"#);
         assert!((job.share() - 0.65).abs() < 1e-9);
     }
 
@@ -787,46 +858,46 @@ aqr: not there
     #[test]
     fn commands() {
         let a = Path::new("aqr");
-        let (cmd, count) = command(a, Verb::Compress, paths(&["d/b", "d/a"]), true, "zip");
+        let r = command(a, Verb::Compress, paths(&["d/b", "d/a"]), true, "zip");
         // (the archive's path joined by the system's separator: `d\d.zip` on Windows)
         let archive = Path::new("d").join("d.zip").to_string_lossy().into_owned();
-        assert_eq!(args_of(&cmd), ["--ipc", "-c", "-P", "--format", "zip", "-o", &archive, "--", "d/a", "d/b"]);
-        assert_eq!(count, 1);
-        let (cmd, count) = command(a, Verb::Compress, paths(&["d/a"]), false, "aqr");
-        assert_eq!(args_of(&cmd), ["--ipc", "-c", "--", "d/a"]);
-        assert_eq!(count, 1);
-        let (cmd, count) = command(a, Verb::Extract, paths(&["x.aqr", "y.aqr"]), false, "aqr");
-        assert_eq!(args_of(&cmd), ["--ipc", "-d", "--each", "--auto-dir", "--", "x.aqr", "y.aqr"]);
-        assert_eq!(count, 2);
-        let (cmd, count) = command_into(a, paths(&["y.aqr", "x.zip"]), Path::new("/p/out"));
-        assert_eq!(args_of(&cmd), ["--ipc", "-d", "--each", "--into", "/p/out", "--", "x.zip", "y.aqr"]);
-        assert_eq!(count, 2);
-        let (cmd, count) = command_add(a, Path::new("x.aqr"), "d/e", &paths(&["/p/b.txt", "/p/c"]));
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args_of(&r.command), ["--ipc"]);
+        assert_eq!(run_args(&r), ["-c", "-P", "--format", "zip", "-o", &archive, "--", "d/a", "d/b"]);
+        assert_eq!(r.count, 1);
+        let r = command(a, Verb::Compress, paths(&["d/a"]), false, "aqr");
+        assert_eq!(run_args(&r), ["-c", "--", "d/a"]);
+        assert_eq!(r.count, 1);
+        let r = command(a, Verb::Extract, paths(&["x.aqr", "y.aqr"]), false, "aqr");
+        assert_eq!(run_args(&r), ["-d", "--each", "--auto-dir", "--", "x.aqr", "y.aqr"]);
+        assert_eq!(r.count, 2);
+        let r = command_into(a, paths(&["y.aqr", "x.zip"]), Path::new("/p/out"));
+        assert_eq!(run_args(&r), ["-d", "--each", "--into", "/p/out", "--", "x.zip", "y.aqr"]);
+        assert_eq!(r.count, 2);
+        let r = command_add(a, Path::new("x.aqr"), "d/e", &paths(&["/p/b.txt", "/p/c"]));
         assert_eq!(
-            args,
-            ["--ipc", "-a", "-o", "x.aqr", "/p/b.txt", "--rename", "d/e/b.txt", "/p/c", "--rename", "d/e/c"]
+            run_args(&r),
+            ["-a", "-o", "x.aqr", "/p/b.txt", "--rename", "d/e/b.txt", "/p/c", "--rename", "d/e/c"]
         );
-        assert_eq!(count, 1);
-        let (cmd, _) = command_add(a, Path::new("x.aqr"), "", &paths(&["/p/b.txt"]));
-        assert_eq!(cmd.get_args().last().unwrap(), "b.txt");
-        let (cmd, count) = command(a, Verb::Test, paths(&["x.aqr"]), false, "aqr");
-        assert_eq!(args_of(&cmd), ["--ipc", "-K", "--each", "--", "x.aqr"]);
-        assert_eq!(count, 1);
+        assert_eq!(r.count, 1);
+        let r = command_add(a, Path::new("x.aqr"), "", &paths(&["/p/b.txt"]));
+        assert_eq!(r.args.last().unwrap(), "b.txt");
+        let r = command(a, Verb::Test, paths(&["x.aqr"]), false, "aqr");
+        assert_eq!(run_args(&r), ["-K", "--each", "--", "x.aqr"]);
+        assert_eq!(r.count, 1);
         // the folder is the name of the archive of several; none: "Archive"
         assert_eq!(archive_of(&paths(&["/p/q/a", "/p/q/b"]), "aqr"), Path::new("/p/q/q.aqr"));
         assert_eq!(archive_of(&paths(&["/a"]), "7z"), Path::new("/Archive.7z"));
         let cmd = session_command(a, None);
-        assert_eq!(args_of(&cmd), ["--session"]);
+        assert_eq!(args_of(&cmd), ["--ipc"]);
         assert!(cmd.get_current_dir().is_none());
         let dir = std::env::temp_dir();
         assert_eq!(session_command(a, Some(&dir)).get_current_dir(), Some(dir.as_path()));
         assert!(session_command(a, Some(Path::new("/no/such/dir"))).get_current_dir().is_none());
-        let (cmd, _) = command(a, Verb::Test, vec![dir.join("x.aqr")], false, "aqr");
-        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
-        let (cmd, _) =
+        let r = command(a, Verb::Test, vec![dir.join("x.aqr")], false, "aqr");
+        assert_eq!(r.command.get_current_dir(), Some(dir.as_path()));
+        let r =
             command_at(a, &dir.join("x.aqr"), &Point { number: 2, shown: String::new(), label: String::new() }, &dir);
-        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+        assert_eq!(r.command.get_current_dir(), Some(dir.as_path()));
     }
 
     /// A stand-in `aqr` (a shell script) in `dir`, writing `body`.
@@ -874,13 +945,18 @@ esac"#,
     #[test]
     fn job_reads_and_sends() {
         let job = Job::new(Verb::Compress, 1, None);
-        let out = "{\"event\":\"begin\",\"inputs\":[\"a\"],\"output\":\"a.aqr\"}\n\
-                   {\"event\":\"output\",\"output\":\"b.aqr\"}\n\
-                   {\"event\":\"stopped\"}\n";
+        // (the run's replies, of request 1: those of another request not taken)
+        job.run(&["-c", "a"]);
+        let out = "{\"r\":1,\"more\":true,\"event\":\"begin\",\"inputs\":[\"a\"],\"output\":\"a.aqr\"}\n\
+                   {\"r\":1,\"more\":true,\"event\":\"output\",\"output\":\"b.aqr\"}\n\
+                   {\"r\":9,\"more\":true,\"event\":\"output\",\"output\":\"c.aqr\"}\n\
+                   {\"r\":1,\"more\":true,\"event\":\"stopped\"}\n\
+                   {\"r\":1,\"exit\":130}\n";
         job.read_out(out.as_bytes());
         {
             let s = job.state.lock().unwrap();
             assert!(s.eof && s.stopped);
+            assert_eq!(s.exit, Some(130));
             assert_eq!(s.output.as_deref(), Some(Path::new("b.aqr")));
         }
         // the log keeps the last LOG lines
@@ -894,9 +970,9 @@ esac"#,
         // no input: sending and closing do nothing
         job.cancel();
         job.finish();
-        job.begin(&[]);
+        job.run::<&str>(&[]);
         job.request_inventory(1, &[]);
-        job.answer(&json!({"ask": 3}), json!("x"));
+        job.answer(&json!({"q": 3}), json!("x"));
         job.close();
     }
 
@@ -909,8 +985,8 @@ esac"#,
         let mut child = Command::new(&cat).stdin(Stdio::piped()).spawn().unwrap();
         let job = Job::new(Verb::Extract, 1, child.stdin.take());
         job.request_inventory(7, &["x".into()]);
-        job.begin(&["-c".into()]);
-        job.answer(&json!({"ask": 3}), json!("pw"));
+        job.run(&["-c"]);
+        job.answer(&json!({"q": 3}), json!("pw"));
         job.cancel();
         job.finish();
         job.close();
@@ -918,11 +994,11 @@ esac"#,
         let lines: Vec<Value> =
             std::fs::read_to_string(&out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         assert_eq!(lines[0], json!({"hello": VERSION, "answers": ["overwrite", "passphrase"]}));
-        assert_eq!(lines[1], json!({"control": "inventory", "id": 7, "args": ["x"]}));
-        assert_eq!(lines[2], json!({"control": "begin", "args": ["-c"]}));
-        assert_eq!(lines[3], json!({"answer": 3, "value": "pw"}));
-        assert_eq!(lines[4], json!({"control": CANCEL}));
-        assert_eq!(lines[5], json!({"control": FINISH}));
+        assert_eq!(lines[1], json!({"q": 1, "op": "inventory", "args": ["x"]}));
+        assert_eq!(lines[2], json!({"q": 2, "op": "run", "args": ["-c"]}));
+        assert_eq!(lines[3], json!({"r": 3, "value": "pw"}));
+        assert_eq!(lines[4], json!({"q": 3, "op": "cancel", "of": 2, "finish": false}));
+        assert_eq!(lines[5], json!({"q": 4, "op": "cancel", "of": 2, "finish": true}));
         assert_eq!(lines.len(), 6);
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -930,7 +1006,7 @@ esac"#,
     #[test]
     fn share_of_compression() {
         let job = Job::new(Verb::Compress, 1, None);
-        let set = |p: &str| job.state.lock().unwrap().take(p);
+        let set = |p: &str| job.state.lock().unwrap().told(p);
         set(r#"{"event":"progress","probe":[1,2],"analysis":[1,2],"compression":[0,0]}"#);
         assert!((job.share() - (0.025 + 0.325)).abs() < 1e-9);
         // no probe to do: counted as done; more than the whole is capped
@@ -1007,10 +1083,10 @@ esac"#,
         assert_eq!(done(&json!({}), "k"), 0.0);
         let mut s = State::default();
         assert_eq!(s.name(), "");
-        s.take(r#"{"event":"end"}"#);
+        s.told(r#"{"event":"end"}"#);
         assert_eq!(s.ended[0].0, "");
-        s.take(r#"{"event":"error"}"#);
+        s.told(r#"{"event":"error"}"#);
         assert_eq!(s.error.as_deref(), Some(""));
-        s.take(r#"{"event":"mystery"}"#);
+        s.told(r#"{"event":"mystery"}"#);
     }
 }

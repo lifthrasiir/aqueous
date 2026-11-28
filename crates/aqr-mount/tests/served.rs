@@ -1,4 +1,4 @@
-//! The tree of an archive through `aqr --serve` (the `aqr` built beside the tests: `cargo rt -p aqr
+//! The tree of an archive through `aqr --ipc` (the `aqr` built beside the tests: `cargo rt -p aqr
 //! -p aqr-mount`): directories looked in, in any case or not, the entries as made, every file
 //! read whole in pieces of odd sizes and at once from several threads.
 

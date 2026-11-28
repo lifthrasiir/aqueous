@@ -3,7 +3,7 @@
 //! without one, the last drive letter free) until it is ejected through its control
 //! ([`control`]: aqr-win's "Eject") or the program ends, however it ends.
 //!
-//! The volume is aqr-mount's tree of the archive, as an `aqr --serve` serves it: `aqr` is
+//! The volume is aqr-mount's tree of the archive, as an `aqr --ipc` serves it: `aqr` is
 //! `AQR`, else the one beside this program, else the one on `PATH` (where the installer puts
 //! its folder).
 //!
@@ -96,7 +96,7 @@ fn main() -> std::process::ExitCode {
     ExitCode::SUCCESS
 }
 
-/// This program's standard handles kept from its children (`aqr --serve`, which std's
+/// This program's standard handles kept from its children (`aqr --ipc`, which std's
 /// `Command` would give every handle that may be inherited): what started this program reads
 /// its output (aqr-win, the line of `--json`) and waits for the pipe's end, which a child
 /// holding it would put off for as long as it runs.

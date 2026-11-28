@@ -3,7 +3,7 @@
 //! stopped, and killed where it does not stop.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -22,20 +22,19 @@ pub struct Job {
 impl Job {
     /// Runs `aqr` on `paths` (`-P` where `encrypt`), read on threads of their own.
     pub fn start(verb: Verb, paths: Vec<PathBuf>, encrypt: bool) -> Result<Arc<Job>, String> {
-        let (cmd, count) = aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, "aqr");
-        Self::run(verb, cmd, count)
+        Self::run(verb, aqr_ipc::command(&aqr_ipc::aqr(), verb, paths, encrypt, "aqr"))
     }
 
     /// Runs `aqr` to extract version `point` of `archive` as it was, into a folder beside it
     /// ([`aqr_ipc::version_folder`]).
     pub fn start_at(archive: &Path, point: &Point) -> Result<Arc<Job>, String> {
         let into = aqr_ipc::version_folder(archive, point);
-        let (cmd, count) = aqr_ipc::command_at(&aqr_ipc::aqr(), archive, point, &into);
-        Self::run(Verb::Extract, cmd, count)
+        Self::run(Verb::Extract, aqr_ipc::command_at(&aqr_ipc::aqr(), archive, point, &into))
     }
 
-    /// Runs `cmd` (`aqr --ipc` of `count` archives), read on threads of their own.
-    fn run(verb: Verb, mut cmd: Command, count: usize) -> Result<Arc<Job>, String> {
+    /// Runs `run` (`aqr --ipc` and its run), read on threads of their own.
+    fn run(verb: Verb, run: aqr_ipc::Run) -> Result<Arc<Job>, String> {
+        let (mut cmd, count) = (run.command, run.count);
         let mut child = cmd.spawn().map_err(|e| aqr_l10n::common::not_run(cmd.get_program().display(), e))?;
         let (out, err) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
         let job = Arc::new(Job {
@@ -44,6 +43,7 @@ impl Job {
             child: Mutex::new(child),
             stopping: Mutex::new(None),
         });
+        job.ipc.run(&run.args);
         let j = job.clone();
         std::thread::spawn(move || j.ipc.read_out(out));
         let j = job.clone();

@@ -281,7 +281,7 @@ fn fill(hwnd: HWND, s: &mut State) {
     s.points = Some(points);
 }
 
-/// Archive `file` opened as of point `p` (as `aqr --serve` tells it), in a window of its own.
+/// Archive `file` opened as of point `p` (as `aqr --ipc` tells it), in a window of its own.
 fn open(file: &Path, p: &Value, hwnd: HWND) -> windows::core::Result<()> {
     // SAFETY: ID lists of their own, freed after
     unsafe {

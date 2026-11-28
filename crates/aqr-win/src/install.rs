@@ -9,7 +9,7 @@
 //! - `--uninstall`: all that taken away, and the files: those of the folder that the installer
 //!   wrote, then this program and the folder (left empty) by `cmd.exe` once this program has
 //!   exited, since a running program cannot be deleted. The servers of the archives browsed in
-//!   Explorer (`aqr-win --serve`, its `aqr --serve`) are told to end first
+//!   Explorer (`aqr-win --serve`, its `aqr --ipc`) are told to end first
 //!   ([`crate::serve::quit_all`]); the shell extension, `aqr-shell.dll`, held by Explorer once it
 //!   loaded it, is moved into the temporary directory and deleted as the user next signs in
 //!   (`RunOnce`). Only the program at the place the uninstaller names (`InstallLocation`)
@@ -87,7 +87,7 @@ pub fn uninstall(quiet: bool) -> Result<bool, String> {
             return Ok(false);
         }
     }
-    // (the servers of the archives browsed ended first: theirs, aqr.exe's `aqr --serve` among
+    // (the servers of the archives browsed ended first: theirs, aqr.exe's `aqr --ipc` among
     // them, are no files running then)
     if crate::serve::quit_all() {
         std::thread::sleep(std::time::Duration::from_millis(1500));

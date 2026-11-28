@@ -13,7 +13,7 @@
 //!
 //! A journal point (a named version, [`Kind::Version`]) is an item right after the archive
 //! file's, never listed: the archive as it was there, the entries after it of that. Its size is
-//! the offset that tells the point (`aqr --serve`'s `metadata`), its time the point's, its name
+//! the offset that tells the point (`aqr --ipc`'s `metadata`), its time the point's, its name
 //! what it is shown as.
 
 use serde_json::Value;
@@ -48,7 +48,7 @@ pub struct Item {
 }
 
 impl Item {
-    /// The entry `v` as `aqr --serve` tells it (`list`, `stat`).
+    /// The entry `v` as `aqr --ipc` tells it (`list`, `stat`).
     pub fn of(v: &Value) -> Item {
         let kind = match v["kind"].as_str() {
             Some("dir") => Kind::Dir,
@@ -75,7 +75,7 @@ impl Item {
         self.kind == Kind::Dir
     }
 
-    /// Journal point `v` as `aqr --serve` tells it (`journal`), shown as `shown`.
+    /// Journal point `v` as `aqr --ipc` tells it (`journal`), shown as `shown`.
     pub fn version(v: &Value, shown: String) -> Item {
         let ms = v["time"].as_u64().unwrap_or(0) as i128;
         Item {

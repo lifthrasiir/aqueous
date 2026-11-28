@@ -116,7 +116,7 @@ struct Connection {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Key {
     pub path: PathBuf,
-    /// The offset of the point's segment's metadata block (`aqr --serve`'s `journal`).
+    /// The offset of the point's segment's metadata block (`aqr --ipc`'s `journal`).
     pub at: Option<u64>,
 }
 
@@ -509,7 +509,7 @@ pub fn read_all(key: &Key, at: &str, max: u64) -> windows::core::Result<Vec<u8>>
     })
 }
 
-/// What the server answered as it opened archive `key` (`aqr --serve`'s `open`: its `fields`).
+/// What the server answered as it opened archive `key` (`aqr --ipc`'s `open`: its `fields`).
 pub fn info(key: &Key) -> windows::core::Result<Value> {
     with(key, |a| json(a, "Info", &[]))
 }
@@ -520,7 +520,7 @@ pub fn appendable(key: &Key) -> bool {
     key.at.is_none() && info(key).is_ok_and(|i| i.get("fields").is_none())
 }
 
-/// The journal points of archive `key` (its named versions): a JSON array of `aqr --serve`'s.
+/// The journal points of archive `key` (its named versions): a JSON array of `aqr --ipc`'s.
 pub fn journal(key: &Key) -> windows::core::Result<Vec<Value>> {
     with(key, |a| Ok(json(a, "Journal", &[])?.as_array().cloned().unwrap_or_default()))
 }

@@ -2,7 +2,7 @@
 name = "aqr-ipc"
 version = "0.1.0"
 edition = "2024"
-description = "The protocols of aqr --ipc and --serve, as the frontends (aqr-win, aqr-mac) speak them: aqr run, what it tells taken"
+description = "The protocol of aqr --ipc (man/aqripc.7), as the frontends (aqr-win, aqr-mac, the mounts) speak it: its frame, runs and what they tell, archives browsed"
 publish = false
 
 [dependencies]

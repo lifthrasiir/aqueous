@@ -36,7 +36,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The pages, in the order they are listed: (name, section).
-PAGES = [("aqr", 1), ("aqrsfx", 5), ("aqrattributes", 5)]
+PAGES = [("aqr", 1), ("aqrsfx", 5), ("aqrattributes", 5), ("aqripc", 7)]
 OURS = {n for n, _ in PAGES}
 
 # Where the site is, for the links of --single.
@@ -497,6 +497,9 @@ class Mdoc:
                         words = [self.default]
                     elif cur == "Fl":
                         words = [""]
+                    elif cur == "No":
+                        # (as mandoc: nothing, the macro after it parsed, `.Pq Ql a No Ql b`)
+                        return
                     else:
                         self.fail(f"{cur} without arguments")
                 if cur == "Fl":

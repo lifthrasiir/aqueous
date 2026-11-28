@@ -104,7 +104,7 @@ impl Versions {
     }
 }
 
-/// The ID list of archive `file` (its file's) as of point `p` (as `aqr --serve` tells it; none: all
+/// The ID list of archive `file` (its file's) as of point `p` (as `aqr --ipc` tells it; none: all
 /// of it), the caller's.
 pub fn target(file: *const ITEMIDLIST, p: Option<&Value>) -> *mut ITEMIDLIST {
     let Some(p) = p else {
