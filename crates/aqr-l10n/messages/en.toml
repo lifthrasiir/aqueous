@@ -83,6 +83,9 @@ test = "Test"
 name_version = "Name this version…"
 extract_version = "Extract a previous version…"
 description = "Archives recompressed losslessly; other formats extracted"
+# Of an archive, where aqr-mount and WinFsp are installed; of a drive it mounted.
+mount = "Mount as a drive"
+eject = "Eject"
 
 # aqr-win.
 [win]
@@ -158,6 +161,13 @@ cmd_not_run = "{exe} is not deleted: cmd.exe does not run: {error}"
 registry_not_made = "Not made: HKEY_CURRENT_USER\\{key}: {error}"
 registry_not_set = "Not set: HKEY_CURRENT_USER\\{key}: {error}"
 registry_not_deleted = "Not deleted: HKEY_CURRENT_USER\\{key}: {error}"
+# "Mount as a drive" and "Eject" (`shell.mount`, `shell.eject`: aqr-mount's drives).
+mount_failed = "{name} could not be mounted"
+no_mount_program = "Mounting needs aqr-mount.exe in {dir}."
+not_a_mount = "{drive} is not a drive that Aqueous mounted."
+eject_ask = "Eject {drive} ({name}) anyway?"
+eject_open = { one = "{n} file of it is open: the program that has it cannot read it any more.", other = "{n} files of it are open: the programs that have them cannot read them any more." }
+not_ejected = "{drive} could not be ejected"
 
 # aqr-win-install.
 [install]

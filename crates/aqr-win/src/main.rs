@@ -37,6 +37,9 @@
 //!   programs may run it, is gathered into the first process of the verb in a folder (`gather`).
 //! - `--serve`: the archives that Explorer browses in its windows (a shell extension), served
 //!   as a COM local server over `aqr --serve` (`serve`).
+//! - `mount ARCHIVE` and `eject DRIVE` (the shell extension's "Mount as a drive" and "Eject"):
+//!   the archive mounted as a drive by aqr-mount where it is installed beside this program, and
+//!   opened; a drive of it ejected, the user asked first where files of it are open (`mount`).
 //! - `aqr.exe` is the one beside this program, else the one on `PATH` (`AQR` names another).
 //!
 //! The window is a task dialog (`dialog`): what is being done, a bar of how far, the file at
@@ -57,6 +60,8 @@ mod folder;
 mod gather;
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod mount;
 #[cfg(windows)]
 mod options;
 #[cfg(windows)]
@@ -152,6 +157,16 @@ fn main() -> std::process::ExitCode {
             };
         }
         "options-preview" => return options::preview(),
+        // (the shell extension's "Mount as a drive" and "Eject", over aqr-mount)
+        "mount" | "eject" => {
+            let Ok([path]) = <[PathBuf; 1]>::try_from(paths) else {
+                return fail(win::nothing(), win::no_path());
+            };
+            return match name {
+                "mount" => mount::mount(&path),
+                _ => mount::eject(&path.to_string_lossy()),
+            };
+        }
         // (the shell extension's drops: ARCHIVE, the directory in it, the paths)
         "add" => {
             let (Some(archive), Some(dir)) = (args.get(1), args.get(2).and_then(|d| d.to_str())) else {
@@ -210,7 +225,7 @@ fn main() -> std::process::ExitCode {
         }
         _ => {
             let usage = "aqr-win --register | --unregister | compress[-options|-passphrase|-zip|-7z] PATH... | \
-                         extract ARCHIVE... | extract-to ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N] | rollback-version ARCHIVE #N | add ARCHIVE DIR PATH...";
+                         extract ARCHIVE... | extract-to ARCHIVE... | test ARCHIVE... | name-version ARCHIVE | extract-version ARCHIVE [#N] | rollback-version ARCHIVE #N | add ARCHIVE DIR PATH... |                          mount ARCHIVE | eject DRIVE";
             return fail(win::not_verb(), usage);
         }
     };

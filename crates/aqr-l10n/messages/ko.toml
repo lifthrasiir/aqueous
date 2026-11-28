@@ -74,6 +74,8 @@ test = "검사"
 name_version = "이 버전에 이름 붙이기…"
 extract_version = "이전 버전에서 꺼내기…"
 description = "무손실 재압축에 기반한 압축 포맷 및 다른 형식의 압축 해제도 지원하는 프로그램"
+mount = "드라이브로 마운트"
+eject = "꺼내기"
 
 [win]
 name_version_ask = "{name}의 이 버전에 이름을 붙입니다.\n{{today}}는 날짜, {{now}}는 날짜와 시각으로 바뀝니다."
@@ -141,6 +143,12 @@ cmd_not_run = "{exe} 파일을 지우지 못했습니다. cmd.exe를 실행할 �
 registry_not_made = "레지스트리 키를 만들지 못했습니다: HKEY_CURRENT_USER\\{key}: {error}"
 registry_not_set = "레지스트리 값을 설정하지 못했습니다: HKEY_CURRENT_USER\\{key}: {error}"
 registry_not_deleted = "레지스트리에서 지우지 못했습니다: HKEY_CURRENT_USER\\{key}: {error}"
+mount_failed = "{name}을(를) 마운트하지 못했습니다"
+no_mount_program = "마운트하려면 {dir}에 aqr-mount.exe가 있어야 합니다."
+not_a_mount = "{drive}은(는) Aqueous가 마운트한 드라이브가 아닙니다."
+eject_ask = "그래도 {drive}({name})을(를) 꺼낼까요?"
+eject_open = { other = "열려 있는 파일이 {n}개 있습니다. 그 파일을 연 프로그램은 더 이상 읽을 수 없게 됩니다." }
+not_ejected = "{drive}을(를) 꺼내지 못했습니다"
 
 [install]
 not_option = "설치 프로그램이 모르는 옵션입니다"

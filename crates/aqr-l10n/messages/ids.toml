@@ -38,3 +38,5 @@ extract_version = 1207
 description = 1208
 compress_options = 1209
 extract_to = 1210
+mount = 1211
+eject = 1212
